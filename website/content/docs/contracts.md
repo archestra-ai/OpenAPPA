@@ -5,7 +5,7 @@ order: 3
 description: Declarations, syntax, and rules for OpenAPPA policy TOML files.
 ---
 
-OpenAPPA reads its policy from a single TOML file. In practice, most of the configuration is generated automatically from tool descriptions, argument schemas, and existing system ACLs before being reviewed by a human auditor.
+OpenAPPA reads a root TOML file. The root can compose policy fragments with `include = ["battery.toml"]`. Root declarations run first. Included declarations follow in list order. An included file cannot include another file or replace root-wide settings. Duplicate external names are an error.
 
 This document is a reference guide for writing and reviewing OpenAPPA policy TOML files. It covers global settings, audience lists and conditions, contract declarations (`[[tool]]`, `[[authority]]`, `[[sanitizer]]`, `[[cast]]`), and policy review red flags.
 
@@ -184,16 +184,20 @@ Ownership, pinning, and what a `tool_input` sanitizer can do to a pinned answer 
 
 #### Implementing a resolver
 
-One `[externals.dynamic]` HTTP endpoint serves every resolver that does not declare a builtin; each request carries the resolver name. A resolver can instead name an in-process builtin on its declaration — the one implementation choice the policy itself may carry. The builtin available today is the Claude Code classifier (`builtin = "claude-code"`); it is one implementation, not the definition of how resolvers work.
+The policy declares what a resolver owns. The deployment binds that resolver name to one implementation under `[externals.dynamic.<name>]`. The implementation can be an HTTP endpoint or the Claude Code builtin.
 
 ```toml
 [[dynamic_resolver]]
 name    = "classify-call"
-builtin = "claude-code"
 returns = ["delta.trust"]
 ```
 
-A resolver with `builtin = "claude-code"` never uses the endpoint. The builtin starts one isolated `claude` process per consult: non-interactive safe mode, no tools, no project settings, no session persistence, a fresh temporary working directory, and an environment with every `APPA_*` variable removed. The process receives the same request the HTTP wire carries on stdin and answers under a strict structured-output schema derived from `returns`, the trust chain, and the attended marks; the request is explicitly treated as untrusted data, never as instructions. Claude answers have no separate ceiling: they are trusted classifier evidence and pass the same exact-shape, policy-vocabulary, audience, and pin validation as HTTP answers. The prompt and the raw model output are never persisted — only the validated answer is.
+```toml
+[externals.dynamic.classify-call]
+builtin = "claude-code"
+```
+
+The Claude Code builtin starts one isolated `claude` process per consult: non-interactive safe mode, no tools, no project settings, no session persistence, a fresh temporary working directory, and an environment with every `APPA_*` variable removed. The process receives the same request the HTTP wire carries on stdin and answers under a strict structured-output schema derived from `returns`, the trust chain, and the attended marks; the request is explicitly treated as untrusted data, never as instructions. Claude answers have no separate ceiling: they are trusted classifier evidence and pass the same exact-shape, policy-vocabulary, audience, and pin validation as HTTP answers. The prompt and the raw model output are never persisted — only the validated answer is.
 
 The deployment tunes the builtin in `[externals.claude_code]`: `command` sets the executable path (a service environment often strips `PATH`), `model` pins the model, and `timeout_ms` gives the consult its own budget instead of the shared machine-consult `timeout_ms` — a model call is slower than an ordinary endpoint. At most four Claude consults run at once per runtime. Each consult has model latency and account cost; a pinned recheck and a replay never invoke it again.
 

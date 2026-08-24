@@ -12,7 +12,7 @@ use crate::builtins::{
     BuiltinAuthority, BuiltinSanitizer, ClaudeCodeBackend, LoadedModule, MODULE_OUTPUT_CEILING, ModuleRegistry,
     ModulesError,
 };
-use crate::config::{CLAUDE_CODE_BUILTIN, Endpoint, Externals, Implementation};
+use crate::config::{CLAUDE_CODE_BUILTIN, DynamicImplementation, Endpoint, Externals, Implementation, ResolverCommand};
 use crate::elicit::Elicitation;
 
 const HITL: &str = "hitl";
@@ -242,6 +242,12 @@ enum SanitizerBackend {
     Module(Arc<LoadedModule>),
 }
 
+enum DynamicBackend {
+    Resolver(Endpoint),
+    ClaudeCode(ClaudeCodeBackend),
+    Command(ResolverCommand),
+}
+
 /// The dispatch tables over the configured implementations. Async and
 /// lock-free on the HTTP path; a module call serializes on its own
 /// gate inside a blocking task. The store's mutex is never in scope
@@ -252,8 +258,7 @@ pub struct ExternalServices {
     authorities: BTreeMap<String, AuthorityBackend>,
     sanitizers: BTreeMap<String, SanitizerBackend>,
     casts: BTreeMap<String, Endpoint>,
-    dynamic: Option<Endpoint>,
-    dynamic_builtins: BTreeMap<String, ClaudeCodeBackend>,
+    dynamic: BTreeMap<String, DynamicBackend>,
     membership: Option<Endpoint>,
     /// The per-runtime gate on concurrent claude consults, shared by every deployment
     /// snapshot the runtime serves.
@@ -275,7 +280,6 @@ impl ExternalServices {
     pub fn new(
         config: Externals,
         registry: &ModuleRegistry,
-        dynamic_builtins: BTreeMap<String, String>,
         claude_permits: Arc<tokio::sync::Semaphore>,
     ) -> Result<ExternalServices, ModulesError> {
         let http = reqwest::Client::builder()
@@ -324,24 +328,28 @@ impl ExternalServices {
             };
             sanitizers.insert(name, backend);
         }
-        let mut resolved_dynamic_builtins = BTreeMap::new();
-        for (name, builtin) in dynamic_builtins {
-            if builtin != CLAUDE_CODE_BUILTIN {
-                return Err(ModulesError::UnknownBuiltin {
-                    section: "dynamic",
-                    name,
-                    builtin,
-                });
-            }
-            resolved_dynamic_builtins.insert(
-                name,
-                ClaudeCodeBackend {
-                    command: config.claude_code.command.clone(),
-                    model: config.claude_code.model.clone(),
-                    timeout: config.claude_code.timeout.unwrap_or(config.timeout),
-                    max_body_bytes: config.max_body_bytes,
-                },
-            );
+        let mut dynamic = BTreeMap::new();
+        for (name, implementation) in config.dynamic {
+            let backend = match implementation {
+                DynamicImplementation::Resolver(endpoint) => DynamicBackend::Resolver(endpoint),
+                DynamicImplementation::Builtin(builtin) if builtin == CLAUDE_CODE_BUILTIN => {
+                    DynamicBackend::ClaudeCode(ClaudeCodeBackend {
+                        command: config.claude_code.command.clone(),
+                        model: config.claude_code.model.clone(),
+                        timeout: config.claude_code.timeout.unwrap_or(config.timeout),
+                        max_body_bytes: config.max_body_bytes,
+                    })
+                }
+                DynamicImplementation::Builtin(builtin) => {
+                    return Err(ModulesError::UnknownBuiltin {
+                        section: "dynamic",
+                        name,
+                        builtin,
+                    });
+                }
+                DynamicImplementation::Command(command) => DynamicBackend::Command(command),
+            };
+            dynamic.insert(name, backend);
         }
         Ok(ExternalServices {
             http,
@@ -349,8 +357,7 @@ impl ExternalServices {
             authorities,
             sanitizers,
             casts: config.casts,
-            dynamic: config.dynamic,
-            dynamic_builtins: resolved_dynamic_builtins,
+            dynamic,
             membership: config.membership,
             claude_permits,
         })
@@ -512,18 +519,16 @@ impl ExternalServices {
             trust_ranks: &context.trust_ranks,
             attention_marks: &context.attention_marks,
         };
-        let answered = match self.dynamic_builtins.get(resolver) {
+        let answered = match self.dynamic.get(resolver) {
             None => {
-                let Some(endpoint) = &self.dynamic else {
-                    tracing::debug!(resolver, "tool resolution without a configured implementation");
-                    return ToolResolution::Unresolved(NoAnswerReason::Unregistered);
-                };
-                match self.post(endpoint, &request).await {
-                    Ok(body) => serde_json::from_slice(&body).map_err(|_| NoAnswerReason::Malformed),
-                    Err(reason) => Err(reason),
-                }
+                tracing::debug!(resolver, "tool resolution without a configured implementation");
+                return ToolResolution::Unresolved(NoAnswerReason::Unregistered);
             }
-            Some(claude) => {
+            Some(DynamicBackend::Resolver(endpoint)) => match self.post(endpoint, &request).await {
+                Ok(body) => serde_json::from_slice(&body).map_err(|_| NoAnswerReason::Malformed),
+                Err(reason) => Err(reason),
+            },
+            Some(DynamicBackend::ClaudeCode(claude)) => {
                 // One deadline covers the permit wait and the subprocess: queueing behind
                 // the gate spends the same budget the consult itself would, so a saturated
                 // pool cannot stack timeout waves.
@@ -541,6 +546,14 @@ impl ExternalServices {
                 let answered = claude.resolve(&request, returns, deadline).await;
                 drop(permit);
                 answered
+            }
+            Some(DynamicBackend::Command(command)) => {
+                tracing::debug!(
+                    resolver,
+                    cwd = %command.cwd.display(),
+                    "command resolver execution is unavailable"
+                );
+                return ToolResolution::Unresolved(NoAnswerReason::Unregistered);
             }
         };
         let raw = match answered {
@@ -815,6 +828,23 @@ mod tests {
     }
 
     fn externals(dynamic_url: Option<String>, timeout_ms: u64, cap: usize) -> Externals {
+        let dynamic = dynamic_url
+            .as_ref()
+            .map(|url| {
+                ["classifier", "review"]
+                    .into_iter()
+                    .map(|name| {
+                        (
+                            name.to_string(),
+                            DynamicImplementation::Resolver(Endpoint {
+                                url: url.clone(),
+                                token: None,
+                            }),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         Externals {
             timeout: Duration::from_millis(timeout_ms),
             review_timeout: Duration::from_millis(timeout_ms),
@@ -822,7 +852,7 @@ mod tests {
             authorities: BTreeMap::new(),
             sanitizers: BTreeMap::new(),
             casts: BTreeMap::new(),
-            dynamic: dynamic_url.clone().map(|url| Endpoint { url, token: None }),
+            dynamic,
             membership: dynamic_url.map(|url| Endpoint { url, token: None }),
             claude_code: Default::default(),
         }
@@ -832,7 +862,6 @@ mod tests {
         ExternalServices::new(
             config,
             &ModuleRegistry::empty(),
-            BTreeMap::new(),
             Arc::new(tokio::sync::Semaphore::new(4)),
         )
         .expect("no builtin references are configured")
@@ -968,6 +997,26 @@ mod tests {
                 attention: Some(vec!["review".to_string()]),
             })
         );
+    }
+
+    #[tokio::test]
+    async fn a_command_resolver_fails_closed_until_command_execution_is_available() {
+        let mut config = externals(None, 2000, 65536);
+        config.dynamic.insert(
+            "classifier".to_string(),
+            DynamicImplementation::Command(ResolverCommand {
+                argv: vec!["resolver".to_string()],
+                cwd: std::path::PathBuf::from("."),
+            }),
+        );
+        let outcome = services_over(config)
+            .resolve_tool(
+                &uses("classifier", [ResolverReturn::Trust]),
+                &serde_json::json!({"path": "notes.txt"}),
+                &context(),
+            )
+            .await;
+        assert_eq!(outcome, ToolResolution::Unresolved(NoAnswerReason::Unregistered));
     }
 
     #[tokio::test]
@@ -1584,7 +1633,6 @@ mod tests {
         match ExternalServices::new(
             config,
             &ModuleRegistry::empty(),
-            BTreeMap::new(),
             Arc::new(tokio::sync::Semaphore::new(4)),
         ) {
             Err(ModulesError::UnknownBuiltin { section, name, builtin }) => {
@@ -1608,7 +1656,6 @@ mod tests {
             ExternalServices::new(
                 config,
                 &ModuleRegistry::empty(),
-                BTreeMap::new(),
                 Arc::new(tokio::sync::Semaphore::new(4))
             ),
             Err(ModulesError::UnknownBuiltin {
@@ -1676,13 +1723,8 @@ mod tests {
         config
             .authorities
             .insert("auto".to_string(), Implementation::Builtin(implementation.to_string()));
-        let services = ExternalServices::new(
-            config,
-            &registry,
-            BTreeMap::new(),
-            Arc::new(tokio::sync::Semaphore::new(4)),
-        )
-        .expect("the module reference resolves");
+        let services = ExternalServices::new(config, &registry, Arc::new(tokio::sync::Semaphore::new(4)))
+            .expect("the module reference resolves");
         (services, dir)
     }
 

@@ -8,7 +8,6 @@ mod session;
 #[cfg(test)]
 pub(crate) use session::raw;
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -128,6 +127,8 @@ pub enum OpenError {
     ReservedTool(String),
     #[error("policy names {kind} {name}, which has no [externals] binding")]
     UnboundExternal { kind: &'static str, name: String },
+    #[error("[externals] binds {kind} {name}, which the policy does not declare")]
+    UndeclaredExternal { kind: &'static str, name: String },
     #[error(
         "cast {0} declares a constant, which the engine answers from the policy — remove its [externals.casts] binding"
     )]
@@ -277,11 +278,7 @@ impl Deployment {
     ) -> Result<Deployment, OpenError> {
         let policy = compile_policy(&config)?;
         validate_deployment(&policy, &config.externals)?;
-        let dynamic_builtins = policy
-            .dynamic_resolver_builtins()
-            .map(|(name, builtin)| (name.as_str().to_string(), builtin.clone()))
-            .collect();
-        let externals = ExternalServices::new(config.externals.clone(), modules, dynamic_builtins, claude_permits)
+        let externals = ExternalServices::new(config.externals.clone(), modules, claude_permits)
             .map_err(|error| OpenError::Modules(error.to_string()))?;
         Ok(Deployment {
             config,
@@ -839,10 +836,8 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
     }
 
     let rc = policy.registry_config();
-    let dynamic_builtins: BTreeMap<_, _> = policy
-        .dynamic_resolver_builtins()
-        .map(|(resolver, builtin)| (resolver.as_str(), builtin.as_str()))
-        .collect();
+    let dynamic_resolvers: std::collections::BTreeSet<_> =
+        policy.dynamic_resolver_names().map(|name| name.as_str()).collect();
     for tool in &rc.tools {
         let name = tool.name.as_str();
         if is_control_tool(name) {
@@ -899,17 +894,20 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
             });
         }
     }
-    for tool in &rc.tools {
-        for binding in &tool.uses {
-            let name = binding.resolver.as_str();
-            // A resolver with a declared builtin never uses the shared endpoint; every other
-            // bound name requires it.
-            if !dynamic_builtins.contains_key(name) && externals.dynamic.is_none() {
-                return Err(OpenError::UnboundExternal {
-                    kind: "dynamic resolver",
-                    name: name.to_string(),
-                });
-            }
+    for name in &dynamic_resolvers {
+        if !externals.dynamic.contains_key(*name) {
+            return Err(OpenError::UnboundExternal {
+                kind: "dynamic resolver",
+                name: (*name).to_string(),
+            });
+        }
+    }
+    for name in externals.dynamic.keys() {
+        if !dynamic_resolvers.contains(name.as_str()) {
+            return Err(OpenError::UndeclaredExternal {
+                kind: "dynamic resolver",
+                name: name.clone(),
+            });
         }
     }
     if let Some(resolver) = &rc.membership
@@ -973,9 +971,14 @@ mod deployment_tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::config::Externals;
+    use crate::config::{DynamicImplementation, Externals};
 
     fn claude_config(policy: &str) -> Config {
+        let mut dynamic = BTreeMap::new();
+        dynamic.insert(
+            "classifier".to_string(),
+            DynamicImplementation::Builtin(crate::config::CLAUDE_CODE_BUILTIN.to_string()),
+        );
         Config::embedded(
             policy.to_string(),
             Externals {
@@ -985,7 +988,7 @@ mod deployment_tests {
                 authorities: BTreeMap::new(),
                 sanitizers: BTreeMap::new(),
                 casts: BTreeMap::new(),
-                dynamic: None,
+                dynamic,
                 membership: None,
                 claude_code: Default::default(),
             },
@@ -1000,7 +1003,6 @@ mod deployment_tests {
                 version = 1
                 [[dynamic_resolver]]
                 name = "classifier"
-                builtin = "claude-code"
                 returns = ["delta.trust", "delta.audience", "requires.attention"]
                 [[tool]]
                 name = "lookup"
@@ -1020,7 +1022,6 @@ mod deployment_tests {
                 version = 1
                 [[dynamic_resolver]]
                 name = "classifier"
-                builtin = "claude-code"
                 returns = ["delta.trust"]
                 [[tool]]
                 name = "fetch"
@@ -1061,13 +1062,12 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     }
 
     #[test]
-    fn the_shared_http_endpoint_covers_every_non_builtin_resolver() {
+    fn every_dynamic_resolver_has_its_own_implementation() {
         let mut config = claude_config(
             r#"
                 version = 1
                 [[dynamic_resolver]]
                 name = "bash-classifier"
-                builtin = "claude-code"
                 returns = ["requires.attention"]
                 [[dynamic_resolver]]
                 name = "other-classifier"
@@ -1084,10 +1084,50 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 uses = [{ resolver = "other-classifier" }]
             "#,
         );
-        config.externals.dynamic = Some(crate::config::Endpoint {
-            url: "https://resolver.example".to_string(),
-            token: None,
-        });
+        config.externals.dynamic.clear();
+        config.externals.dynamic.insert(
+            "bash-classifier".to_string(),
+            DynamicImplementation::Builtin(crate::config::CLAUDE_CODE_BUILTIN.to_string()),
+        );
+        config.externals.dynamic.insert(
+            "other-classifier".to_string(),
+            DynamicImplementation::Resolver(crate::config::Endpoint {
+                url: "https://resolver.example".to_string(),
+                token: None,
+            }),
+        );
         assert!(Deployment::load(config, &crate::builtins::ModuleRegistry::empty(), test_permits()).is_ok());
+    }
+
+    #[test]
+    fn missing_and_undeclared_dynamic_implementations_are_refused() {
+        let policy = r#"
+            version = 1
+            [[dynamic_resolver]]
+            name = "classifier"
+            returns = ["delta.trust"]
+        "#;
+        let mut missing = claude_config(policy);
+        missing.externals.dynamic.clear();
+        assert!(matches!(
+            Deployment::load(missing, &crate::builtins::ModuleRegistry::empty(), test_permits()),
+            Err(OpenError::UnboundExternal {
+                kind: "dynamic resolver",
+                ..
+            })
+        ));
+
+        let mut extra = claude_config(policy);
+        extra.externals.dynamic.insert(
+            "undeclared".to_string(),
+            DynamicImplementation::Builtin(crate::config::CLAUDE_CODE_BUILTIN.to_string()),
+        );
+        assert!(matches!(
+            Deployment::load(extra, &crate::builtins::ModuleRegistry::empty(), test_permits()),
+            Err(OpenError::UndeclaredExternal {
+                kind: "dynamic resolver",
+                ..
+            })
+        ));
     }
 }

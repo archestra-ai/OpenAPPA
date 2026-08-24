@@ -71,10 +71,6 @@ pub enum ConfigError {
     DuplicateEffect { tool: String, kind: String },
     #[error("duplicate dynamic resolver {0}")]
     DuplicateDynamicResolver(String),
-    #[error(
-        "dynamic resolver {name} names unknown builtin {builtin:?}; the one stock dynamic builtin is \"claude-code\""
-    )]
-    UnknownDynamicBuiltin { name: String, builtin: String },
     #[error("tool {tool} uses unregistered resolver {resolver}")]
     UnregisteredDynamicResolver { tool: String, resolver: String },
     #[error("dynamic resolver name {0:?} is empty")]
@@ -130,12 +126,10 @@ pub struct Config {
     registry_config: RegistryConfig,
     boundary_label: Label,
     dynamic_resolver_names: BTreeSet<DynamicResolverName>,
-    dynamic_resolver_builtins: BTreeMap<DynamicResolverName, String>,
 }
 
 impl Config {
-    /// Parse the policy TOML. HTTP implementation bindings remain deployment-owned; the
-    /// supported stock dynamic builtin may be selected on its resolver declaration.
+    /// Parse the policy TOML. Resolver implementation bindings remain deployment-owned.
     pub fn from_toml_str(s: &str) -> Result<Config, ConfigError> {
         let raw: RawConfig = toml::from_str(s)?;
         if raw.version != SUPPORTED_VERSION {
@@ -154,7 +148,6 @@ impl Config {
             None => default_boundary_label(&trust_chain),
         };
 
-        let mut dynamic_resolver_builtins = BTreeMap::new();
         let mut declarations: BTreeMap<DynamicResolverName, ResolverDeclaration> = BTreeMap::new();
         for resolver in raw.dynamic_resolver {
             if resolver.name.is_empty() {
@@ -203,15 +196,6 @@ impl Config {
                 .is_some()
             {
                 return Err(ConfigError::DuplicateDynamicResolver(name.as_str().to_string()));
-            }
-            if let Some(builtin) = resolver.builtin {
-                if builtin != "claude-code" {
-                    return Err(ConfigError::UnknownDynamicBuiltin {
-                        name: name.as_str().to_string(),
-                        builtin,
-                    });
-                }
-                dynamic_resolver_builtins.insert(name, builtin);
             }
         }
         let membership = match raw.membership {
@@ -310,7 +294,6 @@ impl Config {
             registry_config,
             boundary_label,
             dynamic_resolver_names: declarations.keys().cloned().collect(),
-            dynamic_resolver_builtins,
         })
     }
 
@@ -336,12 +319,6 @@ impl Config {
     /// resolver name a tool binding uses.
     pub fn dynamic_resolver_names(&self) -> impl Iterator<Item = &DynamicResolverName> {
         self.dynamic_resolver_names.iter()
-    }
-
-    /// Inline builtin implementations attached to individual dynamic resolver
-    /// registrations. HTTP implementations remain deployment bindings.
-    pub fn dynamic_resolver_builtins(&self) -> impl Iterator<Item = (&DynamicResolverName, &String)> {
-        self.dynamic_resolver_builtins.iter()
     }
 }
 
@@ -472,7 +449,6 @@ struct RawLimits {
 struct RawDynamicResolver {
     name: String,
     resolver: Option<toml::Value>,
-    builtin: Option<String>,
     /// The input names a `uses` entry must map. Omitted means this resolver reads the complete
     /// tool call instead.
     #[serde(default)]

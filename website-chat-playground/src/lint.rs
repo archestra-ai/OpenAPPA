@@ -22,11 +22,6 @@ pub enum PolicyError {
          sanitizer could never derive anything"
     )]
     SanitizerWithoutHint { name: String },
-    #[error(
-        "dynamic resolver {name:?} declares a builtin: this playground answers every resolver \
-         through its own hosted directory, and a builtin would run on the demo host itself"
-    )]
-    BuiltinResolver { name: String },
 }
 
 #[derive(Debug)]
@@ -52,14 +47,6 @@ pub fn check_policy(policy: &str, enabled: &BTreeSet<System>) -> Result<CheckedP
                 name: sanitizer.name.as_str().to_string(),
             });
         }
-    }
-
-    // A visitor's policy never selects an implementation on this host: a builtin resolver
-    // would start a claude process under the demo service's own account.
-    if let Some((name, _)) = config.dynamic_resolver_builtins().next() {
-        return Err(PolicyError::BuiltinResolver {
-            name: name.as_str().to_string(),
-        });
     }
 
     let tool_count = config.registry_config().tools.len();
@@ -138,7 +125,7 @@ mod tests {
     }
 
     #[test]
-    fn a_builtin_resolver_declaration_is_refused() {
+    fn an_inline_resolver_implementation_is_refused() {
         let policy = r#"
 version = 1
 [[dynamic_resolver]]
@@ -152,7 +139,7 @@ uses = [{ resolver = "classify" }]
 "#;
         assert!(matches!(
             check_policy(policy, &systems("crm")),
-            Err(PolicyError::BuiltinResolver { name }) if name == "classify"
+            Err(PolicyError::Load(ConfigError::Parse(_)))
         ));
     }
 

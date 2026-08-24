@@ -162,7 +162,7 @@ uses = [{{ resolver = "classifier" }}]
 timeout_ms = 2000
 max_body_bytes = 65536
 
-[externals.dynamic]
+[externals.dynamic.classifier]
 url = "{url}"
 "#
     )
@@ -250,7 +250,7 @@ delta = {{}}
 timeout_ms = 2000
 max_body_bytes = 65536
 
-[externals.dynamic]
+[externals.dynamic.classifier]
 url = "{url}"
 "#
     );
@@ -385,7 +385,10 @@ uses = [
 timeout_ms = 5000
 max_body_bytes = 65536
 
-[externals.dynamic]
+[externals.dynamic.alpha]
+url = "{url}"
+
+[externals.dynamic.beta]
 url = "{url}"
 "#
     )
@@ -447,7 +450,6 @@ version = 1
 
 [[policy.dynamic_resolver]]
 name = "classifier"
-builtin = "claude-code"
 returns = ["delta.trust"]
 
 [[policy.tool]]
@@ -459,6 +461,9 @@ uses = [{{ resolver = "classifier" }}]
 [externals]
 timeout_ms = 5000
 max_body_bytes = 65536
+
+[externals.dynamic.classifier]
+builtin = "claude-code"
 
 [externals.claude_code]
 command = "{command}"
@@ -552,10 +557,11 @@ esac
         .iter()
         .enumerate()
         .map(|(index, result)| {
-            format!(
-                "[[policy.dynamic_resolver]]\nname = \"classifier-{index}\"\nbuiltin = \"claude-code\"\nreturns = [\"{result}\"]\n"
-            )
+            format!("[[policy.dynamic_resolver]]\nname = \"classifier-{index}\"\nreturns = [\"{result}\"]\n")
         })
+        .collect();
+    let implementations: String = (0..results.len())
+        .map(|index| format!("[externals.dynamic.\"classifier-{index}\"]\nbuiltin = \"claude-code\"\n"))
         .collect();
     let bindings: Vec<String> = (0..results.len())
         .map(|index| format!("{{ resolver = \"classifier-{index}\" }}"))
@@ -576,6 +582,7 @@ uses = [{bindings}]
 timeout_ms = 10000
 max_body_bytes = 65536
 
+{implementations}
 [externals.claude_code]
 command = "{command}"
 "#,
@@ -596,17 +603,22 @@ command = "{command}"
 }
 
 #[tokio::test]
-async fn a_builtin_resolver_never_touches_the_shared_endpoint() {
+async fn a_builtin_resolver_never_touches_an_http_endpoint() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let (url, classifier) = serve_classifier().await;
     let command = fake_claude(
         dir.path(),
         "cat > /dev/null\nprintf '%s' '{\"structured_output\":{\"version\":1,\"result\":{\"delta.trust\":\"trusted\"}}}'",
     );
-    let config = builtin_policy(&command, "").replace(
-        "[externals.claude_code]",
-        &format!("[externals.dynamic]\nurl = \"{url}\"\n\n[externals.claude_code]"),
-    );
+    let config = builtin_policy(&command, "")
+        .replace(
+            "[[policy.tool]]",
+            "[[policy.dynamic_resolver]]\nname = \"other\"\nreturns = [\"delta.audience\"]\n\n[[policy.tool]]",
+        )
+        .replace(
+            "[externals.claude_code]",
+            &format!("[externals.dynamic.other]\nurl = \"{url}\"\n\n[externals.claude_code]"),
+        );
     let runtime = open_runtime(&dir, &config).await;
     assert_eq!(
         propose(&runtime, fetch("https://a.example")).await,

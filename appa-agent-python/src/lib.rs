@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use appa_runtime::api::{OfferId, RemedyOutcome, Runtime};
-use appa_runtime::config::{Config, Endpoint, Externals};
+use appa_runtime::config::{Config, DynamicImplementation, Endpoint, Externals};
 use appa_runtime::hooks;
 use appa_runtime_api::{
     Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, SpawnBinding, SpawnRef, ToolOutcome, TrajectoryId,
@@ -156,7 +156,7 @@ struct ExternalsConfig {
     #[serde(default)]
     max_body_bytes: Option<usize>,
     #[serde(default)]
-    dynamic: Option<EndpointConfig>,
+    dynamic: BTreeMap<String, EndpointConfig>,
     #[serde(default)]
     membership: Option<EndpointConfig>,
     /// The classifier endpoint of every resolver-backed cast, by cast name.
@@ -212,10 +212,19 @@ impl SessionInner {
                         )
                     })
                     .collect(),
-                dynamic: parsed.dynamic.map(|endpoint| Endpoint {
-                    url: endpoint.url,
-                    token: None,
-                }),
+                dynamic: parsed
+                    .dynamic
+                    .into_iter()
+                    .map(|(name, endpoint)| {
+                        (
+                            name,
+                            DynamicImplementation::Resolver(Endpoint {
+                                url: endpoint.url,
+                                token: None,
+                            }),
+                        )
+                    })
+                    .collect(),
                 membership: parsed.membership.map(|e| Endpoint {
                     url: e.url,
                     token: None,
@@ -230,7 +239,7 @@ impl SessionInner {
                 authorities: Default::default(),
                 sanitizers: Default::default(),
                 casts: Default::default(),
-                dynamic: None,
+                dynamic: Default::default(),
                 membership: None,
                 claude_code: Default::default(),
             }

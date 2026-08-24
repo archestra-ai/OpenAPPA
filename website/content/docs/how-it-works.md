@@ -34,13 +34,15 @@ OpenAPPA operates on three runtime concepts:
 
 Policy definitions remain strictly declarative TOML configurations. Instead of writing static allow or block rules for every tool interaction, developers declare tool contracts—specifying what permissions a tool requires (`requires`), how its output restricts security labels (`delta`), and what side effects it causes (`effects`). From these contracts, OpenAPPA automatically derives whether an action is permitted, blocked, or remediable across multi-step agent workflows.
 
+A root configuration can include reusable policy fragments. Root declarations run first. Included declarations follow in the listed order. Included files add declarations and named external bindings; they cannot replace root-wide settings or include more files.
+
 Several contracts can name the same tool. OpenAPPA checks them in declaration order and uses the first matching argument pattern. A bare name is the fallback.
 
 Dynamic judgment—such as regex filters, ML classifiers, or human approval queues—lives in registered components. Authorities and sanitizers run as HTTP endpoints (`resolver`) or in-process modules (`builtin`). Each declares what it `permits`, and that declaration bounds its power. Casts declare a fixed label or use a resolver under a `may_cast` ceiling.
 
 A tool can also use dynamic resolvers that classify each proposed call before dispatch. A resolver declares the inputs it reads and the contract fields it owns through `returns`: `delta.trust` and `delta.audience` for the output label, and `requires.trust`, `requires.audience`, and `requires.attention` for call-time constraints. Attaching the resolver through `uses` assigns every declared field to it. The tool maps each declared input from the proposed call. Without an explicit mapping, the resolver receives the complete call: the tool name, its description when the policy declares one, and the arguments object.
 
-A resolver is implemented either by an HTTP endpoint or by an in-process builtin — the same choice authorities and sanitizers offer. Whichever it is, every request carries the policy's trust chain and the attention marks that authorities name under `permits.attention`: trust answers must select a rank from that chain, and attention answers must select literal marks from that set, preserving per-mark authority routing. A resolver has no `permits` or ceiling of its own, so its returned evidence is part of the trusted deployment boundary.
+The deployment binds each resolver name to one HTTP endpoint or in-process builtin under `[externals.dynamic.<name>]`. The policy declaration does not choose the implementation. Every request carries the policy's trust chain and the attention marks that authorities name under `permits.attention`. Trust answers must select a rank from that chain. Attention answers must select literal marks from that set, which preserves per-mark authority routing. A resolver has no `permits` or ceiling of its own, so its returned evidence is part of the trusted deployment boundary.
 
 ### A resolver's answer is pinned to the call it classified
 

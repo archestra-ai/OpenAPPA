@@ -38,7 +38,9 @@ fn section_examples<'a>(reference: &'a str, heading: &str) -> Vec<&'a str> {
     let mut rest = section;
     while let Some((_, after)) = rest.split_once("```toml\n") {
         let (block, tail) = after.split_once("```").expect("a fenced block closes");
-        examples.push(block);
+        if !block.starts_with("[externals.") {
+            examples.push(block);
+        }
         rest = tail;
     }
     examples
@@ -57,8 +59,8 @@ fn every_resolver_example_in_the_policy_reference_loads() {
     let reference = policy_reference();
     let examples = section_examples(&reference, "### Dynamic resolvers");
     assert!(
-        examples.len() >= 4,
-        "expected the three worked examples and the builtin declaration, found {}",
+        examples.len() >= 3,
+        "expected the three worked policy examples, found {}",
         examples.len()
     );
 

@@ -3,7 +3,7 @@
 //! binary, not configuration.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -14,10 +14,9 @@ pub struct Config {
     pub externals: Externals,
 }
 
-/// The policy file as supplied at startup: the exact bytes read from
-/// disk, the policy value parsed from those bytes, and the key derived
-/// from them. The only constructor parses the bytes it is
-/// given, so the three can never disagree.
+/// The effective policy file: deterministic TOML bytes after includes
+/// compose, and the policy value parsed from those bytes. The stored
+/// value and bytes always describe the same deployment.
 #[derive(Debug, Clone)]
 pub struct PolicyFile {
     bytes: Vec<u8>,
@@ -57,9 +56,8 @@ pub struct Externals {
     /// The classifiers a resolver-backed `[[cast]]` consults. Endpoint-only: a constant
     /// cast is answered from the policy and binds nothing here.
     pub casts: BTreeMap<String, Endpoint>,
-    /// The shared HTTP implementation for every dynamic resolver that does not
-    /// declare an inline builtin.
-    pub dynamic: Option<Endpoint>,
+    /// One implementation per policy-declared dynamic resolver.
+    pub dynamic: BTreeMap<String, DynamicImplementation>,
     /// The membership resolver the policy's `[membership]` registers.
     pub membership: Option<Endpoint>,
     /// Deployment knobs for the stock `claude-code` dynamic resolver.
@@ -91,12 +89,26 @@ impl Default for ClaudeCode {
 }
 
 /// How a registered authority or sanitizer is implemented — `builtin` or
-/// `resolver`, a closed choice per entry. Dynamic HTTP resolution uses the
-/// shared endpoint above; its stock builtin is selected in the policy.
+/// `resolver`, a closed choice per entry.
 #[derive(Debug, Clone)]
 pub enum Implementation {
     Resolver(Endpoint),
     Builtin(String),
+}
+
+/// How one named dynamic resolver runs.
+#[derive(Debug, Clone)]
+pub enum DynamicImplementation {
+    Resolver(Endpoint),
+    Builtin(String),
+    Command(ResolverCommand),
+}
+
+/// A command resolver's argv and the directory of the config that declared it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolverCommand {
+    pub argv: Vec<String>,
+    pub cwd: std::path::PathBuf,
 }
 
 pub const CLAUDE_CODE_BUILTIN: &str = "claude-code";
@@ -141,6 +153,26 @@ pub enum ConfigError {
     UnparsablePolicy { source: toml::de::Error },
     #[error("the composed policy does not render as a policy file: {source}")]
     UnrenderablePolicy { source: toml::ser::Error },
+    #[error("root policy.version must be an integer")]
+    InvalidPolicyVersion,
+    #[error("include path {path:?} must be relative to the root config")]
+    AbsoluteInclude { path: String },
+    #[error("the root config includes {path:?} more than once")]
+    DuplicateInclude { path: String },
+    #[error("included config {path} has unsupported top-level field {field:?}")]
+    IncludedTopLevel { path: String, field: String },
+    #[error("included config {path} cannot set policy field {field:?}")]
+    IncludedPolicyField { path: String, field: String },
+    #[error("included config {path} cannot set externals field {field:?}")]
+    IncludedExternalsField { path: String, field: String },
+    #[error("included config {path} uses policy version {found}, but the root uses {root}")]
+    IncludedVersion { path: String, root: i64, found: i64 },
+    #[error("included config {path} repeats [externals.{section}] entry {name:?}")]
+    DuplicateExternal {
+        path: String,
+        section: String,
+        name: String,
+    },
     #[error("the {section} endpoint {name:?} has an invalid url: {url}")]
     InvalidEndpoint {
         section: &'static str,
@@ -173,7 +205,7 @@ pub enum ConfigError {
     ZeroReviewTimeout,
     #[error("externals.max_body_bytes must be greater than zero")]
     ZeroByteCap,
-    #[error("the {section} entry {name:?} must name exactly one of url or builtin, and only url takes token_env")]
+    #[error("the {section} entry {name:?} must name exactly one implementation, and only url takes token_env")]
     ImplementationChoice { section: &'static str, name: String },
     #[error("the {section} entry {name:?} cannot be builtin")]
     BuiltinNotAllowed { section: &'static str, name: String },
@@ -183,11 +215,15 @@ pub enum ConfigError {
         name: String,
         builtin: String,
     },
+    #[error("the dynamic resolver {name:?} command must contain at least one non-empty argument")]
+    InvalidCommand { name: String },
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
+    #[serde(default)]
+    include: Vec<String>,
     policy: toml::Value,
     externals: RawExternals,
 }
@@ -205,7 +241,8 @@ struct RawExternals {
     sanitizers: BTreeMap<String, RawImplementation>,
     #[serde(default)]
     casts: BTreeMap<String, RawImplementation>,
-    dynamic: Option<RawImplementation>,
+    #[serde(default)]
+    dynamic: BTreeMap<String, RawDynamicImplementation>,
     membership: Option<RawImplementation>,
     claude_code: Option<RawClaudeCode>,
 }
@@ -226,6 +263,15 @@ struct RawImplementation {
     builtin: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDynamicImplementation {
+    url: Option<String>,
+    token_env: Option<String>,
+    builtin: Option<String>,
+    command: Option<Vec<String>>,
+}
+
 fn default_review_timeout_ms() -> u64 {
     600_000
 }
@@ -236,11 +282,54 @@ impl Config {
             path: path.display().to_string(),
             source,
         })?;
-        let raw: RawConfig = toml::from_str(&text).map_err(|source| ConfigError::Unparsable {
+        let root: RawConfig = toml::from_str(&text).map_err(|source| ConfigError::Unparsable {
             path: path.display().to_string(),
             source,
         })?;
-        Config::validate(text, raw, |var| std::env::var(var).ok())
+        let source_dir = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let mut document: toml::Value = toml::from_str(&text).map_err(|source| ConfigError::Unparsable {
+            path: path.display().to_string(),
+            source,
+        })?;
+        document
+            .as_table_mut()
+            .expect("RawConfig parsed the root as a table")
+            .remove("include");
+
+        let root_version = policy_version(&root.policy).ok_or(ConfigError::InvalidPolicyVersion)?;
+        let mut origins = root
+            .externals
+            .dynamic
+            .keys()
+            .map(|name| (name.clone(), source_dir.to_path_buf()))
+            .collect::<BTreeMap<_, _>>();
+        let mut seen = std::collections::BTreeSet::new();
+        for authored in &root.include {
+            let include = Path::new(authored);
+            if include.is_absolute() {
+                return Err(ConfigError::AbsoluteInclude { path: authored.clone() });
+            }
+            if !seen.insert(authored.clone()) {
+                return Err(ConfigError::DuplicateInclude { path: authored.clone() });
+            }
+            let include_path = source_dir.join(include);
+            let included_text = std::fs::read_to_string(&include_path).map_err(|source| ConfigError::Unreadable {
+                path: include_path.display().to_string(),
+                source,
+            })?;
+            let included: toml::Value = toml::from_str(&included_text).map_err(|source| ConfigError::Unparsable {
+                path: include_path.display().to_string(),
+                source,
+            })?;
+            compose_include(&mut document, included, &include_path, root_version, &mut origins)?;
+        }
+
+        let composed = toml::to_string(&document).map_err(|source| ConfigError::UnrenderablePolicy { source })?;
+        let raw: RawConfig = toml::from_str(&composed).map_err(|source| ConfigError::UnparsablePolicy { source })?;
+        Config::validate_composed(composed, raw, origins, |var| std::env::var(var).ok())
     }
 
     /// The configuration of a host that composes its policy in memory
@@ -262,7 +351,29 @@ impl Config {
         &self.policy
     }
 
-    fn validate(text: String, raw: RawConfig, lookup: impl Fn(&str) -> Option<String>) -> Result<Config, ConfigError> {
+    #[cfg(test)]
+    fn validate(
+        text: String,
+        raw: RawConfig,
+        source_dir: &Path,
+        lookup: impl Fn(&str) -> Option<String>,
+    ) -> Result<Config, ConfigError> {
+        let origins = raw
+            .externals
+            .dynamic
+            .keys()
+            .map(|name| (name.clone(), source_dir.to_path_buf()))
+            .collect();
+        Config::validate_composed(text, raw, origins, lookup)
+    }
+
+    fn validate_composed(
+        text: String,
+        raw: RawConfig,
+        dynamic_origins: BTreeMap<String, PathBuf>,
+        lookup: impl Fn(&str) -> Option<String>,
+    ) -> Result<Config, ConfigError> {
+        debug_assert!(raw.include.is_empty(), "composed configuration has no includes");
         if raw.externals.timeout_ms == 0 {
             return Err(ConfigError::ZeroTimeout);
         }
@@ -291,14 +402,7 @@ impl Config {
                     crate::builtins::valid_implementation_name,
                 )?,
                 casts: resolve_endpoints("casts", raw.externals.casts, &lookup)?,
-                dynamic: raw
-                    .externals
-                    .dynamic
-                    .map(|endpoint| {
-                        let raw = endpoint_only("dynamic", "dynamic", endpoint)?;
-                        resolve_endpoint("dynamic", "dynamic".to_string(), raw, &lookup)
-                    })
-                    .transpose()?,
+                dynamic: resolve_dynamic_implementations(raw.externals.dynamic, &dynamic_origins, &lookup)?,
                 membership: raw
                     .externals
                     .membership
@@ -311,6 +415,188 @@ impl Config {
             },
         })
     }
+}
+
+fn policy_version(policy: &toml::Value) -> Option<i64> {
+    policy.as_table()?.get("version")?.as_integer()
+}
+
+fn compose_include(
+    root: &mut toml::Value,
+    included: toml::Value,
+    include_path: &Path,
+    root_version: i64,
+    dynamic_origins: &mut BTreeMap<String, PathBuf>,
+) -> Result<(), ConfigError> {
+    let display = include_path.display().to_string();
+    let mut included = included.as_table().expect("a TOML document is always a table").clone();
+    for field in included.keys() {
+        if !matches!(field.as_str(), "policy" | "externals") {
+            return Err(ConfigError::IncludedTopLevel {
+                path: display,
+                field: field.clone(),
+            });
+        }
+    }
+
+    let included_policy = included
+        .remove("policy")
+        .and_then(|value| value.as_table().cloned())
+        .ok_or_else(|| ConfigError::IncludedTopLevel {
+            path: display.clone(),
+            field: "policy".to_string(),
+        })?;
+    let found_version = included_policy
+        .get("version")
+        .and_then(toml::Value::as_integer)
+        .ok_or_else(|| ConfigError::IncludedPolicyField {
+            path: display.clone(),
+            field: "version".to_string(),
+        })?;
+    if found_version != root_version {
+        return Err(ConfigError::IncludedVersion {
+            path: display,
+            root: root_version,
+            found: found_version,
+        });
+    }
+
+    let root_table = root.as_table_mut().expect("a TOML document is always a table");
+    let root_policy = root_table
+        .get_mut("policy")
+        .and_then(toml::Value::as_table_mut)
+        .expect("RawConfig requires a policy table");
+    for (field, value) in included_policy {
+        if field == "version" {
+            continue;
+        }
+        if !matches!(
+            field.as_str(),
+            "tool" | "dynamic_resolver" | "authority" | "sanitizer" | "cast"
+        ) {
+            return Err(ConfigError::IncludedPolicyField {
+                path: include_path.display().to_string(),
+                field,
+            });
+        }
+        let mut declarations = value
+            .as_array()
+            .cloned()
+            .ok_or_else(|| ConfigError::IncludedPolicyField {
+                path: include_path.display().to_string(),
+                field: field.clone(),
+            })?;
+        let destination = root_policy
+            .entry(field.clone())
+            .or_insert_with(|| toml::Value::Array(Vec::new()))
+            .as_array_mut()
+            .ok_or_else(|| ConfigError::IncludedPolicyField {
+                path: include_path.display().to_string(),
+                field,
+            })?;
+        destination.append(&mut declarations);
+    }
+
+    let Some(included_externals) = included.remove("externals") else {
+        return Ok(());
+    };
+    let included_externals = included_externals
+        .as_table()
+        .ok_or_else(|| ConfigError::IncludedTopLevel {
+            path: include_path.display().to_string(),
+            field: "externals".to_string(),
+        })?;
+    let root_externals = root_table
+        .get_mut("externals")
+        .and_then(toml::Value::as_table_mut)
+        .expect("RawConfig requires an externals table");
+    for (section, entries) in included_externals {
+        if !matches!(section.as_str(), "authorities" | "sanitizers" | "casts" | "dynamic") {
+            return Err(ConfigError::IncludedExternalsField {
+                path: include_path.display().to_string(),
+                field: section.clone(),
+            });
+        }
+        let entries = entries.as_table().ok_or_else(|| ConfigError::IncludedExternalsField {
+            path: include_path.display().to_string(),
+            field: section.clone(),
+        })?;
+        let destination = root_externals
+            .entry(section.clone())
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
+            .as_table_mut()
+            .expect("RawExternals requires named external tables");
+        for (name, entry) in entries {
+            if destination.contains_key(name) {
+                return Err(ConfigError::DuplicateExternal {
+                    path: include_path.display().to_string(),
+                    section: section.clone(),
+                    name: name.clone(),
+                });
+            }
+            destination.insert(name.clone(), entry.clone());
+            if section == "dynamic" {
+                dynamic_origins.insert(
+                    name.clone(),
+                    include_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn resolve_dynamic_implementations(
+    raw: BTreeMap<String, RawDynamicImplementation>,
+    origins: &BTreeMap<String, PathBuf>,
+    lookup: &impl Fn(&str) -> Option<String>,
+) -> Result<BTreeMap<String, DynamicImplementation>, ConfigError> {
+    raw.into_iter()
+        .map(|(name, entry)| {
+            let RawDynamicImplementation {
+                url,
+                token_env,
+                builtin,
+                command,
+            } = entry;
+            let implementation = match (url, builtin, command) {
+                (Some(url), None, None) => {
+                    let endpoint = resolve_endpoint("dynamic", name.clone(), RawEndpoint { url, token_env }, lookup)?;
+                    DynamicImplementation::Resolver(endpoint)
+                }
+                (None, Some(builtin), None) if token_env.is_none() && builtin == CLAUDE_CODE_BUILTIN => {
+                    DynamicImplementation::Builtin(builtin)
+                }
+                (None, Some(builtin), None) if token_env.is_none() => {
+                    return Err(ConfigError::InvalidBuiltinName {
+                        section: "dynamic",
+                        name,
+                        builtin,
+                    });
+                }
+                (None, None, Some(argv)) if token_env.is_none() && argv.iter().all(|argument| !argument.is_empty()) => {
+                    if argv.is_empty() {
+                        return Err(ConfigError::InvalidCommand { name });
+                    }
+                    DynamicImplementation::Command(ResolverCommand {
+                        argv,
+                        cwd: origins
+                            .get(&name)
+                            .expect("every composed dynamic binding records its source")
+                            .clone(),
+                    })
+                }
+                (None, None, Some(_)) if token_env.is_none() => return Err(ConfigError::InvalidCommand { name }),
+                _ => {
+                    return Err(ConfigError::ImplementationChoice {
+                        section: "dynamic",
+                        name,
+                    });
+                }
+            };
+            Ok((name, implementation))
+        })
+        .collect()
 }
 
 fn resolve_implementations(
@@ -512,7 +798,7 @@ mod tests {
 
     fn parse_with(text: &str, lookup: impl Fn(&str) -> Option<String>) -> Result<Config, ConfigError> {
         let raw: RawConfig = toml::from_str(text).expect("test fixture parses as TOML");
-        Config::validate(text.to_string(), raw, lookup)
+        Config::validate(text.to_string(), raw, Path::new("."), lookup)
     }
 
     #[test]
@@ -520,7 +806,7 @@ mod tests {
         let config = parse(MINIMAL).expect("the minimal fixture validates");
         assert_eq!(config.externals.timeout, Duration::from_millis(5000));
         assert_eq!(config.externals.max_body_bytes, 65536);
-        assert!(config.externals.dynamic.is_none());
+        assert!(config.externals.dynamic.is_empty());
         assert_eq!(
             config.policy_file().value().get("anything").and_then(|v| v.as_str()),
             Some("the runtime does not interpret this"),
@@ -590,14 +876,16 @@ mod tests {
     #[test]
     fn a_present_secret_resolves_and_debug_redacts_it() {
         let text = format!(
-            "{MINIMAL}\n[externals.dynamic]\nurl = \"https://resolver.internal\"\ntoken_env = \"APPA_RESOLVER_TOKEN\"\n"
+            "{MINIMAL}\n[externals.dynamic.classifier]\nurl = \"https://resolver.internal\"\ntoken_env = \"APPA_RESOLVER_TOKEN\"\n"
         );
         let config = parse_with(&text, |var| {
             (var == "APPA_RESOLVER_TOKEN").then(|| "sekret".to_string())
         })
         .expect("the fixture with a set secret validates");
         assert!(!format!("{:?}", config.externals).contains("sekret"));
-        let dynamic = config.externals.dynamic.expect("the shared dynamic endpoint is set");
+        let Some(DynamicImplementation::Resolver(dynamic)) = config.externals.dynamic.get("classifier") else {
+            panic!("the named dynamic endpoint is set")
+        };
         let token = dynamic.token.as_ref().expect("the token resolved");
         assert_eq!(token.reveal(), "sekret");
         assert_eq!(format!("{token:?}"), "Token(<redacted>)");
@@ -651,8 +939,11 @@ mod tests {
             Some(Implementation::Builtin(name)) if name == "redact-email",
         ));
 
-        let text = format!("{MINIMAL}\n[externals.dynamic]\nbuiltin = \"claude-code\"\n");
-        assert!(matches!(parse(&text), Err(ConfigError::BuiltinNotAllowed { .. })));
+        let text = format!("{MINIMAL}\n[externals.dynamic.classifier]\nbuiltin = \"claude-code\"\n");
+        assert!(matches!(
+            parse(&text).expect("the dynamic builtin validates").externals.dynamic.get("classifier"),
+            Some(DynamicImplementation::Builtin(name)) if name == "claude-code"
+        ));
         let text = format!("{MINIMAL}\n[externals.membership]\nbuiltin = \"approve\"\n");
         assert!(matches!(parse(&text), Err(ConfigError::BuiltinNotAllowed { .. })));
         let text = format!("{MINIMAL}\n[externals.membership]\nurl = \"https://directory.internal\"\n");
@@ -685,5 +976,219 @@ mod tests {
                 "builtin name {bad:?} must refuse",
             );
         }
+    }
+
+    #[test]
+    fn includes_append_contracts_after_root_contracts_in_authored_order() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        std::fs::write(
+            dir.path().join("appa.toml"),
+            r#"
+                include = ["first.toml", "second.toml"]
+
+                [policy]
+                version = 1
+
+                [[policy.tool]]
+                name = "root"
+                delta = {}
+
+                [externals]
+                timeout_ms = 5000
+                max_body_bytes = 65536
+            "#,
+        )
+        .expect("write root config");
+        for (file, name) in [("first.toml", "first"), ("second.toml", "second")] {
+            std::fs::write(
+                dir.path().join(file),
+                format!(
+                    r#"
+                        [policy]
+                        version = 1
+
+                        [[policy.tool]]
+                        name = "{name}"
+                        delta = {{}}
+                    "#
+                ),
+            )
+            .expect("write included config");
+        }
+
+        let config = Config::load(&dir.path().join("appa.toml")).expect("composed config loads");
+        let names = config.policy_file().value()["tool"]
+            .as_array()
+            .expect("tool declarations")
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("tool name"))
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["root", "first", "second"]);
+        assert!(!String::from_utf8_lossy(config.policy_file().bytes()).contains("include"));
+    }
+
+    #[test]
+    fn included_command_paths_are_relative_to_their_declaring_configs() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        std::fs::create_dir(dir.path().join("battery")).expect("create battery directory");
+        std::fs::write(
+            dir.path().join("appa.toml"),
+            r#"
+                include = ["battery/claude.toml"]
+                [policy]
+                version = 1
+                [externals]
+                timeout_ms = 5000
+                max_body_bytes = 65536
+                [externals.dynamic.local]
+                command = ["python3", "local.py"]
+            "#,
+        )
+        .expect("write root config");
+        std::fs::write(
+            dir.path().join("battery/claude.toml"),
+            r#"
+                [policy]
+                version = 1
+                [externals.dynamic.battery]
+                command = ["python3", "resolver.py"]
+            "#,
+        )
+        .expect("write included config");
+
+        let config = Config::load(&dir.path().join("appa.toml")).expect("composed config loads");
+        let command_cwd = |name| match config.externals.dynamic.get(name).expect("dynamic binding") {
+            DynamicImplementation::Command(command) => command.cwd.as_path(),
+            _ => panic!("binding is a command"),
+        };
+        assert_eq!(command_cwd("local"), dir.path());
+        assert_eq!(command_cwd("battery"), dir.path().join("battery"));
+    }
+
+    #[test]
+    fn include_boundaries_are_strict() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        let root = dir.path().join("appa.toml");
+        let write_root = |include: &str| {
+            std::fs::write(
+                &root,
+                format!(
+                    "include = [{include}]\n[policy]\nversion = 1\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n"
+                ),
+            )
+            .expect("write root config");
+        };
+
+        write_root("\"/absolute.toml\"");
+        assert!(matches!(Config::load(&root), Err(ConfigError::AbsoluteInclude { .. })));
+
+        write_root("\"battery.toml\", \"battery.toml\"");
+        std::fs::write(dir.path().join("battery.toml"), "[policy]\nversion = 1\n").expect("write included config");
+        assert!(matches!(Config::load(&root), Err(ConfigError::DuplicateInclude { .. })));
+
+        write_root("\"battery.toml\"");
+        std::fs::write(
+            dir.path().join("battery.toml"),
+            "include = [\"nested.toml\"]\n[policy]\nversion = 1\n",
+        )
+        .expect("write nested include");
+        assert!(matches!(Config::load(&root), Err(ConfigError::IncludedTopLevel { .. })));
+
+        std::fs::write(dir.path().join("battery.toml"), "[policy]\nversion = 2\n").expect("write version mismatch");
+        assert!(matches!(Config::load(&root), Err(ConfigError::IncludedVersion { .. })));
+    }
+
+    #[test]
+    fn included_files_cannot_replace_root_settings_or_named_externals() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        let root = dir.path().join("appa.toml");
+        std::fs::write(
+            &root,
+            r#"
+                include = ["battery.toml"]
+                [policy]
+                version = 1
+                [externals]
+                timeout_ms = 5000
+                max_body_bytes = 65536
+                [externals.dynamic.classifier]
+                builtin = "claude-code"
+            "#,
+        )
+        .expect("write root config");
+
+        std::fs::write(dir.path().join("battery.toml"), "[policy]\nversion = 1\nlimits = {}\n")
+            .expect("write singleton override");
+        assert!(matches!(
+            Config::load(&root),
+            Err(ConfigError::IncludedPolicyField { .. })
+        ));
+
+        std::fs::write(
+            dir.path().join("battery.toml"),
+            r#"
+                [policy]
+                version = 1
+                [externals.dynamic.classifier]
+                builtin = "claude-code"
+            "#,
+        )
+        .expect("write duplicate external");
+        assert!(matches!(
+            Config::load(&root),
+            Err(ConfigError::DuplicateExternal { .. })
+        ));
+
+        std::fs::write(
+            dir.path().join("battery.toml"),
+            "[policy]\nversion = 1\n[externals]\ntimeout_ms = 1\n",
+        )
+        .expect("write external singleton");
+        assert!(matches!(
+            Config::load(&root),
+            Err(ConfigError::IncludedExternalsField { .. })
+        ));
+    }
+
+    #[test]
+    fn composed_bytes_are_stable_and_standalone() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        let first = dir.path().join("first.toml");
+        let second = dir.path().join("second.toml");
+        std::fs::write(
+            &first,
+            "# comment\n[policy]\nversion=1\n[externals]\ntimeout_ms=5000\nmax_body_bytes=65536\n",
+        )
+        .expect("write first config");
+        std::fs::write(
+            &second,
+            "[policy]\nversion = 1 # another comment\n\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n",
+        )
+        .expect("write second config");
+        let first = Config::load(&first).expect("first config loads");
+        let second = Config::load(&second).expect("second config loads");
+        assert_eq!(first.policy_file().bytes(), second.policy_file().bytes());
+
+        let standalone = dir.path().join("standalone.toml");
+        std::fs::write(&standalone, first.policy_file().bytes()).expect("write composed bytes");
+        Config::load(&standalone).expect("composed bytes load without source files");
+
+        let ordered = |names: [&str; 2]| {
+            let path = dir.path().join(format!("{}-{}.toml", names[0], names[1]));
+            std::fs::write(
+                &path,
+                format!(
+                    "[policy]\nversion = 1\n[[policy.tool]]\nname = {:?}\n[[policy.tool]]\nname = {:?}\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n",
+                    names[0], names[1]
+                ),
+            )
+            .expect("write ordered declarations");
+            Config::load(&path).expect("ordered config loads")
+        };
+        assert_ne!(
+            ordered(["alpha", "beta"]).policy_file().bytes(),
+            ordered(["beta", "alpha"]).policy_file().bytes(),
+            "declaration order is part of deployment identity"
+        );
     }
 }

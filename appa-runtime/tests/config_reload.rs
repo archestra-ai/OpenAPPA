@@ -182,3 +182,49 @@ async fn a_refused_edit_changes_nothing_and_the_gate_keeps_deciding() {
         );
     }
 }
+
+#[tokio::test]
+async fn reload_rereads_includes_and_a_broken_include_keeps_the_previous_deployment() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let root_path = dir.path().join("appa.toml");
+    let battery_path = dir.path().join("battery.toml");
+    std::fs::write(
+        &root_path,
+        "include = [\"battery.toml\"]\n[policy]\nversion = 1\n[externals]\ntimeout_ms = 1000\nmax_body_bytes = 4096\n",
+    )
+    .expect("the root config writes");
+    std::fs::write(
+        &battery_path,
+        "[policy]\nversion = 1\n[[policy.tool]]\nname = \"notes\"\n",
+    )
+    .expect("the battery writes");
+    let runtime = Arc::new(
+        Runtime::open(
+            Config::load(&root_path).expect("the composed config loads"),
+            dir.path().join("appa.db"),
+            None,
+        )
+        .expect("the runtime opens"),
+    );
+
+    std::fs::write(&battery_path, "[policy]\nversion = 1\nlimits = {}\n").expect("the broken battery writes");
+    assert!(Config::load(&root_path).is_err(), "a broken include must refuse");
+    let still_active = TrajectoryId("reload:included-refusal".to_string());
+    start(&runtime, &still_active).await;
+    assert!(
+        allowed(&propose_notes(&runtime, &still_active).await),
+        "a failed composition leaves the previous deployment active"
+    );
+
+    std::fs::write(&battery_path, "[policy]\nversion = 1\n").expect("the edited battery writes");
+    let reloaded = runtime
+        .reload(Config::load(&root_path).expect("the edited include loads"))
+        .expect("the composed deployment reloads");
+    assert!(reloaded.changed);
+    let after = TrajectoryId("reload:included-edit".to_string());
+    start(&runtime, &after).await;
+    assert!(
+        denied(&propose_notes(&runtime, &after).await),
+        "a fresh root sees the edited include"
+    );
+}
