@@ -422,14 +422,8 @@ impl CommandProcess {
     }
 
     fn terminate_group(&mut self) {
-        let Some(process_group) = self.process_group.take() else {
-            return;
-        };
-        // The command starts a fresh process group whose id is the direct child's pid.
-        // A negative pid addresses that whole group. SIGKILL is deliberate: cleanup runs
-        // after every outcome, so a resolver cannot keep descendants alive after answering.
-        unsafe {
-            libc::kill(-process_group, libc::SIGKILL);
+        if let Some(process_group) = self.process_group.take() {
+            kill_process_group(process_group);
         }
     }
 
@@ -455,6 +449,16 @@ impl Drop for CommandProcess {
         // Covers runtime shutdown or task abortion. `kill_on_drop` also targets the direct
         // child; Tokio's orphan queue reaps it when an async wait cannot run.
         self.terminate_group();
+    }
+}
+
+/// A consult's subprocess starts a fresh process group whose id is the direct child's
+/// pid; a negative pid addresses that whole group. SIGKILL is deliberate: cleanup runs
+/// after every outcome, so a resolver cannot keep descendants alive after answering.
+#[cfg(unix)]
+pub(crate) fn kill_process_group(process_group: i32) {
+    unsafe {
+        libc::kill(-process_group, libc::SIGKILL);
     }
 }
 
@@ -529,8 +533,23 @@ async fn run_command_process(
             };
             // Observe exit without reaping. The zombie keeps its pid and process-group id
             // reserved until group cleanup runs, so the id cannot be recycled underneath us.
-            let (bytes, ()) = tokio::try_join!(output, wait_for_child_exit(process_group))?;
-            Ok(bytes)
+            // A helper the command left behind may hold the pipe open after the command
+            // itself exited: seeing the exit first ends the group, so the answer already
+            // written is read out instead of lost to the timeout.
+            tokio::pin!(output);
+            tokio::select! {
+                biased;
+                bytes = &mut output => {
+                    let bytes = bytes?;
+                    wait_for_child_exit(process_group).await?;
+                    Ok(bytes)
+                }
+                exited = wait_for_child_exit(process_group) => {
+                    exited?;
+                    kill_process_group(process_group);
+                    output.await
+                }
+            }
         };
         tokio::select! {
             biased;
@@ -953,6 +972,39 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
                 .expect("stdin is one JSON request");
         assert_eq!(request["kind"], "authority");
         assert_eq!(request["name"], "security");
+    }
+
+    /// The command answers and exits, but a helper it backgrounded keeps its stdout open.
+    /// The answer stands, promptly, and the helper does not outlive the consult.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_helper_holding_the_pipe_neither_stalls_nor_survives_the_command() {
+        let dir = tempfile::tempdir().expect("a fixture directory is created");
+        let pid_file = dir.path().join("helper.pid");
+        let script = format!(
+            "printf '%s' '{{\"version\":1,\"answer\":{{\"delta.trust\":\"trusted\"}}}}'\nsleep 30 &\necho $! > {}\n",
+            pid_file.display()
+        );
+        let services = command_services(dir.path(), &script, 3000, 1024);
+
+        let started = std::time::Instant::now();
+        let outcome = resolve_command(&services).await;
+        assert!(matches!(outcome, ConsultOutcome::Answer(_)), "{outcome:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the answer is read as soon as the command exits"
+        );
+
+        let helper: i32 = std::fs::read_to_string(&pid_file)
+            .expect("the command recorded its helper")
+            .trim()
+            .parse()
+            .expect("a pid");
+        let gone_by = std::time::Instant::now() + Duration::from_secs(3);
+        while unsafe { libc::kill(helper, 0) } == 0 {
+            assert!(std::time::Instant::now() < gone_by, "the helper outlived the consult");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     #[cfg(unix)]

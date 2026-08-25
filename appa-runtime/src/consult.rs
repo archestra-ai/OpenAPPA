@@ -141,7 +141,7 @@ impl WireAudience {
                 readers
                     .iter()
                     .map(|reader| reader.as_str().to_string())
-                    .chain(groups.iter().map(|group| group.as_str().to_string()))
+                    .chain(groups.iter().map(|group| group.to_string()))
                     .collect(),
             ),
         }
@@ -788,6 +788,19 @@ mod tests {
 
     fn chain() -> TrustChain {
         TrustChain::new(vec!["suspicious".to_string(), "trusted".to_string()])
+    }
+
+    #[test]
+    fn a_declared_audience_keeps_its_group_marks() {
+        let declared = DeclaredAudience::Restricted {
+            readers: [appa_engine::label::ReaderId::new("alice")].into_iter().collect(),
+            groups: [appa_engine::names::GroupName::new("eng")].into_iter().collect(),
+        };
+        assert_eq!(
+            WireAudience::declared(&declared),
+            WireAudience::Readers(vec!["alice".to_string(), "@eng".to_string()])
+        );
+        assert_eq!(WireAudience::declared(&DeclaredAudience::Public), WireAudience::Public);
     }
 
     #[test]

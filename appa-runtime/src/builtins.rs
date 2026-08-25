@@ -424,7 +424,11 @@ pub(crate) async fn run_claude_code(
         NoAnswerReason::Unreachable
     })?;
     let process_group = child.id().and_then(|pid| i32::try_from(pid).ok());
-    let exchanged = tokio::time::timeout_at(deadline, exchange(&mut child, prompt, backend.max_body_bytes)).await;
+    let exchanged = tokio::time::timeout_at(
+        deadline,
+        exchange(&mut child, process_group, prompt, backend.max_body_bytes),
+    )
+    .await;
     // Every outcome ends the consult's whole process group: no helper the CLI spawned
     // outlives the answer. On success the child is a zombie by now, so the group id is
     // still its own.
@@ -454,6 +458,7 @@ pub(crate) async fn run_claude_code(
 /// it, so the caller's group cleanup still addresses the right group.
 async fn exchange(
     child: &mut tokio::process::Child,
+    process_group: Option<i32>,
     prompt: &ModelPrompt,
     max_body_bytes: usize,
 ) -> Result<Vec<u8>, NoAnswerReason> {
@@ -469,20 +474,37 @@ async fn exchange(
     drop(stdin);
     // Read the capped output before waiting: a child writing past the cap is killed
     // right away, so a full pipe can never wedge the wait into the timeout.
-    let mut output = Vec::new();
-    let mut chunk = [0u8; 8192];
-    loop {
-        let read = stdout.read(&mut chunk).await.map_err(|_| NoAnswerReason::Transport)?;
-        if read == 0 {
-            break;
+    let read = async {
+        let mut output = Vec::new();
+        let mut chunk = [0u8; 8192];
+        loop {
+            let read = stdout.read(&mut chunk).await.map_err(|_| NoAnswerReason::Transport)?;
+            if read == 0 {
+                return Ok(output);
+            }
+            if output.len().saturating_add(read) > max_body_bytes {
+                return Err(NoAnswerReason::Oversized);
+            }
+            output.extend_from_slice(&chunk[..read]);
         }
-        if output.len().saturating_add(read) > max_body_bytes {
-            return Err(NoAnswerReason::Oversized);
+    };
+    // A helper the CLI left behind may hold the pipe open after the CLI itself exited:
+    // seeing the exit first ends the group, so the answer already written is read out
+    // instead of lost to the timeout.
+    tokio::pin!(read);
+    tokio::select! {
+        biased;
+        output = &mut read => {
+            let output = output?;
+            observe_exit(child).await?;
+            Ok(output)
         }
-        output.extend_from_slice(&chunk[..read]);
+        exited = observe_exit(child) => {
+            exited?;
+            terminate_process_group(process_group);
+            read.await
+        }
     }
-    observe_exit(child).await?;
-    Ok(output)
 }
 
 #[cfg(unix)]
@@ -494,14 +516,10 @@ fn start_own_process_group(command: &mut tokio::process::Command) {
 #[cfg(not(unix))]
 fn start_own_process_group(_: &mut tokio::process::Command) {}
 
-/// The consult started a fresh process group whose id is the child's pid; a negative pid
-/// addresses the whole group. SIGKILL is deliberate: this runs after every outcome.
 #[cfg(unix)]
 fn terminate_process_group(process_group: Option<i32>) {
     if let Some(process_group) = process_group {
-        unsafe {
-            libc::kill(-process_group, libc::SIGKILL);
-        }
+        crate::external::kill_process_group(process_group);
     }
 }
 
@@ -526,8 +544,9 @@ async fn observe_exit(_: &tokio::process::Child) -> Result<(), NoAnswerReason> {
 mod tests {
     use super::*;
 
-    /// A helper the CLI leaves running — here a backgrounded `sleep` whose pid the fake
-    /// records — must not survive the consult that started it.
+    /// A helper the CLI leaves running — here a backgrounded `sleep` that keeps the
+    /// CLI's stdout open, whose pid the fake records — neither stalls the answer nor
+    /// survives the consult that started it.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_claude_consult_takes_its_helpers_down_with_it() {
@@ -539,7 +558,7 @@ mod tests {
         std::fs::write(
             &fake,
             format!(
-                "#!/bin/sh\ncat > /dev/null\nsleep 30 > /dev/null 2>&1 &\necho $! > {}\nprintf '%s' '{{\"structured_output\":{{\"ruling\":\"approve\",\"reason\":\"ok\"}}}}'\n",
+                "#!/bin/sh\ncat > /dev/null\nprintf '%s' '{{\"structured_output\":{{\"ruling\":\"approve\",\"reason\":\"ok\"}}}}'\nsleep 30 &\necho $! > {}\n",
                 pid_file.display()
             ),
         )
@@ -557,10 +576,15 @@ mod tests {
             schema: serde_json::json!({"type": "object"}),
         };
 
+        let started = std::time::Instant::now();
         let answer = backend
             .consult(&prompt, tokio::time::Instant::now() + std::time::Duration::from_secs(5))
             .await;
         assert_eq!(answer, Ok(serde_json::json!({"ruling": "approve", "reason": "ok"})));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "the answer is read as soon as the CLI exits"
+        );
 
         let helper: i32 = std::fs::read_to_string(&pid_file)
             .expect("the fake recorded its helper")
