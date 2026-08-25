@@ -143,7 +143,7 @@ async fn a_sanitized_return_replaces_the_subagents_message_in_the_agent_result()
 [[policy.sanitizer]]
 name = "redactor"
 on = ["tool_output"]
-mandate = { audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } } }
+permits = { audience = { from = ["internal"], to = ["public"] } }
 
 [policy.child]
 return_sanitizer = "redactor"

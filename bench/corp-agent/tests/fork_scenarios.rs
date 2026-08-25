@@ -39,7 +39,7 @@ const FORUM_THREAD: &str = "nightly deploy times out since v2.31; 45 minutes fix
 /// branching test below — the test the gate exists for — applies the same
 /// posture to the shared policy here.
 const SHARED_TICKET_REQUIRES: &str = r#"requires = { trust = "internal" }"#;
-const TICKET_REQUIRES_PRIOR_EGRESS: &str = r#"requires = { trust = "internal", effects = { has = ["egress"] } }"#;
+const TICKET_REQUIRES_PRIOR_EGRESS: &str = r#"requires = { trust = "internal", effects = { contains = ["egress"] } }"#;
 
 fn ticket_gated_on_prior_egress() -> String {
     assert_eq!(

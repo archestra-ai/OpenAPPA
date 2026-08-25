@@ -216,8 +216,8 @@ name = "WebSearch"
 delta = { trust = "suspicious" }
 
 # A fetched page is pending-cast: its trust is decided per value by the
-# `page-classifier` below, never assumed. The `web` tag puts it in the
-# classifier's scope; `confined_results` below holds the raw result
+# `page-classifier` below, never assumed. The `web` tag matches the
+# classifier's `tags`; `confined_results` below holds the raw result
 # until the cast has answered.
 [[policy.tool]]
 name = "WebFetch"
@@ -258,20 +258,22 @@ confined_results = ["WebFetch"]
 # the value stays withheld.
 [[policy.cast]]
 name = "page-classifier"
-resolver = { may_cast = { trust = ["suspicious", "trusted"], audience = { cap = ["public"] } } }
-
-[policy.cast.scope]
 tags = ["web"]
 
+[policy.cast.resolver.may_cast]
+trust = ["suspicious", "trusted"]
+audience = ["public"]
+
 # A constant needs no binding. Registered last: a constant shadows every
-# cast after it that its scope covers, and the loader refuses the dead
+# cast after it that shares its tags, and the loader refuses the dead
 # registration.
 [[policy.cast]]
 name = "github-content"
-constant = { trust = "suspicious", audience = { exactly = ["public"] } }
-
-[policy.cast.scope]
 tags = ["github"]
+
+[policy.cast.constant]
+trust = "suspicious"
+audience = ["public"]
 
 [externals]
 timeout_ms = 5000

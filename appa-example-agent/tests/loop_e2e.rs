@@ -109,11 +109,11 @@ version = 1
 
 [[policy.tool]]
 name = "read_hr"
-delta = { audience = { exactly = ["staff"] } }
+delta = { audience = ["staff"] }
 
 [[policy.tool]]
 name = "send_email"
-requires = { audience = { includes = ["public"] } }
+requires = { audience = { contains = ["public"] } }
 delta = {}
 "#;
     let provider = Provider::default();
@@ -151,11 +151,11 @@ version = 1
 
 [[policy.tool]]
 name = "read_hr"
-delta = { audience = { exactly = ["staff"] } }
+delta = { audience = ["staff"] }
 
 [[policy.tool]]
 name = "send_email"
-requires = { audience = { includes = ["public"] } }
+requires = { audience = { contains = ["public"] } }
 delta = {}
 "#;
     let provider = Provider::default();
@@ -219,10 +219,10 @@ version = 1
 
 [[policy.tool]]
 name = "read_hr"
-delta = { audience = { exactly = ["hr"] } }
+delta = { audience = ["hr"] }
 
 [policy.boundary]
-audience = { exactly = ["public"] }
+audience = ["public"]
 "#;
     let host = ToolHost::default();
     host.answers("read_hr", "Alice Chen, SSN 4821-9930");
@@ -403,7 +403,7 @@ parameters = { type = "object", properties = { task = { type = "string" } } }
 
 [[policy.tool]]
 name = "read_hr"
-delta = { audience = { exactly = ["hr"] } }
+delta = { audience = ["hr"] }
 
 [policy.deployment]
 context_control = true
@@ -522,13 +522,13 @@ parameters = { type = "object", properties = { task = { type = "string" } } }
 
 [[policy.tool]]
 name = "read_hr"
-delta = { audience = { exactly = ["internal"] } }
+delta = { audience = ["internal"] }
 
 [[policy.sanitizer]]
 name = "scrub"
 on = ["tool_output"]
-[policy.sanitizer.mandate]
-audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
+[policy.sanitizer.permits]
+audience = { from = ["internal"], to = ["public"] }
 
 [policy.child]
 return_sanitizer = "scrub"
@@ -580,7 +580,7 @@ parameters = { type = "object", properties = { task = { type = "string" } } }
 
 [[policy.tool]]
 name = "read_hr"
-delta = { audience = { exactly = ["internal"] } }
+delta = { audience = ["internal"] }
 
 [policy.deployment]
 context_control = true
@@ -644,8 +644,8 @@ delta = {}
 
 [[policy.authority]]
 name = "approver"
-[policy.authority.mandate]
-attends = ["irreversible"]
+[policy.authority.permits]
+attention = ["irreversible"]
 "#;
 
 #[tokio::test]
@@ -684,11 +684,11 @@ version = 1
 
 [[policy.tool]]
 name = "read_hr"
-delta = { audience = { exactly = ["staff"] } }
+delta = { audience = ["staff"] }
 
 [[policy.tool]]
 name = "send_email"
-requires = { audience = { includes = ["public"] } }
+requires = { audience = { contains = ["public"] } }
 delta = {}
 "#;
 
@@ -697,19 +697,19 @@ version = 1
 
 [[policy.tool]]
 name = "read_hr"
-delta = { audience = { exactly = ["staff"] } }
+delta = { audience = ["staff"] }
 
 [[policy.tool]]
 name = "send_email"
 parameters = { type = "object", properties = { body = { type = "string" } }, required = ["body"] }
-requires = { audience = { includes = ["public"] } }
+requires = { audience = { contains = ["public"] } }
 delta = {}
 
 [[policy.sanitizer]]
 name = "scrub"
 on = ["tool_input"]
-[policy.sanitizer.mandate]
-audience = { from = { includes = ["staff"] }, to = { exactly = ["public"] } }
+[policy.sanitizer.permits]
+audience = { from = ["staff"], to = ["public"] }
 "#;
 
 #[tokio::test]
@@ -766,25 +766,25 @@ version = 1
 
 [[policy.tool]]
 name = "read_hr"
-delta = { audience = { exactly = ["staff"] } }
+delta = { audience = ["staff"] }
 
 [[policy.tool]]
 name = "send"
 parameters = { type = "object", properties = { body = { type = "string" } }, required = ["body"] }
-requires = { audience = { includes = ["public"] } }
+requires = { audience = { contains = ["public"] } }
 delta = {}
 
 [[policy.tool]]
 name = "delegate"
 parameters = { type = "object", properties = { task = { type = "string" } }, required = ["task"] }
-requires = { audience = { includes = ["public"] } }
+requires = { audience = { contains = ["public"] } }
 delta = {}
 
 [[policy.sanitizer]]
 name = "scrub"
 on = ["tool_input"]
-[policy.sanitizer.mandate]
-audience = { from = { includes = ["staff"] }, to = { exactly = ["public"] } }
+[policy.sanitizer.permits]
+audience = { from = ["staff"], to = ["public"] }
 
 [policy.deployment]
 context_control = true

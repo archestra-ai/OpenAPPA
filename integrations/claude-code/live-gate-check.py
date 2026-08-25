@@ -45,11 +45,11 @@ version = 1
 
 [[policy.tool]]
 name = "Read"
-delta = { audience = { exactly = ["session"] } }
+delta = { audience = ["session"] }
 
 [[policy.tool]]
 name = "Write"
-requires = { audience = { includes = ["public"] } }
+requires = { audience = { contains = ["public"] } }
 delta = {}
 
 [policy.deployment]

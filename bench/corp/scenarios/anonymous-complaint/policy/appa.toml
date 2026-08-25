@@ -3,7 +3,7 @@ version = 1
 trust_chain = ["suspicious", "internal"]
 [policy.boundary]
 trust = "internal"
-audience = { exactly = ["public"] }
+audience = ["public"]
 [policy.child]
 return_sanitizer = "complainant-redactor"
 
@@ -18,11 +18,11 @@ parameters = { type = "object", properties = { task = { type = "string", descrip
 [[policy.tool]]
 name = "search_hr"
 parameters = { type = "object", properties = { query = { type = "string" } }, required = ["query"], additionalProperties = false }
-delta = { audience = { exactly = ["quiet.wren@identity.example"] } }
+delta = { audience = ["quiet.wren@identity.example"] }
 [[policy.tool]]
 name = "read_hr"
 parameters = { type = "object", properties = { file = { type = "string" } }, required = ["file"], additionalProperties = false }
-delta = { audience = { exactly = ["quiet.wren@identity.example"] } }
+delta = { audience = ["quiet.wren@identity.example"] }
 [[policy.tool]]
 name = "create_hr"
 parameters = { type = "object", properties = { file = { type = "string" }, content = { type = "string" } }, required = ["file", "content"], additionalProperties = false }
@@ -30,13 +30,14 @@ delta = {}
 [[policy.tool]]
 name = "send_email"
 parameters = { type = "object", properties = { to = { type = "string" }, subject = { type = "string" }, body = { type = "string" } }, required = ["to", "subject", "body"], additionalProperties = false }
-requires = { audience = { includes = ["$to"] } }
+requires = { audience = { contains = ["$to"] } }
 effects = ["egress"]
 delta = {}
 [[policy.sanitizer]]
 name = "complainant-redactor"
 on = ["tool_output"]
-mandate = { audience = { from = { includes = ["quiet.wren@identity.example"] }, to = { exactly = ["public"] } } }
+[policy.sanitizer.permits]
+audience = { from = ["quiet.wren@identity.example"], to = ["public"] }
 
 # --- deployment coverage -----------------------------------------------------
 #

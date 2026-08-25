@@ -4,8 +4,9 @@
 #
 # Creating a GitHub issue — `mcp__github__issue_write` — carries an
 # attention mark. An attention mark is a requirement no label can
-# satisfy: only an authority that attends it clears it, so
-# every issue write stops and asks the `operator` authority to rule.
+# satisfy: only an authority whose `permits.attention` lists it clears
+# it, so every issue write stops and asks the `operator` authority to
+# rule.
 # The mark is on the write, not on the reads: this session can search
 # and read GitHub freely and stops only where it would publish.
 #
@@ -286,8 +287,8 @@ context_control = true
 name = "operator"
 hint = "The person running this session. Consult them before publishing an issue."
 
-[policy.authority.mandate]
-attends = ["operator-signoff"]
+[policy.authority.permits]
+attention = ["operator-signoff"]
 
 [externals]
 timeout_ms = 5000

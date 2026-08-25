@@ -3,7 +3,7 @@ version = 1
 trust_chain = ["suspicious", "internal"]
 [policy.boundary]
 trust = "internal"
-audience = { exactly = ["public"] }
+audience = ["public"]
 [[policy.dynamic_resolver]]
 name = "tenant-record-readers"
 inputs = ["subject"]
@@ -24,7 +24,7 @@ parameters = { type = "object", properties = { task = { type = "string", descrip
 [[policy.tool]]
 name = "search_vendor"
 parameters = { type = "object", properties = { query = { type = "string" } }, required = ["query"], additionalProperties = false }
-delta = { audience = { exactly = ["Client_Alpha"] } }
+delta = { audience = ["Client_Alpha"] }
 [[policy.tool]]
 name = "read_vendor"
 parameters = { type = "object", properties = { file = { type = "string" } }, required = ["file"], additionalProperties = false }

@@ -176,7 +176,7 @@ pub enum LoadError {
     )]
     ChildReturnSanitizerScoped(String),
     #[error(
-        "sanitizer {0} registers on tool_input with a trust transition: only the `includes` check reads an input substitution, so a trust `to` can never help a call and the sanitizer would sit inert"
+        "sanitizer {0} registers on tool_input with a trust transition: only the `contains` check reads an input substitution, so a trust `to` can never help a call and the sanitizer would sit inert"
     )]
     InputSanitizerTrust(String),
     #[error(
@@ -523,10 +523,10 @@ impl Registry {
             for requirement in &tool.requires.label.audience {
                 match requirement {
                     AudienceRequirement::Includes(RecipientSpec::Static(recipients)) => {
-                        check_declared_readers(recipients, || format!("tool {} includes", tool.name.as_str()))?;
+                        check_declared_readers(recipients, || format!("tool {} contains", tool.name.as_str()))?;
                     }
                     AudienceRequirement::Cap(cap) => {
-                        check_declared_readers(cap, || format!("tool {} cap", tool.name.as_str()))?;
+                        check_declared_readers(cap, || format!("tool {} within", tool.name.as_str()))?;
                     }
                     AudienceRequirement::Includes(RecipientSpec::Placeholder(_)) => {}
                 }
@@ -956,7 +956,7 @@ fn check_audience_bindings(tool: &ToolContract) -> Result<(), LoadError> {
     };
     for requirement in &tool.requires.label.audience {
         match requirement {
-            AudienceRequirement::Includes(RecipientSpec::Placeholder(argument)) => check(argument, "includes")?,
+            AudienceRequirement::Includes(RecipientSpec::Placeholder(argument)) => check(argument, "contains")?,
             AudienceRequirement::Includes(RecipientSpec::Static(_)) | AudienceRequirement::Cap(_) => {}
         }
     }
@@ -1149,8 +1149,8 @@ mod tests {
 
         vec![
             ("tool emit delta", delta),
-            ("tool emit includes", includes),
-            ("tool emit cap", cap),
+            ("tool emit contains", includes),
+            ("tool emit within", cap),
             ("authority officer reader ceiling", ceiling),
             ("sanitizer redactor from", transition_from),
             ("sanitizer redactor to", transition_to),
@@ -1722,7 +1722,7 @@ mod tests {
             vec![AudienceRequirement::Includes(RecipientSpec::Placeholder("to".into()))];
         let mut cfg = base();
         cfg.tools = vec![placeholder];
-        vec![("tool emit includes", cfg)]
+        vec![("tool emit contains", cfg)]
     }
 
     /// The site a `uses` input maps from. It answers to a weaker rule than the `$arg`

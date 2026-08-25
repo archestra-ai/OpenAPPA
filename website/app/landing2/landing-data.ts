@@ -42,7 +42,7 @@ export const SOURCES: Source[] = [
 # Contract derived from the tool-call argument
 [[tool]]
 name     = "gmail__send_email"          # gmail__send_email(body, to)
-~requires = { trust = "trusted", audience = { includes = ["$to"] } }
+~requires = { trust = "trusted", audience = { contains = ["$to"] } }
 ~effects  = ["egress"]
 ~delta    = {}   # a delivery receipt carries nothing`,
       mcp: `
@@ -51,7 +51,7 @@ name     = "gmail__send_email"          # gmail__send_email(body, to)
   "name": "gmail__send_email",
   "_meta": {
 ~    "appa/contract": {
-~      "requires": { "trust": "trusted", "audience": { "includes": ["$to"] } },
+~      "requires": { "trust": "trusted", "audience": { "contains": ["$to"] } },
 ~      "effects": ["egress"],
 ~      "delta": {}
 ~    }
@@ -66,7 +66,7 @@ spec:
   tool: gmail__send_email
 ~  requires:
 ~    trust: trusted
-~    audience: { includes: ["$to"] }
+~    audience: { contains: ["$to"] }
 ~  effects: [egress]
 ~  delta: {}`,
       rego: `
@@ -77,7 +77,7 @@ package appa.gmail
 ~  input.tool == "gmail__send_email"
 ~  c := {
 ~    "requires": {"trust": "trusted",
-~                 "audience": {"includes": [input.arguments.to]}},
+~                 "audience": {"contains": [input.arguments.to]}},
 ~    "effects": ["egress"],
 ~    "delta": {}
 ~  }
@@ -98,7 +98,7 @@ package appa.gmail
 def gmail__send_email(body: str, to: str):
 ~    """Send an email."""
 ~    appa.contract(
-~        requires={"trust": "trusted", "audience": {"includes": ["$to"]}},
+~        requires={"trust": "trusted", "audience": {"contains": ["$to"]}},
 ~        effects=["egress"],
 ~        delta={},   # a delivery receipt carries nothing
 ~    )`,
@@ -122,7 +122,7 @@ when     = { repo = "archestra/*-private" }   # private repos: no audience gate
 
 [[tool]]
 name     = "github__create_issue"          # everywhere else: public only
-~requires = { trust = "trusted", audience = { includes = ["public"] } }
+~requires = { trust = "trusted", audience = { contains = ["public"] } }
 ~effects  = ["egress", "mutation"]
 ~delta    = {}`,
       mcp: `
@@ -134,7 +134,7 @@ name     = "github__create_issue"          # everywhere else: public only
 ~      { "when": { "repo": "archestra/*-private" },
 ~        "requires": {}, "effects": ["egress", "mutation"], "delta": {} },
 ~      { "requires": { "trust": "trusted",
-~                      "audience": { "includes": ["public"] } },
+~                      "audience": { "contains": ["public"] } },
 ~        "effects": ["egress", "mutation"], "delta": {} }
     ]
   }
@@ -152,7 +152,7 @@ spec:
 ~      effects: [egress, mutation]
 ~    - requires:
 ~        trust: trusted
-~        audience: { includes: ["public"] }
+~        audience: { contains: ["public"] }
 ~      effects: [egress, mutation]`,
       rego: `
 package appa.github
@@ -167,7 +167,7 @@ package appa.github
 ~contract[c] {
 ~  not glob.match("archestra/*-private", [], input.arguments.repo)
 ~  c := {"requires": {"trust": "trusted",
-~                     "audience": {"includes": ["public"]}},
+~                     "audience": {"contains": ["public"]}},
 ~        "effects": ["egress", "mutation"], "delta": {}}
 ~}`,
       cedar: `
@@ -190,7 +190,7 @@ def github__create_issue(repo: str, title: str):
 ~             requires={}, effects=["egress", "mutation"]),
 ~        # everywhere else: public only
 ~        default(requires={"trust": "trusted",
-~                          "audience": {"includes": ["public"]}},
+~                          "audience": {"contains": ["public"]}},
 ~                effects=["egress", "mutation"]),
 ~    )`,
     },
@@ -217,7 +217,7 @@ name = "confluence__get_issue"
 #   ← {
 #       "_meta": {
 ~#         "appa/contract": {
-~#           "delta": { "audience": { "exactly": ["legal"] } }
+~#           "delta": { "audience": ["legal"] }
 ~#         }
 #       }
 #     }`,
@@ -232,7 +232,7 @@ name = "confluence__get_issue"
 {
   "_meta": {
 ~    "appa/contract": {
-~      "delta": { "audience": { "exactly": ["legal"] } }
+~      "delta": { "audience": ["legal"] }
 ~    }
   }
 }`,
@@ -246,7 +246,7 @@ spec:
 ~  resolver:                     # contract fetched per call
 ~    endpoint: https://confluence.internal/appa/resolve
 ~    method: tools/resolve
-~  # ← delta: { audience: { exactly: [legal] } }`,
+~  # ← delta: { audience: [legal] }`,
       rego: `
 package appa.confluence
 
@@ -275,7 +275,7 @@ def confluence__get_issue(issue_key: str):
 ~        # out of Confluence's own ACLs, per call
 ~        endpoint="https://confluence.internal/appa/resolve",
 ~        method="tools/resolve",
-~    )   # ← delta: {"audience": {"exactly": ["legal"]}}`,
+~    )   # ← delta: {"audience": ["legal"]}`,
     },
   },
 ];

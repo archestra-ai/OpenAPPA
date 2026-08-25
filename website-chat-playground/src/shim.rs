@@ -172,7 +172,7 @@ async fn dynamic_resolver(
     // The answer carries exactly the result this resolver declares.
     let answer = serde_json::json!({
         "version": 1,
-        "result": { "requires.audience": { "includes": readers } }
+        "result": { "requires.audience": { "contains": readers } }
     });
     (StatusCode::OK, axum::Json(answer))
 }
@@ -461,7 +461,7 @@ mod tests {
         let (status, axum::Json(answer)) = dynamic_resolver(axum::Json(resolve("ap-review@corp.example"))).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
-            answer["result"]["requires.audience"]["includes"],
+            answer["result"]["requires.audience"]["contains"],
             serde_json::json!(["cfo@corp.example", "ap-lead@corp.example"])
         );
         assert_eq!(
@@ -473,14 +473,14 @@ mod tests {
         let (status, axum::Json(answer)) = dynamic_resolver(axum::Json(resolve("all@acme.com"))).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
-            answer["result"]["requires.audience"]["includes"],
+            answer["result"]["requires.audience"]["contains"],
             serde_json::json!(["ceo@acme.com", "staff@acme.com"])
         );
 
         let (status, axum::Json(answer)) = dynamic_resolver(axum::Json(resolve("person@corp.example"))).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
-            answer["result"]["requires.audience"]["includes"],
+            answer["result"]["requires.audience"]["contains"],
             serde_json::json!(["person@corp.example"])
         );
     }

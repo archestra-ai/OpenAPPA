@@ -16,13 +16,13 @@ trust_chain = ["suspicious", "internal"]
 
 [[policy.tool]]
 name = "publish"
-requires = { audience = { includes = ["public"] } }
+requires = { audience = { contains = ["public"] } }
 effects = ["egress"]
 delta = {}
 
 [[policy.tool]]
 name = "read_hr"
-delta = { audience = { exactly = ["hr"] } }
+delta = { audience = ["hr"] }
 
 [[policy.tool]]
 name = "delegate"
@@ -31,7 +31,7 @@ parameters = { type = "object", properties = { task = { type = "string" } } }
 [[policy.sanitizer]]
 name = "redactor"
 on = ["tool_output"]
-mandate = { audience = { from = { includes = ["hr"] }, to = { exactly = ["public"] } } }
+permits = { audience = { from = ["hr"], to = ["public"] } }
 
 [policy.deployment]
 context_control = true
@@ -344,7 +344,7 @@ delta = { trust = "suspicious" }
 [[policy.sanitizer]]
 name = "attest-schema"
 on = ["tool_output"]
-[policy.sanitizer.mandate]
+[policy.sanitizer.permits]
 trust = { from = "suspicious", to = "trusted" }
 
 [policy.child]

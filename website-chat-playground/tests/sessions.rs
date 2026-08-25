@@ -53,7 +53,7 @@ delta = {}
 [[authority]]
 name = "some-desk-the-service-has-never-seen"
 hint = "You are the release desk."
-mandate = { attends = ["release-review"] }
+permits = { attention = ["release-review"] }
 "#;
 
     sessions
@@ -76,7 +76,7 @@ delta = { audience = "unknown" }
 
 [[cast]]
 name = "classifier"
-resolver = { may_cast = { trust = ["suspicious"], audience = { cap = ["public"] } } }
+resolver = { may_cast = { trust = ["suspicious"], audience = ["public"] } }
 "#;
 
     let Err(error) = sessions
@@ -102,7 +102,7 @@ delta = { audience = "unknown" }
 
 [[cast]]
 name = "paranoid"
-constant = { trust = "suspicious", audience = { exactly = ["public"] } }
+constant = { trust = "suspicious", audience = ["public"] }
 "#;
 
     sessions

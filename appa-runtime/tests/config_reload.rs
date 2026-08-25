@@ -20,7 +20,7 @@ fn without_notes() -> String {
 }
 
 fn unloadable() -> String {
-    policy_with("[[policy.tool]]\nname = \"notes\"\nrequires = { nonesuch = { includes = [\"x\"] } }\n")
+    policy_with("[[policy.tool]]\nname = \"notes\"\nrequires = { nonesuch = { contains = [\"x\"] } }\n")
 }
 
 fn unknown_builtin() -> String {
@@ -30,7 +30,7 @@ name = "notes"
 
 [[policy.authority]]
 name = "security"
-mandate = { attends = ["security-signoff"] }
+permits = { attention = ["security-signoff"] }
 
 [externals.authorities.security]
 builtin = "no-such-module"

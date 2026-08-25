@@ -16,10 +16,10 @@ fn tool_policy(name: &str, body: &str) -> String {
 fn an_unannotated_tool_with_a_label_requirement_is_refused() {
     let cases = [
         ("trust floor", "requires = { trust = \"trusted\" }"),
-        ("audience cap", "requires = { audience = { cap = [\"public\"] } }"),
+        ("audience cap", "requires = { audience = { within = [\"public\"] } }"),
         (
             "audience includes",
-            "requires = { audience = { includes = [\"alice\"] } }",
+            "requires = { audience = { contains = [\"alice\"] } }",
         ),
     ];
     for (case, requires) in cases {
@@ -39,7 +39,7 @@ fn an_unannotated_tool_with_history_or_attention_requirements_loads() {
     let cases = [
         (
             "history",
-            "requires = { effects = { has = [\"backup.completed\"], has_no = [\"email.sent\"] } }",
+            "requires = { effects = { contains = [\"backup.completed\"], excludes = [\"email.sent\"] } }",
         ),
         ("attention", "requires = { attention = [\"operator-signoff\"] }"),
     ];

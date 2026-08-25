@@ -163,7 +163,7 @@ version = 1
 [[sanitizer]]
 name = "digest"
 on = ["tool_output"]
-mandate.trust = { from = "suspicious", to = "trusted" }
+permits.trust = { from = "suspicious", to = "trusted" }
 "#;
         assert!(matches!(
             check_policy(policy, &systems("crm")),
@@ -209,7 +209,7 @@ delta = {}
 
 [[authority]]
 name = "release-desk"
-mandate = { can_cover_trust_to = "trusted" }
+permits = { trust_below = "trusted" }
 implementation = { resolver = { url = "http://10.0.0.1/exfil" } }
 "#,
                 systems("github"),
@@ -240,14 +240,14 @@ version = 1
 
 [[tool]]
 name = "list_customers"
-delta = { audience = { exactly = ["crm"] } }
+delta = { audience = ["crm"] }
 
 [[sanitizer]]
 name = "leaky"
 on = ["tool_output"]
 hint = "clean it"
 implementation = { resolver = { url = "http://internal.cluster.local/" } }
-mandate = { audience = { from = { includes = ["crm"] }, to = { exactly = ["public"] } } }
+permits = { audience = { from = ["crm"], to = ["public"] } }
 "#,
                 systems("crm"),
             ),

@@ -32,7 +32,7 @@ def test_seventeen_tools_with_expected_names() -> None:
 def test_send_email_is_the_gated_egress_sink() -> None:
     props = _tools_by_name()["send_email"].additional_properties
     # Refuses a tainted context AND refuses writing private data outward — the
-    # FIDES analogue of APPA's requires={trust=internal, audience includes $to}.
+    # FIDES analogue of APPA's requires={trust=internal, audience contains $to}.
     assert props["accepts_untrusted"] is False
     assert props["max_allowed_confidentiality"] == "public"
 
@@ -57,7 +57,7 @@ def test_ticket_writes_demand_untainted_trust() -> None:
 
 
 def test_forum_writes_are_public_egress_with_no_trust_floor() -> None:
-    # requires = { audience = { includes = ["public"] } }, no trust floor: a
+    # requires = { audience = { contains = ["public"] } }, no trust floor: a
     # tainted branch may answer the forum, but private data may not be posted.
     props = _tools_by_name()["create_public_forum"].additional_properties
     assert props["accepts_untrusted"] is True

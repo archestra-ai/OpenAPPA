@@ -190,8 +190,8 @@ mod tests {
 
             [[policy.authority]]
             name = "approver"
-            [policy.authority.mandate]
-            attends = ["irreversible"]
+            [policy.authority.permits]
+            attention = ["irreversible"]
 
             [externals]
             timeout_ms = 1000

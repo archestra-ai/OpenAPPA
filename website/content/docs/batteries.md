@@ -83,11 +83,11 @@ Slack history uses the same first-match rule. Engineering history stays inside S
 ```toml
 [[policy.tool]]
 name = "mcp__slack__slack_get_channel_history(channel_id:C123*)"
-delta = { trust = "suspicious", audience = { exactly = ["slack-internal"] } }
+delta = { trust = "suspicious", audience = ["slack-internal"] }
 
 [[policy.tool]]
 name = "mcp__slack__slack_get_channel_history"
-delta = { trust = "suspicious", audience = { exactly = ["slack-unclassified"] } }
+delta = { trust = "suspicious", audience = ["slack-unclassified"] }
 ```
 
 ## Use resolvers in batteries
@@ -160,7 +160,7 @@ This Claude Code battery handles `cargo test` directly. Other Bash commands go t
 [[policy.tool]]
 name = "Bash(command:cargo test)"
 requires = { trust = "trusted" }
-delta = { trust = "suspicious", audience = { exactly = ["claude-session"] } }
+delta = { trust = "suspicious", audience = ["claude-session"] }
 
 [[policy.dynamic_resolver]]
 name = "claude-code.bash-review"
@@ -170,7 +170,7 @@ returns = ["requires.attention"]
 name = "Bash"
 uses = [{ resolver = "claude-code.bash-review" }]
 requires = { trust = "trusted" }
-delta = { trust = "suspicious", audience = { exactly = ["claude-session"] } }
+delta = { trust = "suspicious", audience = ["claude-session"] }
 
 [externals.dynamic."claude-code.bash-review"]
 command = ["python3", "./bash-review.py"]
@@ -200,7 +200,7 @@ version = 1
 [[policy.tool]]
 name = "Bash(command:cargo test)"
 requires = { trust = "trusted", attention = ["hitl"] }
-delta = { trust = "suspicious", audience = { exactly = ["claude-session"] } }
+delta = { trust = "suspicious", audience = ["claude-session"] }
 
 [[policy.dynamic_resolver]]
 name = "local.read-sensitivity"

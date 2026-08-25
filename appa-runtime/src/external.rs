@@ -140,7 +140,7 @@ pub struct ToolResolutionAnswer {
     pub attention: Option<Vec<String>>,
 }
 
-/// The audience half of a `requires` answer off the wire: an `includes` floor, a `cap`
+/// The audience half of a `requires` answer off the wire: a `contains` floor, a `within`
 /// ceiling, or both — never neither.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequiredAudienceAnswer {
@@ -224,8 +224,8 @@ struct ToolResolutionResponse {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RequiredAudienceWire {
-    includes: Option<serde_json::Value>,
-    cap: Option<serde_json::Value>,
+    contains: Option<serde_json::Value>,
+    within: Option<serde_json::Value>,
 }
 
 enum AuthorityBackend {
@@ -717,14 +717,14 @@ fn parse_tool_resolution(
     let required_audience = match required_audience {
         None => None,
         Some(wire) => {
-            if wire.includes.is_none() && wire.cap.is_none() {
+            if wire.contains.is_none() && wire.within.is_none() {
                 return ToolResolution::Unresolved(NoAnswerReason::Malformed);
             }
             let audience = |value: Option<serde_json::Value>| match value {
                 None => Some(None),
                 Some(value) => CastAudience::from_wire(&value).map(Some),
             };
-            let (Some(includes), Some(cap)) = (audience(wire.includes), audience(wire.cap)) else {
+            let (Some(includes), Some(cap)) = (audience(wire.contains), audience(wire.within)) else {
                 return ToolResolution::Unresolved(NoAnswerReason::Malformed);
             };
             Some(RequiredAudienceAnswer { includes, cap })
@@ -934,7 +934,7 @@ mod tests {
                 for absent in ["tool", "input", "scope", "returns", "expects"] {
                     assert!(request.get(absent).is_none(), "the request carries no {absent:?} key");
                 }
-                r#"{"version":1,"result":{"delta.trust":"suspicious","delta.audience":"public","requires.trust":"trusted","requires.audience":{"includes":["support"],"cap":["support","audit"]},"requires.attention":["review"]}}"#
+                r#"{"version":1,"result":{"delta.trust":"suspicious","delta.audience":"public","requires.trust":"trusted","requires.audience":{"contains":["support"],"within":["support","audit"]},"requires.attention":["review"]}}"#
             }),
         ))
         .await;
@@ -1142,7 +1142,7 @@ mod tests {
                     "delta.trust": "suspicious",
                     "delta.audience": ["support", "audit"],
                     "requires.trust": "trusted",
-                    "requires.audience": {"includes": ["support"], "cap": ["support", "audit"]},
+                    "requires.audience": {"contains": ["support"], "within": ["support", "audit"]},
                     "requires.attention": ["privacy-review"]
                 }
             }
