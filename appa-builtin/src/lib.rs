@@ -3,8 +3,10 @@
 use serde::Deserialize;
 
 /// The ABI version this crate generates. The loader requires exact
-/// equality before resolving any other symbol.
-pub const ABI_VERSION: u32 = 1;
+/// equality before resolving any other symbol, so a module built against
+/// an earlier request shape is refused when the deployment opens, never
+/// left to fail every consult.
+pub const ABI_VERSION: u32 = 2;
 
 pub const KIND_AUTHORITY: u32 = 1;
 pub const KIND_SANITIZER: u32 = 2;

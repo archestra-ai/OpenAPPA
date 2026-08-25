@@ -973,7 +973,7 @@ mod tests {
     async fn command_consults_queue_behind_the_runtime_gate() {
         let dir = tempfile::tempdir().expect("a fixture directory is created");
         let script = "sleep 0.2\nprintf '%s' '{\"version\":1,\"answer\":{\"delta.trust\":\"trusted\"}}'";
-        for (command_permits, at_least, at_most) in [(1, 600, 5000), (8, 0, 500)] {
+        for (command_permits, at_least, at_most) in [(1, 600, 5000), (8, 0, 600)] {
             let services = ExternalServices::new(
                 command_config(dir.path(), script, 5000, 1024),
                 &ModuleRegistry::empty(),

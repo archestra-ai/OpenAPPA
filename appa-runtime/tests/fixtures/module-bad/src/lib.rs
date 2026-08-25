@@ -34,7 +34,7 @@ mod variant {
 mod variant {
     #[unsafe(export_name = "appa_builtin_abi_version")]
     pub extern "C" fn version() -> u32 {
-        1
+        2
     }
 }
 
@@ -44,7 +44,7 @@ mod variant {
 
     #[unsafe(export_name = "appa_builtin_abi_version")]
     pub extern "C" fn version() -> u32 {
-        1
+        2
     }
 
     #[unsafe(export_name = "appa_builtin_descriptor_v1")]
@@ -69,7 +69,7 @@ mod variant {
 
     #[unsafe(export_name = "appa_builtin_abi_version")]
     pub extern "C" fn version() -> u32 {
-        1
+        2
     }
 
     #[unsafe(export_name = "appa_builtin_descriptor_v1")]
@@ -101,7 +101,7 @@ mod variant {
 
     #[unsafe(export_name = "appa_builtin_abi_version")]
     pub extern "C" fn version() -> u32 {
-        1
+        2
     }
 
     #[unsafe(export_name = "appa_builtin_descriptor_v1")]
@@ -126,7 +126,7 @@ mod variant {
 
     #[unsafe(export_name = "appa_builtin_abi_version")]
     pub extern "C" fn version() -> u32 {
-        1
+        2
     }
 
     #[unsafe(export_name = "appa_builtin_descriptor_v1")]
