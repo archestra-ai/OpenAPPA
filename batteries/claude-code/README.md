@@ -15,7 +15,7 @@ approve. Bash output is always treated as untrusted and private. Every
 **`read-sensitivity.py`** — called on every `Read` tool call, before the
 file is read. Receives the tool name and its arguments (`file_path`,
 plus `offset` and `limit` if given) and decides who may see the file's
-contents: a `file_path` that starts with `.` (such as `.env`) is
+contents: a `file_path` whose file name starts with `.` (such as `.env`) is
 private; any other path is public. A deliberately simple starting rule;
 replace it with one that knows your project.
 

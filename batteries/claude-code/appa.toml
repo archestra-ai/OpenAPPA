@@ -60,7 +60,7 @@ trust = "suspicious"
 audience = ["private"]
 
 # Read labels a path through a one-shot resolver. This example uses a
-# deliberately simple rule: a path beginning with `.` is private.
+# deliberately simple rule: a file whose name begins with `.` is private.
 [[policy.dynamic_resolver]]
 name = "claude-code.read-sensitivity"
 returns = ["delta.audience"]
