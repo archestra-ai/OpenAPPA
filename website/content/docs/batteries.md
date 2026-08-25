@@ -5,7 +5,10 @@ order: 7
 description: A proposal for combining OpenAPPA configs and running resolver scripts.
 ---
 
-> **Proposal:** Batteries are not implemented yet.
+:::proposal
+name: Batteries
+date: 2026-08-21
+author: Ildar Iskhakov
 
 A battery is an OpenAPPA config for a set of tools, such as Claude Code or Slack. It may include small scripts that make decisions for each tool call.
 
@@ -225,3 +228,4 @@ The error names the resolver and the problem. It does not show the data the reso
 Resolver scripts run as trusted local code. Review what they can read, run, and send.
 
 A production file resolver must check full paths, hidden folders, symbolic links, files ignored by Git, and files outside the project.
+:::

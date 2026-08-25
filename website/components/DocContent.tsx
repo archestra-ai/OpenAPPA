@@ -154,7 +154,7 @@ function Markdown({ content, terms = true }: { content: string; terms?: boolean 
   );
 }
 
-function MarkdownWithDirectives({ content }: { content: string }) {
+function MarkdownWithDirectives({ content, terms = true }: { content: string; terms?: boolean }) {
   // split() with a captured group interleaves markdown chunks and directive names
   const parts = content.split(DIRECTIVE_SPLIT);
   return (
@@ -163,7 +163,7 @@ function MarkdownWithDirectives({ content }: { content: string }) {
         index % 2 === 1 ? (
           <Fragment key={index}>{DIRECTIVES[part]?.()}</Fragment>
         ) : (
-          <Markdown key={index} content={part} />
+          <Markdown key={index} content={part} terms={terms} />
         ),
       )}
     </>
@@ -180,7 +180,7 @@ export function DocContent({ content }: { content: string }) {
         const proposal = parseProposal(block);
         return (
           <ProposalBlock key={index} proposal={proposal}>
-            <Markdown content={proposal.body} terms={false} />
+            <MarkdownWithDirectives content={proposal.body} terms={false} />
           </ProposalBlock>
         );
       })}
