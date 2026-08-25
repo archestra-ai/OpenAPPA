@@ -1203,7 +1203,13 @@ impl<'a> Sequence<'a> {
                 }
                 let current = views.current_label();
                 if proposed_label
-                    != crate::check::committed_label_for_call(contract, &current, &call, &expansions).bound()
+                    != crate::check::committed_label_for_call(
+                        contract,
+                        &current,
+                        crate::check::CallReads::Resolved(&call),
+                        &expansions,
+                    )
+                    .bound()
                     || receiving != current.bound()
                 {
                     return Err(TransitionRefusal::ForgedLabel);

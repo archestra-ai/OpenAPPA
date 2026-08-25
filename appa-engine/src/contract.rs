@@ -519,6 +519,52 @@ impl Delta {
     }
 }
 
+/// A contract the check can evaluate with no call at hand: nothing it reads comes from a call —
+/// no resolver answers (`uses`), no placeholder recipients, every group it names already
+/// expanded — and its output contribution is declared and established (not unannotated, no
+/// pending-cast dimension), so the label a successful call commits is known before the call
+/// exists. This is the only shape a recovery route plans a preceding tool over (RMD-20): its
+/// check and its successor state are argument-independent facts of the registry.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StaticContract<'a>(&'a ToolContract);
+
+/// Why a contract is not [`StaticContract`]: what a call to it would first have to supply.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum NotStatic {
+    /// A resolver answer or a placeholder recipient reads the call's arguments.
+    Arguments,
+    /// The result label is established only at admission — unannotated or pending-cast.
+    Unestablished,
+    /// Groups the contract names that these expansions do not answer.
+    Membership(Vec<crate::names::GroupName>),
+}
+
+impl<'a> StaticContract<'a> {
+    pub(crate) fn of(contract: &'a ToolContract, expansions: &Expansions) -> Result<StaticContract<'a>, NotStatic> {
+        let placeholder = contract.requires.label.audience.iter().any(|requirement| {
+            matches!(
+                requirement,
+                AudienceRequirement::Includes(RecipientSpec::Placeholder(_))
+            )
+        });
+        if !contract.uses.is_empty() || placeholder {
+            return Err(NotStatic::Arguments);
+        }
+        match &contract.delta {
+            Some(delta) if delta.pending_cast_dim().is_none() => {}
+            Some(_) | None => return Err(NotStatic::Unestablished),
+        }
+        expansions
+            .require(contract.groups())
+            .map_err(|needed| NotStatic::Membership(needed.needed))?;
+        Ok(StaticContract(contract))
+    }
+
+    pub(crate) fn contract(&self) -> &'a ToolContract {
+        self.0
+    }
+}
+
 /// The recipients of an audience `includes` requirement — a static set, or a placeholder resolved
 /// from the call's arguments (`$recipient` → the value of argument `recipient`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
