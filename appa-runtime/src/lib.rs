@@ -10,3 +10,4 @@ mod consult;
 mod elicit;
 mod engine;
 mod external;
+mod llm;

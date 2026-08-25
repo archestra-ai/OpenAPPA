@@ -14,9 +14,10 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::builtins::{ClaudeCodeBackend, LoadedModule, MODULE_OUTPUT_CEILING, ModuleRegistry, ModulesError, Stock};
-use crate::config::{CLAUDE_CODE_BUILTIN, Endpoint, Externals, Implementation, ResolverCommand, Section};
+use crate::config::{CLAUDE_CODE_BUILTIN, Endpoint, Externals, Implementation, LLM_BUILTIN, ResolverCommand, Section};
 use crate::consult::{Consult, ConsultBody, ConsultKind, ModelPrompt};
 use crate::elicit::Elicitation;
+use crate::llm::LlmBackend;
 
 const HITL: &str = "hitl";
 
@@ -71,6 +72,7 @@ enum Backend {
     Module(Arc<LoadedModule>),
     Hitl,
     ClaudeCode(ClaudeCodeBackend),
+    Llm(LlmBackend),
 }
 
 fn kind_of(section: Section) -> ConsultKind {
@@ -125,6 +127,12 @@ impl ExternalServices {
             timeout: config.claude_code.timeout.unwrap_or(config.timeout),
             max_body_bytes: config.max_body_bytes,
         };
+        let llm = config
+            .llm
+            .as_ref()
+            .map(|profile| LlmBackend::new(profile, config.timeout))
+            .transpose()
+            .map_err(|error| ModulesError::LlmClient(error.to_string()))?;
         let tables = [
             (Section::Authorities, config.authorities),
             (Section::Sanitizers, config.sanitizers),
@@ -139,7 +147,9 @@ impl ExternalServices {
                 let backend = match implementation {
                     Implementation::Resolver(endpoint) => Backend::Url(endpoint),
                     Implementation::Command(command) => Backend::Command(command),
-                    Implementation::Builtin(builtin) => builtin_backend(section, &name, builtin, registry, &claude)?,
+                    Implementation::Builtin(builtin) => {
+                        builtin_backend(section, &name, builtin, registry, &claude, llm.as_ref())?
+                    }
                 };
                 resolved.insert(name, backend);
             }
@@ -183,6 +193,10 @@ impl ExternalServices {
                 }
             },
             Backend::ClaudeCode(claude) => self.consult_claude(claude, consult).await,
+            Backend::Llm(llm) => match ModelPrompt::new(consult) {
+                Some(prompt) => llm.consult(&prompt).await,
+                None => Err(NoAnswerReason::Unregistered),
+            },
         };
         match answered {
             Ok(answer) => ConsultOutcome::Answer(answer),
@@ -315,6 +329,7 @@ fn builtin_backend(
     builtin: String,
     registry: &ModuleRegistry,
     claude: &ClaudeCodeBackend,
+    llm: Option<&LlmBackend>,
 ) -> Result<Backend, ModulesError> {
     let module = match section {
         Section::Authorities => registry.authority(&builtin),
@@ -325,6 +340,9 @@ fn builtin_backend(
         (Section::Authorities, HITL) => Some(Backend::Hitl),
         (Section::Authorities | Section::Sanitizers | Section::Casts | Section::Dynamic, CLAUDE_CODE_BUILTIN) => {
             Some(Backend::ClaudeCode(claude.clone()))
+        }
+        (Section::Authorities | Section::Sanitizers | Section::Casts | Section::Dynamic, LLM_BUILTIN) => {
+            llm.cloned().map(Backend::Llm)
         }
         _ => Stock::for_section(section, &builtin)
             .map(Backend::Stock)
@@ -1237,6 +1255,75 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             "judge".to_string(),
             Implementation::Builtin(CLAUDE_CODE_BUILTIN.to_string()),
         );
+        assert!(matches!(
+            ExternalServices::new(
+                config,
+                &ModuleRegistry::empty(),
+                Arc::new(tokio::sync::Semaphore::new(4))
+            ),
+            Err(ModulesError::UnknownBuiltin {
+                section: "membership",
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_llm_builtin_serves_every_kind_but_membership() {
+        let url = stub(Router::new().route(
+            "/v1/messages",
+            post(|| async {
+                serde_json::json!({
+                    "id": "msg_1", "type": "message", "role": "assistant", "model": "m",
+                    "content": [{ "type": "text", "text": "{\"ruling\":\"approve\",\"reason\":\"fine\"}" }],
+                    "stop_reason": "end_turn", "stop_sequence": null,
+                    "usage": { "input_tokens": 1, "output_tokens": 1 },
+                })
+                .to_string()
+            }),
+        ))
+        .await;
+        let profile = crate::config::LlmProfile {
+            provider: crate::config::LlmProvider::Anthropic,
+            model: "m".to_string(),
+            url: Some(url),
+            token: Some(Token::new("sekret".to_string())),
+            timeout: None,
+            max_concurrent: 2,
+        };
+        let mut config = externals(None, 2000, 65_536);
+        config.llm = Some(profile.clone());
+        for section in [
+            &mut config.authorities,
+            &mut config.sanitizers,
+            &mut config.casts,
+            &mut config.dynamic,
+        ] {
+            section.insert("judge".to_string(), Implementation::Builtin(LLM_BUILTIN.to_string()));
+        }
+        let services = services_over(config);
+        assert_eq!(
+            services
+                .consult(&authority_consult("judge", serde_json::json!({})), None)
+                .await,
+            ConsultOutcome::Answer(serde_json::json!({"ruling": "approve", "reason": "fine"}))
+        );
+        assert!(matches!(
+            services.consult(&sanitizer_consult("judge", "raw"), None).await,
+            ConsultOutcome::Answer(_)
+        ));
+        assert!(matches!(
+            services
+                .consult(&dynamic_consult("judge", serde_json::json!({})), None)
+                .await,
+            ConsultOutcome::Answer(_)
+        ));
+
+        let mut config = externals(None, 2000, 65_536);
+        config.llm = Some(profile);
+        config
+            .membership
+            .insert("judge".to_string(), Implementation::Builtin(LLM_BUILTIN.to_string()));
         assert!(matches!(
             ExternalServices::new(
                 config,

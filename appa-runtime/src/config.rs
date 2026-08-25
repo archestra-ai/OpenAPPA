@@ -313,6 +313,8 @@ pub enum ConfigError {
     ZeroConcurrency,
     #[error("externals.llm.provider {provider:?} is not one of anthropic, openai, gemini, ollama")]
     InvalidLlmProvider { provider: String },
+    #[error("externals.llm.provider {provider} needs a token_env: only ollama runs without a key")]
+    LlmTokenRequired { provider: &'static str },
     #[error("the {section} entry {name:?} must name exactly one implementation, and only url takes token_env")]
     ImplementationChoice { section: &'static str, name: String },
     #[error("the {section} entry {name:?} cannot be builtin")]
@@ -1108,6 +1110,11 @@ fn resolve_llm(raw: RawLlm, lookup: &impl Fn(&str) -> Option<String>) -> Result<
     }
     let url = raw.url.map(|url| validated_url(SECTION, SECTION, url)).transpose()?;
     let token = resolve_token(SECTION, SECTION, raw.token_env, lookup)?;
+    if token.is_none() && provider != LlmProvider::Ollama {
+        return Err(ConfigError::LlmTokenRequired {
+            provider: provider.as_str(),
+        });
+    }
     Ok(LlmProfile {
         provider,
         model: raw.model,
@@ -1205,7 +1212,7 @@ mod tests {
         max_body_bytes = 65536
     "#;
 
-    const LLM_TABLE: &str = "[externals.llm]\nprovider = \"anthropic\"\nmodel = \"claude-sonnet-4-5\"\n";
+    const LLM_TABLE: &str = "[externals.llm]\nprovider = \"ollama\"\nmodel = \"llama\"\n";
 
     fn parse(text: &str) -> Result<Config, ConfigError> {
         parse_with(text, |_| None)
@@ -1442,12 +1449,17 @@ mod tests {
     #[test]
     fn the_llm_table_validates_like_an_endpoint() {
         let with = |body: &str| format!("{MINIMAL}\n[externals.llm]\nprovider = \"openai\"\nmodel = \"gpt\"\n{body}\n");
-        let config = parse(&with("")).expect("a bare profile validates");
+        let bare = format!("{MINIMAL}\n[externals.llm]\nprovider = \"ollama\"\nmodel = \"llama\"\n");
+        let config = parse(&bare).expect("an ollama profile validates without a key");
         let llm = config.externals.llm.expect("the profile is set");
-        assert_eq!(llm.provider, LlmProvider::OpenAi);
-        assert_eq!(llm.model, "gpt");
+        assert_eq!(llm.provider, LlmProvider::Ollama);
+        assert_eq!(llm.model, "llama");
         assert!(llm.url.is_none() && llm.token.is_none() && llm.timeout.is_none());
         assert_eq!(llm.max_concurrent, DEFAULT_LLM_CONCURRENCY);
+        assert!(matches!(
+            parse(&with("")),
+            Err(ConfigError::LlmTokenRequired { provider: "openai" })
+        ));
 
         let config = parse_with(
             &with("url = \"http://127.0.0.1:11434\"\ntoken_env = \"APPA_LLM_TOKEN\"\ntimeout_ms = 40000\nmax_concurrent = 2"),

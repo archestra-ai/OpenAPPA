@@ -182,6 +182,8 @@ pub(crate) enum ModulesError {
         name: String,
         builtin: String,
     },
+    #[error("{0}")]
+    LlmClient(String),
 }
 
 /// Loads every module in the directory. `None` — no directory
