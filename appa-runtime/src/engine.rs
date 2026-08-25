@@ -1272,78 +1272,50 @@ impl RuntimeEngine {
             OfferConsult::Rewrite { sanitizer, call } => {
                 let arguments = call.canonical_arguments();
                 let source = RawResultDigest::of(arguments.canonical_bytes());
-                match sanitizer_derivation(evidence, sanitizer.as_str(), &source) {
-                    SanitizerAnswer::Missing => {
-                        return Ok(EngineDecision::deliver(Next::ResolveExternal(vec![
-                            ExternalRequest::Sanitizer {
-                                sanitizer: sanitizer.as_str().to_string(),
-                                source,
-                                body: ValueBody::new(arguments.canonical_text()),
-                            },
-                        ])));
-                    }
-                    SanitizerAnswer::NoAnswer => {
-                        return Ok(no_answer(format!(
-                            "[appa] sanitizer {} gave no answer; the offer stands and may be executed again",
-                            sanitizer.as_str()
-                        )));
-                    }
-                    SanitizerAnswer::Derived(derived) => {
-                        // A rewrite whose arguments select another ordered contract is a new call
-                        // under it: that contract's resolvers and placeholder groups are consulted
-                        // about the rewritten arguments before the engine judges it. A rewrite
-                        // that stays in its contract carries the call's own answers, and a
-                        // derivation the engine cannot mint a call from is the engine's to refuse.
-                        let (tool_resolutions, memberships) = match self
-                            .engine
-                            .resolve_call(call.tool().clone(), derived.as_str().as_bytes())
-                        {
-                            Ok(rewritten) if rewritten.contract_id() != call.contract_id() => {
-                                match self.answers_for(view, trajectory, &rewritten, evidence) {
-                                    Ok(answers) => answers,
-                                    Err(Resolution::Consult(requests)) => {
-                                        return Ok(EngineDecision::deliver(Next::ResolveExternal(requests)));
-                                    }
-                                    Err(Resolution::Feedback(text)) => return Ok(no_answer(text)),
-                                }
+                let derived =
+                    match sanitizer_derived(evidence, &sanitizer, source, ValueBody::new(arguments.canonical_text())) {
+                        Ok(derived) => derived,
+                        Err(next) => return Ok(next),
+                    };
+                // A rewrite whose arguments select another ordered contract is a new call under
+                // it: that contract's resolvers and placeholder groups are consulted about the
+                // rewritten arguments before the engine judges it. A rewrite that stays in its
+                // contract carries the call's own answers, and a derivation the engine cannot
+                // mint a call from is the engine's to refuse.
+                let (tool_resolutions, memberships) = match self
+                    .engine
+                    .resolve_call(call.tool().clone(), derived.as_str().as_bytes())
+                {
+                    Ok(rewritten) if rewritten.contract_id() != call.contract_id() => {
+                        match self.answers_for(view, trajectory, &rewritten, evidence) {
+                            Ok(answers) => answers,
+                            Err(Resolution::Consult(requests)) => {
+                                return Ok(EngineDecision::deliver(Next::ResolveExternal(requests)));
                             }
-                            Ok(_) | Err(_) => (Vec::new(), Vec::new()),
-                        };
-                        OfferOutcome::Derived(Evidence::Rewrite {
-                            sanitizer,
-                            source,
-                            derived,
-                            tool_resolutions,
-                            memberships,
-                        })
+                            Err(Resolution::Feedback(text)) => return Ok(no_answer(text)),
+                        }
                     }
-                }
+                    Ok(_) | Err(_) => (Vec::new(), Vec::new()),
+                };
+                OfferOutcome::Derived(Evidence::Rewrite {
+                    sanitizer,
+                    source,
+                    derived,
+                    tool_resolutions,
+                    memberships,
+                })
             }
             OfferConsult::Sanitizer {
                 sanitizer,
                 source,
                 body,
-            } => match sanitizer_derivation(evidence, sanitizer.as_str(), &source) {
-                SanitizerAnswer::Missing => {
-                    return Ok(EngineDecision::deliver(Next::ResolveExternal(vec![
-                        ExternalRequest::Sanitizer {
-                            sanitizer: sanitizer.as_str().to_string(),
-                            source,
-                            body,
-                        },
-                    ])));
-                }
-                SanitizerAnswer::NoAnswer => {
-                    return Ok(no_answer(format!(
-                        "[appa] sanitizer {} gave no answer; the offer stands and may be executed again",
-                        sanitizer.as_str()
-                    )));
-                }
-                SanitizerAnswer::Derived(derived) => OfferOutcome::Derived(Evidence::Sanitizer {
+            } => match sanitizer_derived(evidence, &sanitizer, source, body) {
+                Ok(derived) => OfferOutcome::Derived(Evidence::Sanitizer {
                     sanitizer,
                     source,
                     derived,
                 }),
+                Err(next) => return Ok(next),
             },
             OfferConsult::Authorities { call, required } => {
                 match self.offer_authorities(&views, &engine_offer, &call, &required, evidence) {
@@ -2390,6 +2362,30 @@ fn sanitizer_evidence(evidence: &[ExternalEvidence]) -> Vec<Evidence> {
             _ => None,
         })
         .collect()
+}
+
+/// The sanitizer's derivation from the evidence gathered so far, or what the offer does without
+/// one: asks for it, or stands for a later deliberate retry after the sanitizer gave no answer.
+fn sanitizer_derived(
+    evidence: &[ExternalEvidence],
+    sanitizer: &appa_engine::names::SanitizerName,
+    source: RawResultDigest,
+    body: ValueBody,
+) -> Result<ValueBody, EngineDecision> {
+    match sanitizer_derivation(evidence, sanitizer.as_str(), &source) {
+        SanitizerAnswer::Derived(derived) => Ok(derived),
+        SanitizerAnswer::Missing => Err(EngineDecision::deliver(Next::ResolveExternal(vec![
+            ExternalRequest::Sanitizer {
+                sanitizer: sanitizer.as_str().to_string(),
+                source,
+                body,
+            },
+        ]))),
+        SanitizerAnswer::NoAnswer => Err(no_answer(format!(
+            "[appa] sanitizer {} gave no answer; the offer stands and may be executed again",
+            sanitizer.as_str()
+        ))),
+    }
 }
 
 fn sanitizer_derivation(evidence: &[ExternalEvidence], name: &str, source: &RawResultDigest) -> SanitizerAnswer {

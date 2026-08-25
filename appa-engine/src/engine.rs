@@ -2303,18 +2303,24 @@ impl Engine {
             position: position as u32,
         };
         // The call each position is about now: the candidate an input hop derived, under the
-        // contract its own arguments select, or the proposal.
-        let standing: Vec<&ResolvedCall> = proposals
+        // contract its own arguments select and with the group resolutions that hop consumed,
+        // or the proposal.
+        let standing: Vec<(&ResolvedCall, Expansions)> = proposals
             .iter()
             .enumerate()
-            .map(|(position, call)| views.standing_call(&subject_at(position)).unwrap_or(call))
+            .map(|(position, call)| {
+                let subject = subject_at(position);
+                (
+                    views.standing_call(&subject).unwrap_or(call),
+                    expansions
+                        .clone()
+                        .inheriting(&self.recorded_expansions(views.candidate_resolutions(&subject))),
+                )
+            })
             .collect();
-        expansions.require(
-            standing
-                .iter()
-                .filter_map(|call| self.registry.contract(call))
-                .flat_map(ToolContract::groups),
-        )?;
+        for (call, expansions) in &standing {
+            expansions.require(self.registry.contract(call).into_iter().flat_map(ToolContract::groups))?;
+        }
         let mut released = Vec::new();
         let mut blocked = Vec::new();
         let mut spent = Vec::new();
@@ -2341,7 +2347,8 @@ impl Engine {
                     // this position is about now is the candidate, and the check reads its
                     // substitution. Its offers are the ones already pending on
                     // the same subject, which is why the two must be reported together.
-                    let candidate = standing[position].clone();
+                    let (candidate, expansions) = &standing[position];
+                    let candidate = (*candidate).clone();
                     let contract = self.validated_contract(&candidate)?;
                     let stage = views.call_stage(&subject);
                     match check::evaluate(contract, views, &candidate, &stage, expansions) {
