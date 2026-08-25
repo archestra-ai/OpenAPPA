@@ -3403,6 +3403,11 @@ impl<'a> Sequence<'a> {
             .parameters
             .validate(call.arguments())
             .map_err(TransitionRefusal::InvalidPayload)?;
+        // The sanitizer's jurisdiction reaches the contract the rewrite selects as well as the
+        // one the offer was planned on.
+        if !registered.applies_to(&contract.tags) {
+            return Err(TransitionRefusal::SanitizerUnapplicable);
+        }
         if call.contract_id() == predecessor.contract_id() {
             // A rewrite that stays in its contract carries its predecessor's answers exactly; the
             // comparison binds *which* answers, and the consulted call on the record binds what

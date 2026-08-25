@@ -629,7 +629,10 @@ impl Projection {
                             derived: derived.clone(),
                             lineage: lineage.clone(),
                             consulted,
-                            resolutions: resolutions.clone(),
+                            resolutions: match derived {
+                                DerivedCandidate::Call { .. } => resolutions.clone(),
+                                DerivedCandidate::Result { .. } | DerivedCandidate::Return { .. } => Vec::new(),
+                            },
                         },
                     );
                 }

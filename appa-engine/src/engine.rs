@@ -3024,6 +3024,12 @@ impl Engine {
             tool_resolutions,
             memberships,
         )?;
+        // The sanitizer's jurisdiction reaches the contract the rewrite selects as well as the
+        // one the offer was planned on: a rewrite is no way past a tag that keeps sanitizers off
+        // a contract.
+        if !registered.applies_to(&contract.tags) {
+            return Err(TransitionError::SanitizerUnapplicable);
+        }
         expansions.require(contract.groups())?;
 
         let next = CallStage::substituting(label.clone(), lineage.clone());
@@ -11384,6 +11390,12 @@ mod tests {
     /// requires `partner` and every desk in `desks` statically. `redact` widens the audience
     /// from internal to internal+partner, `widen` from partner to partner+auditor.
     fn ordered_read_engine(desks: &[&str]) -> Engine {
+        ordered_read_engine_tagged(desks, "outbound")
+    }
+
+    /// [`ordered_read_engine`] with the private contract carrying `private_tag` instead of
+    /// `outbound`.
+    fn ordered_read_engine_tagged(desks: &[&str], private_tag: &str) -> Engine {
         let read = |name: &str| ToolContract {
             description: Some("A test tool.".to_string()),
             uses: vec![],
@@ -11417,6 +11429,7 @@ mod tests {
         };
         let private = ToolContract {
             emits: classified_read(),
+            tags: vec![crate::names::TagName::new(private_tag)],
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: Some(TRUSTED),
@@ -11739,6 +11752,32 @@ mod tests {
         );
         assert_eq!(kept.call.contract_id(), crate::value::ToolContractId::new(0).unwrap());
         assert_eq!(kept.call.tool_resolutions(), proposal.tool_resolutions());
+    }
+
+    #[test]
+    fn a_rewrite_into_a_contract_the_sanitizer_does_not_reach_is_refused() {
+        let e = ordered_read_engine_tagged(&[], "classified");
+        let proposal =
+            read_of(&e, "public/q3.md").with_tool_resolutions(vec![read_pin_for(&e, "public/q3.md", &["partner"])]);
+        let log = vec![opened(&e)];
+        let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
+        let hop = hop_named(&facts, "redact");
+        let log = [log, facts].concat();
+
+        // `redact` reaches `outbound` contracts. The public contract is one; the private contract
+        // the rewritten arguments select is tagged to keep sanitizers off it, so the rewrite is
+        // refused even though the private contract's own requirements would be met.
+        assert_eq!(
+            execute_offer(
+                &e,
+                &log,
+                hop,
+                rewrite(&proposal, "redact", r#"{"path":"private/q3.md"}"#, vec![], vec![]),
+            )
+            .err(),
+            Some(TransitionError::SanitizerUnapplicable)
+        );
+        assert_eq!(e.validate_replay(&log), Ok(()));
     }
 
     #[test]
