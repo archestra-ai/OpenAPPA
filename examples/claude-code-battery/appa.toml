@@ -1,8 +1,8 @@
 # Compose complete Claude Code and Slack battery configurations.
 
 include = [
-  "./batteries/claude-code/appa.toml",
-  "./batteries/slack/appa.toml",
+  "../../batteries/claude-code/appa.toml",
+  "../../batteries/slack/appa.toml",
 ]
 
 [policy]
@@ -37,7 +37,7 @@ attention = ["hitl"]
 
 [policy.tool.delta]
 trust = "suspicious"
-audience = ["claude-session"]
+audience = ["private"]
 
 # A root contract can also replace a battery's fallback with a local resolver.
 [[policy.dynamic_resolver]]

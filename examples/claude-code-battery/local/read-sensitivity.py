@@ -21,7 +21,7 @@ def main():
     sensitive = file_path != ".env.example" and (
         file_path.startswith(".") or file_path.startswith("clients/")
     )
-    audience = ["claude-session"] if sensitive else "public"
+    audience = ["private"] if sensitive else "public"
     json.dump(
         {"version": 1, "result": {"delta.audience": audience}},
         sys.stdout,
