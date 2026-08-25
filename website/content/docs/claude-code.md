@@ -70,6 +70,7 @@ OpenAPPA can also call the installed Claude Code CLI as a built-in tool-level dy
 ```toml
 [[dynamic_resolver]]
 name    = "classify-customer"
+builtin = "claude-code"
 returns = ["delta.trust", "delta.audience", "requires.trust", "requires.audience", "requires.attention"]
 
 [[tool]]
@@ -87,9 +88,6 @@ attention = ["privacy-review"]
 [externals]
 timeout_ms = 5000
 max_body_bytes = 65536
-
-[externals.dynamic.classify-customer]
-builtin = "claude-code"
 
 [externals.claude_code]
 command = "/usr/local/bin/claude"   # the executable; a service environment often strips PATH

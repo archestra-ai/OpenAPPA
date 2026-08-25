@@ -450,6 +450,7 @@ version = 1
 
 [[policy.dynamic_resolver]]
 name = "classifier"
+builtin = "claude-code"
 returns = ["delta.trust"]
 
 [[policy.tool]]
@@ -461,9 +462,6 @@ uses = [{{ resolver = "classifier" }}]
 [externals]
 timeout_ms = 5000
 max_body_bytes = 65536
-
-[externals.dynamic.classifier]
-builtin = "claude-code"
 
 [externals.claude_code]
 command = "{command}"
@@ -557,11 +555,10 @@ esac
         .iter()
         .enumerate()
         .map(|(index, result)| {
-            format!("[[policy.dynamic_resolver]]\nname = \"classifier-{index}\"\nreturns = [\"{result}\"]\n")
+            format!(
+                "[[policy.dynamic_resolver]]\nname = \"classifier-{index}\"\nbuiltin = \"claude-code\"\nreturns = [\"{result}\"]\n"
+            )
         })
-        .collect();
-    let implementations: String = (0..results.len())
-        .map(|index| format!("[externals.dynamic.\"classifier-{index}\"]\nbuiltin = \"claude-code\"\n"))
         .collect();
     let bindings: Vec<String> = (0..results.len())
         .map(|index| format!("{{ resolver = \"classifier-{index}\" }}"))
@@ -582,7 +579,6 @@ uses = [{bindings}]
 timeout_ms = 10000
 max_body_bytes = 65536
 
-{implementations}
 [externals.claude_code]
 command = "{command}"
 "#,

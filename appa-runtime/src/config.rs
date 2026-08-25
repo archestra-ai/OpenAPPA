@@ -56,7 +56,8 @@ pub struct Externals {
     /// The classifiers a resolver-backed `[[cast]]` consults. Endpoint-only: a constant
     /// cast is answered from the policy and binds nothing here.
     pub casts: BTreeMap<String, Endpoint>,
-    /// One implementation per policy-declared dynamic resolver.
+    /// One implementation per policy-declared dynamic resolver that does not carry
+    /// `builtin = "claude-code"` on its declaration. A builtin resolver takes no entry here.
     pub dynamic: BTreeMap<String, DynamicImplementation>,
     /// The membership resolver the policy's `[membership]` registers.
     pub membership: Option<Endpoint>,
@@ -96,11 +97,11 @@ pub enum Implementation {
     Builtin(String),
 }
 
-/// How one named dynamic resolver runs.
+/// How one deployment-bound dynamic resolver runs: an HTTP endpoint or a local
+/// command. The stock builtin is not bound here; the policy declaration carries it.
 #[derive(Debug, Clone)]
 pub enum DynamicImplementation {
     Resolver(Endpoint),
-    Builtin(String),
     Command(ResolverCommand),
 }
 
@@ -481,11 +482,6 @@ fn embedded_document(policy: toml::Value, externals: &Externals) -> Result<toml:
     for (name, implementation) in &externals.dynamic {
         let value = match implementation {
             DynamicImplementation::Resolver(endpoint) => embedded_endpoint("dynamic", name, endpoint)?,
-            DynamicImplementation::Builtin(builtin) => toml::Value::Table(
-                [("builtin".to_string(), toml::Value::String(builtin.clone()))]
-                    .into_iter()
-                    .collect(),
-            ),
             DynamicImplementation::Command(command) => {
                 let cwd = command
                     .cwd
@@ -804,22 +800,19 @@ fn resolve_dynamic_implementations(
                 builtin,
                 command,
             } = entry;
-            let implementation = match (url, builtin, command) {
-                (Some(url), None, None) => {
+            // The stock builtin is selected on the policy declaration, never bound here.
+            if builtin.is_some() {
+                return Err(ConfigError::BuiltinNotAllowed {
+                    section: "dynamic",
+                    name,
+                });
+            }
+            let implementation = match (url, command) {
+                (Some(url), None) => {
                     let endpoint = resolve_endpoint("dynamic", name.clone(), RawEndpoint { url, token_env }, lookup)?;
                     DynamicImplementation::Resolver(endpoint)
                 }
-                (None, Some(builtin), None) if token_env.is_none() && builtin == CLAUDE_CODE_BUILTIN => {
-                    DynamicImplementation::Builtin(builtin)
-                }
-                (None, Some(builtin), None) if token_env.is_none() => {
-                    return Err(ConfigError::InvalidBuiltinName {
-                        section: "dynamic",
-                        name,
-                        builtin,
-                    });
-                }
-                (None, None, Some(argv)) if token_env.is_none() && argv.iter().all(|argument| !argument.is_empty()) => {
+                (None, Some(argv)) if token_env.is_none() && argv.iter().all(|argument| !argument.is_empty()) => {
                     if argv.is_empty() {
                         return Err(ConfigError::InvalidCommand { name });
                     }
@@ -831,7 +824,7 @@ fn resolve_dynamic_implementations(
                             .clone(),
                     })
                 }
-                (None, None, Some(_)) if token_env.is_none() => return Err(ConfigError::InvalidCommand { name }),
+                (None, Some(_)) if token_env.is_none() => return Err(ConfigError::InvalidCommand { name }),
                 _ => {
                     return Err(ConfigError::ImplementationChoice {
                         section: "dynamic",
@@ -1184,10 +1177,11 @@ mod tests {
             Some(Implementation::Builtin(name)) if name == "redact-email",
         ));
 
+        // The stock dynamic builtin lives on the policy declaration, not in the deployment.
         let text = format!("{MINIMAL}\n[externals.dynamic.classifier]\nbuiltin = \"claude-code\"\n");
         assert!(matches!(
-            parse(&text).expect("the dynamic builtin validates").externals.dynamic.get("classifier"),
-            Some(DynamicImplementation::Builtin(name)) if name == "claude-code"
+            parse(&text),
+            Err(ConfigError::BuiltinNotAllowed { section: "dynamic", .. })
         ));
         let text = format!("{MINIMAL}\n[externals.membership]\nbuiltin = \"approve\"\n");
         assert!(matches!(parse(&text), Err(ConfigError::BuiltinNotAllowed { .. })));
@@ -1434,7 +1428,7 @@ mod tests {
                 timeout_ms = 5000
                 max_body_bytes = 65536
                 [externals.dynamic.classifier]
-                builtin = "claude-code"
+                url = "https://classifier.internal"
             "#,
         )
         .expect("write root config");
@@ -1452,7 +1446,7 @@ mod tests {
                 [policy]
                 version = 1
                 [externals.dynamic.classifier]
-                builtin = "claude-code"
+                url = "https://battery.internal"
             "#,
         )
         .expect("write duplicate external");

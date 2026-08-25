@@ -184,22 +184,18 @@ Ownership, pinning, and what a `tool_input` sanitizer can do to a pinned answer 
 
 #### Implementing a resolver
 
-The policy declares what a resolver owns. The deployment binds that resolver name to one implementation under `[externals.dynamic.<name>]`. The implementation can be an HTTP endpoint or the Claude Code builtin.
+A resolver either carries its implementation or leaves it to the deployment. A resolver that carries the stock Claude Code classifier names it on its declaration with `builtin = "claude-code"` and takes no `[externals.dynamic]` binding. Every other resolver is bound by name under `[externals.dynamic.<name>]` to an HTTP endpoint.
 
-The configuration also accepts `command = ["program", "arg"]` for a local resolver. Command execution is not available in this build, so this binding returns no answer and the tool does not run.
+The configuration also accepts `command = ["program", "arg"]` under `[externals.dynamic.<name>]` for a local resolver. Command execution is not available in this build, so this binding returns no answer and the tool does not run.
 
 ```toml
 [[dynamic_resolver]]
 name    = "classify-call"
+builtin = "claude-code"
 returns = ["delta.trust"]
 ```
 
-```toml
-[externals.dynamic.classify-call]
-builtin = "claude-code"
-```
-
-The Claude Code builtin starts one isolated `claude` process per consult: non-interactive safe mode, no tools, no project settings, no session persistence, a fresh temporary working directory, and an environment with every `APPA_*` variable removed. The process receives the same request the HTTP wire carries on stdin and answers under a strict structured-output schema derived from `returns`, the trust chain, and the attended marks; the request is explicitly treated as untrusted data, never as instructions. Claude answers have no separate ceiling: they are trusted classifier evidence and pass the same exact-shape, policy-vocabulary, audience, and pin validation as HTTP answers. The prompt and the raw model output are never persisted — only the validated answer is.
+A resolver with `builtin = "claude-code"` never uses an endpoint. The builtin starts one isolated `claude` process per consult: non-interactive safe mode, no tools, no project settings, no session persistence, a fresh temporary working directory, and an environment with every `APPA_*` variable removed. The process receives the same request the HTTP wire carries on stdin and answers under a strict structured-output schema derived from `returns`, the trust chain, and the attended marks; the request is explicitly treated as untrusted data, never as instructions. Claude answers have no separate ceiling: they are trusted classifier evidence and pass the same exact-shape, policy-vocabulary, audience, and pin validation as HTTP answers. The prompt and the raw model output are never persisted — only the validated answer is.
 
 The deployment tunes the builtin in `[externals.claude_code]`: `command` sets the executable path (a service environment often strips `PATH`), `model` pins the model, and `timeout_ms` gives the consult its own budget instead of the shared machine-consult `timeout_ms` — a model call is slower than an ordinary endpoint. At most four Claude consults run at once per runtime. Each consult has model latency and account cost; a pinned recheck and a replay never invoke it again.
 

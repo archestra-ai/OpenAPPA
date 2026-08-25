@@ -281,7 +281,7 @@ fn bind_hosted_externals(config: &mut Config, origin: &str) -> usize {
             .values_mut()
             .filter_map(|implementation| match implementation {
                 DynamicImplementation::Resolver(endpoint) => Some(endpoint),
-                DynamicImplementation::Builtin(_) | DynamicImplementation::Command(_) => None,
+                DynamicImplementation::Command(_) => None,
             }),
     );
     let mut bound = 0;

@@ -277,9 +277,12 @@ impl ExternalServices {
     /// implementation name. The registry is borrowed, not consumed: it
     /// loads once at open and outlives every deployment a configuration
     /// reload installs.
+    /// `dynamic_builtins` names every policy resolver that carries `builtin = "claude-code"`
+    /// on its declaration; the deployment binds every other resolver in `config.dynamic`.
     pub fn new(
         config: Externals,
         registry: &ModuleRegistry,
+        dynamic_builtins: BTreeMap<String, String>,
         claude_permits: Arc<tokio::sync::Semaphore>,
     ) -> Result<ExternalServices, ModulesError> {
         let http = reqwest::Client::builder()
@@ -332,24 +335,27 @@ impl ExternalServices {
         for (name, implementation) in config.dynamic {
             let backend = match implementation {
                 DynamicImplementation::Resolver(endpoint) => DynamicBackend::Resolver(endpoint),
-                DynamicImplementation::Builtin(builtin) if builtin == CLAUDE_CODE_BUILTIN => {
-                    DynamicBackend::ClaudeCode(ClaudeCodeBackend {
-                        command: config.claude_code.command.clone(),
-                        model: config.claude_code.model.clone(),
-                        timeout: config.claude_code.timeout.unwrap_or(config.timeout),
-                        max_body_bytes: config.max_body_bytes,
-                    })
-                }
-                DynamicImplementation::Builtin(builtin) => {
-                    return Err(ModulesError::UnknownBuiltin {
-                        section: "dynamic",
-                        name,
-                        builtin,
-                    });
-                }
                 DynamicImplementation::Command(command) => DynamicBackend::Command(command),
             };
             dynamic.insert(name, backend);
+        }
+        for (name, builtin) in dynamic_builtins {
+            if builtin != CLAUDE_CODE_BUILTIN {
+                return Err(ModulesError::UnknownBuiltin {
+                    section: "dynamic",
+                    name,
+                    builtin,
+                });
+            }
+            dynamic.insert(
+                name,
+                DynamicBackend::ClaudeCode(ClaudeCodeBackend {
+                    command: config.claude_code.command.clone(),
+                    model: config.claude_code.model.clone(),
+                    timeout: config.claude_code.timeout.unwrap_or(config.timeout),
+                    max_body_bytes: config.max_body_bytes,
+                }),
+            );
         }
         Ok(ExternalServices {
             http,
@@ -862,6 +868,7 @@ mod tests {
         ExternalServices::new(
             config,
             &ModuleRegistry::empty(),
+            BTreeMap::new(),
             Arc::new(tokio::sync::Semaphore::new(4)),
         )
         .expect("no builtin references are configured")
@@ -1633,6 +1640,7 @@ mod tests {
         match ExternalServices::new(
             config,
             &ModuleRegistry::empty(),
+            BTreeMap::new(),
             Arc::new(tokio::sync::Semaphore::new(4)),
         ) {
             Err(ModulesError::UnknownBuiltin { section, name, builtin }) => {
@@ -1656,6 +1664,7 @@ mod tests {
             ExternalServices::new(
                 config,
                 &ModuleRegistry::empty(),
+                BTreeMap::new(),
                 Arc::new(tokio::sync::Semaphore::new(4))
             ),
             Err(ModulesError::UnknownBuiltin {
@@ -1723,8 +1732,13 @@ mod tests {
         config
             .authorities
             .insert("auto".to_string(), Implementation::Builtin(implementation.to_string()));
-        let services = ExternalServices::new(config, &registry, Arc::new(tokio::sync::Semaphore::new(4)))
-            .expect("the module reference resolves");
+        let services = ExternalServices::new(
+            config,
+            &registry,
+            BTreeMap::new(),
+            Arc::new(tokio::sync::Semaphore::new(4)),
+        )
+        .expect("the module reference resolves");
         (services, dir)
     }
 
