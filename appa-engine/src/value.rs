@@ -562,13 +562,14 @@ impl ResolvedCall {
     /// replacement arguments, the resolver answers this call carries, and only those membership
     /// answers the replacement leaves standing.
     ///
-    /// A resolver answers about the call the agent proposed, and a substitution is a registered
-    /// sanitizer's rewrite of that proposal, so the answers ride along here rather than being
-    /// dropped. Riding along is not standing: whether a carried answer is admissible on the
-    /// rewritten call is [`crate::check::validate_tool_resolutions`]'s to decide, against the
-    /// proposal on the record. The engine also refuses a rewrite that would select another ordered
-    /// contract. A membership answer expands the group one argument names, so it survives only
-    /// while that argument's value is unchanged.
+    /// A resolver answers about the call it was consulted on, and a substitution within one
+    /// ordered contract is a registered sanitizer's rewrite of that call, so the answers ride
+    /// along here rather than being dropped. Riding along is not standing: whether a carried
+    /// answer is admissible on the rewritten call is [`crate::check::validate_tool_resolutions`]'s
+    /// to decide, against the call last consulted on the record. A rewrite whose arguments select
+    /// another ordered contract never renders through here: it is a new call under that contract,
+    /// carrying only the answers consulted for it. A membership answer expands the group one
+    /// argument names, so it survives only while that argument's value is unchanged.
     pub(crate) fn substituting(&self, arguments: CanonicalArguments) -> ResolvedCall {
         let unchanged = |argument: &str| arguments.value().get(argument) == self.arguments.value().get(argument);
         let memberships = self

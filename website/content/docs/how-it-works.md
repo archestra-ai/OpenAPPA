@@ -52,7 +52,7 @@ Each contract field has a single source of truth. A field written in policy and 
 
 When a tool call is proposed, OpenAPPA evaluates attached resolvers immediately. The validated answer is pinned to the exact inputs the resolver received. This pinned answer stays with the call through requirement checks, remedy evaluation, human approval, dispatch, and execution logging. Replaying an execution log verifies the recorded answer against the same resolver inputs rather than re-querying the resolver. New tool proposals always consult resolvers freshly.
 
-If an input-substitution sanitizer rewrites the arguments of a tool call, the original resolver classification remains pinned to the call. The resolver is not consulted again after the rewrite. OpenAPPA rejects the rewrite if its arguments would select a different ordered tool contract.
+If an input-substitution sanitizer rewrites the arguments of a tool call and the rewritten arguments select the same ordered tool contract, the original resolver classification remains pinned to the call; the resolver is not consulted again. If the rewritten arguments select a different ordered tool contract, the rewrite is judged as a new call under that contract: its resolvers are consulted for the rewritten arguments, and its effects and requirements apply.
 
 Because a `tool_input` sanitizer rewrites the entire argument payload without specifying which fields changed, the rewrite retains the classification assigned to the original proposal. For example, a changed path or recipient keeps the original classification when it remains in the same ordered contract. You can restrict which tools a sanitizer can modify with its `tags`.
 

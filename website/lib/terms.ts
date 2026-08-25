@@ -37,7 +37,7 @@ const TERMS = {
 
   /* Tool contracts */
   "Tool(argument:pattern)":
-    "An ordered tool contract selector. OpenAPPA uses the first contract whose top-level string argument matches the pattern. An asterisk matches any text; a bare tool name is the fallback. A sanitizer rewrite cannot move a call to another selector.",
+    "An ordered tool contract selector. OpenAPPA uses the first contract whose top-level string argument matches the pattern. An asterisk matches any text; a bare tool name is the fallback. A sanitizer rewrite that selects another contract is judged as a new call under it.",
   delta:
     "The label contribution of an admitted call result. A delta never expands permissions: it intersects reader sets, lowers the trust rank, or leaves the trajectory label unchanged.",
   requires:
@@ -112,7 +112,7 @@ const TERMS = {
   /* Sanitizers and Casts */
   on: "Where a sanitizer may apply: tool_output at an admission the host can withhold — a child return, or a tool result at a confined application point; tool_input as whole-argument substitution at dispatch.",
   tool_input:
-    "A sanitizer application point: the sanitizer derives a replacement for one call's arguments, and the harness dispatches exactly those bytes. The rewrite keeps the proposal's resolver answers, does not consult again, and cannot select another ordered contract.",
+    "A sanitizer application point: the sanitizer derives a replacement for one call's arguments, and the harness dispatches exactly those bytes. A rewrite that stays in its contract keeps the proposal's resolver answers and does not consult again; one that selects another ordered contract is judged as a new call under it, with that contract's resolvers consulted for the rewritten arguments.",
   tool_output:
     "A sanitizer application point: an admission the host can withhold — the child-return crossing, or a tool result at an application point the deployment confines. The derivation is admitted; the raw value is withheld.",
   from: "In a sanitizer's permits: for audience, the readers the source audience must contain; for trust, the rank the source must meet or exceed.",

@@ -11757,7 +11757,7 @@ mod tests {
             other => panic!("the substitution re-plans over the derived call, got {other:?}"),
         };
         assert_eq!(block.call.contract_id(), crate::value::ToolContractId::new(0).unwrap());
-        assert_eq!(block.call.tool_resolutions(), &[answer.clone()]);
+        assert_eq!(block.call.tool_resolutions(), std::slice::from_ref(&answer));
         assert_eq!(block.block.raw.requirement_gaps, vec![includes_gap("auditor")]);
         let facts = appended_facts(hopped);
         let widen = hop_named(&facts, "widen");
