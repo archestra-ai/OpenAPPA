@@ -54,7 +54,7 @@ When a tool call is proposed, OpenAPPA evaluates attached resolvers immediately.
 
 If an input-substitution sanitizer rewrites the arguments of a tool call and the rewritten arguments select the same ordered tool contract, the resolver classification of the call last consulted — the proposal, or an earlier rewrite that selected this contract — remains pinned to the call; the resolver is not consulted again. If the rewritten arguments select a different ordered tool contract, the rewrite is judged as a new call under that contract: its resolvers are consulted for the rewritten arguments, and its effects and requirements apply.
 
-Because a `tool_input` sanitizer rewrites the entire argument payload without specifying which fields changed, the rewrite retains the classification assigned to the original proposal. For example, a changed path or recipient keeps the original classification when it remains in the same ordered contract. You can restrict which tools a sanitizer can modify with its `tags`.
+Because a `tool_input` sanitizer rewrites the entire argument payload without specifying which fields changed, the rewrite retains the classification assigned to the call last consulted. For example, a changed path or recipient keeps the original classification when it remains in the same ordered contract. You can restrict which tools a sanitizer can modify with its `tags`.
 
 If a resolver fails to return a valid answer (e.g. timeout, network failure, or invalid response format), OpenAPPA halts execution with an operational error. It does not record a policy denial, and the tool does not execute.
 

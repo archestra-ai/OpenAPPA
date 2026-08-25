@@ -1892,28 +1892,11 @@ impl Engine {
                 .registry
                 .contract(call)
                 .expect("a resolved call names a checkable tool");
-            match check::validate_memberships(contract, call) {
-                Ok(()) => {}
-                Err(check::MembershipRefusal::Needed(reads)) => needed.extend(reads.into_iter().map(|read| read.group)),
-                Err(check::MembershipRefusal::Foreign(argument)) => {
-                    return Err(TransitionError::ForeignMembership { argument });
-                }
-            }
-            match check::validate_tool_resolutions(&self.registry, contract, call, check::AnsweredFor::ThisCall) {
-                Ok(()) => {}
-                Err(check::ToolResolutionRefusal::Needed(bindings)) => {
-                    for binding in bindings {
-                        let resolver = binding.resolver.as_str().to_string();
-                        if !unresolved.contains(&resolver) {
-                            unresolved.push(resolver);
-                        }
-                    }
-                }
-                Err(check::ToolResolutionRefusal::Foreign(resolver)) => {
-                    return Err(TransitionError::ForeignToolResolution { resolver });
-                }
-                Err(check::ToolResolutionRefusal::OutsidePolicy(resolver)) => {
-                    return Err(TransitionError::InvalidToolResolution { resolver });
+            let (groups, resolvers) = unanswered(&self.registry, contract, call)?;
+            needed.extend(groups);
+            for resolver in resolvers {
+                if !unresolved.contains(&resolver) {
+                    unresolved.push(resolver);
                 }
             }
         }
@@ -3652,7 +3635,7 @@ fn substituted_call<'a>(
         if !tool_resolutions.is_empty() || !memberships.is_empty() {
             return Err(TransitionError::EvidenceMismatch);
         }
-        let substituted = call.substituting(rewritten.canonical_arguments().clone());
+        let substituted = call.substituting(rewritten.into_canonical_arguments());
         let consulted = views
             .consulted_call(subject)
             .ok_or(TransitionError::SanitizerUnapplicable)?;
@@ -3671,27 +3654,43 @@ fn substituted_call<'a>(
     let substituted = rewritten
         .with_tool_resolutions(tool_resolutions.to_vec())
         .with_memberships(memberships.to_vec());
-    match check::validate_memberships(contract, &substituted) {
-        Ok(()) => {}
-        Err(check::MembershipRefusal::Needed(reads)) => {
-            let mut needed: Vec<_> = reads.into_iter().map(|read| read.group).collect();
-            needed.sort();
-            needed.dedup();
-            return Err(TransitionError::MembershipNeeded { needed });
-        }
+    let (mut needed, resolvers) = unanswered(registry, contract, &substituted)?;
+    if !needed.is_empty() {
+        needed.sort();
+        needed.dedup();
+        return Err(TransitionError::MembershipNeeded { needed });
+    }
+    if !resolvers.is_empty() {
+        return Err(TransitionError::ToolResolutionNeeded { resolvers });
+    }
+    Ok((substituted, contract))
+}
+
+/// What a call's contract declares that the call does not yet carry: the groups its placeholders
+/// name and the resolvers it uses, each once. A foreign or out-of-policy answer is a refusal.
+fn unanswered(
+    registry: &Registry,
+    contract: &ToolContract,
+    call: &ResolvedCall,
+) -> Result<(Vec<crate::names::GroupName>, Vec<String>), TransitionError> {
+    let groups = match check::validate_memberships(contract, call) {
+        Ok(()) => Vec::new(),
+        Err(check::MembershipRefusal::Needed(reads)) => reads.into_iter().map(|read| read.group).collect(),
         Err(check::MembershipRefusal::Foreign(argument)) => {
             return Err(TransitionError::ForeignMembership { argument });
         }
-    }
-    match check::validate_tool_resolutions(registry, contract, &substituted, check::AnsweredFor::ThisCall) {
-        Ok(()) => {}
+    };
+    let resolvers = match check::validate_tool_resolutions(registry, contract, call, check::AnsweredFor::ThisCall) {
+        Ok(()) => Vec::new(),
         Err(check::ToolResolutionRefusal::Needed(bindings)) => {
-            let mut resolvers: Vec<String> = bindings
-                .into_iter()
-                .map(|binding| binding.resolver.as_str().to_string())
-                .collect();
-            resolvers.dedup();
-            return Err(TransitionError::ToolResolutionNeeded { resolvers });
+            let mut resolvers: Vec<String> = Vec::new();
+            for binding in bindings {
+                let resolver = binding.resolver.as_str().to_string();
+                if !resolvers.contains(&resolver) {
+                    resolvers.push(resolver);
+                }
+            }
+            resolvers
         }
         Err(check::ToolResolutionRefusal::Foreign(resolver)) => {
             return Err(TransitionError::ForeignToolResolution { resolver });
@@ -3699,8 +3698,8 @@ fn substituted_call<'a>(
         Err(check::ToolResolutionRefusal::OutsidePolicy(resolver)) => {
             return Err(TransitionError::InvalidToolResolution { resolver });
         }
-    }
-    Ok((substituted, contract))
+    };
+    Ok((groups, resolvers))
 }
 
 fn invalidated_siblings(

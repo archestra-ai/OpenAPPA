@@ -1648,8 +1648,9 @@ impl RuntimeEngine {
             (Err(Resolution::Feedback(text)), _) | (_, Err(Resolution::Feedback(text))) => {
                 Err(Resolution::Feedback(text))
             }
-            (Err(Resolution::Consult(tools)), Err(Resolution::Consult(memberships))) => {
-                Err(Resolution::Consult([tools, memberships].concat()))
+            (Err(Resolution::Consult(mut tools)), Err(Resolution::Consult(memberships))) => {
+                tools.extend(memberships);
+                Err(Resolution::Consult(tools))
             }
             (Err(Resolution::Consult(requests)), Ok(_)) | (Ok(_), Err(Resolution::Consult(requests))) => {
                 Err(Resolution::Consult(requests))

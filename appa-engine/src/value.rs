@@ -515,6 +515,10 @@ impl ResolvedCall {
         &self.arguments
     }
 
+    pub(crate) fn into_canonical_arguments(self) -> CanonicalArguments {
+        self.arguments
+    }
+
     /// Attach the resolver answers pinned to this call. Canonical order only: a
     /// duplicate binding is not merged here — the boundary refuses it
     /// ([`crate::check::validate_tool_resolutions`]) — so the set the runtime handed over is

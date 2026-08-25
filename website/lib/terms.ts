@@ -112,7 +112,7 @@ const TERMS = {
   /* Sanitizers and Casts */
   on: "Where a sanitizer may apply: tool_output at an admission the host can withhold — a child return, or a tool result at a confined application point; tool_input as whole-argument substitution at dispatch.",
   tool_input:
-    "A sanitizer application point: the sanitizer derives a replacement for one call's arguments, and the harness dispatches exactly those bytes. A rewrite that stays in its contract keeps the proposal's resolver answers and does not consult again; one that selects another ordered contract is judged as a new call under it, with that contract's resolvers consulted for the rewritten arguments.",
+    "A sanitizer application point: the sanitizer derives a replacement for one call's arguments, and the harness dispatches exactly those bytes. A rewrite that stays in its contract keeps the resolver answers of the call last consulted and does not consult again; one that selects another ordered contract is judged as a new call under it, with that contract's resolvers consulted for the rewritten arguments.",
   tool_output:
     "A sanitizer application point: an admission the host can withhold — the child-return crossing, or a tool result at an application point the deployment confines. The derivation is admitted; the raw value is withheld.",
   from: "In a sanitizer's permits: for audience, the readers the source audience must contain; for trust, the rank the source must meet or exceed.",
