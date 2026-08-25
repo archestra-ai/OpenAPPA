@@ -13,11 +13,6 @@ it.
 | `github/` | the GitHub MCP server's default tool sets: profile, repositories, issues, pull requests, users (44 tools) | none |
 | `grain/` | the Grain MCP server: meetings, transcripts, notes, deals, clips, stories, collections, workspace admin (49 tools) | none |
 
-Every battery follows one rule. A write needs trusted data. A write to
-a place anyone can read also needs data that may be seen by everyone
-(`public`). A read from a place assumed private marks its result
-`private`.
-
 Include a battery with a path relative to the root config:
 
 ```toml
