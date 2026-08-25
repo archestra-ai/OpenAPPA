@@ -870,21 +870,11 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
     )?;
     // A resolver-backed cast classifies over the wire, so it needs a binding. A constant
     // is answered from the policy itself and binds nothing.
-    for cast in &rc.casts {
-        let name = cast.name.as_str();
-        let bound = externals.casts.contains_key(name);
-        match (&cast.resolution, bound) {
-            (appa_engine::authority::CastResolution::Resolver { .. }, false) => {
-                return Err(OpenError::UnboundExternal {
-                    kind: "cast",
-                    name: name.to_string(),
-                });
-            }
-            (appa_engine::authority::CastResolution::Constant(_), true) => {
-                return Err(OpenError::BoundConstantCast(name.to_string()));
-            }
-            _ => {}
-        }
+    if let Some(cast) = rc.casts.iter().find(|cast| {
+        matches!(cast.resolution, appa_engine::authority::CastResolution::Constant(_))
+            && externals.casts.contains_key(cast.name.as_str())
+    }) {
+        return Err(OpenError::BoundConstantCast(cast.name.as_str().to_string()));
     }
     bound_exactly(
         "cast",

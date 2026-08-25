@@ -462,6 +462,60 @@ pub(crate) fn kill_process_group(process_group: i32) {
     }
 }
 
+/// One subprocess exchange, shared by every transport that runs a local process: the
+/// input on stdin, the answer read off stdout under `max_body_bytes`, and the child seen
+/// out — unreaped — before returning. Exit is observed without reaping: the zombie keeps
+/// its pid and process-group id reserved until the caller's group cleanup runs, so the
+/// id cannot be recycled underneath it. A helper the child left behind may hold the pipe
+/// open after the child itself exited: seeing the exit first ends the group, so the
+/// answer already written is read out instead of lost to the timeout.
+#[cfg(unix)]
+pub(crate) async fn exchange_with_child(
+    child: &mut tokio::process::Child,
+    process_group: i32,
+    input: &[u8],
+    max_body_bytes: usize,
+) -> Result<Vec<u8>, NoAnswerReason> {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let mut stdin = child.stdin.take().ok_or(NoAnswerReason::Transport)?;
+    let mut stdout = child.stdout.take().ok_or(NoAnswerReason::Transport)?;
+    stdin.write_all(input).await.map_err(|_| NoAnswerReason::Transport)?;
+    stdin.shutdown().await.map_err(|_| NoAnswerReason::Transport)?;
+    drop(stdin);
+
+    // Read under the cap before anything waits: a child writing past it is reported
+    // oversized at once, so a full pipe can never wedge the exchange into the timeout.
+    let output = async {
+        let mut bytes = Vec::new();
+        let mut chunk = [0u8; 8192];
+        loop {
+            let read = stdout.read(&mut chunk).await.map_err(|_| NoAnswerReason::Transport)?;
+            if read == 0 {
+                return Ok(bytes);
+            }
+            if bytes.len().saturating_add(read) > max_body_bytes {
+                return Err(NoAnswerReason::Oversized);
+            }
+            bytes.extend_from_slice(&chunk[..read]);
+        }
+    };
+    tokio::pin!(output);
+    tokio::select! {
+        biased;
+        bytes = &mut output => {
+            let bytes = bytes?;
+            wait_for_child_exit(process_group).await?;
+            Ok(bytes)
+        }
+        exited = wait_for_child_exit(process_group) => {
+            exited?;
+            kill_process_group(process_group);
+            output.await
+        }
+    }
+}
+
 #[cfg(unix)]
 async fn run_command_process(
     command: ResolverCommand,
@@ -472,8 +526,6 @@ async fn run_command_process(
 ) -> Result<Vec<u8>, NoAnswerReason> {
     use std::os::unix::process::CommandExt as _;
     use std::process::Stdio;
-
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     let Some((executable, arguments)) = command.argv.split_first() else {
         return Err(NoAnswerReason::Unregistered);
@@ -502,55 +554,8 @@ async fn run_command_process(
         child: Some(child),
         process_group: Some(process_group),
     };
-    let Some(mut stdin) = process.child_mut().stdin.take() else {
-        process.terminate_and_reap_later();
-        return Err(NoAnswerReason::Transport);
-    };
-    let Some(mut stdout) = process.child_mut().stdout.take() else {
-        process.terminate_and_reap_later();
-        return Err(NoAnswerReason::Transport);
-    };
-
     let outcome = {
-        let exchange = async {
-            stdin.write_all(&input).await.map_err(|_| NoAnswerReason::Transport)?;
-            stdin.shutdown().await.map_err(|_| NoAnswerReason::Transport)?;
-            drop(stdin);
-
-            let output = async {
-                let mut bytes = Vec::new();
-                let mut chunk = [0u8; 8192];
-                loop {
-                    let read = stdout.read(&mut chunk).await.map_err(|_| NoAnswerReason::Transport)?;
-                    if read == 0 {
-                        return Ok(bytes);
-                    }
-                    if bytes.len().saturating_add(read) > max_body_bytes {
-                        return Err(NoAnswerReason::Oversized);
-                    }
-                    bytes.extend_from_slice(&chunk[..read]);
-                }
-            };
-            // Observe exit without reaping. The zombie keeps its pid and process-group id
-            // reserved until group cleanup runs, so the id cannot be recycled underneath us.
-            // A helper the command left behind may hold the pipe open after the command
-            // itself exited: seeing the exit first ends the group, so the answer already
-            // written is read out instead of lost to the timeout.
-            tokio::pin!(output);
-            tokio::select! {
-                biased;
-                bytes = &mut output => {
-                    let bytes = bytes?;
-                    wait_for_child_exit(process_group).await?;
-                    Ok(bytes)
-                }
-                exited = wait_for_child_exit(process_group) => {
-                    exited?;
-                    kill_process_group(process_group);
-                    output.await
-                }
-            }
-        };
+        let exchange = exchange_with_child(process.child_mut(), process_group, &input, max_body_bytes);
         tokio::select! {
             biased;
             _ = &mut cancelled => Err(NoAnswerReason::Transport),
@@ -782,6 +787,7 @@ mod tests {
     }
 
     /// A fake `claude` executable: a shell script the backend's `command` override runs.
+    #[cfg(unix)]
     fn fake_claude(dir: &std::path::Path, script: &str) -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let path = dir.join("fake-claude");
@@ -790,6 +796,7 @@ mod tests {
         path
     }
 
+    #[cfg(unix)]
     fn claude_backend(command: std::path::PathBuf, timeout_ms: u64, cap: usize) -> ClaudeCodeBackend {
         ClaudeCodeBackend {
             command,
@@ -1150,6 +1157,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         args.get(position + 1).unwrap_or_else(|| panic!("{flag} takes a value"))
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn claude_code_receives_the_declaration_in_the_system_prompt_and_the_artifact_on_stdin() {
         let consult = dynamic_consult(
@@ -1229,6 +1237,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         assert_eq!(schema, prompt.schema);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn every_claude_process_failure_is_no_answer() {
         let prompt = ModelPrompt::new(&dynamic_consult("review", serde_json::json!({}))).expect("renders");
@@ -1266,6 +1275,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn the_claude_builtin_serves_every_kind_but_membership() {
         let dir = tempfile::tempdir().expect("a fixture directory is created");

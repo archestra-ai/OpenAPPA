@@ -487,17 +487,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recipient_directory_refuses_unknown_bindings() {
-        let request = Consult {
-            version: 2,
-            name: "email-recipient-readers".to_string(),
+    async fn recipient_directory_refuses_unknown_bindings_and_other_versions() {
+        let consult = |version: u32, name: &str| Consult {
+            version,
+            name: name.to_string(),
             artifact: DynamicResolverArtifact {
                 args: DynamicResolverArgs {
                     to: "ap-review@corp.example".to_string(),
                 },
             },
         };
-        let (status, _) = dynamic_resolver(axum::Json(request)).await;
+        let (status, _) = dynamic_resolver(axum::Json(consult(1, "someone-elses-resolver"))).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = dynamic_resolver(axum::Json(consult(2, "email-recipient-readers"))).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
 

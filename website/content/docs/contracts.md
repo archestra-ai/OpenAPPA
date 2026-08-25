@@ -542,7 +542,7 @@ An entry is `[externals.<kind>.<name>]`, with `<kind>` one of `authorities`, `sa
 | `builtin = "hitl"` | authorities | The harness asks a person. |
 | `builtin = "approve"` | authorities | Approves within `permits`. |
 | `builtin = "redact-email"` | sanitizers | Replaces email addresses with a placeholder. |
-| `builtin = "claude-code"` | authorities, sanitizers, casts, dynamic | One isolated `claude -p` process per consult, tuned in `[externals.claude_code]`. |
+| `builtin = "claude-code"` | authorities, sanitizers, casts, dynamic | Unix only. One isolated `claude -p` process per consult, tuned in `[externals.claude_code]`. |
 | `builtin = "llm"` | authorities, sanitizers, casts, dynamic | The API-key profile in `[externals.llm]`. |
 | `builtin = "<module>"` | authorities, sanitizers | A deployer module from `--modules-dir`, called in-process. |
 

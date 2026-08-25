@@ -349,6 +349,7 @@ fn open_library(path: &Path) -> Result<libloading::Library, libloading::Error> {
     unsafe { libloading::Library::new(path) }
 }
 
+#[cfg(unix)]
 #[derive(Debug, serde::Deserialize)]
 struct ClaudeResultEnvelope {
     structured_output: Option<serde_json::Value>,
@@ -376,12 +377,16 @@ impl ClaudeCodeBackend {
     }
 }
 
+#[cfg(unix)]
 pub(crate) async fn run_claude_code(
     backend: &ClaudeCodeBackend,
     prompt: &ModelPrompt,
     deadline: tokio::time::Instant,
 ) -> Result<serde_json::Value, NoAnswerReason> {
+    use std::os::unix::process::CommandExt as _;
     use std::process::Stdio;
+
+    use crate::external::{exchange_with_child, kill_process_group};
 
     let schema = serde_json::to_string(&prompt.schema).map_err(|_| NoAnswerReason::Malformed)?;
     let work = tempfile::tempdir().map_err(|_| NoAnswerReason::Transport)?;
@@ -410,7 +415,7 @@ pub(crate) async fn run_claude_code(
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    start_own_process_group(&mut command);
+    command.as_std_mut().process_group(0);
     // No APPA secret or wiring variable reaches the model: the child needs its own
     // credentials and HOME, never this runtime's bearer tokens.
     for (key, _) in std::env::vars_os() {
@@ -423,16 +428,24 @@ pub(crate) async fn run_claude_code(
         tracing::warn!(command = %backend.command.display(), "the claude executable did not start");
         NoAnswerReason::Unreachable
     })?;
-    let process_group = child.id().and_then(|pid| i32::try_from(pid).ok());
+    let process_group = child
+        .id()
+        .and_then(|pid| i32::try_from(pid).ok())
+        .ok_or(NoAnswerReason::Transport)?;
     let exchanged = tokio::time::timeout_at(
         deadline,
-        exchange(&mut child, process_group, prompt, backend.max_body_bytes),
+        exchange_with_child(
+            &mut child,
+            process_group,
+            prompt.input.as_bytes(),
+            backend.max_body_bytes,
+        ),
     )
     .await;
     // Every outcome ends the consult's whole process group: no helper the CLI spawned
-    // outlives the answer. On success the child is a zombie by now, so the group id is
-    // still its own.
-    terminate_process_group(process_group);
+    // outlives the answer. On success the child is an unreaped zombie by now, so the
+    // group id is still its own.
+    kill_process_group(process_group);
     let output = match exchanged {
         Ok(Ok(output)) => output,
         Ok(Err(reason)) => {
@@ -454,90 +467,15 @@ pub(crate) async fn run_claude_code(
     envelope.structured_output.ok_or(NoAnswerReason::Malformed)
 }
 
-/// Feed the artifact, read the capped answer, and see the child out — without reaping
-/// it, so the caller's group cleanup still addresses the right group.
-async fn exchange(
-    child: &mut tokio::process::Child,
-    process_group: Option<i32>,
-    prompt: &ModelPrompt,
-    max_body_bytes: usize,
-) -> Result<Vec<u8>, NoAnswerReason> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    let mut stdin = child.stdin.take().ok_or(NoAnswerReason::Transport)?;
-    let mut stdout = child.stdout.take().ok_or(NoAnswerReason::Transport)?;
-    stdin
-        .write_all(prompt.input.as_bytes())
-        .await
-        .map_err(|_| NoAnswerReason::Transport)?;
-    stdin.shutdown().await.map_err(|_| NoAnswerReason::Transport)?;
-    drop(stdin);
-    // Read the capped output before waiting: a child writing past the cap is killed
-    // right away, so a full pipe can never wedge the wait into the timeout.
-    let read = async {
-        let mut output = Vec::new();
-        let mut chunk = [0u8; 8192];
-        loop {
-            let read = stdout.read(&mut chunk).await.map_err(|_| NoAnswerReason::Transport)?;
-            if read == 0 {
-                return Ok(output);
-            }
-            if output.len().saturating_add(read) > max_body_bytes {
-                return Err(NoAnswerReason::Oversized);
-            }
-            output.extend_from_slice(&chunk[..read]);
-        }
-    };
-    // A helper the CLI left behind may hold the pipe open after the CLI itself exited:
-    // seeing the exit first ends the group, so the answer already written is read out
-    // instead of lost to the timeout.
-    tokio::pin!(read);
-    tokio::select! {
-        biased;
-        output = &mut read => {
-            let output = output?;
-            observe_exit(child).await?;
-            Ok(output)
-        }
-        exited = observe_exit(child) => {
-            exited?;
-            terminate_process_group(process_group);
-            read.await
-        }
-    }
-}
-
-#[cfg(unix)]
-fn start_own_process_group(command: &mut tokio::process::Command) {
-    use std::os::unix::process::CommandExt as _;
-    command.as_std_mut().process_group(0);
-}
-
+/// The builtin is a local process under a process group this platform lacks; the
+/// configuration refuses it before a deployment opens, so this is never reached.
 #[cfg(not(unix))]
-fn start_own_process_group(_: &mut tokio::process::Command) {}
-
-#[cfg(unix)]
-fn terminate_process_group(process_group: Option<i32>) {
-    if let Some(process_group) = process_group {
-        crate::external::kill_process_group(process_group);
-    }
-}
-
-#[cfg(not(unix))]
-fn terminate_process_group(_: Option<i32>) {}
-
-#[cfg(unix)]
-async fn observe_exit(child: &tokio::process::Child) -> Result<(), NoAnswerReason> {
-    let pid = child
-        .id()
-        .and_then(|pid| i32::try_from(pid).ok())
-        .ok_or(NoAnswerReason::Transport)?;
-    crate::external::wait_for_child_exit(pid).await
-}
-
-#[cfg(not(unix))]
-async fn observe_exit(_: &tokio::process::Child) -> Result<(), NoAnswerReason> {
-    Ok(())
+pub(crate) async fn run_claude_code(
+    _backend: &ClaudeCodeBackend,
+    _prompt: &ModelPrompt,
+    _deadline: tokio::time::Instant,
+) -> Result<serde_json::Value, NoAnswerReason> {
+    Err(NoAnswerReason::Unregistered)
 }
 
 #[cfg(test)]

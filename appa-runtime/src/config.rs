@@ -331,6 +331,10 @@ pub enum ConfigError {
     InvalidCommand { section: &'static str, name: String },
     #[error("the {section} entry {name:?} uses a local command, which this platform does not support")]
     UnsupportedCommandPlatform { section: &'static str, name: String },
+    #[error(
+        "the {section} entry {name:?} names the builtin \"claude-code\", which runs a local process this platform does not support"
+    )]
+    UnsupportedClaudeCodePlatform { section: &'static str, name: String },
     #[error("the embedded {section} command {name:?} has a relative working directory")]
     RelativeCommandCwd { section: &'static str, name: String },
     #[error("embedded setting {field} cannot be represented in TOML")]
@@ -381,6 +385,15 @@ impl Section {
     /// presence is checked when the deployment opens); casts and dynamic resolvers take
     /// only the model builtins; a membership resolver is never a builtin.
     fn check_builtin(self, name: &str, builtin: &str) -> Result<(), ConfigError> {
+        // The subscription transport is a local process under a process group, which only
+        // Unix provides; like a `command`, it is refused where it cannot be cleaned up.
+        #[cfg(not(unix))]
+        if builtin == CLAUDE_CODE_BUILTIN {
+            return Err(ConfigError::UnsupportedClaudeCodePlatform {
+                section: self.name(),
+                name: name.to_string(),
+            });
+        }
         let model_builtin = builtin == CLAUDE_CODE_BUILTIN || builtin == LLM_BUILTIN;
         let allowed = match self {
             Section::Authorities | Section::Sanitizers => crate::builtins::valid_implementation_name(builtin),
@@ -1542,6 +1555,16 @@ mod tests {
         assert!(matches!(
             parse(&text),
             Err(ConfigError::UnsupportedCommandPlatform { name, .. }) if name == "classifier"
+        ));
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn the_claude_code_builtin_is_refused_on_an_unsupported_platform() {
+        let text = format!("{MINIMAL}\n[externals.dynamic.classifier]\nbuiltin = \"claude-code\"\n");
+        assert!(matches!(
+            parse(&text),
+            Err(ConfigError::UnsupportedClaudeCodePlatform { name, .. }) if name == "classifier"
         ));
     }
 
