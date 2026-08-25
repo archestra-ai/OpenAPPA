@@ -8,6 +8,11 @@ args = { subject = "client-alpha-support.md" }
 readers = ["Client_Alpha"]
 
 [[dynamic_resolver_answer]]
+resolver = "tenant-record-write-readers"
+args = { subject = "client-alpha-support.md" }
+readers = ["Client_Alpha"]
+
+[[dynamic_resolver_answer]]
 resolver = "mailbox-tenant-readers"
 args = { subject = "alpha.manager@clients.example" }
 readers = ["Client_Alpha"]

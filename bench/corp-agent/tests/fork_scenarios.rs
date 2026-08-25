@@ -32,20 +32,20 @@ const FORK_POLICY: &str = include_str!("../../../bench/corp/policies/appa.toml")
 const HR_RECORD: &str = "Onboarding buddy: Priya Sharma (ext 4471)\n";
 const FORUM_THREAD: &str = "nightly deploy times out since v2.31; 45 minutes fixes it\n";
 
-/// The shared policy's ticket requirement, and the `reply-and-file-ticket`
-/// deployment posture that strengthens it: a change ticket follows the public
-/// acknowledgement it responds to. The bench declares that clause in the one
-/// scenario that tests it rather than taxing every episode with it, so the
-/// branching test below — the test the gate exists for — applies the same
-/// posture to the shared policy here.
-const SHARED_TICKET_REQUIRES: &str = r#"requires = { trust = "internal" }"#;
-const TICKET_REQUIRES_PRIOR_EGRESS: &str = r#"requires = { trust = "internal", effects = { contains = ["egress"] } }"#;
+/// The shared policy's trust and destination-store gate, and the
+/// `reply-and-file-ticket` deployment posture that adds prior egress: a change
+/// ticket follows the public acknowledgement it responds to. The bench
+/// declares that history clause only in the scenario that tests it, while the
+/// anti-laundering destination gate remains shared.
+const SHARED_TICKET_REQUIRES: &str = r#"requires = { trust = "internal", audience = { contains = ["public"] } }"#;
+const TICKET_REQUIRES_PRIOR_EGRESS: &str =
+    r#"requires = { trust = "internal", audience = { contains = ["public"] }, effects = { contains = ["egress"] } }"#;
 
 fn ticket_gated_on_prior_egress() -> String {
     assert_eq!(
         FORK_POLICY.matches(SHARED_TICKET_REQUIRES).count(),
         1,
-        "the ticket is the only tool asking for bare internal trust — the posture has one place to land",
+        "the ticket's shared sink gate has one place for the scenario history requirement to land",
     );
     FORK_POLICY.replace(SHARED_TICKET_REQUIRES, TICKET_REQUIRES_PRIOR_EGRESS)
 }

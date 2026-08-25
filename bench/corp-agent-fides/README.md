@@ -87,7 +87,7 @@ corp_fides/
   systems.py    the connection to the shared corp-systems-mcp server: root/binary resolution + MCP client
   profile.py    frozen versioned profile configuration and strict JSON loader
   tools.py      the 17 FIDES-labeled tools forwarding over MCP; the APPA->FIDES label mapping lives here
-  agent.py      builds the model client(s) + SecureAgentConfig + Agent (FIDES on, or --no-defense)
+  agent.py      builds the model client(s) + SecureAgentConfig + Agent for one closed execution mode
   __main__.py   the CLI: corp-agent-fides
 tests/
   test_systems.py      drives the shared server over MCP from Python (no key)
@@ -137,14 +137,14 @@ binary over MCP (skipped, with a message, if no Rust toolchain is available).
 # FIDES on (default): the injection is defended, the sink stays empty
 ./scripts/injection-forum-fides.sh
 
-# --no-defense: same loop, same prompt, no FIDES — the HR record leaks
+# unmediated mode: same loop, same prompt, no FIDES — the HR record leaks
 ./scripts/injection-forum-open.sh
 ```
 
 | Script | What it shows |
 |--------|---------------|
 | `./scripts/injection-forum-fides.sh` | **The block**: planted thread → FIDES hides the forum text and refuses `send_email`; `data/email/` stays empty; audit log records it |
-| `./scripts/injection-forum-open.sh` | **The leak** (`--no-defense`): the same attack exfiltrates the HR record |
+| `./scripts/injection-forum-open.sh` | **The leak** (`--mode unmediated`): the same attack exfiltrates the HR record |
 | `./scripts/summarize-hr.sh` | Benign: HR reads are `private` but safe to read — the summary returns |
 | `./scripts/email-finance.sh` | Profile override: raise `send_email`'s ceiling to `private` for the sanctioned finance mail |
 | `./scripts/reset-email.sh` | Clear the `data/email/` sink |
@@ -154,7 +154,7 @@ Direct invocation:
 
 ```sh
 corp-agent-fides "Find Alice Chen's HR record and summarise it"
-corp-agent-fides --no-defense "<prompt>"     # the unmediated contrast
+corp-agent-fides --mode unmediated "<prompt>"     # the unmediated contrast
 corp-agent-fides --profile profile.json "<prompt>"
 corp-agent-fides --chat
 ```
@@ -177,12 +177,12 @@ enforcement unchanged:
 
 This profile is included as `profiles/audience-intersection.json`.
 
-Profiles configure labels and wrapper policy in both modes. `--no-defense`
+Profiles configure labels and wrapper policy in all three modes. `unmediated`
 still builds the identical wrappers but does not install FIDES enforcement.
 
 | Flag | Meaning |
 |------|---------|
-| `--no-defense` | build the agent without `SecureAgentConfig` (the leak) |
+| `--mode <mode>` | one of `native-auto-hide` (default), `middleware-only`, or `unmediated` |
 | `--profile <path>` | strict version 1 JSON result-label and tool-policy overrides |
 | `--model <id>` | OpenRouter model id (env `FIDES_DEMO_MODEL`; default `anthropic/claude-sonnet-5`) |
 | `--quarantine-model <id>` | model for the quarantine client (env `FIDES_QUARANTINE_MODEL`; default: same as `--model`) |

@@ -326,6 +326,7 @@ def render_comparison_markdown(
         arm_map = samples_by_base_id[bid]
         guarded_s = arm_map.get("guarded")
         stock_s = arm_map.get("stock")
+        fides_native_s = arm_map.get("fides-native")
         if not guarded_s:
             continue
 
@@ -335,13 +336,17 @@ def render_comparison_markdown(
 
         stock_sec = _score_value(stock_s, "actual_dispatch_scorer", "actual_security") or "?"
         guarded_sec = _score_value(guarded_s, "actual_dispatch_scorer", "actual_security") or "?"
+        fides_native_sec = _score_value(fides_native_s, "actual_dispatch_scorer", "actual_security") or "?"
 
         highlight = "🛡️ **OpenAPPA Protected**" if (stock_sec == "I" and guarded_sec == "C") else "✅ **Clean / Secure**"
 
         lines.append(f"#### Task `{bid}` ({highlight})")
         lines.append(f"- **User Prompt:** *{guarded_s.input}*")
         lines.append(f"- **Target Attack Marker:** `{marker}` | **Expected Answer:** `{expected}`")
-        lines.append(f"- **Stock Security:** `{stock_sec}` | **OpenAPPA Guarded Security:** `{guarded_sec}`")
+        lines.append(
+            f"- **Stock Security:** `{stock_sec}` | **OpenAPPA Guarded Security:** `{guarded_sec}` | "
+            f"**FIDES-native Security:** `{fides_native_sec}`"
+        )
         lines.append("")
 
         lines.append("<details>")
@@ -355,6 +360,9 @@ def render_comparison_markdown(
             lines.append(render_sample_trajectory(stock_s))
         lines.append("##### 🛡️ OpenAPPA Guarded Trajectory (Policy Mediation):")
         lines.append(render_sample_trajectory(guarded_s))
+        if fides_native_s:
+            lines.append("##### 🏢 FIDES-native Trajectory (Automatic Hiding + Quarantine):")
+            lines.append(render_sample_trajectory(fides_native_s))
         lines.append("</details>")
         lines.append("")
 
@@ -371,6 +379,7 @@ def render_comparison_markdown(
         arm_map = samples_by_base_id[bid]
         guarded_s = arm_map.get("guarded")
         fides_s = arm_map.get("fides")
+        fides_native_s = arm_map.get("fides-native")
         if not guarded_s:
             continue
 
@@ -378,8 +387,13 @@ def render_comparison_markdown(
         g_u = _score_value(guarded_s, "actual_dispatch_scorer", "actual_utility") or "?"
         f_sec = _score_value(fides_s, "actual_dispatch_scorer", "actual_security") or "?"
         f_u = _score_value(fides_s, "actual_dispatch_scorer", "actual_utility") or "?"
+        fn_sec = _score_value(fides_native_s, "actual_dispatch_scorer", "actual_security") or "?"
+        fn_u = _score_value(fides_native_s, "actual_dispatch_scorer", "actual_utility") or "?"
 
-        lines.append(f"#### Task `{bid}` (Guarded: sec=`{g_sec}`, util=`{g_u}` | FIDES: sec=`{f_sec}`, util=`{f_u}`)")
+        lines.append(
+            f"#### Task `{bid}` (Guarded: sec=`{g_sec}`, util=`{g_u}` | "
+            f"FIDES: sec=`{f_sec}`, util=`{f_u}` | FIDES-native: sec=`{fn_sec}`, util=`{fn_u}`)"
+        )
         lines.append(f"- **User Prompt:** *{guarded_s.input}*")
         lines.append("")
         lines.append("<details>")
@@ -390,6 +404,9 @@ def render_comparison_markdown(
         if fides_s:
             lines.append("##### 🏢 FIDES Trajectory:")
             lines.append(render_sample_trajectory(fides_s))
+        if fides_native_s:
+            lines.append("##### 🏢 FIDES-native Trajectory:")
+            lines.append(render_sample_trajectory(fides_native_s))
         lines.append("</details>")
         lines.append("")
 
@@ -399,13 +416,17 @@ def render_comparison_markdown(
         arm_map = samples_by_base_id[bid]
         guarded_s = arm_map.get("guarded")
         stock_s = arm_map.get("stock")
+        fides_native_s = arm_map.get("fides-native")
         if not guarded_s:
             continue
 
         g_sec = _score_value(guarded_s, "actual_dispatch_scorer", "actual_security") or "?"
         s_sec = _score_value(stock_s, "actual_dispatch_scorer", "actual_security") or "?"
+        fn_sec = _score_value(fides_native_s, "actual_dispatch_scorer", "actual_security") or "?"
 
-        lines.append(f"#### Task `{bid}` (Guarded: sec=`{g_sec}` | Stock: sec=`{s_sec}`)")
+        lines.append(
+            f"#### Task `{bid}` (Guarded: sec=`{g_sec}` | Stock: sec=`{s_sec}` | FIDES-native: sec=`{fn_sec}`)"
+        )
         lines.append(f"- **User Prompt:** *{guarded_s.input}*")
         lines.append("")
         lines.append("<details>")
@@ -413,6 +434,9 @@ def render_comparison_markdown(
         lines.append("")
         lines.append("##### 🛡️ OpenAPPA Guarded Trajectory:")
         lines.append(render_sample_trajectory(guarded_s))
+        if fides_native_s:
+            lines.append("##### 🏢 FIDES-native Trajectory:")
+            lines.append(render_sample_trajectory(fides_native_s))
         lines.append("</details>")
         lines.append("")
 

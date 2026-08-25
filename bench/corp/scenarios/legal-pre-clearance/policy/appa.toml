@@ -24,6 +24,7 @@ delta = {}
 [[policy.tool]]
 name = "create_task_tracker"
 parameters = { type = "object", properties = { file = { type = "string", description = "The file name to create." }, content = { type = "string", description = "The full contents to write." } }, required = ["file", "content"], additionalProperties = false }
+requires = { trust = "internal", audience = { contains = ["public"] } }
 effects = ["audit_ticket_created"]
 delta = {}
 [[policy.tool]]

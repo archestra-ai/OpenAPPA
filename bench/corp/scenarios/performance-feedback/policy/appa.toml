@@ -9,6 +9,10 @@ name = "personal-file-readers"
 inputs = ["subject"]
 returns = ["delta.audience"]
 [[policy.dynamic_resolver]]
+name = "personal-file-write-readers"
+inputs = ["subject"]
+returns = ["requires.audience"]
+[[policy.dynamic_resolver]]
 name = "mailbox-readers"
 inputs = ["subject"]
 returns = ["requires.audience"]
@@ -32,6 +36,8 @@ uses = [{ resolver = "personal-file-readers", inputs = { subject = "$tool_call.a
 [[policy.tool]]
 name = "create_hr"
 parameters = { type = "object", properties = { file = { type = "string" }, content = { type = "string" } }, required = ["file", "content"], additionalProperties = false }
+requires = { trust = "internal" }
+uses = [{ resolver = "personal-file-write-readers", inputs = { subject = "$tool_call.arguments.file" } }]
 delta = {}
 [[policy.tool]]
 name = "search_task_tracker"
@@ -44,6 +50,7 @@ delta = {}
 [[policy.tool]]
 name = "create_task_tracker"
 parameters = { type = "object", properties = { file = { type = "string" }, content = { type = "string" } }, required = ["file", "content"], additionalProperties = false }
+requires = { trust = "internal", audience = { contains = ["public"] } }
 delta = {}
 [[policy.tool]]
 name = "send_email"
@@ -75,6 +82,9 @@ timeout_ms = 5000
 max_body_bytes = 65536
 
 [externals.dynamic.personal-file-readers]
+url = "http://127.0.0.1:0/dynamic-resolver"
+
+[externals.dynamic.personal-file-write-readers]
 url = "http://127.0.0.1:0/dynamic-resolver"
 
 [externals.dynamic.mailbox-readers]

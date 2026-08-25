@@ -57,7 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
     preflight_parser = commands.add_parser("preflight", help="validate pins, policies, inventory, and credentials")
     preflight_parser.add_argument("--model", default=DEFAULT_MODEL)
 
-    smoke_parser = commands.add_parser("smoke", help="run a manifested 15-sample lifecycle smoke test")
+    smoke_parser = commands.add_parser("smoke", help="run a manifested 20-sample lifecycle smoke test")
     add_execution_arguments(smoke_parser, default_concurrency=10)
 
     run_parser = commands.add_parser("run", help="run upstream and control samples")

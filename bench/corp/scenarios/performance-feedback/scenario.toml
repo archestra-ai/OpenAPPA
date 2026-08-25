@@ -8,7 +8,17 @@ args = { subject = "elena-morris-performance.md" }
 readers = ["elena.morris@northwind.example"]
 
 [[dynamic_resolver_answer]]
+resolver = "personal-file-write-readers"
+args = { subject = "elena-morris-performance.md" }
+readers = ["elena.morris@northwind.example"]
+
+[[dynamic_resolver_answer]]
 resolver = "personal-file-readers"
+args = { subject = "marcus-lee-performance.md" }
+readers = ["marcus.lee@northwind.example"]
+
+[[dynamic_resolver_answer]]
+resolver = "personal-file-write-readers"
 args = { subject = "marcus-lee-performance.md" }
 readers = ["marcus.lee@northwind.example"]
 

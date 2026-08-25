@@ -14,6 +14,11 @@ args = { subject = "project-onyx-packet.md" }
 readers = ["cfo@northwind.example", "legal-lead@northwind.example"]
 
 [[dynamic_resolver_answer]]
+resolver = "document-write-acl"
+args = { subject = "project-onyx-packet.md" }
+readers = ["cfo@northwind.example", "legal-lead@northwind.example"]
+
+[[dynamic_resolver_answer]]
 resolver = "distribution-list-members"
 args = { subject = "onyx-steering@northwind.example" }
 readers = ["cfo@northwind.example", "legal-lead@northwind.example"]

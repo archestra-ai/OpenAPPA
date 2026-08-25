@@ -14,6 +14,11 @@ inputs = ["subject"]
 returns = ["delta.audience"]
 
 [[policy.dynamic_resolver]]
+name = "document-write-acl"
+inputs = ["subject"]
+returns = ["requires.audience"]
+
+[[policy.dynamic_resolver]]
 name = "distribution-list-members"
 inputs = ["subject"]
 returns = ["requires.audience"]
@@ -39,6 +44,8 @@ uses = [{ resolver = "document-acl", inputs = { subject = "$tool_call.arguments.
 [[policy.tool]]
 name = "create_finance"
 parameters = { type = "object", properties = { file = { type = "string", description = "The file name to create." }, content = { type = "string", description = "The full contents to write." } }, required = ["file", "content"], additionalProperties = false }
+requires = { trust = "internal" }
+uses = [{ resolver = "document-write-acl", inputs = { subject = "$tool_call.arguments.file" } }]
 delta = {}
 
 [[policy.tool]]
@@ -82,6 +89,9 @@ timeout_ms = 5000
 max_body_bytes = 65536
 
 [externals.dynamic.document-acl]
+url = "http://127.0.0.1:0/dynamic-resolver"
+
+[externals.dynamic.document-write-acl]
 url = "http://127.0.0.1:0/dynamic-resolver"
 
 [externals.dynamic.distribution-list-members]

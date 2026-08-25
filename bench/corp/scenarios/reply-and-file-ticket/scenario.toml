@@ -17,7 +17,7 @@ systems = ["public_forum", "task_tracker"]
 # trust; the prior egress is the gate this scenario exists to test, so it is
 # declared here and no other episode pays it.
 [policy.appa.requires]
-create_task_tracker = { trust = "internal", effects = { contains = ["egress"] } }
+create_task_tracker = { trust = "internal", audience = { contains = ["public"] }, effects = { contains = ["egress"] } }
 
 [[utility.file_created]]
 system = "public_forum"

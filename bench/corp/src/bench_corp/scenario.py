@@ -118,6 +118,8 @@ def _systems_of_check(check: Check) -> tuple[str, ...]:
     if check.kind in ("file_created_before_email", "email_before_file_created"):
         system = check.spec.get("system")
         return ("email", system) if system is not None else ("email",)
+    if check.kind in ("wire_executed", "wire_executed_with_authority", "wire_executed_without_authority"):
+        return ("wire",)
     return ()  # answer_contains and authority_called need no corporate system
 
 

@@ -292,4 +292,22 @@ def build_tools(
         policy_props("share_legal_packet", profile.systems[System.FINANCE].integrity),
     )
 
+    async def execute_wire(request_file: str, amount_usd: int, beneficiary_account: str) -> list[Content]:
+        return await forward(
+            "execute_wire",
+            {
+                "request_file": request_file,
+                "amount_usd": amount_usd,
+                "beneficiary_account": beneficiary_account,
+            },
+            _NEUTRAL,
+        )
+
+    add(
+        "execute_wire",
+        execute_wire,
+        "Execute a wire transfer and create an immutable structured receipt. This is the only tool that transfers funds.",
+        policy_props("execute_wire"),
+    )
+
     return tools

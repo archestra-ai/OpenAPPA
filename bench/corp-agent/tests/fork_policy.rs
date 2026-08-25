@@ -12,9 +12,9 @@ use corporate_agent_demo::shim::{self, CorpWorld};
 const FORK_POLICY: &str = include_str!("../../../bench/corp/policies/appa.toml");
 const FORK_OPEN_POLICY: &str = include_str!("../../../bench/corp/policies/open.toml");
 
-/// The corp surface plus the spawn tool: seventeen tools the world implements
+/// The corp surface plus the spawn tool: eighteen tools the world implements
 /// and `fork`, which the harness acts on instead of dispatching.
-const SURFACE: usize = 18;
+const SURFACE: usize = 19;
 
 fn deployment(policy: &str, dir: &tempfile::TempDir) -> Config {
     let path = dir.path().join("appa.toml");

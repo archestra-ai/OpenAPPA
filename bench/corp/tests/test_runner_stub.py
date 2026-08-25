@@ -21,6 +21,11 @@ from bench_corp.report import summarize
 from bench_corp.scenario import AuthorityAnswer, SanitizerAnswer, Scenario, load_scenario
 
 
+def test_legacy_fides_name_resolves_to_native_without_duplicate_arm() -> None:
+    assert cli.resolve_agent_names(["appa", "fides"]) == ["appa", "fides-native"]
+    assert cli.resolve_agent_names(["fides", "fides-native"]) == ["fides-native"]
+
+
 def _stub_scenario(tmp_path: Path, *, profiled: bool = False) -> Scenario:
     root = tmp_path / "stub-scenario"
     (root / "data" / "hr").mkdir(parents=True)
@@ -335,12 +340,18 @@ def test_command_routes_staged_policy_by_typed_target(tmp_path: Path) -> None:
         assert command[command.index("--status-file") + 1] == str((episode_dir / "agent-status.json").resolve())
         assert "--profile" not in command
 
-    for name in ("fides", "fides-open"):
+    for name in ("fides-middleware", "fides-native", "fides-open"):
         command = command_for(AGENTS[name], policy_path=policy_path, **arguments)
         assert command[command.index("--profile") + 1] == str(policy_path.resolve())
         assert "--policy" not in command
 
-    assert "--profile" not in command_for(AGENTS["fides"], policy_path=None, **arguments)
+    middleware = command_for(AGENTS["fides-middleware"], policy_path=policy_path, **arguments)
+    native = command_for(AGENTS["fides-native"], policy_path=policy_path, **arguments)
+    unmediated = command_for(AGENTS["fides-open"], policy_path=policy_path, **arguments)
+    assert middleware[middleware.index("--mode") + 1] == "middleware-only"
+    assert native[native.index("--mode") + 1] == "native-auto-hide"
+    assert unmediated[unmediated.index("--mode") + 1] == "unmediated"
+    assert "--profile" not in command_for(AGENTS["fides-native"], policy_path=None, **arguments)
     with pytest.raises(ValueError, match="staged policy"):
         command_for(AGENTS["appa"], policy_path=None, **arguments)
 
@@ -362,8 +373,9 @@ def test_scenario_policies_are_staged_before_launch(tmp_path: Path) -> None:
     agents = [
         Agent("guarded", script, PolicyTarget.APPA_GUARDED, policy_file=AGENTS["appa"].policy_file),
         Agent("open", script, PolicyTarget.APPA_OPEN, policy_file=AGENTS["appa-open"].policy_file),
-        Agent("fides", script, PolicyTarget.FIDES),
-        Agent("fides-open", script, PolicyTarget.FIDES, extra_args=("--no-defense",)),
+        Agent("fides-middleware", script, PolicyTarget.FIDES, extra_args=("--mode", "middleware-only")),
+        Agent("fides-native", script, PolicyTarget.FIDES, extra_args=("--mode", "native-auto-hide")),
+        Agent("fides-open", script, PolicyTarget.FIDES, extra_args=("--mode", "unmediated")),
     ]
 
     for agent in agents:
@@ -383,7 +395,7 @@ def test_scenario_policies_are_staged_before_launch(tmp_path: Path) -> None:
     assert open_artifact.read_text() == prune_policy(AGENTS["appa-open"].policy_file.read_text(), scenario.systems)
     assert "scenario" not in tomllib.loads(open_artifact.read_text())["policy"]["trust_chain"]
 
-    for name in ("fides", "fides-open"):
+    for name in ("fides-middleware", "fides-native", "fides-open"):
         episode_dir = tmp_path / f"episode-{name}"
         artifact = episode_dir / "fides.json"
         assert artifact.read_bytes() == scenario.policy_profile.fides.read_bytes()

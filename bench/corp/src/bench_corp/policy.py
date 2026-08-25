@@ -30,11 +30,12 @@ from .checks import KNOWN_SYSTEMS
 REQUIRED_SYSTEMS_OF_TOOL: dict[str, frozenset[str]] = {
     f"{verb}_{system}": frozenset({system})
     for system in KNOWN_SYSTEMS
-    if system != "email"
+    if system not in ("email", "wire")
     for verb in ("search", "read", "create")
 } | {
     "send_email": frozenset({"email"}),
     "share_legal_packet": frozenset({"finance", "email"}),
+    "execute_wire": frozenset({"wire"}),
     "fork": frozenset(),
 }
 

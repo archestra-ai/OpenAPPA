@@ -9,6 +9,10 @@ name = "tenant-record-readers"
 inputs = ["subject"]
 returns = ["delta.audience"]
 [[policy.dynamic_resolver]]
+name = "tenant-record-write-readers"
+inputs = ["subject"]
+returns = ["requires.audience"]
+[[policy.dynamic_resolver]]
 name = "mailbox-tenant-readers"
 inputs = ["subject"]
 returns = ["requires.audience"]
@@ -32,6 +36,8 @@ uses = [{ resolver = "tenant-record-readers", inputs = { subject = "$tool_call.a
 [[policy.tool]]
 name = "create_vendor"
 parameters = { type = "object", properties = { file = { type = "string" }, content = { type = "string" } }, required = ["file", "content"], additionalProperties = false }
+requires = { trust = "internal" }
+uses = [{ resolver = "tenant-record-write-readers", inputs = { subject = "$tool_call.arguments.file" } }]
 delta = {}
 [[policy.tool]]
 name = "send_email"
@@ -63,6 +69,9 @@ timeout_ms = 5000
 max_body_bytes = 65536
 
 [externals.dynamic.tenant-record-readers]
+url = "http://127.0.0.1:0/dynamic-resolver"
+
+[externals.dynamic.tenant-record-write-readers]
 url = "http://127.0.0.1:0/dynamic-resolver"
 
 [externals.dynamic.mailbox-tenant-readers]
