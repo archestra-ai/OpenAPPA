@@ -26,6 +26,7 @@ clap = { version = "4", features = ["derive", "env"] }
 # `join_all` runs one evidence batch's independent consults concurrently.
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 libloading = "0.9"
+libc = "0.2"
 rand = "0.10"
 reqwest = { workspace = true }
 # `server` carries the tool macros' schema derive; `transport-streamable-http-server`

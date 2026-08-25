@@ -220,6 +220,8 @@ pub enum ConfigError {
     },
     #[error("the dynamic resolver {name:?} command must contain at least one non-empty argument")]
     InvalidCommand { name: String },
+    #[error("the dynamic resolver {name:?} uses a local command, which this platform does not support")]
+    UnsupportedCommandPlatform { name: String },
     #[error("embedded endpoint {name:?} in {section} has a token that cannot be stored safely")]
     EmbeddedToken { section: &'static str, name: String },
     #[error("embedded setting {field} cannot be represented in TOML")]
@@ -812,19 +814,7 @@ fn resolve_dynamic_implementations(
                     let endpoint = resolve_endpoint("dynamic", name.clone(), RawEndpoint { url, token_env }, lookup)?;
                     DynamicImplementation::Resolver(endpoint)
                 }
-                (None, Some(argv)) if token_env.is_none() && argv.iter().all(|argument| !argument.is_empty()) => {
-                    if argv.is_empty() {
-                        return Err(ConfigError::InvalidCommand { name });
-                    }
-                    DynamicImplementation::Command(ResolverCommand {
-                        argv,
-                        cwd: origins
-                            .get(&name)
-                            .expect("every composed dynamic binding records its source")
-                            .clone(),
-                    })
-                }
-                (None, Some(_)) if token_env.is_none() => return Err(ConfigError::InvalidCommand { name }),
+                (None, Some(argv)) if token_env.is_none() => resolve_command(name.clone(), argv, origins)?,
                 _ => {
                     return Err(ConfigError::ImplementationChoice {
                         section: "dynamic",
@@ -835,6 +825,31 @@ fn resolve_dynamic_implementations(
             Ok((name, implementation))
         })
         .collect()
+}
+
+fn resolve_command(
+    name: String,
+    argv: Vec<String>,
+    origins: &BTreeMap<String, PathBuf>,
+) -> Result<DynamicImplementation, ConfigError> {
+    if argv.is_empty() || argv.iter().any(String::is_empty) {
+        return Err(ConfigError::InvalidCommand { name });
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (argv, origins);
+        return Err(ConfigError::UnsupportedCommandPlatform { name });
+    }
+    #[cfg(unix)]
+    {
+        Ok(DynamicImplementation::Command(ResolverCommand {
+            argv,
+            cwd: origins
+                .get(&name)
+                .expect("every composed dynamic binding records its source")
+                .clone(),
+        }))
+    }
 }
 
 fn resolve_implementations(
@@ -1206,6 +1221,16 @@ mod tests {
         assert!(matches!(parse(&token), Err(ConfigError::ImplementationChoice { .. })));
     }
 
+    #[cfg(not(unix))]
+    #[test]
+    fn a_command_binding_is_refused_on_an_unsupported_platform() {
+        let text = format!("{MINIMAL}\n[externals.dynamic.classifier]\ncommand = [\"python3\", \"resolver.py\"]\n");
+        assert!(matches!(
+            parse(&text),
+            Err(ConfigError::UnsupportedCommandPlatform { name }) if name == "classifier"
+        ));
+    }
+
     #[test]
     fn a_builtin_name_outside_the_grammar_is_refused() {
         for bad in ["Upper", "under_score", "-lead", ""] {
@@ -1266,6 +1291,7 @@ mod tests {
         assert!(!String::from_utf8_lossy(config.policy_file().bytes()).contains("include"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn included_command_paths_are_relative_to_their_declaring_configs() {
         let dir = tempfile::tempdir().expect("temp directory");
@@ -1334,6 +1360,7 @@ mod tests {
         assert_eq!(standalone.policy_file().bytes(), config.policy_file().bytes());
     }
 
+    #[cfg(unix)]
     #[test]
     fn embedded_command_bindings_are_stored_and_reloadable() {
         let first_dir = tempfile::tempdir().expect("first command directory");

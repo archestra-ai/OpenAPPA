@@ -168,6 +168,43 @@ url = "{url}"
     )
 }
 
+#[cfg(unix)]
+fn command_policy(script: &str, matched_without_resolver: bool) -> String {
+    let direct = if matched_without_resolver {
+        r#"
+[[policy.tool]]
+name = "fetch(url:https://public*)"
+delta = {}
+"#
+    } else {
+        ""
+    };
+    format!(
+        r#"
+[policy]
+version = 1
+
+[[policy.dynamic_resolver]]
+name = "classifier"
+returns = ["delta.trust"]
+
+{direct}
+[[policy.tool]]
+name = "fetch"
+description = "Fetches one URL and returns its body."
+parameters = {{ type = "object", properties = {{ url = {{ type = "string" }} }}, required = ["url"] }}
+uses = [{{ resolver = "classifier" }}]
+
+[externals]
+timeout_ms = 5000
+max_body_bytes = 65536
+
+[externals.dynamic.classifier]
+command = ["/bin/sh", "{script}"]
+"#
+    )
+}
+
 #[tokio::test]
 async fn an_http_resolver_classifies_the_complete_call_and_a_fresh_proposal_consults_again() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
@@ -277,6 +314,94 @@ url = "{url}"
     assert_eq!(
         requests[0]["args"],
         serde_json::json!({ "name": "fetch", "arguments": { "url": "https://private.example" } })
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn command_resolvers_run_only_for_the_selected_contract_and_pick_up_script_edits() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let script = dir.path().join("resolver.sh");
+    let calls = dir.path().join("calls.txt");
+    std::fs::write(
+        &script,
+        "cat >> calls.txt\nprintf '%s' '{\"version\":1,\"result\":{\"delta.trust\":\"trusted\"}}'",
+    )
+    .expect("the resolver script writes");
+    let runtime = open_runtime(&dir, &command_policy("resolver.sh", true)).await;
+
+    let public = fetch("https://public.example");
+    assert_eq!(
+        propose(&runtime, public.clone()).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    assert!(!calls.exists(), "the earlier direct contract starts no resolver");
+    ran(&runtime, public).await;
+
+    let private = fetch("https://private.example");
+    assert_eq!(
+        propose(&runtime, private.clone()).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    assert!(calls.exists(), "the fallback contract runs its command resolver");
+    ran(&runtime, private).await;
+
+    std::fs::write(&script, "cat > /dev/null\nprintf 'not-json'").expect("the resolver edit writes");
+    let baseline = audit_len(&runtime);
+    assert!(matches!(
+        propose(&runtime, fetch("https://another.example")).await,
+        HookDecision::Refuse { .. }
+    ));
+    assert_eq!(
+        audit_len(&runtime),
+        baseline,
+        "a script edit applies on the next call and malformed output appends nothing"
+    );
+}
+
+#[cfg(unix)]
+async fn wait_for_file(path: &std::path::Path) {
+    for _ in 0..200 {
+        if path.exists() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("timed out waiting for {}", path.display());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_command_consult_keeps_its_deployment_during_reload() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let config_path = dir.path().join("appa.toml");
+    let started = dir.path().join("started");
+    let gate = dir.path().join("gate");
+    std::fs::write(
+        dir.path().join("old.sh"),
+        "cat > /dev/null\ntouch started\nwhile [ ! -f gate ]; do sleep 0.01; done\nprintf '%s' '{\"version\":1,\"result\":{\"delta.trust\":\"trusted\"}}'",
+    )
+    .expect("the old resolver writes");
+    std::fs::write(dir.path().join("new.sh"), "cat > /dev/null\nexit 7").expect("the new resolver writes");
+    let runtime = open_runtime(&dir, &command_policy("old.sh", false)).await;
+
+    let in_flight = {
+        let runtime = Arc::clone(&runtime);
+        tokio::spawn(async move { propose(&runtime, fetch("https://a.example")).await })
+    };
+    wait_for_file(&started).await;
+
+    std::fs::write(&config_path, command_policy("new.sh", false)).expect("the replacement config writes");
+    let reloaded = runtime
+        .reload(Config::load(&config_path).expect("the replacement config loads"))
+        .expect("the replacement deployment opens");
+    assert!(reloaded.changed);
+    std::fs::write(&gate, "go").expect("the old resolver is released");
+
+    assert_eq!(
+        in_flight.await.expect("the proposal task completes"),
+        HookDecision::AllowCall { spawn: None },
+        "the in-flight call finishes with the deployment that started it"
     );
 }
 

@@ -1,7 +1,7 @@
 # Complete battery composition example
 
-This is a self-contained proposal example. Matcher rows, complete-configuration
-includes, and per-resolver `command` bindings are not implemented yet.
+This is a self-contained example of matcher rows, complete-configuration
+includes, and per-resolver `command` bindings.
 
 The example contains one deployment and two included batteries:
 
@@ -31,6 +31,8 @@ rule to require fresh `hitl` attention. It also replaces the shipped `Read`
 default with `local.read-sensitivity`, implemented by the script in `local/`.
 The local resolver keeps `.env.example` Public, restricts other dot-prefixed
 paths, and additionally restricts `clients/`.
+
+This command-based example requires a Unix system.
 
 The Claude Code battery uses first-match Bash contracts. Exact common commands
 avoid a resolver call. The default contract invokes `bash-review.py` for one

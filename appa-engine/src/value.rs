@@ -273,10 +273,8 @@ impl OfferId {
             return Err(OfferIdParseError);
         }
         let mut out = [0u8; 32];
-        for (index, chunk) in bytes.chunks_exact(2).enumerate() {
-            let hi = hex_nibble(chunk[0])?;
-            let lo = hex_nibble(chunk[1])?;
-            out[index] = (hi << 4) | lo;
+        for (index, [high, low]) in bytes.as_chunks::<2>().0.iter().enumerate() {
+            out[index] = (hex_nibble(*high)? << 4) | hex_nibble(*low)?;
         }
         Ok(OfferId(out))
     }
