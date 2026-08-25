@@ -95,10 +95,8 @@ fn contract_description(contract: &ToolContract, chain: &TrustChain) -> String {
                 sources.join(", ")
             }
         };
-        // Only the results this tool references say anything about it; the rest of the
-        // resolver's answer is validated and dropped.
         let returned: Vec<&str> = uses
-            .reads
+            .returns
             .iter()
             .map(|field| match field {
                 appa_engine::contract::ResolverReturn::Trust => "output trust",

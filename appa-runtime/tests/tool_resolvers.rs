@@ -157,7 +157,6 @@ name = "fetch"
 description = "Fetches one URL and returns its body."
 parameters = {{ type = "object", properties = {{ url = {{ type = "string" }} }}, required = ["url"] }}
 uses = [{{ resolver = "classifier" }}]
-delta = {{ trust = "resolver.classifier.trust" }}
 
 [externals]
 timeout_ms = 2000
@@ -170,7 +169,7 @@ url = "{url}"
 }
 
 #[tokio::test]
-async fn an_http_resolver_classifies_the_whole_call_and_a_fresh_proposal_consults_again() {
+async fn an_http_resolver_classifies_the_complete_call_and_a_fresh_proposal_consults_again() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let (url, classifier) = serve_classifier().await;
     classifier.set(
@@ -196,7 +195,7 @@ async fn an_http_resolver_classifies_the_whole_call_and_a_fresh_proposal_consult
         serde_json::json!({
             "name": "fetch",
             "description": "Fetches one URL and returns its body.",
-            "arguments": { "url": "https://a.example" }
+            "arguments": { "url": "https://a.example" },
         })
     );
     for absent in ["tool", "input", "scope", "returns", "expects"] {
@@ -220,6 +219,65 @@ async fn an_http_resolver_classifies_the_whole_call_and_a_fresh_proposal_consult
         HookDecision::AllowCall { spawn: None }
     );
     assert_eq!(classifier.requests().len(), 3);
+}
+
+#[tokio::test]
+async fn only_the_first_matching_contract_runs_its_resolver() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, classifier) = serve_classifier().await;
+    classifier.set(
+        "classifier",
+        Answer::Wire(serde_json::json!({ "version": 1, "result": { "delta.trust": "trusted" } })),
+    );
+    let config = format!(
+        r#"
+[policy]
+version = 1
+
+[[policy.dynamic_resolver]]
+name = "classifier"
+returns = ["delta.trust"]
+
+[[policy.tool]]
+name = "fetch(url:https://private*)"
+uses = [{{ resolver = "classifier" }}]
+
+[[policy.tool]]
+name = "fetch"
+delta = {{}}
+
+[externals]
+timeout_ms = 2000
+max_body_bytes = 65536
+
+[externals.dynamic]
+url = "{url}"
+"#
+    );
+    let runtime = open_runtime(&dir, &config).await;
+
+    let public = fetch("https://public.example");
+    assert_eq!(
+        propose(&runtime, public.clone()).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    assert!(
+        classifier.requests().is_empty(),
+        "the fallback contract has no resolver"
+    );
+    ran(&runtime, public).await;
+
+    assert_eq!(
+        propose(&runtime, fetch("https://private.example")).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    let requests = classifier.requests();
+    assert_eq!(requests.len(), 1);
+    // The matched contract declares no description, so the complete call carries none.
+    assert_eq!(
+        requests[0]["args"],
+        serde_json::json!({ "name": "fetch", "arguments": { "url": "https://private.example" } })
+    );
 }
 
 #[tokio::test]
@@ -322,8 +380,6 @@ uses = [
   {{ resolver = "alpha" }},
   {{ resolver = "beta", inputs = {{ subject = "$tool_call.arguments.url" }} }},
 ]
-delta = {{ trust = "resolver.alpha.trust" }}
-requires = {{ trust = "resolver.beta.trust" }}
 
 [externals]
 timeout_ms = 5000
@@ -399,7 +455,6 @@ name = "fetch"
 description = "Fetches one URL and returns its body."
 parameters = {{ type = "object", properties = {{ url = {{ type = "string" }} }}, required = ["url"] }}
 uses = [{{ resolver = "classifier" }}]
-delta = {{ trust = "resolver.classifier.trust" }}
 
 [externals]
 timeout_ms = 5000
@@ -516,8 +571,6 @@ name = "fetch"
 description = "Fetches one URL and returns its body."
 parameters = {{ type = "object", properties = {{ url = {{ type = "string" }} }}, required = ["url"] }}
 uses = [{bindings}]
-delta = {{ trust = "resolver.classifier-0.trust", audience = "resolver.classifier-1.audience" }}
-requires = {{ trust = "resolver.classifier-2.trust", audience = "resolver.classifier-3.audience", attention = "resolver.classifier-4.attention" }}
 
 [externals]
 timeout_ms = 10000

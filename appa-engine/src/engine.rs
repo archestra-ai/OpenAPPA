@@ -109,9 +109,9 @@ impl Engine {
             profile: declaration,
         } = policy;
         let profile = DeploymentProfile::declare(declaration.clone())?;
-        let identity = PolicyIdentityV1::of(&config, &child_return, &profile);
         let registry = Registry::build(config, planner_cap, profile)?;
         profile::validate_coverage(&registry, &declaration, &child_return)?;
+        let identity = PolicyIdentityV1::of_registry(&registry, &child_return);
         Ok(Engine {
             registry,
             identity,
@@ -141,8 +141,7 @@ impl Engine {
     pub fn open_vectors(&self) -> Vec<OpenVector> {
         let tools = self
             .registry
-            .tools()
-            .map(|tool| &tool.name)
+            .tool_names()
             .chain(self.registry.provider_run_contracts().map(|tool| &tool.name));
         profile::derive_open_vectors(self.profile(), tools)
     }
@@ -1893,7 +1892,7 @@ impl Engine {
         for call in proposals {
             let contract = self
                 .registry
-                .tool(call.tool())
+                .contract(call)
                 .expect("a resolved call names a checkable tool");
             match check::validate_memberships(contract, call) {
                 Ok(()) => {}
@@ -2083,7 +2082,7 @@ impl Engine {
             .flat_map(|(_, call, raw, role)| {
                 let contract = self
                     .registry
-                    .tool(call.tool())
+                    .contract(call)
                     .expect("a refused sibling names a checkable tool");
                 plan::block_groups(&self.registry, contract, raw, *role)
             })
@@ -2170,7 +2169,7 @@ impl Engine {
         for call in proposals {
             let contract = self
                 .registry
-                .tool(call.tool())
+                .contract(call)
                 .expect("a resolved call names a checkable tool");
             let check::CheckOutcome::Block(raw) =
                 check::evaluate(contract, &views, call, &CallStage::default(), expansions)
@@ -2320,7 +2319,7 @@ impl Engine {
         expansions.require(
             proposals
                 .iter()
-                .filter_map(|call| self.registry.tool(call.tool()))
+                .filter_map(|call| self.registry.contract(call))
                 .flat_map(ToolContract::groups),
         )?;
         let mut released = Vec::new();
@@ -2966,9 +2965,10 @@ impl Engine {
     ///
     /// The sanitizer read the engine's own canonical argument bytes and returned one complete
     /// replacement object. Its bytes are untrusted: the engine strictly parses them, schema-checks
-    /// them against the callee's declared parameters, constructs the canonical arguments itself,
-    /// and only then has a call to measure. Nothing about the replacement is taken on the runtime's
-    /// word, and the tool is never replaced.
+    /// them against the selected contract's parameters, verifies that its arguments still select
+    /// that contract, constructs the canonical arguments itself, and only then has a call to
+    /// measure. Nothing about the replacement is taken on the runtime's word, and the tool is never
+    /// replaced.
     ///
     /// A valid strictly helpful replacement commits as the next candidate on this subject and ends
     /// every sibling offer standing on its predecessor. The engine then re-checks it: where nothing
@@ -3016,7 +3016,7 @@ impl Engine {
             .lineage()
             .extend(sanitizer.clone())
             .ok_or(TransitionError::SanitizerUnapplicable)?;
-        let substituted = substituted_call(contract, call, body)?;
+        let substituted = substituted_call(&self.registry, contract, call, body)?;
         // The rewrite carries the answers a resolver gave about the proposal this subject stands
         // on; they are admissible here because that proposal is on the record.
         let proposal = views
@@ -3514,10 +3514,19 @@ impl Engine {
     /// engine. Tool lookup, strict JSON scanning, schema validation, and RFC 8785 rendering
     /// happen together, so outer runtimes cannot construct a call under a different schema.
     pub fn resolve_call(&self, tool: ToolName, raw_arguments: &[u8]) -> Result<ResolvedCall, EngineError> {
-        let contract = self.checkable_contract(&tool)?;
-        let arguments =
-            CanonicalArguments::from_raw(raw_arguments, &contract.parameters).map_err(EngineError::InvalidCall)?;
-        Ok(ResolvedCall::new(tool, arguments))
+        if !self.registry.contains_tool(&tool) {
+            return Err(contract_for(&self.registry, &tool).unwrap_err());
+        }
+        let parsed = CanonicalArguments::parse(raw_arguments).map_err(EngineError::InvalidCall)?;
+        let (id, contract) = self
+            .registry
+            .select_tool(&tool, parsed.value())
+            .ok_or(EngineError::InvalidCall(ArgumentError::NoMatchingContract))?;
+        contract
+            .parameters
+            .validate(parsed.value())
+            .map_err(EngineError::InvalidCall)?;
+        Ok(ResolvedCall::new_keyed(tool, id, parsed))
     }
 
     /// Evaluate a proposed call: allow, or block carrying everything that stopped it at once —
@@ -3576,16 +3585,18 @@ impl Engine {
     }
 
     fn dispatch_contract(&self, views: &Views, dispatch: &DispatchId) -> Result<&ToolContract, TransitionError> {
-        let tool = views.dispatch_tool(dispatch).ok_or(TransitionError::UnknownDispatch)?;
-        self.checkable_contract(tool).map_err(TransitionError::Call)
-    }
-
-    fn checkable_contract(&self, tool: &ToolName) -> Result<&ToolContract, EngineError> {
-        contract_for(&self.registry, tool)
+        let call = views.dispatch_call(dispatch).ok_or(TransitionError::UnknownDispatch)?;
+        self.validated_contract(call).map_err(TransitionError::Call)
     }
 
     fn validated_contract(&self, call: &ResolvedCall) -> Result<&ToolContract, EngineError> {
-        let contract = self.checkable_contract(call.tool())?;
+        if self.registry.provider_run_contract(call.tool()).is_some() {
+            return Err(EngineError::ProviderRunTool(call.tool().as_str().to_string()));
+        }
+        let contract = self
+            .registry
+            .keyed_tool(call.tool(), call.contract_id())
+            .ok_or_else(|| EngineError::UnknownTool(call.tool().as_str().to_string()))?;
         contract
             .parameters
             .validate(call.arguments())
@@ -3605,13 +3616,18 @@ fn crossed(facts: &[Fact]) -> ValueBody {
 }
 
 fn substituted_call(
+    registry: &Registry,
     contract: &ToolContract,
     call: &ResolvedCall,
     body: &ValueBody,
 ) -> Result<ResolvedCall, TransitionError> {
     let arguments = crate::params::CanonicalArguments::from_raw(body.as_str().as_bytes(), &contract.parameters)
         .map_err(|error| TransitionError::Call(EngineError::InvalidCall(error)))?;
-    Ok(call.substituting(arguments))
+    let substituted = call.substituting(arguments);
+    if !registry.selection_matches(&substituted) {
+        return Err(TransitionError::SanitizerUnapplicable);
+    }
+    Ok(substituted)
 }
 
 fn invalidated_siblings(
@@ -3780,6 +3796,7 @@ pub(crate) fn opened_dispatch(
         trajectory: views.trajectory().clone(),
         dispatch: dispatch.clone(),
         tool: call.tool().clone(),
+        contract: call.contract_id(),
         arguments: call.canonical_arguments().clone(),
         proposed_label: check::committed_label_for_call(
             contract,
@@ -3872,7 +3889,7 @@ pub(crate) fn compose_batch<'a>(
     {
         let views = working.view(trajectory);
         for call in proposals {
-            let Ok(contract) = contract_for(registry, call.tool()) else {
+            let Ok(contract) = contract_for_call(registry, call) else {
                 // Reported as malformed by the composition below, at its position.
                 per_call.push((std::borrow::Cow::Borrowed(expansions), None));
                 continue;
@@ -3914,7 +3931,7 @@ pub(crate) fn compose_batch<'a>(
         let release = {
             let views = working.view(trajectory);
             let malformed = ComposeRefusal::Malformed;
-            let contract = contract_for(registry, call.tool()).map_err(malformed)?;
+            let contract = contract_for_call(registry, call).map_err(malformed)?;
             contract
                 .parameters
                 .validate(call.arguments())
@@ -3986,6 +4003,16 @@ fn contract_for<'a>(registry: &'a Registry, tool: &ToolName) -> Result<&'a ToolC
             EngineError::ProviderRunTool(tool.as_str().to_string())
         } else {
             EngineError::UnknownTool(tool.as_str().to_string())
+        }
+    })
+}
+
+fn contract_for_call<'a>(registry: &'a Registry, call: &ResolvedCall) -> Result<&'a ToolContract, EngineError> {
+    registry.contract(call).ok_or_else(|| {
+        if registry.provider_run_contract(call.tool()).is_some() {
+            EngineError::ProviderRunTool(call.tool().as_str().to_string())
+        } else {
+            EngineError::UnknownTool(call.tool().as_str().to_string())
         }
     })
 }
@@ -4604,6 +4631,7 @@ mod tests {
                 trajectory: traj(),
                 dispatch,
                 tool: call.tool().clone(),
+                contract: call.contract_id(),
                 arguments: call.canonical_arguments().clone(),
                 proposed_label: EstablishedLabel::new(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
                 receiving: EstablishedLabel::new(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
@@ -5967,7 +5995,6 @@ mod tests {
                 crate::contract::ToolCallSource::argument("who").expect("a plain name is a source"),
             )]),
             returns: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
-            reads: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
         }
     }
 
@@ -5978,14 +6005,11 @@ mod tests {
             returns: [crate::contract::ResolverReturn::RequiredAudience]
                 .into_iter()
                 .collect(),
-            reads: [crate::contract::ResolverReturn::RequiredAudience]
-                .into_iter()
-                .collect(),
         }
     }
 
-    /// A pin for the call on `post_call` whose `body` argument holds `body`. Its args are the
-    /// complete call that tool would have sent, so any rewrite of `body` changes them.
+    /// A pin for the call on `post_call` whose `body` argument holds `body`. Its args are all the
+    /// tool arguments, so any rewrite of `body` changes them.
     fn call_pin_for(body: &str) -> crate::contract::PinnedToolResolution {
         call_pin_for_reader(body, "partner")
     }
@@ -6226,7 +6250,6 @@ mod tests {
                         crate::contract::ToolCallSource::argument("body").expect("a plain name is a source"),
                     )]),
                     returns: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
-                    reads: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
                 },
                 crate::contract::ResolverArgsDigest::of(b""),
                 None,
@@ -6556,7 +6579,7 @@ mod tests {
     }
 
     #[test]
-    fn a_complete_call_answer_keeps_its_hop_and_rides_through_the_substitution() {
+    fn an_all_arguments_answer_keeps_its_hop_and_rides_through_the_substitution() {
         let e = substituting_engine(TRUSTED);
         let proposal =
             call("post_call", json!({ "body": "ssn 123" })).with_tool_resolutions(vec![call_pin_for("ssn 123")]);
@@ -9007,6 +9030,7 @@ mod tests {
                 trajectory: child.clone(),
                 dispatch: DispatchId::new(child.clone(), call.digest(), 0),
                 tool: call.tool().clone(),
+                contract: call.contract_id(),
                 arguments: call.canonical_arguments().clone(),
                 proposed_label: EstablishedLabel::new(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
                 receiving: EstablishedLabel::new(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
@@ -11120,6 +11144,124 @@ mod tests {
     }
 
     #[test]
+    fn ordered_selectors_choose_once_before_schema_validation() {
+        let mut first = plain_tool("read(path:secret*)");
+        first.parameters = crate::params::ToolParameters::compile(&json!({
+            "type": "object",
+            "properties": { "path": { "type": "string" }, "token": { "type": "string" } },
+            "required": ["path", "token"]
+        }))
+        .unwrap();
+        let mut overlap = plain_tool("read(path:*)");
+        overlap.parameters = crate::params::test_string_argument_schema("path");
+        let fallback = plain_tool("read");
+        let e = engine(vec![first, overlap, fallback]);
+
+        let selected = e
+            .resolve_call(ToolName::new("read"), br#"{"path":"secret.txt","token":"ok"}"#)
+            .unwrap();
+        assert_eq!(selected.contract_id(), crate::value::ToolContractId::new(0).unwrap());
+        assert!(
+            matches!(
+                e.resolve_call(ToolName::new("read"), br#"{"path":"secret.txt"}"#),
+                Err(EngineError::InvalidCall(ArgumentError::Schema(_)))
+            ),
+            "the first match's schema failure must not fall through"
+        );
+        let overlap = e.resolve_call(ToolName::new("read"), br#"{"path":"public"}"#).unwrap();
+        assert_eq!(overlap.contract_id(), crate::value::ToolContractId::new(1).unwrap());
+        let fallback = e.resolve_call(ToolName::new("read"), br#"{}"#).unwrap();
+        assert_eq!(fallback.contract_id(), crate::value::ToolContractId::new(2).unwrap());
+        let no_fallback = engine(vec![plain_tool("read(path:secret*)")]);
+        assert!(matches!(
+            no_fallback.resolve_call(ToolName::new("read"), br#"{}"#),
+            Err(EngineError::InvalidCall(ArgumentError::NoMatchingContract))
+        ));
+        assert!(matches!(
+            e.resolve_call(ToolName::new("read"), br#"{"path":"x","path":"y"}"#),
+            Err(EngineError::InvalidCall(ArgumentError::DuplicateKey(_)))
+        ));
+    }
+
+    #[test]
+    fn selector_order_and_matchers_move_policy_identity_but_normalized_wildcards_do_not() {
+        let identity = |names: &[&str]| {
+            engine(names.iter().map(|name| plain_tool(name)).collect())
+                .identity()
+                .bytes()
+                .to_owned()
+        };
+        let base = identity(&["read(path:secret*)", "read"]);
+        assert_ne!(identity(&["read", "read(path:secret*)"]), base);
+        assert_ne!(identity(&["read(path:private*)", "read"]), base);
+        assert_eq!(identity(&["read(path:secret**)", "read"]), base);
+        assert_eq!(identity(&["read", "send"]), identity(&["send", "read"]));
+    }
+
+    #[test]
+    fn substitution_cannot_cross_into_another_ordered_contract() {
+        let e = engine(vec![plain_tool("read(path:safe*)"), plain_tool("read(path:*)")]);
+        let selected = e
+            .resolve_call(ToolName::new("read"), br#"{"path":"private.txt"}"#)
+            .unwrap();
+        assert_eq!(selected.contract_id(), crate::value::ToolContractId::new(1).unwrap());
+
+        let rewritten = selected.substituting(crate::params::test_arguments(&json!({ "path": "safe.txt" })));
+        assert_eq!(rewritten.contract_id(), selected.contract_id());
+        assert!(!e.registry.selection_matches(&rewritten));
+        let contract = e.registry.contract(&selected).unwrap();
+        assert!(matches!(
+            substituted_call(
+                &e.registry,
+                contract,
+                &selected,
+                &ValueBody::new(r#"{"path":"safe.txt"}"#)
+            ),
+            Err(TransitionError::SanitizerUnapplicable)
+        ));
+
+        assert!(
+            substituted_call(
+                &e.registry,
+                contract,
+                &selected,
+                &ValueBody::new(r#"{"path":"other-private.txt"}"#)
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn replay_refuses_a_later_contract_for_arguments_matching_an_earlier_one() {
+        let e = engine(vec![plain_tool("read(path:*)"), plain_tool("read")]);
+        let call = e
+            .resolve_call(ToolName::new("read"), br#"{"path":"secret.txt"}"#)
+            .unwrap();
+        let opening = vec![opened(&e)];
+        let mut facts = appended_facts(proposed(&e, &opening, "b1", nonce(), call).expect("the call releases"));
+        assert_eq!(e.validate_replay(&[opening.clone(), facts.clone()].concat()), Ok(()));
+
+        let later = crate::value::ToolContractId::new(1).unwrap();
+        for fact in &mut facts {
+            match fact {
+                Fact::ProposalBatchDecided { proposals, .. } => {
+                    let original = &proposals[0];
+                    proposals[0] =
+                        ResolvedCall::new_keyed(original.tool().clone(), later, original.canonical_arguments().clone())
+                            .with_tool_resolutions(original.tool_resolutions().to_vec())
+                            .with_memberships(original.memberships().to_vec());
+                }
+                Fact::DispatchOpened { contract, .. } => *contract = later,
+                _ => {}
+            }
+        }
+        assert_eq!(
+            e.validate_replay(&[opening, facts].concat()),
+            Err(TransitionRefusal::MisdecidedBatch)
+        );
+    }
+
+    #[test]
     fn replay_refuses_a_corrupt_dispatched_call() {
         let e = engine(vec![strict_tool("send")]);
         let mut log = vec![opened(&e)];
@@ -11134,6 +11276,7 @@ mod tests {
                     trajectory: traj(),
                     dispatch: DispatchId::new(traj(), minted_from.digest(), 0),
                     tool: ToolName::new(tool),
+                    contract: Default::default(),
                     arguments: crate::params::test_arguments(&payload),
                     proposed_label: established(TRUSTED, Audience::Public),
                     receiving: established(TRUSTED, Audience::Public),
@@ -11158,6 +11301,15 @@ mod tests {
         assert!(matches!(
             e.validate_replay(&dispatched("send", json!({ "to": "hr" }), &smuggled)),
             Err(TransitionRefusal::DigestMismatch)
+        ));
+        let mut forged_contract = dispatched("send", json!({ "to": "hr" }), &good);
+        let Fact::DispatchOpened { contract, .. } = &mut forged_contract[1] else {
+            unreachable!("the fixture opens one dispatch")
+        };
+        *contract = crate::value::ToolContractId::new(99).unwrap();
+        assert!(matches!(
+            e.validate_replay(&forged_contract),
+            Err(TransitionRefusal::UnknownTool(name)) if name == "send"
         ));
     }
 
@@ -12414,9 +12566,6 @@ mod tests {
                 crate::contract::ToolCallSource::argument("room").expect("a plain name is a source"),
             )]),
             returns: [crate::contract::ResolverReturn::RequiredAudience]
-                .into_iter()
-                .collect(),
-            reads: [crate::contract::ResolverReturn::RequiredAudience]
                 .into_iter()
                 .collect(),
         };

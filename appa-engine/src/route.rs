@@ -1107,6 +1107,7 @@ mod tests {
             trajectory: traj(),
             dispatch: DispatchId::new(traj(), seed.digest(), 0),
             tool: seed.tool().clone(),
+            contract: seed.contract_id(),
             arguments: seed.canonical_arguments().clone(),
             proposed_label: EstablishedLabel::new(TRUSTED, Audience::Public),
             receiving: EstablishedLabel::new(TRUSTED, Audience::Public),

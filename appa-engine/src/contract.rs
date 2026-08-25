@@ -68,17 +68,6 @@ impl ResolverReturn {
             ResolverReturn::Attention => "requires.attention",
         }
     }
-
-    /// The last component a tool field's reference spells. The destination supplies the scope,
-    /// so `resolver.classify.trust` reads [`Self::Trust`] under `delta` and [`Self::RequiredTrust`]
-    /// under `requires` — the reference never repeats what its position already states.
-    pub fn short_name(self) -> &'static str {
-        match self {
-            ResolverReturn::Trust | ResolverReturn::RequiredTrust => "trust",
-            ResolverReturn::Audience | ResolverReturn::RequiredAudience => "audience",
-            ResolverReturn::Attention => "attention",
-        }
-    }
 }
 
 /// The root of the one special source a `uses` entry may read.
@@ -89,7 +78,8 @@ pub const TOOL_CALL_ROOT: &str = "$tool_call";
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub enum ToolCallSource {
-    /// `$tool_call` — the complete call: its name, description, and arguments.
+    /// `$tool_call` — the complete call: its name, its description when the tool declares one,
+    /// and its arguments.
     Call,
     /// `$tool_call.name`
     Name,
@@ -162,9 +152,10 @@ impl ToolCallSource {
         }
     }
 
-    /// Whether this source carries the tool's description, which the policy must then declare.
-    pub fn reads_description(&self) -> bool {
-        matches!(self, ToolCallSource::Call | ToolCallSource::Description)
+    /// Whether this source needs a declared tool description. `$tool_call` carries the description
+    /// when there is one and omits it otherwise; only `$tool_call.description` insists on it.
+    pub fn requires_declared_description(&self) -> bool {
+        matches!(self, ToolCallSource::Description)
     }
 }
 
@@ -203,25 +194,21 @@ impl ResolverArgsDigest {
 }
 
 /// One resolver a tool uses: which registered resolver, the call value it reads for each input
-/// that resolver declares, every result that resolver returns, and the results this tool's own
-/// fields reference. An empty `inputs` map is the complete-call form — the resolver declared no
-/// inputs, so its `args` is the whole call.
+/// that resolver declares, and the contract destinations it owns. An empty `inputs` map sends the
+/// complete call.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ToolResolverUse {
     pub resolver: DynamicResolverName,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub inputs: BTreeMap<String, ToolCallSource>,
-    /// Every result the resolver declares. An answer must carry exactly these, whether or not
-    /// this tool reads them.
+    /// Every destination the resolver owns. An answer must carry exactly these.
     pub returns: BTreeSet<ResolverReturn>,
-    /// The subset this tool's fields reference. Never empty: a use no field reads is a load error.
-    pub reads: BTreeSet<ResolverReturn>,
 }
 
 impl ToolResolverUse {
-    /// Whether this use shows its resolver the tool's description.
-    pub fn reads_description(&self) -> bool {
-        self.inputs.is_empty() || self.inputs.values().any(ToolCallSource::reads_description)
+    /// Whether this use needs a declared tool description.
+    pub fn requires_declared_description(&self) -> bool {
+        self.inputs.values().any(ToolCallSource::requires_declared_description)
     }
 }
 
@@ -270,10 +257,7 @@ impl PinnedToolResolution {
         required_audience: Option<RequiredAudience>,
         attention: Option<Vec<MarkName>>,
     ) -> Option<Self> {
-        // The resolver answers its own declared results, not the subset this tool reads.
         if uses.returns.is_empty()
-            || uses.reads.is_empty()
-            || !uses.reads.is_subset(&uses.returns)
             || uses.returns.contains(&ResolverReturn::Trust) != trust.is_some()
             || uses.returns.contains(&ResolverReturn::Audience) != audience.is_some()
             || uses.returns.contains(&ResolverReturn::RequiredTrust) != required_trust.is_some()
@@ -313,48 +297,45 @@ impl PinnedToolResolution {
         self.args
     }
 
-    /// A result the answer carries **and** this tool reads. Every consumer of a resolver value
-    /// goes through this: a declared result no field references establishes nothing.
-    fn read(&self, result: ResolverReturn) -> bool {
-        self.uses.reads.contains(&result)
+    /// Whether this answer owns a contract destination.
+    fn owns(&self, result: ResolverReturn) -> bool {
+        self.uses.returns.contains(&result)
     }
 
-    /// Every trust rank the answer carries, read or not. A result no field references
-    /// establishes nothing, but it is still persisted, so the check holds all of them to the
-    /// policy's vocabulary rather than only the ones that happen to be used.
+    /// Every trust rank the answer carries.
     pub(crate) fn every_trust(&self) -> impl Iterator<Item = Trust> + '_ {
         self.trust.into_iter().chain(self.required_trust)
     }
 
-    /// Every attention mark the answer carries, read or not.
+    /// Every attention mark the answer carries.
     pub(crate) fn every_mark(&self) -> &[MarkName] {
         &self.attention
     }
 
     pub fn trust(&self) -> Option<Trust> {
-        self.read(ResolverReturn::Trust).then_some(self.trust).flatten()
+        self.owns(ResolverReturn::Trust).then_some(self.trust).flatten()
     }
 
     pub fn audience(&self) -> Option<&Audience> {
-        self.read(ResolverReturn::Audience)
+        self.owns(ResolverReturn::Audience)
             .then_some(self.audience.as_ref())
             .flatten()
     }
 
     pub fn required_trust(&self) -> Option<Trust> {
-        self.read(ResolverReturn::RequiredTrust)
+        self.owns(ResolverReturn::RequiredTrust)
             .then_some(self.required_trust)
             .flatten()
     }
 
     pub fn required_audience(&self) -> Option<&RequiredAudience> {
-        self.read(ResolverReturn::RequiredAudience)
+        self.owns(ResolverReturn::RequiredAudience)
             .then_some(self.required_audience.as_ref())
             .flatten()
     }
 
     pub fn attention(&self) -> &[MarkName] {
-        match self.read(ResolverReturn::Attention) {
+        match self.owns(ResolverReturn::Attention) {
             true => &self.attention,
             false => &[],
         }
@@ -657,28 +638,29 @@ pub struct ToolContract {
 }
 
 impl ToolContract {
-    /// Whether one of this tool's fields reads this result from a resolver — the one definition
-    /// of "resolver-owned" every load check and label derivation reads. A resolver may *return* a
-    /// result this tool never references; that establishes nothing here.
+    /// Whether one of this tool's resolvers owns this destination.
     pub(crate) fn resolver_owns(&self, field: ResolverReturn) -> bool {
-        self.uses.iter().any(|uses| uses.reads.contains(&field))
+        self.uses.iter().any(|uses| uses.returns.contains(&field))
     }
 
-    /// The description a resolver reads, which load validation guarantees is present wherever
-    /// one is read.
+    /// The description a `$tool_call.description` input reads, which load validation guarantees
+    /// is present wherever one is read.
     fn described(&self) -> &str {
         self.description
             .as_deref()
             .expect("load validation refuses a `uses` entry that reads a description the tool does not declare")
     }
 
-    /// The complete call a resolver reads: exactly the three keys the wire carries.
+    /// The complete call a resolver reads: the tool name, its description when the policy declares
+    /// one, and the arguments. A tool without a description sends no `description` key.
     fn complete_call(&self, arguments: &serde_json::Value) -> serde_json::Value {
-        serde_json::json!({
-            "name": self.name.as_str(),
-            "description": self.described(),
-            "arguments": arguments,
-        })
+        let mut call = serde_json::Map::new();
+        call.insert("name".into(), serde_json::Value::String(self.name.as_str().to_string()));
+        if let Some(description) = &self.description {
+            call.insert("description".into(), serde_json::Value::String(description.clone()));
+        }
+        call.insert("arguments".into(), arguments.clone());
+        serde_json::Value::Object(call)
     }
 
     fn source_value(&self, source: &ToolCallSource, arguments: &serde_json::Value) -> serde_json::Value {
@@ -696,7 +678,8 @@ impl ToolContract {
 
     /// The `args` value one use sends: the complete call when the resolver declares no inputs,
     /// otherwise one entry per declared input. The single definition — the runtime builds the
-    /// request through it, and the check rebuilds the pinned value through it.
+    /// request through it, and the check rebuilds the pinned value through it — so the tool name a
+    /// no-input resolver sees is part of what its answer is pinned to.
     pub fn resolver_args(&self, uses: &ToolResolverUse, arguments: &serde_json::Value) -> serde_json::Value {
         match uses.inputs.is_empty() {
             true => self.complete_call(arguments),
@@ -805,7 +788,6 @@ mod tests {
                 ToolCallSource::argument("customer_id").expect("a plain name is a source"),
             )]),
             returns: BTreeSet::from([ResolverReturn::Audience]),
-            reads: BTreeSet::from([ResolverReturn::Audience]),
         }
     }
 
@@ -822,7 +804,6 @@ mod tests {
                 resolver: DynamicResolverName::new("classifier"),
                 inputs: std::collections::BTreeMap::new(),
                 returns: BTreeSet::from([field]),
-                reads: BTreeSet::from([field]),
             }],
             delta: None,
             emits: crate::fact::EffectSet::default(),
@@ -844,7 +825,6 @@ mod tests {
             resolver: DynamicResolverName::new("classifier"),
             inputs: std::collections::BTreeMap::new(),
             returns: BTreeSet::from([ResolverReturn::Audience]),
-            reads: BTreeSet::from([ResolverReturn::Audience]),
         };
         let pin = PinnedToolResolution::from_answer(
             binding,
@@ -953,7 +933,6 @@ mod tests {
                 ),
             ]),
             returns: BTreeSet::from([ResolverReturn::Trust]),
-            reads: BTreeSet::from([ResolverReturn::Trust]),
         };
         let contract = described(vec![mapped.clone()]);
         assert_eq!(
@@ -969,15 +948,62 @@ mod tests {
             })
         );
 
-        // A resolver declaring no inputs receives the complete call as `args` itself, not
-        // wrapped under a name.
+        // A resolver declaring no inputs receives the complete call.
         let whole = ToolResolverUse {
             inputs: BTreeMap::new(),
             ..mapped
         };
+        assert!(!whole.requires_declared_description());
         assert_eq!(
             described(vec![whole.clone()]).resolver_args(&whole, &arguments),
             complete
+        );
+
+        // A tool without a description sends `name` and `arguments` only, whether the resolver
+        // declares no inputs or maps `$tool_call`; only `$tool_call.description` insists on one.
+        let undescribed = ToolContract {
+            description: None,
+            ..described(vec![])
+        };
+        let bare = serde_json::json!({
+            "name": "Bash",
+            "arguments": { "command": "git push origin main", "timeout": 60_000 },
+        });
+        assert_eq!(undescribed.resolver_args(&whole, &arguments), bare);
+        let call_source = ToolResolverUse {
+            inputs: BTreeMap::from([("whole".to_string(), ToolCallSource::Call)]),
+            ..whole.clone()
+        };
+        assert!(!call_source.requires_declared_description());
+        assert_eq!(
+            undescribed.resolver_args(&call_source, &arguments),
+            serde_json::json!({ "whole": bare })
+        );
+        let description_source = ToolResolverUse {
+            inputs: BTreeMap::from([("purpose".to_string(), ToolCallSource::Description)]),
+            ..whole
+        };
+        assert!(description_source.requires_declared_description());
+    }
+
+    #[test]
+    fn two_tools_sharing_a_resolver_and_arguments_are_different_classification_subjects() {
+        // The tool name rides inside the digested `args`, so an answer given for one tool never
+        // stands in for another tool's call with identical arguments.
+        let uses = ToolResolverUse {
+            resolver: DynamicResolverName::new("classify"),
+            inputs: BTreeMap::new(),
+            returns: BTreeSet::from([ResolverReturn::Trust]),
+        };
+        let arguments = serde_json::json!({ "path": "notes.txt" });
+        let read = described(vec![uses.clone()]);
+        let glob = ToolContract {
+            name: ToolName::new("Glob"),
+            ..described(vec![uses.clone()])
+        };
+        assert_ne!(
+            read.resolver_args_digest(&uses, &arguments),
+            glob.resolver_args_digest(&uses, &arguments)
         );
     }
 

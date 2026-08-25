@@ -293,7 +293,7 @@ pub(crate) fn enumerate_plans(
     role: CallRole,
     expansions: &Expansions,
 ) -> Vec<ExecutableRemedyPlan> {
-    let Some(contract) = registry.tool(call.tool()) else {
+    let Some(contract) = registry.keyed_tool(call.tool(), call.contract_id()) else {
         return Vec::new();
     };
     let block = check::evaluate_state(
@@ -1142,10 +1142,23 @@ fn direct_redispatches(
     expansions: &Expansions,
 ) -> Vec<RedispatchPlan> {
     let mut direct = Vec::new();
-    for tool in registry.tools() {
-        let clears = direct_clears(tool, &raw.requirement_gaps, current, expansions);
+    // A redispatch names the tool, not one ordered contract, so it clears a gap only when every
+    // variant of that tool clears it.
+    for name in registry.tool_names() {
+        let variant_clears: Vec<Vec<Gap>> = registry
+            .variants(name)
+            .map(|tool| direct_clears(tool, &raw.requirement_gaps, current, expansions))
+            .collect();
+        let Some((first, rest)) = variant_clears.split_first() else {
+            continue;
+        };
+        let clears: Vec<Gap> = first
+            .iter()
+            .filter(|gap| rest.iter().all(|other| other.contains(gap)))
+            .cloned()
+            .collect();
         // The constructor is also the emptiness filter: a tool clearing nothing yields `None`.
-        direct.extend(RedispatchPlan::new(tool.name.clone(), clears));
+        direct.extend(RedispatchPlan::new(name.clone(), clears));
     }
     direct
 }
@@ -1456,7 +1469,6 @@ mod tests {
                 })
                 .unwrap_or_default(),
             returns: [ResolverReturn::Attention].into_iter().collect(),
-            reads: [ResolverReturn::Attention].into_iter().collect(),
         };
         let log = vec![opened(Label::new(Dim::Known(TRUSTED), Dim::Known(internal)))];
         let offers_hop = |resolvers| {
@@ -1616,7 +1628,6 @@ mod tests {
                 crate::contract::ToolCallSource::argument("room").expect("a plain name is a source"),
             )]),
             returns: [ResolverReturn::Audience].into_iter().collect(),
-            reads: [ResolverReturn::Audience].into_iter().collect(),
         };
         let mut lookup = reader(
             "lookup",
@@ -1682,7 +1693,6 @@ mod tests {
                 crate::contract::ToolCallSource::argument("channel").expect("a plain name is a source"),
             )]),
             returns: [ResolverReturn::RequiredAudience].into_iter().collect(),
-            reads: [ResolverReturn::RequiredAudience].into_iter().collect(),
         };
         let mut send = reader("send", Delta::NONE);
         send.parameters = crate::params::test_string_argument_schema("channel");
@@ -2113,7 +2123,6 @@ mod tests {
                             crate::contract::ToolCallSource::argument("to").expect("a plain name is a source"),
                         )]),
                         returns: [ResolverReturn::Audience].into_iter().collect(),
-                        reads: [ResolverReturn::Audience].into_iter().collect(),
                     }];
                     dynamic.parameters = crate::params::test_string_argument_schema("to");
                     dynamic
@@ -2519,6 +2528,7 @@ mod tests {
             trajectory: traj(),
             dispatch: crate::value::DispatchId::new(traj(), seed.digest(), 0),
             tool: seed.tool().clone(),
+            contract: seed.contract_id(),
             arguments: seed.canonical_arguments().clone(),
             proposed_label: established(TRUSTED, Audience::Public),
             receiving: established(TRUSTED, Audience::Public),

@@ -1079,7 +1079,7 @@ impl RuntimeEngine {
                     match cast_state(chain, evidence, value) {
                         CastAnswerState::Missing => consults.push(ExternalRequest::Cast {
                             value,
-                            ask: self.cast_ask(view, &acting, value_tool(view, &acting, value), casts, body),
+                            ask: self.cast_ask(view, &acting, value_source(view, &acting, value), casts, body),
                         }),
                         CastAnswerState::Unreadable(continued) => consults.push(*continued),
                         CastAnswerState::NoAnswer | CastAnswerState::Resolved => {
@@ -1590,12 +1590,15 @@ impl RuntimeEngine {
         evidence: &[ExternalEvidence],
     ) -> Result<Vec<PinnedToolResolution>, Resolution> {
         let tool = ToolName::new(call.tool.clone());
-        let Some(contract) = self.engine.registry().tool(&tool) else {
-            return Err(Resolution::Feedback(format!(
-                "[appa] unknown tool {}: not in this deployment's policy",
-                call.tool
-            )));
-        };
+        let resolved = self
+            .engine
+            .resolve_call(tool, call.arguments.get().as_bytes())
+            .map_err(|error| Resolution::Feedback(malformed_feedback(&error)))?;
+        let contract = self
+            .engine
+            .registry()
+            .contract(&resolved)
+            .expect("a resolved call names its registered contract");
         if contract.uses.is_empty() {
             return Ok(Vec::new());
         }
@@ -1604,7 +1607,7 @@ impl RuntimeEngine {
         // the clock resolver evidence is matched against: an answer given under a context this
         // view no longer shows, or for other arguments, is not evidence for this call, and the
         // use consults again.
-        let (resolved, current_context) = self.tool_resolution_payload(view, trajectory, call, contract, &tool)?;
+        let current_context = self.tool_resolution_context(view, trajectory, contract);
         let mut pins = Vec::new();
         let mut requests = Vec::new();
         for uses in &contract.uses {
@@ -1686,28 +1689,19 @@ impl RuntimeEngine {
 
     /// What a tool-resolution consult carries beside the binding: the call's canonical
     /// argument object and the trajectory's current label context.
-    fn tool_resolution_payload(
+    fn tool_resolution_context(
         &self,
         view: &EngineView,
         trajectory: &TrajectoryId,
-        call: &ProposedCall,
         contract: &appa_engine::contract::ToolContract,
-        tool: &ToolName,
-    ) -> Result<(ResolvedCall, ToolResolutionContext), Resolution> {
-        let resolved = self
-            .engine
-            .resolve_call(tool.clone(), call.arguments.get().as_bytes())
-            .map_err(|_| Resolution::Feedback(format!("[appa] {} has invalid arguments", call.tool)))?;
+    ) -> ToolResolutionContext {
         let static_attention = contract
             .requires
             .attention
             .iter()
             .map(|mark| mark.as_str().to_string())
             .collect();
-        Ok((
-            resolved,
-            self.label_context(view, &engine_id(trajectory), static_attention),
-        ))
+        self.label_context(view, &engine_id(trajectory), static_attention)
     }
 
     /// The label context every classifier consult carries — a tool resolver's and a cast's
@@ -1762,13 +1756,14 @@ impl RuntimeEngine {
         &self,
         view: &EngineView,
         trajectory: &EngineTrajectoryId,
-        tool: Option<ToolName>,
+        source: CastSource,
         casts: Vec<ApplicableCast>,
         body: ValueBody,
     ) -> CastAsk {
-        let static_attention = tool
+        let CastSource { tool, call } = source;
+        let static_attention = call
             .as_ref()
-            .and_then(|tool| self.engine.registry().tool(tool))
+            .and_then(|call| self.engine.registry().contract(call))
             .map(|contract| {
                 contract
                     .requires
@@ -1826,13 +1821,13 @@ impl RuntimeEngine {
             EvidenceRequest::PendingCast { casts, source, body } => {
                 match pending_cast_state(chain, evidence, &source) {
                     CastAnswerState::Missing => {
-                        let tool = dispatch.and_then(|dispatch| {
+                        let call = dispatch.and_then(|dispatch| {
                             view.views(trajectory)
-                                .and_then(|views| views.dispatch_tool(dispatch).cloned())
+                                .and_then(|views| views.dispatch_call(dispatch).cloned())
                         });
                         Ok(Next::ResolveExternal(vec![ExternalRequest::PendingCast {
                             source,
-                            ask: self.cast_ask(view, trajectory, tool, casts, body),
+                            ask: self.cast_ask(view, trajectory, CastSource::from_call(call), casts, body),
                         }]))
                     }
                     CastAnswerState::Unreadable(continued) => Ok(Next::ResolveExternal(vec![*continued])),
@@ -1842,7 +1837,7 @@ impl RuntimeEngine {
             EvidenceRequest::Cast { casts, value, body } => match cast_state(chain, evidence, value) {
                 CastAnswerState::Missing => Ok(Next::ResolveExternal(vec![ExternalRequest::Cast {
                     value,
-                    ask: self.cast_ask(view, trajectory, value_tool(view, trajectory, value), casts, body),
+                    ask: self.cast_ask(view, trajectory, value_source(view, trajectory, value), casts, body),
                 }])),
                 CastAnswerState::Unreadable(continued) => Ok(Next::ResolveExternal(vec![*continued])),
                 CastAnswerState::NoAnswer | CastAnswerState::Resolved => blocked(),
@@ -1914,7 +1909,10 @@ impl RuntimeEngine {
         evidence: &[ExternalEvidence],
     ) -> Result<Vec<PinnedMembership>, Resolution> {
         let tool = ToolName::new(call.tool.clone());
-        let Some(contract) = self.engine.registry().tool(&tool) else {
+        let Ok(resolved) = self.engine.resolve_call(tool, call.arguments.get().as_bytes()) else {
+            return Ok(Vec::new());
+        };
+        let Some(contract) = self.engine.registry().contract(&resolved) else {
             return Ok(Vec::new());
         };
         // Same fast path as the dynamic pass: no placeholder, nothing to read.
@@ -1928,9 +1926,6 @@ impl RuntimeEngine {
         }) {
             return Ok(Vec::new());
         }
-        let Ok(resolved) = self.engine.resolve_call(tool, call.arguments.get().as_bytes()) else {
-            return Ok(Vec::new());
-        };
         let reads = appa_engine::check::group_reads(contract, &resolved);
         if reads.is_empty() {
             return Ok(Vec::new());
@@ -2592,12 +2587,35 @@ fn unestablished_source(views: &Views, value: ValueId) -> String {
 
 /// The tool whose result `value` is, as a cast's classifier is told it. A child return
 /// originates from no tool.
-fn value_tool(view: &EngineView, trajectory: &EngineTrajectoryId, value: ValueId) -> Option<ToolName> {
-    let views = view.views(trajectory)?;
-    match views.value_provenance(value)? {
-        Provenance::ToolResult { dispatch } => views.dispatch_tool(dispatch).cloned(),
-        Provenance::ProviderRun { tool, .. } => Some(tool.clone()),
-        Provenance::ChildReturn { .. } => None,
+/// The tool a cast classifies a value of, and the call that produced it where a dispatch did:
+/// under ordered contracts the call, not the name, selects the contract whose requirements
+/// the classifier sees. A provider-run value names its tool; no dispatch released it.
+#[derive(Default)]
+struct CastSource {
+    tool: Option<ToolName>,
+    call: Option<ResolvedCall>,
+}
+
+impl CastSource {
+    fn from_call(call: Option<ResolvedCall>) -> Self {
+        CastSource {
+            tool: call.as_ref().map(|call| call.tool().clone()),
+            call,
+        }
+    }
+}
+
+fn value_source(view: &EngineView, trajectory: &EngineTrajectoryId, value: ValueId) -> CastSource {
+    let Some(views) = view.views(trajectory) else {
+        return CastSource::default();
+    };
+    match views.value_provenance(value) {
+        Some(Provenance::ToolResult { dispatch }) => CastSource::from_call(views.dispatch_call(dispatch).cloned()),
+        Some(Provenance::ProviderRun { tool, .. }) => CastSource {
+            tool: Some(tool.clone()),
+            call: None,
+        },
+        Some(Provenance::ChildReturn { .. }) | None => CastSource::default(),
     }
 }
 
@@ -2791,10 +2809,9 @@ mod tests {
                 name = "lookup"
                 description = "Looks one record up."
                 uses = [{ resolver = "classifier" }]
-                delta = { trust = "resolver.classifier.trust", audience = "resolver.classifier.audience" }
                 # The tool keeps its own attention mark: `requires.attention` has one owner, and
                 # here it is the policy, so the classifier sees the mark under `static_attention`.
-                requires = { trust = "resolver.classifier.trust", audience = "resolver.classifier.audience", attention = ["static-review"] }
+                requires = { attention = ["static-review"] }
                 [[authority]]
                 name = "reviewer"
                 [authority.permits]
@@ -2825,7 +2842,7 @@ mod tests {
                         &serde_json::json!({
                             "name": "lookup",
                             "description": "Looks one record up.",
-                            "arguments": {"nested": {"id": 7}, "deep": true}
+                            "arguments": {"nested": {"id": 7}, "deep": true},
                         })
                     );
                     assert_eq!(context.trust_ranks, ["suspicious", "trusted"]);

@@ -36,8 +36,9 @@ The Claude Code battery uses first-match Bash contracts. Exact common commands
 avoid a resolver call. The default contract invokes `bash-review.py` for one
 call. OpenAPPA writes one JSON request to standard input, reads one JSON answer
 from standard output, and waits for the command to exit. A resolver receives
-the complete tool argument object in `args` unless the binding selects a
-specific argument. Its declared `returns` apply directly to the tool contract.
+the complete tool call in `args` — `name`, `description` when the tool
+declares one, and `arguments` — unless the binding selects a specific
+argument. Its declared `returns` apply directly to the tool contract.
 No schema, input mapping, or result expression is needed for this default.
 
 The resolver controls only whether a command needs fresh human review. It does
@@ -63,7 +64,7 @@ Run the resolver directly:
 
 ```sh
 cd examples/claude-code-battery
-printf '%s\n' '{"version":1,"resolver":"claude-code.bash-review","args":{"command":"python scripts/release.py"}}' \
+printf '%s\n' '{"version":1,"resolver":"claude-code.bash-review","args":{"name":"Bash","description":"Runs one shell command and returns its output.","arguments":{"command":"python scripts/release.py"}}}' \
   | python3 ./batteries/claude-code/bash-review.py
 ```
 
@@ -73,7 +74,7 @@ get an empty attention requirement.
 Run the Read resolver directly:
 
 ```sh
-printf '%s\n' '{"version":1,"resolver":"claude-code.read-sensitivity","args":{"file_path":".env"}}' \
+printf '%s\n' '{"version":1,"resolver":"claude-code.read-sensitivity","args":{"name":"Read","description":"Reads a file and returns its contents.","arguments":{"file_path":".env"}}}' \
   | python3 ./batteries/claude-code/read-sensitivity.py
 ```
 
@@ -83,7 +84,7 @@ The result restricts `.env` to `claude-session`. Replace `.env` with
 Run the local replacement resolver directly:
 
 ```sh
-printf '%s\n' '{"version":1,"resolver":"local.read-sensitivity","args":{"file_path":"clients/acme.txt"}}' \
+printf '%s\n' '{"version":1,"resolver":"local.read-sensitivity","args":{"name":"Read","description":"Reads a file and returns its contents.","arguments":{"file_path":"clients/acme.txt"}}}' \
   | python3 ./local/read-sensitivity.py
 ```
 

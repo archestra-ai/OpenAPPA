@@ -34,6 +34,8 @@ const TERMS = {
     "Actionable paths returned on a policy refusal explaining how to unblock execution safely (e.g. human approval, sanitizer, or narrowing acceptance).",
 
   /* Tool contracts */
+  "Tool(argument:pattern)":
+    "An ordered tool contract selector. OpenAPPA uses the first contract whose top-level string argument matches the pattern. An asterisk matches any text; a bare tool name is the fallback. A sanitizer rewrite cannot move a call to another selector.",
   delta:
     "The label contribution of an admitted call result. A delta never expands permissions: it intersects reader sets, lowers the trust rank, or leaves the trajectory label unchanged.",
   requires:
@@ -55,17 +57,15 @@ const TERMS = {
   "[membership]":
     "The one registration every @name group resolves through. A group mention without it is a load error.",
   "[[dynamic_resolver]]":
-    "A named external that classifies proposed tool calls. It declares the inputs a tool must supply and the results it always returns. It is distinct from @group membership resolution.",
+    "A named external that classifies proposed tool calls. Its opaque non-empty name can contain dots. It declares the inputs a tool must supply and the contract destinations it owns through returns. It is distinct from @group membership resolution.",
   inputs:
-    "The values a resolver reads. A tool maps each one from $tool_call; a resolver that declares none reads the complete call.",
+    "The values a resolver reads. A tool maps each one from $tool_call. Without an explicit mapping, the resolver reads the complete tool call: name, description when declared, and arguments.",
   uses:
     "A tool's dynamic resolvers. Each entry names a registered resolver and maps every input that resolver declares. Omit it when the tool uses none.",
   returns:
-    "The results a resolver always answers with, each named for the one contract field it establishes: delta.trust, delta.audience, requires.trust, requires.audience, requires.attention. Trust values select from the policy trust chain; attention values select from the marks authorities name under permits.attention.",
+    "The contract destinations an attached resolver owns and always answers with: delta.trust, delta.audience, requires.trust, requires.audience, requires.attention. Static values and other resolvers cannot own the same destinations. Trust values select from the policy trust chain; attention values select from marks authorities name under permits.attention.",
   "$tool_call":
-    "The only source a resolver input reads. Its five forms are the complete call, its name, its description, its arguments, and one top-level argument.",
-  "resolver.<name>.<result>":
-    "A tool field reading one resolver result. The field it sits under decides which result it reads, so the same reference reads delta.trust under delta and requires.trust under requires.",
+    "The only source a resolver input reads. Its five forms are the complete call (name, description when declared, arguments), its name, its description, its arguments, and one top-level argument. Only $tool_call.description requires a declared description.",
   "[externals.dynamic]":
     "The shared HTTP endpoint for every dynamic resolver without an inline builtin. Requests carry the resolver name.",
   internal:
@@ -110,7 +110,7 @@ const TERMS = {
   /* Sanitizers and Casts */
   on: "Where a sanitizer may apply: tool_output at an admission the host can withhold — a child return, or a tool result at a confined application point; tool_input as whole-argument substitution at dispatch.",
   tool_input:
-    "A sanitizer application point: the sanitizer derives a replacement for the whole argument set of one call, and the harness dispatches exactly the substituted bytes. The rewritten call keeps the resolver answers pinned to the proposal it replaces; the resolver is not consulted again.",
+    "A sanitizer application point: the sanitizer derives a replacement for one call's arguments, and the harness dispatches exactly those bytes. The rewrite keeps the proposal's resolver answers, does not consult again, and cannot select another ordered contract.",
   tool_output:
     "A sanitizer application point: an admission the host can withhold — the child-return crossing, or a tool result at an application point the deployment confines. The derivation is admitted; the raw value is withheld.",
   from: "In a sanitizer's permits: for audience, the readers the source audience must contain; for trust, the rank the source must meet or exceed.",

@@ -29,7 +29,6 @@ delta = { audience = ["Client_Alpha"] }
 name = "read_vendor"
 parameters = { type = "object", properties = { file = { type = "string" } }, required = ["file"], additionalProperties = false }
 uses = [{ resolver = "tenant-record-readers", inputs = { subject = "$tool_call.arguments.file" } }]
-delta = { audience = "resolver.tenant-record-readers.audience" }
 [[policy.tool]]
 name = "create_vendor"
 parameters = { type = "object", properties = { file = { type = "string" }, content = { type = "string" } }, required = ["file", "content"], additionalProperties = false }
@@ -38,7 +37,6 @@ delta = {}
 name = "send_email"
 parameters = { type = "object", properties = { to = { type = "string" }, subject = { type = "string" }, body = { type = "string" } }, required = ["to", "subject", "body"], additionalProperties = false }
 uses = [{ resolver = "mailbox-tenant-readers", inputs = { subject = "$tool_call.arguments.to" } }]
-requires = { audience = "resolver.mailbox-tenant-readers.audience" }
 effects = ["egress"]
 delta = {}
 

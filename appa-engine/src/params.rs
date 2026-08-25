@@ -106,6 +106,8 @@ pub enum ArgumentError {
     UnsafeInteger,
     #[error("arguments do not satisfy the tool's registered schema: {0}")]
     Schema(String),
+    #[error("arguments match no registered contract")]
+    NoMatchingContract,
     #[error("persisted argument payload is not in canonical form")]
     NotCanonical,
 }
@@ -803,6 +805,12 @@ pub struct CanonicalArguments {
 }
 
 impl CanonicalArguments {
+    /// Strictly parse and canonicalize one argument object without applying a tool schema.
+    /// Contract selection reads this value before the selected contract validates it.
+    pub(crate) fn parse(bytes: &[u8]) -> Result<Self, ArgumentError> {
+        Self::from_raw_unchecked(bytes)
+    }
+
     /// The engine construction path: one raw JSON object, strictly scanned and
     /// schema-validated.
     pub(crate) fn from_raw(bytes: &[u8], parameters: &ToolParameters) -> Result<Self, ArgumentError> {

@@ -428,9 +428,25 @@ impl LabeledValue {
     }
 }
 
+/// The ordinal of a checkable contract among contracts for the same harness tool.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ToolContractId(u32);
+
+impl ToolContractId {
+    pub(crate) fn new(ordinal: usize) -> Option<Self> {
+        ordinal.try_into().ok().map(ToolContractId)
+    }
+
+    pub(crate) fn ordinal(self) -> usize {
+        self.0 as usize
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ResolvedCall {
     tool: ToolName,
+    contract: ToolContractId,
     arguments: CanonicalArguments,
     tool_resolutions: Vec<PinnedToolResolution>,
     memberships: Vec<PinnedMembership>,
@@ -441,6 +457,7 @@ impl<'de> Deserialize<'de> for ResolvedCall {
         #[derive(Deserialize)]
         struct WireCall {
             tool: ToolName,
+            contract: ToolContractId,
             arguments: CanonicalArguments,
             #[serde(default)]
             tool_resolutions: Vec<PinnedToolResolution>,
@@ -451,7 +468,7 @@ impl<'de> Deserialize<'de> for ResolvedCall {
         let wire = WireCall::deserialize(deserializer)?;
         let pinned_memberships = wire.memberships.clone();
         let pinned_tool_resolutions = wire.tool_resolutions.clone();
-        let canonical = ResolvedCall::new(wire.tool, wire.arguments)
+        let canonical = ResolvedCall::new_keyed(wire.tool, wire.contract, wire.arguments)
             .with_tool_resolutions(wire.tool_resolutions)
             .with_memberships(wire.memberships);
         if canonical.memberships != pinned_memberships {
@@ -469,9 +486,15 @@ impl<'de> Deserialize<'de> for ResolvedCall {
 }
 
 impl ResolvedCall {
+    #[cfg(test)]
     pub(crate) fn new(tool: ToolName, arguments: CanonicalArguments) -> Self {
+        Self::new_keyed(tool, ToolContractId::default(), arguments)
+    }
+
+    pub(crate) fn new_keyed(tool: ToolName, contract: ToolContractId, arguments: CanonicalArguments) -> Self {
         ResolvedCall {
             tool,
+            contract,
             arguments,
             tool_resolutions: Vec::new(),
             memberships: Vec::new(),
@@ -480,6 +503,10 @@ impl ResolvedCall {
 
     pub fn tool(&self) -> &ToolName {
         &self.tool
+    }
+
+    pub fn contract_id(&self) -> ToolContractId {
+        self.contract
     }
 
     pub fn arguments(&self) -> &serde_json::Value {
@@ -541,8 +568,9 @@ impl ResolvedCall {
     /// sanitizer's rewrite of that proposal, so the answers ride along here rather than being
     /// dropped. Riding along is not standing: whether a carried answer is admissible on the
     /// rewritten call is [`crate::check::validate_tool_resolutions`]'s to decide, against the
-    /// proposal on the record. A membership answer expands the group one argument names, so it
-    /// survives only while that argument's value is unchanged.
+    /// proposal on the record. The engine also refuses a rewrite that would select another ordered
+    /// contract. A membership answer expands the group one argument names, so it survives only
+    /// while that argument's value is unchanged.
     pub(crate) fn substituting(&self, arguments: CanonicalArguments) -> ResolvedCall {
         let unchanged = |argument: &str| arguments.value().get(argument) == self.arguments.value().get(argument);
         let memberships = self
@@ -551,7 +579,7 @@ impl ResolvedCall {
             .filter(|membership| unchanged(membership.argument()))
             .cloned()
             .collect();
-        ResolvedCall::new(self.tool.clone(), arguments)
+        ResolvedCall::new_keyed(self.tool.clone(), self.contract, arguments)
             .with_tool_resolutions(self.tool_resolutions.clone())
             .with_memberships(memberships)
     }
@@ -609,7 +637,6 @@ mod tests {
             resolver: crate::names::DynamicResolverName::new("classifier"),
             inputs: std::collections::BTreeMap::new(),
             returns: [crate::contract::ResolverReturn::Trust].into_iter().collect(),
-            reads: [crate::contract::ResolverReturn::Trust].into_iter().collect(),
         };
         let contract = crate::contract::ToolContract {
             name: ToolName::new("lookup"),
@@ -671,7 +698,6 @@ mod tests {
                         crate::contract::ToolCallSource::argument("recipient").expect("a plain name is a source"),
                     )]),
                     returns: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
-                    reads: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
                 },
                 crate::contract::ResolverArgsDigest::of(b""),
                 None,
@@ -707,7 +733,6 @@ mod tests {
                         crate::contract::ToolCallSource::argument("recipient").expect("a plain name is a source"),
                     )]),
                     returns: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
-                    reads: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
                 },
                 crate::contract::ResolverArgsDigest::of(b""),
                 None,

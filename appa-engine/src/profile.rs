@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::contract::ToolContract;
 use crate::fact::ReturnPolicy;
 use crate::label::{Dim, Dimension, Label, Trust};
 use crate::names::SurfaceName;
@@ -307,11 +308,68 @@ impl PolicyIdentityV1 {
         PolicyIdentityV1(hasher.finalize().into())
     }
 
+    pub(crate) fn of_registry(registry: &Registry, child_return: &ReturnPolicy) -> Self {
+        let document = identity_document_from_registry(registry, child_return);
+        let canonical = serde_json_canonicalizer::to_vec(&document).expect("an identity document canonicalizes");
+        let mut hasher = Sha256::new();
+        hasher.update(b"appa:policy-identity:v1");
+        hasher.update([0u8]);
+        hasher.update(&canonical);
+        PolicyIdentityV1(hasher.finalize().into())
+    }
+
     /// The digest bytes, for hosts that persist the identity beside a
     /// trajectory's durable opening record.
     pub fn bytes(&self) -> &[u8; 32] {
         &self.0
     }
+}
+
+fn identity_document_from_registry(registry: &Registry, child_return: &ReturnPolicy) -> serde_json::Value {
+    let render = |matcher: &crate::registry::ToolMatcher, tool: &ToolContract| {
+        serde_json::json!({
+            "name": tool.name,
+            "matcher": matcher,
+            "tags": sorted_set(&tool.tags),
+            "parameters": tool.parameters.normalized(),
+            "description": tool.description,
+            "uses": sorted_set(&tool.uses),
+            "delta": tool.delta,
+            "emits": tool.emits,
+            "requires": {
+                "trust_floor": tool.requires.label.trust_floor,
+                "audience": sorted_set(&tool.requires.label.audience),
+                "history": sorted_set(&tool.requires.history),
+                "attention": sorted_set(&tool.requires.attention),
+            },
+        })
+    };
+    let mut tools: Vec<_> = registry
+        .semantic_tools()
+        .map(|(matcher, tool)| render(matcher, tool))
+        .collect();
+    tools.extend(
+        registry
+            .provider_run_contracts()
+            .map(|tool| render(&crate::registry::ToolMatcher::Bare, tool)),
+    );
+    let mut document = identity_document(
+        &RegistryConfig {
+            trust_chain: registry.trust_chain().clone(),
+            tools: Vec::new(),
+            authorities: registry.authorities().to_vec(),
+            sanitizers: registry.sanitizers().cloned().collect(),
+            casts: registry.casts().to_vec(),
+            membership: registry.membership().cloned(),
+        },
+        child_return,
+        registry.profile(),
+    );
+    document
+        .as_object_mut()
+        .expect("identity document is an object")
+        .insert("tools".into(), tools.into());
+    document
 }
 
 fn canonical_value(value: &impl Serialize) -> serde_json::Value {
@@ -584,7 +642,11 @@ pub(crate) fn covering_declaration(config: &RegistryConfig) -> ProfileDeclaratio
         context_control: true,
         dispatch: ExecutorClass::Enforced,
         executor_exceptions: BTreeMap::new(),
-        confined_results: config.tools.iter().map(|tool| tool.name.clone()).collect(),
+        confined_results: config
+            .tools
+            .iter()
+            .map(|tool| crate::registry::base_tool_name(&tool.name).expect("test contracts have valid names"))
+            .collect(),
         confined_child_return: true,
         provider_surfaces: BTreeMap::new(),
         binding: BindingMode::Harness,
@@ -756,7 +818,6 @@ mod tests {
                     resolver: DynamicResolverName::new("directory"),
                     inputs: std::collections::BTreeMap::new(),
                     returns: [ResolverReturn::Audience].into_iter().collect(),
-                    reads: [ResolverReturn::Audience].into_iter().collect(),
                 }];
                 t
             }),
@@ -781,6 +842,14 @@ mod tests {
             provider_run(&mut declaration, "search");
             assert!(open(cfg, declaration, ReturnPolicy::Raw).is_ok());
         }
+
+        let cfg = config(vec![tool("search(query:*)")]);
+        let mut declaration = covering_declaration(&cfg);
+        provider_run(&mut declaration, "search");
+        assert!(matches!(
+            open(cfg, declaration, ReturnPolicy::Raw),
+            Err(LoadError::ProviderRunSelector(tool)) if tool == "search"
+        ));
     }
 
     #[test]
@@ -1288,7 +1357,6 @@ mod tests {
             resolver: crate::names::DynamicResolverName::new("classifier"),
             inputs: std::collections::BTreeMap::new(),
             returns: [crate::contract::ResolverReturn::Trust].into_iter().collect(),
-            reads: [crate::contract::ResolverReturn::Trust].into_iter().collect(),
         }];
         assert_ne!(identity(&resolver_edit, &ReturnPolicy::Raw, &profile), base);
 
