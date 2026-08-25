@@ -132,10 +132,11 @@ The resolver can be any program. Here is a Python example:
 ```python
 import json
 import sys
+from pathlib import PurePath
 
 request = json.load(sys.stdin)
 file_path = request["args"]["arguments"]["file_path"]
-audience = ["private"] if file_path.startswith(".") else "public"
+audience = ["private"] if PurePath(file_path).name.startswith(".") else "public"
 
 json.dump(
     {"version": 1, "result": {"delta.audience": audience}},
@@ -175,7 +176,7 @@ command = ["python3", "./read-sensitivity.py"]
 
 `README.md` matches the first rule, so `read-sensitivity.py` does not run.
 
-The resolver returns `["private"]` for a path that starts with `.` and `"public"` for any other path.
+The resolver returns `["private"]` for a file whose name starts with `.` and `"public"` for any other path. It checks the file name, not the whole path: Claude Code passes absolute paths, which always start with `/`.
 
 This only controls approval. It does not make Bash output Public. The output stays inside the Claude session.
 
