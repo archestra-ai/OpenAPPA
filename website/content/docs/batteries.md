@@ -16,7 +16,6 @@ A battery is an OpenAPPA config for a set of tools, such as Claude Code or Slack
 batteries/
 |-- claude-code/
 |   |-- appa.toml
-|   |-- bash-review.py
 |   `-- read-sensitivity.py
 `-- slack/
     `-- appa.toml
@@ -58,19 +57,19 @@ OpenAPPA checks root rules from top to bottom. It then checks each battery in `i
 
 The first match wins. The position of `include` in the root file does not change this order.
 
-Trusted messages can go to engineering channels. Messages to other channels need fresh human approval.
+The Slack battery asks a person before any message is sent. A root rule placed above it lets one channel through:
 
 ```toml
+# root config: trusted messages go to the engineering channel without a question
 [[policy.tool]]
-name = "mcp__slack__slack_send_message(channel_id:C123*)"
+name = "mcp__claude_ai_Slack__slack_send_message(channel_id:C0ABC*)"
 requires = { trust = "trusted" }
-effects = ["egress", "mutation"]
 delta = {}
 
+# shipped battery: everything else needs fresh human approval
 [[policy.tool]]
-name = "mcp__slack__slack_send_message"
+name = "mcp__claude_ai_Slack__slack_send_message"
 requires = { trust = "trusted", attention = ["hitl"] }
-effects = ["egress", "mutation"]
 delta = {}
 ```
 
@@ -78,16 +77,18 @@ Text inside parentheses matches one argument. `*` matches any text.
 
 A bare tool name is the default. It matches when no earlier rule did.
 
-Slack history uses the same first-match rule. Engineering history stays inside Slack. Other history is kept separate.
+Slack history uses the same first-match rule. The battery keeps all history private. A root rule can mark one channel as untrusted, for example a channel shared with people outside your company:
 
 ```toml
+# root config: a shared channel may contain outsiders' words
 [[policy.tool]]
-name = "mcp__slack__slack_get_channel_history(channel_id:C123*)"
-delta = { trust = "suspicious", audience = ["slack-internal"] }
+name = "mcp__claude_ai_Slack__slack_read_channel(channel_id:C0SHARED*)"
+delta = { trust = "suspicious", audience = ["private"] }
 
+# shipped battery: every other channel is private and keeps its trust
 [[policy.tool]]
-name = "mcp__slack__slack_get_channel_history"
-delta = { trust = "suspicious", audience = ["slack-unclassified"] }
+name = "mcp__claude_ai_Slack__slack_read_channel"
+delta = { audience = ["private"] }
 ```
 
 ## Use resolvers in batteries
@@ -123,7 +124,7 @@ Request:
 Result:
 
 ```json
-{"version":1,"result":{"delta.audience":["claude-session"]}}
+{"version":1,"result":{"delta.audience":["private"]}}
 ```
 
 The resolver can be any program. Here is a Python example:
@@ -134,7 +135,7 @@ import sys
 
 request = json.load(sys.stdin)
 file_path = request["args"]["arguments"]["file_path"]
-audience = ["claude-session"] if file_path.startswith(".") else "public"
+audience = ["private"] if file_path.startswith(".") else "public"
 
 json.dump(
     {"version": 1, "result": {"delta.audience": audience}},
@@ -152,31 +153,29 @@ Script changes apply on the next call. No restart is needed.
 
 Resolvers do not have their own order. The first matching tool rule decides which resolver, if any, runs.
 
-This Claude Code battery handles `cargo test` directly. Other Bash commands go to the resolver:
+A rule written above the rule that uses a resolver wins without running it. Here `README.md` is public by rule; every other path asks the resolver:
 
 ```toml
 [[policy.tool]]
-name = "Bash(command:cargo test)"
-requires = { trust = "trusted" }
-delta = { trust = "suspicious", audience = ["claude-session"] }
+name = "Read(file_path:README.md)"
+delta = {}
 
 [[policy.dynamic_resolver]]
-name = "claude-code.bash-review"
-returns = ["requires.attention"]
+name = "claude-code.read-sensitivity"
+returns = ["delta.audience"]
 
 [[policy.tool]]
-name = "Bash"
-uses = [{ resolver = "claude-code.bash-review" }]
-requires = { trust = "trusted" }
-delta = { trust = "suspicious", audience = ["claude-session"] }
+name = "Read"
+uses = [{ resolver = "claude-code.read-sensitivity" }]
+delta = { trust = "suspicious" }
 
-[externals.dynamic."claude-code.bash-review"]
-command = ["python3", "./bash-review.py"]
+[externals.dynamic."claude-code.read-sensitivity"]
+command = ["python3", "./read-sensitivity.py"]
 ```
 
-`cargo test` matches the first rule, so `bash-review.py` does not run.
+`README.md` matches the first rule, so `read-sensitivity.py` does not run.
 
-The resolver returns an empty list when no approval is needed. It returns `["hitl"]` for all other commands.
+The resolver returns `["private"]` for a path that starts with `.` and `"public"` for any other path.
 
 This only controls approval. It does not make Bash output Public. The output stays inside the Claude session.
 
@@ -198,7 +197,7 @@ version = 1
 [[policy.tool]]
 name = "Bash(command:cargo test)"
 requires = { trust = "trusted", attention = ["hitl"] }
-delta = { trust = "suspicious", audience = ["claude-session"] }
+delta = { trust = "suspicious", audience = ["private"] }
 
 [[policy.dynamic_resolver]]
 name = "local.read-sensitivity"
