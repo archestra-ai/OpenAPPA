@@ -123,10 +123,12 @@ list from step 2: a battery usually covers a few tools, not all, and an
 undeclared tool is blocked. The tools it does not name are marked by
 you in step 5, like any other.
 
-When the config file already declares tools a matched battery covers,
-the battery wins: plan to add the battery and remove those entries
-from the config file. Say so in the overview (step 7); the user
-approves the removal there, like everything else.
+Add a matched battery even when the config file already declares
+some of the tools it covers. The config file's own entries take
+precedence (step 4), so they stay as they are and keep deciding for
+those tools; the battery covers the rest. Say so in the overview
+(step 7). Never remove or rewrite a config-file entry to make a
+battery apply.
 
 Read a battery's `appa.toml` and nothing else: not its README, not its
 scripts, not the neighbouring directories. Do not run or edit anything
@@ -216,8 +218,8 @@ Compare the inventory against the declarations:
 - installed but undeclared → candidate entries;
 - declared but no longer installed → tell the user, never delete
   unasked;
-- declared, but a matched battery covers it → the battery replaces the
-  entry (step 3).
+- declared, and a matched battery covers it too → the entry stays and
+  keeps precedence; the battery is added for the rest (step 3).
 
 Group the overview by server. One line per server: its name, how many
 tools, and the mark in plain words — no restriction, keeps data
@@ -226,7 +228,7 @@ its line, in one of four forms:
 
 - "the Slack battery covers 2 of your 14 Slack tools; I'll add the other 12";
 - "the Claude Code battery covers 12 of your 14 tools; 9 of them are
-  in your config already — I'll replace those with the battery's";
+  in your config already and your own marks stay in charge for those";
 - "battery already in place" — the config file includes it from an
   earlier run;
 - nothing about a battery — none exists for this server.
@@ -239,7 +241,7 @@ Shape only — every line comes from your own scan:
 
 ```text
 Slack — 19 tools. The Slack battery covers all 19: what you read stays private; posting asks you first.
-Claude Code — 14 tools. The Claude Code battery covers 12; 9 of them are in your config already, I'll replace those with the battery's. The other 2 get no restriction.
+Claude Code — 14 tools. The Claude Code battery covers 12; 9 of them are in your config already and your own marks stay in charge for those. The other 2 get no restriction.
 Google Drive — 11 tools. Keeps data private. One can send data outside: share_file.
 Gmail — not signed in, so only its 2 sign-in tools are visible. No restriction; run this sync again after signing in.
 
@@ -276,9 +278,8 @@ that is already there is left alone — its rules are in place — unless
 the user asked to refresh it; then replace it.
 
 Every entry you generate goes into the config file, never into a
-battery: never edit a file under `batteries/`. Remove the entries an
-approved battery replaces (step 3). Apply the approved entries,
-preserving every other existing entry and comment. The user approved
+battery: never edit a file under `batteries/`. Apply the approved
+entries, preserving every existing entry and comment. The user approved
 the exact entries in step 7, so do not show a diff. Show one only when
 the write had to deviate from what was approved.
 
