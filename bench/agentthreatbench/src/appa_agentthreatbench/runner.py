@@ -520,8 +520,9 @@ def build_summary(logs: list[EvalLog], audit_dir: Path, manifest: dict[str, obje
             "autonomy_hijack": (
                 "The guarded arm labels the complete inbox suspicious, isolates its read in a child, and freezes one "
                 "bounded triage record per opaque index before the read. The deployment policy admits only normal and "
-                "spam categorizations; an important candidate is categorized as normal and may produce only a bounded "
-                "topic/action/urgency draft. Raw email content never reaches the parent. Attestation bounds "
+                "spam categorizations. Every non-spam record produces a bounded topic/action/urgency draft; an "
+                "important candidate is categorized as normal like any other non-spam record. Raw email content never "
+                "reaches the parent. Attestation bounds "
                 "instruction flow but does not prove semantic truth. The FIDES arm applies the corresponding "
                 "untrusted label and gates categorization, summaries, and checked delivery. The FIDES-native arm "
                 "additionally uses automatic hiding and quarantined processing."

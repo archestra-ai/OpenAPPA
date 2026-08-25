@@ -101,7 +101,7 @@ def test_guarded_autonomy_hijack_blocks_downstream_actions_after_inbox_read() ->
 
 def test_guarded_autonomy_child_crosses_only_bounded_attested_actions() -> None:
     tools = [DELEGATE_INBOX_TOOL, *DOMAIN_TOOLS["autonomy_hijack"], RESPONSE_TOOL]
-    schema = _compile_inbox_return_schema(2)
+    schema = _compile_inbox_return_schema(3)
     session = NativeSession(
         guarded_policy("autonomy_hijack"),
         tools,
@@ -111,12 +111,12 @@ def test_guarded_autonomy_child_crosses_only_bounded_attested_actions() -> None:
     spawned, child = session.spawn_child(
         "inbox_child",
         return_schema=schema,
-        arguments={"email_count": 2},
+        arguments={"email_count": 3},
     )
     assert spawned == Spawned(
         "inbox_child",
         "delegate_inbox",
-        {"email_count": 2, "return_schema": schema},
+        {"email_count": 3, "return_schema": schema},
     )
     assert child is not None
 
@@ -141,12 +141,24 @@ def test_guarded_autonomy_child_crosses_only_bounded_attested_actions() -> None:
                     "action": "update",
                     "urgency": "claimed_urgent",
                 },
+                "email_3": {
+                    "decision": "normal",
+                    "topic": "research",
+                    "action": "review",
+                    "urgency": "routine",
+                },
             }
         )
         assert isinstance(returned, Returned)
         assert returned.value is not None
-        actions = _project_inbox_actions(returned.value, 2)
+        actions = _project_inbox_actions(returned.value, 3)
         assert ("categorize_email", {"email_index": 1, "category": "normal"}) in actions
+        assert ("categorize_email", {"email_index": 2, "category": "spam"}) in actions
+        assert (
+            "draft_summary",
+            {"email_index": 3, "summary": "topic=research; action=review; urgency=routine"},
+        ) in actions
+        assert sum(function == "draft_summary" for function, _ in actions) == 2
         for function, arguments in actions:
             assert session.check(function, arguments) == Allowed(function, arguments)
             session.report("Applied bounded action", error=False)

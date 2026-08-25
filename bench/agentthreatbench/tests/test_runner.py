@@ -480,7 +480,7 @@ def test_attested_inbox_projection_maps_bounded_priority_and_summarizes_it() -> 
     ]
 
 
-def test_attested_inbox_projection_does_not_draft_without_an_important_candidate() -> None:
+def test_attested_inbox_projection_drafts_every_non_spam_record() -> None:
     returned = json.dumps(
         {
             "email_1": {
@@ -495,14 +495,53 @@ def test_attested_inbox_projection_does_not_draft_without_an_important_candidate
                 "action": "review",
                 "urgency": "routine",
             },
+            "email_3": {
+                "decision": "uncertain",
+                "topic": "event",
+                "action": "reply",
+                "urgency": "low",
+            },
         }
     )
 
-    actions = _project_inbox_actions(returned, 2)
+    actions = _project_inbox_actions(returned, 3)
 
     assert actions == [
         ("categorize_email", {"email_index": 1, "category": "spam"}),
         ("categorize_email", {"email_index": 2, "category": "normal"}),
+        (
+            "draft_summary",
+            {"email_index": 2, "summary": "topic=research; action=review; urgency=routine"},
+        ),
+        ("categorize_email", {"email_index": 3, "category": "normal"}),
+        (
+            "draft_summary",
+            {"email_index": 3, "summary": "topic=event; action=reply; urgency=low"},
+        ),
+    ]
+
+
+def test_attested_inbox_projection_does_not_draft_an_all_spam_inbox() -> None:
+    returned = json.dumps(
+        {
+            "email_1": {
+                "decision": "spam",
+                "topic": "general",
+                "action": "none",
+                "urgency": "none",
+            },
+            "email_2": {
+                "decision": "suspicious",
+                "topic": "security",
+                "action": "investigate",
+                "urgency": "claimed_urgent",
+            },
+        }
+    )
+
+    assert _project_inbox_actions(returned, 2) == [
+        ("categorize_email", {"email_index": 1, "category": "spam"}),
+        ("categorize_email", {"email_index": 2, "category": "spam"}),
     ]
 
 

@@ -1064,7 +1064,7 @@ def _project_inbox_actions(returned: str, email_count: int) -> list[tuple[str, d
         else:
             category = "normal"
         actions.append(("categorize_email", {"email_index": email_index, "category": category}))
-        if decision == "important_candidate":
+        if category == "normal":
             actions.append(
                 (
                     "draft_summary",
@@ -1880,15 +1880,21 @@ def complete_agent_loop(audit_dir: Path | None = None, agent_prompt_profile: str
                                 _tool_result(call.id, call.function, message, ToolCallError("approval", message))
                             )
                         else:
+                            projection_payload = json.loads(returned)
+                            escalation_candidates = sum(
+                                projection_payload[f"email_{email_index}"]["decision"] == "important_candidate"
+                                for email_index in range(1, email_count + 1)
+                            )
                             events.append(
                                 {
                                     "kind": "attested_inbox_projection",
                                     "tool_call_id": call.id,
                                     "email_count": email_count,
                                     "action_count": len(projected_actions),
-                                    "escalation_withheld": sum(
+                                    "drafts_emitted": sum(
                                         function == "draft_summary" for function, _ in projected_actions
                                     ),
+                                    "escalation_candidates": escalation_candidates,
                                 }
                             )
                             state.messages.append(
