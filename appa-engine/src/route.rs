@@ -229,7 +229,7 @@ impl<'a> BlockContext<'a> {
         let registry = engine.registry();
         let call = views.standing_call(subject).ok_or(RouteError::UnknownSubject)?.clone();
         let decided = views.decided_batch(batch).ok_or(RouteError::UnknownSubject)?;
-        let contract = registry.tool(call.tool()).ok_or(RouteError::UnknownSubject)?;
+        let contract = registry.contract(&call).ok_or(RouteError::UnknownSubject)?;
 
         let mut expansions = registry.expansions_from_event(answers)?;
         if let Some((_, offers)) = views.pending_block(subject) {
@@ -1142,7 +1142,7 @@ mod tests {
     }
 
     fn raw_block(registry: &Registry, views: &Views, call: &ResolvedCall) -> RawBlock {
-        let contract = registry.tool(call.tool()).unwrap();
+        let contract = registry.contract(call).unwrap();
         match check::evaluate(contract, views, call, &CallStage::default(), &Expansions::default()) {
             CheckOutcome::Block(raw) => raw,
             other => panic!("expected a block, got {other:?}"),
@@ -1165,7 +1165,7 @@ mod tests {
         let trajectory = traj();
         let views = projection.view(&trajectory);
         let context = BlockContext {
-            contract: registry.tool(call.tool()).unwrap(),
+            contract: registry.contract(call).unwrap(),
             call: call.clone(),
             stage: CallStage::default(),
             role: CallRole::Ordinary,

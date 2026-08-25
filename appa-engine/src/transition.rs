@@ -144,6 +144,15 @@ pub enum OfferConsult {
         call: ResolvedCall,
         required: Vec<crate::plan::RequiredRuling>,
     },
+    /// An input-substitution hop: the sanitizer rewrites the arguments of the call this offer
+    /// stands on. The runtime derives the sanitizer's input from the call, and — where the
+    /// rewritten arguments select another ordered contract — consults that contract's resolvers
+    /// about the rewritten call before executing.
+    Rewrite {
+        sanitizer: SanitizerName,
+        call: ResolvedCall,
+    },
+    /// An output sanitizer over a value the host withholds: a child return.
     Sanitizer {
         sanitizer: SanitizerName,
         source: RawResultDigest,
@@ -287,10 +296,21 @@ pub enum OutcomeBody {
 /// engine event.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Evidence {
+    /// An output sanitizer's derivation of a withheld value.
     Sanitizer {
         sanitizer: SanitizerName,
         source: RawResultDigest,
         derived: ValueBody,
+    },
+    /// An input sanitizer's rewrite of a call's arguments, with the answers the runtime consulted
+    /// for the rewritten call where its arguments select another ordered contract. A rewrite that
+    /// stays in its contract carries the call's own answers and hands nothing in here.
+    Rewrite {
+        sanitizer: SanitizerName,
+        source: RawResultDigest,
+        derived: ValueBody,
+        tool_resolutions: Vec<crate::contract::PinnedToolResolution>,
+        memberships: Vec<crate::contract::PinnedMembership>,
     },
     Cast {
         cast: crate::names::CastName,
@@ -1181,18 +1201,18 @@ impl<'a> Sequence<'a> {
                 }
                 let views = self.projection.view(trajectory);
                 // And its resolver answers, one per binding the contract spells. An opening whose
-                // call an input hop rewrote carries the answers given about the proposal it
-                // descends from, so that proposal is the second call they may be about. Every
-                // opening names the call subject its decision released it for, so a record with
-                // no readable proposal is refused rather than judged on the call alone.
-                let proposal = views
-                    .proposed_call(subject)
+                // call an input hop rewrote within one contract carries the answers given about the
+                // call last consulted, so that call is the one they may be about. Every opening
+                // names the call subject its decision released it for, so a record with no
+                // readable consulted call is refused rather than judged on the call alone.
+                let consulted = views
+                    .consulted_call(subject)
                     .ok_or(TransitionRefusal::ForgedResolution)?;
                 if crate::check::validate_tool_resolutions(
                     self.engine.registry(),
                     contract,
                     &call,
-                    crate::check::AnsweredFor::Proposal(proposal),
+                    crate::check::AnsweredFor::Consulted(consulted),
                 )
                 .is_err()
                 {
@@ -3362,45 +3382,73 @@ impl<'a> Sequence<'a> {
         if expected.as_ref() != Some(lineage) {
             return Err(TransitionRefusal::SanitizerUnapplicable);
         }
-        let contract = self
-            .engine
-            .registry()
+        // The contract the offer was planned on judges the sanitizer's scope and the block the
+        // hop improves; the contract the rewritten arguments select judges the rewrite. The
+        // persisted ordinal is checked against a fresh selection, never taken on the record's word.
+        let registry = self.engine.registry();
+        let before_contract = registry
             .contract(predecessor)
             .ok_or_else(|| TransitionRefusal::UnknownTool(predecessor.tool().as_str().to_string()))?;
+        if !registry.selection_matches(call) {
+            return Err(TransitionRefusal::SanitizerUnapplicable);
+        }
+        let contract = registry
+            .contract(call)
+            .ok_or_else(|| TransitionRefusal::UnknownTool(call.tool().as_str().to_string()))?;
         contract
             .parameters
             .validate(call.arguments())
             .map_err(TransitionRefusal::InvalidPayload)?;
-        if call != &predecessor.substituting(call.canonical_arguments().clone()) {
-            return Err(TransitionRefusal::ForgedLabel);
-        }
-        if !self.engine.registry().selection_matches(call) {
-            return Err(TransitionRefusal::SanitizerUnapplicable);
-        }
-        // The predecessor comparison binds *which* answers this rewrite carries; this binds what
-        // they may be about — the proposal a resolver was asked about, on the record.
-        let proposal = views.proposed_call(subject).ok_or(TransitionRefusal::UnbackedOffer)?;
-        if crate::check::validate_tool_resolutions(
-            self.engine.registry(),
-            contract,
-            call,
-            crate::check::AnsweredFor::Proposal(proposal),
-        )
-        .is_err()
-        {
-            return Err(TransitionRefusal::SanitizerUnapplicable);
+        if call.contract_id() == predecessor.contract_id() {
+            // A rewrite that stays in its contract carries its predecessor's answers exactly; the
+            // comparison binds *which* answers, and the consulted call on the record binds what
+            // they may be about.
+            if call != &predecessor.substituting(call.canonical_arguments().clone()) {
+                return Err(TransitionRefusal::ForgedLabel);
+            }
+            let consulted = views.consulted_call(subject).ok_or(TransitionRefusal::UnbackedOffer)?;
+            if crate::check::validate_tool_resolutions(
+                registry,
+                contract,
+                call,
+                crate::check::AnsweredFor::Consulted(consulted),
+            )
+            .is_err()
+            {
+                return Err(TransitionRefusal::SanitizerUnapplicable);
+            }
+        } else {
+            // A rewrite that selects another contract is a new call under it: its answers are
+            // about its own arguments, and every group its placeholders spell is pinned, exactly
+            // as a proposal's are.
+            if crate::check::validate_tool_resolutions(registry, contract, call, crate::check::AnsweredFor::ThisCall)
+                .is_err()
+            {
+                return Err(TransitionRefusal::ForgedResolution);
+            }
+            if crate::check::validate_memberships(contract, call).is_err()
+                || crate::check::pins_agree(contract, call, expansions).is_err()
+            {
+                return Err(TransitionRefusal::ForgedMembership);
+            }
         }
 
         let stage = views.call_stage(subject);
         let derived = registered
-            .derive_input(&stage.released(&views.current_label()), &contract.tags, expansions)
+            .derive_input(
+                &stage.released(&views.current_label()),
+                &before_contract.tags,
+                expansions,
+            )
             .ok_or(TransitionRefusal::SanitizerUnapplicable)?;
         if label != &derived {
             return Err(TransitionRefusal::ForgedLabel);
         }
-        // The check the hop improves reads the callee's declared groups.
+        // The check the hop improves reads the callee's declared groups, on both sides.
+        required(expansions, before_contract.groups())?;
         required(expansions, contract.groups())?;
-        let CheckOutcome::Block(before) = crate::check::evaluate(contract, &views, predecessor, &stage, expansions)
+        let CheckOutcome::Block(before) =
+            crate::check::evaluate(before_contract, &views, predecessor, &stage, expansions)
         else {
             return Err(TransitionRefusal::UnbackedOffer);
         };

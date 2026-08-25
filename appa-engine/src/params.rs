@@ -811,8 +811,10 @@ impl CanonicalArguments {
         Self::from_raw_unchecked(bytes)
     }
 
-    /// The engine construction path: one raw JSON object, strictly scanned and
-    /// schema-validated.
+    /// One raw JSON object, strictly scanned and schema-validated against one contract. The
+    /// engine selects the contract first and validates through [`ToolParameters::validate`]; this
+    /// is the test fixture path.
+    #[cfg(test)]
     pub(crate) fn from_raw(bytes: &[u8], parameters: &ToolParameters) -> Result<Self, ArgumentError> {
         let unchecked = Self::from_raw_unchecked(bytes)?;
         parameters.validate(&unchecked.value)?;

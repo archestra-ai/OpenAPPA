@@ -102,6 +102,11 @@ pub(crate) struct RecordedCandidate {
     pub(crate) via: crate::candidate::DerivedVia,
     pub(crate) derived: DerivedCandidate,
     pub(crate) lineage: SanitizerLineage,
+    /// The rewritten call the resolvers were last consulted about, where an input hop selected
+    /// another ordered contract on the way to this candidate. `None` where every hop stayed in
+    /// the proposal's contract — the proposal is then the call consulted — or where the fold met
+    /// no standing call to compare against.
+    pub(crate) consulted: Option<ResolvedCall>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -216,6 +221,26 @@ pub struct Projection {
     offers: BTreeMap<crate::value::OfferId, RecordedOffer>,
     approvals: BTreeMap<crate::value::OfferId, PreparedApproval>,
     versions: crate::basis::Versions,
+}
+
+/// The proposal a call subject names in the batches a trajectory decided: the batch it names,
+/// decided by the subject's own trajectory, at the position it names.
+fn proposal_of<'a>(
+    decided: &'a BTreeMap<crate::transition::ProposalBatchId, DecidedBatch>,
+    subject: &SubjectKey,
+) -> Option<&'a ResolvedCall> {
+    let SubjectKey::Call {
+        trajectory,
+        batch,
+        position,
+    } = subject
+    else {
+        return None;
+    };
+    let decided = decided.get(batch)?;
+    (&decided.trajectory == trajectory)
+        .then(|| decided.proposals.get(*position as usize))
+        .flatten()
 }
 
 impl Projection {
@@ -572,12 +597,34 @@ impl Projection {
                             .derivation_unresolved
                             .extend(derivation_unresolved.iter().copied());
                     }
+                    // A rewrite that selects another ordered contract was consulted afresh and
+                    // is the call the answers of every later same-contract rewrite are about;
+                    // one that stays in its contract carries its predecessor's. Read before this
+                    // candidate replaces the one it descends from.
+                    let consulted = match derived {
+                        DerivedCandidate::Call { call, .. } => {
+                            let held = candidates.get(subject);
+                            let standing = held
+                                .and_then(|held| match &held.derived {
+                                    DerivedCandidate::Call { call, .. } => Some(call),
+                                    DerivedCandidate::Result { .. } | DerivedCandidate::Return { .. } => None,
+                                })
+                                .or_else(|| proposal_of(decided, subject));
+                            match standing {
+                                Some(standing) if standing.contract_id() != call.contract_id() => Some(call.clone()),
+                                Some(_) => held.and_then(|held| held.consulted.clone()),
+                                None => None,
+                            }
+                        }
+                        DerivedCandidate::Result { .. } | DerivedCandidate::Return { .. } => None,
+                    };
                     candidates.insert(
                         subject.clone(),
                         RecordedCandidate {
                             via: via.clone(),
                             derived: derived.clone(),
                             lineage: lineage.clone(),
+                            consulted,
                         },
                     );
                 }
@@ -1292,28 +1339,30 @@ impl Views<'_> {
         }
     }
 
-    /// The call this subject was proposed as, before any input hop rewrote it. A resolver
-    /// answered about this call and is never asked again, so it is the second call a pinned
-    /// answer may be admitted for — see [`crate::check::validate_tool_resolutions`]. `None`
-    /// wherever the record does not name one, which fails the pin closed: a subject that is
-    /// not a call's, a batch this view's trajectory did not decide, or a position that batch
-    /// does not hold.
+    /// The call this subject was proposed as, before any input hop rewrote it. `None` wherever
+    /// the record does not name one: a subject that is not a call's, a batch this view's
+    /// trajectory did not decide, or a position that batch does not hold.
     pub(crate) fn proposed_call(&self, subject: &SubjectKey) -> Option<&ResolvedCall> {
-        let SubjectKey::Call {
-            trajectory,
-            batch,
-            position,
-        } = subject
-        else {
+        let SubjectKey::Call { trajectory, .. } = subject else {
             return None;
         };
         if trajectory != self.trajectory() {
             return None;
         }
-        let decided = self.decided_batch(batch)?;
-        (&decided.trajectory == trajectory)
-            .then(|| decided.proposals.get(*position as usize))
-            .flatten()
+        proposal_of(&self.projection.decided, subject)
+    }
+
+    /// The call this subject's resolvers were last consulted about: the proposal, or the latest
+    /// input hop whose rewrite selected another ordered contract. A same-contract rewrite carries
+    /// that call's answers without consulting again, so it is the call those answers may be about —
+    /// see [`crate::check::validate_tool_resolutions`]. `None` wherever the record does not name
+    /// one, which fails the pin closed.
+    pub(crate) fn consulted_call(&self, subject: &SubjectKey) -> Option<&ResolvedCall> {
+        self.projection
+            .candidates
+            .get(subject)
+            .and_then(|held| held.consulted.as_ref())
+            .or_else(|| self.proposed_call(subject))
     }
 
     /// The call this subject stands on now: the candidate an input hop derived, or the proposal

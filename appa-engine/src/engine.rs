@@ -341,15 +341,10 @@ impl Engine {
         }
         match &recorded.subject {
             crate::basis::SubjectKey::Call { .. } => match recorded.plan.hop() {
-                Some(sanitizer) => {
-                    let call = self.offer_call(&views, recorded);
-                    let arguments = call.canonical_arguments();
-                    Ok(OfferConsult::Sanitizer {
-                        sanitizer: sanitizer.clone(),
-                        source: crate::value::RawResultDigest::of(arguments.canonical_bytes()),
-                        body: ValueBody::new(arguments.canonical_text()),
-                    })
-                }
+                Some(sanitizer) => Ok(OfferConsult::Rewrite {
+                    sanitizer: sanitizer.clone(),
+                    call: self.offer_call(&views, recorded),
+                }),
                 None if recorded.plan.required.is_empty() => Ok(OfferConsult::Accept),
                 None => Ok(OfferConsult::Authorities {
                     call: self.offer_call(&views, recorded),
@@ -1348,7 +1343,10 @@ impl Engine {
                                 source,
                                 derived,
                             } if named == &sanitizer && source == &raw_digest => Some(derived.clone()),
-                            Evidence::Sanitizer { .. } | Evidence::Cast { .. } | Evidence::PendingCast { .. } => None,
+                            Evidence::Sanitizer { .. }
+                            | Evidence::Rewrite { .. }
+                            | Evidence::Cast { .. }
+                            | Evidence::PendingCast { .. } => None,
                         });
                         let Some(derived) = derived else {
                             let append = self.checkpoint_batch(view, &views, dispatch, &call, raw_digest)?;
@@ -2316,8 +2314,20 @@ impl Engine {
         recorded: &[DispatchId],
         expansions: &Expansions,
     ) -> Result<FollowUp, TransitionError> {
+        let subject_at = |position: usize| crate::basis::SubjectKey::Call {
+            trajectory: batch.trajectory.clone(),
+            batch: batch.id.clone(),
+            position: position as u32,
+        };
+        // The call each position is about now: the candidate an input hop derived, under the
+        // contract its own arguments select, or the proposal.
+        let standing: Vec<&ResolvedCall> = proposals
+            .iter()
+            .enumerate()
+            .map(|(position, call)| views.call_candidate(&subject_at(position)).unwrap_or(call))
+            .collect();
         expansions.require(
-            proposals
+            standing
                 .iter()
                 .filter_map(|call| self.registry.contract(call))
                 .flat_map(ToolContract::groups),
@@ -2328,7 +2338,6 @@ impl Engine {
         let mut settled = Vec::new();
         let mut next = recorded.iter().peekable();
         for (position, call) in proposals.iter().enumerate() {
-            let contract = self.validated_contract(call)?;
             match next.next_if(|dispatch| views.dispatch_call(dispatch) == Some(call)) {
                 // Only a dispatch still awaiting its result may be handed back for invocation.
                 Some(dispatch) if views.is_open(dispatch) && !views.is_succeeded(dispatch) => released.push(Released {
@@ -2344,16 +2353,13 @@ impl Engine {
                     });
                 }
                 None => {
-                    let subject = crate::basis::SubjectKey::Call {
-                        trajectory: batch.trajectory.clone(),
-                        batch: batch.id.clone(),
-                        position: position as u32,
-                    };
+                    let subject = subject_at(position);
                     // An input hop the agent has since run replaced this proposal, so the call
                     // this position is about now is the candidate, and the check reads its
                     // substitution. Its offers are the ones already pending on
                     // the same subject, which is why the two must be reported together.
-                    let candidate = views.call_candidate(&subject).unwrap_or(call).clone();
+                    let candidate = standing[position].clone();
+                    let contract = self.validated_contract(&candidate)?;
                     let stage = views.call_stage(&subject);
                     match check::evaluate(contract, views, &candidate, &stage, expansions) {
                         CheckOutcome::Block(raw) => {
@@ -2964,11 +2970,12 @@ impl Engine {
     /// One input-substitution progress hop.
     ///
     /// The sanitizer read the engine's own canonical argument bytes and returned one complete
-    /// replacement object. Its bytes are untrusted: the engine strictly parses them, schema-checks
-    /// them against the selected contract's parameters, verifies that its arguments still select
-    /// that contract, constructs the canonical arguments itself, and only then has a call to
-    /// measure. Nothing about the replacement is taken on the runtime's word, and the tool is never
-    /// replaced.
+    /// replacement object. Its bytes are untrusted: the engine strictly parses them, selects the
+    /// ordered contract their arguments name, schema-checks them against that contract's
+    /// parameters, constructs the canonical arguments itself, and only then has a call to measure.
+    /// Nothing about the replacement is taken on the runtime's word, and the tool is never
+    /// replaced. The sanitizer's scope and the block it improves are judged on the contract the
+    /// offer was planned on; the rewritten call is judged on the contract it selects.
     ///
     /// A valid strictly helpful replacement commits as the next candidate on this subject and ends
     /// every sibling offer standing on its predecessor. The engine then re-checks it: where nothing
@@ -2994,10 +3001,12 @@ impl Engine {
         if !raw.unestablished.is_empty() {
             return Err(PlanError::Unestablished(raw.unestablished.clone()).into());
         }
-        let Evidence::Sanitizer {
+        let Evidence::Rewrite {
             sanitizer: named,
             source,
             derived: body,
+            tool_resolutions,
+            memberships,
         } = evidence
         else {
             return Err(TransitionError::EvidenceMismatch);
@@ -3016,22 +3025,16 @@ impl Engine {
             .lineage()
             .extend(sanitizer.clone())
             .ok_or(TransitionError::SanitizerUnapplicable)?;
-        let substituted = substituted_call(&self.registry, contract, call, body)?;
-        // The rewrite carries the answers a resolver gave about the proposal this subject stands
-        // on; they are admissible here because that proposal is on the record.
-        let proposal = views
-            .proposed_call(&recorded.subject)
-            .ok_or(TransitionError::SanitizerUnapplicable)?;
-        if check::validate_tool_resolutions(
+        let (substituted, contract) = substituted_call(
             &self.registry,
-            contract,
-            &substituted,
-            check::AnsweredFor::Proposal(proposal),
-        )
-        .is_err()
-        {
-            return Err(TransitionError::SanitizerUnapplicable);
-        }
+            views,
+            &recorded.subject,
+            call,
+            body,
+            tool_resolutions,
+            memberships,
+        )?;
+        expansions.require(contract.groups())?;
 
         let next = CallStage::substituting(label.clone(), lineage.clone());
         let after = check::evaluate(contract, views, &substituted, &next, expansions);
@@ -3165,7 +3168,7 @@ impl Engine {
         use crate::projection::OfferEnd;
         if let crate::basis::SubjectKey::ConfinedResult(dispatch) = &recorded.subject {
             return match (end, &execution.outcome, recorded.plan.hop()) {
-                (OfferEnd::Accepted, OfferOutcome::Derived(_), Some(_))
+                (OfferEnd::Accepted, OfferOutcome::Derived(Evidence::Sanitizer { .. }), Some(_))
                 | (OfferEnd::Accepted, OfferOutcome::Approved(_), None) => Ok(EngineDecision {
                     append: None,
                     follow_up: FollowUp::Offer(self.confined_repeat(views, dispatch)),
@@ -3174,15 +3177,17 @@ impl Engine {
                     append: None,
                     follow_up: FollowUp::Offer(OfferFollowUp::Invalidated),
                 }),
-                (_, OfferOutcome::Derived(_), None) | (_, OfferOutcome::Approved(_), Some(_)) => {
-                    Err(TransitionError::PlanOutcomeMismatch)
-                }
+                (OfferEnd::Accepted, OfferOutcome::Derived(_), Some(_))
+                | (_, OfferOutcome::Derived(_), None)
+                | (_, OfferOutcome::Approved(_), Some(_)) => Err(TransitionError::PlanOutcomeMismatch),
                 _ => Err(TransitionError::TerminalOffer),
             };
         }
         if let crate::basis::SubjectKey::Return(id) = &recorded.subject {
             return match (end, &execution.outcome, recorded.plan.hop()) {
-                (OfferEnd::Accepted, OfferOutcome::Derived(_), Some(name)) if !name.is_attest_schema() => {
+                (OfferEnd::Accepted, OfferOutcome::Derived(Evidence::Sanitizer { .. }), Some(name))
+                    if !name.is_attest_schema() =>
+                {
                     Ok(EngineDecision {
                         append: None,
                         follow_up: FollowUp::Offer(self.return_repeat(views, id)),
@@ -3213,10 +3218,11 @@ impl Engine {
         }
         if recorded.plan.hop().is_some() {
             return match (end, &execution.outcome) {
-                (OfferEnd::Accepted, OfferOutcome::Derived(_)) => Ok(EngineDecision {
+                (OfferEnd::Accepted, OfferOutcome::Derived(Evidence::Rewrite { .. })) => Ok(EngineDecision {
                     append: None,
                     follow_up: FollowUp::Offer(self.substituted_repeat(views, recorded, execution, expansions)?),
                 }),
+                (OfferEnd::Accepted, OfferOutcome::Derived(_)) => Err(TransitionError::PlanOutcomeMismatch),
                 (OfferEnd::Invalidated, _) => Ok(EngineDecision {
                     append: None,
                     follow_up: FollowUp::Offer(OfferFollowUp::Invalidated),
@@ -3517,16 +3523,7 @@ impl Engine {
         if !self.registry.contains_tool(&tool) {
             return Err(contract_for(&self.registry, &tool).unwrap_err());
         }
-        let parsed = CanonicalArguments::parse(raw_arguments).map_err(EngineError::InvalidCall)?;
-        let (id, contract) = self
-            .registry
-            .select_tool(&tool, parsed.value())
-            .ok_or(EngineError::InvalidCall(ArgumentError::NoMatchingContract))?;
-        contract
-            .parameters
-            .validate(parsed.value())
-            .map_err(EngineError::InvalidCall)?;
-        Ok(ResolvedCall::new_keyed(tool, id, parsed))
+        select_call(&self.registry, tool, raw_arguments).map(|(call, _)| call)
     }
 
     /// Evaluate a proposed call: allow, or block carrying everything that stopped it at once —
@@ -3615,19 +3612,95 @@ fn crossed(facts: &[Fact]) -> ValueBody {
         .expect("a candidate's admission carries the value that crossed")
 }
 
-fn substituted_call(
-    registry: &Registry,
-    contract: &ToolContract,
+/// Strict JSON scanning, ordered-contract selection on the parsed arguments, schema validation
+/// against the selected contract, and RFC 8785 rendering, together: the one way a call is minted
+/// from raw argument bytes, whether a provider proposed them or a sanitizer derived them.
+fn select_call<'a>(
+    registry: &'a Registry,
+    tool: ToolName,
+    raw_arguments: &[u8],
+) -> Result<(ResolvedCall, &'a ToolContract), EngineError> {
+    let parsed = CanonicalArguments::parse(raw_arguments).map_err(EngineError::InvalidCall)?;
+    let (id, contract) = registry
+        .select_tool(&tool, parsed.value())
+        .ok_or(EngineError::InvalidCall(ArgumentError::NoMatchingContract))?;
+    contract
+        .parameters
+        .validate(parsed.value())
+        .map_err(EngineError::InvalidCall)?;
+    Ok((ResolvedCall::new_keyed(tool, id, parsed), contract))
+}
+
+/// The call a sanitizer's replacement renders, under the ordered contract its arguments select.
+///
+/// A rewrite that stays in its contract carries the answers the call it replaces carries, given
+/// about the call last consulted on the record; the runtime consulted nothing and hands nothing
+/// in. A rewrite that selects another contract is a new call under it: nothing rides along, and
+/// the answers the runtime consulted about the rewritten arguments are judged as a proposal's are.
+fn substituted_call<'a>(
+    registry: &'a Registry,
+    views: &Views,
+    subject: &crate::basis::SubjectKey,
     call: &ResolvedCall,
     body: &ValueBody,
-) -> Result<ResolvedCall, TransitionError> {
-    let arguments = crate::params::CanonicalArguments::from_raw(body.as_str().as_bytes(), &contract.parameters)
-        .map_err(|error| TransitionError::Call(EngineError::InvalidCall(error)))?;
-    let substituted = call.substituting(arguments);
-    if !registry.selection_matches(&substituted) {
-        return Err(TransitionError::SanitizerUnapplicable);
+    tool_resolutions: &[crate::contract::PinnedToolResolution],
+    memberships: &[crate::contract::PinnedMembership],
+) -> Result<(ResolvedCall, &'a ToolContract), TransitionError> {
+    let (rewritten, contract) =
+        select_call(registry, call.tool().clone(), body.as_str().as_bytes()).map_err(TransitionError::Call)?;
+    if rewritten.contract_id() == call.contract_id() {
+        if !tool_resolutions.is_empty() || !memberships.is_empty() {
+            return Err(TransitionError::EvidenceMismatch);
+        }
+        let substituted = call.substituting(rewritten.canonical_arguments().clone());
+        let consulted = views
+            .consulted_call(subject)
+            .ok_or(TransitionError::SanitizerUnapplicable)?;
+        if check::validate_tool_resolutions(
+            registry,
+            contract,
+            &substituted,
+            check::AnsweredFor::Consulted(consulted),
+        )
+        .is_err()
+        {
+            return Err(TransitionError::SanitizerUnapplicable);
+        }
+        return Ok((substituted, contract));
     }
-    Ok(substituted)
+    let substituted = rewritten
+        .with_tool_resolutions(tool_resolutions.to_vec())
+        .with_memberships(memberships.to_vec());
+    match check::validate_memberships(contract, &substituted) {
+        Ok(()) => {}
+        Err(check::MembershipRefusal::Needed(reads)) => {
+            let mut needed: Vec<_> = reads.into_iter().map(|read| read.group).collect();
+            needed.sort();
+            needed.dedup();
+            return Err(TransitionError::MembershipNeeded { needed });
+        }
+        Err(check::MembershipRefusal::Foreign(argument)) => {
+            return Err(TransitionError::ForeignMembership { argument });
+        }
+    }
+    match check::validate_tool_resolutions(registry, contract, &substituted, check::AnsweredFor::ThisCall) {
+        Ok(()) => {}
+        Err(check::ToolResolutionRefusal::Needed(bindings)) => {
+            let mut resolvers: Vec<String> = bindings
+                .into_iter()
+                .map(|binding| binding.resolver.as_str().to_string())
+                .collect();
+            resolvers.dedup();
+            return Err(TransitionError::ToolResolutionNeeded { resolvers });
+        }
+        Err(check::ToolResolutionRefusal::Foreign(resolver)) => {
+            return Err(TransitionError::ForeignToolResolution { resolver });
+        }
+        Err(check::ToolResolutionRefusal::OutsidePolicy(resolver)) => {
+            return Err(TransitionError::InvalidToolResolution { resolver });
+        }
+    }
+    Ok((substituted, contract))
 }
 
 fn invalidated_siblings(
@@ -3707,6 +3780,15 @@ fn replay_outcome(recorded: &crate::projection::RecordedOffer, end: &crate::proj
             authority: authority.clone(),
         },
         OfferEnd::Accepted => match recorded.plan.hop() {
+            Some(sanitizer) if matches!(recorded.subject, crate::basis::SubjectKey::Call { .. }) => {
+                OfferOutcome::Derived(Evidence::Rewrite {
+                    sanitizer: sanitizer.clone(),
+                    source: RawResultDigest::of(&[]),
+                    derived: ValueBody::new(""),
+                    tool_resolutions: Vec::new(),
+                    memberships: Vec::new(),
+                })
+            }
             Some(sanitizer) if !sanitizer.is_attest_schema() => OfferOutcome::Derived(Evidence::Sanitizer {
                 sanitizer: sanitizer.clone(),
                 source: RawResultDigest::of(&[]),
@@ -5682,10 +5764,9 @@ mod tests {
         let log = [log, facts].concat();
         assert_eq!(
             e.offer_consults(&viewing(&e, &log), &traj(), &input_hop),
-            Ok(OfferConsult::Sanitizer {
+            Ok(OfferConsult::Rewrite {
                 sanitizer: crate::names::SanitizerName::new("redact"),
-                source: crate::value::RawResultDigest::of(br#"{"body":"ssn 123"}"#),
-                body: ValueBody::new(r#"{"body":"ssn 123"}"#),
+                call: proposal,
             }),
         );
     }
@@ -6056,10 +6137,12 @@ mod tests {
     }
 
     fn substitution(call: &ResolvedCall, replacement: &str) -> OfferOutcome {
-        OfferOutcome::Derived(crate::transition::Evidence::Sanitizer {
+        OfferOutcome::Derived(crate::transition::Evidence::Rewrite {
             sanitizer: crate::names::SanitizerName::new("redact"),
             source: crate::value::RawResultDigest::of(call.canonical_arguments().canonical_bytes()),
             derived: ValueBody::new(replacement),
+            tool_resolutions: Vec::new(),
+            memberships: Vec::new(),
         })
     }
 
@@ -11199,36 +11282,63 @@ mod tests {
     }
 
     #[test]
-    fn substitution_cannot_cross_into_another_ordered_contract() {
+    fn a_substitution_that_selects_another_ordered_contract_is_a_new_call_under_it() {
         let e = engine(vec![plain_tool("read(path:safe*)"), plain_tool("read(path:*)")]);
         let selected = e
             .resolve_call(ToolName::new("read"), br#"{"path":"private.txt"}"#)
             .unwrap();
         assert_eq!(selected.contract_id(), crate::value::ToolContractId::new(1).unwrap());
-
-        let rewritten = selected.substituting(crate::params::test_arguments(&json!({ "path": "safe.txt" })));
-        assert_eq!(rewritten.contract_id(), selected.contract_id());
-        assert!(!e.registry.selection_matches(&rewritten));
-        let contract = e.registry.contract(&selected).unwrap();
-        assert!(matches!(
+        let opening = vec![opened(&e)];
+        let facts = appended_facts(proposed(&e, &opening, "b1", nonce(), selected.clone()).expect("the call releases"));
+        let log = [opening, facts].concat();
+        let projection = crate::projection::Projection::build(&log, log.len() as u64);
+        let trajectory = traj();
+        let views = projection.view(&trajectory);
+        let subject = crate::basis::SubjectKey::Call {
+            trajectory: traj(),
+            batch: crate::transition::ProposalBatchId::new("b1"),
+            position: 0,
+        };
+        let rewrite = |body: &str, pins: &[crate::contract::PinnedToolResolution]| {
             substituted_call(
                 &e.registry,
-                contract,
+                &views,
+                &subject,
                 &selected,
-                &ValueBody::new(r#"{"path":"safe.txt"}"#)
-            ),
-            Err(TransitionError::SanitizerUnapplicable)
+                &ValueBody::new(body),
+                pins,
+                &[],
+            )
+        };
+
+        // Arguments that select another contract render a new call under it: the selected
+        // ordinal, nothing carried.
+        let (fresh, contract) = rewrite(r#"{"path":"safe.txt"}"#, &[]).expect("a new call under contract 0");
+        assert_eq!(fresh.contract_id(), crate::value::ToolContractId::new(0).unwrap());
+        assert!(std::ptr::eq(contract, e.registry.contract(&fresh).unwrap()));
+        assert!(fresh.tool_resolutions().is_empty());
+        assert!(
+            !e.registry
+                .selection_matches(&selected.substituting(fresh.canonical_arguments().clone()))
+        );
+
+        // Arguments that stay in the contract render the substitution: the call's own answers
+        // ride along, and nothing may be handed in beside them.
+        let (kept, contract) = rewrite(r#"{"path":"other-private.txt"}"#, &[]).expect("the substitution");
+        assert_eq!(kept, selected.substituting(kept.canonical_arguments().clone()));
+        assert!(std::ptr::eq(contract, e.registry.contract(&selected).unwrap()));
+        assert!(matches!(
+            rewrite(r#"{"path":"other-private.txt"}"#, &[call_pin_for("ssn 123")]),
+            Err(TransitionError::EvidenceMismatch)
         ));
 
-        assert!(
-            substituted_call(
-                &e.registry,
-                contract,
-                &selected,
-                &ValueBody::new(r#"{"path":"other-private.txt"}"#)
-            )
-            .is_ok()
-        );
+        // Arguments no contract selects, or that fail the selected schema, mint nothing.
+        assert!(matches!(
+            rewrite(r#"{"path":7}"#, &[]),
+            Err(TransitionError::Call(EngineError::InvalidCall(
+                ArgumentError::NoMatchingContract
+            )))
+        ));
     }
 
     #[test]
