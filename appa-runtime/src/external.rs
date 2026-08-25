@@ -94,15 +94,43 @@ pub struct ExternalServices {
     timeout: Duration,
     max_body_bytes: usize,
     backends: BTreeMap<ConsultKind, BTreeMap<String, Backend>>,
-    /// The per-runtime gate on concurrent claude consults, shared by every deployment
-    /// snapshot the runtime serves.
-    claude_permits: Arc<tokio::sync::Semaphore>,
+    gates: ConsultGates,
+}
+
+/// How many claude-code consults may run at once across a runtime — a subprocess whose
+/// cost is a full model call, so the gate is fixed and small.
+const CLAUDE_CONSULT_PERMITS: usize = 4;
+
+/// How many `command` consults may run at once across a runtime: every trajectory's
+/// pending consults fan out together, and each is a process.
+const COMMAND_CONSULT_PERMITS: usize = 8;
+
+/// The per-runtime gates on consults that cost a process, shared by every deployment
+/// snapshot the runtime serves: a reload's old and new snapshots contend on the same
+/// permits.
+#[derive(Clone)]
+pub(crate) struct ConsultGates {
+    claude: Arc<tokio::sync::Semaphore>,
+    command: Arc<tokio::sync::Semaphore>,
+}
+
+impl ConsultGates {
+    pub(crate) fn per_runtime() -> ConsultGates {
+        ConsultGates::of(CLAUDE_CONSULT_PERMITS, COMMAND_CONSULT_PERMITS)
+    }
+
+    fn of(claude: usize, command: usize) -> ConsultGates {
+        ConsultGates {
+            claude: Arc::new(tokio::sync::Semaphore::new(claude)),
+            command: Arc::new(tokio::sync::Semaphore::new(command)),
+        }
+    }
 }
 
 impl ExternalServices {
     #[cfg(test)]
     pub(crate) fn claude_permits(&self) -> &Arc<tokio::sync::Semaphore> {
-        &self.claude_permits
+        &self.gates.claude
     }
 
     /// Resolves every configured `builtin` reference against the stock
@@ -114,7 +142,7 @@ impl ExternalServices {
     pub fn new(
         config: Externals,
         registry: &ModuleRegistry,
-        claude_permits: Arc<tokio::sync::Semaphore>,
+        gates: ConsultGates,
     ) -> Result<ExternalServices, ModulesError> {
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -160,7 +188,7 @@ impl ExternalServices {
             timeout: config.timeout,
             max_body_bytes: config.max_body_bytes,
             backends,
-            claude_permits,
+            gates,
         })
     }
 
@@ -218,8 +246,21 @@ impl ExternalServices {
         consult: &Consult,
     ) -> Result<serde_json::Value, NoAnswerReason> {
         let input = serde_json::to_vec(consult).map_err(|_| NoAnswerReason::Malformed)?;
-        let output = run_command(command, input, self.timeout, self.max_body_bytes).await?;
-        read_answer(&output)
+        // As for claude: one deadline covers the permit wait and the process.
+        let deadline = tokio::time::Instant::now() + self.timeout;
+        let permit = match tokio::time::timeout_at(deadline, self.gates.command.acquire()).await {
+            Ok(permit) => permit.expect("the command consult gate is never closed"),
+            Err(_) => {
+                tracing::warn!(
+                    name = consult.name,
+                    "the command consult gate stayed saturated for the whole budget"
+                );
+                return Err(NoAnswerReason::Timeout);
+            }
+        };
+        let output = run_command(command, input, deadline, self.max_body_bytes).await;
+        drop(permit);
+        read_answer(&output?)
     }
 
     async fn consult_claude(
@@ -234,7 +275,7 @@ impl ExternalServices {
         // gate spends the same budget the consult itself would, so a saturated pool
         // cannot stack timeout waves.
         let deadline = tokio::time::Instant::now() + claude.timeout;
-        let permit = match tokio::time::timeout_at(deadline, self.claude_permits.acquire()).await {
+        let permit = match tokio::time::timeout_at(deadline, self.gates.claude.acquire()).await {
             Ok(permit) => permit.expect("the claude consult gate is never closed"),
             Err(_) => {
                 tracing::warn!(
@@ -359,10 +400,9 @@ fn builtin_backend(
 async fn run_command(
     command: &ResolverCommand,
     input: Vec<u8>,
-    timeout: Duration,
+    deadline: tokio::time::Instant,
     max_body_bytes: usize,
 ) -> Result<Vec<u8>, NoAnswerReason> {
-    let deadline = tokio::time::Instant::now() + timeout;
     let (cancel, cancelled) = tokio::sync::oneshot::channel();
     let command = command.clone();
     let task =
@@ -379,7 +419,7 @@ async fn run_command(
 async fn run_command(
     _command: &ResolverCommand,
     _input: Vec<u8>,
-    _timeout: Duration,
+    _deadline: tokio::time::Instant,
     _max_body_bytes: usize,
 ) -> Result<Vec<u8>, NoAnswerReason> {
     Err(NoAnswerReason::Unregistered)
@@ -409,15 +449,33 @@ impl Drop for CommandTask {
     }
 }
 
+/// A consult's subprocess, spawned into its own process group, and the promise that the
+/// group ends with the consult: every outcome, and a dropped future, terminate it.
 #[cfg(unix)]
-struct CommandProcess {
+pub(crate) struct CommandProcess {
     child: Option<tokio::process::Child>,
     process_group: Option<i32>,
 }
 
 #[cfg(unix)]
 impl CommandProcess {
-    fn child_mut(&mut self) -> &mut tokio::process::Child {
+    /// Adopt a child spawned into a fresh process group; its pid is the group id.
+    pub(crate) fn spawned(child: tokio::process::Child) -> Result<CommandProcess, NoAnswerReason> {
+        let process_group = child
+            .id()
+            .and_then(|pid| i32::try_from(pid).ok())
+            .ok_or(NoAnswerReason::Transport)?;
+        Ok(CommandProcess {
+            child: Some(child),
+            process_group: Some(process_group),
+        })
+    }
+
+    pub(crate) fn process_group(&self) -> i32 {
+        self.process_group.expect("a live command process owns its group")
+    }
+
+    pub(crate) fn child_mut(&mut self) -> &mut tokio::process::Child {
         self.child.as_mut().expect("a live command process owns its child")
     }
 
@@ -427,12 +485,14 @@ impl CommandProcess {
         }
     }
 
-    async fn terminate_and_reap(&mut self) -> Result<std::process::ExitStatus, NoAnswerReason> {
+    pub(crate) async fn terminate_and_reap(&mut self) -> Result<std::process::ExitStatus, NoAnswerReason> {
         self.terminate_group();
         self.child_mut().wait().await.map_err(|_| NoAnswerReason::Transport)
     }
 
-    fn terminate_and_reap_later(mut self) {
+    /// Do not let a child stuck in uninterruptible I/O extend the caller's deadline: the
+    /// group is ended now, and a detached task keeps the reaping responsibility.
+    pub(crate) fn terminate_and_reap_later(mut self) {
         self.terminate_group();
         let Some(mut child) = self.child.take() else {
             return;
@@ -546,14 +606,8 @@ async fn run_command_process(
     }
 
     let child = configured.spawn().map_err(|_| NoAnswerReason::Unreachable)?;
-    let process_group = child
-        .id()
-        .and_then(|pid| i32::try_from(pid).ok())
-        .ok_or(NoAnswerReason::Transport)?;
-    let mut process = CommandProcess {
-        child: Some(child),
-        process_group: Some(process_group),
-    };
+    let mut process = CommandProcess::spawned(child)?;
+    let process_group = process.process_group();
     let outcome = {
         let exchange = exchange_with_child(process.child_mut(), process_group, &input, max_body_bytes);
         tokio::select! {
@@ -573,8 +627,6 @@ async fn run_command_process(
             }
         }
         Err(reason) => {
-            // Do not let a child stuck in uninterruptible I/O extend the caller's deadline.
-            // The detached task retains reaping responsibility after the group is killed.
             process.terminate_and_reap_later();
             Err(reason)
         }
@@ -696,12 +748,8 @@ mod tests {
     }
 
     fn services_over(config: Externals) -> ExternalServices {
-        ExternalServices::new(
-            config,
-            &ModuleRegistry::empty(),
-            Arc::new(tokio::sync::Semaphore::new(4)),
-        )
-        .expect("no builtin references are configured")
+        ExternalServices::new(config, &ModuleRegistry::empty(), ConsultGates::of(4, 8))
+            .expect("no builtin references are configured")
     }
 
     fn services(url: Option<String>, timeout_ms: u64, cap: usize) -> ExternalServices {
@@ -893,6 +941,11 @@ mod tests {
 
     #[cfg(unix)]
     fn command_services(dir: &std::path::Path, script: &str, timeout_ms: u64, cap: usize) -> ExternalServices {
+        services_over(command_config(dir, script, timeout_ms, cap))
+    }
+
+    #[cfg(unix)]
+    fn command_config(dir: &std::path::Path, script: &str, timeout_ms: u64, cap: usize) -> Externals {
         std::fs::write(dir.join("resolver.sh"), script).expect("the resolver script writes");
         let mut config = externals(None, timeout_ms, cap);
         let command = |name: &str| {
@@ -910,7 +963,38 @@ mod tests {
         };
         config.dynamic.extend([command("classifier")]);
         config.authorities.extend([command("security")]);
-        services_over(config)
+        config
+    }
+
+    /// Three commands that each sleep 200ms: behind a one-permit gate they run one after
+    /// another; behind the runtime's gate they run together.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_consults_queue_behind_the_runtime_gate() {
+        let dir = tempfile::tempdir().expect("a fixture directory is created");
+        let script = "sleep 0.2\nprintf '%s' '{\"version\":1,\"answer\":{\"delta.trust\":\"trusted\"}}'";
+        for (command_permits, at_least, at_most) in [(1, 600, 5000), (8, 0, 500)] {
+            let services = ExternalServices::new(
+                command_config(dir.path(), script, 5000, 1024),
+                &ModuleRegistry::empty(),
+                ConsultGates::of(4, command_permits),
+            )
+            .expect("no builtin references are configured");
+            let started = std::time::Instant::now();
+            let outcomes = tokio::join!(
+                resolve_command(&services),
+                resolve_command(&services),
+                resolve_command(&services)
+            );
+            let elapsed = started.elapsed();
+            for outcome in [outcomes.0, outcomes.1, outcomes.2] {
+                assert!(matches!(outcome, ConsultOutcome::Answer(_)), "{outcome:?}");
+            }
+            assert!(
+                elapsed >= Duration::from_millis(at_least) && elapsed < Duration::from_millis(at_most),
+                "{command_permits} permits took {elapsed:?}"
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -1140,6 +1224,32 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         assert_process_gone(pid).await;
     }
 
+    /// Dropping the future that awaits a claude consult — a client gone, a runtime
+    /// stopping — still ends the consult's process group.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_cancelled_claude_consult_takes_its_descendants_down() {
+        let dir = tempfile::tempdir().expect("a fixture directory is created");
+        let pid_file = dir.path().join("descendant.pid");
+        let command = fake_claude(
+            dir.path(),
+            &format!(
+                "cat > /dev/null\nsleep 30 >/dev/null 2>&1 &\necho $! > {}\nwait",
+                pid_file.display()
+            ),
+        );
+        let backend = claude_backend(command, 10_000, 65_536);
+        let prompt = ModelPrompt::new(&dynamic_consult("review", serde_json::json!({}))).expect("renders");
+        let consult = tokio::spawn(async move {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            run_claude_code(&backend, &prompt, deadline).await
+        });
+        let pid = recorded_pid(&pid_file).await;
+        consult.abort();
+        let _ = consult.await;
+        assert_process_gone(pid).await;
+    }
+
     /// Split the fake claude's NUL-separated argument capture.
     fn captured_args(path: &std::path::Path) -> Vec<String> {
         let raw = std::fs::read(path).expect("the fake captured arguments");
@@ -1320,11 +1430,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             Implementation::Builtin(CLAUDE_CODE_BUILTIN.to_string()),
         );
         assert!(matches!(
-            ExternalServices::new(
-                config,
-                &ModuleRegistry::empty(),
-                Arc::new(tokio::sync::Semaphore::new(4))
-            ),
+            ExternalServices::new(config, &ModuleRegistry::empty(), ConsultGates::of(4, 8)),
             Err(ModulesError::UnknownBuiltin {
                 section: "membership",
                 ..
@@ -1389,11 +1495,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             .membership
             .insert("judge".to_string(), Implementation::Builtin(LLM_BUILTIN.to_string()));
         assert!(matches!(
-            ExternalServices::new(
-                config,
-                &ModuleRegistry::empty(),
-                Arc::new(tokio::sync::Semaphore::new(4))
-            ),
+            ExternalServices::new(config, &ModuleRegistry::empty(), ConsultGates::of(4, 8)),
             Err(ModulesError::UnknownBuiltin {
                 section: "membership",
                 ..
@@ -1610,11 +1712,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         config
             .authorities
             .insert("auto".to_string(), Implementation::Builtin("no-such".to_string()));
-        match ExternalServices::new(
-            config,
-            &ModuleRegistry::empty(),
-            Arc::new(tokio::sync::Semaphore::new(4)),
-        ) {
+        match ExternalServices::new(config, &ModuleRegistry::empty(), ConsultGates::of(4, 8)) {
             Err(ModulesError::UnknownBuiltin { section, name, builtin }) => {
                 assert_eq!(
                     (section, name.as_str(), builtin.as_str()),
@@ -1642,11 +1740,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
                 _ => &mut config.dynamic,
             };
             table.insert("x".to_string(), Implementation::Builtin(builtin.to_string()));
-            match ExternalServices::new(
-                config,
-                &ModuleRegistry::empty(),
-                Arc::new(tokio::sync::Semaphore::new(4)),
-            ) {
+            match ExternalServices::new(config, &ModuleRegistry::empty(), ConsultGates::of(4, 8)) {
                 Err(ModulesError::UnknownBuiltin { section: refused, .. }) => assert_eq!(refused, section),
                 Err(other) => panic!("{section}/{builtin} must refuse as unknown, got {other}"),
                 Ok(_) => panic!("{section}/{builtin} must refuse"),
@@ -1712,8 +1806,8 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         config
             .authorities
             .insert("auto".to_string(), Implementation::Builtin(implementation.to_string()));
-        let services = ExternalServices::new(config, &registry, Arc::new(tokio::sync::Semaphore::new(4)))
-            .expect("the module reference resolves");
+        let services =
+            ExternalServices::new(config, &registry, ConsultGates::of(4, 8)).expect("the module reference resolves");
         (services, dir)
     }
 

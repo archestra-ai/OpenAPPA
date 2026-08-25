@@ -21,7 +21,7 @@ pub(crate) use session::{LateOpen, Session, is_control_tool};
 use crate::config::Config;
 use crate::elicit::Elicitation;
 use crate::engine::{EngineRefusal, Liveness, PolicyEngine, RuntimeEngine};
-use crate::external::ExternalServices;
+use crate::external::{ConsultGates, ExternalServices};
 use appa_eventlog::{Backend, Log, LogStore};
 
 /// One remedy offer as it is quoted and carried.
@@ -257,10 +257,6 @@ impl From<EngineRefusal> for EventError {
     }
 }
 
-/// How many claude-code consults may run at once across this runtime — subprocesses are
-/// the one external whose cost is a full model call, so the gate is fixed and small.
-const CLAUDE_CONSULT_PERMITS: usize = 4;
-
 /// Everything one policy file settles: the file itself, the engine
 /// compiled from it, and the implementations its `[externals]` bind.
 /// A reload replaces the whole value; no field ever changes alone.
@@ -274,11 +270,11 @@ impl Deployment {
     fn load(
         config: Config,
         modules: &crate::builtins::ModuleRegistry,
-        claude_permits: Arc<tokio::sync::Semaphore>,
+        gates: ConsultGates,
     ) -> Result<Deployment, OpenError> {
         let policy = compile_policy(&config)?;
         validate_deployment(&policy, &config.externals)?;
-        let externals = ExternalServices::new(config.externals.clone(), modules, claude_permits)
+        let externals = ExternalServices::new(config.externals.clone(), modules, gates)
             .map_err(|error| OpenError::Modules(error.to_string()))?;
         Ok(Deployment {
             config,
@@ -319,9 +315,9 @@ struct Inner {
     modules: crate::builtins::ModuleRegistry,
     executing: std::sync::Mutex<std::collections::BTreeSet<String>>,
     permits: std::sync::Mutex<std::collections::BTreeMap<String, Vec<Actor>>>,
-    /// One gate for every claude-code consult this runtime runs; deployment reloads clone
-    /// it, so old and new snapshots contend on the same permits.
-    claude_permits: Arc<tokio::sync::Semaphore>,
+    /// The gates every process-costing consult of this runtime passes; deployment reloads
+    /// clone them, so old and new snapshots contend on the same permits.
+    gates: ConsultGates,
 }
 
 impl Inner {
@@ -407,8 +403,8 @@ impl Runtime {
     pub fn open(config: Config, db: PathBuf, modules: Option<PathBuf>) -> Result<Runtime, OpenError> {
         let modules =
             crate::builtins::load(modules.as_deref()).map_err(|error| OpenError::Modules(error.to_string()))?;
-        let claude_permits = Arc::new(tokio::sync::Semaphore::new(CLAUDE_CONSULT_PERMITS));
-        let deployment = Deployment::load(config, &modules, Arc::clone(&claude_permits))?;
+        let gates = ConsultGates::per_runtime();
+        let deployment = Deployment::load(config, &modules, gates.clone())?;
         let store = LogStore::open(Backend::Sqlite { path: db }).map_err(|error| match error {
             appa_eventlog::OpenError::Damaged { path, detail } => OpenError::Damaged(format!("{path}: {detail}")),
             error @ appa_eventlog::OpenError::ForeignSchema { .. } => OpenError::Damaged(error.to_string()),
@@ -422,7 +418,7 @@ impl Runtime {
                 modules,
                 executing: std::sync::Mutex::new(std::collections::BTreeSet::new()),
                 permits: std::sync::Mutex::new(std::collections::BTreeMap::new()),
-                claude_permits,
+                gates,
             }),
         })
     }
@@ -433,7 +429,7 @@ impl Runtime {
     /// learns where a configuration came from, so an embedding host
     /// reloads a composed policy the same way.
     pub fn reload(&self, config: Config) -> Result<Reloaded, OpenError> {
-        let deployment = Deployment::load(config, &self.inner.modules, Arc::clone(&self.inner.claude_permits))?;
+        let deployment = Deployment::load(config, &self.inner.modules, self.inner.gates.clone())?;
         let identity = deployment.resident().identity_hex();
         let deployment = Arc::new(deployment);
         let previous = {
@@ -960,8 +956,8 @@ pub(crate) mod testing {
 
 #[cfg(test)]
 mod deployment_tests {
-    fn test_permits() -> std::sync::Arc<tokio::sync::Semaphore> {
-        std::sync::Arc::new(tokio::sync::Semaphore::new(4))
+    fn test_permits() -> ConsultGates {
+        ConsultGates::per_runtime()
     }
 
     use std::time::Duration;

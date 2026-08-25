@@ -386,7 +386,7 @@ pub(crate) async fn run_claude_code(
     use std::os::unix::process::CommandExt as _;
     use std::process::Stdio;
 
-    use crate::external::{exchange_with_child, kill_process_group};
+    use crate::external::{CommandProcess, exchange_with_child};
 
     let schema = serde_json::to_string(&prompt.schema).map_err(|_| NoAnswerReason::Malformed)?;
     let work = tempfile::tempdir().map_err(|_| NoAnswerReason::Transport)?;
@@ -424,41 +424,37 @@ pub(crate) async fn run_claude_code(
         }
     }
     tracing::debug!("claude consult starts");
-    let mut child = command.spawn().map_err(|_| {
+    let child = command.spawn().map_err(|_| {
         tracing::warn!(command = %backend.command.display(), "the claude executable did not start");
         NoAnswerReason::Unreachable
     })?;
-    let process_group = child
-        .id()
-        .and_then(|pid| i32::try_from(pid).ok())
-        .ok_or(NoAnswerReason::Transport)?;
+    // The guard ends the consult's whole process group on every outcome, a dropped future
+    // included: no helper the CLI spawned outlives the answer.
+    let mut process = CommandProcess::spawned(child)?;
+    let process_group = process.process_group();
     let exchanged = tokio::time::timeout_at(
         deadline,
         exchange_with_child(
-            &mut child,
+            process.child_mut(),
             process_group,
             prompt.input.as_bytes(),
             backend.max_body_bytes,
         ),
     )
     .await;
-    // Every outcome ends the consult's whole process group: no helper the CLI spawned
-    // outlives the answer. On success the child is an unreaped zombie by now, so the
-    // group id is still its own.
-    kill_process_group(process_group);
     let output = match exchanged {
         Ok(Ok(output)) => output,
         Ok(Err(reason)) => {
-            let _ = child.kill().await;
+            process.terminate_and_reap_later();
             return Err(reason);
         }
         Err(_) => {
-            let _ = child.kill().await;
+            process.terminate_and_reap_later();
             tracing::warn!("claude consult timed out and was terminated");
             return Err(NoAnswerReason::Timeout);
         }
     };
-    let status = child.wait().await.map_err(|_| NoAnswerReason::Transport)?;
+    let status = process.terminate_and_reap().await?;
     if !status.success() {
         tracing::debug!(code = ?status.code(), "claude exited without an answer");
         return Err(NoAnswerReason::Transport);

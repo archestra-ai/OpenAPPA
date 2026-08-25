@@ -538,7 +538,7 @@ An entry is `[externals.<kind>.<name>]`, with `<kind>` one of `authorities`, `sa
 | Binding | Serves | Notes |
 |---|---|---|
 | `url = "…"` | every kind | HTTPS anywhere; cleartext `http` only on loopback; no credentials in the URL. `token_env` names an `APPA_*` variable whose value is sent as a bearer token. |
-| `command = ["…", …]` | every kind | Unix only. One JSON consult on standard input, one JSON answer on standard output; no shell; the working folder is that of the file that declares it; bounded by `timeout_ms` and `max_body_bytes`. |
+| `command = ["…", …]` | every kind | Unix only. One JSON consult on standard input, one JSON answer on standard output; no shell; the working folder is that of the file that declares it; bounded by `timeout_ms` and `max_body_bytes`. At most eight run at once per runtime. |
 | `builtin = "hitl"` | authorities | The harness asks a person. |
 | `builtin = "approve"` | authorities | Approves within `permits`. |
 | `builtin = "redact-email"` | sanitizers | Replaces email addresses with a placeholder. |
