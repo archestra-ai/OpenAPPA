@@ -28,7 +28,7 @@ use appa_example_agent::{
     Agent, ArgumentKey, Limits, OpenAiCompatible, Outcome, SpawnTool, ToolCatalogue, ToolName, ToolShim, TranscriptHead,
 };
 use appa_runtime::api::{AuditEntry, AuditEvent, AuditLabel, DispatchOutcome, Runtime, TrajectoryId};
-use appa_runtime::config::{Config, DynamicImplementation, Endpoint, Implementation};
+use appa_runtime::config::{Config, Endpoint, Implementation};
 use clap::Parser;
 use corp_systems::systems::System;
 use corporate_agent_demo::shim::{self, CorpWorld};
@@ -266,24 +266,17 @@ fn install_decision_log() {
 /// which is the right answer for a component nobody is hosting.
 fn bind_hosted_externals(config: &mut Config, origin: &str) -> usize {
     let externals = &mut config.externals;
-    let mut endpoints: Vec<_> = externals
+    let endpoints = externals
         .authorities
         .values_mut()
         .chain(externals.sanitizers.values_mut())
+        .chain(externals.casts.values_mut())
+        .chain(externals.dynamic.values_mut())
+        .chain(externals.membership.values_mut())
         .filter_map(|implementation| match implementation {
             Implementation::Resolver(endpoint) => Some(endpoint),
-            Implementation::Builtin(_) => None,
-        })
-        .collect();
-    endpoints.extend(
-        externals
-            .dynamic
-            .values_mut()
-            .filter_map(|implementation| match implementation {
-                DynamicImplementation::Resolver(endpoint) => Some(endpoint),
-                DynamicImplementation::Command(_) => None,
-            }),
-    );
+            Implementation::Builtin(_) | Implementation::Command(_) => None,
+        });
     let mut bound = 0;
     for endpoint in endpoints {
         let Some(path) = endpoint.url.strip_prefix(UNBOUND_ORIGIN) else {

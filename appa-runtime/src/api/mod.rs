@@ -130,10 +130,6 @@ pub enum OpenError {
     #[error("[externals] binds {kind} {name}, which the policy does not declare")]
     UndeclaredExternal { kind: &'static str, name: String },
     #[error(
-        "dynamic resolver {0} carries builtin = \"claude-code\" on its declaration and takes no [externals.dynamic] binding — remove the binding"
-    )]
-    BoundBuiltinResolver(String),
-    #[error(
         "cast {0} declares a constant, which the engine answers from the policy — remove its [externals.casts] binding"
     )]
     BoundConstantCast(String),
@@ -282,11 +278,7 @@ impl Deployment {
     ) -> Result<Deployment, OpenError> {
         let policy = compile_policy(&config)?;
         validate_deployment(&policy, &config.externals)?;
-        let dynamic_builtins = policy
-            .dynamic_resolver_builtins()
-            .map(|(name, builtin)| (name.as_str().to_string(), builtin.clone()))
-            .collect();
-        let externals = ExternalServices::new(config.externals.clone(), modules, dynamic_builtins, claude_permits)
+        let externals = ExternalServices::new(config.externals.clone(), modules, claude_permits)
             .map_err(|error| OpenError::Modules(error.to_string()))?;
         Ok(Deployment {
             config,
@@ -844,22 +836,40 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
     }
 
     let rc = policy.registry_config();
-    let dynamic_resolvers: std::collections::BTreeSet<_> =
-        policy.dynamic_resolver_names().map(|name| name.as_str()).collect();
-    let dynamic_builtins: std::collections::BTreeSet<_> = policy
-        .dynamic_resolver_builtins()
-        .map(|(name, _)| name.as_str())
-        .collect();
     for tool in &rc.tools {
         let name = tool.name.as_str();
         if is_control_tool(name) {
             return Err(OpenError::ReservedTool(name.to_string()));
         }
     }
-    // A resolver-backed cast classifies over the wire, so it needs an endpoint. A
-    // constant is answered from the policy itself and binds nothing — an endpoint bound
-    // to one would never be called, so the deployment is refused rather than left
-    // believing a classifier runs.
+
+    // One rule for every kind: each registered name is bound, and each binding names a
+    // registered component. A binding nothing registers would never be consulted, so the
+    // deployment is refused rather than left believing an implementation runs.
+    bound_exactly(
+        "authority",
+        rc.authorities.iter().map(|authority| authority.name.as_str()),
+        &externals.authorities,
+    )?;
+    if externals
+        .sanitizers
+        .contains_key(appa_engine::names::SanitizerName::ATTEST_SCHEMA)
+    {
+        return Err(OpenError::UnsupportedPolicy(
+            "[externals] binds sanitizer attest-schema — the reserved builtin is applied by the engine itself and takes no implementation"
+                .to_string(),
+        ));
+    }
+    bound_exactly(
+        "sanitizer",
+        rc.sanitizers
+            .iter()
+            .filter(|sanitizer| !sanitizer.name.is_attest_schema())
+            .map(|sanitizer| sanitizer.name.as_str()),
+        &externals.sanitizers,
+    )?;
+    // A resolver-backed cast classifies over the wire, so it needs a binding. A constant
+    // is answered from the policy itself and binds nothing.
     for cast in &rc.casts {
         let name = cast.name.as_str();
         let bound = externals.casts.contains_key(name);
@@ -876,56 +886,43 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
             _ => {}
         }
     }
-    if externals
-        .sanitizers
-        .contains_key(appa_engine::names::SanitizerName::ATTEST_SCHEMA)
-    {
-        return Err(OpenError::UnsupportedPolicy(
-            "[externals] binds sanitizer attest-schema — the reserved builtin is applied by the engine itself and takes no implementation"
-                .to_string(),
-        ));
-    }
-    for sanitizer in &rc.sanitizers {
-        let name = sanitizer.name.as_str();
-        if sanitizer.name.is_attest_schema() {
-            continue;
-        }
-        if !externals.sanitizers.contains_key(name) {
-            return Err(OpenError::UnboundExternal {
-                kind: "sanitizer",
-                name: name.to_string(),
-            });
-        }
-    }
-    for name in &dynamic_resolvers {
-        let bound = externals.dynamic.contains_key(*name);
-        // A resolver that carries the stock builtin on its declaration is complete as
-        // written; every other resolver needs exactly one deployment binding.
-        if dynamic_builtins.contains(name) {
-            if bound {
-                return Err(OpenError::BoundBuiltinResolver((*name).to_string()));
-            }
-        } else if !bound {
-            return Err(OpenError::UnboundExternal {
-                kind: "dynamic resolver",
-                name: (*name).to_string(),
-            });
-        }
-    }
-    for name in externals.dynamic.keys() {
-        if !dynamic_resolvers.contains(name.as_str()) {
-            return Err(OpenError::UndeclaredExternal {
-                kind: "dynamic resolver",
-                name: name.clone(),
-            });
-        }
-    }
-    if let Some(resolver) = &rc.membership
-        && externals.membership.is_none()
-    {
+    bound_exactly(
+        "cast",
+        rc.casts.iter().filter_map(|cast| match cast.resolution {
+            appa_engine::authority::CastResolution::Resolver { .. } => Some(cast.name.as_str()),
+            appa_engine::authority::CastResolution::Constant(_) => None,
+        }),
+        &externals.casts,
+    )?;
+    bound_exactly(
+        "dynamic resolver",
+        policy.dynamic_resolver_names().map(|name| name.as_str()),
+        &externals.dynamic,
+    )?;
+    bound_exactly(
+        "membership resolver",
+        rc.membership.iter().map(|resolver| resolver.as_str()),
+        &externals.membership,
+    )?;
+    Ok(())
+}
+
+fn bound_exactly<'a>(
+    kind: &'static str,
+    registered: impl Iterator<Item = &'a str>,
+    bound: &std::collections::BTreeMap<String, crate::config::Implementation>,
+) -> Result<(), OpenError> {
+    let registered: std::collections::BTreeSet<&str> = registered.collect();
+    if let Some(name) = registered.iter().find(|name| !bound.contains_key(**name)) {
         return Err(OpenError::UnboundExternal {
-            kind: "membership resolver",
-            name: resolver.as_str().to_string(),
+            kind,
+            name: (*name).to_string(),
+        });
+    }
+    if let Some(name) = bound.keys().find(|name| !registered.contains(name.as_str())) {
+        return Err(OpenError::UndeclaredExternal {
+            kind,
+            name: name.clone(),
         });
     }
     Ok(())
@@ -977,30 +974,18 @@ mod deployment_tests {
         std::sync::Arc::new(tokio::sync::Semaphore::new(4))
     }
 
-    use std::collections::BTreeMap;
     use std::time::Duration;
 
     use super::*;
-    use crate::config::{DynamicImplementation, Externals};
+    use crate::config::{Binding, ExternalBindings, Implementation};
 
-    /// A deployment with no `[externals.dynamic]` bindings: the policy under test carries
-    /// `builtin = "claude-code"` on the declarations it wants answered by Claude Code.
     fn claude_config(policy: &str) -> Config {
-        Config::embedded(
-            policy.to_string(),
-            Externals {
-                timeout: Duration::from_secs(30),
-                review_timeout: Duration::from_secs(600),
-                max_body_bytes: 65_536,
-                authorities: BTreeMap::new(),
-                sanitizers: BTreeMap::new(),
-                casts: BTreeMap::new(),
-                dynamic: BTreeMap::new(),
-                membership: None,
-                claude_code: Default::default(),
-            },
-        )
-        .expect("the embedded configuration parses")
+        let mut bindings = ExternalBindings::new(Duration::from_secs(30), 65_536);
+        bindings.dynamic.insert(
+            "classifier".to_string(),
+            Binding::Builtin(crate::config::CLAUDE_CODE_BUILTIN.to_string()),
+        );
+        Config::embedded(policy.to_string(), bindings).expect("the embedded configuration parses")
     }
 
     #[test]
@@ -1010,7 +995,6 @@ mod deployment_tests {
                 version = 1
                 [[dynamic_resolver]]
                 name = "classifier"
-                builtin = "claude-code"
                 returns = ["delta.trust", "delta.audience", "requires.attention"]
                 [[tool]]
                 name = "lookup"
@@ -1030,7 +1014,6 @@ mod deployment_tests {
                 version = 1
                 [[dynamic_resolver]]
                 name = "classifier"
-                builtin = "claude-code"
                 returns = ["delta.trust"]
                 [[tool]]
                 name = "fetch"
@@ -1077,7 +1060,6 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 version = 1
                 [[dynamic_resolver]]
                 name = "bash-classifier"
-                builtin = "claude-code"
                 returns = ["requires.attention"]
                 [[dynamic_resolver]]
                 name = "other-classifier"
@@ -1094,10 +1076,14 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 uses = [{ resolver = "other-classifier" }]
             "#,
         );
-        // The builtin resolver is complete as declared; only the other one is bound here.
+        config.externals.dynamic.clear();
+        config.externals.dynamic.insert(
+            "bash-classifier".to_string(),
+            Implementation::Builtin(crate::config::CLAUDE_CODE_BUILTIN.to_string()),
+        );
         config.externals.dynamic.insert(
             "other-classifier".to_string(),
-            DynamicImplementation::Resolver(crate::config::Endpoint {
+            Implementation::Resolver(crate::config::Endpoint {
                 url: "https://resolver.example".to_string(),
                 token: None,
             }),
@@ -1113,13 +1099,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             name = "classifier"
             returns = ["delta.trust"]
         "#;
-        let endpoint = || {
-            DynamicImplementation::Resolver(crate::config::Endpoint {
-                url: "https://resolver.example".to_string(),
-                token: None,
-            })
-        };
-        let missing = claude_config(policy);
+        let mut missing = claude_config(policy);
+        missing.externals.dynamic.clear();
         assert!(matches!(
             Deployment::load(missing, &crate::builtins::ModuleRegistry::empty(), test_permits()),
             Err(OpenError::UnboundExternal {
@@ -1129,38 +1110,16 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         ));
 
         let mut extra = claude_config(policy);
-        extra.externals.dynamic.insert("classifier".to_string(), endpoint());
-        extra.externals.dynamic.insert("undeclared".to_string(), endpoint());
+        extra.externals.dynamic.insert(
+            "undeclared".to_string(),
+            Implementation::Builtin(crate::config::CLAUDE_CODE_BUILTIN.to_string()),
+        );
         assert!(matches!(
             Deployment::load(extra, &crate::builtins::ModuleRegistry::empty(), test_permits()),
             Err(OpenError::UndeclaredExternal {
                 kind: "dynamic resolver",
                 ..
             })
-        ));
-    }
-
-    #[test]
-    fn a_builtin_resolver_takes_no_deployment_binding() {
-        let mut bound = claude_config(
-            r#"
-                version = 1
-                [[dynamic_resolver]]
-                name = "classifier"
-                builtin = "claude-code"
-                returns = ["delta.trust"]
-            "#,
-        );
-        bound.externals.dynamic.insert(
-            "classifier".to_string(),
-            DynamicImplementation::Resolver(crate::config::Endpoint {
-                url: "https://resolver.example".to_string(),
-                token: None,
-            }),
-        );
-        assert!(matches!(
-            Deployment::load(bound, &crate::builtins::ModuleRegistry::empty(), test_permits()),
-            Err(OpenError::BoundBuiltinResolver(name)) if name == "classifier"
         ));
     }
 }

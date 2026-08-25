@@ -152,11 +152,13 @@ pub enum OfferConsult {
         sanitizer: SanitizerName,
         call: ResolvedCall,
     },
-    /// An output sanitizer over a value the host withholds: a child return.
+    /// An output sanitizer over a value the host withholds: a confined tool result naming
+    /// the tool that produced it, or a child return naming none.
     Sanitizer {
         sanitizer: SanitizerName,
         source: RawResultDigest,
         body: ValueBody,
+        tool: Option<crate::value::ToolName>,
     },
     Replay(OfferOutcome),
     Stale,

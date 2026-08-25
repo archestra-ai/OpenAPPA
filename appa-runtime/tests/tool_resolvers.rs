@@ -50,7 +50,7 @@ async fn serve_classifier() -> (String, Classifier) {
             "/resolve",
             post(|State(classifier): State<Classifier>, body: String| async move {
                 let request: serde_json::Value = serde_json::from_str(&body).expect("the request is JSON");
-                let resolver = request["resolver"].as_str().unwrap_or_default().to_string();
+                let resolver = request["name"].as_str().unwrap_or_default().to_string();
                 classifier.requests.lock().unwrap().push(request);
                 let delay = classifier.delays.lock().unwrap().get(&resolver).copied();
                 if let Some(delay) = delay {
@@ -211,7 +211,7 @@ async fn an_http_resolver_classifies_the_complete_call_and_a_fresh_proposal_cons
     let (url, classifier) = serve_classifier().await;
     classifier.set(
         "classifier",
-        Answer::Wire(serde_json::json!({ "version": 1, "result": { "delta.trust": "trusted" } })),
+        Answer::Wire(serde_json::json!({ "version": 1, "answer": { "delta.trust": "trusted" } })),
     );
     let runtime = open_runtime(&dir, &http_policy(&url)).await;
 
@@ -225,21 +225,38 @@ async fn an_http_resolver_classifies_the_complete_call_and_a_fresh_proposal_cons
     assert_eq!(requests.len(), 1);
     let request = &requests[0];
     assert_eq!(request["version"], 1);
-    assert_eq!(request["resolver"], "classifier");
+    assert_eq!(request["kind"], "dynamic");
+    assert_eq!(request["name"], "classifier");
     // The resolver declares no inputs, so `args` is the complete call.
     assert_eq!(
-        request["args"],
+        request["artifact"],
         serde_json::json!({
-            "name": "fetch",
-            "description": "Fetches one URL and returns its body.",
-            "arguments": { "url": "https://a.example" },
+            "args": {
+                "name": "fetch",
+                "description": "Fetches one URL and returns its body.",
+                "arguments": { "url": "https://a.example" },
+            }
         })
     );
-    for absent in ["tool", "input", "scope", "returns", "expects"] {
-        assert!(request.get(absent).is_none(), "the request carries no {absent:?} key");
-    }
-    assert_eq!(request["trust_ranks"], serde_json::json!(["suspicious", "trusted"]));
-    assert!(request["context"]["current_trust"].is_string());
+    assert_eq!(
+        request["declaration"],
+        serde_json::json!({
+            "returns": ["delta.trust"],
+            "trust_ranks": ["suspicious", "trusted"],
+            "attention_marks": [],
+        })
+    );
+    let keys: Vec<&str> = request
+        .as_object()
+        .expect("an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        ["artifact", "declaration", "kind", "name", "version"],
+        "nothing about the trajectory rides along"
+    );
 
     // Different canonical arguments are a different classification subject.
     assert_eq!(
@@ -264,7 +281,7 @@ async fn only_the_first_matching_contract_runs_its_resolver() {
     let (url, classifier) = serve_classifier().await;
     classifier.set(
         "classifier",
-        Answer::Wire(serde_json::json!({ "version": 1, "result": { "delta.trust": "trusted" } })),
+        Answer::Wire(serde_json::json!({ "version": 1, "answer": { "delta.trust": "trusted" } })),
     );
     let config = format!(
         r#"
@@ -312,7 +329,7 @@ url = "{url}"
     assert_eq!(requests.len(), 1);
     // The matched contract declares no description, so the complete call carries none.
     assert_eq!(
-        requests[0]["args"],
+        requests[0]["artifact"]["args"],
         serde_json::json!({ "name": "fetch", "arguments": { "url": "https://private.example" } })
     );
 }
@@ -325,7 +342,7 @@ async fn command_resolvers_run_only_for_the_selected_contract_and_pick_up_script
     let calls = dir.path().join("calls.txt");
     std::fs::write(
         &script,
-        "cat >> calls.txt\nprintf '%s' '{\"version\":1,\"result\":{\"delta.trust\":\"trusted\"}}'",
+        "cat >> calls.txt\nprintf '%s' '{\"version\":1,\"answer\":{\"delta.trust\":\"trusted\"}}'",
     )
     .expect("the resolver script writes");
     let runtime = open_runtime(&dir, &command_policy("resolver.sh", true)).await;
@@ -379,7 +396,7 @@ async fn a_command_consult_keeps_its_deployment_during_reload() {
     let gate = dir.path().join("gate");
     std::fs::write(
         dir.path().join("old.sh"),
-        "cat > /dev/null\ntouch started\nwhile [ ! -f gate ]; do sleep 0.01; done\nprintf '%s' '{\"version\":1,\"result\":{\"delta.trust\":\"trusted\"}}'",
+        "cat > /dev/null\ntouch started\nwhile [ ! -f gate ]; do sleep 0.01; done\nprintf '%s' '{\"version\":1,\"answer\":{\"delta.trust\":\"trusted\"}}'",
     )
     .expect("the old resolver writes");
     std::fs::write(dir.path().join("new.sh"), "cat > /dev/null\nexit 7").expect("the new resolver writes");
@@ -411,7 +428,7 @@ async fn a_mapped_input_shows_the_resolver_one_argument() {
     let (url, classifier) = serve_classifier().await;
     classifier.set(
         "classifier",
-        Answer::Wire(serde_json::json!({ "version": 1, "result": { "delta.trust": "trusted" } })),
+        Answer::Wire(serde_json::json!({ "version": 1, "answer": { "delta.trust": "trusted" } })),
     );
     let config = http_policy(&url)
         .replace(
@@ -434,7 +451,7 @@ returns = ["delta.trust"]"#,
     let requests = classifier.requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(
-        requests[0]["args"],
+        requests[0]["artifact"]["args"],
         serde_json::json!({ "subject": "https://a.example" })
     );
 }
@@ -449,10 +466,15 @@ async fn every_resolver_failure_refuses_the_hook_and_appends_nothing() {
     for failure in [
         Answer::Down,
         Answer::Malformed,
-        // Undeclared fields are exactly as unusable as transport failures.
+        // A missing answer, a foreign version, an undeclared rank, an undeclared result, and
+        // an extra envelope key are exactly as unusable as transport failures.
         Answer::Wire(serde_json::json!({ "version": 1 })),
-        Answer::Wire(serde_json::json!({ "version": 7, "delta": { "trust": "trusted" } })),
-        Answer::Wire(serde_json::json!({ "version": 1, "delta": { "trust": "invented" } })),
+        Answer::Wire(serde_json::json!({ "version": 7, "answer": { "delta.trust": "trusted" } })),
+        Answer::Wire(serde_json::json!({ "version": 1, "answer": { "delta.trust": "invented" } })),
+        Answer::Wire(
+            serde_json::json!({ "version": 1, "answer": { "delta.trust": "trusted", "delta.audience": "public" } }),
+        ),
+        Answer::Wire(serde_json::json!({ "version": 1, "answer": { "delta.trust": "trusted" }, "context": {} })),
     ] {
         classifier.set("classifier", failure);
         let decision = propose(&runtime, fetch("https://a.example")).await;
@@ -474,7 +496,7 @@ async fn every_resolver_failure_refuses_the_hook_and_appends_nothing() {
     // the failures, and the fresh invocation consults again.
     classifier.set(
         "classifier",
-        Answer::Wire(serde_json::json!({ "version": 1, "result": { "delta.trust": "trusted" } })),
+        Answer::Wire(serde_json::json!({ "version": 1, "answer": { "delta.trust": "trusted" } })),
     );
     assert_eq!(
         propose(&runtime, fetch("https://a.example")).await,
@@ -526,11 +548,11 @@ async fn independent_consults_overlap_and_completion_order_never_moves_the_recor
         let (url, classifier) = serve_classifier().await;
         classifier.set(
             "alpha",
-            Answer::Wire(serde_json::json!({ "version": 1, "result": { "delta.trust": "trusted" } })),
+            Answer::Wire(serde_json::json!({ "version": 1, "answer": { "delta.trust": "trusted" } })),
         );
         classifier.set(
             "beta",
-            Answer::Wire(serde_json::json!({ "version": 1, "result": { "requires.trust": "suspicious" } })),
+            Answer::Wire(serde_json::json!({ "version": 1, "answer": { "requires.trust": "suspicious" } })),
         );
         // Both consults sleep: sequential execution would cost ~600ms, concurrent ~300ms.
         classifier.delay("alpha", Duration::from_millis(300));
@@ -603,7 +625,7 @@ async fn the_claude_builtin_runs_the_configured_command_and_model() {
     let command = fake_claude(
         dir.path(),
         &format!(
-            "printf '%s\\n' \"$@\" > {args}\ncat > /dev/null\nprintf '%s' '{{\"structured_output\":{{\"version\":1,\"result\":{{\"delta.trust\":\"trusted\"}}}}}}'",
+            "printf '%s\\n' \"$@\" > {args}\ncat > /dev/null\nprintf '%s' '{{\"structured_output\":{{\"delta.trust\":\"trusted\"}}}}'",
             args = args_path.display(),
         ),
     );
@@ -655,17 +677,22 @@ async fn concurrent_claude_consults_are_gated_by_the_runtime_permit_pool() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     // One destination has one owner, so a tool takes at most five resolvers, one per result.
     // Five 300ms consults through a four-permit gate are still two waves. Each resolver
-    // declares a different result, so the fake answers by the name it reads on stdin.
+    // declares a different result, so the fake answers by the declaration it finds on the
+    // last line of its system prompt.
     let command = fake_claude(
         dir.path(),
-        r#"request=$(cat)
+        r#"while [ $# -gt 0 ]; do
+  if [ "$1" = "--system-prompt" ]; then shift; declaration=$(printf '%s\n' "$1" | tail -n 1); fi
+  shift
+done
+cat > /dev/null
 sleep 0.3
-case "$request" in
-  *classifier-0*) printf '%s' '{"structured_output":{"version":1,"result":{"delta.trust":"trusted"}}}' ;;
-  *classifier-1*) printf '%s' '{"structured_output":{"version":1,"result":{"delta.audience":"public"}}}' ;;
-  *classifier-2*) printf '%s' '{"structured_output":{"version":1,"result":{"requires.trust":"suspicious"}}}' ;;
-  *classifier-3*) printf '%s' '{"structured_output":{"version":1,"result":{"requires.audience":{"within":"public"}}}}' ;;
-  *) printf '%s' '{"structured_output":{"version":1,"result":{"requires.attention":[]}}}' ;;
+case "$declaration" in
+  *'"delta.trust"'*) printf '%s' '{"structured_output":{"delta.trust":"trusted"}}' ;;
+  *'"delta.audience"'*) printf '%s' '{"structured_output":{"delta.audience":"public"}}' ;;
+  *'"requires.trust"'*) printf '%s' '{"structured_output":{"requires.trust":"suspicious"}}' ;;
+  *'"requires.audience"'*) printf '%s' '{"structured_output":{"requires.audience":{"within":"public"}}}' ;;
+  *) printf '%s' '{"structured_output":{"requires.attention":[]}}' ;;
 esac
 "#,
     );
@@ -729,7 +756,7 @@ async fn a_builtin_resolver_never_touches_an_http_endpoint() {
     let (url, classifier) = serve_classifier().await;
     let command = fake_claude(
         dir.path(),
-        "cat > /dev/null\nprintf '%s' '{\"structured_output\":{\"version\":1,\"result\":{\"delta.trust\":\"trusted\"}}}'",
+        "cat > /dev/null\nprintf '%s' '{\"structured_output\":{\"delta.trust\":\"trusted\"}}'",
     );
     let config = builtin_policy(&command, "")
         .replace(

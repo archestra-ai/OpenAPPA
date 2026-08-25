@@ -1,5 +1,5 @@
 //! Configuration: one immutable `appa.toml` with the policy and the
-//! external endpoints. The harness adapter is a CLI flag on the
+//! external bindings. The harness adapter is a CLI flag on the
 //! binary, not configuration.
 
 use std::collections::BTreeMap;
@@ -37,8 +37,99 @@ impl PolicyFile {
     }
 }
 
-/// The registered externals: authorities, sanitizers, the
-/// dynamic resolver, and the membership resolver. Every HTTP call
+/// The declared bindings, as a deployment writes them: one entry per registered
+/// component under its kind's section, and the deployment-wide tables. This is the one
+/// input shape both load paths share — `appa.toml` composes into it, and an embedded host
+/// hands it in — and it carries no secret: a token is named by its `APPA_*` variable and
+/// resolved from the environment when the deployment validates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalBindings {
+    pub timeout_ms: u64,
+    pub review_timeout_ms: u64,
+    pub max_body_bytes: usize,
+    pub authorities: BTreeMap<String, Binding>,
+    pub sanitizers: BTreeMap<String, Binding>,
+    pub casts: BTreeMap<String, Binding>,
+    pub dynamic: BTreeMap<String, Binding>,
+    pub membership: BTreeMap<String, Binding>,
+    pub claude_code: ClaudeCode,
+    pub llm: Option<LlmBinding>,
+}
+
+impl ExternalBindings {
+    /// No bindings and the default review window; the two mandatory settings are the
+    /// caller's.
+    pub fn new(timeout: Duration, max_body_bytes: usize) -> ExternalBindings {
+        ExternalBindings {
+            timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+            review_timeout_ms: default_review_timeout_ms(),
+            max_body_bytes,
+            authorities: BTreeMap::new(),
+            sanitizers: BTreeMap::new(),
+            casts: BTreeMap::new(),
+            dynamic: BTreeMap::new(),
+            membership: BTreeMap::new(),
+            claude_code: ClaudeCode::default(),
+            llm: None,
+        }
+    }
+}
+
+/// How one registered component is served, as declared: exactly one of an HTTP endpoint,
+/// a local command, or a builtin name. A command's `cwd` is the directory of the file that
+/// declared it — an embedded host supplies an absolute one itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Binding {
+    Url { url: String, token_env: Option<String> },
+    Command { argv: Vec<String>, cwd: PathBuf },
+    Builtin(String),
+}
+
+/// The `[externals.llm]` table as declared: the one API-key model profile every
+/// `builtin = "llm"` entry in the deployment consults.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlmBinding {
+    pub provider: LlmProvider,
+    pub model: String,
+    pub url: Option<String>,
+    pub token_env: Option<String>,
+    pub timeout_ms: Option<u64>,
+    pub max_concurrent: Option<u32>,
+}
+
+/// The API providers the `llm` builtin speaks to. Closed: the transport is compiled in
+/// per provider, so a name outside this set is a configuration refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmProvider {
+    Anthropic,
+    OpenAi,
+    Gemini,
+    Ollama,
+}
+
+impl LlmProvider {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LlmProvider::Anthropic => "anthropic",
+            LlmProvider::OpenAi => "openai",
+            LlmProvider::Gemini => "gemini",
+            LlmProvider::Ollama => "ollama",
+        }
+    }
+
+    fn parse(name: &str) -> Option<LlmProvider> {
+        match name {
+            "anthropic" => Some(LlmProvider::Anthropic),
+            "openai" => Some(LlmProvider::OpenAi),
+            "gemini" => Some(LlmProvider::Gemini),
+            "ollama" => Some(LlmProvider::Ollama),
+            _ => None,
+        }
+    }
+}
+
+/// The registered externals, validated and resolved: the implementation every
+/// bound component runs on, and the deployment-wide tables. Every machine consult
 /// carries an explicit timeout and byte cap and fails closed.
 #[derive(Debug, Clone)]
 pub struct Externals {
@@ -53,32 +144,32 @@ pub struct Externals {
     pub max_body_bytes: usize,
     pub authorities: BTreeMap<String, Implementation>,
     pub sanitizers: BTreeMap<String, Implementation>,
-    /// The classifiers a resolver-backed `[[cast]]` consults. Endpoint-only: a constant
-    /// cast is answered from the policy and binds nothing here.
-    pub casts: BTreeMap<String, Endpoint>,
-    /// One implementation per policy-declared dynamic resolver that does not carry
-    /// `builtin = "claude-code"` on its declaration. A builtin resolver takes no entry here.
-    pub dynamic: BTreeMap<String, DynamicImplementation>,
-    /// The membership resolver the policy's `[membership]` registers.
-    pub membership: Option<Endpoint>,
-    /// Deployment knobs for the stock `claude-code` dynamic resolver.
+    /// A resolver-backed `[[cast]]` binds here; a constant cast is answered from the policy
+    /// and binds nothing.
+    pub casts: BTreeMap<String, Implementation>,
+    pub dynamic: BTreeMap<String, Implementation>,
+    /// The one resolver the policy's `[membership]` registers, under its name.
+    pub membership: BTreeMap<String, Implementation>,
+    /// Deployment knobs for the stock `claude-code` builtin.
     pub claude_code: ClaudeCode,
+    /// The profile the stock `llm` builtin consults, where the deployment declares one.
+    pub llm: Option<LlmProfile>,
 }
 
-/// How this deployment runs the stock `claude-code` classifier. `command` overrides the
+/// How this deployment runs the stock `claude-code` builtin. `command` overrides the
 /// executable (a service environment often strips `PATH`); `model` pins the model the
 /// consult runs on; `timeout` bounds one consult on its own budget instead of the shared
 /// machine-consult `timeout`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaudeCode {
-    pub command: std::path::PathBuf,
+    pub command: PathBuf,
     pub model: String,
     pub timeout: Option<Duration>,
 }
 
 impl Default for ClaudeCode {
     /// The usable defaults every construction path shares — an embedded host building
-    /// `Externals` by hand gets the same `claude` on `PATH` and `sonnet` alias the file
+    /// its bindings by hand gets the same `claude` on `PATH` and `sonnet` alias the file
     /// loader fills in, never an empty command.
     fn default() -> ClaudeCode {
         ClaudeCode {
@@ -89,30 +180,40 @@ impl Default for ClaudeCode {
     }
 }
 
-/// How a registered authority or sanitizer is implemented — `builtin` or
-/// `resolver`, a closed choice per entry.
+/// The `[externals.llm]` profile, validated: its endpoint rules are a `url` binding's
+/// (`https` anywhere, cleartext `http` only to loopback, no credentials in the URL, the
+/// token from an `APPA_*` variable). `url` is `None` where the provider's own API host
+/// serves; `timeout` is the profile's own consult budget, `None` meaning the shared one.
+#[derive(Debug, Clone)]
+pub struct LlmProfile {
+    pub provider: LlmProvider,
+    pub model: String,
+    pub url: Option<String>,
+    pub token: Option<Token>,
+    pub timeout: Option<Duration>,
+    pub max_concurrent: usize,
+}
+
+const DEFAULT_LLM_CONCURRENCY: usize = 4;
+
+/// How one bound component is served — an HTTP endpoint, a local command, or a builtin
+/// name — a closed choice per entry, the same for every kind.
 #[derive(Debug, Clone)]
 pub enum Implementation {
     Resolver(Endpoint),
+    Command(ResolverCommand),
     Builtin(String),
 }
 
-/// How one deployment-bound dynamic resolver runs: an HTTP endpoint or a local
-/// command. The stock builtin is not bound here; the policy declaration carries it.
-#[derive(Debug, Clone)]
-pub enum DynamicImplementation {
-    Resolver(Endpoint),
-    Command(ResolverCommand),
-}
-
-/// A command resolver's argv and the directory of the config that declared it.
+/// A command binding's argv and the directory of the config that declared it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolverCommand {
     pub argv: Vec<String>,
-    pub cwd: std::path::PathBuf,
+    pub cwd: PathBuf,
 }
 
 pub const CLAUDE_CODE_BUILTIN: &str = "claude-code";
+pub const LLM_BUILTIN: &str = "llm";
 
 /// One external endpoint: a validated URL plus its bearer token, if
 /// the service needs one. `https` reaches anywhere; `http` only
@@ -208,6 +309,10 @@ pub enum ConfigError {
     ZeroReviewTimeout,
     #[error("externals.max_body_bytes must be greater than zero")]
     ZeroByteCap,
+    #[error("externals.llm.max_concurrent must be greater than zero")]
+    ZeroConcurrency,
+    #[error("externals.llm.provider {provider:?} is not one of anthropic, openai, gemini, ollama")]
+    InvalidLlmProvider { provider: String },
     #[error("the {section} entry {name:?} must name exactly one implementation, and only url takes token_env")]
     ImplementationChoice { section: &'static str, name: String },
     #[error("the {section} entry {name:?} cannot be builtin")]
@@ -218,14 +323,82 @@ pub enum ConfigError {
         name: String,
         builtin: String,
     },
-    #[error("the dynamic resolver {name:?} command must contain at least one non-empty argument")]
-    InvalidCommand { name: String },
-    #[error("the dynamic resolver {name:?} uses a local command, which this platform does not support")]
-    UnsupportedCommandPlatform { name: String },
-    #[error("embedded endpoint {name:?} in {section} has a token that cannot be stored safely")]
-    EmbeddedToken { section: &'static str, name: String },
+    #[error("the {section} entry {name:?} names the builtin \"llm\", but the deployment declares no [externals.llm]")]
+    LlmNotConfigured { section: &'static str, name: String },
+    #[error("the {section} entry {name:?} command must contain at least one non-empty argument")]
+    InvalidCommand { section: &'static str, name: String },
+    #[error("the {section} entry {name:?} uses a local command, which this platform does not support")]
+    UnsupportedCommandPlatform { section: &'static str, name: String },
+    #[error("the embedded {section} command {name:?} has a relative working directory")]
+    RelativeCommandCwd { section: &'static str, name: String },
     #[error("embedded setting {field} cannot be represented in TOML")]
     UnrepresentableEmbeddedSetting { field: &'static str },
+}
+
+/// The five sections a component binds under. Every section takes the same three
+/// transports; which builtin names a section accepts is the one difference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Section {
+    Authorities,
+    Sanitizers,
+    Casts,
+    Dynamic,
+    Membership,
+}
+
+impl Section {
+    pub(crate) const ALL: [Section; 5] = [
+        Section::Authorities,
+        Section::Sanitizers,
+        Section::Casts,
+        Section::Dynamic,
+        Section::Membership,
+    ];
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Section::Authorities => "authorities",
+            Section::Sanitizers => "sanitizers",
+            Section::Casts => "casts",
+            Section::Dynamic => "dynamic",
+            Section::Membership => "membership",
+        }
+    }
+
+    fn parse(name: &str) -> Option<Section> {
+        Section::ALL.into_iter().find(|section| section.name() == name)
+    }
+
+    /// The origin key one command entry records: `<section>.<name>`.
+    fn origin_key(self, name: &str) -> String {
+        format!("{}.{name}", self.name())
+    }
+
+    /// Whether `builtin` is a name this section may bind. Authorities and sanitizers take
+    /// the stock names, the model builtins, and any module-grammar name (the module's
+    /// presence is checked when the deployment opens); casts and dynamic resolvers take
+    /// only the model builtins; a membership resolver is never a builtin.
+    fn check_builtin(self, name: &str, builtin: &str) -> Result<(), ConfigError> {
+        let model_builtin = builtin == CLAUDE_CODE_BUILTIN || builtin == LLM_BUILTIN;
+        let allowed = match self {
+            Section::Authorities | Section::Sanitizers => crate::builtins::valid_implementation_name(builtin),
+            Section::Casts | Section::Dynamic => model_builtin,
+            Section::Membership => {
+                return Err(ConfigError::BuiltinNotAllowed {
+                    section: self.name(),
+                    name: name.to_string(),
+                });
+            }
+        };
+        if !allowed {
+            return Err(ConfigError::InvalidBuiltinName {
+                section: self.name(),
+                name: name.to_string(),
+                builtin: builtin.to_string(),
+            });
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -241,7 +414,7 @@ struct RawConfig {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawComposedMetadata {
-    dynamic_command_cwd: BTreeMap<String, String>,
+    command_cwd: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -252,15 +425,42 @@ struct RawExternals {
     review_timeout_ms: u64,
     max_body_bytes: usize,
     #[serde(default)]
-    authorities: BTreeMap<String, RawImplementation>,
+    authorities: BTreeMap<String, RawBinding>,
     #[serde(default)]
-    sanitizers: BTreeMap<String, RawImplementation>,
+    sanitizers: BTreeMap<String, RawBinding>,
     #[serde(default)]
-    casts: BTreeMap<String, RawImplementation>,
+    casts: BTreeMap<String, RawBinding>,
     #[serde(default)]
-    dynamic: BTreeMap<String, RawDynamicImplementation>,
-    membership: Option<RawImplementation>,
+    dynamic: BTreeMap<String, RawBinding>,
+    #[serde(default)]
+    membership: BTreeMap<String, RawBinding>,
     claude_code: Option<RawClaudeCode>,
+    llm: Option<RawLlm>,
+}
+
+impl RawExternals {
+    fn section(&self, section: Section) -> &BTreeMap<String, RawBinding> {
+        match section {
+            Section::Authorities => &self.authorities,
+            Section::Sanitizers => &self.sanitizers,
+            Section::Casts => &self.casts,
+            Section::Dynamic => &self.dynamic,
+            Section::Membership => &self.membership,
+        }
+    }
+
+    /// Every command entry, by origin key.
+    fn command_keys(&self) -> std::collections::BTreeSet<String> {
+        Section::ALL
+            .into_iter()
+            .flat_map(|section| {
+                self.section(section)
+                    .iter()
+                    .filter(|(_, binding)| binding.command.is_some())
+                    .map(move |(name, _)| section.origin_key(name))
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -273,15 +473,18 @@ struct RawClaudeCode {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawImplementation {
+struct RawLlm {
+    provider: String,
+    model: String,
     url: Option<String>,
     token_env: Option<String>,
-    builtin: Option<String>,
+    timeout_ms: Option<u64>,
+    max_concurrent: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawDynamicImplementation {
+struct RawBinding {
     url: Option<String>,
     token_env: Option<String>,
     builtin: Option<String>,
@@ -325,7 +528,7 @@ impl Config {
                 reason: "stored composition metadata cannot appear with include".to_string(),
             });
         }
-        let mut origins = root_dynamic_origins(&root, &source_dir)?;
+        let mut origins = root_command_origins(&root, &source_dir)?;
         let mut seen = std::collections::BTreeSet::new();
         for authored in &root.include {
             let include = Path::new(authored);
@@ -353,21 +556,22 @@ impl Config {
 
         let composed = toml::to_string(&document).map_err(|source| ConfigError::UnrenderablePolicy { source })?;
         let raw: RawConfig = toml::from_str(&composed).map_err(|source| ConfigError::UnparsablePolicy { source })?;
-        add_composed_metadata(&mut document, &raw.externals.dynamic, &origins)?;
+        add_composed_metadata(&mut document, &raw.externals, &origins)?;
         let stored = toml::to_string(&document).map_err(|source| ConfigError::UnrenderablePolicy { source })?;
         Config::validate_composed(stored, raw, origins, |var| std::env::var(var).ok())
     }
 
     /// The configuration of a host that composes its policy in memory
     /// rather than reading `appa.toml`: the policy text it composed, and
-    /// the bindings it binds itself.
-    pub fn embedded(policy: String, externals: Externals) -> Result<Config, ConfigError> {
+    /// the bindings it declares. Validation is the file loader's, tokens
+    /// included: a `token_env` resolves from this process's environment.
+    pub fn embedded(policy: String, bindings: ExternalBindings) -> Result<Config, ConfigError> {
         let value: toml::Value = toml::from_str(&policy).map_err(|source| ConfigError::UnparsablePolicy { source })?;
-        let document = embedded_document(value, &externals)?;
+        let document = embedded_document(value, &bindings)?;
         let text = toml::to_string(&document).map_err(|source| ConfigError::UnrenderablePolicy { source })?;
         let raw: RawConfig = toml::from_str(&text).map_err(|source| ConfigError::UnparsablePolicy { source })?;
-        let origins = root_dynamic_origins(&raw, Path::new("."))?;
-        Config::validate_composed(text, raw, origins, |_| None)
+        let origins = root_command_origins(&raw, Path::new("."))?;
+        Config::validate_composed(text, raw, origins, |var| std::env::var(var).ok())
     }
 
     pub fn policy_file(&self) -> &PolicyFile {
@@ -383,9 +587,9 @@ impl Config {
     ) -> Result<Config, ConfigError> {
         let origins = raw
             .externals
-            .dynamic
-            .keys()
-            .map(|name| (name.clone(), source_dir.to_path_buf()))
+            .command_keys()
+            .into_iter()
+            .map(|key| (key, source_dir.to_path_buf()))
             .collect();
         Config::validate_composed(text, raw, origins, lookup)
     }
@@ -393,152 +597,151 @@ impl Config {
     fn validate_composed(
         text: String,
         raw: RawConfig,
-        dynamic_origins: BTreeMap<String, PathBuf>,
+        origins: BTreeMap<String, PathBuf>,
         lookup: impl Fn(&str) -> Option<String>,
     ) -> Result<Config, ConfigError> {
         debug_assert!(raw.include.is_empty(), "composed configuration has no includes");
-        if raw.externals.timeout_ms == 0 {
+        let RawExternals {
+            timeout_ms,
+            review_timeout_ms,
+            max_body_bytes,
+            authorities,
+            sanitizers,
+            casts,
+            dynamic,
+            membership,
+            claude_code,
+            llm,
+        } = raw.externals;
+        if timeout_ms == 0 {
             return Err(ConfigError::ZeroTimeout);
         }
-        if raw.externals.review_timeout_ms == 0 {
+        if review_timeout_ms == 0 {
             return Err(ConfigError::ZeroReviewTimeout);
         }
-        if raw.externals.max_body_bytes == 0 {
+        if max_body_bytes == 0 {
             return Err(ConfigError::ZeroByteCap);
         }
+        let llm = llm.map(|raw| resolve_llm(raw, &lookup)).transpose()?;
+        let resolve = |section: Section, entries: BTreeMap<String, RawBinding>| {
+            resolve_bindings(section, entries, &origins, &lookup, llm.is_some())
+        };
         Ok(Config {
             policy: PolicyFile::new(text.into_bytes(), raw.policy),
             externals: Externals {
-                timeout: Duration::from_millis(raw.externals.timeout_ms),
-                review_timeout: Duration::from_millis(raw.externals.review_timeout_ms),
-                max_body_bytes: raw.externals.max_body_bytes,
-                authorities: resolve_implementations(
-                    "authorities",
-                    raw.externals.authorities,
-                    &lookup,
-                    crate::builtins::valid_implementation_name,
-                )?,
-                sanitizers: resolve_implementations(
-                    "sanitizers",
-                    raw.externals.sanitizers,
-                    &lookup,
-                    crate::builtins::valid_implementation_name,
-                )?,
-                casts: resolve_endpoints("casts", raw.externals.casts, &lookup)?,
-                dynamic: resolve_dynamic_implementations(raw.externals.dynamic, &dynamic_origins, &lookup)?,
-                membership: raw
-                    .externals
-                    .membership
-                    .map(|endpoint| {
-                        let raw = endpoint_only("membership", "membership", endpoint)?;
-                        resolve_endpoint("membership", "membership".to_string(), raw, &lookup)
-                    })
-                    .transpose()?,
-                claude_code: resolve_claude_code(raw.externals.claude_code)?,
+                timeout: Duration::from_millis(timeout_ms),
+                review_timeout: Duration::from_millis(review_timeout_ms),
+                max_body_bytes,
+                authorities: resolve(Section::Authorities, authorities)?,
+                sanitizers: resolve(Section::Sanitizers, sanitizers)?,
+                casts: resolve(Section::Casts, casts)?,
+                dynamic: resolve(Section::Dynamic, dynamic)?,
+                membership: resolve(Section::Membership, membership)?,
+                claude_code: resolve_claude_code(claude_code)?,
+                llm,
             },
         })
     }
 }
 
-fn embedded_document(policy: toml::Value, externals: &Externals) -> Result<toml::Value, ConfigError> {
+fn embedded_document(policy: toml::Value, bindings: &ExternalBindings) -> Result<toml::Value, ConfigError> {
     let mut external_table = toml::value::Table::new();
     external_table.insert(
         "timeout_ms".to_string(),
-        embedded_integer("externals.timeout_ms", externals.timeout.as_millis())?,
+        embedded_integer("externals.timeout_ms", u128::from(bindings.timeout_ms))?,
     );
-    external_table.insert(
-        "review_timeout_ms".to_string(),
-        embedded_integer("externals.review_timeout_ms", externals.review_timeout.as_millis())?,
-    );
+    // Defaults and empty sections are left unwritten, as an authored file leaves them:
+    // the same bindings persist as the same bytes whichever path declared them.
+    if bindings.review_timeout_ms != default_review_timeout_ms() {
+        external_table.insert(
+            "review_timeout_ms".to_string(),
+            embedded_integer("externals.review_timeout_ms", u128::from(bindings.review_timeout_ms))?,
+        );
+    }
     external_table.insert(
         "max_body_bytes".to_string(),
-        embedded_integer("externals.max_body_bytes", externals.max_body_bytes as u128)?,
+        embedded_integer("externals.max_body_bytes", bindings.max_body_bytes as u128)?,
     );
 
-    let mut authorities = toml::value::Table::new();
-    for (name, implementation) in &externals.authorities {
-        authorities.insert(
-            name.clone(),
-            embedded_implementation("authorities", name, implementation)?,
-        );
-    }
-    external_table.insert("authorities".to_string(), toml::Value::Table(authorities));
-
-    let mut sanitizers = toml::value::Table::new();
-    for (name, implementation) in &externals.sanitizers {
-        sanitizers.insert(
-            name.clone(),
-            embedded_implementation("sanitizers", name, implementation)?,
-        );
-    }
-    external_table.insert("sanitizers".to_string(), toml::Value::Table(sanitizers));
-
-    let mut casts = toml::value::Table::new();
-    for (name, endpoint) in &externals.casts {
-        casts.insert(name.clone(), embedded_endpoint("casts", name, endpoint)?);
-    }
-    external_table.insert("casts".to_string(), toml::Value::Table(casts));
-
-    let mut dynamic = toml::value::Table::new();
     let mut command_cwds = toml::value::Table::new();
-    for (name, implementation) in &externals.dynamic {
-        let value = match implementation {
-            DynamicImplementation::Resolver(endpoint) => embedded_endpoint("dynamic", name, endpoint)?,
-            DynamicImplementation::Command(command) => {
-                let cwd = command
-                    .cwd
-                    .to_str()
-                    .ok_or(ConfigError::UnrepresentableEmbeddedSetting {
-                        field: "externals.dynamic command cwd",
-                    })?;
-                command_cwds.insert(name.clone(), toml::Value::String(cwd.to_string()));
-                toml::Value::Table(
-                    [(
-                        "command".to_string(),
-                        toml::Value::Array(command.argv.iter().cloned().map(toml::Value::String).collect()),
-                    )]
-                    .into_iter()
-                    .collect(),
-                )
-            }
-        };
-        dynamic.insert(name.clone(), value);
+    for (section, entries) in [
+        (Section::Authorities, &bindings.authorities),
+        (Section::Sanitizers, &bindings.sanitizers),
+        (Section::Casts, &bindings.casts),
+        (Section::Dynamic, &bindings.dynamic),
+        (Section::Membership, &bindings.membership),
+    ] {
+        if entries.is_empty() {
+            continue;
+        }
+        let mut table = toml::value::Table::new();
+        for (name, binding) in entries {
+            table.insert(
+                name.clone(),
+                embedded_binding(section, name, binding, &mut command_cwds)?,
+            );
+        }
+        external_table.insert(section.name().to_string(), toml::Value::Table(table));
     }
-    external_table.insert("dynamic".to_string(), toml::Value::Table(dynamic));
 
-    if let Some(endpoint) = &externals.membership {
-        external_table.insert(
-            "membership".to_string(),
-            embedded_endpoint("membership", "membership", endpoint)?,
-        );
-    }
-    let mut claude_code = toml::value::Table::new();
-    let claude_command = externals
-        .claude_code
-        .command
-        .to_str()
-        .ok_or(ConfigError::UnrepresentableEmbeddedSetting {
-            field: "externals.claude_code.command",
-        })?;
-    claude_code.insert("command".to_string(), toml::Value::String(claude_command.to_string()));
-    claude_code.insert(
-        "model".to_string(),
-        toml::Value::String(externals.claude_code.model.clone()),
-    );
-    if let Some(timeout) = externals.claude_code.timeout {
+    if bindings.claude_code != ClaudeCode::default() {
+        let mut claude_code = toml::value::Table::new();
+        let claude_command =
+            bindings
+                .claude_code
+                .command
+                .to_str()
+                .ok_or(ConfigError::UnrepresentableEmbeddedSetting {
+                    field: "externals.claude_code.command",
+                })?;
+        claude_code.insert("command".to_string(), toml::Value::String(claude_command.to_string()));
         claude_code.insert(
-            "timeout_ms".to_string(),
-            embedded_integer("externals.claude_code.timeout_ms", timeout.as_millis())?,
+            "model".to_string(),
+            toml::Value::String(bindings.claude_code.model.clone()),
         );
+        if let Some(timeout) = bindings.claude_code.timeout {
+            claude_code.insert(
+                "timeout_ms".to_string(),
+                embedded_integer("externals.claude_code.timeout_ms", timeout.as_millis())?,
+            );
+        }
+        external_table.insert("claude_code".to_string(), toml::Value::Table(claude_code));
     }
-    external_table.insert("claude_code".to_string(), toml::Value::Table(claude_code));
+
+    if let Some(llm) = &bindings.llm {
+        let mut table = toml::value::Table::new();
+        table.insert(
+            "provider".to_string(),
+            toml::Value::String(llm.provider.as_str().to_string()),
+        );
+        table.insert("model".to_string(), toml::Value::String(llm.model.clone()));
+        if let Some(url) = &llm.url {
+            table.insert("url".to_string(), toml::Value::String(url.clone()));
+        }
+        if let Some(token_env) = &llm.token_env {
+            table.insert("token_env".to_string(), toml::Value::String(token_env.clone()));
+        }
+        if let Some(timeout_ms) = llm.timeout_ms {
+            table.insert(
+                "timeout_ms".to_string(),
+                embedded_integer("externals.llm.timeout_ms", u128::from(timeout_ms))?,
+            );
+        }
+        if let Some(max_concurrent) = llm.max_concurrent {
+            table.insert(
+                "max_concurrent".to_string(),
+                toml::Value::Integer(i64::from(max_concurrent)),
+            );
+        }
+        external_table.insert("llm".to_string(), toml::Value::Table(table));
+    }
 
     let mut document = toml::value::Table::new();
     if !command_cwds.is_empty() {
         document.insert(
             "appa_composed".to_string(),
             toml::Value::Table(
-                [("dynamic_command_cwd".to_string(), toml::Value::Table(command_cwds))]
+                [("command_cwd".to_string(), toml::Value::Table(command_cwds))]
                     .into_iter()
                     .collect(),
             ),
@@ -555,32 +758,40 @@ fn embedded_integer(field: &'static str, value: u128) -> Result<toml::Value, Con
         .map_err(|_| ConfigError::UnrepresentableEmbeddedSetting { field })
 }
 
-fn embedded_implementation(
-    section: &'static str,
+fn embedded_binding(
+    section: Section,
     name: &str,
-    implementation: &Implementation,
+    binding: &Binding,
+    command_cwds: &mut toml::value::Table,
 ) -> Result<toml::Value, ConfigError> {
-    match implementation {
-        Implementation::Resolver(endpoint) => embedded_endpoint(section, name, endpoint),
-        Implementation::Builtin(builtin) => Ok(toml::Value::Table(
-            [("builtin".to_string(), toml::Value::String(builtin.clone()))]
-                .into_iter()
-                .collect(),
-        )),
-    }
-}
-
-fn embedded_endpoint(section: &'static str, name: &str, endpoint: &Endpoint) -> Result<toml::Value, ConfigError> {
-    if endpoint.token.is_some() {
-        return Err(ConfigError::EmbeddedToken {
-            section,
-            name: name.to_string(),
-        });
-    }
+    let entry: Vec<(&str, toml::Value)> = match binding {
+        Binding::Url { url, token_env } => {
+            let mut entry = vec![("url", toml::Value::String(url.clone()))];
+            if let Some(token_env) = token_env {
+                entry.push(("token_env", toml::Value::String(token_env.clone())));
+            }
+            entry
+        }
+        Binding::Builtin(builtin) => vec![("builtin", toml::Value::String(builtin.clone()))],
+        Binding::Command { argv, cwd } => {
+            if !cwd.is_absolute() {
+                return Err(ConfigError::RelativeCommandCwd {
+                    section: section.name(),
+                    name: name.to_string(),
+                });
+            }
+            let cwd = cwd.to_str().ok_or(ConfigError::UnrepresentableEmbeddedSetting {
+                field: "externals command cwd",
+            })?;
+            command_cwds.insert(section.origin_key(name), toml::Value::String(cwd.to_string()));
+            vec![(
+                "command",
+                toml::Value::Array(argv.iter().cloned().map(toml::Value::String).collect()),
+            )]
+        }
+    };
     Ok(toml::Value::Table(
-        [("url".to_string(), toml::Value::String(endpoint.url.clone()))]
-            .into_iter()
-            .collect(),
+        entry.into_iter().map(|(key, value)| (key.to_string(), value)).collect(),
     ))
 }
 
@@ -588,79 +799,70 @@ fn policy_version(policy: &toml::Value) -> Option<i64> {
     policy.as_table()?.get("version")?.as_integer()
 }
 
-fn root_dynamic_origins(root: &RawConfig, source_dir: &Path) -> Result<BTreeMap<String, PathBuf>, ConfigError> {
-    let commands = root
-        .externals
-        .dynamic
-        .iter()
-        .filter(|(_, implementation)| implementation.command.is_some())
-        .map(|(name, _)| name.as_str())
-        .collect::<std::collections::BTreeSet<_>>();
+/// The working directory of every command entry the root declares: the root's own
+/// directory, or — for stored composed bytes — the directory the metadata recorded.
+fn root_command_origins(root: &RawConfig, source_dir: &Path) -> Result<BTreeMap<String, PathBuf>, ConfigError> {
+    let commands = root.externals.command_keys();
     let Some(metadata) = &root.appa_composed else {
         return Ok(commands
             .into_iter()
-            .map(|name| (name.to_string(), source_dir.to_path_buf()))
+            .map(|key| (key, source_dir.to_path_buf()))
             .collect());
     };
     let recorded = metadata
-        .dynamic_command_cwd
+        .command_cwd
         .keys()
-        .map(String::as_str)
+        .cloned()
         .collect::<std::collections::BTreeSet<_>>();
     if commands != recorded {
         return Err(ConfigError::InvalidComposedMetadata {
-            reason: "dynamic command names do not match the recorded working directories".to_string(),
+            reason: "command entries do not match the recorded working directories".to_string(),
         });
     }
     metadata
-        .dynamic_command_cwd
+        .command_cwd
         .iter()
-        .map(|(name, cwd)| {
+        .map(|(key, cwd)| {
             let cwd = PathBuf::from(cwd);
             if !cwd.is_absolute() {
                 return Err(ConfigError::InvalidComposedMetadata {
-                    reason: format!("dynamic command {name:?} has a non-absolute working directory"),
+                    reason: format!("command {key:?} has a non-absolute working directory"),
                 });
             }
-            Ok((name.clone(), cwd))
+            Ok((key.clone(), cwd))
         })
         .collect()
 }
 
 fn add_composed_metadata(
     document: &mut toml::Value,
-    dynamic: &BTreeMap<String, RawDynamicImplementation>,
+    externals: &RawExternals,
     origins: &BTreeMap<String, PathBuf>,
 ) -> Result<(), ConfigError> {
-    let command_cwds = dynamic
-        .iter()
-        .filter(|(_, implementation)| implementation.command.is_some())
-        .map(|(name, _)| {
+    let command_cwds = externals
+        .command_keys()
+        .into_iter()
+        .map(|key| {
             let cwd = origins
-                .get(name)
-                .expect("every composed dynamic binding records its source");
+                .get(&key)
+                .expect("every composed command binding records its source");
             let cwd = cwd.to_str().ok_or_else(|| ConfigError::InvalidComposedMetadata {
-                reason: format!("dynamic command {name:?} has a non-UTF-8 working directory"),
+                reason: format!("command {key:?} has a non-UTF-8 working directory"),
             })?;
-            Ok((name.clone(), toml::Value::String(cwd.to_string())))
+            Ok((key, toml::Value::String(cwd.to_string())))
         })
         .collect::<Result<toml::map::Map<_, _>, ConfigError>>()?;
+    let table = document.as_table_mut().expect("a TOML document is always a table");
     if command_cwds.is_empty() {
-        document
-            .as_table_mut()
-            .expect("a TOML document is always a table")
-            .remove("appa_composed");
+        table.remove("appa_composed");
         return Ok(());
     }
     let metadata = toml::Value::Table(
-        [("dynamic_command_cwd".to_string(), toml::Value::Table(command_cwds))]
+        [("command_cwd".to_string(), toml::Value::Table(command_cwds))]
             .into_iter()
             .collect(),
     );
-    document
-        .as_table_mut()
-        .expect("a TOML document is always a table")
-        .insert("appa_composed".to_string(), metadata);
+    table.insert("appa_composed".to_string(), metadata);
     Ok(())
 }
 
@@ -669,7 +871,7 @@ fn compose_include(
     included: toml::Value,
     include_path: &Path,
     root_version: i64,
-    dynamic_origins: &mut BTreeMap<String, PathBuf>,
+    origins: &mut BTreeMap<String, PathBuf>,
 ) -> Result<(), ConfigError> {
     let display = include_path.display().to_string();
     let mut included = included.as_table().expect("a TOML document is always a table").clone();
@@ -753,19 +955,19 @@ fn compose_include(
         .get_mut("externals")
         .and_then(toml::Value::as_table_mut)
         .expect("RawConfig requires an externals table");
-    for (section, entries) in included_externals {
-        if !matches!(section.as_str(), "authorities" | "sanitizers" | "casts" | "dynamic") {
+    for (section_name, entries) in included_externals {
+        let Some(section) = Section::parse(section_name) else {
             return Err(ConfigError::IncludedExternalsField {
                 path: include_path.display().to_string(),
-                field: section.clone(),
+                field: section_name.clone(),
             });
-        }
+        };
         let entries = entries.as_table().ok_or_else(|| ConfigError::IncludedExternalsField {
             path: include_path.display().to_string(),
-            field: section.clone(),
+            field: section_name.clone(),
         })?;
         let destination = root_externals
-            .entry(section.clone())
+            .entry(section_name.clone())
             .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
             .as_table_mut()
             .expect("RawExternals requires named external tables");
@@ -773,148 +975,107 @@ fn compose_include(
             if destination.contains_key(name) {
                 return Err(ConfigError::DuplicateExternal {
                     path: include_path.display().to_string(),
-                    section: section.clone(),
+                    section: section_name.clone(),
                     name: name.clone(),
                 });
             }
             destination.insert(name.clone(), entry.clone());
-            if section == "dynamic" {
-                dynamic_origins.insert(
-                    name.clone(),
-                    include_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf(),
-                );
-            }
+            origins.insert(
+                section.origin_key(name),
+                include_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf(),
+            );
         }
     }
     Ok(())
 }
 
-fn resolve_dynamic_implementations(
-    raw: BTreeMap<String, RawDynamicImplementation>,
+fn resolve_bindings(
+    section: Section,
+    raw: BTreeMap<String, RawBinding>,
     origins: &BTreeMap<String, PathBuf>,
     lookup: &impl Fn(&str) -> Option<String>,
-) -> Result<BTreeMap<String, DynamicImplementation>, ConfigError> {
-    raw.into_iter()
-        .map(|(name, entry)| {
-            let RawDynamicImplementation {
-                url,
-                token_env,
-                builtin,
-                command,
-            } = entry;
-            // The stock builtin is selected on the policy declaration, never bound here.
-            if builtin.is_some() {
-                return Err(ConfigError::BuiltinNotAllowed {
-                    section: "dynamic",
-                    name,
-                });
-            }
-            let implementation = match (url, command) {
-                (Some(url), None) => {
-                    let endpoint = resolve_endpoint("dynamic", name.clone(), RawEndpoint { url, token_env }, lookup)?;
-                    DynamicImplementation::Resolver(endpoint)
-                }
-                (None, Some(argv)) if token_env.is_none() => resolve_command(name.clone(), argv, origins)?,
-                _ => {
-                    return Err(ConfigError::ImplementationChoice {
-                        section: "dynamic",
-                        name,
-                    });
-                }
-            };
-            Ok((name, implementation))
-        })
-        .collect()
-}
-
-fn resolve_command(
-    name: String,
-    argv: Vec<String>,
-    origins: &BTreeMap<String, PathBuf>,
-) -> Result<DynamicImplementation, ConfigError> {
-    if argv.is_empty() || argv.iter().any(String::is_empty) {
-        return Err(ConfigError::InvalidCommand { name });
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (argv, origins);
-        return Err(ConfigError::UnsupportedCommandPlatform { name });
-    }
-    #[cfg(unix)]
-    {
-        Ok(DynamicImplementation::Command(ResolverCommand {
-            argv,
-            cwd: origins
-                .get(&name)
-                .expect("every composed dynamic binding records its source")
-                .clone(),
-        }))
-    }
-}
-
-fn resolve_implementations(
-    section: &'static str,
-    raw: BTreeMap<String, RawImplementation>,
-    lookup: &impl Fn(&str) -> Option<String>,
-    valid_builtin: fn(&str) -> bool,
+    llm_configured: bool,
 ) -> Result<BTreeMap<String, Implementation>, ConfigError> {
     raw.into_iter()
         .map(|(name, entry)| {
-            let implementation = resolve_implementation(section, &name, entry, lookup, valid_builtin)?;
+            let implementation = resolve_binding(section, &name, entry, origins, lookup, llm_configured)?;
             Ok((name, implementation))
         })
         .collect()
 }
 
-/// One entry's implementation choice: exactly one of `url` (with an optional token) or a
-/// `builtin` naming an implementation the section accepts.
-fn resolve_implementation(
-    section: &'static str,
+/// One entry's implementation choice: exactly one of `url` (with an optional token), a
+/// `command`, or a `builtin` the section accepts.
+fn resolve_binding(
+    section: Section,
     name: &str,
-    entry: RawImplementation,
+    entry: RawBinding,
+    origins: &BTreeMap<String, PathBuf>,
     lookup: &impl Fn(&str) -> Option<String>,
-    valid_builtin: impl Fn(&str) -> bool,
+    llm_configured: bool,
 ) -> Result<Implementation, ConfigError> {
-    let RawImplementation {
+    let RawBinding {
         url,
         token_env,
         builtin,
+        command,
     } = entry;
-    match (url, builtin) {
-        (Some(url), None) => {
-            let endpoint = RawEndpoint { url, token_env };
-            Ok(Implementation::Resolver(resolve_endpoint(
-                section,
-                name.to_string(),
-                endpoint,
-                lookup,
-            )?))
+    match (url, builtin, command) {
+        (Some(url), None, None) => {
+            let url = validated_url(section.name(), name, url)?;
+            let token = resolve_token(section.name(), name, token_env, lookup)?;
+            Ok(Implementation::Resolver(Endpoint { url, token }))
         }
-        (None, Some(builtin)) => {
-            if token_env.is_some() {
-                return Err(ConfigError::ImplementationChoice {
-                    section,
+        (None, Some(builtin), None) if token_env.is_none() => {
+            section.check_builtin(name, &builtin)?;
+            if builtin == LLM_BUILTIN && !llm_configured {
+                return Err(ConfigError::LlmNotConfigured {
+                    section: section.name(),
                     name: name.to_string(),
-                });
-            }
-            if !valid_builtin(&builtin) {
-                return Err(ConfigError::InvalidBuiltinName {
-                    section,
-                    name: name.to_string(),
-                    builtin,
                 });
             }
             Ok(Implementation::Builtin(builtin))
         }
+        (None, None, Some(argv)) if token_env.is_none() => resolve_command(section, name, argv, origins),
         _ => Err(ConfigError::ImplementationChoice {
-            section,
+            section: section.name(),
             name: name.to_string(),
         }),
     }
 }
 
-/// A section whose every entry is an endpoint. A cast classifies content over the wire or
-/// resolves to a declared constant the engine reads itself, so there is no builtin to name.
+fn resolve_command(
+    section: Section,
+    name: &str,
+    argv: Vec<String>,
+    origins: &BTreeMap<String, PathBuf>,
+) -> Result<Implementation, ConfigError> {
+    if argv.is_empty() || argv.iter().any(String::is_empty) {
+        return Err(ConfigError::InvalidCommand {
+            section: section.name(),
+            name: name.to_string(),
+        });
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (argv, origins);
+        return Err(ConfigError::UnsupportedCommandPlatform {
+            section: section.name(),
+            name: name.to_string(),
+        });
+    }
+    #[cfg(unix)]
+    {
+        Ok(Implementation::Command(ResolverCommand {
+            argv,
+            cwd: origins
+                .get(&section.origin_key(name))
+                .expect("every composed command binding records its source")
+                .clone(),
+        }))
+    }
+}
+
 /// The `[externals.claude_code]` table with its defaults filled: bare `claude` on `PATH`,
 /// the `sonnet` alias, and the shared machine-consult timeout. A zero `timeout_ms` is a
 /// refusal like the shared one.
@@ -928,63 +1089,45 @@ fn resolve_claude_code(raw: Option<RawClaudeCode>) -> Result<ClaudeCode, ConfigE
         return Err(ConfigError::ZeroTimeout);
     }
     Ok(ClaudeCode {
-        command: raw
-            .command
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| "claude".into()),
+        command: raw.command.map(PathBuf::from).unwrap_or_else(|| "claude".into()),
         model: raw.model.unwrap_or_else(|| "sonnet".to_string()),
         timeout: raw.timeout_ms.map(Duration::from_millis),
     })
 }
 
-fn resolve_endpoints(
-    section: &'static str,
-    raw: BTreeMap<String, RawImplementation>,
-    lookup: &impl Fn(&str) -> Option<String>,
-) -> Result<BTreeMap<String, Endpoint>, ConfigError> {
-    raw.into_iter()
-        .map(|(name, entry)| {
-            let endpoint = endpoint_only(section, &name, entry)?;
-            let resolved = resolve_endpoint(section, name.clone(), endpoint, lookup)?;
-            Ok((name, resolved))
-        })
-        .collect()
-}
-
-fn endpoint_only(section: &'static str, name: &str, entry: RawImplementation) -> Result<RawEndpoint, ConfigError> {
-    if entry.builtin.is_some() {
-        return Err(ConfigError::BuiltinNotAllowed {
-            section,
-            name: name.to_string(),
-        });
+fn resolve_llm(raw: RawLlm, lookup: &impl Fn(&str) -> Option<String>) -> Result<LlmProfile, ConfigError> {
+    const SECTION: &str = "llm";
+    let provider = LlmProvider::parse(&raw.provider).ok_or_else(|| ConfigError::InvalidLlmProvider {
+        provider: raw.provider.clone(),
+    })?;
+    if raw.timeout_ms == Some(0) {
+        return Err(ConfigError::ZeroTimeout);
     }
-    match entry.url {
-        Some(url) => Ok(RawEndpoint {
-            url,
-            token_env: entry.token_env,
-        }),
-        None => Err(ConfigError::ImplementationChoice {
-            section,
-            name: name.to_string(),
-        }),
+    if raw.max_concurrent == Some(0) {
+        return Err(ConfigError::ZeroConcurrency);
     }
+    let url = raw.url.map(|url| validated_url(SECTION, SECTION, url)).transpose()?;
+    let token = resolve_token(SECTION, SECTION, raw.token_env, lookup)?;
+    Ok(LlmProfile {
+        provider,
+        model: raw.model,
+        url,
+        token,
+        timeout: raw.timeout_ms.map(Duration::from_millis),
+        max_concurrent: raw
+            .max_concurrent
+            .map(|count| count as usize)
+            .unwrap_or(DEFAULT_LLM_CONCURRENCY),
+    })
 }
 
-struct RawEndpoint {
-    url: String,
-    token_env: Option<String>,
-}
-
-fn resolve_endpoint(
-    section: &'static str,
-    name: String,
-    raw: RawEndpoint,
-    lookup: &impl Fn(&str) -> Option<String>,
-) -> Result<Endpoint, ConfigError> {
-    let parsed = reqwest::Url::parse(&raw.url).map_err(|_| ConfigError::InvalidEndpoint {
+/// The URL rules every endpoint shares: `https` anywhere, cleartext `http` only to
+/// loopback, and no credentials inside the URL.
+fn validated_url(section: &'static str, name: &str, url: String) -> Result<String, ConfigError> {
+    let parsed = reqwest::Url::parse(&url).map_err(|_| ConfigError::InvalidEndpoint {
         section,
-        name: name.clone(),
-        url: raw.url.clone(),
+        name: name.to_string(),
+        url: url.clone(),
     })?;
     match parsed.scheme() {
         "https" => {}
@@ -992,35 +1135,52 @@ fn resolve_endpoint(
             if !is_loopback(&parsed) {
                 return Err(ConfigError::CleartextEndpoint {
                     section,
-                    name,
-                    url: raw.url,
+                    name: name.to_string(),
+                    url,
                 });
             }
         }
         _ => {
             return Err(ConfigError::InvalidEndpoint {
                 section,
-                name,
-                url: raw.url,
+                name: name.to_string(),
+                url,
             });
         }
     }
     if !parsed.username().is_empty() || parsed.password().is_some() {
-        return Err(ConfigError::CredentialsInUrl { section, name });
+        return Err(ConfigError::CredentialsInUrl {
+            section,
+            name: name.to_string(),
+        });
     }
-    let token = match raw.token_env {
-        None => None,
-        Some(var) => {
-            if !var.starts_with("APPA_") {
-                return Err(ConfigError::ForeignSecretVariable { section, name, var });
-            }
-            match lookup(&var) {
-                Some(value) if !value.is_empty() => Some(Token::new(value)),
-                _ => return Err(ConfigError::MissingSecret { section, name, var }),
-            }
-        }
+    Ok(url)
+}
+
+fn resolve_token(
+    section: &'static str,
+    name: &str,
+    token_env: Option<String>,
+    lookup: &impl Fn(&str) -> Option<String>,
+) -> Result<Option<Token>, ConfigError> {
+    let Some(var) = token_env else {
+        return Ok(None);
     };
-    Ok(Endpoint { url: raw.url, token })
+    if !var.starts_with("APPA_") {
+        return Err(ConfigError::ForeignSecretVariable {
+            section,
+            name: name.to_string(),
+            var,
+        });
+    }
+    match lookup(&var) {
+        Some(value) if !value.is_empty() => Ok(Some(Token::new(value))),
+        _ => Err(ConfigError::MissingSecret {
+            section,
+            name: name.to_string(),
+            var,
+        }),
+    }
 }
 
 fn is_loopback(url: &reqwest::Url) -> bool {
@@ -1045,6 +1205,8 @@ mod tests {
         max_body_bytes = 65536
     "#;
 
+    const LLM_TABLE: &str = "[externals.llm]\nprovider = \"anthropic\"\nmodel = \"claude-sonnet-4-5\"\n";
+
     fn parse(text: &str) -> Result<Config, ConfigError> {
         parse_with(text, |_| None)
     }
@@ -1054,12 +1216,23 @@ mod tests {
         Config::validate(text.to_string(), raw, Path::new("."), lookup)
     }
 
+    fn bindings(section: Section, config: &Config) -> &BTreeMap<String, Implementation> {
+        match section {
+            Section::Authorities => &config.externals.authorities,
+            Section::Sanitizers => &config.externals.sanitizers,
+            Section::Casts => &config.externals.casts,
+            Section::Dynamic => &config.externals.dynamic,
+            Section::Membership => &config.externals.membership,
+        }
+    }
+
     #[test]
     fn a_minimal_file_loads_and_keeps_the_policy_opaque() {
         let config = parse(MINIMAL).expect("the minimal fixture validates");
         assert_eq!(config.externals.timeout, Duration::from_millis(5000));
         assert_eq!(config.externals.max_body_bytes, 65536);
         assert!(config.externals.dynamic.is_empty());
+        assert!(config.externals.llm.is_none());
         assert_eq!(
             config.policy_file().value().get("anything").and_then(|v| v.as_str()),
             Some("the runtime does not interpret this"),
@@ -1136,7 +1309,7 @@ mod tests {
         })
         .expect("the fixture with a set secret validates");
         assert!(!format!("{:?}", config.externals).contains("sekret"));
-        let Some(DynamicImplementation::Resolver(dynamic)) = config.externals.dynamic.get("classifier") else {
+        let Some(Implementation::Resolver(dynamic)) = config.externals.dynamic.get("classifier") else {
             panic!("the named dynamic endpoint is set")
         };
         let token = dynamic.token.as_ref().expect("the token resolved");
@@ -1153,7 +1326,7 @@ mod tests {
     #[test]
     fn the_claude_code_table_fills_its_defaults_and_refuses_junk() {
         let config = parse(MINIMAL).expect("no claude table is the default");
-        assert_eq!(config.externals.claude_code.command, std::path::PathBuf::from("claude"));
+        assert_eq!(config.externals.claude_code.command, PathBuf::from("claude"));
         assert_eq!(config.externals.claude_code.model, "sonnet");
         assert_eq!(config.externals.claude_code.timeout, None);
 
@@ -1163,7 +1336,7 @@ mod tests {
         let config = parse(&text).expect("the claude table validates");
         assert_eq!(
             config.externals.claude_code.command,
-            std::path::PathBuf::from("/opt/claude/bin/claude")
+            PathBuf::from("/opt/claude/bin/claude")
         );
         assert_eq!(config.externals.claude_code.model, "pinned");
         assert_eq!(config.externals.claude_code.timeout, Some(Duration::from_secs(60)));
@@ -1177,35 +1350,151 @@ mod tests {
         );
     }
 
+    /// Every kind × transport cell: which of `url`, `command`, and each builtin name a
+    /// section accepts.
     #[test]
-    fn builtin_entries_load_only_where_supported() {
-        let text = format!(
-            "{MINIMAL}\n[externals.authorities.auto]\nbuiltin = \"approve\"\n\n[externals.sanitizers.pii]\nbuiltin = \"redact-email\"\n"
-        );
-        let config = parse(&text).expect("builtin entries validate");
-        assert!(matches!(
-            config.externals.authorities.get("auto"),
-            Some(Implementation::Builtin(name)) if name == "approve",
-        ));
-        assert!(matches!(
-            config.externals.sanitizers.get("pii"),
-            Some(Implementation::Builtin(name)) if name == "redact-email",
-        ));
+    fn every_section_takes_the_same_transports_and_its_own_builtins() {
+        let entry = |section: Section, body: &str| {
+            format!("{MINIMAL}\n{LLM_TABLE}\n[externals.{}.x]\n{body}\n", section.name())
+        };
+        for section in Section::ALL {
+            let config = parse(&entry(section, "url = \"https://x.internal\"")).expect("a url binds everywhere");
+            assert!(matches!(
+                bindings(section, &config).get("x"),
+                Some(Implementation::Resolver(_))
+            ));
+            #[cfg(unix)]
+            {
+                let config =
+                    parse(&entry(section, "command = [\"python3\", \"x.py\"]")).expect("a command binds everywhere");
+                assert!(matches!(
+                    bindings(section, &config).get("x"),
+                    Some(Implementation::Command(_))
+                ));
+            }
+            assert!(
+                matches!(
+                    parse(&entry(section, "command = [\"\"]")),
+                    Err(ConfigError::InvalidCommand { .. })
+                ),
+                "{}: an empty argument is refused",
+                section.name()
+            );
+        }
 
-        // The stock dynamic builtin lives on the policy declaration, not in the deployment.
-        let text = format!("{MINIMAL}\n[externals.dynamic.classifier]\nbuiltin = \"claude-code\"\n");
+        let cell = |section: Section, builtin: &str| parse(&entry(section, &format!("builtin = \"{builtin}\"")));
+        let accepts = |section: Section, builtin: &str| {
+            let config =
+                cell(section, builtin).unwrap_or_else(|error| panic!("{} takes {builtin}: {error}", section.name()));
+            assert!(matches!(
+                bindings(section, &config).get("x"),
+                Some(Implementation::Builtin(name)) if name == builtin
+            ));
+        };
+        let refuses = |section: Section, builtin: &str| {
+            assert!(
+                matches!(cell(section, builtin), Err(ConfigError::InvalidBuiltinName { .. })),
+                "{} must refuse builtin {builtin}",
+                section.name()
+            );
+        };
+        for section in [Section::Authorities, Section::Sanitizers] {
+            for builtin in ["hitl", "approve", "redact-email", "claude-code", "llm", "some-module"] {
+                accepts(section, builtin);
+            }
+        }
+        for section in [Section::Casts, Section::Dynamic] {
+            for builtin in ["claude-code", "llm"] {
+                accepts(section, builtin);
+            }
+            for builtin in ["hitl", "approve", "redact-email", "some-module"] {
+                refuses(section, builtin);
+            }
+        }
+        for builtin in ["hitl", "approve", "redact-email", "claude-code", "llm", "some-module"] {
+            assert!(
+                matches!(
+                    cell(Section::Membership, builtin),
+                    Err(ConfigError::BuiltinNotAllowed { .. })
+                ),
+                "membership must refuse builtin {builtin}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_llm_builtin_needs_the_llm_table() {
+        for section in [
+            Section::Authorities,
+            Section::Sanitizers,
+            Section::Casts,
+            Section::Dynamic,
+        ] {
+            let text = format!("{MINIMAL}\n[externals.{}.x]\nbuiltin = \"llm\"\n", section.name());
+            assert!(
+                matches!(parse(&text), Err(ConfigError::LlmNotConfigured { .. })),
+                "{} llm without a profile must refuse",
+                section.name()
+            );
+        }
+    }
+
+    #[test]
+    fn the_llm_table_validates_like_an_endpoint() {
+        let with = |body: &str| format!("{MINIMAL}\n[externals.llm]\nprovider = \"openai\"\nmodel = \"gpt\"\n{body}\n");
+        let config = parse(&with("")).expect("a bare profile validates");
+        let llm = config.externals.llm.expect("the profile is set");
+        assert_eq!(llm.provider, LlmProvider::OpenAi);
+        assert_eq!(llm.model, "gpt");
+        assert!(llm.url.is_none() && llm.token.is_none() && llm.timeout.is_none());
+        assert_eq!(llm.max_concurrent, DEFAULT_LLM_CONCURRENCY);
+
+        let config = parse_with(
+            &with("url = \"http://127.0.0.1:11434\"\ntoken_env = \"APPA_LLM_TOKEN\"\ntimeout_ms = 40000\nmax_concurrent = 2"),
+            |var| (var == "APPA_LLM_TOKEN").then(|| "sekret".to_string()),
+        )
+        .expect("a full profile validates");
+        let llm = config.externals.llm.expect("the profile is set");
+        assert_eq!(llm.url.as_deref(), Some("http://127.0.0.1:11434"));
+        assert_eq!(llm.token.as_ref().map(Token::reveal), Some("sekret"));
+        assert_eq!(llm.timeout, Some(Duration::from_secs(40)));
+        assert_eq!(llm.max_concurrent, 2);
+
         assert!(matches!(
-            parse(&text),
-            Err(ConfigError::BuiltinNotAllowed { section: "dynamic", .. })
+            parse(&with("token_env = \"OPENAI_API_KEY\"")),
+            Err(ConfigError::ForeignSecretVariable { section: "llm", .. })
         ));
-        let text = format!("{MINIMAL}\n[externals.membership]\nbuiltin = \"approve\"\n");
-        assert!(matches!(parse(&text), Err(ConfigError::BuiltinNotAllowed { .. })));
-        let text = format!("{MINIMAL}\n[externals.membership]\nurl = \"https://directory.internal\"\n");
-        let config = parse(&text).expect("a membership endpoint validates");
-        assert_eq!(
-            config.externals.membership.map(|endpoint| endpoint.url),
-            Some("https://directory.internal".to_string())
-        );
+        assert!(matches!(
+            parse(&with("token_env = \"APPA_LLM_TOKEN\"")),
+            Err(ConfigError::MissingSecret { section: "llm", .. })
+        ));
+        assert!(matches!(
+            parse(&with("url = \"https://user:pw@gateway.internal/v1\"")),
+            Err(ConfigError::CredentialsInUrl { section: "llm", .. })
+        ));
+        assert!(matches!(
+            parse_with(
+                &with("url = \"http://gateway.internal/v1\"\ntoken_env = \"APPA_LLM_TOKEN\""),
+                |_| Some("sekret".to_string())
+            ),
+            Err(ConfigError::CleartextEndpoint { section: "llm", .. })
+        ));
+        assert!(matches!(
+            parse(&with("url = \"ftp://gateway.internal\"")),
+            Err(ConfigError::InvalidEndpoint { section: "llm", .. })
+        ));
+        assert!(matches!(parse(&with("timeout_ms = 0")), Err(ConfigError::ZeroTimeout)));
+        assert!(matches!(
+            parse(&with("max_concurrent = 0")),
+            Err(ConfigError::ZeroConcurrency)
+        ));
+        let unknown = format!("{MINIMAL}\n[externals.llm]\nprovider = \"cohere\"\nmodel = \"m\"\n");
+        assert!(matches!(
+            parse(&unknown),
+            Err(ConfigError::InvalidLlmProvider { provider }) if provider == "cohere"
+        ));
+        let typo = format!("{MINIMAL}\n[externals.llm]\nprovider = \"openai\"\nmodel = \"m\"\napi_key = \"x\"\n");
+        assert!(toml::from_str::<RawConfig>(&typo).is_err());
     }
 
     #[test]
@@ -1219,6 +1508,19 @@ mod tests {
 
         let token = format!("{MINIMAL}\n[externals.authorities.auto]\nbuiltin = \"approve\"\ntoken_env = \"APPA_X\"\n");
         assert!(matches!(parse(&token), Err(ConfigError::ImplementationChoice { .. })));
+
+        let command_and_url =
+            format!("{MINIMAL}\n[externals.sanitizers.pii]\nurl = \"https://a.example\"\ncommand = [\"x\"]\n");
+        assert!(matches!(
+            parse(&command_and_url),
+            Err(ConfigError::ImplementationChoice { .. })
+        ));
+
+        let singleton_membership = format!("{MINIMAL}\n[externals.membership]\nurl = \"https://directory.internal\"\n");
+        assert!(
+            toml::from_str::<RawConfig>(&singleton_membership).is_err(),
+            "membership binds by name like every other section"
+        );
     }
 
     #[cfg(not(unix))]
@@ -1227,7 +1529,7 @@ mod tests {
         let text = format!("{MINIMAL}\n[externals.dynamic.classifier]\ncommand = [\"python3\", \"resolver.py\"]\n");
         assert!(matches!(
             parse(&text),
-            Err(ConfigError::UnsupportedCommandPlatform { name }) if name == "classifier"
+            Err(ConfigError::UnsupportedCommandPlatform { name, .. }) if name == "classifier"
         ));
     }
 
@@ -1291,6 +1593,8 @@ mod tests {
         assert!(!String::from_utf8_lossy(config.policy_file().bytes()).contains("include"));
     }
 
+    /// A command's working directory is its declaring file's, in every section, and the
+    /// composed bytes record it so a stored deployment reloads the same binding.
     #[cfg(unix)]
     #[test]
     fn included_command_paths_are_relative_to_their_declaring_configs() {
@@ -1307,6 +1611,8 @@ mod tests {
                 max_body_bytes = 65536
                 [externals.dynamic.local]
                 command = ["python3", "local.py"]
+                [externals.authorities.desk]
+                command = ["python3", "desk.py"]
             "#,
         )
         .expect("write root config");
@@ -1317,18 +1623,38 @@ mod tests {
                 version = 1
                 [externals.dynamic.battery]
                 command = ["python3", "resolver.py"]
+                [externals.sanitizers.scrub]
+                command = ["python3", "scrub.py"]
+                [externals.casts.classify]
+                command = ["python3", "classify.py"]
+                [externals.membership.directory]
+                command = ["python3", "directory.py"]
             "#,
         )
         .expect("write included config");
 
         let config = Config::load(&dir.path().join("appa.toml")).expect("composed config loads");
-        let command_cwd = |name| match config.externals.dynamic.get(name).expect("dynamic binding") {
-            DynamicImplementation::Command(command) => command.cwd.as_path(),
-            _ => panic!("binding is a command"),
-        };
+        let command_cwd =
+            |section: Section, name: &str| match bindings(section, &config).get(name).expect("binding is present") {
+                Implementation::Command(command) => command.cwd.clone(),
+                _ => panic!("binding is a command"),
+            };
         let canonical = std::fs::canonicalize(dir.path()).expect("canonical temp directory");
-        assert_eq!(command_cwd("local"), canonical);
-        assert_eq!(command_cwd("battery"), canonical.join("battery"));
+        assert_eq!(command_cwd(Section::Dynamic, "local"), canonical);
+        assert_eq!(command_cwd(Section::Authorities, "desk"), canonical);
+        for (section, name) in [
+            (Section::Dynamic, "battery"),
+            (Section::Sanitizers, "scrub"),
+            (Section::Casts, "classify"),
+            (Section::Membership, "directory"),
+        ] {
+            assert_eq!(
+                command_cwd(section, name),
+                canonical.join("battery"),
+                "{}.{name}",
+                section.name()
+            );
+        }
         assert!(
             String::from_utf8_lossy(config.policy_file().bytes()).contains("[appa_composed"),
             "command origins are part of deployment identity"
@@ -1353,11 +1679,23 @@ mod tests {
         let standalone_path = standalone_dir.path().join("appa.toml");
         std::fs::write(&standalone_path, config.policy_file().bytes()).expect("write stored config");
         let standalone = Config::load(&standalone_path).expect("stored command config reloads");
-        let Some(DynamicImplementation::Command(command)) = standalone.externals.dynamic.get("battery") else {
-            panic!("stored battery binding is a command")
+        let Some(Implementation::Command(command)) = standalone.externals.sanitizers.get("scrub") else {
+            panic!("stored scrub binding is a command")
         };
         assert_eq!(command.cwd, canonical.join("battery"));
         assert_eq!(standalone.policy_file().bytes(), config.policy_file().bytes());
+
+        let mismatched = String::from_utf8_lossy(config.policy_file().bytes())
+            .replace("\"sanitizers.scrub\"", "\"sanitizers.other\"");
+        std::fs::write(&standalone_path, mismatched).expect("write mismatched metadata");
+        assert!(matches!(
+            Config::load(&standalone_path),
+            Err(ConfigError::InvalidComposedMetadata { .. })
+        ));
+    }
+
+    fn embedded(bindings: ExternalBindings) -> Result<Config, ConfigError> {
+        Config::embedded("version = 1".to_string(), bindings)
     }
 
     #[cfg(unix)]
@@ -1366,29 +1704,15 @@ mod tests {
         let first_dir = tempfile::tempdir().expect("first command directory");
         let second_dir = tempfile::tempdir().expect("second command directory");
         let make = |argument: &str, cwd: &Path| {
-            let mut dynamic = BTreeMap::new();
-            dynamic.insert(
+            let mut bindings = ExternalBindings::new(Duration::from_millis(5000), 65_536);
+            bindings.casts.insert(
                 "classifier".to_string(),
-                DynamicImplementation::Command(ResolverCommand {
+                Binding::Command {
                     argv: vec!["python3".to_string(), argument.to_string()],
                     cwd: std::fs::canonicalize(cwd).expect("canonical command directory"),
-                }),
-            );
-            Config::embedded(
-                "version = 1".to_string(),
-                Externals {
-                    timeout: Duration::from_millis(5000),
-                    review_timeout: Duration::from_millis(600_000),
-                    max_body_bytes: 65_536,
-                    authorities: BTreeMap::new(),
-                    sanitizers: BTreeMap::new(),
-                    casts: BTreeMap::new(),
-                    dynamic,
-                    membership: None,
-                    claude_code: ClaudeCode::default(),
                 },
-            )
-            .expect("embedded command config loads")
+            );
+            embedded(bindings).expect("embedded command config loads")
         };
 
         let first = make("resolver.py", first_dir.path());
@@ -1401,11 +1725,84 @@ mod tests {
         std::fs::write(&stored, first.policy_file().bytes()).expect("write stored embedded config");
         let reloaded = Config::load(&stored).expect("stored embedded config reloads");
         assert_eq!(reloaded.policy_file().bytes(), first.policy_file().bytes());
-        let Some(DynamicImplementation::Command(command)) = reloaded.externals.dynamic.get("classifier") else {
+        let Some(Implementation::Command(command)) = reloaded.externals.casts.get("classifier") else {
             panic!("reloaded classifier is a command")
         };
         assert_eq!(command.argv, ["python3", "resolver.py"]);
         assert_eq!(command.cwd, std::fs::canonicalize(first_dir.path()).unwrap());
+
+        let mut relative = ExternalBindings::new(Duration::from_millis(5000), 65_536);
+        relative.dynamic.insert(
+            "classifier".to_string(),
+            Binding::Command {
+                argv: vec!["python3".to_string()],
+                cwd: PathBuf::from("battery"),
+            },
+        );
+        assert!(matches!(
+            embedded(relative),
+            Err(ConfigError::RelativeCommandCwd { section: "dynamic", .. })
+        ));
+    }
+
+    /// An embedded host names its secrets like a file does: the variable is persisted,
+    /// the value is resolved from the environment, and the bytes match a file that
+    /// declares the same bindings.
+    #[test]
+    fn embedded_tokens_persist_as_variable_names_and_resolve_from_the_environment() {
+        const VAR: &str = "APPA_CONFIG_TEST_EMBEDDED_TOKEN";
+        let mut bindings = ExternalBindings::new(Duration::from_millis(5000), 65_536);
+        bindings.authorities.insert(
+            "desk".to_string(),
+            Binding::Url {
+                url: "https://desk.internal".to_string(),
+                token_env: Some(VAR.to_string()),
+            },
+        );
+        bindings.llm = Some(LlmBinding {
+            provider: LlmProvider::Anthropic,
+            model: "claude-sonnet-4-5".to_string(),
+            url: None,
+            token_env: Some(VAR.to_string()),
+            timeout_ms: Some(30_000),
+            max_concurrent: Some(2),
+        });
+
+        unsafe { std::env::remove_var(VAR) };
+        assert!(matches!(
+            embedded(bindings.clone()),
+            Err(ConfigError::MissingSecret { .. })
+        ));
+
+        unsafe { std::env::set_var(VAR, "sekret") };
+        let config = embedded(bindings).expect("the embedded bindings validate against the environment");
+        unsafe { std::env::remove_var(VAR) };
+        let Some(Implementation::Resolver(endpoint)) = config.externals.authorities.get("desk") else {
+            panic!("desk is an endpoint")
+        };
+        assert_eq!(endpoint.token.as_ref().map(Token::reveal), Some("sekret"));
+        let llm = config.externals.llm.as_ref().expect("the profile is set");
+        assert_eq!(llm.token.as_ref().map(Token::reveal), Some("sekret"));
+        assert_eq!(llm.max_concurrent, 2);
+        let stored = String::from_utf8_lossy(config.policy_file().bytes()).into_owned();
+        assert!(stored.contains(VAR), "the variable name is persisted");
+        assert!(!stored.contains("sekret"), "the secret never reaches the stored bytes");
+
+        let dir = tempfile::tempdir().expect("temp directory");
+        let path = dir.path().join("appa.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "[policy]\nversion = 1\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n\
+                 [externals.authorities.desk]\nurl = \"https://desk.internal\"\ntoken_env = \"{VAR}\"\n\
+                 [externals.llm]\nprovider = \"anthropic\"\nmodel = \"claude-sonnet-4-5\"\ntoken_env = \"{VAR}\"\ntimeout_ms = 30000\nmax_concurrent = 2\n"
+            ),
+        )
+        .expect("write file config");
+        unsafe { std::env::set_var(VAR, "sekret") };
+        let from_file = Config::load(&path).expect("the file config loads");
+        unsafe { std::env::remove_var(VAR) };
+        assert_eq!(from_file.policy_file().bytes(), config.policy_file().bytes());
     }
 
     #[test]
@@ -1441,56 +1838,89 @@ mod tests {
         assert!(matches!(Config::load(&root), Err(ConfigError::IncludedVersion { .. })));
     }
 
+    /// Per section: a fragment may add named entries and nothing else; the same name in
+    /// the root or in another fragment is a refusal, never an override; the deployment
+    /// tables are the root's alone.
     #[test]
     fn included_files_cannot_replace_root_settings_or_named_externals() {
         let dir = tempfile::tempdir().expect("temp directory");
         let root = dir.path().join("appa.toml");
-        std::fs::write(
-            &root,
-            r#"
-                include = ["battery.toml"]
-                [policy]
-                version = 1
-                [externals]
-                timeout_ms = 5000
-                max_body_bytes = 65536
-                [externals.dynamic.classifier]
-                url = "https://classifier.internal"
-            "#,
-        )
-        .expect("write root config");
+        let write_root = |includes: &str| {
+            std::fs::write(
+                &root,
+                format!(
+                    "include = [{includes}]\n[policy]\nversion = 1\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n\
+                     [externals.dynamic.classifier]\nbuiltin = \"claude-code\"\n\
+                     [externals.authorities.desk]\nurl = \"https://desk.internal\"\n"
+                ),
+            )
+            .expect("write root config");
+        };
+        let battery = dir.path().join("battery.toml");
+        write_root("\"battery.toml\"");
 
-        std::fs::write(dir.path().join("battery.toml"), "[policy]\nversion = 1\nlimits = {}\n")
-            .expect("write singleton override");
+        std::fs::write(&battery, "[policy]\nversion = 1\nlimits = {}\n").expect("write singleton override");
         assert!(matches!(
             Config::load(&root),
             Err(ConfigError::IncludedPolicyField { .. })
         ));
 
-        std::fs::write(
-            dir.path().join("battery.toml"),
-            r#"
-                [policy]
-                version = 1
-                [externals.dynamic.classifier]
-                url = "https://battery.internal"
-            "#,
-        )
-        .expect("write duplicate external");
-        assert!(matches!(
-            Config::load(&root),
-            Err(ConfigError::DuplicateExternal { .. })
-        ));
+        for section in Section::ALL {
+            std::fs::write(
+                &battery,
+                format!(
+                    "[policy]\nversion = 1\n[externals.{}.fresh]\nurl = \"https://fresh.internal\"\n",
+                    section.name()
+                ),
+            )
+            .expect("write fragment entry");
+            let config = Config::load(&root).expect("a fragment adds an entry to any section");
+            assert!(bindings(section, &config).contains_key("fresh"), "{}", section.name());
+        }
 
-        std::fs::write(
-            dir.path().join("battery.toml"),
-            "[policy]\nversion = 1\n[externals]\ntimeout_ms = 1\n",
-        )
-        .expect("write external singleton");
+        for (section, name) in [("dynamic", "classifier"), ("authorities", "desk")] {
+            std::fs::write(
+                &battery,
+                format!("[policy]\nversion = 1\n[externals.{section}.{name}]\nurl = \"https://other.internal\"\n"),
+            )
+            .expect("write duplicate external");
+            assert!(
+                matches!(
+                    Config::load(&root),
+                    Err(ConfigError::DuplicateExternal { section: found, name: dup, .. }) if found == section && dup == name
+                ),
+                "{section}.{name} in a fragment must not override the root"
+            );
+        }
+
+        write_root("\"battery.toml\", \"other.toml\"");
+        for file in ["battery.toml", "other.toml"] {
+            std::fs::write(
+                dir.path().join(file),
+                "[policy]\nversion = 1\n[externals.sanitizers.scrub]\nurl = \"https://scrub.internal\"\n",
+            )
+            .expect("write twin fragments");
+        }
         assert!(matches!(
             Config::load(&root),
-            Err(ConfigError::IncludedExternalsField { .. })
+            Err(ConfigError::DuplicateExternal { section, name, .. }) if section == "sanitizers" && name == "scrub"
         ));
+        write_root("\"battery.toml\"");
+
+        for field in [
+            "timeout_ms = 1",
+            "review_timeout_ms = 1",
+            "max_body_bytes = 1",
+            "claude_code = { model = \"other\" }",
+            "llm = { provider = \"openai\", model = \"m\" }",
+        ] {
+            std::fs::write(&battery, format!("[policy]\nversion = 1\n[externals]\n{field}\n"))
+                .expect("write external singleton");
+            assert!(
+                matches!(Config::load(&root), Err(ConfigError::IncludedExternalsField { .. })),
+                "{field} is root-only"
+            );
+        }
     }
 
     #[test]

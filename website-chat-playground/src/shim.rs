@@ -77,7 +77,7 @@ async fn handle(State(world): State<Arc<World>>, body: String) -> (StatusCode, S
 struct Consult<T> {
     version: u32,
     name: String,
-    payload: T,
+    artifact: T,
 }
 
 #[derive(Debug, Serialize)]
@@ -105,12 +105,12 @@ async fn authority(
         return Err(StatusCode::NOT_ACCEPTABLE);
     }
     let tool = consult
-        .payload
+        .artifact
         .get("tool")
         .and_then(|tool| tool.as_str())
         .unwrap_or("(unknown tool)")
         .to_string();
-    let ruling = match world.approvals.request(&tool, consult.payload).await {
+    let ruling = match world.approvals.request(&tool, consult.artifact).await {
         Some(true) => "approve",
         Some(false) => "deny",
         None => "abstain",
@@ -129,7 +129,7 @@ async fn sanitize(
     if consult.version != 1 || consult.name != name {
         return Err(StatusCode::NOT_ACCEPTABLE);
     }
-    match world.derivations.derive(&name, &consult.payload.body).await {
+    match world.derivations.derive(&name, &consult.artifact.body).await {
         Some(body) => Ok(axum::Json(ConsultAnswer {
             version: 1,
             answer: Derivation { body },
@@ -146,7 +146,12 @@ pub struct SanitizerInput {
 #[derive(Deserialize)]
 struct DynamicResolverRequest {
     version: u32,
-    resolver: String,
+    name: String,
+    artifact: DynamicResolverArtifact,
+}
+
+#[derive(Deserialize)]
+struct DynamicResolverArtifact {
     /// Exactly what the policy's `uses` entry selected. This directory declares one input,
     /// `to`, so that is the only key it reads.
     args: DynamicResolverArgs,
@@ -160,11 +165,11 @@ struct DynamicResolverArgs {
 async fn dynamic_resolver(
     axum::Json(request): axum::Json<DynamicResolverRequest>,
 ) -> (StatusCode, axum::Json<serde_json::Value>) {
-    if request.version != 1 || request.resolver != "email-recipient-readers" {
+    if request.version != 1 || request.name != "email-recipient-readers" {
         return (StatusCode::NOT_FOUND, axum::Json(serde_json::json!({})));
     }
 
-    let readers = match request.args.to.as_str() {
+    let readers = match request.artifact.args.to.as_str() {
         "ap-review@corp.example" => vec!["cfo@corp.example", "ap-lead@corp.example"],
         "all@acme.com" => vec!["ceo@acme.com", "staff@acme.com"],
         recipient => vec![recipient],
@@ -172,7 +177,7 @@ async fn dynamic_resolver(
     // The answer carries exactly the result this resolver declares.
     let answer = serde_json::json!({
         "version": 1,
-        "result": { "requires.audience": { "contains": readers } }
+        "answer": { "requires.audience": { "contains": readers } }
     });
     (StatusCode::OK, axum::Json(answer))
 }
@@ -180,18 +185,23 @@ async fn dynamic_resolver(
 #[derive(Deserialize)]
 struct MembershipRequest {
     version: u32,
+    artifact: MembershipArtifact,
+}
+
+#[derive(Deserialize)]
+struct MembershipArtifact {
     group: String,
 }
 
 async fn membership(axum::Json(request): axum::Json<MembershipRequest>) -> (StatusCode, axum::Json<serde_json::Value>) {
-    let readers = match (request.version, request.group.as_str()) {
+    let readers = match (request.version, request.artifact.group.as_str()) {
         (1, "finance") => vec!["cfo@corp.example", "ap-lead@corp.example"],
         (1, "acme") => vec!["ceo@acme.com", "staff@acme.com"],
         _ => return (StatusCode::NOT_FOUND, axum::Json(serde_json::json!({}))),
     };
     (
         StatusCode::OK,
-        axum::Json(serde_json::json!({ "version": 1, "readers": readers })),
+        axum::Json(serde_json::json!({ "version": 1, "answer": { "readers": readers } })),
     )
 }
 
@@ -454,18 +464,20 @@ mod tests {
     async fn recipient_directory_expands_the_demo_lists() {
         let resolve = |value: &str| DynamicResolverRequest {
             version: 1,
-            resolver: "email-recipient-readers".to_string(),
-            args: DynamicResolverArgs { to: value.to_string() },
+            name: "email-recipient-readers".to_string(),
+            artifact: DynamicResolverArtifact {
+                args: DynamicResolverArgs { to: value.to_string() },
+            },
         };
 
         let (status, axum::Json(answer)) = dynamic_resolver(axum::Json(resolve("ap-review@corp.example"))).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
-            answer["result"]["requires.audience"]["contains"],
+            answer["answer"]["requires.audience"]["contains"],
             serde_json::json!(["cfo@corp.example", "ap-lead@corp.example"])
         );
         assert_eq!(
-            answer["result"].as_object().map(|result| result.len()),
+            answer["answer"].as_object().map(|result| result.len()),
             Some(1),
             "the answer carries exactly the one result this resolver declares"
         );
@@ -473,14 +485,14 @@ mod tests {
         let (status, axum::Json(answer)) = dynamic_resolver(axum::Json(resolve("all@acme.com"))).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
-            answer["result"]["requires.audience"]["contains"],
+            answer["answer"]["requires.audience"]["contains"],
             serde_json::json!(["ceo@acme.com", "staff@acme.com"])
         );
 
         let (status, axum::Json(answer)) = dynamic_resolver(axum::Json(resolve("person@corp.example"))).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
-            answer["result"]["requires.audience"]["contains"],
+            answer["answer"]["requires.audience"]["contains"],
             serde_json::json!(["person@corp.example"])
         );
     }
@@ -489,9 +501,11 @@ mod tests {
     async fn recipient_directory_refuses_unknown_bindings() {
         let request = DynamicResolverRequest {
             version: 2,
-            resolver: "email-recipient-readers".to_string(),
-            args: DynamicResolverArgs {
-                to: "ap-review@corp.example".to_string(),
+            name: "email-recipient-readers".to_string(),
+            artifact: DynamicResolverArtifact {
+                args: DynamicResolverArgs {
+                    to: "ap-review@corp.example".to_string(),
+                },
             },
         };
         let (status, _) = dynamic_resolver(axum::Json(request)).await;
@@ -512,11 +526,11 @@ mod tests {
         assert!(body.contains("invalid name"), "got: {body}");
     }
 
-    fn consult<T>(name: &str, version: u32, payload: T) -> axum::Json<Consult<T>> {
+    fn consult<T>(name: &str, version: u32, artifact: T) -> axum::Json<Consult<T>> {
         axum::Json(Consult {
             version,
             name: name.to_string(),
-            payload,
+            artifact,
         })
     }
 

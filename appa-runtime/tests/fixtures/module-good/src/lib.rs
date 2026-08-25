@@ -5,17 +5,18 @@ use appa_builtin::{BuiltinError, BuiltinInput, export_builtin_authority};
 static IN_CALL: AtomicBool = AtomicBool::new(false);
 
 fn fixture(input: &BuiltinInput) -> Result<serde_json::Value, BuiltinError> {
-    match input.payload.get("mode").and_then(|mode| mode.as_str()) {
+    let mode = input.artifact["arguments"].get("mode").and_then(|mode| mode.as_str());
+    match mode {
         Some("error") => Err(BuiltinError::new("the fixture declined")),
         Some("panic") => panic!("a deliberate fixture panic"),
-        Some("big") => Ok(serde_json::json!({ "filler": "x".repeat(1024 * 1024) })),
+        Some("big") => Ok(serde_json::json!({ "ruling": "approve", "reason": "x".repeat(1024 * 1024) })),
         Some("gate") => {
             let overlapped = IN_CALL.swap(true, Ordering::SeqCst);
             std::thread::sleep(std::time::Duration::from_millis(80));
             IN_CALL.store(false, Ordering::SeqCst);
-            Ok(serde_json::json!({ "ruling": "approve", "overlapped": overlapped }))
+            Ok(serde_json::json!({ "ruling": "approve", "reason": format!("overlapped={overlapped}") }))
         }
-        _ => Ok(serde_json::json!({ "ruling": "approve", "component": input.component })),
+        _ => Ok(serde_json::json!({ "ruling": "approve", "reason": format!("component={}", input.component) })),
     }
 }
 

@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use appa_runtime::config::{DynamicImplementation, Endpoint, Externals, Implementation};
+use appa_runtime::config::{Binding, ExternalBindings};
 
 use crate::systems::System;
 
@@ -132,53 +132,56 @@ const MAX_CONSULT_BYTES: usize = 256 * 1024;
 /// misses would be refused by `Runtime::open` as unbound, which
 /// is a contained failure but a failure — a visitor's own policy would not
 /// start.
-pub fn externals_for(policy: &appa_policy::Config, base: &str) -> Externals {
+pub fn externals_for(policy: &appa_policy::Config, base: &str) -> ExternalBindings {
     let registry = policy.registry_config();
-    let endpoint = |path: String| Implementation::Resolver(Endpoint { url: path, token: None });
-    Externals {
-        timeout: CONSULT_TIMEOUT,
-        review_timeout: REVIEW_WINDOW,
-        max_body_bytes: MAX_CONSULT_BYTES,
-        authorities: registry
-            .authorities
-            .iter()
-            .map(|authority| {
-                let name = authority.name.as_str().to_string();
-                let url = format!("{base}{AUTHORITY_PATH}/{name}");
-                (name, endpoint(url))
-            })
-            .collect(),
-        sanitizers: registry
-            .sanitizers
-            .iter()
-            .map(|sanitizer| {
-                let name = sanitizer.name.as_str().to_string();
-                let url = format!("{base}{SANITIZER_PATH}/{name}");
-                (name, endpoint(url))
-            })
-            .collect(),
-        // The playground serves no classifier route, so a resolver-backed cast stays
-        // unbound and refuses the policy at open. Constant casts need no binding.
-        casts: std::collections::BTreeMap::new(),
-        // The playground routes every named resolver to the same handler.
-        dynamic: policy
-            .dynamic_resolver_names()
-            .map(|name| {
-                (
-                    name.as_str().to_string(),
-                    DynamicImplementation::Resolver(Endpoint {
-                        url: format!("{base}{DYNAMIC_RESOLVER_PATH}"),
-                        token: None,
-                    }),
-                )
-            })
-            .collect(),
-        membership: Some(Endpoint {
-            url: format!("{base}{MEMBERSHIP_PATH}"),
-            token: None,
-        }),
-        claude_code: Default::default(),
-    }
+    let endpoint = |path: String| Binding::Url {
+        url: path,
+        token_env: None,
+    };
+    let mut bindings = ExternalBindings::new(CONSULT_TIMEOUT, MAX_CONSULT_BYTES);
+    bindings.review_timeout_ms = REVIEW_WINDOW.as_millis() as u64;
+    bindings.authorities = registry
+        .authorities
+        .iter()
+        .map(|authority| {
+            let name = authority.name.as_str().to_string();
+            let url = format!("{base}{AUTHORITY_PATH}/{name}");
+            (name, endpoint(url))
+        })
+        .collect();
+    bindings.sanitizers = registry
+        .sanitizers
+        .iter()
+        .filter(|sanitizer| !sanitizer.name.is_attest_schema())
+        .map(|sanitizer| {
+            let name = sanitizer.name.as_str().to_string();
+            let url = format!("{base}{SANITIZER_PATH}/{name}");
+            (name, endpoint(url))
+        })
+        .collect();
+    // The playground serves no classifier route, so a resolver-backed cast stays
+    // unbound and refuses the policy at open. Constant casts need no binding.
+    // The playground routes every named resolver to the same handler.
+    bindings.dynamic = policy
+        .dynamic_resolver_names()
+        .map(|name| {
+            (
+                name.as_str().to_string(),
+                endpoint(format!("{base}{DYNAMIC_RESOLVER_PATH}")),
+            )
+        })
+        .collect();
+    bindings.membership = registry
+        .membership
+        .iter()
+        .map(|resolver| {
+            (
+                resolver.as_str().to_string(),
+                endpoint(format!("{base}{MEMBERSHIP_PATH}")),
+            )
+        })
+        .collect();
+    bindings
 }
 
 #[cfg(test)]

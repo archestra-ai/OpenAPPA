@@ -1511,6 +1511,7 @@ mod tests {
                     audience: DeclaredAudience::Public,
                 }),
                 scope: Scope::default(),
+                hint: None,
             }])
             .registry();
         let found = routes(&castable, &log_unknown, &wipe, depth(2));
@@ -1543,6 +1544,7 @@ mod tests {
                 audience: DeclaredAudience::declared([], [board.clone()]).unwrap(),
             }),
             scope: Scope::default(),
+            hint: None,
         }])
         .grouped()
         .registry();

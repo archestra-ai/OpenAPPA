@@ -372,11 +372,12 @@ impl Engine {
                         sanitizer: sanitizer.clone(),
                         source,
                         body,
+                        tool: None,
                     })
                 }
                 None => Ok(OfferConsult::Accept),
             },
-            crate::basis::SubjectKey::ConfinedResult(_) => match recorded.plan.hop() {
+            crate::basis::SubjectKey::ConfinedResult(dispatch) => match recorded.plan.hop() {
                 Some(sanitizer) => {
                     let DerivedCandidate::Result { value, .. } =
                         views.candidate(&recorded.subject).ok_or(TransitionError::StaleOffer)?
@@ -389,6 +390,7 @@ impl Engine {
                         sanitizer: sanitizer.clone(),
                         source,
                         body,
+                        tool: views.dispatch_tool(dispatch).cloned(),
                     })
                 }
                 None => Ok(OfferConsult::Accept),
@@ -5756,6 +5758,7 @@ mod tests {
                 sanitizer: crate::names::SanitizerName::new("scrubber"),
                 source: crate::value::RawResultDigest::of(derived.as_str().as_bytes()),
                 body: derived.clone(),
+                tool: Some(ToolName::new("fetch")),
             }),
         );
         assert_eq!(

@@ -70,7 +70,10 @@ use std::collections::BTreeMap;
 
 use crate::api::OutcomeBody;
 pub(crate) use crate::api::{OfferId, ProposedCall, SpawnBinding, ToolOutcome, TrajectoryId};
-use crate::external::{CastAnswer, CastAudience, ToolResolutionAnswer, ToolResolutionContext};
+use crate::consult::{
+    AuthorityAnswer, AuthorityArtifact, AuthorityDeclaration, CastAnswer, CastDeclaration, CastTool, DynamicAnswer,
+    DynamicDeclaration, Requirement, Ruling, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint, WireAudience,
+};
 
 /// One fresh 256-bit random number per act that can surface offers; the
 /// runtime mixes it into every `OfferId` it mints.
@@ -104,19 +107,21 @@ pub struct Feedback {
 pub enum ExternalRequest {
     Authority {
         authority: String,
-        payload: serde_json::Value,
+        declaration: AuthorityDeclaration,
+        artifact: AuthorityArtifact,
         review: AuthorityReview,
     },
     Sanitizer {
         sanitizer: String,
         source: RawResultDigest,
-        body: ValueBody,
+        declaration: SanitizerDeclaration,
+        artifact: SanitizerArtifact,
     },
     ToolResolution {
         uses: ToolResolverUse,
         /// Exactly what this use selected: the value the request carries as `args`.
         args: serde_json::Value,
-        context: ToolResolutionContext,
+        declaration: DynamicDeclaration,
     },
     Membership {
         resolver: String,
@@ -138,16 +143,27 @@ pub enum ExternalRequest {
 }
 
 /// One cast ask as the session answers it: the casts still to try, in registration order,
-/// and what every classifier consult carries beside the cast's name — the value's bytes, the
-/// tool whose result the value is (a child return has none), and the label context a tool
-/// resolver also receives. Evidence carries the ask it answers, so an answer the engine
-/// refuses is followed by the ask's next cast without recomputing anything.
+/// and the value's bytes every classifier consult carries. Evidence carries the ask it
+/// answers, so an answer the engine refuses is followed by the ask's next cast without
+/// recomputing anything.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CastAsk {
-    pub casts: Vec<ApplicableCast>,
+    pub casts: Vec<CastCandidate>,
     pub body: ValueBody,
-    pub tool: Option<String>,
-    pub context: ToolResolutionContext,
+}
+
+/// One applicable cast as the session tries it: answered from the policy, or consulted
+/// under its declaration.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CastCandidate {
+    pub name: String,
+    pub resolution: CandidateResolution,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CandidateResolution {
+    Constant(EstablishedLabel),
+    Resolver(CastDeclaration),
 }
 
 impl CastAsk {
@@ -157,13 +173,11 @@ impl CastAsk {
             casts: self
                 .casts
                 .iter()
-                .skip_while(|applicable| applicable.name.as_str() != cast)
+                .skip_while(|candidate| candidate.name != cast)
                 .skip(1)
                 .cloned()
                 .collect(),
             body: self.body.clone(),
-            tool: self.tool.clone(),
-            context: self.context.clone(),
         }
     }
 }
@@ -201,12 +215,9 @@ pub enum ExternalEvidence {
     ToolResolution {
         resolver: String,
         /// The `args` the classifier answered for, by digest. Evidence matches that value only,
-        /// so two calls sharing a resolver and a context never take each other's answer.
+        /// so two calls sharing a resolver never take each other's answer.
         args: appa_engine::contract::ResolverArgsDigest,
-        answer: ToolResolutionAnswer,
-        /// The label context the classifier answered under. Evidence matches only while the
-        /// call's current context is the one it described; a moved trajectory consults again.
-        context: ToolResolutionContext,
+        answer: DynamicAnswer,
     },
     Membership {
         resolver: String,
@@ -279,12 +290,19 @@ pub enum AuthorityVerdict {
 
 impl AuthorityVerdict {
     /// Parse one consult answer. Malformed answers abstain — a wire mistake
-    /// must never approve or deny.
+    /// must never approve or deny. The reason is diagnostic only: logged, never kept.
     pub fn from_wire(answer: &serde_json::Value) -> AuthorityVerdict {
-        match answer.get("ruling").and_then(|r| r.as_str()) {
-            Some("approve") => AuthorityVerdict::Approve,
-            Some("deny") => AuthorityVerdict::Deny,
-            _ => AuthorityVerdict::Abstain,
+        match AuthorityAnswer::from_wire(answer) {
+            Some(AuthorityAnswer { ruling, reason }) => {
+                if let Some(reason) = reason {
+                    tracing::debug!(reason, "the authority gave its reason");
+                }
+                match ruling {
+                    Ruling::Approve => AuthorityVerdict::Approve,
+                    Ruling::Deny => AuthorityVerdict::Deny,
+                }
+            }
+            None => AuthorityVerdict::Abstain,
         }
     }
 }
@@ -987,7 +1005,7 @@ impl RuntimeEngine {
             Ok(resolved) => resolved,
             Err(error) => return Ok(deny(malformed_feedback(&error))),
         };
-        let (tool_pins, memberships) = match self.answers_for(view, trajectory, &resolved, evidence) {
+        let (tool_pins, memberships) = match self.answers_for(&resolved, evidence) {
             Ok(answers) => answers,
             Err(Resolution::Feedback(text)) => return Ok(deny(text)),
             Err(Resolution::Consult(requests)) => return Ok(EngineDecision::deliver(Next::ResolveExternal(requests))),
@@ -1074,7 +1092,7 @@ impl RuntimeEngine {
                     match cast_state(chain, evidence, value) {
                         CastAnswerState::Missing => consults.push(ExternalRequest::Cast {
                             value,
-                            ask: self.cast_ask(view, &acting, value_source(view, &acting, value), casts, body),
+                            ask: self.cast_ask(value_source(view, &acting, value), casts, body),
                         }),
                         CastAnswerState::Unreadable(continued) => consults.push(*continued),
                         CastAnswerState::NoAnswer | CastAnswerState::Resolved => {
@@ -1272,11 +1290,16 @@ impl RuntimeEngine {
             OfferConsult::Rewrite { sanitizer, call } => {
                 let arguments = call.canonical_arguments();
                 let source = RawResultDigest::of(arguments.canonical_bytes());
-                let derived =
-                    match sanitizer_derived(evidence, &sanitizer, source, ValueBody::new(arguments.canonical_text())) {
-                        Ok(derived) => derived,
-                        Err(next) => return Ok(next),
-                    };
+                let derived = match self.sanitizer_derived(
+                    evidence,
+                    &sanitizer,
+                    source,
+                    ValueBody::new(arguments.canonical_text()),
+                    SanitizerSubject::Input { call: &call },
+                ) {
+                    Ok(derived) => derived,
+                    Err(next) => return Ok(next),
+                };
                 // A rewrite whose arguments select another ordered contract is a new call under
                 // it: that contract's resolvers and placeholder groups are consulted about the
                 // rewritten arguments before the engine judges it. A rewrite that stays in its
@@ -1287,7 +1310,7 @@ impl RuntimeEngine {
                     .resolve_call(call.tool().clone(), derived.as_str().as_bytes())
                 {
                     Ok(rewritten) if rewritten.contract_id() != call.contract_id() => {
-                        match self.answers_for(view, trajectory, &rewritten, evidence) {
+                        match self.answers_for(&rewritten, evidence) {
                             Ok(answers) => answers,
                             Err(Resolution::Consult(requests)) => {
                                 return Ok(EngineDecision::deliver(Next::ResolveExternal(requests)));
@@ -1309,7 +1332,8 @@ impl RuntimeEngine {
                 sanitizer,
                 source,
                 body,
-            } => match sanitizer_derived(evidence, &sanitizer, source, body) {
+                tool,
+            } => match self.sanitizer_derived(evidence, &sanitizer, source, body, SanitizerSubject::Output { tool }) {
                 Ok(derived) => OfferOutcome::Derived(Evidence::Sanitizer {
                     sanitizer,
                     source,
@@ -1408,6 +1432,8 @@ impl RuntimeEngine {
         required: &[RequiredRuling],
         evidence: &[ExternalEvidence],
     ) -> AuthorityOutcome {
+        let registry = self.engine.registry();
+        let chain = registry.trust_chain();
         let mut approvals = Vec::new();
         let mut requests = Vec::new();
         for requirement in required {
@@ -1417,17 +1443,25 @@ impl RuntimeEngine {
                 trajectory_label: views.current_label(),
             };
             match authority_verdict(evidence, &name) {
-                None => requests.push(ExternalRequest::Authority {
-                    authority: name,
-                    payload: authority_payload(
-                        &requirement.authority,
-                        self.engine.registry(),
-                        call,
-                        &requirement.covers,
-                        views,
-                    ),
-                    review,
-                }),
+                None => {
+                    let registered = registry
+                        .authority(&requirement.authority)
+                        .expect("plans reference only registered authorities");
+                    requests.push(ExternalRequest::Authority {
+                        authority: name,
+                        declaration: AuthorityDeclaration::of(registered, chain),
+                        artifact: AuthorityArtifact {
+                            tool: call.tool().as_str().to_string(),
+                            arguments: call.arguments().clone(),
+                            requirements: requirement
+                                .covers
+                                .iter()
+                                .map(|gap| Requirement::of(gap, chain))
+                                .collect(),
+                        },
+                        review,
+                    });
+                }
                 Some((AuthorityVerdict::Approve, review)) => approvals.push(AuthorityEvidence {
                     offer: *offer,
                     authority: requirement.authority.clone(),
@@ -1603,8 +1637,6 @@ impl RuntimeEngine {
     /// consults still owed: the resolvers it uses and the placeholder groups its arguments name.
     fn answers_for(
         &self,
-        view: &EngineView,
-        trajectory: &TrajectoryId,
         resolved: &ResolvedCall,
         evidence: &[ExternalEvidence],
     ) -> Result<(Vec<PinnedToolResolution>, Vec<PinnedMembership>), Resolution> {
@@ -1613,7 +1645,7 @@ impl RuntimeEngine {
             .registry()
             .contract(resolved)
             .expect("a resolved call names its registered contract");
-        let tools = self.tool_resolutions_for(view, trajectory, contract, resolved, evidence);
+        let tools = self.tool_resolutions_for(contract, resolved, evidence);
         let memberships = self.memberships_for(contract, resolved, evidence);
         match (tools, memberships) {
             (Ok(tool_pins), Ok(memberships)) => Ok((tool_pins, memberships)),
@@ -1632,8 +1664,6 @@ impl RuntimeEngine {
 
     fn tool_resolutions_for(
         &self,
-        view: &EngineView,
-        trajectory: &TrajectoryId,
         contract: &appa_engine::contract::ToolContract,
         resolved: &ResolvedCall,
         evidence: &[ExternalEvidence],
@@ -1642,11 +1672,9 @@ impl RuntimeEngine {
             return Ok(Vec::new());
         }
         let chain = self.engine.registry().trust_chain();
-        // The consult payload — the canonical arguments and the classifier context — is also
-        // the clock resolver evidence is matched against: an answer given under a context this
-        // view no longer shows, or for other arguments, is not evidence for this call, and the
-        // use consults again.
-        let current_context = self.tool_resolution_context(view, trajectory, contract);
+        // The arguments the consult carries are also the key resolver evidence is matched
+        // against: an answer given for other arguments is not evidence for this call, and
+        // the use consults again.
         let mut pins = Vec::new();
         let mut requests = Vec::new();
         for uses in &contract.uses {
@@ -1657,10 +1685,7 @@ impl RuntimeEngine {
                     resolver,
                     args: answered_for,
                     answer,
-                    context,
-                } if resolver == uses.resolver.as_str() && *answered_for == asked && *context == current_context => {
-                    Some(answer.clone())
-                }
+                } if resolver == uses.resolver.as_str() && *answered_for == asked => Some(answer.clone()),
                 _ => None,
             });
             match answer {
@@ -1668,7 +1693,7 @@ impl RuntimeEngine {
                     requests.push(ExternalRequest::ToolResolution {
                         uses: uses.clone(),
                         args,
-                        context: current_context.clone(),
+                        declaration: self.dynamic_declaration(uses),
                     });
                 }
                 Some(answer) => {
@@ -1726,98 +1751,110 @@ impl RuntimeEngine {
         Ok(pins)
     }
 
-    /// What a tool-resolution consult carries beside the binding: the call's canonical
-    /// argument object and the trajectory's current label context.
-    fn tool_resolution_context(
-        &self,
-        view: &EngineView,
-        trajectory: &TrajectoryId,
-        contract: &appa_engine::contract::ToolContract,
-    ) -> ToolResolutionContext {
-        let static_attention = contract
-            .requires
-            .attention
-            .iter()
-            .map(|mark| mark.as_str().to_string())
-            .collect();
-        self.label_context(view, &engine_id(trajectory), static_attention)
-    }
-
-    /// The label context every classifier consult carries — a tool resolver's and a cast's
-    /// alike: the trajectory's current bound, whether either dimension is still unresolved,
-    /// and the names the policy defines. `static_attention` is what the policy already
-    /// requires of the tool named beside it.
-    fn label_context(
-        &self,
-        view: &EngineView,
-        trajectory: &EngineTrajectoryId,
-        static_attention: Vec<String>,
-    ) -> ToolResolutionContext {
-        let current = view
-            .views(trajectory)
-            .expect("the event's trajectory was validated as open")
-            .current_label();
-        let bound = current.bound();
-        let chain = self.engine.registry().trust_chain();
-        ToolResolutionContext {
-            current_trust: chain
-                .name_of(bound.trust)
-                .map(str::to_string)
-                .unwrap_or_else(|| format!("unnamed-rank-{}", bound.trust.rank())),
-            current_trust_rank: bound.trust.rank(),
-            current_audience: match &bound.audience {
-                Audience::Public => serde_json::Value::String("public".to_string()),
-                Audience::Restricted(readers) => serde_json::Value::Array(
-                    readers
-                        .iter()
-                        .map(|reader| serde_json::Value::String(reader.as_str().to_string()))
-                        .collect(),
-                ),
-            },
-            trust_unresolved: !current.is_established(Dimension::Trust),
-            audience_unresolved: !current.is_established(Dimension::Audience),
-            trust_ranks: (0..chain.len())
-                .filter_map(|rank| chain.name_of(Trust::new(rank as u8)).map(str::to_string))
-                .collect(),
-            attention_marks: self
-                .engine
-                .registry()
+    /// What one dynamic resolver binding declares: the results it owns and the policy's
+    /// vocabulary its answer may use.
+    fn dynamic_declaration(&self, uses: &ToolResolverUse) -> DynamicDeclaration {
+        let registry = self.engine.registry();
+        DynamicDeclaration::of(
+            &uses.returns,
+            registry.trust_chain(),
+            registry
                 .attention_marks()
                 .map(|mark| mark.as_str().to_string())
                 .collect(),
-            static_attention,
+        )
+    }
+
+    /// One sanitizer consult: the registered declaration at the point the offer applies
+    /// it, and the value with the tool it belongs to.
+    fn sanitizer_request(
+        &self,
+        sanitizer: &appa_engine::names::SanitizerName,
+        source: RawResultDigest,
+        body: ValueBody,
+        subject: SanitizerSubject<'_>,
+    ) -> ExternalRequest {
+        let registry = self.engine.registry();
+        let registered = registry
+            .sanitizer(sanitizer)
+            .expect("plans reference only registered sanitizers");
+        let (on, tool, parameters) = match subject {
+            SanitizerSubject::Input { call } => {
+                let contract = registry
+                    .contract(call)
+                    .expect("a resolved call names its registered contract");
+                let parameters =
+                    serde_json::to_value(&contract.parameters).expect("a compiled parameter schema serializes");
+                (SanitizerPoint::ToolInput, Some(call.tool().clone()), Some(parameters))
+            }
+            SanitizerSubject::Output { tool } => (SanitizerPoint::ToolOutput, tool, None),
+        };
+        ExternalRequest::Sanitizer {
+            sanitizer: sanitizer.as_str().to_string(),
+            source,
+            declaration: SanitizerDeclaration::of(registered, on, registry.trust_chain(), parameters),
+            artifact: SanitizerArtifact {
+                tool: tool.map(|tool| tool.as_str().to_string()),
+                body: body.as_str().to_string(),
+            },
         }
     }
 
-    /// One cast ask, ready for the session: the casts the engine selected, the value's bytes,
-    /// the tool whose result it is, and the label context of the trajectory acting.
-    fn cast_ask(
+    /// The sanitizer's derivation from the evidence gathered so far, or what the offer does
+    /// without one: asks for it, or stands for a later deliberate retry after the sanitizer
+    /// gave no answer.
+    fn sanitizer_derived(
         &self,
-        view: &EngineView,
-        trajectory: &EngineTrajectoryId,
-        source: CastSource,
-        casts: Vec<ApplicableCast>,
+        evidence: &[ExternalEvidence],
+        sanitizer: &appa_engine::names::SanitizerName,
+        source: RawResultDigest,
         body: ValueBody,
-    ) -> CastAsk {
-        let CastSource { tool, call } = source;
-        let static_attention = call
-            .as_ref()
-            .and_then(|call| self.engine.registry().contract(call))
-            .map(|contract| {
-                contract
-                    .requires
-                    .attention
-                    .iter()
-                    .map(|mark| mark.as_str().to_string())
-                    .collect()
-            })
-            .unwrap_or_default();
-        CastAsk {
-            casts,
-            body,
-            tool: tool.map(|tool| tool.as_str().to_string()),
-            context: self.label_context(view, trajectory, static_attention),
+        subject: SanitizerSubject<'_>,
+    ) -> Result<ValueBody, EngineDecision> {
+        match sanitizer_derivation(evidence, sanitizer.as_str(), &source) {
+            SanitizerAnswer::Derived(derived) => Ok(derived),
+            SanitizerAnswer::Missing => Err(EngineDecision::deliver(Next::ResolveExternal(vec![
+                self.sanitizer_request(sanitizer, source, body, subject),
+            ]))),
+            SanitizerAnswer::NoAnswer => Err(no_answer(format!(
+                "[appa] sanitizer {} gave no answer; the offer stands and may be executed again",
+                sanitizer.as_str()
+            ))),
         }
+    }
+
+    /// One cast ask, ready for the session: the casts the engine selected — each answered
+    /// from the policy or carrying its declaration — and the value's bytes. The tool whose
+    /// result the value is rides in every resolver's declaration.
+    fn cast_ask(&self, source: CastSource, casts: Vec<ApplicableCast>, body: ValueBody) -> CastAsk {
+        let registry = self.engine.registry();
+        let CastSource { tool, call } = source;
+        let tool = match call.as_ref().and_then(|call| registry.contract(call)) {
+            Some(contract) => Some(CastTool::of(contract)),
+            None => tool.map(|tool| CastTool {
+                name: tool.as_str().to_string(),
+                description: None,
+            }),
+        };
+        let casts = casts
+            .into_iter()
+            .map(|applicable| CastCandidate {
+                resolution: match applicable.constant {
+                    Some(constant) => CandidateResolution::Constant(constant),
+                    None => {
+                        let registered = registry
+                            .cast(&applicable.name)
+                            .expect("the engine selects only registered casts");
+                        CandidateResolution::Resolver(
+                            CastDeclaration::of(registered, registry.trust_chain(), tool.clone())
+                                .expect("a cast the engine did not answer resolves by resolver"),
+                        )
+                    }
+                },
+                name: applicable.name.as_str().to_string(),
+            })
+            .collect();
+        CastAsk { casts, body }
     }
 
     /// The next step for an evidence request an outcome or a return raised: the ask, or the
@@ -1851,11 +1888,16 @@ impl RuntimeEngine {
                 ) {
                     return blocked();
                 }
-                Ok(Next::ResolveExternal(vec![ExternalRequest::Sanitizer {
-                    sanitizer: sanitizer.as_str().to_string(),
+                let tool = dispatch.and_then(|dispatch| {
+                    view.views(trajectory)
+                        .and_then(|views| views.dispatch_tool(dispatch).cloned())
+                });
+                Ok(Next::ResolveExternal(vec![self.sanitizer_request(
+                    &sanitizer,
                     source,
                     body,
-                }]))
+                    SanitizerSubject::Output { tool },
+                )]))
             }
             EvidenceRequest::PendingCast { casts, source, body } => {
                 match pending_cast_state(chain, evidence, &source) {
@@ -1866,7 +1908,7 @@ impl RuntimeEngine {
                         });
                         Ok(Next::ResolveExternal(vec![ExternalRequest::PendingCast {
                             source,
-                            ask: self.cast_ask(view, trajectory, CastSource::from_call(call), casts, body),
+                            ask: self.cast_ask(CastSource::from_call(call), casts, body),
                         }]))
                     }
                     CastAnswerState::Unreadable(continued) => Ok(Next::ResolveExternal(vec![*continued])),
@@ -1876,7 +1918,7 @@ impl RuntimeEngine {
             EvidenceRequest::Cast { casts, value, body } => match cast_state(chain, evidence, value) {
                 CastAnswerState::Missing => Ok(Next::ResolveExternal(vec![ExternalRequest::Cast {
                     value,
-                    ask: self.cast_ask(view, trajectory, value_source(view, trajectory, value), casts, body),
+                    ask: self.cast_ask(value_source(view, trajectory, value), casts, body),
                 }])),
                 CastAnswerState::Unreadable(continued) => Ok(Next::ResolveExternal(vec![*continued])),
                 CastAnswerState::NoAnswer | CastAnswerState::Resolved => blocked(),
@@ -2259,10 +2301,10 @@ fn continued_casts(
 }
 
 /// The engine-side audience a classifier's wire audience resolves to.
-fn resolved_audience(audience: &CastAudience) -> Audience {
+fn resolved_audience(audience: &WireAudience) -> Audience {
     match audience {
-        CastAudience::Public => Audience::Public,
-        CastAudience::Readers(readers) => Audience::restricted(readers.iter().map(ReaderId::new)),
+        WireAudience::Public => Audience::Public,
+        WireAudience::Readers(readers) => Audience::restricted(readers.iter().map(ReaderId::new)),
     }
 }
 
@@ -2364,28 +2406,11 @@ fn sanitizer_evidence(evidence: &[ExternalEvidence]) -> Vec<Evidence> {
         .collect()
 }
 
-/// The sanitizer's derivation from the evidence gathered so far, or what the offer does without
-/// one: asks for it, or stands for a later deliberate retry after the sanitizer gave no answer.
-fn sanitizer_derived(
-    evidence: &[ExternalEvidence],
-    sanitizer: &appa_engine::names::SanitizerName,
-    source: RawResultDigest,
-    body: ValueBody,
-) -> Result<ValueBody, EngineDecision> {
-    match sanitizer_derivation(evidence, sanitizer.as_str(), &source) {
-        SanitizerAnswer::Derived(derived) => Ok(derived),
-        SanitizerAnswer::Missing => Err(EngineDecision::deliver(Next::ResolveExternal(vec![
-            ExternalRequest::Sanitizer {
-                sanitizer: sanitizer.as_str().to_string(),
-                source,
-                body,
-            },
-        ]))),
-        SanitizerAnswer::NoAnswer => Err(no_answer(format!(
-            "[appa] sanitizer {} gave no answer; the offer stands and may be executed again",
-            sanitizer.as_str()
-        ))),
-    }
+/// What a sanitizer consult judges: the arguments of the call about to run, or a value on
+/// its way in — a tool's result naming its producer, a child's return naming none.
+enum SanitizerSubject<'a> {
+    Input { call: &'a ResolvedCall },
+    Output { tool: Option<ToolName> },
 }
 
 fn sanitizer_derivation(evidence: &[ExternalEvidence], name: &str, source: &RawResultDigest) -> SanitizerAnswer {
@@ -2503,28 +2528,6 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn authority_payload(
-    authority: &appa_engine::names::AuthorityName,
-    registry: &appa_engine::registry::Registry,
-    resolved: &ResolvedCall,
-    gaps: &[appa_engine::check::Gap],
-    views: &Views,
-) -> serde_json::Value {
-    let hint = registry
-        .authority(authority)
-        .and_then(|registered| registered.hint.as_ref())
-        .map(|hint| hint.as_str());
-    serde_json::json!({
-        "authority": authority.as_str(),
-        "hint": hint,
-        "tool": resolved.tool().as_str(),
-        "digest": hex(resolved.digest().bytes()),
-        "trajectory_label": label_wire(&views.current_label(), registry.trust_chain()),
-        "arguments": resolved.arguments(),
-        "gaps": gaps.iter().map(gap_text).collect::<Vec<_>>(),
-    })
-}
-
 /// One admitted value's own contribution as a fold: a known dimension is the bound, an
 /// unknown one names the value itself as the unresolved source.
 fn value_fold(id: ValueId, label: &Label) -> PartialLabel {
@@ -2583,30 +2586,6 @@ const fn is_format(c: char) -> bool {
             | '\u{E0001}'
             | '\u{E0020}'..='\u{E007F}'
     )
-}
-
-fn label_wire(
-    label: &appa_engine::label::PartialLabel,
-    chain: &appa_engine::registry::TrustChain,
-) -> serde_json::Value {
-    use appa_engine::label::{Audience, Dimension};
-
-    let bound = label.bound();
-    let unresolved = |dim| label.unresolved(dim).map(|value| value.index()).collect::<Vec<_>>();
-    let trust = match chain.name_of(bound.trust) {
-        Some(rank) => rank.to_string(),
-        None => format!("rank {}, which this deployment does not name", bound.trust.rank()),
-    };
-    serde_json::json!({
-        "trust": trust,
-        "trust_rank": bound.trust.rank(),
-        "audience": match &bound.audience {
-            Audience::Public => serde_json::Value::String("public".to_string()),
-            Audience::Restricted(readers) => readers.iter().map(|reader| reader.as_str()).collect(),
-        },
-        "unresolved_trust": unresolved(Dimension::Trust),
-        "unresolved_audience": unresolved(Dimension::Audience),
-    })
 }
 
 fn gap_text(gap: &appa_engine::check::Gap) -> String {
@@ -2857,10 +2836,10 @@ fn block_feedback(views: &Views, planned: &PlannedBlock, offers: &[(OfferId, Pla
 #[cfg(test)]
 mod tests {
     use super::{
-        ExternalEvidence, ExternalRequest, OfferId, Resolution, RuntimeEngine, TrajectoryId, audience_wire,
-        remedy_instruction, remedy_lines, terminal_safe,
+        ExternalEvidence, ExternalRequest, OfferId, Resolution, RuntimeEngine, audience_wire, remedy_instruction,
+        remedy_lines, terminal_safe,
     };
-    use crate::external::{CastAudience, RequiredAudienceAnswer, ToolResolutionAnswer};
+    use crate::consult::{DynamicAnswer, RequiredAudienceAnswer, WireAudience};
     use appa_engine::contract::RequiredAudience;
     use appa_engine::label::{Audience, ReaderId};
     use appa_engine::plan::{ExecutableRemedyPlan, PlanId, PlannedBlock, RemedyPlan, RemedyStep};
@@ -2880,7 +2859,7 @@ mod tests {
                 description = "Looks one record up."
                 uses = [{ resolver = "classifier" }]
                 # The tool keeps its own attention mark: `requires.attention` has one owner, and
-                # here it is the policy, so the classifier sees the mark under `static_attention`.
+                # here it is the policy, so the classifier never sees the mark.
                 requires = { attention = ["static-review"] }
                 [[authority]]
                 name = "reviewer"
@@ -2890,10 +2869,6 @@ mod tests {
         )
         .expect("the tool-level resolver policy compiles");
         let engine = RuntimeEngine::new(policy.engine().clone());
-        let trajectory = TrajectoryId("root".to_string());
-        let view = engine
-            .validated(engine.root_opening(&trajectory, b"test policy"), &trajectory, 0)
-            .expect("the root opening builds a view");
         let call = engine
             .engine
             .resolve_call(
@@ -2908,85 +2883,58 @@ mod tests {
             .registry()
             .contract(&call)
             .expect("the call names its contract");
-        let (consulted_args, consulted_context) =
-            match engine.tool_resolutions_for(&view, &trajectory, contract, &call, &[]) {
-                Err(Resolution::Consult(requests)) => match requests.as_slice() {
-                    [ExternalRequest::ToolResolution { uses, args, context }] => {
-                        assert_eq!(uses.resolver.as_str(), "classifier");
-                        // The resolver declares no inputs, so `args` is the complete call.
-                        assert_eq!(
-                            args,
-                            &serde_json::json!({
-                                "name": "lookup",
-                                "description": "Looks one record up.",
-                                "arguments": {"nested": {"id": 7}, "deep": true},
-                            })
-                        );
-                        assert_eq!(context.trust_ranks, ["suspicious", "trusted"]);
-                        assert_eq!(context.attention_marks, ["privacy-review"]);
-                        assert_eq!(context.static_attention, ["static-review"]);
-                        (
-                            appa_engine::contract::ResolverArgsDigest::of(&appa_engine::params::canonical_bytes(args)),
-                            context.clone(),
-                        )
-                    }
-                    other => panic!("expected one tool-resolution consult, got {other:?}"),
-                },
-                other => panic!("an unanswered tool resolver must consult, got {other:?}"),
-            };
-
-        // An answer given under a different label context is not evidence for this call:
-        // the binding consults again instead of replaying it.
-        let foreign_context = crate::external::ToolResolutionContext {
-            current_trust: "suspicious".to_string(),
-            current_trust_rank: 0,
-            ..consulted_context.clone()
-        };
-        assert!(matches!(
-            engine.tool_resolutions_for(
-                &view,
-                &trajectory,
-                contract,
-                &call,
-                &[ExternalEvidence::ToolResolution {
-                    resolver: "classifier".to_string(),
-                    args: consulted_args,
-                    answer: ToolResolutionAnswer {
-                        trust: Some("suspicious".to_string()),
-                        audience: Some(CastAudience::Public),
-                        required_trust: Some("trusted".to_string()),
-                        required_audience: Some(RequiredAudienceAnswer {
-                            includes: Some(CastAudience::Readers(vec!["support".to_string()])),
-                            cap: Some(CastAudience::Public),
-                        }),
-                        attention: None,
+        let consulted_args = match engine.tool_resolutions_for(contract, &call, &[]) {
+            Err(Resolution::Consult(requests)) => match requests.as_slice() {
+                [
+                    ExternalRequest::ToolResolution {
+                        uses,
+                        args,
+                        declaration,
                     },
-                    context: foreign_context,
-                }],
-            ),
-            Err(Resolution::Consult(_))
-        ));
+                ] => {
+                    assert_eq!(uses.resolver.as_str(), "classifier");
+                    // The resolver declares no inputs, so `args` is the complete call.
+                    assert_eq!(
+                        args,
+                        &serde_json::json!({
+                            "name": "lookup",
+                            "description": "Looks one record up.",
+                            "arguments": {"nested": {"id": 7}, "deep": true},
+                        })
+                    );
+                    // The declaration carries the policy's vocabulary and nothing of the
+                    // trajectory: no current label, no static attention.
+                    assert_eq!(declaration.trust_ranks, ["suspicious", "trusted"]);
+                    assert_eq!(declaration.attention_marks, ["privacy-review"]);
+                    assert_eq!(
+                        declaration.returns,
+                        ["delta.trust", "delta.audience", "requires.trust", "requires.audience"]
+                    );
+                    appa_engine::contract::ResolverArgsDigest::of(&appa_engine::params::canonical_bytes(args))
+                }
+                other => panic!("expected one tool-resolution consult, got {other:?}"),
+            },
+            other => panic!("an unanswered tool resolver must consult, got {other:?}"),
+        };
 
+        let answer = || DynamicAnswer {
+            trust: Some("suspicious".to_string()),
+            audience: Some(WireAudience::Public),
+            required_trust: Some("trusted".to_string()),
+            required_audience: Some(RequiredAudienceAnswer {
+                includes: Some(WireAudience::Readers(vec!["support".to_string()])),
+                cap: Some(WireAudience::Public),
+            }),
+            attention: None,
+        };
         let pins = engine
             .tool_resolutions_for(
-                &view,
-                &trajectory,
                 contract,
                 &call,
                 &[ExternalEvidence::ToolResolution {
                     resolver: "classifier".to_string(),
                     args: consulted_args,
-                    answer: ToolResolutionAnswer {
-                        trust: Some("suspicious".to_string()),
-                        audience: Some(CastAudience::Public),
-                        required_trust: Some("trusted".to_string()),
-                        required_audience: Some(RequiredAudienceAnswer {
-                            includes: Some(CastAudience::Readers(vec!["support".to_string()])),
-                            cap: Some(CastAudience::Public),
-                        }),
-                        attention: None,
-                    },
-                    context: consulted_context.clone(),
+                    answer: answer(),
                 }],
             )
             .expect("a complete answer pins");
@@ -3019,24 +2967,12 @@ mod tests {
             .expect("the call resolves");
         assert!(matches!(
             engine.tool_resolutions_for(
-                &view,
-                &trajectory,
                 contract,
                 &other_call,
                 &[ExternalEvidence::ToolResolution {
                     resolver: "classifier".to_string(),
                     args: consulted_args,
-                    answer: ToolResolutionAnswer {
-                        trust: Some("suspicious".to_string()),
-                        audience: Some(CastAudience::Public),
-                        required_trust: Some("trusted".to_string()),
-                        required_audience: Some(RequiredAudienceAnswer {
-                            includes: Some(CastAudience::Readers(vec!["support".to_string()])),
-                            cap: Some(CastAudience::Public),
-                        }),
-                        attention: None,
-                    },
-                    context: consulted_context,
+                    answer: answer(),
                 }],
             ),
             Err(Resolution::Consult(_))
@@ -3109,68 +3045,5 @@ mod tests {
             "trusted",
             "the full Cf range replaces"
         );
-    }
-
-    #[test]
-    fn the_label_wire_names_every_state_it_can_be_in() {
-        use appa_engine::label::{Audience, EstablishedLabel, PartialLabel, ReaderId, Trust};
-        use appa_engine::registry::TrustChain;
-        use appa_engine::value::ValueId;
-
-        let chain = TrustChain::new(vec!["suspicious".to_string(), "trusted".to_string()]);
-        let wire = |label: &PartialLabel| super::label_wire(label, &chain);
-
-        let open = PartialLabel::established(EstablishedLabel::new(Trust::new(1), Audience::Public));
-        assert_eq!(
-            wire(&open),
-            serde_json::json!({
-                "trust": "trusted",
-                "trust_rank": 1,
-                "audience": "public",
-                "unresolved_trust": [],
-                "unresolved_audience": [],
-            }),
-        );
-
-        let restricted = PartialLabel::established(EstablishedLabel::new(
-            Trust::new(0),
-            Audience::restricted([ReaderId::new("private")]),
-        ));
-        assert_eq!(
-            wire(&restricted)["audience"],
-            serde_json::json!(["private"]),
-            "the bound readers cross by name",
-        );
-        assert_eq!(wire(&restricted)["trust"], serde_json::json!("suspicious"));
-
-        let nobody = PartialLabel::established(EstablishedLabel::new(Trust::new(0), Audience::restricted([])));
-        assert_eq!(
-            wire(&nobody)["audience"],
-            serde_json::json!([]),
-            "an empty reader set is not public",
-        );
-
-        let neutral = PartialLabel::established(EstablishedLabel::top());
-        let rendered = wire(&neutral);
-        assert_eq!(rendered["trust_rank"], serde_json::json!(255));
-        assert!(
-            !rendered["trust"].is_null(),
-            "an unnamed rank still reports itself: {rendered}",
-        );
-        assert!(
-            rendered["trust"].as_str().expect("trust is a string").contains("255"),
-            "the rank travels when the chain cannot name it: {rendered}",
-        );
-
-        use appa_engine::label::{Dim, Label};
-        let mut partial = PartialLabel::established(EstablishedLabel::new(Trust::new(1), Audience::Public));
-        partial.fold_value(ValueId::new(7), &Label::new(Dim::Unknown, Dim::Unknown));
-        let rendered = wire(&partial);
-        assert_eq!(
-            rendered["unresolved_trust"],
-            serde_json::json!([7]),
-            "the unresolved source crosses by its own id: {rendered}",
-        );
-        assert_eq!(rendered["unresolved_audience"], serde_json::json!([7]));
     }
 }

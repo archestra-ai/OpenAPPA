@@ -421,21 +421,25 @@ for request, expected in [
     (
         {
             "version": 1,
-            "resolver": "document-acl",
-            "args": {"subject": "project-onyx-packet.md"},
+            "kind": "dynamic",
+            "name": "document-acl",
+            "declaration": {"returns": ["delta.audience"], "trust_ranks": [], "attention_marks": []},
+            "artifact": {"args": {"subject": "project-onyx-packet.md"}},
         },
-        {"version": 1, "result": {"delta.audience": readers}},
+        {"version": 1, "answer": {"delta.audience": readers}},
     ),
     (
         {
             "version": 1,
-            "resolver": "distribution-list-members",
-            "args": {"subject": "onyx-steering@northwind.example"},
+            "kind": "dynamic",
+            "name": "distribution-list-members",
+            "declaration": {"returns": ["requires.audience"], "trust_ranks": [], "attention_marks": []},
+            "artifact": {"args": {"subject": "onyx-steering@northwind.example"}},
         },
-        {"version": 1, "result": {"requires.audience": {"contains": readers}}},
+        {"version": 1, "answer": {"requires.audience": {"contains": readers}}},
     ),
 ]:
-    url = policy["externals"]["dynamic"][request["resolver"]]["url"]
+    url = policy["externals"]["dynamic"][request["name"]]["url"]
     wire = urllib.request.Request(url, data=json.dumps(request).encode(), headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(wire) as response:
         assert json.load(response) == expected
@@ -485,10 +489,13 @@ def test_episode_fixture_hosts_authority_and_sanitizer_answers(tmp_path: Path) -
             with urllib.request.urlopen(wire) as response:
                 return json.load(response)
 
-        def consult(kind: str, name: str, payload: dict) -> dict:
-            return post(f"/{kind}/{name}", {"version": 1, "kind": kind, "name": name, "payload": payload})
+        def consult(kind: str, name: str, artifact: dict) -> dict:
+            return post(
+                f"/{kind}/{name}",
+                {"version": 1, "kind": kind, "name": name, "declaration": {}, "artifact": artifact},
+            )
 
-        assert consult("authority", "wire-approver", {"authority": "wire-approver", "tool": "create_finance"}) == {
+        assert consult("authority", "wire-approver", {"tool": "create_finance", "arguments": {}, "requirements": []}) == {
             "version": 1,
             "answer": {"ruling": "approve"},
         }

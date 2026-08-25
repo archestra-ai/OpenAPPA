@@ -4,11 +4,18 @@
 use std::sync::Arc;
 
 use crate::elicit::Elicitation;
-use crate::engine::{
-    AuthorityVerdict, CastAsk, CastLabel, CastVerdict, EngineDecision, EngineEvent, EngineView, ExternalEvidence,
-    ExternalRequest, Feedback, ForkStatus, Liveness, Next, OfferNonce, OpenDispatch, Presentation, engine_id,
+use appa_engine::value::ValueBody;
+
+use crate::consult::{
+    CastAnswer, CastArtifact, CastDeclaration, Consult, ConsultBody, DynamicAnswer, DynamicArtifact,
+    MembershipArtifact, ReadersAnswer, SanitizerAnswer,
 };
-use crate::external::{CastAnswer, ConsultKind, ConsultOutcome, ReadersResolution, ToolResolution};
+use crate::engine::{
+    AuthorityVerdict, CandidateResolution, CastAsk, CastLabel, CastVerdict, EngineDecision, EngineEvent, EngineView,
+    ExternalEvidence, ExternalRequest, Feedback, ForkStatus, Liveness, Next, OfferNonce, OpenDispatch, Presentation,
+    engine_id,
+};
+use crate::external::ConsultOutcome;
 
 use super::{
     ChildReturnDecision, Deployment, EventError, ExactCall, Inner, OfferId, OutcomeBody, ProposedCall, RemedyDecision,
@@ -767,16 +774,19 @@ impl Session {
         Ok(match &request {
             ExternalRequest::Authority {
                 authority,
-                payload,
+                declaration,
+                artifact,
                 review,
             } => {
-                let outcome = self
-                    .deployment
-                    .externals
-                    .consult(ConsultKind::Authority, authority, payload, elicitation)
-                    .await;
-                let verdict = match outcome {
-                    ConsultOutcome::Answer(body) => AuthorityVerdict::from_wire(&body),
+                let consult = Consult {
+                    name: authority.clone(),
+                    body: ConsultBody::Authority {
+                        declaration: declaration.clone(),
+                        artifact: artifact.clone(),
+                    },
+                };
+                let verdict = match self.deployment.externals.consult(&consult, elicitation).await {
+                    ConsultOutcome::Answer(answer) => AuthorityVerdict::from_wire(&answer),
                     ConsultOutcome::NoAnswer(_) => AuthorityVerdict::Abstain,
                 };
                 ExternalEvidence::Authority {
@@ -788,16 +798,18 @@ impl Session {
             ExternalRequest::Sanitizer {
                 sanitizer,
                 source,
-                body,
+                declaration,
+                artifact,
             } => {
-                let payload = serde_json::json!({ "body": body.as_str() });
-                let outcome = self
-                    .deployment
-                    .externals
-                    .consult(ConsultKind::Sanitizer, sanitizer, &payload, None)
-                    .await;
-                let derived = match outcome {
-                    ConsultOutcome::Answer(body) => body.get("body").and_then(|b| b.as_str()).map(String::from),
+                let consult = Consult {
+                    name: sanitizer.clone(),
+                    body: ConsultBody::Sanitizer {
+                        declaration: declaration.clone(),
+                        artifact: artifact.clone(),
+                    },
+                };
+                let derived = match self.deployment.externals.consult(&consult, None).await {
+                    ConsultOutcome::Answer(answer) => SanitizerAnswer::from_wire(&answer).map(|answer| answer.body),
                     ConsultOutcome::NoAnswer(_) => None,
                 };
                 ExternalEvidence::Sanitizer {
@@ -806,11 +818,28 @@ impl Session {
                     derived,
                 }
             }
-            ExternalRequest::ToolResolution { uses, args, context } => {
-                let answer = match self.deployment.externals.resolve_tool(uses, args, context).await {
-                    ToolResolution::Resolved(answer) => answer,
-                    ToolResolution::Unresolved(reason) => {
-                        let resolver = uses.resolver.as_str();
+            ExternalRequest::ToolResolution {
+                uses,
+                args,
+                declaration,
+            } => {
+                let resolver = uses.resolver.as_str();
+                let consult = Consult {
+                    name: resolver.to_string(),
+                    body: ConsultBody::Dynamic {
+                        declaration: declaration.clone(),
+                        artifact: DynamicArtifact { args: args.clone() },
+                    },
+                };
+                let answer = match self.deployment.externals.consult(&consult, None).await {
+                    ConsultOutcome::Answer(answer) => {
+                        DynamicAnswer::from_wire(&answer, declaration).ok_or(crate::external::NoAnswerReason::Malformed)
+                    }
+                    ConsultOutcome::NoAnswer(reason) => Err(reason),
+                };
+                let answer = match answer {
+                    Ok(answer) => answer,
+                    Err(reason) => {
                         match reason {
                             crate::external::NoAnswerReason::Unreachable | crate::external::NoAnswerReason::Timeout => {
                                 tracing::warn!(resolver, ?reason, "a tool-resolution consult produced no answer")
@@ -824,12 +853,11 @@ impl Session {
                     }
                 };
                 ExternalEvidence::ToolResolution {
-                    resolver: uses.resolver.as_str().to_string(),
+                    resolver: resolver.to_string(),
                     // The evidence names the exact value it answered for, so a sibling call with
                     // other arguments cannot consume it.
                     args: appa_engine::contract::ResolverArgsDigest::of(&appa_engine::params::canonical_bytes(args)),
                     answer,
-                    context: context.clone(),
                 }
             }
             ExternalRequest::PendingCast { source, ask } => ExternalEvidence::PendingCast {
@@ -842,11 +870,16 @@ impl Session {
                 verdict: self.cascade(ask).await,
                 ask: ask.clone(),
             },
-            // The membership resolver wire is the declared external contract verbatim.
             ExternalRequest::Membership { resolver, group } => {
-                let readers = match self.deployment.externals.resolve_membership(resolver, group).await {
-                    ReadersResolution::Resolved { readers } => Some(readers),
-                    ReadersResolution::Unresolved(_) => None,
+                let consult = Consult {
+                    name: resolver.clone(),
+                    body: ConsultBody::Membership {
+                        artifact: MembershipArtifact { group: group.clone() },
+                    },
+                };
+                let readers = match self.deployment.externals.consult(&consult, None).await {
+                    ConsultOutcome::Answer(answer) => ReadersAnswer::from_wire(&answer).map(|answer| answer.readers),
+                    ConsultOutcome::NoAnswer(_) => None,
                 };
                 ExternalEvidence::Membership {
                     resolver: resolver.clone(),
@@ -863,38 +896,37 @@ impl Session {
     /// fallback. The first answer obtained is the one submitted, and the engine alone judges
     /// it: an answer it refuses comes back as the same ask continued past that cast.
     async fn cascade(&self, ask: &CastAsk) -> Option<CastVerdict> {
-        let payload = serde_json::json!({
-            "body": ask.body.as_str(),
-            "tool": ask.tool,
-            "context": ask.context,
-        });
         for cast in &ask.casts {
-            let name = cast.name.as_str().to_string();
-            if let Some(constant) = &cast.constant {
-                return Some(CastVerdict {
-                    cast: name,
-                    label: CastLabel::Declared(constant.clone()),
-                });
-            }
-            if let Some(answer) = self.classify(&name, &payload).await {
-                return Some(CastVerdict {
-                    cast: name,
-                    label: CastLabel::Classified(answer),
-                });
-            }
+            let label = match &cast.resolution {
+                CandidateResolution::Constant(constant) => CastLabel::Declared(constant.clone()),
+                CandidateResolution::Resolver(declaration) => {
+                    match self.classify(&cast.name, declaration, &ask.body).await {
+                        Some(answer) => CastLabel::Classified(answer),
+                        None => continue,
+                    }
+                }
+            };
+            return Some(CastVerdict {
+                cast: cast.name.clone(),
+                label,
+            });
         }
         None
     }
 
     /// One classifier consult. Every failure — unbound, unreachable, malformed, over the
     /// body cap — is the same no-answer: a classifier that cannot speak grants nothing.
-    async fn classify(&self, cast: &str, payload: &serde_json::Value) -> Option<CastAnswer> {
-        match self
-            .deployment
-            .externals
-            .consult(ConsultKind::Cast, cast, payload, None)
-            .await
-        {
+    async fn classify(&self, cast: &str, declaration: &CastDeclaration, body: &ValueBody) -> Option<CastAnswer> {
+        let consult = Consult {
+            name: cast.to_string(),
+            body: ConsultBody::Cast {
+                declaration: declaration.clone(),
+                artifact: CastArtifact {
+                    body: body.as_str().to_string(),
+                },
+            },
+        };
+        match self.deployment.externals.consult(&consult, None).await {
             ConsultOutcome::Answer(answer) => CastAnswer::from_wire(&answer),
             ConsultOutcome::NoAnswer(_) => None,
         }
@@ -1661,8 +1693,10 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
             ));
         }
 
+        // The binding comes back with the declaration that registers it: a binding no
+        // policy declares is refused at open.
         let url = stub(serde_json::json!({"ruling": "approve"})).await;
-        let runtime = Runtime::open(config_with(READ_ONLY, Some(&url)), db, None)
+        let runtime = Runtime::open(config_with(ATTENTION, Some(&url)), db, None)
             .expect("the deployment with the restored binding opens");
         let session = runtime.session(&root(), &root()).expect("the old root reopens");
         session
@@ -1767,7 +1801,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
             use axum::routing::post;
             let app = axum::Router::new().route(
                 "/",
-                post(|| async { axum::Json(serde_json::json!({"version": 1, "readers": ["carol"]})) }),
+                post(|| async { axum::Json(serde_json::json!({"version": 1, "answer": {"readers": ["carol"]}})) }),
             );
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
                 .await
@@ -1789,7 +1823,7 @@ name = "read"
 delta = { audience = ["@team"] }
 "#;
         let text = format!(
-            "[policy]\n{policy}\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n[externals.membership]\nurl = \"{directory}\"\n"
+            "[policy]\n{policy}\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n[externals.membership.directory]\nurl = \"{directory}\"\n"
         );
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let path = dir.path().join("appa.toml");
@@ -2927,18 +2961,8 @@ confined_child_return = true
         config_from(&text)
     }
 
-    fn bare_externals() -> crate::config::Externals {
-        crate::config::Externals {
-            timeout: std::time::Duration::from_millis(2000),
-            review_timeout: std::time::Duration::from_millis(2000),
-            max_body_bytes: 65536,
-            authorities: std::collections::BTreeMap::new(),
-            sanitizers: std::collections::BTreeMap::new(),
-            casts: std::collections::BTreeMap::new(),
-            dynamic: std::collections::BTreeMap::new(),
-            membership: None,
-            claude_code: Default::default(),
-        }
+    fn bare_externals() -> crate::config::ExternalBindings {
+        crate::config::ExternalBindings::new(std::time::Duration::from_millis(2000), 65536)
     }
 
     #[test]
@@ -2987,10 +3011,10 @@ confined_child_return = true
         let mut externals = bare_externals();
         externals.sanitizers.insert(
             "attest-schema".to_string(),
-            crate::config::Implementation::Resolver(crate::config::Endpoint {
+            crate::config::Binding::Url {
                 url: "http://127.0.0.1:1/".to_string(),
-                token: None,
-            }),
+                token_env: None,
+            },
         );
         let config = Config::embedded(ATTESTED_CHILD_COMPOSED.to_string(), externals).expect("the policy embeds");
         assert!(matches!(
@@ -3005,10 +3029,10 @@ confined_child_return = true
         let mut externals = bare_externals();
         externals.sanitizers.insert(
             "attest-schema".to_string(),
-            crate::config::Implementation::Resolver(crate::config::Endpoint {
+            crate::config::Binding::Url {
                 url: "http://127.0.0.1:1/".to_string(),
-                token: None,
-            }),
+                token_env: None,
+            },
         );
         let config = Config::embedded(
             "version = 1\n\n[deployment]\ncontext_control = true\n".to_string(),

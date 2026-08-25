@@ -52,11 +52,11 @@ pub struct Dispatch {
 #[derive(Debug, Deserialize)]
 struct Consult {
     version: u32,
-    payload: ConsultPayload,
+    artifact: ConsultArtifact,
 }
 
 #[derive(Debug, Deserialize)]
-struct ConsultPayload {
+struct ConsultArtifact {
     body: String,
 }
 
@@ -118,7 +118,7 @@ async fn redact(axum::Json(consult): axum::Json<Consult>) -> Result<axum::Json<C
     Ok(axum::Json(ConsultAnswer {
         version: 1,
         answer: Derivation {
-            body: redact_numbers(&consult.payload.body),
+            body: redact_numbers(&consult.artifact.body),
         },
     }))
 }

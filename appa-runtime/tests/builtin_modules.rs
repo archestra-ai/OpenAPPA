@@ -17,6 +17,22 @@ timeout_ms = 2000
 max_body_bytes = 65536
 "#;
 
+/// A binding needs a registration: the policy declares what each bound name is.
+const AUTHORITY_AUTO: &str = r#"
+[[policy.authority]]
+name = "auto"
+[policy.authority.permits]
+trust_below = "trusted"
+"#;
+
+const SANITIZER_PII: &str = r#"
+[[policy.sanitizer]]
+name = "pii"
+on = ["tool_input"]
+[policy.sanitizer.permits]
+audience = { from = ["internal"], to = ["public"] }
+"#;
+
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -125,7 +141,7 @@ fn expect_refusal(deployment: &Deployment, needle: &str) {
 
 #[test]
 fn a_wellformed_module_loads_and_its_name_resolves_from_config() {
-    let config = format!("{CONFIG}\n[externals.authorities.auto]\nbuiltin = \"fixture-auth\"\n");
+    let config = format!("{CONFIG}{AUTHORITY_AUTO}\n[externals.authorities.auto]\nbuiltin = \"fixture-auth\"\n");
     let deployment = Deployment::new(&config);
     deployment.install(
         good_module(),
@@ -138,7 +154,7 @@ fn a_wellformed_module_loads_and_its_name_resolves_from_config() {
 #[test]
 fn stock_builtins_need_no_modules_directory_at_all() {
     let config = format!(
-        "{CONFIG}\n[externals.authorities.auto]\nbuiltin = \"approve\"\n\n[externals.sanitizers.pii]\nbuiltin = \"redact-email\"\n"
+        "{CONFIG}{AUTHORITY_AUTO}{SANITIZER_PII}\n[externals.authorities.auto]\nbuiltin = \"approve\"\n\n[externals.sanitizers.pii]\nbuiltin = \"redact-email\"\n"
     );
     let deployment = Deployment::new(&config);
     Runtime::open(deployment.config(), deployment.db(), None).expect("the stock-only deployment opens");
@@ -214,7 +230,7 @@ fn a_stray_file_in_the_modules_directory_refuses() {
 
 #[test]
 fn a_dangling_builtin_reference_refuses_with_and_without_a_directory() {
-    let config = format!("{CONFIG}\n[externals.sanitizers.pii]\nbuiltin = \"no-such-module\"\n");
+    let config = format!("{CONFIG}{SANITIZER_PII}\n[externals.sanitizers.pii]\nbuiltin = \"no-such-module\"\n");
 
     let deployment = Deployment::new(&config);
     expect_refusal(&deployment, "no-such-module");
@@ -248,7 +264,7 @@ fn dot_files_are_skipped_not_refused() {
 
 #[test]
 fn a_kind_crossed_reference_refuses() {
-    let config = format!("{CONFIG}\n[externals.sanitizers.pii]\nbuiltin = \"fixture-auth\"\n");
+    let config = format!("{CONFIG}{SANITIZER_PII}\n[externals.sanitizers.pii]\nbuiltin = \"fixture-auth\"\n");
     let deployment = Deployment::new(&config);
     deployment.install(good_module(), &library_filename("libgood"));
     expect_refusal(&deployment, "fixture-auth");
