@@ -64,7 +64,7 @@ Run the resolver directly:
 
 ```sh
 cd examples/claude-code-battery
-printf '%s\n' '{"version":1,"resolver":"claude-code.bash-review","args":{"name":"Bash","arguments":{"command":"python scripts/release.py"}}}' \
+printf '%s\n' '{"version":1,"resolver":"claude-code.bash-review","args":{"name":"Bash","description":"Runs one shell command and returns its output.","arguments":{"command":"python scripts/release.py"}}}' \
   | python3 ./batteries/claude-code/bash-review.py
 ```
 
@@ -74,7 +74,7 @@ get an empty attention requirement.
 Run the Read resolver directly:
 
 ```sh
-printf '%s\n' '{"version":1,"resolver":"claude-code.read-sensitivity","args":{"name":"Read","arguments":{"file_path":".env"}}}' \
+printf '%s\n' '{"version":1,"resolver":"claude-code.read-sensitivity","args":{"name":"Read","description":"Reads a file and returns its contents.","arguments":{"file_path":".env"}}}' \
   | python3 ./batteries/claude-code/read-sensitivity.py
 ```
 
@@ -84,7 +84,7 @@ The result restricts `.env` to `claude-session`. Replace `.env` with
 Run the local replacement resolver directly:
 
 ```sh
-printf '%s\n' '{"version":1,"resolver":"local.read-sensitivity","args":{"name":"Read","arguments":{"file_path":"clients/acme.txt"}}}' \
+printf '%s\n' '{"version":1,"resolver":"local.read-sensitivity","args":{"name":"Read","description":"Reads a file and returns its contents.","arguments":{"file_path":"clients/acme.txt"}}}' \
   | python3 ./local/read-sensitivity.py
 ```
 
