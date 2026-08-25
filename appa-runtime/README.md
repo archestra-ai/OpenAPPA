@@ -49,8 +49,11 @@ timeout_ms = 5000
 max_body_bytes = 65536
 ```
 
-Implementation bindings (authority and sanitizer endpoints) live in
-`[externals]`, never inline in the policy.
+Implementation bindings live in `[externals]`, never inline in the
+policy: one `[externals.<kind>.<name>]` entry per registered authority,
+sanitizer, cast, dynamic resolver, or membership resolver, bound to a
+`url`, a `command`, or a `builtin` (stock, a model transport, or a
+module from `--modules-dir`).
 
 `integrations/claude-code/examples/claude-code.appa.toml` is a
 complete starting point: it releases every built-in Claude Code tool

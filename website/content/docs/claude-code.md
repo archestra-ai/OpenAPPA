@@ -65,7 +65,7 @@ Installing the plugin does not force every Claude Code session through OpenAPPA.
 
 ## Use Claude Code as a dynamic classifier
 
-OpenAPPA can also call the installed Claude Code CLI as a built-in tool-level dynamic resolver. When a tool attaches the resolver with `uses`, the resolver directly owns every `delta` and `requires` destination in its `returns` declaration. The tool does not reference those results in its fields.
+OpenAPPA can also call the installed Claude Code CLI as a model builtin: `builtin = "claude-code"` serves an authority, a sanitizer, a cast, or a tool-level dynamic resolver, and `builtin = "llm"` serves the same four kinds through an API-key profile in `[externals.llm]`. This example binds a dynamic resolver. When a tool attaches the resolver with `uses`, the resolver directly owns every `delta` and `requires` destination in its `returns` declaration. The tool does not reference those results in its fields.
 
 ```toml
 [[dynamic_resolver]]
@@ -98,9 +98,23 @@ timeout_ms = 60000                  # the consult's own budget — a model call 
 builtin = "hitl"
 ```
 
-The runtime uses the current user's Claude Code authentication. It starts one fresh safe-mode process per consult with no tools, hooks, project settings, or persisted session, in a temporary working directory, with every `APPA_*` environment variable removed. The classifier sees what the tool's `uses` entry selected — the complete call (name, description when declared, arguments), or one value per declared input — plus current trust and audience, the policy trust chain, the attention marks that authorities name under `permits.attention`, and existing static attention requirements. It answers every result its resolver declares, so it may establish the output label and demand a call-time constraint in one consult. Requirements support a trust floor, an audience `contains` list and `within` list, and a fresh attention mark selected from that policy-provided list; history remains static. If no authority names any mark, the only valid dynamic attention answer is an empty list. At most four Claude consults run at once.
+The runtime uses the current user's Claude Code authentication. It starts one fresh safe-mode process per consult with no tools, hooks, project settings, or persisted session, in a temporary working directory, with every `APPA_*` environment variable removed. The system prompt carries the resolver's declaration — its `returns`, the policy trust chain, and the attention marks that authorities name under `permits.attention`; the only user turn is the artifact: what the tool's `uses` entry selected — the complete call (name, description when declared, arguments), or one value per declared input. Nothing about the trajectory is sent: no current label, no history. The classifier answers every result its resolver declares, so it may establish the output label and demand a call-time constraint in one consult. Requirements support a trust floor, an audience `contains` list and `within` list, and a fresh attention mark selected from that policy-provided list; history remains static. If no authority names any mark, the only valid dynamic attention answer is an empty list. At most four Claude consults run at once.
 
-This is a trusted classifier rather than a sandboxed policy authority: there is no additional ceiling on its answer, and argument-level prompt-injection resistance is best-effort. Process errors, timeouts, invalid fields, and trust or attention values outside policy produce no answer: the call is not checked, nothing is recorded, and the failure surfaces operationally — never as a policy denial.
+A model dynamic resolver is a trusted classifier rather than a sandboxed policy authority: there is no additional ceiling on its answer, and argument-level prompt-injection resistance is best-effort. Bound as an authority, sanitizer, or cast, the same model rules only within that component's `permits` or `may_cast`, like any other implementation. Process errors, timeouts, invalid fields, and trust or attention values outside policy produce no answer: the call is not checked, nothing is recorded, and the failure surfaces operationally — never as a policy denial.
+
+To serve the same resolver from an API key instead of the subscription, bind `builtin = "llm"` and add one profile per deployment:
+
+```toml
+[externals.dynamic.classify-customer]
+builtin = "llm"
+
+[externals.llm]
+provider       = "anthropic"        # anthropic | openai | gemini | ollama
+model          = "claude-sonnet-4-5"
+token_env      = "APPA_LLM_TOKEN"   # required, except for ollama
+timeout_ms     = 30000
+max_concurrent = 4
+```
 
 ## Uninstall
 

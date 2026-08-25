@@ -8,10 +8,13 @@ def main():
 
     if request.get("version") != 1:
         raise ValueError("unsupported request version")
-    if request.get("resolver") != "claude-code.read-sensitivity":
+    if request.get("kind") != "dynamic":
+        raise ValueError("unexpected consult kind")
+    if request.get("name") != "claude-code.read-sensitivity":
         raise ValueError("unexpected resolver name")
 
-    args = request.get("args")
+    artifact = request.get("artifact")
+    args = artifact.get("args") if isinstance(artifact, dict) else None
     if not isinstance(args, dict) or args.get("name") != "Read":
         raise ValueError("args.name must be Read")
     arguments = args.get("arguments")
@@ -22,7 +25,7 @@ def main():
     # Claude Code sends an absolute path, so test the file name, not the path.
     audience = ["private"] if PurePath(file_path).name.startswith(".") else "public"
     json.dump(
-        {"version": 1, "result": {"delta.audience": audience}},
+        {"version": 1, "answer": {"delta.audience": audience}},
         sys.stdout,
     )
     sys.stdout.write("\n")

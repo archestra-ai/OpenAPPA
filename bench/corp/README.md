@@ -154,7 +154,7 @@ body_contains_any = ["4821", "185,000"]   # Trigger substrings (at least one mat
 | `sanitizer_answer` | No | Hosted sanitizer and the source-line markers it removes before returning a derivation. |
 
 #### Dynamic Resolver Configuration
-Dynamic resolver mocks specify mock responses for policy evaluation. A request names its resolver and the exact `args` that resolver's declared inputs selected — never the tool — so `resolver` plus `args` is the whole key. A policy names its externals in `[externals]` on loopback port 0 — a loadable URL no listener can own. The runner replaces that origin with its fixture server's address once it binds, keeping the path, which is what the server routes on.
+Dynamic resolver mocks specify mock responses for policy evaluation. A consult names its resolver (`name`) and carries the exact `args` that resolver's declared inputs selected under `artifact` — never the tool — so `resolver` plus `args` is the whole fixture key. A policy names its externals in `[externals]` on loopback port 0 — a loadable URL no listener can own. The runner replaces that origin with its fixture server's address once it binds, keeping the path, which is what the server routes on.
 
 ```toml
 [[dynamic_resolver_answer]]
@@ -425,7 +425,7 @@ Each test episode creates an isolated log directory under `runs/<run-id>/<agent>
 - `agent-status.json`: APPA's typed terminal status (`completed`, `budget_finalized`, or a failure class).
 - `policies/`: Pruned active policy rules.
 - `result.json`: Validation check outcomes plus terminal status and recovered provider-retry count.
-- `external-requests.jsonl`: Dynamic resolver, sanitizer, and authority fixture calls (when applicable).
+- `external-requests.jsonl`: Dynamic resolver, sanitizer, and authority fixture consults — each a `{version, kind, name, declaration, artifact}` envelope (when applicable).
 
 The run root contains `summary.json` (aggregated evaluation matrix) and `config.json` (run metadata, git commit SHA, model settings).
 

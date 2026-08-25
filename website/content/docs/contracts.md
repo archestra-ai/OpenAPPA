@@ -5,7 +5,7 @@ order: 3
 description: Declarations, syntax, and rules for OpenAPPA policy TOML files.
 ---
 
-OpenAPPA reads a root TOML file. The root can compose policy fragments with `include = ["battery.toml"]`. Root declarations run first. Included declarations follow in list order. An included file cannot include another file or replace root-wide settings. Duplicate external names are an error.
+OpenAPPA reads a root TOML file. The root can compose policy fragments with `include = ["battery.toml"]`. Root declarations run first. Included declarations follow in list order. An included file cannot include another file or replace root-wide settings. Duplicate external names within one kind are an error.
 
 This document is a reference guide for writing and reviewing OpenAPPA policy TOML files. It covers global settings, audience lists and conditions, contract declarations (`[[tool]]`, `[[authority]]`, `[[sanitizer]]`, `[[cast]]`), and policy review red flags.
 
@@ -38,7 +38,7 @@ A reader list can name a **group**, written `@name`. An argument placeholder (`c
 
 ```toml
 [membership]                    # one per deployment; every @group resolves here
-name = "corp-directory"         # registration only; the deployment binds the endpoint
+name = "corp-directory"         # registration only; the deployment binds the directory
 
 [[tool]]
 name     = "post_audit_note"
@@ -48,7 +48,18 @@ delta    = {}
 
 Each tool call resolves group membership freshly, then pins that reader set for the duration of the call (including checks, remedy plans, dispatch, and logging). Directory updates apply to new calls immediately without reloading the policy. Execution records store the resolved reader IDs, never the group name. The reserved word `public` cannot be a group member.
 
-If a membership resolver fails (timeout, network error, or invalid payload), OpenAPPA halts the check with an operational error and records nothing to the log. An empty reader list is a valid response. The resolver endpoint receives a JSON POST request (`{"version": 1, "resolver": "...", "group": "..."}`) and returns `{"version": 1, "readers": [...]}`.
+The deployment binds the registered name under `[externals.membership.<name>]` to an HTTP endpoint or a local command; no builtin serves a directory. The consult is the common envelope described under [Externals](#externals), with an empty declaration and the group name as the artifact:
+
+```toml
+[externals.membership.corp-directory]         # the deployment binds the directory
+url = "https://directory.corp/members"
+```
+
+```json
+{ "version": 1, "kind": "membership", "name": "corp-directory", "declaration": {}, "artifact": { "group": "auditors" } }
+```
+
+The answer is `{"version": 1, "answer": {"readers": ["cfo", "audit-lead"]}}`. An empty reader list is a valid answer. If a membership resolver fails (timeout, network error, or invalid answer), OpenAPPA halts the check with an operational error and records nothing to the log.
 
 ### Ordered tool contracts
 
@@ -93,7 +104,7 @@ description = "Runs one shell command and returns its output."
 uses        = [{ resolver = "classify-command" }]
 ```
 
-The resolver receives this value in `args`:
+The resolver receives this value as the consult's `artifact.args`:
 
 ```json
 {
@@ -184,9 +195,7 @@ Ownership, pinning, and what a `tool_input` sanitizer can do to a pinned answer 
 
 #### Implementing a resolver
 
-A resolver either carries its implementation or leaves it to the deployment. A resolver that carries the stock Claude Code classifier names it on its declaration with `builtin = "claude-code"` and takes no `[externals.dynamic]` binding. Every other resolver is bound by name under `[externals.dynamic.<name>]` to an HTTP endpoint or a Unix command.
-
-On Unix systems, a local command uses `command = ["program", "arg"]` under `[externals.dynamic.<name>]`. OpenAPPA invokes this argument list directly, without a shell. It sends one request on standard input and reads one answer from standard output. The command runs in the folder of the config that declares it. The shared `timeout_ms` and `max_body_bytes` settings bound the complete exchange. OpenAPPA rejects a command binding on unsupported platforms. A missing command, failed process, timeout, oversized answer, or invalid answer returns no resolver evidence. The tool does not run.
+A resolver either carries its implementation or leaves it to the deployment. A resolver that carries a stock model builtin names it on its declaration with `builtin = "claude-code"` or `builtin = "llm"` and takes no `[externals.dynamic]` binding. Every other resolver is bound by name under `[externals.dynamic.<name>]` to an HTTP endpoint or a Unix command. [Externals](#externals) has the binding rule, the transports, and the consult every kind shares. A registered resolver without a binding, a binding no `[[dynamic_resolver]]` registers, and a binding for a resolver that carries a builtin are all load errors.
 
 ```toml
 [[dynamic_resolver]]
@@ -195,58 +204,48 @@ builtin = "claude-code"
 returns = ["delta.trust"]
 ```
 
-A resolver with `builtin = "claude-code"` never uses an endpoint. The builtin starts one isolated `claude` process per consult: non-interactive safe mode, no tools, no project settings, no session persistence, a fresh temporary working directory, and an environment with every `APPA_*` variable removed. The process receives the same request the HTTP wire carries on stdin and answers under a strict structured-output schema derived from `returns`, the trust chain, and the attended marks; the request is explicitly treated as untrusted data, never as instructions. Claude answers have no separate ceiling: they are trusted classifier evidence and pass the same exact-shape, policy-vocabulary, audience, and pin validation as HTTP answers. The prompt and the raw model output are never persisted — only the validated answer is.
+A dynamic resolver has no `permits` and no ceiling. Its answer is trusted classifier evidence, whichever transport serves it, and every transport passes the same exact-shape, policy-vocabulary, audience, and pin validation. A pinned recheck and a replay never consult it again.
 
-The deployment tunes the builtin in `[externals.claude_code]`: `command` sets the executable path (a service environment often strips `PATH`), `model` pins the model, and `timeout_ms` gives the consult its own budget instead of the shared machine-consult `timeout_ms` — a model call is slower than an ordinary endpoint. At most four Claude consults run at once per runtime. Each consult has model latency and account cost; a pinned recheck and a replay never invoke it again.
-
-All implementations receive the same request and answer under the same validation.
-
-Request, for the one-argument example above:
+The consult's declaration is the resolver's vocabulary; its artifact is `args`. For the one-argument example above:
 
 ```json
 {
   "version": 1,
-  "resolver": "classify-customer",
-  "args": { "subject": "cust-7" },
-  "context": {
-    "current_trust": "trusted",
-    "current_trust_rank": 1,
-    "current_audience": "public",
-    "trust_unresolved": false,
-    "audience_unresolved": false,
-    "static_attention": []
+  "kind": "dynamic",
+  "name": "classify-customer",
+  "declaration": {
+    "returns": ["delta.trust", "delta.audience"],
+    "trust_ranks": ["suspicious", "trusted"],
+    "attention_marks": ["privacy-review"]
   },
-  "trust_ranks": ["suspicious", "trusted"],
-  "attention_marks": ["privacy-review"]
+  "artifact": { "args": { "subject": "cust-7" } }
 }
 ```
 
 | Key | Meaning |
 |---|---|
-| `version` | The request shape. It is `1`. |
-| `resolver` | Which resolver answers, when one service handles several |
-| `args` | The data the tool's input mapping selected, under the resolver's declared input names. Without a mapping, the complete call: `name`, `description` when declared, and `arguments`. |
-| `context` | The state before this tool call: current trust name and rank, current readers, whether each dimension is still unknown, and the attention marks the tool policy already requires |
-| `trust_ranks` | The policy's trust chain, least-trusted first. A trust result must name one of these. |
-| `attention_marks` | The attended marks. An attention result must name these only. |
+| `declaration.returns` | The results the resolver declared. The answer holds exactly these. |
+| `declaration.trust_ranks` | The policy's trust chain, least-trusted first. A trust result must name one of these. |
+| `declaration.attention_marks` | The attended marks. An attention result must name these only. |
+| `artifact.args` | The data the tool's input mapping selected, under the resolver's declared input names. Without a mapping, the complete call: `name`, `description` when declared, and `arguments`. |
 
-A resolver with mapped inputs that needs the tool name or its description reads it as an input.
+The consult carries nothing about the trajectory: no current label, no rank, no reader ids, no history. A resolver with mapped inputs that needs the tool name or its description reads it as an input.
 
-Response:
+Response, from an endpoint or a command:
 
 ```json
 {
   "version": 1,
-  "result": {
+  "answer": {
     "delta.trust": "trusted",
     "delta.audience": ["finance"]
   }
 }
 ```
 
-`version` must match the request. `result` holds every result the resolver declared, keyed by the result's own name — including a result this tool does not read.
+`version` must match the consult. `answer` holds every result the resolver declared, keyed by the result's own name — including a result this tool does not read. A model builtin answers the same object without the envelope.
 
-OpenAPPA rejects a missing result, an extra result, and a `null` result. It rejects an extra key beside `version` and `result`. Trust and attention values must come from the lists in the request, whether or not the tool reads them: a result no field reads establishes nothing, but the record keeps it, so it answers to the same vocabulary. `delta.audience` is `"public"` or a list of reader names, and never a group. `requires.audience` is an object with `contains`, `within`, or both: `{"contains": [...], "within": [...]}`. An empty reader list is a valid, maximally restrictive answer. An empty attention list is valid, and it is the only valid attention answer when `attention_marks` is empty.
+OpenAPPA rejects a missing result, an extra result, and a `null` result. It rejects an extra key beside `version` and `answer`. Trust and attention values must come from the declaration, whether or not the tool reads them: a result no field reads establishes nothing, but the record keeps it, so it answers to the same vocabulary. `delta.audience` is `"public"` or a list of reader names, and never a group. `requires.audience` is an object with `contains`, `within`, or both: `{"contains": [...], "within": [...]}`. An empty reader list is a valid, maximally restrictive answer. An empty attention list is valid, and it is the only valid attention answer when `attention_marks` is empty.
 
 ### Deployment coverage
 
@@ -275,7 +274,8 @@ A tool contract is short: a name, a `delta`, and often `effects` and a `[tool.re
 | **Combined Read & Release** | Single tool `share_doc(doc, recipient)` fetching and releasing in one step. | Split into `fetch_doc` (read) and `grant_doc_access` (release). | Combined tools force authorities to approve releases before content is fetched. |
 | **What an authority permits** | A wide `permits` table, such as `audience_missing = ["public"]`. | Restrict the authority's `permits` and `tags` to the minimum the desk needs. | An authority cannot rule beyond its `permits`, but a wide `permits` weakens the review gate. |
 | **Auto-Approval Wiring** | `builtin = "approve"` behind a wide `permits` — an automated yes across everything it permits. | Keep what an auto-approval authority permits narrow; reserve wide `permits` for `hitl` or a reviewed resolver. | `builtin = "approve"` creates an automated open gate for all matching actions. Keep its `permits` and `tags` minimal. |
-| **Hint Accuracy** | A `hint` describing a power the `permits` does not hold, or content the sanitizer does not remove. | Restate what the component permits in your own words: say what the entity covers or strips, and nothing more. | A hint reaches the agent with every plan naming the entity, and grants nothing. A misleading one steers plan choice wrongly and misleads review. |
+| **Model Judge Wiring** | `builtin = "claude-code"` or `builtin = "llm"` behind a wide `permits`, or on a sanitizer with a wide transition. | Keep a model authority's `permits` narrow and its `hint` exact; give a model sanitizer the narrowest transition its job needs. | `permits` caps what a model ruling clears and what a model derivation claims, not how well the model judged. The model sees only the declaration and the artifact, never the trajectory. |
+| **Hint Accuracy** | A `hint` describing a power the `permits` or `may_cast` does not hold, or content the sanitizer does not remove. | Restate what the component permits in your own words: say what the entity covers, strips, or labels, and nothing more. | A hint reaches the agent with every plan naming the entity, reaches a model implementation as its charter, and grants nothing. A misleading one steers plan choice wrongly and misleads review. |
 
 ## Tools
 
@@ -335,14 +335,18 @@ attention          = ["finance-signoff"]       # The marks its rulings satisfy
 ```
 
 The policy stops there. Who actually rules is a deployment question, bound in
-`[externals]`:
+`[externals]` (see [Externals](#externals) for the binding rule):
 
 ```toml
 [externals.authorities.finance-officer]
-url = "https://approver.corp/rule"
-# Builtin options:
+url       = "https://approver.corp/rule"
+token_env = "APPA_APPROVER_TOKEN"            # sent as a bearer token
+# Other bindings:
+# command = ["/usr/local/bin/rule", "--json"]  # A local program, Unix only
 # builtin = "hitl"                             # Human-in-the-loop elicitation
 # builtin = "approve"                          # In-process auto-approval
+# builtin = "claude-code"                      # A model rules, within `permits`
+# builtin = "llm"                              # A model rules through [externals.llm]
 ```
 
 A missing authority binding does not stop the deployment. That authority
@@ -352,10 +356,13 @@ returns no answer, so a remedy that names it cannot release the call.
 
 | Implementation | Description | Audit Properties |
 |---|---|---|
-| **`builtin = "hitl"`** | Prompts a human reviewer in the loop. | Highest audit fidelity; presents exact arguments and label context to a human. |
+| **`builtin = "hitl"`** | Prompts a human reviewer in the loop. | Highest audit fidelity; presents the exact call and the requirements the ruling would cover to a person. |
 | **`builtin = "approve"`** | Auto-approves matching gaps in-process. | Intentionally opens an automated policy bypass within what the authority `permits`. |
-| **`builtin = "<module name>"`** | A deployer builtin module: your own compiled code, loaded by the runtime at startup and called in-process. | Bound by the same `permits` as any implementation; the module is deployer trusted code with the runtime's own privileges. |
-| **`url = ...`** | Queries a privileged external service. | Receives call digest, rendered payload, and review context; decision is logged verbatim. |
+| **`builtin = "claude-code"`**, **`builtin = "llm"`** | A model rules from the authority's `hint` and `permits`, the call, and its unmet requirements. | `approve` or `deny` only, capped by `permits` like any implementation. The model never sees the trajectory; a wide `permits` is the review concern, not the model. |
+| **`builtin = "<module name>"`** | A deployer builtin module from `--modules-dir`: your own compiled code, loaded by the runtime at startup and called in-process. | Bound by the same `permits` as any implementation; the module is deployer trusted code with the runtime's own privileges. |
+| **`url = ...`**, **`command = [...]`** | Queries a privileged external service or a local program. | Receives the declaration and the call with its unmet requirements; the ruling is logged. |
+
+An authority consult's declaration is `{"hint": …, "permits": …}` as the policy wrote it. Its artifact is the call — `tool` and canonical `arguments` — and `requirements`: the unmet requirements this ruling would cover, each `{"kind": "trust", "required": "trusted"}`, `{"kind": "audience", "required": "public"}` or `{"kind": "audience", "required": 2}` (the number of readers the call requires), `{"kind": "effect", "excludes": "…"}`, or `{"kind": "attention", "mark": "…"}`. It names no actual rank, reader, or label state. The answer is `{"ruling": "approve" | "deny", "reason"?: "…"}`; `reason` is logged at debug level and never persisted.
 
 ## Sanitizers
 
@@ -377,6 +384,8 @@ audience = { from = ["finance"], to = ["public"] }
 ```toml
 [externals.sanitizers.pii-redactor]            # the deployment binds the scrubber
 builtin = "redact-email"
+# builtin = "claude-code"                      # A model rewrites the value, within `permits`
+# builtin = "llm"                              # A model rewrites it through [externals.llm]
 ```
 
 ### Sanitizer implementation modes
@@ -384,9 +393,12 @@ builtin = "redact-email"
 | Implementation | Description | Audit Properties |
 |---|---|---|
 | **`builtin = "redact-email"`** | In-process redactor: replaces email addresses with a fixed placeholder. | Deterministic and offline; guarantees exact string transformation without external calls. |
-| **(reserved name `attest-schema`)** | The quarantine-exit sanitizer, registered by name alone: the engine applies it itself, so it takes no `[externals]` entry, and binding one is a load error. | Derives the return unchanged; claims instruction-cleanliness only. |
-| **`builtin = "<module name>"`** | A deployer builtin module: your own compiled scrubber, loaded at startup and called in-process. | Bound by the same `permits` as any implementation; deployer trusted code. |
-| **`url = ...`** | A scrubbing service behind an endpoint. | The derivation is re-validated against the declared transition before admission. |
+| **(reserved name `attest-schema`)** | The quarantine-exit sanitizer, registered by name alone: the engine applies it itself, so it takes no `[externals.sanitizers.attest-schema]` entry, and binding one is a load error. | Derives the return unchanged; claims instruction-cleanliness only. |
+| **`builtin = "claude-code"`**, **`builtin = "llm"`** | A model rewrites the value from the sanitizer's `hint`, `on`, and `permits`, and for `tool_input` the tool's parameter schema. | `permits` caps the label the derivation claims, not the bytes the model leaves in it: what the model keeps is what crosses. Keep the transition narrow and the `hint` exact. |
+| **`builtin = "<module name>"`** | A deployer builtin module from `--modules-dir`: your own compiled scrubber, loaded at startup and called in-process. | Bound by the same `permits` as any implementation; deployer trusted code. |
+| **`url = ...`**, **`command = [...]`** | A scrubbing service behind an endpoint, or a local program. | The derivation is re-validated against the declared transition before admission. |
+
+A sanitizer consult's declaration is `{"hint": …, "on": [...], "permits": …}` plus `parameters`, the tool's argument schema, when the sanitizer rewrites `tool_input`. Its artifact is `{"tool": …, "body": …}` — the tool whose value it is, when known, and the bytes to rewrite. The answer is `{"body": …}`: the derivation, which OpenAPPA labels from `permits`.
 
 A sanitizer permits one dimension. For trust, `from` is the rank the source must meet or exceed, and `to` is the rank the derivation carries — this is how a scrubber vouches untrusted fetched text back up:
 
@@ -423,7 +435,7 @@ hint = "Verifies the sub-agent returned valid structured data matching the schem
 trust = { from = "suspicious", to = "trusted" }
 ```
 
-Registering `name = "attest-schema"` is sufficient; OpenAPPA applies it natively without requiring an `[externals]` entry (configuring one is a load error).
+Registering `name = "attest-schema"` is sufficient; OpenAPPA applies it natively without an `[externals]` entry (binding one is a load error).
 
 ## Casts
 
@@ -434,10 +446,12 @@ A block lists each Unknown source by value under `unestablished`, together with 
 ```toml
 [[cast]]
 name     = "content-classifier"
+hint     = "Labels a support ticket by how far its text can be trusted."
+                                              # What the classifier is for, in the deployer's words
 tags     = ["support"]                        # Applies only to values from tools with these tags
 resolver = { may_cast = { trust = ["suspicious"], audience = ["public"] } }
                                               # The answer must be one of these ranks and within
-                                              # these readers; the ceiling is policy, the endpoint deployment
+                                              # these readers; the ceiling is policy, the classifier deployment
 
 [[cast]]
 name     = "paranoid-default"
@@ -448,9 +462,11 @@ constant = { trust = "suspicious", audience = ["public"] }
 ```toml
 [externals.casts.content-classifier]           # the deployment binds the classifier
 url = "https://classify.corp/label"
+# builtin = "claude-code"                      # A model labels the value, within `may_cast`
+# builtin = "llm"                              # A model labels it through [externals.llm]
 ```
 
-A dynamic cast requires a resolver bounded by a `may_cast` ceiling (`builtin` is not supported for casts). A constant cast is defined directly in policy, so it requires no `[externals]` binding.
+A resolver-backed cast binds under `[externals.casts.<name>]` to an HTTP endpoint, a local command, or a model builtin, always under its `may_cast` ceiling. A constant cast is defined directly in policy, so it takes no `[externals]` binding, and binding one is a load error.
 
 When resolving an `Unknown` value, OpenAPPA evaluates applicable casts (selected by `tags`) in registration order until one returns an answer. If a resolver is unreachable or fails, OpenAPPA moves to the next registered cast. Place fallback constant casts last, as any cast registered after a constant cast without `tags` will never be reached.
 
@@ -458,11 +474,11 @@ OpenAPPA validates every resolver answer against the declared `may_cast` ceiling
 
 A classifier can be consulted again for the same value after a runtime restart or a concurrent-write retry, so a cast implementation must be idempotent.
 
-The runtime consults a resolver-backed cast with a JSON POST. The comments explain each key; they are not sent.
+The runtime consults a resolver-backed cast with the common envelope. The comments explain each key; they are not sent.
 
 ```jsonc
 {
-  // WHY: Identifies the request shape.
+  // WHY: Identifies the consult shape.
   "version": 1,
 
   // WHY: Says which external kind is consulted.
@@ -471,26 +487,117 @@ The runtime consults a resolver-backed cast with a JSON POST. The comments expla
   // WHY: Selects the cast when one service answers for several.
   "name": "content-classifier",
 
-  "payload": {
-    // WHY: Gives the classifier the value's bytes.
-    "body": "the ticket text",
+  // WHY: What the policy declared: the deployer's hint, the ceiling the answer
+  // must stay within, and the tool whose result the value is (absent for a
+  // subagent's return).
+  "declaration": {
+    "hint": "Labels a support ticket by how far its text can be trusted.",
+    "may_cast": { "trust": ["suspicious"], "audience": "public" },
+    "tool": { "name": "read_ticket", "description": "Reads one support ticket." }
+  },
 
-    // WHY: Names the tool whose result the value is; null for a subagent's return.
-    "tool": "read_ticket",
-
-    // WHY: Gives the current state, in the shape a dynamic resolver receives.
-    "context": {
-      "current_trust": "trusted",
-      "current_trust_rank": 1,
-      "current_audience": "public",
-      "trust_unresolved": true,
-      "audience_unresolved": true,
-      "static_attention": []
-    }
-  }
+  // WHY: The value's bytes, and nothing else — no current label, no history.
+  "artifact": { "body": "the ticket text" }
 }
 ```
 
-The response is `{"version": 1, "answer": {"trust": "suspicious", "audience": "public"}}`, where `audience` is `"public"` or an array of literal reader ids. Anything else — an error status, a timeout, a malformed body, or an empty answer — is no answer: nothing is recorded, the next applicable cast is consulted, and when none answers the call stays undecided and can be proposed again.
+The response is `{"version": 1, "answer": {"trust": "suspicious", "audience": "public"}}`, where `audience` is `"public"` or an array of literal reader ids; a model builtin answers the inner object alone. Anything else — an error status, a timeout, a malformed body, or an empty answer — is no answer: nothing is recorded, the next applicable cast is consulted, and when none answers the call stays undecided and can be proposed again.
 
-A tool contract can also declare a pending dimension with `delta = { trust = "unknown" }`. When configured in `confined_results`, the runtime withholds raw results from the model until the cast evaluates the payload. If the resolved label restricts the trajectory, OpenAPPA presents a narrowing prompt to the agent before delivering the data.
+A tool contract can also declare a pending dimension with `delta = { trust = "unknown" }`. When configured in `confined_results`, the runtime withholds raw results from the model until the cast evaluates the value. If the resolved label restricts the trajectory, OpenAPPA presents a narrowing prompt to the agent before delivering the data.
+
+## Externals
+
+The policy registers components by name. The deployment binds each name in the `[externals]` table, under one rule for every kind:
+
+```toml
+[externals]
+timeout_ms     = 2000        # one machine consult: endpoint or command
+max_body_bytes = 65536       # the largest answer accepted
+
+[externals.authorities.finance-officer]
+url       = "https://approver.corp/rule"
+token_env = "APPA_APPROVER_TOKEN"     # an APPA_* variable; its value is sent as a bearer token
+
+[externals.sanitizers.pii-redactor]
+builtin = "redact-email"
+
+[externals.casts.content-classifier]
+command = ["/usr/local/bin/classify", "--json"]
+
+[externals.dynamic.classify-customer]
+builtin = "llm"
+
+[externals.membership.corp-directory]
+url = "https://directory.corp/members"
+```
+
+An entry is `[externals.<kind>.<name>]`, with `<kind>` one of `authorities`, `sanitizers`, `casts`, `dynamic`, or `membership`, and exactly one of `url`, `command`, or `builtin`. A registered name without a binding, and a binding whose name no declaration registers, are both load errors, for every kind. A constant cast and the reserved `attest-schema` sanitizer take no entry. An included fragment can add entries; the root-wide settings (`timeout_ms`, `max_body_bytes`, `review_timeout_ms`, `[externals.claude_code]`, `[externals.llm]`) stay in the root, and the same name in two files is an error.
+
+### Transports
+
+| Binding | Serves | Notes |
+|---|---|---|
+| `url = "…"` | every kind | HTTPS anywhere; cleartext `http` only on loopback; no credentials in the URL. `token_env` names an `APPA_*` variable whose value is sent as a bearer token. |
+| `command = ["…", …]` | every kind | Unix only. One JSON consult on standard input, one JSON answer on standard output; no shell; the working folder is that of the file that declares it; bounded by `timeout_ms` and `max_body_bytes`. |
+| `builtin = "hitl"` | authorities | The harness asks a person. |
+| `builtin = "approve"` | authorities | Approves within `permits`. |
+| `builtin = "redact-email"` | sanitizers | Replaces email addresses with a placeholder. |
+| `builtin = "claude-code"` | authorities, sanitizers, casts, dynamic | One isolated `claude -p` process per consult, tuned in `[externals.claude_code]`. |
+| `builtin = "llm"` | authorities, sanitizers, casts, dynamic | The API-key profile in `[externals.llm]`. |
+| `builtin = "<module>"` | authorities, sanitizers | A deployer module from `--modules-dir`, called in-process. |
+
+### The consult
+
+Every transport receives one JSON object per consult:
+
+```json
+{
+  "version": 1,
+  "kind": "authority",
+  "name": "finance-officer",
+  "declaration": { "hint": "…", "permits": { "trust_below": "trusted" } },
+  "artifact": { "tool": "wire_funds", "arguments": { "amount": 5000 }, "requirements": [{ "kind": "trust", "required": "trusted" }] }
+}
+```
+
+| Key | Meaning |
+|---|---|
+| `version` | The consult shape. It is `1`. |
+| `kind` | `authority`, `sanitizer`, `cast`, `dynamic`, or `membership`. |
+| `name` | The registered name, for one service that answers for several. |
+| `declaration` | The policy's own words for this component: its `hint`, its `permits` or `may_cast`, its `returns` and vocabulary. The policy author wrote it; the agent never can. |
+| `artifact` | The value under judgment: the call and its unmet requirements, the body to rewrite or label, the resolver's `args`, or the group name. |
+
+| Kind | `declaration` | `artifact` | `answer` |
+|---|---|---|---|
+| `authority` | `hint`, `permits` | `tool`, `arguments`, `requirements` | `ruling` (`approve` or `deny`), optional `reason` |
+| `sanitizer` | `hint`, `on`, `permits`, `parameters` (for `tool_input`) | `tool` (when known), `body` | `body` |
+| `cast` | `hint`, `may_cast`, `tool` (when known) | `body` | `trust`, `audience` |
+| `dynamic` | `returns`, `trust_ranks`, `attention_marks` | `args` | one value per declared result |
+| `membership` | empty | `group` | `readers` |
+
+The consult never carries the trajectory: no current label, no rank, no reader ids, no history, no user turn. A component judges the artifact against its own declaration and nothing else.
+
+An endpoint or a command answers `{"version": 1, "answer": { … }}`. `version` must be `1`, `answer` must hold exactly the keys its kind defines, and no other key may appear. Anything else — an error status, a non-zero exit, a timeout, an oversized body, a malformed answer — is no answer: nothing is recorded, and the flow that asked stays where it was (a blocked call, a withheld result, the next cast in the cascade). A failed consult is never a denial.
+
+### Model transports
+
+`claude-code` and `llm` render the same consult for a model: a fixed per-kind preamble and the `declaration` JSON as the system prompt, the `artifact` JSON as the only user turn, and an output schema built from the declaration — the `ruling` enum, the `may_cast` ranks, the declared results. The model answers the bare per-kind object; the artifact is treated as data, never as instructions. The prompt and the raw model output are never persisted; only the validated answer is.
+
+A model answer can do what the kind allows any implementation: an authority's ruling stays within `permits`, a cast's label within `may_cast`, and a sanitizer's derivation carries exactly the `permits` transition. A dynamic resolver has no ceiling, so a model bound there is trusted classifier evidence, exactly as an endpoint is. A model sanitizer deserves a second look: `permits` caps the label the derivation claims, not the bytes the model leaves in it, so keep its transition narrow and its `hint` exact.
+
+`[externals.claude_code]` tunes the subscription transport: `command` sets the executable, `model` pins the model, and `timeout_ms` gives a consult its own budget. Each consult is one `claude -p` process in safe mode with no tools, no project settings, no session persistence, a fresh temporary working directory, and every `APPA_*` variable removed from its environment. At most four run at once per runtime.
+
+`[externals.llm]` is the API-key transport, one profile per deployment:
+
+```toml
+[externals.llm]
+provider       = "anthropic"          # anthropic | openai | gemini | ollama
+model          = "claude-sonnet-4-5"
+token_env      = "APPA_LLM_TOKEN"     # required, except for ollama
+# url          = "https://gateway.corp/v1"   # optional; validated like a `url` binding
+timeout_ms     = 30000                # this profile's own consult budget
+max_concurrent = 4                    # consults in flight at once
+```
+
+`openai` speaks the chat-completions API, so an OpenAI-compatible `url` works unchanged. `ollama` defaults to `http://localhost:11434` and takes no token.
