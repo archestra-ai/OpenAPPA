@@ -3,8 +3,6 @@
 Rules for the GitHub MCP server (`https://api.githubcopilot.com/mcp/`)
 with its default tool sets: your profile, repositories, issues, pull
 requests, and user search. Written for public repositories. Add it to your root config with `include`.
-The root config must define an authority named `hitl`; see
-`examples/claude-code-battery/appa.toml`.
 
 ## Files
 
@@ -20,8 +18,8 @@ fetched web page is. That stops it from steering a later action.
 
 *Writes* — every tool that creates, edits, comments, pushes, merges, or
 deletes. Each one publishes to a place anyone can read, so it runs only
-with trusted data that may be seen by everyone, and after a person
-approves. Private data cannot be written to GitHub under these rules. That includes
+with trusted data that may be seen by everyone. Private data cannot be
+written to GitHub under these rules. That includes
 `issue_write`, `add_issue_comment`, `create_pull_request`,
 `merge_pull_request`, `push_files`, and `delete_file`.
 
@@ -36,6 +34,6 @@ The default assumes public repositories. For a private repository, add
 root rules that name it (`repo:`), or its whole organisation (`owner:`),
 so its reads come out private and its writes accept private data; the
 comment at the top of `appa.toml` shows both.
-To let a write run without approval, add a root rule for that tool
-without the approval step. Root rules run first. Nothing in this file
-needs editing.
+To make a write ask a person first, add a root rule for that tool with
+`attention = ["hitl"]` in its `requires`. Root rules run first. Nothing
+in this file needs editing.

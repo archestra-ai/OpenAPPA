@@ -4,8 +4,7 @@
 # text is written by whoever pushed it, so every read enters at the low
 # rank of the trust chain, like a fetched web page. Every write publishes
 # to a place anyone can read, so it needs trusted data that may be seen
-# by everyone (audience contains `public`), and a person's approval. The
-# root config supplies the `hitl` authority.
+# by everyone (audience contains `public`).
 #
 # For a private repository, add root rules that name it; root rules run
 # first. Its reads become private, and its writes accept private data.
@@ -23,8 +22,7 @@
 #   [policy.tool.requires]
 #   trust = "trusted"
 #   audience = { contains = ["private"] }
-#   attention = ["hitl"]
-#
+#   #
 # To cover a whole organisation instead, match `owner:my-org`.
 
 [policy]
@@ -142,7 +140,7 @@ delta = { trust = "suspicious" }
 name = "mcp__github__pull_request_read"
 delta = { trust = "suspicious" }
 
-# --- writes: every one publishes, every one needs a person ---
+# --- writes: every one publishes ---
 
 [[policy.tool]]
 name = "mcp__github__create_repository"
@@ -151,7 +149,6 @@ delta = {}
 [policy.tool.requires]
 trust = "trusted"
 audience = { contains = ["public"] }
-attention = ["hitl"]
 
 [[policy.tool]]
 name = "mcp__github__fork_repository"
@@ -160,7 +157,6 @@ delta = {}
 [policy.tool.requires]
 trust = "trusted"
 audience = { contains = ["public"] }
-attention = ["hitl"]
 
 [[policy.tool]]
 name = "mcp__github__create_branch"
@@ -169,7 +165,6 @@ delta = {}
 [policy.tool.requires]
 trust = "trusted"
 audience = { contains = ["public"] }
-attention = ["hitl"]
 
 [[policy.tool]]
 name = "mcp__github__create_or_update_file"
@@ -178,7 +173,6 @@ delta = {}
 [policy.tool.requires]
 trust = "trusted"
 audience = { contains = ["public"] }
-attention = ["hitl"]
 
 [[policy.tool]]
 name = "mcp__github__push_files"
@@ -187,7 +181,6 @@ delta = {}
 [policy.tool.requires]
 trust = "trusted"
 audience = { contains = ["public"] }
-attention = ["hitl"]
 
 [[policy.tool]]
 name = "mcp__github__delete_file"
@@ -196,7 +189,6 @@ delta = {}
 [policy.tool.requires]
 trust = "trusted"
 audience = { contains = ["public"] }
-attention = ["hitl"]
 
 [[policy.tool]]
 name = "mcp__github__issue_write"
@@ -205,7 +197,6 @@ delta = {}
 [policy.tool.requires]
 trust = "trusted"
 audience = { contains = ["public"] }
-attention = ["hitl"]
 
 [[policy.tool]]
 name = "mcp__github__sub_issue_write"
@@ -214,7 +205,6 @@ delta = {}
 [policy.tool.requires]
 trust = "trusted"
 audience = { contains = ["public"] }
-attention = ["hitl"]
 
 [[policy.tool]]
 name = "mcp__github__add_issue_comment"
@@ -223,7 +213,6 @@ delta = {}
 [policy.tool.requires]
 trust = "trusted"
 audience = { contains = ["public"] }
-attention = ["hitl"]
 
 [[policy.tool]]
 name = "mcp__github__create_pull_request"
@@ -232,7 +221,6 @@ delta = {}
 [policy.tool.requires]
 trust = "trusted"
 audience = { contains = ["public"] }
-attention = ["hitl"]
 
 [[policy.tool]]
 name = "mcp__github__update_pull_request"
@@ -241,7 +229,6 @@ delta = {}
 [policy.tool.requires]
 trust = "trusted"
 audience = { contains = ["public"] }
-attention = ["hitl"]
 
 [[policy.tool]]
 name = "mcp__github__update_pull_request_branch"
@@ -250,7 +237,6 @@ delta = {}
 [policy.tool.requires]
 trust = "trusted"
 audience = { contains = ["public"] }
-attention = ["hitl"]
 
 [[policy.tool]]
 name = "mcp__github__merge_pull_request"
@@ -259,7 +245,6 @@ delta = {}
 [policy.tool.requires]
 trust = "trusted"
 audience = { contains = ["public"] }
-attention = ["hitl"]
 
 [[policy.tool]]
 name = "mcp__github__pull_request_review_write"
@@ -268,7 +253,6 @@ delta = {}
 [policy.tool.requires]
 trust = "trusted"
 audience = { contains = ["public"] }
-attention = ["hitl"]
 
 [[policy.tool]]
 name = "mcp__github__add_comment_to_pending_review"
@@ -277,7 +261,6 @@ delta = {}
 [policy.tool.requires]
 trust = "trusted"
 audience = { contains = ["public"] }
-attention = ["hitl"]
 
 [[policy.tool]]
 name = "mcp__github__add_reply_to_pull_request_comment"
@@ -286,7 +269,6 @@ delta = {}
 [policy.tool.requires]
 trust = "trusted"
 audience = { contains = ["public"] }
-attention = ["hitl"]
 
 [[policy.tool]]
 name = "mcp__github__request_copilot_review"
@@ -295,4 +277,3 @@ delta = {}
 [policy.tool.requires]
 trust = "trusted"
 audience = { contains = ["public"] }
-attention = ["hitl"]
