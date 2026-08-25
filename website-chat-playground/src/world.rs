@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use appa_runtime::config::{Endpoint, Externals, Implementation};
+use appa_runtime::config::{DynamicImplementation, Endpoint, Externals, Implementation};
 
 use crate::systems::System;
 
@@ -160,12 +160,19 @@ pub fn externals_for(policy: &appa_policy::Config, base: &str) -> Externals {
         // The playground serves no classifier route, so a resolver-backed cast stays
         // unbound and refuses the policy at open. Constant casts need no binding.
         casts: std::collections::BTreeMap::new(),
-        // One HTTP endpoint serves every declared resolver; the policy gate refused any
-        // inline builtin before this world was built.
-        dynamic: policy.dynamic_resolver_names().next().is_some().then(|| Endpoint {
-            url: format!("{base}{DYNAMIC_RESOLVER_PATH}"),
-            token: None,
-        }),
+        // The playground routes every named resolver to the same handler.
+        dynamic: policy
+            .dynamic_resolver_names()
+            .map(|name| {
+                (
+                    name.as_str().to_string(),
+                    DynamicImplementation::Resolver(Endpoint {
+                        url: format!("{base}{DYNAMIC_RESOLVER_PATH}"),
+                        token: None,
+                    }),
+                )
+            })
+            .collect(),
         membership: Some(Endpoint {
             url: format!("{base}{MEMBERSHIP_PATH}"),
             token: None,

@@ -442,7 +442,10 @@ def guarded_externals(resolver_url: str | None = None) -> str | None:
     if resolver_url is None:
         return None
     return f"""\
-[dynamic]
+[dynamic.customer-acl]
+url = {json.dumps(resolver_url)}
+
+[dynamic.recipient-members]
 url = {json.dumps(resolver_url)}
 """
 

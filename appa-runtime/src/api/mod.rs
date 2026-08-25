@@ -8,7 +8,6 @@ mod session;
 #[cfg(test)]
 pub(crate) use session::raw;
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -128,6 +127,12 @@ pub enum OpenError {
     ReservedTool(String),
     #[error("policy names {kind} {name}, which has no [externals] binding")]
     UnboundExternal { kind: &'static str, name: String },
+    #[error("[externals] binds {kind} {name}, which the policy does not declare")]
+    UndeclaredExternal { kind: &'static str, name: String },
+    #[error(
+        "dynamic resolver {0} carries builtin = \"claude-code\" on its declaration and takes no [externals.dynamic] binding — remove the binding"
+    )]
+    BoundBuiltinResolver(String),
     #[error(
         "cast {0} declares a constant, which the engine answers from the policy — remove its [externals.casts] binding"
     )]
@@ -839,9 +844,11 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
     }
 
     let rc = policy.registry_config();
-    let dynamic_builtins: BTreeMap<_, _> = policy
+    let dynamic_resolvers: std::collections::BTreeSet<_> =
+        policy.dynamic_resolver_names().map(|name| name.as_str()).collect();
+    let dynamic_builtins: std::collections::BTreeSet<_> = policy
         .dynamic_resolver_builtins()
-        .map(|(resolver, builtin)| (resolver.as_str(), builtin.as_str()))
+        .map(|(name, _)| name.as_str())
         .collect();
     for tool in &rc.tools {
         let name = tool.name.as_str();
@@ -899,17 +906,27 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
             });
         }
     }
-    for tool in &rc.tools {
-        for binding in &tool.uses {
-            let name = binding.resolver.as_str();
-            // A resolver with a declared builtin never uses the shared endpoint; every other
-            // bound name requires it.
-            if !dynamic_builtins.contains_key(name) && externals.dynamic.is_none() {
-                return Err(OpenError::UnboundExternal {
-                    kind: "dynamic resolver",
-                    name: name.to_string(),
-                });
+    for name in &dynamic_resolvers {
+        let bound = externals.dynamic.contains_key(*name);
+        // A resolver that carries the stock builtin on its declaration is complete as
+        // written; every other resolver needs exactly one deployment binding.
+        if dynamic_builtins.contains(name) {
+            if bound {
+                return Err(OpenError::BoundBuiltinResolver((*name).to_string()));
             }
+        } else if !bound {
+            return Err(OpenError::UnboundExternal {
+                kind: "dynamic resolver",
+                name: (*name).to_string(),
+            });
+        }
+    }
+    for name in externals.dynamic.keys() {
+        if !dynamic_resolvers.contains(name.as_str()) {
+            return Err(OpenError::UndeclaredExternal {
+                kind: "dynamic resolver",
+                name: name.clone(),
+            });
         }
     }
     if let Some(resolver) = &rc.membership
@@ -973,8 +990,10 @@ mod deployment_tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::config::Externals;
+    use crate::config::{DynamicImplementation, Externals};
 
+    /// A deployment with no `[externals.dynamic]` bindings: the policy under test carries
+    /// `builtin = "claude-code"` on the declarations it wants answered by Claude Code.
     fn claude_config(policy: &str) -> Config {
         Config::embedded(
             policy.to_string(),
@@ -985,7 +1004,7 @@ mod deployment_tests {
                 authorities: BTreeMap::new(),
                 sanitizers: BTreeMap::new(),
                 casts: BTreeMap::new(),
-                dynamic: None,
+                dynamic: BTreeMap::new(),
                 membership: None,
                 claude_code: Default::default(),
             },
@@ -1061,7 +1080,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     }
 
     #[test]
-    fn the_shared_http_endpoint_covers_every_non_builtin_resolver() {
+    fn every_dynamic_resolver_has_its_own_implementation() {
         let mut config = claude_config(
             r#"
                 version = 1
@@ -1084,10 +1103,73 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 uses = [{ resolver = "other-classifier" }]
             "#,
         );
-        config.externals.dynamic = Some(crate::config::Endpoint {
-            url: "https://resolver.example".to_string(),
-            token: None,
-        });
+        // The builtin resolver is complete as declared; only the other one is bound here.
+        config.externals.dynamic.insert(
+            "other-classifier".to_string(),
+            DynamicImplementation::Resolver(crate::config::Endpoint {
+                url: "https://resolver.example".to_string(),
+                token: None,
+            }),
+        );
         assert!(Deployment::load(config, &crate::builtins::ModuleRegistry::empty(), test_permits()).is_ok());
+    }
+
+    #[test]
+    fn missing_and_undeclared_dynamic_implementations_are_refused() {
+        let policy = r#"
+            version = 1
+            [[dynamic_resolver]]
+            name = "classifier"
+            returns = ["delta.trust"]
+        "#;
+        let endpoint = || {
+            DynamicImplementation::Resolver(crate::config::Endpoint {
+                url: "https://resolver.example".to_string(),
+                token: None,
+            })
+        };
+        let missing = claude_config(policy);
+        assert!(matches!(
+            Deployment::load(missing, &crate::builtins::ModuleRegistry::empty(), test_permits()),
+            Err(OpenError::UnboundExternal {
+                kind: "dynamic resolver",
+                ..
+            })
+        ));
+
+        let mut extra = claude_config(policy);
+        extra.externals.dynamic.insert("classifier".to_string(), endpoint());
+        extra.externals.dynamic.insert("undeclared".to_string(), endpoint());
+        assert!(matches!(
+            Deployment::load(extra, &crate::builtins::ModuleRegistry::empty(), test_permits()),
+            Err(OpenError::UndeclaredExternal {
+                kind: "dynamic resolver",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn a_builtin_resolver_takes_no_deployment_binding() {
+        let mut bound = claude_config(
+            r#"
+                version = 1
+                [[dynamic_resolver]]
+                name = "classifier"
+                builtin = "claude-code"
+                returns = ["delta.trust"]
+            "#,
+        );
+        bound.externals.dynamic.insert(
+            "classifier".to_string(),
+            DynamicImplementation::Resolver(crate::config::Endpoint {
+                url: "https://resolver.example".to_string(),
+                token: None,
+            }),
+        );
+        assert!(matches!(
+            Deployment::load(bound, &crate::builtins::ModuleRegistry::empty(), test_permits()),
+            Err(OpenError::BoundBuiltinResolver(name)) if name == "classifier"
+        ));
     }
 }

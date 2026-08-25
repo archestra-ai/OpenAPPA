@@ -66,7 +66,7 @@ confined_results = ["search_hr", "read_hr", "create_hr", "search_task_tracker", 
 
 # --- registered externals ---------------------------------------------------
 #
-# One HTTP implementation serves every resolver name. Its URL is a loopback placeholder: the bench runner binds its fixture server on
+# Each resolver has a named HTTP implementation. These URLs are loopback placeholders: the bench runner binds its fixture server on
 # an ephemeral port and rewrites them before opening the runtime, since
 # `Config::load` refuses non-loopback http.
 
@@ -74,5 +74,8 @@ confined_results = ["search_hr", "read_hr", "create_hr", "search_task_tracker", 
 timeout_ms = 5000
 max_body_bytes = 65536
 
-[externals.dynamic]
+[externals.dynamic.personal-file-readers]
+url = "http://127.0.0.1:0/dynamic-resolver"
+
+[externals.dynamic.mailbox-readers]
 url = "http://127.0.0.1:0/dynamic-resolver"

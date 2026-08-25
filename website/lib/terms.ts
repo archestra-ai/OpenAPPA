@@ -6,6 +6,8 @@
 
 const TERMS = {
   version: "The policy configuration dialect version.",
+  include:
+    "Policy fragments composed by the root configuration. Root declarations run first, followed by included declarations in list order. Included files cannot include more files or replace root-wide settings.",
   trust_chain:
     "The ordered list of trust ranks, least-trusted first. Omitted, it defaults to suspicious < trusted.",
 
@@ -66,8 +68,8 @@ const TERMS = {
     "The contract destinations an attached resolver owns and always answers with: delta.trust, delta.audience, requires.trust, requires.audience, requires.attention. Static values and other resolvers cannot own the same destinations. Trust values select from the policy trust chain; attention values select from marks authorities name under permits.attention.",
   "$tool_call":
     "The only source a resolver input reads. Its five forms are the complete call (name, description when declared, arguments), its name, its description, its arguments, and one top-level argument. Only $tool_call.description requires a declared description.",
-  "[externals.dynamic]":
-    "The shared HTTP endpoint for every dynamic resolver without an inline builtin. Requests carry the resolver name.",
+  "[externals.dynamic.<name>]":
+    "The deployment binding for one dynamic resolver that does not carry a builtin on its declaration. It selects an HTTP endpoint or local command. Command execution is not available in this build, so a command binding returns no answer.",
   internal:
     "An example reader for restricted internal data. Reading internal data closes off public destinations.",
   "{public, trusted}":
