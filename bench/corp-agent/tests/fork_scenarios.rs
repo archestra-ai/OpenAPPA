@@ -37,9 +37,9 @@ const FORUM_THREAD: &str = "nightly deploy times out since v2.31; 45 minutes fix
 /// ticket follows the public acknowledgement it responds to. The bench
 /// declares that history clause only in the scenario that tests it, while the
 /// anti-laundering destination gate remains shared.
-const SHARED_TICKET_REQUIRES: &str =
-    r#"requires = { trust = "internal", audience = { contains = ["public"] } }"#;
-const TICKET_REQUIRES_PRIOR_EGRESS: &str = r#"requires = { trust = "internal", audience = { contains = ["public"] }, effects = { contains = ["egress"] } }"#;
+const SHARED_TICKET_REQUIRES: &str = r#"requires = { trust = "internal", audience = { contains = ["public"] } }"#;
+const TICKET_REQUIRES_PRIOR_EGRESS: &str =
+    r#"requires = { trust = "internal", audience = { contains = ["public"] }, effects = { contains = ["egress"] } }"#;
 
 fn ticket_gated_on_prior_egress() -> String {
     assert_eq!(
