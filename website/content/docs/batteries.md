@@ -119,7 +119,7 @@ OpenAPPA starts the command only when the selected tool rule uses the resolver. 
 Request:
 
 ```json
-{"version":1,"resolver":"claude-code.read-sensitivity","args":{"name":"Read","description":"Reads a file and returns its contents.","arguments":{"file_path":".env"}}}
+{"version":1,"resolver":"claude-code.read-sensitivity","args":{"name":"Read","arguments":{"file_path":".env"}}}
 ```
 
 Result:
@@ -144,7 +144,7 @@ json.dump(
 )
 ```
 
-`args` is the complete call: `name`, `description` when the tool declares one, and `arguments`. A battery resolver must check the version, resolver name, tool name, and argument types. It must exit with an error for bad input.
+`args` is the complete call: `name`, `description` when the tool declares one, and `arguments`. The `Read` rule above declares none, so the request carries none. A battery resolver must check the version, resolver name, tool name, and argument types. It must exit with an error for bad input.
 
 OpenAPPA runs the command without a shell. The script path is relative to the battery config. Its folder is the working folder.
 
