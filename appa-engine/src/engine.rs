@@ -5766,8 +5766,39 @@ mod tests {
             e.offer_consults(&viewing(&e, &log), &traj(), &input_hop),
             Ok(OfferConsult::Rewrite {
                 sanitizer: crate::names::SanitizerName::new("redact"),
-                call: proposal,
+                call: proposal.clone(),
             }),
+        );
+
+        // A spent input hop answers from the record as the rewrite it was, and only for one.
+        let hopped = appended_facts(
+            execute_offer(&e, &log, input_hop, substitution(&proposal, REDACTED)).expect("the hop runs"),
+        );
+        let spent = [log, hopped].concat();
+        assert_eq!(
+            e.offer_consults(&viewing(&e, &spent), &traj(), &input_hop),
+            Ok(OfferConsult::Replay(OfferOutcome::Derived(Evidence::Rewrite {
+                sanitizer: crate::names::SanitizerName::new("redact"),
+                source: crate::value::RawResultDigest::of(&[]),
+                derived: ValueBody::new(""),
+                tool_resolutions: vec![],
+                memberships: vec![],
+            }))),
+        );
+        assert_eq!(
+            execute_offer(
+                &e,
+                &spent,
+                input_hop,
+                OfferOutcome::Derived(Evidence::Sanitizer {
+                    sanitizer: crate::names::SanitizerName::new("redact"),
+                    source: crate::value::RawResultDigest::of(&[]),
+                    derived: ValueBody::new(""),
+                }),
+            )
+            .err(),
+            Some(TransitionError::PlanOutcomeMismatch),
+            "an output derivation names another kind of offer"
         );
     }
 
@@ -11341,6 +11372,560 @@ mod tests {
         ));
     }
 
+    /// One harness tool under two ordered contracts, both in the input sanitizers' scope.
+    /// `read(path:public/*)` at 0 uses a resolver that reads the complete call and owns the
+    /// recipients it requires; `read(path:private/*)` at 1 records a classified read and
+    /// requires `partner` and every desk in `desks` statically. `redact` widens the audience
+    /// from internal to internal+partner, `widen` from partner to partner+auditor.
+    fn ordered_read_engine(desks: &[&str]) -> Engine {
+        let read = |name: &str| ToolContract {
+            description: Some("A test tool.".to_string()),
+            uses: vec![],
+            name: ToolName::new(name),
+            tags: vec![crate::names::TagName::new("outbound")],
+            delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::compile(&json!({
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "required": ["path"],
+                "additionalProperties": false,
+            }))
+            .unwrap(),
+            emits: EffectSet::default(),
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: Some(TRUSTED),
+                    audience: vec![],
+                },
+                ..Requires::default()
+            },
+        };
+        let includes = |reader: &str| {
+            AudienceRequirement::Includes(RecipientSpec::Static(DeclaredAudience::literal(Audience::restricted(
+                [ReaderId::new(reader)],
+            ))))
+        };
+        let public = ToolContract {
+            uses: vec![read_call()],
+            ..read("read(path:public/*)")
+        };
+        let private = ToolContract {
+            emits: classified_read(),
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: Some(TRUSTED),
+                    audience: std::iter::once("partner")
+                        .chain(desks.iter().copied())
+                        .map(includes)
+                        .collect(),
+                },
+                ..Requires::default()
+            },
+            ..read("read(path:private/*)")
+        };
+        open_engine_at(
+            RegistryConfig {
+                trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
+                tools: vec![public, private],
+                authorities: vec![],
+                sanitizers: vec![
+                    input_sanitizer("redact", &["internal"], &["internal", "partner"]),
+                    input_sanitizer("widen", &["partner"], &["internal", "partner", "auditor"]),
+                ],
+                casts: vec![],
+                membership: None,
+            },
+            known(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
+        )
+    }
+
+    fn classified_read() -> EffectSet {
+        EffectSet::new([EffectKind::new("classified.read")]).unwrap()
+    }
+
+    fn input_sanitizer(name: &str, from: &[&str], to: &[&str]) -> crate::authority::Sanitizer {
+        let audience = |readers: &[&str]| {
+            DeclaredAudience::literal(Audience::restricted(
+                readers.iter().map(|reader| ReaderId::new(*reader)),
+            ))
+        };
+        crate::authority::Sanitizer {
+            name: crate::names::SanitizerName::new(name),
+            on: crate::authority::SanitizerPoints {
+                input: true,
+                output: false,
+            },
+            transition: crate::authority::DeclaredTransition::Audience {
+                from_includes: audience(from),
+                to: audience(to),
+            },
+            scope: crate::authority::Scope {
+                tags: vec![crate::names::TagName::new("outbound")],
+            },
+            hint: None,
+        }
+    }
+
+    fn read_call() -> crate::contract::ToolResolverUse {
+        crate::contract::ToolResolverUse {
+            resolver: crate::names::DynamicResolverName::new("classify"),
+            inputs: std::collections::BTreeMap::new(),
+            returns: [crate::contract::ResolverReturn::RequiredAudience]
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    /// The `classify` answer about `read` of `path` under the public contract: the readers the
+    /// call then requires. Its args are the complete call, so any rewrite of `path` changes them.
+    fn read_pin_for(e: &Engine, path: &str, readers: &[&str]) -> crate::contract::PinnedToolResolution {
+        let uses = read_call();
+        let contract = e
+            .registry
+            .keyed_tool(&ToolName::new("read"), crate::value::ToolContractId::new(0).unwrap())
+            .expect("the public contract is first");
+        crate::contract::PinnedToolResolution::from_answer(
+            uses.clone(),
+            contract.resolver_args_digest(&uses, &json!({ "path": path })),
+            None,
+            None,
+            None,
+            Some(crate::contract::RequiredAudience {
+                includes: Some(Audience::restricted(
+                    readers.iter().map(|reader| ReaderId::new(*reader)),
+                )),
+                cap: None,
+            }),
+            None,
+        )
+        .expect("a literal required audience pins")
+    }
+
+    fn read_of(e: &Engine, path: &str) -> ResolvedCall {
+        e.resolve_call(ToolName::new("read"), format!(r#"{{"path":"{path}"}}"#).as_bytes())
+            .expect("the call resolves")
+    }
+
+    fn rewrite(
+        call: &ResolvedCall,
+        sanitizer: &str,
+        replacement: &str,
+        tool_resolutions: Vec<crate::contract::PinnedToolResolution>,
+        memberships: Vec<crate::contract::PinnedMembership>,
+    ) -> OfferOutcome {
+        OfferOutcome::Derived(crate::transition::Evidence::Rewrite {
+            sanitizer: crate::names::SanitizerName::new(sanitizer),
+            source: crate::value::RawResultDigest::of(call.canonical_arguments().canonical_bytes()),
+            derived: ValueBody::new(replacement),
+            tool_resolutions,
+            memberships,
+        })
+    }
+
+    fn hop_named(facts: &[Fact], name: &str) -> crate::value::OfferId {
+        opened_offers(facts)
+            .into_iter()
+            .find(|(_, plan)| plan.hop() == Some(&crate::names::SanitizerName::new(name)))
+            .map(|(offer, _)| offer)
+            .unwrap_or_else(|| panic!("the {name} hop is offered"))
+    }
+
+    fn released_by(decision: &EngineDecision) -> Released {
+        match offer_answer(decision) {
+            OfferFollowUp::Released(released) => (**released).clone(),
+            other => panic!("the rewrite clears the last gap and dispatches, got {other:?}"),
+        }
+    }
+
+    fn opened_contract_of(
+        facts: &[Fact],
+    ) -> (
+        crate::value::ToolContractId,
+        EffectSet,
+        Vec<crate::contract::PinnedToolResolution>,
+    ) {
+        facts
+            .iter()
+            .find_map(|fact| match fact {
+                Fact::DispatchOpened {
+                    contract,
+                    proposed_effects,
+                    tool_resolutions,
+                    ..
+                } => Some((*contract, proposed_effects.clone(), tool_resolutions.clone())),
+                _ => None,
+            })
+            .expect("the rewrite dispatches")
+    }
+
+    fn includes_gap(reader: &str) -> Gap {
+        Gap::Includes {
+            recipients: Audience::restricted([ReaderId::new(reader)]),
+        }
+    }
+
+    #[test]
+    fn a_rewrite_that_selects_another_contract_is_judged_under_it_with_the_answers_consulted_for_it() {
+        let e = ordered_read_engine(&["auditor", "legal"]);
+        let proposal = read_of(&e, "private/q3.md");
+        assert_eq!(proposal.contract_id(), crate::value::ToolContractId::new(1).unwrap());
+        let log = vec![opened(&e)];
+        let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
+        let hop = hop_named(&facts, "redact");
+        let log = [log, facts].concat();
+        let public = r#"{"path":"public/q3.md"}"#;
+
+        // The rewritten arguments select the public contract, whose resolver was never asked:
+        // the rewrite is a new call under it, and that contract's answers are owed first.
+        assert_eq!(
+            execute_offer(&e, &log, hop, rewrite(&proposal, "redact", public, vec![], vec![])).err(),
+            Some(TransitionError::ToolResolutionNeeded {
+                resolvers: vec!["classify".to_string()]
+            })
+        );
+        // An answer about the proposal is not evidence for the rewrite.
+        assert_eq!(
+            execute_offer(
+                &e,
+                &log,
+                hop,
+                rewrite(
+                    &proposal,
+                    "redact",
+                    public,
+                    vec![read_pin_for(&e, "private/q3.md", &["partner"])],
+                    vec![]
+                ),
+            )
+            .err(),
+            Some(TransitionError::ForeignToolResolution {
+                resolver: "classify".to_string()
+            })
+        );
+        let answer = read_pin_for(&e, "public/q3.md", &["partner"]);
+        let hopped = execute_offer(
+            &e,
+            &log,
+            hop,
+            rewrite(&proposal, "redact", public, vec![answer.clone()], vec![]),
+        )
+        .expect("the hop runs");
+        let released = released_by(&hopped);
+        assert_eq!(
+            released.call.contract_id(),
+            crate::value::ToolContractId::new(0).unwrap()
+        );
+        assert_eq!(released.call.tool_resolutions(), &[answer]);
+        let facts = appended_facts(hopped);
+        assert_eq!(
+            opened_contract_of(&facts),
+            (
+                crate::value::ToolContractId::new(0).unwrap(),
+                EffectSet::default(),
+                released.call.tool_resolutions().to_vec()
+            ),
+            "the opening records the public contract: its effects, not the classified read's, and its answers"
+        );
+        let log = [log, facts].concat();
+        assert_eq!(e.validate_replay(&log), Ok(()));
+
+        // Replay holds the record to the same rule: the pinned answer is about the rewritten call
+        // and nothing else, and the persisted contract is the one the arguments select.
+        let derived_at = log
+            .iter()
+            .position(|fact| matches!(fact, Fact::CandidateDerived { .. }))
+            .expect("the hop derived a candidate");
+        for (forged_call, refusal) in [
+            (
+                released
+                    .call
+                    .clone()
+                    .with_tool_resolutions(vec![read_pin_for(&e, "private/q3.md", &["partner"])]),
+                TransitionRefusal::ForgedResolution,
+            ),
+            (
+                ResolvedCall::new_keyed(
+                    ToolName::new("read"),
+                    crate::value::ToolContractId::new(1).unwrap(),
+                    released.call.canonical_arguments().clone(),
+                ),
+                TransitionRefusal::SanitizerUnapplicable,
+            ),
+        ] {
+            let mut forged = log.clone();
+            let Fact::CandidateDerived {
+                derived: DerivedCandidate::Call { call, .. },
+                ..
+            } = &mut forged[derived_at]
+            else {
+                unreachable!("found above")
+            };
+            *call = forged_call;
+            assert_eq!(e.validate_replay(&forged), Err(refusal));
+        }
+    }
+
+    #[test]
+    fn a_rewrite_into_the_classified_contract_records_its_effect_and_carries_no_answer() {
+        let e = ordered_read_engine(&[]);
+        let proposal =
+            read_of(&e, "public/q3.md").with_tool_resolutions(vec![read_pin_for(&e, "public/q3.md", &["partner"])]);
+        assert_eq!(proposal.contract_id(), crate::value::ToolContractId::new(0).unwrap());
+        let log = vec![opened(&e)];
+        let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
+        let hop = hop_named(&facts, "redact");
+        let log = [log, facts].concat();
+
+        let hopped = execute_offer(
+            &e,
+            &log,
+            hop,
+            rewrite(&proposal, "redact", r#"{"path":"private/q3.md"}"#, vec![], vec![]),
+        )
+        .expect("the hop runs");
+        let released = released_by(&hopped);
+        assert_eq!(
+            released.call.contract_id(),
+            crate::value::ToolContractId::new(1).unwrap()
+        );
+        assert!(
+            released.call.tool_resolutions().is_empty(),
+            "the classified contract uses no resolver; the public contract's answer does not ride along"
+        );
+        let facts = appended_facts(hopped);
+        assert_eq!(
+            opened_contract_of(&facts),
+            (crate::value::ToolContractId::new(1).unwrap(), classified_read(), vec![]),
+            "the opening records the classified read the selected contract emits"
+        );
+        assert_eq!(e.validate_replay(&[log.clone(), facts].concat()), Ok(()));
+
+        // A rewrite that stays in the public contract keeps the proposal's answer and takes none
+        // beside it.
+        let public = r#"{"path":"public/q4.md"}"#;
+        assert_eq!(
+            execute_offer(
+                &e,
+                &log,
+                hop,
+                rewrite(
+                    &proposal,
+                    "redact",
+                    public,
+                    vec![read_pin_for(&e, "public/q4.md", &["partner"])],
+                    vec![]
+                ),
+            )
+            .err(),
+            Some(TransitionError::EvidenceMismatch)
+        );
+        let kept = released_by(
+            &execute_offer(&e, &log, hop, rewrite(&proposal, "redact", public, vec![], vec![])).expect("the hop runs"),
+        );
+        assert_eq!(kept.call.contract_id(), crate::value::ToolContractId::new(0).unwrap());
+        assert_eq!(kept.call.tool_resolutions(), proposal.tool_resolutions());
+    }
+
+    #[test]
+    fn a_rewrite_within_the_contract_carries_the_answers_of_the_call_last_consulted() {
+        let e = ordered_read_engine(&["auditor", "legal"]);
+        let proposal = read_of(&e, "private/q3.md");
+        let log = vec![opened(&e)];
+        let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
+        let redact = hop_named(&facts, "redact");
+        let log = [log, facts].concat();
+
+        // The first hop selects the public contract; its answer requires the auditor, which the
+        // redaction does not reach, so the rewritten call blocks on that one gap — the public
+        // contract's, not the classified read's partner, auditor and legal desks.
+        let answer = read_pin_for(&e, "public/q3.md", &["auditor"]);
+        let hopped = execute_offer(
+            &e,
+            &log,
+            redact,
+            rewrite(
+                &proposal,
+                "redact",
+                r#"{"path":"public/q3.md"}"#,
+                vec![answer.clone()],
+                vec![],
+            ),
+        )
+        .expect("the hop runs");
+        let block = match offer_answer(&hopped) {
+            OfferFollowUp::Substituted { block } => (**block).clone(),
+            other => panic!("the substitution re-plans over the derived call, got {other:?}"),
+        };
+        assert_eq!(block.call.contract_id(), crate::value::ToolContractId::new(0).unwrap());
+        assert_eq!(block.call.tool_resolutions(), &[answer.clone()]);
+        assert_eq!(block.block.raw.requirement_gaps, vec![includes_gap("auditor")]);
+        let facts = appended_facts(hopped);
+        let widen = hop_named(&facts, "widen");
+        let log = [log, facts].concat();
+
+        // Deciding the batch again reads the candidate under the contract it selected.
+        match proposed(&e, &log, "b1", nonce(), proposal.clone())
+            .expect("the batch answers from the record")
+            .follow_up
+        {
+            FollowUp::Proposals { blocked, .. } => {
+                assert_eq!(blocked[0].call, block.call);
+                assert_eq!(blocked[0].block.raw.requirement_gaps, vec![includes_gap("auditor")]);
+            }
+            other => panic!("a repeated batch answers as proposals, got {other:?}"),
+        }
+
+        // The second hop stays in the public contract: it carries the answer the first hop was
+        // consulted for — about that hop's arguments, not the proposal's — and consults nothing.
+        let hopped = execute_offer(
+            &e,
+            &log,
+            widen,
+            rewrite(&block.call, "widen", r#"{"path":"public/q3-v2.md"}"#, vec![], vec![]),
+        )
+        .expect("the hop runs");
+        let released = released_by(&hopped);
+        assert_eq!(
+            released.call.contract_id(),
+            crate::value::ToolContractId::new(0).unwrap()
+        );
+        assert_eq!(released.call.tool_resolutions(), &[answer]);
+        let log = [log, appended_facts(hopped)].concat();
+        assert_eq!(e.validate_replay(&log), Ok(()));
+    }
+
+    #[test]
+    fn a_rewrite_that_selects_a_contract_with_other_gaps_is_no_remedy_for_this_block() {
+        let e = ordered_read_engine(&["auditor"]);
+        let proposal = read_of(&e, "private/q3.md");
+        let log = vec![opened(&e)];
+        let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
+        let hop = hop_named(&facts, "redact");
+        let log = [log, facts].concat();
+        let public = r#"{"path":"public/q3.md"}"#;
+
+        // The block wants partner and auditor. A rewritten call that wants the press desk, or the
+        // auditor and legal desks together, is blocked on something this block never was: the hop
+        // improves nothing, lands no record, and the offer stands.
+        for readers in [&["press"][..], &["auditor", "legal"][..]] {
+            let answer = read_pin_for(&e, "public/q3.md", readers);
+            assert_eq!(
+                execute_offer(
+                    &e,
+                    &log,
+                    hop,
+                    rewrite(&proposal, "redact", public, vec![answer], vec![])
+                )
+                .err(),
+                Some(TransitionError::SanitizerUnapplicable)
+            );
+        }
+        // A replacement the selected contract's schema refuses mints no call.
+        assert!(matches!(
+            execute_offer(
+                &e,
+                &log,
+                hop,
+                rewrite(
+                    &proposal,
+                    "redact",
+                    r#"{"path":"public/q3.md","extra":1}"#,
+                    vec![],
+                    vec![]
+                ),
+            ),
+            Err(TransitionError::Call(EngineError::InvalidCall(_)))
+        ));
+        assert_eq!(e.validate_replay(&log), Ok(()));
+    }
+
+    #[test]
+    fn a_rewrite_into_a_contract_reading_a_group_pins_that_group_afresh() {
+        let send = |name: &str, audience: AudienceRequirement| ToolContract {
+            parameters: crate::params::test_string_argument_schema("to"),
+            tags: vec![crate::names::TagName::new("outbound")],
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: None,
+                    audience: vec![audience],
+                },
+                ..Requires::default()
+            },
+            ..plain_tool(name)
+        };
+        let e = open_engine_at(
+            RegistryConfig {
+                trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
+                tools: vec![
+                    send(
+                        "send(to:@*)",
+                        AudienceRequirement::Includes(RecipientSpec::Placeholder("to".into())),
+                    ),
+                    send(
+                        "send",
+                        AudienceRequirement::Includes(RecipientSpec::Static(DeclaredAudience::literal(
+                            Audience::restricted([ReaderId::new("partner")]),
+                        ))),
+                    ),
+                ],
+                authorities: vec![],
+                sanitizers: vec![input_sanitizer("redact", &["internal"], &["internal", "partner"])],
+                casts: vec![],
+                membership: Some(crate::names::MembershipResolverName::new("directory")),
+            },
+            known(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
+        );
+        let proposal = e
+            .resolve_call(ToolName::new("send"), br#"{"to":"partner-desk"}"#)
+            .expect("the call resolves");
+        assert_eq!(proposal.contract_id(), crate::value::ToolContractId::new(1).unwrap());
+        let log = vec![opened(&e)];
+        let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
+        let hop = hop_named(&facts, "redact");
+        let log = [log, facts].concat();
+        let group = r#"{"to":"@team"}"#;
+
+        // The rewritten argument names a group under the first contract: its membership is owed,
+        // and a membership pinned for another argument is not it.
+        assert_eq!(
+            execute_offer(&e, &log, hop, rewrite(&proposal, "redact", group, vec![], vec![])).err(),
+            Some(TransitionError::MembershipNeeded {
+                needed: vec![crate::names::GroupName::new("team")]
+            })
+        );
+        assert_eq!(
+            execute_offer(
+                &e,
+                &log,
+                hop,
+                rewrite(&proposal, "redact", group, vec![], vec![expansion("cc", &["partner"])]),
+            )
+            .err(),
+            Some(TransitionError::ForeignMembership {
+                argument: "cc".to_string()
+            })
+        );
+        let hopped = execute_offer(
+            &e,
+            &log,
+            hop,
+            rewrite(&proposal, "redact", group, vec![], vec![expansion("to", &["partner"])]),
+        )
+        .expect("the hop runs");
+        let released = released_by(&hopped);
+        assert_eq!(
+            released.call.contract_id(),
+            crate::value::ToolContractId::new(0).unwrap()
+        );
+        assert_eq!(released.call.memberships(), &[expansion("to", &["partner"])]);
+        let facts = appended_facts(hopped);
+        assert!(facts.iter().any(|fact| matches!(
+            fact,
+            Fact::DispatchOpened { memberships, .. } if memberships == &[expansion("to", &["partner"])]
+        )));
+        assert_eq!(e.validate_replay(&[log, facts].concat()), Ok(()));
+    }
+
     #[test]
     fn replay_refuses_a_later_contract_for_arguments_matching_an_earlier_one() {
         let e = engine(vec![plain_tool("read(path:*)"), plain_tool("read")]);
@@ -15231,6 +15816,38 @@ mod tests {
                 e.recovery_routes(&view, &subject("b1"), &[], RouteDepth::ONE),
                 Err(RouteError::NotBlocked),
                 "a released call stands decided but passes its check, so there is nothing to plan"
+            );
+        }
+
+        #[test]
+        fn a_route_reads_the_ordered_contract_the_standing_call_selected() {
+            let private = ToolContract {
+                requires: Requires {
+                    label: LabelRequirements {
+                        trust_floor: None,
+                        audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                            DeclaredAudience::literal(Audience::restricted([ReaderId::new("partner")])),
+                        ))],
+                    },
+                    ..Requires::default()
+                },
+                ..plain_tool("read(path:private/*)")
+            };
+            let e = engine_at(
+                vec![plain_tool("read(path:public/*)"), private],
+                known(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
+            );
+            let log = vec![opened(&e)];
+            let proposal = e
+                .resolve_call(ToolName::new("read"), br#"{"path":"private/q3.md"}"#)
+                .expect("the call resolves");
+            let blocked = appended_facts(proposed(&e, &log, "b1", nonce(), proposal).expect("the batch decides"));
+            assert!(!blocked.iter().any(|fact| matches!(fact, Fact::DispatchOpened { .. })));
+            let log = [log, blocked].concat();
+            let view = e.view(&traj(), log.clone(), log.len() as u64).expect("the log replays");
+            assert!(
+                e.recovery_routes(&view, &subject("b1"), &[], RouteDepth::ONE).is_ok(),
+                "the standing call is blocked under the contract it selected; the first contract's verdict is not its verdict"
             );
         }
     }

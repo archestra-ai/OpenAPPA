@@ -1517,6 +1517,92 @@ mod tests {
     }
 
     #[test]
+    fn the_consulted_call_is_the_proposal_until_a_hop_selects_another_contract() {
+        let read = |path: &str, contract: usize| {
+            ResolvedCall::new_keyed(
+                ToolName::new("read"),
+                crate::value::ToolContractId::new(contract).unwrap(),
+                crate::params::test_arguments(&json!({ "path": path })),
+            )
+        };
+        let batch = crate::transition::ProposalBatchId::new("b1");
+        let subject = |trajectory: &str| SubjectKey::Call {
+            trajectory: traj(trajectory),
+            batch: batch.clone(),
+            position: 0,
+        };
+        let block = crate::value::BlockId::of_proposal(
+            &crate::value::OfferNonce::new([7u8; 32]),
+            &traj("a"),
+            &batch,
+            0,
+            &read("private/q3.md", 1).digest(),
+        );
+        let hop = |trajectory: &str, call: ResolvedCall| Fact::CandidateDerived {
+            trajectory: traj(trajectory),
+            subject: subject(trajectory),
+            via: crate::candidate::DerivedVia::Sanitizer {
+                name: SanitizerName::new("redact"),
+                transition: crate::authority::Transition::Audience {
+                    from_includes: Audience::Public,
+                    to: Audience::Public,
+                },
+            },
+            derived: DerivedCandidate::Call {
+                source: crate::value::RawResultDigest::of(&[]),
+                from: crate::value::OfferId::of_plan(&block, 0, b"plan"),
+                call,
+                label: base().into_label(),
+            },
+            lineage: SanitizerLineage::default(),
+            resolutions: vec![],
+        };
+        let consulted = |log: &[Fact], trajectory: &str| {
+            build(log)
+                .view(&traj(trajectory))
+                .consulted_call(&subject(trajectory))
+                .cloned()
+        };
+
+        let mut log = vec![opened("a")];
+        log.extend(fork_pair("a", "b", ForkSnapshot::freeze(base(), [], [])));
+        log.push(Fact::ProposalBatchDecided {
+            trajectory: traj("a"),
+            batch: batch.clone(),
+            proposals: vec![read("private/q3.md", 1)],
+            spawn: None,
+            released: vec![],
+            resolutions: vec![],
+        });
+        assert_eq!(consulted(&log, "a"), Some(read("private/q3.md", 1)), "the proposal");
+        log.push(hop("a", read("private/q4.md", 1)));
+        assert_eq!(
+            consulted(&log, "a"),
+            Some(read("private/q3.md", 1)),
+            "a hop within the contract"
+        );
+        log.push(hop("a", read("public/q3.md", 0)));
+        assert_eq!(
+            consulted(&log, "a"),
+            Some(read("public/q3.md", 0)),
+            "a hop that selects another"
+        );
+        log.push(hop("a", read("public/q4.md", 0)));
+        assert_eq!(
+            consulted(&log, "a"),
+            Some(read("public/q3.md", 0)),
+            "and a hop within that one"
+        );
+        log.push(hop("a", read("private/q5.md", 1)));
+        assert_eq!(consulted(&log, "a"), Some(read("private/q5.md", 1)), "back again");
+
+        // A candidate on a subject whose batch its own trajectory never decided has no standing
+        // call to compare against: no consulted call, never the candidate itself, and no panic.
+        log.push(hop("b", read("public/q3.md", 0)));
+        assert_eq!(consulted(&log, "b"), None);
+    }
+
+    #[test]
     fn a_cast_fact_rebuilds_the_same_fold_as_a_resolved_admission() {
         let resolved = EstablishedLabel::new(Trust::new(0), Audience::restricted([ReaderId::new("internal")]));
         let via_cast = vec![
