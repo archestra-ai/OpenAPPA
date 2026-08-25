@@ -208,6 +208,7 @@ name = "mcp__claude_ai_Grain__create_clip"
 delta = {}
 
 [policy.tool.requires]
+trust = "trusted"
 audience = { within = ["private"] }
 
 [[policy.tool]]
@@ -215,6 +216,7 @@ name = "mcp__claude_ai_Grain__create_story"
 delta = {}
 
 [policy.tool.requires]
+trust = "trusted"
 audience = { within = ["private"] }
 
 [[policy.tool]]
@@ -222,6 +224,7 @@ name = "mcp__claude_ai_Grain__add_clips_to_story"
 delta = {}
 
 [policy.tool.requires]
+trust = "trusted"
 audience = { within = ["private"] }
 
 [[policy.tool]]
@@ -229,6 +232,7 @@ name = "mcp__claude_ai_Grain__create_collection"
 delta = {}
 
 [policy.tool.requires]
+trust = "trusted"
 audience = { within = ["private"] }
 
 [[policy.tool]]
@@ -236,6 +240,7 @@ name = "mcp__claude_ai_Grain__add_recordings_to_collection"
 delta = {}
 
 [policy.tool.requires]
+trust = "trusted"
 audience = { within = ["private"] }
 
 [[policy.tool]]
@@ -243,6 +248,7 @@ name = "mcp__claude_ai_Grain__tag_meetings"
 delta = {}
 
 [policy.tool.requires]
+trust = "trusted"
 audience = { within = ["private"] }
 
 [[policy.tool]]
@@ -250,6 +256,7 @@ name = "mcp__claude_ai_Grain__create_smart_topic"
 delta = {}
 
 [policy.tool.requires]
+trust = "trusted"
 audience = { within = ["private"] }
 
 # --- sharing outward: a person decides ---

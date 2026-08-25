@@ -14,7 +14,7 @@ it can go to a public place. Its trust is unchanged, so it can be
 summarised and posted back to Slack.
 
 *Writes nobody else reads yet* — adding a reaction, saving a draft to
-your own Drafts. No approval.
+your own Drafts. Trusted data, no approval.
 
 *Writes other people read* — sending or scheduling a message, creating
 or updating a canvas, creating a channel. Trusted data and a person's

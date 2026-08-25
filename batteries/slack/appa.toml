@@ -1,8 +1,8 @@
 # Included Slack battery for the claude.ai Slack connector.
 #
 # Plain rules only: one per tool, no argument patterns. Everything read
-# from Slack is private. Everything that shows text to other people
-# needs trusted data and a person's approval. The root config supplies
+# from Slack is private. Every write needs trusted data; one that shows
+# text to other people also needs a person's approval. The root config supplies
 # the `hitl` authority.
 #
 # A root rule placed above these can narrow any of them by argument.
@@ -98,14 +98,16 @@ name = "mcp__claude_ai_Slack__slack_search_emojis"
 [policy.tool.delta]
 audience = ["private"]
 
-# --- writes nobody else reads yet: a reaction, a draft in your own Drafts ---
+# --- writes nobody else reads yet: trusted data, no approval ---
 
 [[policy.tool]]
 name = "mcp__claude_ai_Slack__slack_add_reaction"
+requires = { trust = "trusted" }
 delta = {}
 
 [[policy.tool]]
 name = "mcp__claude_ai_Slack__slack_send_message_draft"
+requires = { trust = "trusted" }
 delta = {}
 
 # --- writes other people read: trusted data, a person approves ---

@@ -21,8 +21,8 @@ counts, and settings. Private to Grain readers.
 *Links* — `resolve_urls` turns ids into URLs. No restriction.
 
 *Writes inside the workspace* — creating clips, stories, collections,
-smart topics, adding to them, tagging meetings. Allowed when the data
-going in is Grain data; no approval step.
+smart topics, adding to them, tagging meetings. Trusted data; no
+approval step.
 
 *Sharing outward and administration* — making a collection visible to
 anyone with the link, inviting people, assigning or removing paid
