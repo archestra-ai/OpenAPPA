@@ -59,13 +59,13 @@ const TERMS = {
   "[[dynamic_resolver]]":
     "A named external that classifies proposed tool calls. Its opaque non-empty name can contain dots. It declares the inputs a tool must supply and the contract destinations it owns through returns. It is distinct from @group membership resolution.",
   inputs:
-    "The values a resolver reads. A tool maps each one from $tool_call. Without an explicit mapping, the resolver reads the complete tool arguments object.",
+    "The values a resolver reads. A tool maps each one from $tool_call. Without an explicit mapping, the resolver reads the complete tool call: name, description when declared, and arguments.",
   uses:
     "A tool's dynamic resolvers. Each entry names a registered resolver and maps every input that resolver declares. Omit it when the tool uses none.",
   returns:
     "The contract destinations an attached resolver owns and always answers with: delta.trust, delta.audience, requires.trust, requires.audience, requires.attention. Static values and other resolvers cannot own the same destinations. Trust values select from the policy trust chain; attention values select from marks authorities name under permits.attention.",
   "$tool_call":
-    "The only source a resolver input reads. Its five forms are the complete call, its name, its description, its arguments, and one top-level argument.",
+    "The only source a resolver input reads. Its five forms are the complete call (name, description when declared, arguments), its name, its description, its arguments, and one top-level argument. Only $tool_call.description requires a declared description.",
   "[externals.dynamic]":
     "The shared HTTP endpoint for every dynamic resolver without an inline builtin. Requests carry the resolver name.",
   internal:

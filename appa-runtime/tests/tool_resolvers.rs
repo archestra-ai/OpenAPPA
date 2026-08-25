@@ -169,7 +169,7 @@ url = "{url}"
 }
 
 #[tokio::test]
-async fn an_http_resolver_classifies_all_arguments_and_a_fresh_proposal_consults_again() {
+async fn an_http_resolver_classifies_the_complete_call_and_a_fresh_proposal_consults_again() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let (url, classifier) = serve_classifier().await;
     classifier.set(
@@ -189,8 +189,15 @@ async fn an_http_resolver_classifies_all_arguments_and_a_fresh_proposal_consults
     let request = &requests[0];
     assert_eq!(request["version"], 1);
     assert_eq!(request["resolver"], "classifier");
-    // The resolver declares no inputs, so `args` is the complete arguments object.
-    assert_eq!(request["args"], serde_json::json!({ "url": "https://a.example" }));
+    // The resolver declares no inputs, so `args` is the complete call.
+    assert_eq!(
+        request["args"],
+        serde_json::json!({
+            "name": "fetch",
+            "description": "Fetches one URL and returns its body.",
+            "arguments": { "url": "https://a.example" },
+        })
+    );
     for absent in ["tool", "input", "scope", "returns", "expects"] {
         assert!(request.get(absent).is_none(), "the request carries no {absent:?} key");
     }
@@ -264,7 +271,13 @@ url = "{url}"
         propose(&runtime, fetch("https://private.example")).await,
         HookDecision::AllowCall { spawn: None }
     );
-    assert_eq!(classifier.requests().len(), 1);
+    let requests = classifier.requests();
+    assert_eq!(requests.len(), 1);
+    // The matched contract declares no description, so the complete call carries none.
+    assert_eq!(
+        requests[0]["args"],
+        serde_json::json!({ "name": "fetch", "arguments": { "url": "https://private.example" } })
+    );
 }
 
 #[tokio::test]

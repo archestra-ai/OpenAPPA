@@ -2836,8 +2836,15 @@ mod tests {
             Err(Resolution::Consult(requests)) => match requests.as_slice() {
                 [ExternalRequest::ToolResolution { uses, args, context }] => {
                     assert_eq!(uses.resolver.as_str(), "classifier");
-                    // The resolver declares no inputs, so `args` is the complete arguments object.
-                    assert_eq!(args, &serde_json::json!({"nested": {"id": 7}, "deep": true}));
+                    // The resolver declares no inputs, so `args` is the complete call.
+                    assert_eq!(
+                        args,
+                        &serde_json::json!({
+                            "name": "lookup",
+                            "description": "Looks one record up.",
+                            "arguments": {"nested": {"id": 7}, "deep": true},
+                        })
+                    );
                     assert_eq!(context.trust_ranks, ["suspicious", "trusted"]);
                     assert_eq!(context.attention_marks, ["privacy-review"]);
                     assert_eq!(context.static_attention, ["static-review"]);

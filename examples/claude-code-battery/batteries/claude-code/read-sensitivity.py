@@ -11,9 +11,12 @@ def main():
         raise ValueError("unexpected resolver name")
 
     args = request.get("args")
-    file_path = args.get("file_path") if isinstance(args, dict) else None
+    if not isinstance(args, dict) or args.get("name") != "Read":
+        raise ValueError("args.name must be Read")
+    arguments = args.get("arguments")
+    file_path = arguments.get("file_path") if isinstance(arguments, dict) else None
     if not isinstance(file_path, str) or not file_path:
-        raise ValueError("args.file_path must be a non-empty string")
+        raise ValueError("args.arguments.file_path must be a non-empty string")
 
     audience = ["claude-session"] if file_path.startswith(".") else "public"
     json.dump(

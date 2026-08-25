@@ -1104,7 +1104,7 @@ fn validate_tool_resolvers(tool: &ToolContract) -> Result<(), LoadError> {
                 resolver: uses.resolver.as_str().to_string(),
             });
         }
-        if uses.reads_description() && tool.description.is_none() {
+        if uses.requires_declared_description() && tool.description.is_none() {
             return Err(LoadError::ResolverReadsMissingDescription {
                 tool: tool.name.as_str().to_string(),
                 resolver: uses.resolver.as_str().to_string(),
@@ -1455,6 +1455,40 @@ mod tests {
         assert!(matches!(
             Registry::build_covered(cfg),
             Err(LoadError::ResolverOwnsNothing { tool, resolver })
+                if tool == "lookup" && resolver == "classifier"
+        ));
+    }
+
+    #[test]
+    fn only_an_explicit_description_input_needs_a_declared_description() {
+        let attach = |inputs: std::collections::BTreeMap<String, crate::contract::ToolCallSource>| ToolContract {
+            description: None,
+            uses: vec![ToolResolverUse {
+                resolver: crate::names::DynamicResolverName::new("classifier"),
+                inputs,
+                returns: std::collections::BTreeSet::from([ResolverReturn::Trust]),
+            }],
+            ..tool("lookup")
+        };
+        let source = |source| std::collections::BTreeMap::from([("what".to_string(), source)]);
+
+        let mut cfg = base();
+        cfg.tools = vec![attach(std::collections::BTreeMap::new())];
+        assert!(
+            Registry::build_covered(cfg).is_ok(),
+            "a no-input resolver on an undescribed tool loads"
+        );
+        let mut cfg = base();
+        cfg.tools = vec![attach(source(crate::contract::ToolCallSource::Call))];
+        assert!(
+            Registry::build_covered(cfg).is_ok(),
+            "`$tool_call` tolerates a missing description"
+        );
+        let mut cfg = base();
+        cfg.tools = vec![attach(source(crate::contract::ToolCallSource::Description))];
+        assert!(matches!(
+            Registry::build_covered(cfg),
+            Err(LoadError::ResolverReadsMissingDescription { tool, resolver })
                 if tool == "lookup" && resolver == "classifier"
         ));
     }

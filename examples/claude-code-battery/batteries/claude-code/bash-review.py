@@ -19,10 +19,13 @@ def main():
         raise ValueError("unexpected resolver name")
 
     args = request.get("args")
-    if not isinstance(args, dict) or not isinstance(args.get("command"), str):
-        raise ValueError("args.command must be a string")
+    if not isinstance(args, dict) or args.get("name") != "Bash":
+        raise ValueError("args.name must be Bash")
+    arguments = args.get("arguments")
+    if not isinstance(arguments, dict) or not isinstance(arguments.get("command"), str):
+        raise ValueError("args.arguments.command must be a string")
 
-    attention = [] if args["command"] in NO_REVIEW_COMMANDS else ["hitl"]
+    attention = [] if arguments["command"] in NO_REVIEW_COMMANDS else ["hitl"]
     json.dump(
         {"version": 1, "result": {"requires.attention": attention}},
         sys.stdout,

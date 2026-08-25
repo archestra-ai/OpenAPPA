@@ -474,7 +474,7 @@ struct RawDynamicResolver {
     resolver: Option<toml::Value>,
     builtin: Option<String>,
     /// The input names a `uses` entry must map. Omitted means this resolver reads the complete
-    /// tool arguments object instead.
+    /// tool call instead.
     #[serde(default)]
     inputs: Vec<String>,
     /// The results this resolver always returns, each named for the contract field it
@@ -548,7 +548,7 @@ struct RawTool {
 #[serde(deny_unknown_fields)]
 struct RawToolUse {
     resolver: String,
-    /// One `$tool_call` source per input the resolver declares. Omitted is the complete-arguments
+    /// One `$tool_call` source per input the resolver declares. Omitted is the complete-call
     /// form, legal only for a resolver that declares no inputs.
     inputs: Option<BTreeMap<String, String>>,
 }
@@ -1443,7 +1443,7 @@ uses = [
         let review = &tool.uses[1];
         assert!(
             review.inputs.is_empty(),
-            "an input-free resolver uses the default arguments object"
+            "an input-free resolver reads the complete call"
         );
         assert_eq!(review.returns, [ResolverReturn::Attention].into_iter().collect());
     }

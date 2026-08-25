@@ -5897,8 +5897,8 @@ mod tests {
             uses: vec![dynamic_who()],
             ..post("post_to", vec![crate::names::TagName::new("outbound")])
         };
-        // Its resolver declares no inputs, so it reads all arguments: every rewrite changes what
-        // it was shown. The recipients it requires are the answer's, not the policy's.
+        // Its resolver declares no inputs, so it reads the complete call: every rewrite changes
+        // what it was shown. The recipients it requires are the answer's, not the policy's.
         let post_call = ToolContract {
             uses: vec![dynamic_call()],
             requires: Requires {
@@ -6561,7 +6561,7 @@ mod tests {
         assert_eq!(
             offers[0].1.hop(),
             Some(&crate::names::SanitizerName::new("redact")),
-            "a resolver that reads all arguments is offered the input hop"
+            "a resolver that reads the complete call is offered the input hop"
         );
         let log = [log, facts].concat();
 

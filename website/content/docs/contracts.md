@@ -78,9 +78,9 @@ A dynamic resolver classifies a proposed tool call before the engine checks it. 
 
 A `[[dynamic_resolver]]` declares two things: the `inputs` a tool must supply, and the contract destinations it owns through `returns`. A `[[tool]]` attaches one with `uses` and maps each declared input from the proposed call. Attaching it assigns every destination in `returns` to that resolver. Resolver names are opaque non-empty strings and can contain dots.
 
-#### Example: pass the complete arguments object
+#### Example: pass the complete call
 
-Omit `inputs` on the resolver and its `uses` entry to pass the complete tool arguments object:
+Omit `inputs` on the resolver and its `uses` entry to pass the complete tool call: its name, its description when the tool declares one, and its arguments.
 
 ```toml
 [[dynamic_resolver]]
@@ -97,12 +97,16 @@ The resolver receives this value in `args`:
 
 ```json
 {
-  "command": "git push origin main",
-  "timeout": 60000
+  "name": "Bash",
+  "description": "Runs one shell command and returns its output.",
+  "arguments": {
+    "command": "git push origin main",
+    "timeout": 60000
+  }
 }
 ```
 
-This form does not need a tool parameter schema or description.
+This form does not need a tool parameter schema. It does not need a `description`: a tool without one sends `name` and `arguments` only.
 
 #### Example: pass one argument
 
@@ -158,13 +162,13 @@ A tool maps each declared input from the proposed call. `$tool_call` is the only
 
 | Value | Meaning |
 |---|---|
-| `$tool_call` | Complete tool call |
+| `$tool_call` | Complete tool call: `name`, `description` when the tool declares one, and `arguments` |
 | `$tool_call.name` | Tool name |
 | `$tool_call.description` | Tool description from the policy |
 | `$tool_call.arguments` | Complete argument object |
 | `$tool_call.arguments.<name>` | One top-level argument |
 
-Any read of the description needs a tool `description`. A single argument needs a tool parameter schema, and the schema must mark that top-level argument as required. The resolver then receives whatever JSON value the call carries under that name.
+A resolver with no `inputs` receives `$tool_call` as its `args`. `$tool_call.description` needs a tool `description`; `$tool_call` does not, and omits the key when there is none. A single argument needs a tool parameter schema, and the schema must mark that top-level argument as required. The resolver then receives whatever JSON value the call carries under that name.
 
 A result is named for the one contract field it fills. These five names are the whole vocabulary:
 
@@ -219,12 +223,12 @@ Request, for the one-argument example above:
 |---|---|
 | `version` | The request shape. It is `1`. |
 | `resolver` | Which resolver answers, when one service handles several |
-| `args` | Only the data the tool's input mapping selected, under the resolver's declared input names |
+| `args` | The data the tool's input mapping selected, under the resolver's declared input names. Without a mapping, the complete call: `name`, `description` when declared, and `arguments`. |
 | `context` | The state before this tool call: current trust name and rank, current readers, whether each dimension is still unknown, and the attention marks the tool policy already requires |
 | `trust_ranks` | The policy's trust chain, least-trusted first. A trust result must name one of these. |
 | `attention_marks` | The attended marks. An attention result must name these only. |
 
-A resolver that needs the tool name or its description reads it as an input.
+A resolver with mapped inputs that needs the tool name or its description reads it as an input.
 
 Response:
 
@@ -303,7 +307,7 @@ excludes = ["migration.applied"]                       # Neither recorded nor re
 - **`delta` is strictly restrictive**: A tool's delta can only narrow the audience or lower trust. Within an annotated `delta`, an omitted dimension defaults to identity (unchanged).
 - **Pending-cast deltas (`delta = { trust = "unknown" }` or `delta = { audience = "unknown" }`)**: Holds one label dimension pending resolution by a registered `[[cast]]` at admission. At most one dimension may be pending-cast. Declaring both `requires` and `unknown` delta on the same dimension is a load error. `"unknown"` is reserved: it can name neither a trust rank nor a reader.
 - **Dynamic argument placeholders (`$arg`)**: `requires.audience = { contains = ["$recipient"] }` evaluates `$recipient` against the actual call argument at runtime. The argument value can be a literal reader ID, the reserved word `public`, or an `@group` expanded by the membership resolver. Placeholders are supported only inside `contains`. The argument must be declared as a required top-level string in the tool's `parameters` schema.
-- **Dynamic resolvers (`uses`)**: Attaches registered resolvers to classify proposed calls. Each entry maps required inputs from `$tool_call`. Mapped arguments must be required top-level properties in the tool schema. Without an explicit input mapping, a resolver receives the complete tool arguments object.
+- **Dynamic resolvers (`uses`)**: Attaches registered resolvers to classify proposed calls. Each entry maps required inputs from `$tool_call`. Mapped arguments must be required top-level properties in the tool schema. Without an explicit input mapping, a resolver receives the complete tool call: `name`, `description` when declared, and `arguments`.
 - **Single field ownership**: Each contract field has one source: a static policy value or an attached resolver whose `returns` includes that destination. Static and resolver ownership cannot overlap. Two attached resolvers cannot own the same destination.
 - **History checks (`requires.effects`)**: `contains` passes when the trajectory already recorded the effect. `excludes` passes when the effect is neither recorded nor reserved by an unsettled dispatch (a dispatch released with that effect that has not yet succeeded or failed).
 - **Attention demands (`requires.attention`)**: Forces fresh authority sign-off on *every* call; never satisfied by execution history.

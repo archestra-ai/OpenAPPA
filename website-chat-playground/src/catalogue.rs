@@ -62,7 +62,7 @@ fn describe(contract: &ToolContract, chain: &TrustChain) -> String {
     }
     for uses in &contract.uses {
         let read = match uses.inputs.is_empty() {
-            true => "all arguments".to_string(),
+            true => "the complete call".to_string(),
             false => {
                 let sources: Vec<String> = uses.inputs.values().map(|source| source.spelling()).collect();
                 sources.join(", ")
