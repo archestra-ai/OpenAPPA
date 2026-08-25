@@ -140,7 +140,7 @@ delta = { trust = "suspicious" }
 name = "mcp__github__pull_request_read"
 delta = { trust = "suspicious" }
 
-# --- writes: every one publishes ---
+# --- writes: the repository is assumed public, so only public data may go in ---
 
 [[policy.tool]]
 name = "mcp__github__create_repository"
