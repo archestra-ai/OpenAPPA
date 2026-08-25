@@ -19,11 +19,6 @@ Include a battery with a path relative to the root config:
 include = ["../../batteries/claude-code/appa.toml"]
 ```
 
-The Claude Code plugin ships a copy of this directory
-(`integrations/claude-code/plugin/batteries/`) so its `appa-tool-sync`
-skill finds batteries without the network. Edit batteries here and copy
-them over; CI fails when the two differ.
-
 Each battery's `command` bindings run in the battery's own directory. A
 complete deployment that includes both batteries and overrides parts of
 them is in `examples/claude-code-battery/`. The Batteries page in the

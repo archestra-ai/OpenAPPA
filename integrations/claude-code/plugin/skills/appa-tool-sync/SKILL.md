@@ -7,11 +7,11 @@ description: Probe every MCP server available to this Claude Code installation, 
 
 Bring the running runtime's policy up to date with the MCP tools
 actually installed. OpenAPPA ships batteries — rules for tool sets it
-knows, one directory per battery, bundled in this plugin; use those
-first. Declare every other tool yourself and mark it: what its result
-carries, and whether it sends data out of the session. Mark what the
-tool's own purpose makes plain. Ask the user once about the servers
-you cannot judge.
+knows, one directory per battery under `batteries/` in its repository;
+use those first. Declare every other tool yourself and mark it: what
+its result carries, and whether it sends data out of the session. Mark
+what the tool's own purpose makes plain. Ask the user once about the
+servers you cannot judge.
 
 Marking is a grant. A tool the policy does not name is blocked, so
 every entry you add releases something. The user sees the full
@@ -21,12 +21,13 @@ This skill edits one config file and calls one endpoint. It tells you
 **where to look**, not what you will find: do not assume the policy
 dialect or which servers exist — read them from the machine each time.
 
-Do not open the OpenAPPA repository — not the plugin's marketplace
-clone, not a local checkout such as `~/code/OpenAPPA`. Everything this
-skill needs is in the plugin (the batteries, step 3) and in the config
-file being edited (step 4). If a battery's `appa.toml` refers to
-something the config file must supply and you cannot tell what, ask
-the user.
+Do not explore the OpenAPPA repository. The only things this skill
+reads from it are the names under `batteries/` and each matched
+battery's `appa.toml` (step 3) — nothing else, in neither the plugin's
+marketplace clone nor a local checkout such as `~/code/OpenAPPA`.
+Everything about the policy dialect comes from the config file being
+edited (step 4). If a battery's `appa.toml` refers to something the
+config file must supply and you cannot tell what, ask the user.
 
 ## Extra instructions
 
@@ -93,24 +94,28 @@ the same variable the plugin's hooks and statusline read.
 
 ## 3. Look for batteries
 
-OpenAPPA ships rules for tool sets it knows, one directory per battery.
-The plugin bundles them:
+OpenAPPA ships rules for tool sets it knows, one directory per battery
+under `batteries/` in its repository. Each directory holds an
+`appa.toml` and, sometimes, small scripts the rules run. Match a
+battery by the tool names its `appa.toml` declares, not by the
+directory name: the `slack` battery names `mcp__claude_ai_Slack__*`
+tools, so it matches a server whose tools carry that prefix. The
+`claude-code` battery names the harness's built-in tools and matches
+every session.
+
+Find them without the network first:
 
 ```sh
-ls "${CLAUDE_PLUGIN_ROOT}/batteries/"
+ls ~/.claude/plugins/marketplaces/appa/batteries/
 ```
 
-`CLAUDE_PLUGIN_ROOT` is the plugin's directory; if it is unset, use the
-directory two levels above this skill's. If `batteries/` is not there,
-the plugin install is incomplete: tell the user to run
-`claude plugin update appa-runtime` and stop.
-
-Each directory holds an `appa.toml` and, sometimes, small scripts the
-rules run. Match a battery by the tool names its `appa.toml` declares,
-not by the directory name: the `slack` battery names
-`mcp__claude_ai_Slack__*` tools, so it matches a server whose tools
-carry that prefix. The `claude-code` battery names the harness's
-built-in tools and matches every session.
+That directory is the clone of the repository the plugin was installed
+from; `claude plugin marketplace update appa` refreshes it. If it or
+`batteries/` is missing, list them from GitHub instead:
+`gh api repos/archestra-ai/OpenAPPA/contents/batteries --jq '.[].name'`,
+and fetch a matched battery's `appa.toml` with
+`gh api repos/archestra-ai/OpenAPPA/contents/batteries/<name>/appa.toml`.
+Do not look anywhere else for them.
 
 For every battery whose declared tool names share a prefix with an
 installed server's tools, compare its list with the server's real tool
@@ -257,7 +262,7 @@ without approval.
 
 For each battery the user approved and the config file does not
 include yet: copy its whole directory — the `appa.toml` and every
-script beside it — from the plugin to
+script beside it — from the clone (or from GitHub) to
 `<config directory>/batteries/<name>/`, next to the config file, and
 add its path to the `include` list:
 
@@ -265,8 +270,8 @@ add its path to the `include` list:
 include = ["./batteries/claude-code/appa.toml", "./batteries/slack/appa.toml"]
 ```
 
-Copy, do not link: the plugin's directory changes when the plugin
-updates, and the scripts run from where they are copied. A directory
+Copy, do not link: the path must stay valid when the plugin updates,
+and the scripts run from that directory. A directory
 that is already there is left alone — its rules are in place — unless
 the user asked to refresh it; then replace it.
 
