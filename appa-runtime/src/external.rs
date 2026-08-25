@@ -130,7 +130,7 @@ impl ExternalServices {
         let llm = config
             .llm
             .as_ref()
-            .map(|profile| LlmBackend::new(profile, config.timeout))
+            .map(|profile| LlmBackend::new(profile, config.timeout, config.max_body_bytes))
             .transpose()
             .map_err(|error| ModulesError::LlmClient(error.to_string()))?;
         let tables = [
@@ -557,8 +557,10 @@ async fn run_command_process(
     }
 }
 
+/// Observe a child's exit without reaping it: the zombie keeps its pid and process-group
+/// id reserved, so a group kill that follows cannot hit a recycled id.
 #[cfg(unix)]
-async fn wait_for_child_exit(pid: i32) -> Result<(), NoAnswerReason> {
+pub(crate) async fn wait_for_child_exit(pid: i32) -> Result<(), NoAnswerReason> {
     loop {
         let exited = {
             let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();

@@ -398,7 +398,7 @@ builtin = "redact-email"
 | **`builtin = "<module name>"`** | A deployer builtin module from `--modules-dir`: your own compiled scrubber, loaded at startup and called in-process. | Bound by the same `permits` as any implementation; deployer trusted code. |
 | **`url = ...`**, **`command = [...]`** | A scrubbing service behind an endpoint, or a local program. | The derivation is re-validated against the declared transition before admission. |
 
-A sanitizer consult's declaration is `{"hint": …, "on": [...], "permits": …}` plus `parameters`, the tool's argument schema, when the sanitizer rewrites `tool_input`. Its artifact is `{"tool": …, "body": …}` — the tool whose value it is, when known, and the bytes to rewrite. The answer is `{"body": …}`: the derivation, which OpenAPPA labels from `permits`.
+A sanitizer consult's declaration is `{"hint": …, "on": "tool_input" | "tool_output", "permits": …}` — `on` is the one point this consult applies at — plus `parameters`, the tool's argument schema, when the sanitizer rewrites `tool_input`. Its artifact is `{"tool": …, "body": …}` — the tool whose value it is, when known, and the bytes to rewrite. The answer is `{"body": …}`: the derivation, which OpenAPPA labels from `permits`.
 
 A sanitizer permits one dimension. For trust, `from` is the rank the source must meet or exceed, and `to` is the rank the derivation carries — this is how a scrubber vouches untrusted fetched text back up:
 

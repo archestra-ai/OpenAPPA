@@ -143,27 +143,20 @@ pub struct SanitizerInput {
     pub body: String,
 }
 
-#[derive(Deserialize)]
-struct DynamicResolverRequest {
-    version: u32,
-    name: String,
-    artifact: DynamicResolverArtifact,
-}
-
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct DynamicResolverArtifact {
     /// Exactly what the policy's `uses` entry selected. This directory declares one input,
     /// `to`, so that is the only key it reads.
     args: DynamicResolverArgs,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct DynamicResolverArgs {
     to: String,
 }
 
 async fn dynamic_resolver(
-    axum::Json(request): axum::Json<DynamicResolverRequest>,
+    axum::Json(request): axum::Json<Consult<DynamicResolverArtifact>>,
 ) -> (StatusCode, axum::Json<serde_json::Value>) {
     if request.version != 1 || request.name != "email-recipient-readers" {
         return (StatusCode::NOT_FOUND, axum::Json(serde_json::json!({})));
@@ -182,18 +175,14 @@ async fn dynamic_resolver(
     (StatusCode::OK, axum::Json(answer))
 }
 
-#[derive(Deserialize)]
-struct MembershipRequest {
-    version: u32,
-    artifact: MembershipArtifact,
-}
-
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct MembershipArtifact {
     group: String,
 }
 
-async fn membership(axum::Json(request): axum::Json<MembershipRequest>) -> (StatusCode, axum::Json<serde_json::Value>) {
+async fn membership(
+    axum::Json(request): axum::Json<Consult<MembershipArtifact>>,
+) -> (StatusCode, axum::Json<serde_json::Value>) {
     let readers = match (request.version, request.artifact.group.as_str()) {
         (1, "finance") => vec!["cfo@corp.example", "ap-lead@corp.example"],
         (1, "acme") => vec!["ceo@acme.com", "staff@acme.com"],
@@ -462,7 +451,7 @@ mod tests {
 
     #[tokio::test]
     async fn recipient_directory_expands_the_demo_lists() {
-        let resolve = |value: &str| DynamicResolverRequest {
+        let resolve = |value: &str| Consult {
             version: 1,
             name: "email-recipient-readers".to_string(),
             artifact: DynamicResolverArtifact {
@@ -499,7 +488,7 @@ mod tests {
 
     #[tokio::test]
     async fn recipient_directory_refuses_unknown_bindings() {
-        let request = DynamicResolverRequest {
+        let request = Consult {
             version: 2,
             name: "email-recipient-readers".to_string(),
             artifact: DynamicResolverArtifact {

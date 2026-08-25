@@ -748,10 +748,19 @@ fn dynamic_schema(declaration: &DynamicDeclaration) -> serde_json::Value {
             "items": {"type": "string", "enum": declaration.attention_marks}
         }),
     };
+    // One variant per accepted shape, each with every property required: that is the
+    // wire language (`contains`, `within`, or both) and also the strict-mode subset an
+    // OpenAI-compatible provider accepts, which has no optional properties.
+    let bounds = |keys: &[&str]| {
+        serde_json::json!({
+            "type": "object",
+            "properties": keys.iter().map(|key| (key.to_string(), audience_schema())).collect::<serde_json::Map<_, _>>(),
+            "required": keys,
+            "additionalProperties": false
+        })
+    };
     let required_audience_schema = serde_json::json!({
-        "type": "object",
-        "properties": {"contains": audience_schema(), "within": audience_schema()},
-        "additionalProperties": false
+        "anyOf": [bounds(&["contains"]), bounds(&["within"]), bounds(&["contains", "within"])]
     });
     let mut properties = serde_json::Map::new();
     let mut required = Vec::new();
@@ -1050,6 +1059,43 @@ mod tests {
                 "artifact": {"group": "@eng"}
             })
         );
+    }
+
+    #[test]
+    fn the_required_audience_schema_admits_exactly_the_shapes_the_parser_does() {
+        let declaration = DynamicDeclaration {
+            returns: vec!["requires.audience".to_string()],
+            trust_ranks: vec!["trusted".to_string()],
+            attention_marks: vec![],
+        };
+        let schema = dynamic_schema(&declaration);
+        let variants = schema["properties"]["requires.audience"]["anyOf"]
+            .as_array()
+            .expect("one variant per accepted shape");
+        let required_sets: Vec<Vec<String>> = variants
+            .iter()
+            .map(|variant| {
+                serde_json::from_value(variant["required"].clone()).expect("every variant requires its keys")
+            })
+            .collect();
+        assert_eq!(
+            required_sets,
+            vec![
+                vec!["contains".to_string()],
+                vec!["within".to_string()],
+                vec!["contains".to_string(), "within".to_string()],
+            ]
+        );
+        for variant in variants {
+            let required = variant["required"].as_array().expect("required keys");
+            let properties = variant["properties"].as_object().expect("properties");
+            assert_eq!(
+                required.len(),
+                properties.len(),
+                "strict providers accept no optional property"
+            );
+            assert_eq!(variant["additionalProperties"], serde_json::json!(false));
+        }
     }
 
     #[test]

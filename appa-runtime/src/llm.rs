@@ -26,8 +26,13 @@ const MIN_ANSWER_TOKENS: u64 = 4096;
 const MAX_ANSWER_TOKENS: u64 = 32_768;
 const ANSWER_OVERHEAD_TOKENS: u64 = 1024;
 
-fn answer_budget(input: &str) -> u64 {
-    (input.len() as u64 / 2 + ANSWER_OVERHEAD_TOKENS).clamp(MIN_ANSWER_TOKENS, MAX_ANSWER_TOKENS)
+/// The output tokens one consult may spend: sized from the input, and never more than
+/// the deployment accepts as an answer body — a token is at least one byte, so an answer
+/// within this budget always fits under `max_body_bytes`.
+fn answer_budget(input: &str, max_body_bytes: usize) -> u64 {
+    (input.len() as u64 / 2 + ANSWER_OVERHEAD_TOKENS)
+        .clamp(MIN_ANSWER_TOKENS, MAX_ANSWER_TOKENS)
+        .min(max_body_bytes as u64)
 }
 
 /// One provider client built from the `[externals.llm]` profile at open, shared by every
@@ -37,6 +42,7 @@ pub struct LlmBackend {
     client: LlmClient,
     model: String,
     timeout: Duration,
+    max_body_bytes: usize,
     permits: Arc<tokio::sync::Semaphore>,
 }
 
@@ -46,6 +52,7 @@ impl std::fmt::Debug for LlmBackend {
             .field("provider", &self.client.provider())
             .field("model", &self.model)
             .field("timeout", &self.timeout)
+            .field("max_body_bytes", &self.max_body_bytes)
             .finish()
     }
 }
@@ -81,8 +88,13 @@ pub struct LlmClientError {
 
 impl LlmBackend {
     /// Build the provider client once. `shared_timeout` is the deployment's machine-consult
-    /// budget, used when the profile declares none of its own.
-    pub fn new(profile: &LlmProfile, shared_timeout: Duration) -> Result<LlmBackend, LlmClientError> {
+    /// budget, used when the profile declares none of its own; `max_body_bytes` is the
+    /// deployment's cap on any answer, model answers included.
+    pub fn new(
+        profile: &LlmProfile,
+        shared_timeout: Duration,
+        max_body_bytes: usize,
+    ) -> Result<LlmBackend, LlmClientError> {
         let token = profile.token.as_ref().map(|token| token.reveal()).unwrap_or("");
         let failed = |error: rig_core::http_client::Error| LlmClientError {
             provider: profile.provider.as_str(),
@@ -122,6 +134,7 @@ impl LlmBackend {
             client,
             model: profile.model.clone(),
             timeout: profile.timeout.unwrap_or(shared_timeout),
+            max_body_bytes,
             permits: Arc::new(tokio::sync::Semaphore::new(profile.max_concurrent)),
         })
     }
@@ -145,29 +158,35 @@ impl LlmBackend {
                 tracing::debug!(%error, "the llm consult failed");
                 Err(no_answer(error))
             }
+            Ok(Ok(text)) if text.len() > self.max_body_bytes => Err(NoAnswerReason::Oversized),
             Ok(Ok(text)) => serde_json::from_str(&text).map_err(|_| NoAnswerReason::Malformed),
         }
     }
 
     async fn prompt(&self, prompt: &ModelPrompt) -> Result<String, PromptError> {
+        let max_tokens = answer_budget(&prompt.input, self.max_body_bytes);
         match &self.client {
-            LlmClient::Anthropic(client) => run(client.completion_model(&self.model), prompt).await,
-            LlmClient::OpenAi(client) => run(client.completion_model(&self.model), prompt).await,
-            LlmClient::Gemini(client) => run(client.completion_model(&self.model), prompt).await,
-            LlmClient::Ollama(client) => run(client.completion_model(&self.model), prompt).await,
+            LlmClient::Anthropic(client) => run(client.completion_model(&self.model), prompt, max_tokens).await,
+            LlmClient::OpenAi(client) => run(client.completion_model(&self.model), prompt, max_tokens).await,
+            LlmClient::Gemini(client) => run(client.completion_model(&self.model), prompt, max_tokens).await,
+            LlmClient::Ollama(client) => run(client.completion_model(&self.model), prompt, max_tokens).await,
         }
     }
 }
 
 /// One fresh, memoryless agent per consult: the preamble and declaration as the system
 /// prompt, the artifact as the only user turn, the schema enforced natively.
-async fn run<M: CompletionModel + 'static>(model: M, prompt: &ModelPrompt) -> Result<String, PromptError> {
+async fn run<M: CompletionModel + 'static>(
+    model: M,
+    prompt: &ModelPrompt,
+    max_tokens: u64,
+) -> Result<String, PromptError> {
     let schema = schemars::Schema::try_from(prompt.schema.clone()).expect("every consult schema is a JSON object");
     AgentBuilder::new(model)
         .preamble(&prompt.system)
         .output_schema_raw(schema)
         .output_mode(OutputMode::Native)
-        .max_tokens(answer_budget(&prompt.input))
+        .max_tokens(max_tokens)
         .temperature(0.0)
         .build()
         .prompt(prompt.input.as_str())
@@ -310,9 +329,14 @@ mod tests {
     }
 
     fn built(provider: LlmProvider, url: String, max_concurrent: usize) -> LlmBackend {
+        built_under(provider, url, max_concurrent, 65_536)
+    }
+
+    fn built_under(provider: LlmProvider, url: String, max_concurrent: usize, max_body_bytes: usize) -> LlmBackend {
         LlmBackend::new(
             &profile(provider, Some(url), Some("sekret"), max_concurrent),
             Duration::from_secs(5),
+            max_body_bytes,
         )
         .expect("the backend builds")
     }
@@ -412,11 +436,11 @@ mod tests {
     #[test]
     fn gemini_and_ollama_profiles_build_without_a_network() {
         let gemini = profile(LlmProvider::Gemini, None, Some("sekret"), 2);
-        assert!(LlmBackend::new(&gemini, Duration::from_secs(1)).is_ok());
+        assert!(LlmBackend::new(&gemini, Duration::from_secs(1), 65_536).is_ok());
         let ollama = profile(LlmProvider::Ollama, None, None, 2);
-        assert!(LlmBackend::new(&ollama, Duration::from_secs(1)).is_ok());
+        assert!(LlmBackend::new(&ollama, Duration::from_secs(1), 65_536).is_ok());
         let pinned = profile(LlmProvider::Ollama, Some("http://127.0.0.1:11434".to_string()), None, 2);
-        assert!(LlmBackend::new(&pinned, Duration::from_secs(1)).is_ok());
+        assert!(LlmBackend::new(&pinned, Duration::from_secs(1), 65_536).is_ok());
     }
 
     #[tokio::test]
@@ -446,6 +470,23 @@ mod tests {
         drop(closed);
         let backend = built(LlmProvider::Anthropic, unreachable, 4);
         assert!(backend.consult(&prompt()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn an_answer_past_max_body_bytes_is_oversized_and_the_budget_never_asks_for_one() {
+        let (addr, stub) = serve("/v1/messages", anthropic_reply, Duration::ZERO).await;
+        let backend = built_under(LlmProvider::Anthropic, format!("http://{addr}"), 4, 48);
+
+        stub.answering(StubAnswer::Text("{\"ruling\":\"approve\"}".to_string()));
+        assert_eq!(
+            backend.consult(&prompt()).await,
+            Ok(serde_json::json!({ "ruling": "approve" }))
+        );
+        assert_eq!(stub.requests()[0].1["max_tokens"], 48, "a token is at least a byte");
+
+        let long = format!("{{\"ruling\":\"approve\",\"reason\":\"{}\"}}", "x".repeat(64));
+        stub.answering(StubAnswer::Text(long));
+        assert_eq!(backend.consult(&prompt()).await, Err(NoAnswerReason::Oversized));
     }
 
     #[tokio::test]

@@ -383,8 +383,6 @@ pub(crate) async fn run_claude_code(
 ) -> Result<serde_json::Value, NoAnswerReason> {
     use std::process::Stdio;
 
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
     let schema = serde_json::to_string(&prompt.schema).map_err(|_| NoAnswerReason::Malformed)?;
     let work = tempfile::tempdir().map_err(|_| NoAnswerReason::Transport)?;
     let mut command = tokio::process::Command::new(&backend.command);
@@ -412,6 +410,7 @@ pub(crate) async fn run_claude_code(
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
+    start_own_process_group(&mut command);
     // No APPA secret or wiring variable reaches the model: the child needs its own
     // credentials and HOME, never this runtime's bearer tokens.
     for (key, _) in std::env::vars_os() {
@@ -424,54 +423,160 @@ pub(crate) async fn run_claude_code(
         tracing::warn!(command = %backend.command.display(), "the claude executable did not start");
         NoAnswerReason::Unreachable
     })?;
-    let mut stdin = child.stdin.take().ok_or(NoAnswerReason::Transport)?;
-    let mut stdout = child.stdout.take().ok_or(NoAnswerReason::Transport)?;
-    let exchange = async {
-        stdin
-            .write_all(prompt.input.as_bytes())
-            .await
-            .map_err(|_| NoAnswerReason::Transport)?;
-        stdin.shutdown().await.map_err(|_| NoAnswerReason::Transport)?;
-        drop(stdin);
-        // Read the capped output before waiting: a child writing past the cap is killed
-        // right away, so a full pipe can never wedge the wait into the timeout.
-        let mut output = Vec::new();
-        let mut chunk = [0u8; 8192];
-        loop {
-            let read = stdout.read(&mut chunk).await.map_err(|_| NoAnswerReason::Transport)?;
-            if read == 0 {
-                break;
-            }
-            if output.len().saturating_add(read) > backend.max_body_bytes {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                return Err(NoAnswerReason::Oversized);
-            }
-            output.extend_from_slice(&chunk[..read]);
+    let process_group = child.id().and_then(|pid| i32::try_from(pid).ok());
+    let exchanged = tokio::time::timeout_at(deadline, exchange(&mut child, prompt, backend.max_body_bytes)).await;
+    // Every outcome ends the consult's whole process group: no helper the CLI spawned
+    // outlives the answer. On success the child is a zombie by now, so the group id is
+    // still its own.
+    terminate_process_group(process_group);
+    let output = match exchanged {
+        Ok(Ok(output)) => output,
+        Ok(Err(reason)) => {
+            let _ = child.kill().await;
+            return Err(reason);
         }
-        let status = child.wait().await.map_err(|_| NoAnswerReason::Transport)?;
-        if !status.success() {
-            tracing::debug!(code = ?status.code(), "claude exited without an answer");
-            return Err(NoAnswerReason::Transport);
-        }
-        Ok(output)
-    };
-    let output = match tokio::time::timeout_at(deadline, exchange).await {
-        Ok(output) => output?,
         Err(_) => {
             let _ = child.kill().await;
-            let _ = child.wait().await;
             tracing::warn!("claude consult timed out and was terminated");
             return Err(NoAnswerReason::Timeout);
         }
     };
+    let status = child.wait().await.map_err(|_| NoAnswerReason::Transport)?;
+    if !status.success() {
+        tracing::debug!(code = ?status.code(), "claude exited without an answer");
+        return Err(NoAnswerReason::Transport);
+    }
     let envelope: ClaudeResultEnvelope = serde_json::from_slice(&output).map_err(|_| NoAnswerReason::Malformed)?;
     envelope.structured_output.ok_or(NoAnswerReason::Malformed)
+}
+
+/// Feed the artifact, read the capped answer, and see the child out — without reaping
+/// it, so the caller's group cleanup still addresses the right group.
+async fn exchange(
+    child: &mut tokio::process::Child,
+    prompt: &ModelPrompt,
+    max_body_bytes: usize,
+) -> Result<Vec<u8>, NoAnswerReason> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut stdin = child.stdin.take().ok_or(NoAnswerReason::Transport)?;
+    let mut stdout = child.stdout.take().ok_or(NoAnswerReason::Transport)?;
+    stdin
+        .write_all(prompt.input.as_bytes())
+        .await
+        .map_err(|_| NoAnswerReason::Transport)?;
+    stdin.shutdown().await.map_err(|_| NoAnswerReason::Transport)?;
+    drop(stdin);
+    // Read the capped output before waiting: a child writing past the cap is killed
+    // right away, so a full pipe can never wedge the wait into the timeout.
+    let mut output = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        let read = stdout.read(&mut chunk).await.map_err(|_| NoAnswerReason::Transport)?;
+        if read == 0 {
+            break;
+        }
+        if output.len().saturating_add(read) > max_body_bytes {
+            return Err(NoAnswerReason::Oversized);
+        }
+        output.extend_from_slice(&chunk[..read]);
+    }
+    observe_exit(child).await?;
+    Ok(output)
+}
+
+#[cfg(unix)]
+fn start_own_process_group(command: &mut tokio::process::Command) {
+    use std::os::unix::process::CommandExt as _;
+    command.as_std_mut().process_group(0);
+}
+
+#[cfg(not(unix))]
+fn start_own_process_group(_: &mut tokio::process::Command) {}
+
+/// The consult started a fresh process group whose id is the child's pid; a negative pid
+/// addresses the whole group. SIGKILL is deliberate: this runs after every outcome.
+#[cfg(unix)]
+fn terminate_process_group(process_group: Option<i32>) {
+    if let Some(process_group) = process_group {
+        unsafe {
+            libc::kill(-process_group, libc::SIGKILL);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn terminate_process_group(_: Option<i32>) {}
+
+#[cfg(unix)]
+async fn observe_exit(child: &tokio::process::Child) -> Result<(), NoAnswerReason> {
+    let pid = child
+        .id()
+        .and_then(|pid| i32::try_from(pid).ok())
+        .ok_or(NoAnswerReason::Transport)?;
+    crate::external::wait_for_child_exit(pid).await
+}
+
+#[cfg(not(unix))]
+async fn observe_exit(_: &tokio::process::Child) -> Result<(), NoAnswerReason> {
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A helper the CLI leaves running — here a backgrounded `sleep` whose pid the fake
+    /// records — must not survive the consult that started it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_claude_consult_takes_its_helpers_down_with_it() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let pid_file = dir.path().join("helper.pid");
+        let fake = dir.path().join("fake-claude");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\ncat > /dev/null\nsleep 30 > /dev/null 2>&1 &\necho $! > {}\nprintf '%s' '{{\"structured_output\":{{\"ruling\":\"approve\",\"reason\":\"ok\"}}}}'\n",
+                pid_file.display()
+            ),
+        )
+        .expect("the fake claude writes");
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("the fake is executable");
+        let backend = ClaudeCodeBackend {
+            command: fake,
+            model: "m".to_string(),
+            timeout: std::time::Duration::from_secs(5),
+            max_body_bytes: 65_536,
+        };
+        let prompt = ModelPrompt {
+            system: "rule".to_string(),
+            input: "{}".to_string(),
+            schema: serde_json::json!({"type": "object"}),
+        };
+
+        let answer = backend
+            .consult(&prompt, tokio::time::Instant::now() + std::time::Duration::from_secs(5))
+            .await;
+        assert_eq!(answer, Ok(serde_json::json!({"ruling": "approve", "reason": "ok"})));
+
+        let helper: i32 = std::fs::read_to_string(&pid_file)
+            .expect("the fake recorded its helper")
+            .trim()
+            .parse()
+            .expect("a pid");
+        let gone_by = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let alive = unsafe { libc::kill(helper, 0) } == 0;
+            if !alive {
+                break;
+            }
+            assert!(std::time::Instant::now() < gone_by, "the helper outlived the consult");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
 
     #[test]
     fn the_name_grammar_is_lowercase_kebab_within_64_bytes() {
