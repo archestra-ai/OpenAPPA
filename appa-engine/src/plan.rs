@@ -233,12 +233,23 @@ pub(crate) fn plan(
     let no_denials = BTreeSet::new();
     let denied = views.denied_authorities(&call.digest()).unwrap_or(&no_denials);
 
+    let has_committed = |kind: &EffectKind| views.has_effect(kind);
+    let has_reserved = |kind: &EffectKind| views.has_reservation(kind);
     let mut plans: Vec<RemedyPlan> = match raw.unestablished.is_empty() {
-        true => enumerate_plans(registry, &current, views, call, stage, role, expansions)
-            .into_iter()
-            .filter(|plan| !denied.iter().any(|authority| plan.names_authority(authority)))
-            .map(RemedyPlan::Executable)
-            .collect(),
+        true => enumerate_plans(
+            registry,
+            &current,
+            &has_committed,
+            &has_reserved,
+            call,
+            stage,
+            role,
+            expansions,
+        )
+        .into_iter()
+        .filter(|plan| !denied.iter().any(|authority| plan.names_authority(authority)))
+        .map(RemedyPlan::Executable)
+        .collect(),
         false => Vec::new(),
     };
 
@@ -268,10 +279,15 @@ pub(crate) fn plan(
     }
 }
 
-fn enumerate_plans(
+/// The executable plans of one stage over an explicit state: the branch's label and the
+/// history predicates. The log supplies them for a live block; a recovery route supplies the
+/// state it has reached (RMD-20).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn enumerate_plans(
     registry: &Registry,
     current: &PartialLabel,
-    views: &Views,
+    has_committed: &impl Fn(&EffectKind) -> bool,
+    has_reserved: &impl Fn(&EffectKind) -> bool,
     call: &ResolvedCall,
     stage: &CallStage,
     role: CallRole,
@@ -280,14 +296,12 @@ fn enumerate_plans(
     let Some(contract) = registry.tool(call.tool()) else {
         return Vec::new();
     };
-    let has_committed = |kind: &EffectKind| views.has_effect(kind);
-    let has_reserved = |kind: &EffectKind| views.has_reservation(kind);
     let block = check::evaluate_state(
         contract,
         current,
-        &has_committed,
-        &has_reserved,
-        call,
+        has_committed,
+        has_reserved,
+        check::CallReads::Resolved(call),
         stage,
         expansions,
     );
@@ -403,7 +417,7 @@ fn plan_precedes(gaps: &[Gap], a: &[GapPower<'_>], b: &[GapPower<'_>]) -> bool {
     strictly_less
 }
 
-enum GapPower<'a> {
+pub(crate) enum GapPower<'a> {
     None,
     Substitution(&'a Audience),
     Ruling {
@@ -494,7 +508,7 @@ fn assigned_power<'a>(
     }
 }
 
-fn gap_power_cmp(gap: &Gap, a: &GapPower<'_>, b: &GapPower<'_>) -> Option<Ordering> {
+pub(crate) fn gap_power_cmp(gap: &Gap, a: &GapPower<'_>, b: &GapPower<'_>) -> Option<Ordering> {
     let ((a, a_readers), (b, b_readers)) = match (a, b) {
         (GapPower::None, GapPower::None) => return Some(Ordering::Equal),
         (GapPower::None, _) => return Some(Ordering::Less),
@@ -539,7 +553,7 @@ fn gap_power_cmp(gap: &Gap, a: &GapPower<'_>, b: &GapPower<'_>) -> Option<Orderi
     }
 }
 
-fn inclusion_cmp(a_in_b: bool, b_in_a: bool) -> Option<Ordering> {
+pub(crate) fn inclusion_cmp(a_in_b: bool, b_in_a: bool) -> Option<Ordering> {
     match (a_in_b, b_in_a) {
         (true, true) => Some(Ordering::Equal),
         (true, false) => Some(Ordering::Less),
@@ -1128,23 +1142,32 @@ fn direct_redispatches(
     expansions: &Expansions,
 ) -> Vec<RedispatchPlan> {
     let mut direct = Vec::new();
-    let has_cap = raw.requirement_gaps.iter().any(|gap| matches!(gap, Gap::Cap { .. }));
     for tool in registry.tools() {
-        let committed = has_cap.then(|| check::committed_label(tool, current, expansions));
-        let clears: Vec<Gap> = raw
-            .requirement_gaps
-            .iter()
-            .filter(|gap| match (gap, &committed) {
-                (Gap::Prior(kind), _) => tool.emits.contains(kind),
-                (Gap::Cap { cap }, Some(committed)) => committed.within_cap(cap) == Adequacy::Holds,
-                _ => false,
-            })
-            .cloned()
-            .collect();
+        let clears = direct_clears(tool, &raw.requirement_gaps, current, expansions);
         // The constructor is also the emptiness filter: a tool clearing nothing yields `None`.
         direct.extend(RedispatchPlan::new(tool.name.clone(), clears));
     }
     direct
+}
+
+/// The gaps a successful call to `tool` clears by itself (RMD-13): a `prior` it emits, or a cap
+/// the label it commits from `current` stays within.
+pub(crate) fn direct_clears(
+    tool: &ToolContract,
+    gaps: &[Gap],
+    current: &PartialLabel,
+    expansions: &Expansions,
+) -> Vec<Gap> {
+    let has_cap = gaps.iter().any(|gap| matches!(gap, Gap::Cap { .. }));
+    let committed = has_cap.then(|| check::committed_label(tool, current, expansions));
+    gaps.iter()
+        .filter(|gap| match (gap, &committed) {
+            (Gap::Prior(kind), _) => tool.emits.contains(kind),
+            (Gap::Cap { cap }, Some(committed)) => committed.within_cap(cap) == Adequacy::Holds,
+            _ => false,
+        })
+        .cloned()
+        .collect()
 }
 
 #[cfg(test)]
@@ -3796,9 +3819,10 @@ mod tests {
                 &state.partial(),
                 &has_committed,
                 &has_reserved,
-                &call,
-            &CallStage::default(),
-             &Expansions::default());
+                check::CallReads::Resolved(&call),
+                &CallStage::default(),
+                &Expansions::default(),
+            );
             if !eval.consumed.is_empty() || (eval.requirement_gaps.is_empty() && eval.narrowing.is_none()) {
                 return Ok(());
             }
@@ -3885,9 +3909,10 @@ mod tests {
                 &state.partial(),
                 &has_committed,
                 &has_reserved,
-                &call,
+                check::CallReads::Resolved(&call),
                 &CallStage::default(),
-             &Expansions::default());
+                &Expansions::default(),
+            );
             if !eval.consumed.is_empty() || (eval.requirement_gaps.is_empty() && eval.narrowing.is_none()) {
                 return Ok(());
             }
@@ -4024,9 +4049,10 @@ mod tests {
                 &state.partial(),
                 &has_committed,
                 &has_reserved,
-                &call,
-            &CallStage::default(),
-             &Expansions::default());
+                check::CallReads::Resolved(&call),
+                &CallStage::default(),
+                &Expansions::default(),
+            );
             if !eval.consumed.is_empty() || (eval.requirement_gaps.is_empty() && eval.narrowing.is_none()) {
                 return Ok(());
             }

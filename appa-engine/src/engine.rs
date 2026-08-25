@@ -292,10 +292,33 @@ impl Engine {
         }
     }
 
-    fn recorded_expansions(&self, resolutions: &[GroupResolution]) -> Expansions {
+    pub(crate) fn recorded_expansions(&self, resolutions: &[GroupResolution]) -> Expansions {
         self.registry
             .expansions_from_resolutions(resolutions)
             .expect("a validated log persists only groups the policy writes")
+    }
+
+    /// Every recovery route for a blocked call within `depth` (RMD-20), least mandate power
+    /// first: advisory only. Nothing is appended, no offer is minted, and `remedy_plans` stand as
+    /// surfaced; `answers` are the expansions the caller can supply now, behind the ones the log
+    /// already recorded for this subject. `RouteDepth::ONE` yields exactly the block's plans. An
+    /// empty list asserts only that no route exists within this abstraction and `depth`.
+    pub fn recovery_routes(
+        &self,
+        view: &EngineView,
+        subject: &crate::basis::SubjectKey,
+        answers: &[GroupExpansion],
+        depth: crate::route::RouteDepth,
+    ) -> Result<Vec<crate::route::RecoveryRoute>, crate::route::RouteError> {
+        if view.policy() != self.identity {
+            return Err(crate::route::RouteError::ForeignView);
+        }
+        let crate::basis::SubjectKey::Call { trajectory, .. } = subject else {
+            return Err(crate::route::RouteError::NotACallSubject);
+        };
+        let views = view.projection().view(trajectory);
+        let context = crate::route::BlockContext::reconstruct(self, &views, subject, answers)?;
+        crate::route::search(&self.registry, &views, &context, depth)
     }
 
     /// What the runtime must resolve before it can execute one live offer.
@@ -3758,9 +3781,14 @@ pub(crate) fn opened_dispatch(
         dispatch: dispatch.clone(),
         tool: call.tool().clone(),
         arguments: call.canonical_arguments().clone(),
-        proposed_label: check::committed_label_for_call(contract, &current, call, expansions)
-            .bound()
-            .clone(),
+        proposed_label: check::committed_label_for_call(
+            contract,
+            &current,
+            check::CallReads::Resolved(call),
+            expansions,
+        )
+        .bound()
+        .clone(),
         receiving: current.bound().clone(),
         proposed_effects: contract.emits.clone(),
         tool_resolutions: call.tool_resolutions().to_vec(),
@@ -14846,6 +14874,108 @@ mod tests {
         assert_eq!(e.validate_replay(&ended), Ok(()));
     }
 
+    mod recovery_routes {
+        use super::*;
+        use crate::route::{Certainty, Contingency, RecoveryRoute, RouteDepth, RouteError, RouteOutcome, RouteStep};
+        use std::collections::BTreeSet;
+
+        fn subject(batch: &str) -> crate::basis::SubjectKey {
+            crate::basis::SubjectKey::Call {
+                trajectory: traj(),
+                batch: crate::transition::ProposalBatchId::new(batch),
+                position: 0,
+            }
+        }
+
+        #[test]
+        fn depth_one_through_the_engine_is_the_offers_the_block_opened() {
+            let e = two_officer_engine();
+            let log = vec![opened(&e)];
+            let wire = call("wire", json!({}));
+            let blocked = appended_facts(proposed(&e, &log, "b1", nonce(), wire.clone()).expect("the call blocks"));
+            let offered: Vec<RecoveryRoute> = opened_offers(&blocked)
+                .into_iter()
+                .map(|(_, plan)| RecoveryRoute {
+                    steps: plan
+                        .required
+                        .iter()
+                        .map(|required| RouteStep::Authorize {
+                            authority: required.authority.clone(),
+                            covers: required.covers.clone(),
+                            call: wire.digest(),
+                        })
+                        .collect(),
+                    outcome: RouteOutcome::Complete,
+                })
+                .collect();
+            assert_eq!(offered.len(), 2);
+            for route in &offered {
+                let [RouteStep::Authorize { authority, .. }] = &route.steps[..] else {
+                    panic!("one ruling per offer: {route:?}");
+                };
+                assert_eq!(
+                    route.certainty(),
+                    Certainty::Contingent(BTreeSet::from([Contingency::AuthorityDecision {
+                        authority: authority.clone(),
+                    }]))
+                );
+            }
+            let log = [log, blocked].concat();
+            let view = e.view(&traj(), log.clone(), log.len() as u64).expect("the log replays");
+
+            for depth in [RouteDepth::ONE, RouteDepth::new(4).unwrap()] {
+                let found = e
+                    .recovery_routes(&view, &subject("b1"), &[], depth)
+                    .expect("a blocked call has a route search");
+                assert_eq!(found, offered, "no tool clears a trust floor, so depth adds nothing");
+            }
+            assert_eq!(
+                e.view(&traj(), log.clone(), log.len() as u64).map(|_| ()),
+                Ok(()),
+                "the search appended nothing"
+            );
+        }
+
+        #[test]
+        fn only_a_blocked_standing_call_has_routes() {
+            let e = two_officer_engine();
+            let log = vec![opened(&e)];
+            let view = e.view(&traj(), log.clone(), log.len() as u64).expect("the log replays");
+            let at = |subject: &crate::basis::SubjectKey| e.recovery_routes(&view, subject, &[], RouteDepth::ONE);
+
+            assert_eq!(at(&subject("never")), Err(RouteError::UnknownSubject));
+            assert_eq!(
+                engine(vec![neutral_tool()]).recovery_routes(&view, &subject("never"), &[], RouteDepth::ONE),
+                Err(RouteError::ForeignView),
+                "a view built under another policy is refused before anything is read"
+            );
+            assert_eq!(
+                at(&crate::basis::SubjectKey::Return(ChildReturnId::new(
+                    TrajectoryId::new("child"),
+                    0
+                ))),
+                Err(RouteError::NotACallSubject)
+            );
+
+            let e = engine_at(
+                vec![crm_tool()],
+                known(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
+            );
+            let log = vec![opened(&e)];
+            let released = appended_facts(
+                proposed(&e, &log, "b1", nonce(), call("get_ticket", json!({}))).expect("the batch decides"),
+            );
+            assert!(released.iter().any(|fact| matches!(fact, Fact::DispatchOpened { .. })));
+            let log = [log, released].concat();
+            let view = e.view(&traj(), log.clone(), log.len() as u64).expect("the log replays");
+            assert_eq!(
+                e.recovery_routes(&view, &subject("b1"), &[], RouteDepth::ONE),
+                Err(RouteError::NotBlocked),
+                "a released call stands decided but passes its check, so there is nothing to plan"
+            );
+        }
+    }
+
     mod configured_groups {
         use super::*;
         use crate::contract::AudienceDelta;
@@ -14950,6 +15080,155 @@ mod tests {
         fn assert_no_group_names(facts: &[Fact]) {
             let json = serde_json::to_string(facts).expect("facts serialize");
             assert!(!json.contains("\"@"), "a serialized record holds a group name: {json}");
+        }
+
+        #[test]
+        fn a_planned_state_that_reads_an_unanswered_group_refuses_the_search_instead_of_resolving_it() {
+            use crate::route::{RouteDepth, RouteError, RouteOutcome, RouteStep};
+
+            let mut backup = plain_tool("backup");
+            backup.emits = EffectSet::new([EffectKind::new("backup")]).unwrap();
+            backup.delta = Some(Delta {
+                trust: None,
+                audience: Some(Dim::Known(readers(&["internal"])).into()),
+            });
+            let mut wire = plain_tool("wire");
+            wire.requires = Requires {
+                label: LabelRequirements {
+                    trust_floor: None,
+                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                        DeclaredAudience::literal(readers(&["partner"])),
+                    ))],
+                },
+                history: vec![HistoryRequirement::Prior(EffectKind::new("backup"))],
+                ..Requires::default()
+            };
+            let officer = crate::authority::Authority {
+                name: AuthorityName::new("officer"),
+                mandate: crate::authority::Mandate {
+                    reader_ceiling: Some(grouped(&["partner"], &["board"])),
+                    ..crate::authority::Mandate::default()
+                },
+                scope: crate::authority::Scope::default(),
+                hint: None,
+            };
+            let e = grouped_engine(
+                config(vec![backup, wire], vec![officer]),
+                &[],
+                known(TRUSTED, Audience::Public),
+            );
+            let log = vec![opened(&e)];
+            let decided = e
+                .handle(
+                    &viewing(&e, &log),
+                    batch_with("b1", vec![], vec![raw(&call("wire", json!({})))], vec![]),
+                )
+                .expect("a `prior` gap alone reads no group");
+            let log = [log, appended_facts(decided)].concat();
+            let view = e.view(&traj(), log.clone(), log.len() as u64).expect("the log replays");
+            let subject = crate::basis::SubjectKey::Call {
+                trajectory: traj(),
+                batch: crate::transition::ProposalBatchId::new("b1"),
+                position: 0,
+            };
+            let routes =
+                |answers: &[GroupExpansion]| e.recovery_routes(&view, &subject, answers, RouteDepth::new(2).unwrap());
+
+            assert_eq!(
+                routes(&[]),
+                Err(RouteError::MembershipNeeded(vec![GroupName::new("board")])),
+                "after `backup` narrows the audience, the `includes` gap makes the officer's ceiling a read"
+            );
+            let planned = routes(&[expansion("board", &[])]).expect("the answer lets the state plan");
+            assert_eq!(planned.len(), 1);
+            assert_eq!(planned[0].outcome, RouteOutcome::Complete);
+            assert!(
+                matches!(
+                    &planned[0].steps[..],
+                    [RouteStep::Precede { tool, .. }, RouteStep::Authorize { authority, .. }]
+                        if tool.as_str() == "backup" && authority.as_str() == "officer"
+                ),
+                "{:?}",
+                planned[0].steps
+            );
+        }
+
+        #[test]
+        fn a_route_reads_the_resolutions_the_block_recorded_over_any_fresh_answer() {
+            use crate::route::{RouteDepth, RouteOutcome, RouteStep};
+
+            let mut seen = plain_tool("seen");
+            seen.delta = Some(Delta {
+                trust: None,
+                audience: Some(AudienceDelta::Static(grouped(&[], &["board"]))),
+            });
+            let e = grouped_engine(
+                config(vec![capped_send(), seen], vec![]),
+                &[],
+                known(TRUSTED, readers(&["alice"])),
+            );
+            let log = vec![opened(&e)];
+            let decided = e
+                .handle(
+                    &viewing(&e, &log),
+                    batch_with(
+                        "b1",
+                        vec![],
+                        vec![raw(&call("send", json!({})))],
+                        vec![expansion("board", &[]), expansion("team", &[])],
+                    ),
+                )
+                .expect("the tool plans of the block read `board`, so the batch answers it too");
+            let log = [log, appended_facts(decided)].concat();
+            let view = e.view(&traj(), log.clone(), log.len() as u64).expect("the log replays");
+            let subject = crate::basis::SubjectKey::Call {
+                trajectory: traj(),
+                batch: crate::transition::ProposalBatchId::new("b1"),
+                position: 0,
+            };
+            let cap = crate::check::Gap::Cap {
+                cap: readers(&["auditor"]),
+            };
+            let routes = |answers: Vec<GroupExpansion>| {
+                e.recovery_routes(&view, &subject, &answers, RouteDepth::new(2).unwrap())
+                    .expect("the recorded answer for `team` stands")
+            };
+
+            let recorded = routes(vec![]);
+            assert_eq!(recorded.len(), 1);
+            assert_eq!(recorded[0].outcome, RouteOutcome::Complete);
+            assert!(
+                matches!(
+                    &recorded[0].steps[..],
+                    [RouteStep::Precede { tool, clears, accepts: Some(narrowing) }]
+                        if tool.as_str() == "seen"
+                            && clears == &vec![cap.clone()]
+                            && narrowing.to.audience == readers(&[])
+                ),
+                "the recorded empty `board` narrows `alice` to nobody, within the cap the recorded empty \
+                 `team` leaves at `auditor`: {:?}",
+                recorded[0].steps
+            );
+            assert_eq!(
+                routes(vec![
+                    expansion("board", &["alice"]),
+                    expansion("team", &["alice", "bob"])
+                ]),
+                recorded,
+                "fresh answers that would leave `alice` in the audience and lift the cap change nothing: \
+                 the answers the block consumed stand"
+            );
+            assert_eq!(
+                e.recovery_routes(
+                    &view,
+                    &subject,
+                    &[expansion("team", &["alice"]), expansion("team", &["bob"])],
+                    RouteDepth::ONE
+                ),
+                Err(crate::route::RouteError::Expansion(ExpansionRefusal::Duplicate(
+                    GroupName::new("team")
+                )))
+            );
         }
 
         fn with_resolutions(fact: &Fact, resolutions: serde_json::Value) -> Result<Fact, serde_json::Error> {
