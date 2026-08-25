@@ -41,6 +41,9 @@ jobs:
           jq -e .plugins .claude-plugin/marketplace.json >/dev/null
           jq -e .plugins integrations/claude-code/.claude-plugin/marketplace.json >/dev/null
 
+      - name: Plugin batteries match repository batteries
+        run: diff -r batteries integrations/claude-code/plugin/batteries
+
   rust-checks:
     name: Rust Checks
     runs-on: ubuntu-latest
