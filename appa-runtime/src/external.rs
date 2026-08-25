@@ -804,8 +804,18 @@ async fn run_command_process(
 
     let outcome = {
         let exchange = async {
-            stdin.write_all(&input).await.map_err(|_| NoAnswerReason::Transport)?;
-            stdin.shutdown().await.map_err(|_| NoAnswerReason::Transport)?;
+            // A resolver may answer without reading its request and close stdin first. A
+            // broken pipe here is that early close, not a transport fault: the exit status and
+            // the answer still decide the outcome.
+            let written = match stdin.write_all(&input).await {
+                Ok(()) => stdin.shutdown().await,
+                Err(error) => Err(error),
+            };
+            if let Err(error) = written
+                && error.kind() != std::io::ErrorKind::BrokenPipe
+            {
+                return Err(NoAnswerReason::Transport);
+            }
             drop(stdin);
 
             let output = async {
