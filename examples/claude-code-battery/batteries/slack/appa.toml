@@ -13,16 +13,25 @@ delta = {}
 # Every unmatched channel requires fresh approval.
 [[policy.tool]]
 name = "mcp__slack__slack_send_message"
-requires = { trust = "trusted", attention = ["hitl"] }
 effects = ["egress", "mutation"]
 delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["hitl"]
 
 # Engineering history is private to the Slack-internal audience.
 [[policy.tool]]
 name = "mcp__slack__slack_get_channel_history(channel_id:C123*)"
-delta = { trust = "suspicious", audience = { exactly = ["slack-internal"] } }
+
+[policy.tool.delta]
+trust = "suspicious"
+audience = ["slack-internal"]
 
 # An unmatched channel stays conservatively restricted.
 [[policy.tool]]
 name = "mcp__slack__slack_get_channel_history"
-delta = { trust = "suspicious", audience = { exactly = ["slack-unclassified"] } }
+
+[policy.tool.delta]
+trust = "suspicious"
+audience = ["slack-unclassified"]

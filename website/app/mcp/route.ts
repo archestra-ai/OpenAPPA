@@ -91,7 +91,7 @@ const handler = createMcpHandler(
         description:
           "Glossary definition of an OpenAPPA policy/model term exactly as the docs define it — e.g. delta, requires, audience, attention, Unknown, trajectory.",
         inputSchema: z.object({
-          term: z.string().describe('The term, e.g. "delta" or "may_add"'),
+          term: z.string().describe('The term, e.g. "delta" or "permits"'),
         }),
       },
       async ({ term }) => {

@@ -66,7 +66,7 @@ def test_prune_preserves_tool_annotations() -> None:
     policy = AGENTS["appa"].policy_file.read_text()
     by_name = {tool["name"]: tool for tool in _tools_of(prune_policy(policy, ("hr", "public_forum", "email")))}
     assert by_name["read_public_forum"]["delta"] == {"trust": "suspicious"}
-    assert by_name["read_hr"]["delta"] == {"audience": {"exactly": ["hr"]}}
+    assert by_name["read_hr"]["delta"] == {"audience": ["hr"]}
     assert by_name["send_email"]["requires"]["trust"] == "internal"
     assert by_name["send_email"]["effects"] == ["egress"]
 
@@ -121,11 +121,11 @@ def test_scenario_requires_override_reaches_the_pruned_policy() -> None:
     by_name = {tool["name"]: tool for tool in _tools_of(applied)}
     assert by_name["create_task_tracker"]["requires"] == {
         "trust": "internal",
-        "effects": {"has": ["egress"]},
+        "effects": {"contains": ["egress"]},
     }
     # The override is scoped to the tool it names and to the arm that declared
     # it: the sibling emitter and the open baseline are untouched.
-    assert by_name["create_public_forum"]["requires"] == {"audience": {"includes": ["public"]}}
+    assert by_name["create_public_forum"]["requires"] == {"audience": {"contains": ["public"]}}
     assert scenario.policy_requires.get("open") is None
 
 

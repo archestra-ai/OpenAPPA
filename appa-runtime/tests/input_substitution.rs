@@ -13,19 +13,19 @@ version = 1
 
 [[policy.tool]]
 name = "read_hr"
-delta = { audience = { exactly = ["hr"] } }
+delta = { audience = ["hr"] }
 
 [[policy.tool]]
 name = "send"
 parameters = { type = "object", properties = { body = { type = "string" } }, required = ["body"] }
-requires = { audience = { includes = ["public"] } }
+requires = { audience = { contains = ["public"] } }
 effects = ["egress"]
 delta = {}
 
 [[policy.sanitizer]]
 name = "redactor"
 on = ["tool_input"]
-mandate = { audience = { from = { includes = ["hr"] }, to = { exactly = ["public"] } } }
+permits = { audience = { from = ["hr"], to = ["public"] } }
 
 [externals]
 timeout_ms = 1000

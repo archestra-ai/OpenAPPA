@@ -19,18 +19,18 @@ name = "directory"
 
 [[policy.tool]]
 name = "read_hr"
-delta = { audience = { exactly = ["alice", "bob"] } }
+delta = { audience = ["alice", "bob"] }
 
 [[policy.tool]]
 name = "send"
 parameters = { type = "object", properties = { to = { type = "string" } }, required = ["to"] }
-requires = { audience = { includes = ["$to"] } }
+requires = { audience = { contains = ["$to"] } }
 effects = ["egress"]
 delta = {}
 
 [[policy.tool]]
 name = "send_capped"
-requires = { audience = { cap = ["alice", "@team"] } }
+requires = { audience = { within = ["alice", "@team"] } }
 effects = ["egress"]
 delta = {}
 

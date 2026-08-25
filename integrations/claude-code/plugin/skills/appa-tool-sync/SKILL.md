@@ -99,7 +99,7 @@ Decide two things per tool, from its name and its description.
 from a private source narrows the audience:
 
 ```toml
-delta = { audience = { exactly = ["private"] } }
+delta = { audience = ["private"] }
 ```
 
 Every other tool carries nothing:
@@ -113,11 +113,11 @@ that publishes, posts, sends, shares, or uploads to a place other
 people read may carry unrestricted values only:
 
 ```toml
-requires = { audience = { includes = ["public"] } }
+requires = { audience = { contains = ["public"] } }
 delta = {}
 ```
 
-Only a Public audience includes `public`, so this is the
+Only a Public audience contains `public`, so this is the
 wall: nothing a private tool returned reaches that sink. A tool that
 publishes nowhere gets no `requires`.
 
@@ -125,8 +125,10 @@ Two rules the loader enforces:
 
 - Write a `delta` key on every entry. A `requires` on an entry with no
   `delta` is refused at load.
-- Every audience mention carries its operator — `exactly`, `includes`,
-  `cap`, `may_add`. A bare list is a load error.
+- A `delta` audience is a bare list of readers. A `requires` audience
+  names its check instead: `contains` (the flow's readers include every
+  reader listed) or `within` (the flow's readers are all among those
+  listed). A bare list under `requires` is a load error.
 
 A tool can be both. One that reads private data and sends it outward
 carries the private `delta` and the public `requires` together, and is

@@ -106,7 +106,7 @@ delta    = {}
 [[sanitizer]]
 name = "attest-schema"
 on   = ["tool_output"]
-[sanitizer.mandate]
+[sanitizer.permits]
 trust = { from = "suspicious", to = "trusted" }
 
 [child]

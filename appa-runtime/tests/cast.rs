@@ -46,23 +46,23 @@ delta = {}
 
 [[policy.cast]]
 name = "mail-classifier"
-scope = { tags = ["mail"] }
-resolver = { may_cast = { trust = ["suspicious", "trusted"], audience = { cap = ["public"] } } }
+tags = ["mail"]
+resolver = { may_cast = { trust = ["suspicious", "trusted"], audience = ["public"] } }
 
 [[policy.cast]]
 name = "files-classifier"
-scope = { tags = ["files"] }
-resolver = { may_cast = { trust = ["suspicious"], audience = { cap = ["public"] } } }
+tags = ["files"]
+resolver = { may_cast = { trust = ["suspicious"], audience = ["public"] } }
 
 [[policy.cast]]
 name = "files-fallback"
-scope = { tags = ["files"] }
-constant = { trust = "suspicious", audience = { exactly = ["public"] } }
+tags = ["files"]
+constant = { trust = "suspicious", audience = ["public"] }
 
 [[policy.cast]]
 name = "web-classifier"
-scope = { tags = ["web"] }
-resolver = { may_cast = { trust = ["suspicious", "trusted"], audience = { cap = ["public"] } } }
+tags = ["web"]
+resolver = { may_cast = { trust = ["suspicious", "trusted"], audience = ["public"] } }
 
 [policy.deployment]
 context_control = true
@@ -106,8 +106,8 @@ delta = { trust = "unknown" }
             r#"
 [[policy.cast]]
 name = "{cast}"
-scope = {{ tags = ["files"] }}
-resolver = {{ may_cast = {{ trust = ["suspicious"], audience = {{ cap = ["public"] }} }} }}
+tags = ["files"]
+resolver = {{ may_cast = {{ trust = ["suspicious"], audience = ["public"] }} }}
 "#
         ));
     }
@@ -115,8 +115,8 @@ resolver = {{ may_cast = {{ trust = ["suspicious"], audience = {{ cap = ["public
         r#"
 [[policy.cast]]
 name = "files-fallback"
-scope = { tags = ["files"] }
-constant = { trust = "suspicious", audience = { exactly = ["public"] } }
+tags = ["files"]
+constant = { trust = "suspicious", audience = ["public"] }
 
 [policy.deployment]
 context_control = true

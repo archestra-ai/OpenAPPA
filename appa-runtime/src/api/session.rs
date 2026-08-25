@@ -1085,8 +1085,8 @@ context_control = true
 version = 1
 [[policy.authority]]
 name = "approver"
-[policy.authority.mandate]
-attends = ["irreversible"]
+[policy.authority.permits]
+attention = ["irreversible"]
 [policy.authority.implementation]
 builtin = "approve"
 "#;
@@ -1105,8 +1105,8 @@ builtin = "approve"
 version = 1
 [[policy.authority]]
 name = "approver"
-[policy.authority.mandate]
-attends = ["irreversible"]
+[policy.authority.permits]
+attention = ["irreversible"]
 "#;
         assert!(matches!(
             Runtime::open(config_with(policy, None), dir.path().join("appa.db"), None),
@@ -1124,7 +1124,7 @@ name = "fetch"
 delta = { trust = "unknown" }
 [[policy.cast]]
 name = "paranoid"
-constant = { trust = "suspicious", audience = { exactly = ["public"] } }
+constant = { trust = "suspicious", audience = ["public"] }
 [policy.deployment]
 confined_results = ["fetch"]
 "#;
@@ -1144,7 +1144,7 @@ name = "fetch"
 delta = { trust = "unknown" }
 [[policy.cast]]
 name = "classifier"
-resolver = { may_cast = { trust = ["suspicious"], audience = { cap = ["public"] } } }
+resolver = { may_cast = { trust = ["suspicious"], audience = ["public"] } }
 [policy.deployment]
 confined_results = ["fetch"]
 "#;
@@ -1200,7 +1200,7 @@ version = 1
 name = "fetch"
 [[policy.cast]]
 name = "channel-class"
-constant = { trust = "trusted", audience = { exactly = ["public"] } }
+constant = { trust = "trusted", audience = ["public"] }
 "#;
         assert!(
             Runtime::open(config_with(policy, None), dir.path().join("appa.db"), None).is_ok(),
@@ -1218,7 +1218,7 @@ version = 1
 name = "fetch"
 [[policy.cast]]
 name = "channel-class"
-constant = { trust = "trusted", audience = { exactly = ["public"] } }
+constant = { trust = "trusted", audience = ["public"] }
 [externals]
 timeout_ms = 2000
 max_body_bytes = 65536
@@ -1789,7 +1789,7 @@ name = "directory"
 
 [[policy.tool]]
 name = "read"
-delta = { audience = { exactly = ["@team"] } }
+delta = { audience = ["@team"] }
 "#;
         let text = format!(
             "[policy]\n{policy}\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n[externals.membership]\nurl = \"{directory}\"\n"
@@ -2087,8 +2087,8 @@ delta = {}
 
 [[policy.authority]]
 name = "approver"
-[policy.authority.mandate]
-attends = ["irreversible"]
+[policy.authority.permits]
+attention = ["irreversible"]
 "#;
 
     fn wire(amount: u64) -> ProposedCall {
@@ -2322,19 +2322,19 @@ version = 1
 
 [[policy.tool]]
 name = "read_hr"
-delta = { audience = { exactly = ["hr"] } }
+delta = { audience = ["hr"] }
 
 [[policy.tool]]
 name = "send"
 parameters = { type = "object", properties = { body = { type = "string" } }, required = ["body"] }
-requires = { audience = { includes = ["public"] } }
+requires = { audience = { contains = ["public"] } }
 delta = {}
 
 [[policy.sanitizer]]
 name = "redactor"
 on = ["tool_input"]
-[policy.sanitizer.mandate]
-audience = { from = { includes = ["hr"] }, to = { exactly = ["public"] } }
+[policy.sanitizer.permits]
+audience = { from = ["hr"], to = ["public"] }
 "#;
 
     const SUBSTITUTED_ATTENDED_SEND: &str = r#"
@@ -2342,24 +2342,24 @@ version = 1
 
 [[policy.tool]]
 name = "read_hr"
-delta = { audience = { exactly = ["hr"] } }
+delta = { audience = ["hr"] }
 
 [[policy.tool]]
 name = "send"
 parameters = { type = "object", properties = { body = { type = "string" } }, required = ["body"] }
-requires = { audience = { includes = ["public"] }, attention = ["irreversible"] }
+requires = { audience = { contains = ["public"] }, attention = ["irreversible"] }
 delta = {}
 
 [[policy.sanitizer]]
 name = "redactor"
 on = ["tool_input"]
-[policy.sanitizer.mandate]
-audience = { from = { includes = ["hr"] }, to = { exactly = ["public"] } }
+[policy.sanitizer.permits]
+audience = { from = ["hr"], to = ["public"] }
 
 [[policy.authority]]
 name = "approver"
-[policy.authority.mandate]
-attends = ["irreversible"]
+[policy.authority.permits]
+attention = ["irreversible"]
 "#;
 
     const SUBSTITUTED_SEND_FORKING: &str = r#"
@@ -2367,12 +2367,12 @@ version = 1
 
 [[policy.tool]]
 name = "read_hr"
-delta = { audience = { exactly = ["hr"] } }
+delta = { audience = ["hr"] }
 
 [[policy.tool]]
 name = "send"
 parameters = { type = "object", properties = { body = { type = "string" } }, required = ["body"] }
-requires = { audience = { includes = ["public"] } }
+requires = { audience = { contains = ["public"] } }
 delta = {}
 
 [[policy.tool]]
@@ -2382,8 +2382,8 @@ parameters = { type = "object", properties = { a = { type = "integer" } } }
 [[policy.sanitizer]]
 name = "redactor"
 on = ["tool_input"]
-[policy.sanitizer.mandate]
-audience = { from = { includes = ["hr"] }, to = { exactly = ["public"] } }
+[policy.sanitizer.permits]
+audience = { from = ["hr"], to = ["public"] }
 
 [policy.deployment]
 context_control = true
@@ -2778,8 +2778,8 @@ name = "fetch"
 [[policy.sanitizer]]
 name = "scrub"
 on = ["tool_output"]
-[policy.sanitizer.mandate]
-audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
+[policy.sanitizer.permits]
+audience = { from = ["internal"], to = ["public"] }
 
 [policy.child]
 return_sanitizer = "scrub"
@@ -2882,7 +2882,7 @@ version = 1
 [[policy.sanitizer]]
 name = "attest-schema"
 on = ["tool_output"]
-[policy.sanitizer.mandate]
+[policy.sanitizer.permits]
 trust = { from = "suspicious", to = "trusted" }
 
 [policy.deployment]
@@ -2896,7 +2896,7 @@ version = 1
 [[sanitizer]]
 name = "attest-schema"
 on = ["tool_output"]
-[sanitizer.mandate]
+[sanitizer.permits]
 trust = { from = "suspicious", to = "trusted" }
 
 [deployment]
@@ -2910,7 +2910,7 @@ version = 1
 [[policy.sanitizer]]
 name = "attest-schema"
 on = ["tool_output"]
-[policy.sanitizer.mandate]
+[policy.sanitizer.permits]
 trust = { from = "suspicious", to = "trusted" }
 
 [policy.child]
@@ -3030,13 +3030,13 @@ version = 1
 [[policy.tool]]
 name = "leak"
 parameters = { type = "object", properties = { q = { type = "string" } } }
-delta = { audience = { exactly = ["internal"] } }
+delta = { audience = ["internal"] }
 
 [[policy.sanitizer]]
 name = "scrub"
 on = ["tool_output"]
-[policy.sanitizer.mandate]
-audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
+[policy.sanitizer.permits]
+audience = { from = ["internal"], to = ["public"] }
 
 [policy.deployment]
 confined_results = ["leak"]
@@ -3056,13 +3056,13 @@ version = 1
 name = "leak"
 parameters = { type = "object", properties = { q = { type = "string" } } }
 effects = ["leak"]
-delta = { audience = { exactly = ["internal"] } }
+delta = { audience = ["internal"] }
 
 [[policy.sanitizer]]
 name = "scrub"
 on = ["tool_output"]
-[policy.sanitizer.mandate]
-audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
+[policy.sanitizer.permits]
+audience = { from = ["internal"], to = ["public"] }
 
 [policy.deployment]
 confined_results = ["leak"]
@@ -3140,13 +3140,13 @@ version = 1
 [[policy.tool]]
 name = "leak"
 parameters = { type = "object", properties = { q = { type = "string" } } }
-delta = { audience = { exactly = ["internal"] }, trust = "suspicious" }
+delta = { audience = ["internal"], trust = "suspicious" }
 
 [[policy.sanitizer]]
 name = "scrub"
 on = ["tool_output"]
-[policy.sanitizer.mandate]
-audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
+[policy.sanitizer.permits]
+audience = { from = ["internal"], to = ["public"] }
 
 [policy.deployment]
 confined_results = ["leak"]
@@ -3200,8 +3200,8 @@ delta = { trust = "suspicious" }
 [[policy.sanitizer]]
 name = "scrub"
 on = ["tool_output"]
-[policy.sanitizer.mandate]
-audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
+[policy.sanitizer.permits]
+audience = { from = ["internal"], to = ["public"] }
 
 [policy.child]
 return_sanitizer = "scrub"

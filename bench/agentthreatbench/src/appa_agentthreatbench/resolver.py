@@ -105,7 +105,7 @@ class ResolverFixture:
             "customer-acl": "delta.audience",
             "recipient-members": "requires.audience",
         }[str(request["resolver"])]
-        value: object = readers if result_name == "delta.audience" else {"includes": readers}
+        value: object = readers if result_name == "delta.audience" else {"contains": readers}
         return {"version": 1, "result": {result_name: value}}
 
     def snapshot(self) -> list[dict[str, object]]:

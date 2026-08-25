@@ -155,7 +155,7 @@ trust_chain = ["suspicious", "internal"]
 [[tool]]
 name = "read_hr"
 parameters = { type = "object", properties = { file = { type = "string" } }, required = ["file"], additionalProperties = false }
-delta = { audience = { exactly = ["hr"] } }
+delta = { audience = ["hr"] }
 
 [[tool]]
 name = "fork"

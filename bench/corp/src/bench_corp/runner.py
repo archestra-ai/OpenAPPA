@@ -167,7 +167,7 @@ def _serve_external_fixtures(
                 answer = dynamic_by_request.get(key) if request.get("version") == 1 else None
                 if answer is not None:
                     result_name, readers = answer
-                    value: object = list(readers) if result_name == "delta.audience" else {"includes": list(readers)}
+                    value: object = list(readers) if result_name == "delta.audience" else {"contains": list(readers)}
                     response = {"version": 1, "result": {result_name: value}}
             elif isinstance(request, dict) and self.path.startswith("/authority/"):
                 kind = "authority"

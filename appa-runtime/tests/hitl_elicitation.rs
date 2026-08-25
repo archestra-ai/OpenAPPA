@@ -31,8 +31,8 @@ requires = { attention = ["signoff"] }
 name = "operator"
 hint = "The person at the keyboard."
 
-[policy.authority.mandate]
-attends = ["signoff"]
+[policy.authority.permits]
+attention = ["signoff"]
 
 [externals]
 timeout_ms = 1000
@@ -221,9 +221,9 @@ requires = {{ trust = "resolver.classifier.trust", attention = "resolver.classif
 name = "operator"
 hint = "The person at the keyboard."
 
-[policy.authority.mandate]
-can_cover_trust_to = "trusted"
-attends = ["operator-signoff"]
+[policy.authority.permits]
+trust_below = "trusted"
+attention = ["operator-signoff"]
 
 [externals]
 timeout_ms = 1000

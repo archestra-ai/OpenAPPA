@@ -3,7 +3,7 @@ version = 1
 trust_chain = ["suspicious", "internal"]
 [policy.boundary]
 trust = "internal"
-audience = { exactly = ["public"] }
+audience = ["public"]
 
 # Branching is an ordinary registered tool: the runtime checks this call like
 # any other, and releasing it is what opens a child trajectory (`BRN-2`,
@@ -29,7 +29,7 @@ delta = {}
 [[policy.tool]]
 name = "send_email"
 parameters = { type = "object", properties = { to = { type = "string", description = "Recipient email address." }, subject = { type = "string", description = "Subject line." }, body = { type = "string", description = "Message body." } }, required = ["to", "subject", "body"], additionalProperties = false }
-requires = { effects = { has = ["audit_ticket_created"] } }
+requires = { effects = { contains = ["audit_ticket_created"] } }
 effects = ["egress"]
 delta = {}
 

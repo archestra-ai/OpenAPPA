@@ -50,7 +50,7 @@ pub enum ConfigError {
     UnknownSanitizerPoint { token: String },
     #[error("sanitizer {name} declares no application point (`on` is empty)")]
     NoSanitizerPoint { name: String },
-    #[error("sanitizer {name} mandate: {reason}")]
+    #[error("sanitizer {name} permits: {reason}")]
     SanitizerMandateShape { name: String, reason: &'static str },
     #[error("{kind} {name}: {reason}")]
     BadImplementation {
@@ -408,7 +408,7 @@ struct RawStartingLabel {
 #[serde(untagged)]
 enum RawStartingAudience {
     Token(String),
-    Exactly(RawExactly),
+    List(Vec<String>),
 }
 
 impl RawDeployment {
@@ -429,13 +429,11 @@ impl RawDeployment {
                     Some(RawStartingAudience::Token(token)) => {
                         return Err(ConfigError::BadDeploymentToken {
                             field: "starting_label audience",
-                            expected: r#""public" or { exactly = [...] }"#,
+                            expected: r#""public" or [...]"#,
                             found: token,
                         });
                     }
-                    Some(RawStartingAudience::Exactly(a)) => {
-                        parse_audience(&a.exactly, "deployment starting_label audience")?
-                    }
+                    Some(RawStartingAudience::List(a)) => parse_audience(&a, "deployment starting_label audience")?,
                 };
                 Label::new(Dim::Known(trust), Dim::Known(audience))
             }
@@ -516,7 +514,7 @@ struct RawChild {
 #[serde(deny_unknown_fields)]
 struct RawBoundary {
     trust: Option<String>,
-    audience: Option<RawExactly>,
+    audience: Option<Vec<String>>,
 }
 
 impl RawBoundary {
@@ -526,7 +524,7 @@ impl RawBoundary {
             None => top_trust(chain),
         };
         let audience = match self.audience {
-            Some(a) => parse_audience(&a.exactly, "boundary audience")?,
+            Some(a) => parse_audience(&a, "boundary audience")?,
             None => Audience::Public,
         };
         Ok(Label::new(Dim::Known(trust), Dim::Known(audience)))
@@ -748,7 +746,7 @@ struct RawDelta {
 #[serde(untagged)]
 enum RawDeltaAudience {
     Token(String),
-    Exactly(RawExactly),
+    List(Vec<String>),
 }
 
 const UNKNOWN_TOKEN: &str = "unknown";
@@ -778,27 +776,19 @@ impl RawDelta {
                     None => {
                         return Err(ConfigError::BadAudience {
                             context,
-                            reason: format!(
-                                "expected {{ exactly = [...] }}, \"unknown\", or a resolver result, found {token:?}"
-                            ),
+                            reason: format!("expected [...], \"unknown\", or a resolver result, found {token:?}"),
                         });
                     }
                 }
             }
-            Some(RawDeltaAudience::Exactly(a)) => Some(AudienceDelta::Static(parse_declared_audience(
-                &a.exactly,
+            Some(RawDeltaAudience::List(a)) => Some(AudienceDelta::Static(parse_declared_audience(
+                &a,
                 &format!("{ctx} delta audience"),
             )?)),
             None => None,
         };
         Ok(Delta { trust, audience })
     }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawExactly {
-    exactly: Vec<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -845,23 +835,23 @@ impl RawRequires {
                         return Err(ConfigError::BadAudience {
                             context,
                             reason: format!(
-                                "expected {{ includes = [...] }}, {{ cap = [...] }}, or a resolver result, found {value:?}"
+                                "expected {{ contains = [...] }}, {{ within = [...] }}, or a resolver result, found {value:?}"
                             ),
                         });
                     }
                 }
             }
             Some(RawRequiresAudienceField::Operators(a)) => {
-                if let Some(inc) = a.includes {
+                if let Some(inc) = a.contains {
                     audience.push(AudienceRequirement::Includes(parse_recipient_spec(
                         &inc,
-                        &format!("{ctx} requires includes"),
+                        &format!("{ctx} requires contains"),
                     )?));
                 }
-                if let Some(cap) = a.cap {
+                if let Some(cap) = a.within {
                     audience.push(AudienceRequirement::Cap(parse_declared_audience(
                         &cap,
-                        &format!("{ctx} requires cap"),
+                        &format!("{ctx} requires within"),
                     )?));
                 }
             }
@@ -869,9 +859,13 @@ impl RawRequires {
         }
         let mut history = Vec::new();
         if let Some(e) = self.effects {
-            history.extend(e.has.into_iter().map(|k| HistoryRequirement::Prior(EffectKind::new(k))));
             history.extend(
-                e.has_no
+                e.contains
+                    .into_iter()
+                    .map(|k| HistoryRequirement::Prior(EffectKind::new(k))),
+            );
+            history.extend(
+                e.excludes
                     .into_iter()
                     .map(|k| HistoryRequirement::NoPrior(EffectKind::new(k))),
             );
@@ -913,17 +907,17 @@ impl RawRequires {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawRequiresAudience {
-    includes: Option<Vec<String>>,
-    cap: Option<Vec<String>>,
+    contains: Option<Vec<String>>,
+    within: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawHistory {
     #[serde(default)]
-    has: Vec<String>,
+    contains: Vec<String>,
     #[serde(default)]
-    has_no: Vec<String>,
+    excludes: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -933,9 +927,9 @@ struct RawAuthority {
     #[serde(default)]
     hint: Option<String>,
     #[serde(default)]
-    mandate: RawMandate,
+    permits: RawPermits,
     #[serde(default)]
-    scope: RawScope,
+    tags: Vec<String>,
     implementation: Option<toml::Value>,
 }
 
@@ -948,12 +942,12 @@ impl RawAuthority {
             });
         }
         let ctx = format!("authority {}", self.name);
-        let mandate = self.mandate.convert(chain, &ctx)?;
+        let mandate = self.permits.convert(chain, &ctx)?;
         Ok(Authority {
             name: AuthorityName::new(self.name),
             mandate,
             scope: Scope {
-                tags: self.scope.tags.into_iter().map(TagName::new).collect(),
+                tags: self.tags.into_iter().map(TagName::new).collect(),
             },
             hint: self.hint.map(Hint::new),
         })
@@ -962,43 +956,27 @@ impl RawAuthority {
 
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
-struct RawMandate {
-    can_cover_trust_to: Option<String>,
-    can_cover_readers: Option<RawMayAdd>,
+struct RawPermits {
+    trust_below: Option<String>,
+    audience_missing: Option<Vec<String>>,
     #[serde(default)]
-    can_waive: Vec<String>,
+    effects_containing: Vec<String>,
     #[serde(default)]
-    attends: Vec<String>,
+    attention: Vec<String>,
 }
 
-impl RawMandate {
+impl RawPermits {
     fn convert(self, chain: &TrustChain, ctx: &str) -> Result<Mandate, ConfigError> {
         Ok(Mandate {
-            trust_ceiling: self
-                .can_cover_trust_to
-                .map(|t| parse_trust(&t, chain, ctx))
-                .transpose()?,
+            trust_ceiling: self.trust_below.map(|t| parse_trust(&t, chain, ctx)).transpose()?,
             reader_ceiling: self
-                .can_cover_readers
-                .map(|r| parse_declared_audience(&r.may_add, &format!("{ctx} can_cover_readers")))
+                .audience_missing
+                .map(|r| parse_declared_audience(&r, &format!("{ctx} audience_missing")))
                 .transpose()?,
-            waivers: self.can_waive.into_iter().map(EffectKind::new).collect(),
-            attends: self.attends.into_iter().map(MarkName::new).collect(),
+            waivers: self.effects_containing.into_iter().map(EffectKind::new).collect(),
+            attends: self.attention.into_iter().map(MarkName::new).collect(),
         })
     }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawMayAdd {
-    may_add: Vec<String>,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct RawScope {
-    #[serde(default)]
-    tags: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -1009,8 +987,8 @@ struct RawSanitizer {
     #[serde(default)]
     hint: Option<String>,
     #[serde(default)]
-    scope: RawScope,
-    mandate: RawSanitizerMandate,
+    tags: Vec<String>,
+    permits: RawSanitizerPermits,
     implementation: Option<toml::Value>,
 }
 
@@ -1023,13 +1001,13 @@ impl RawSanitizer {
             });
         }
         let on = parse_points(&self.on, &self.name)?;
-        let transition = self.mandate.convert(chain, &self.name)?;
+        let transition = self.permits.convert(chain, &self.name)?;
         Ok(Sanitizer {
             name: SanitizerName::new(self.name),
             on,
             transition,
             scope: Scope {
-                tags: self.scope.tags.into_iter().map(TagName::new).collect(),
+                tags: self.tags.into_iter().map(TagName::new).collect(),
             },
             hint: self.hint.map(Hint::new),
         })
@@ -1038,19 +1016,19 @@ impl RawSanitizer {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawSanitizerMandate {
+struct RawSanitizerPermits {
     #[serde(default)]
     audience: Option<RawAudienceTransition>,
     #[serde(default)]
     trust: Option<RawTrustTransition>,
 }
 
-impl RawSanitizerMandate {
+impl RawSanitizerPermits {
     fn convert(self, chain: &TrustChain, name: &str) -> Result<DeclaredTransition, ConfigError> {
         match (self.audience, self.trust) {
             (Some(audience), None) => Ok(DeclaredTransition::Audience {
-                from_includes: parse_declared_audience(&audience.from.includes, &format!("sanitizer {name} from"))?,
-                to: parse_declared_audience(&audience.to.exactly, &format!("sanitizer {name} to"))?,
+                from_includes: parse_declared_audience(&audience.from, &format!("sanitizer {name} from"))?,
+                to: parse_declared_audience(&audience.to, &format!("sanitizer {name} to"))?,
             }),
             (None, Some(trust)) => Ok(DeclaredTransition::Trust {
                 from_floor: parse_trust(&trust.from, chain, &format!("sanitizer {name} from"))?,
@@ -1058,11 +1036,11 @@ impl RawSanitizerMandate {
             }),
             (Some(_), Some(_)) => Err(ConfigError::SanitizerMandateShape {
                 name: name.to_string(),
-                reason: "declares both an audience and a trust transition — a mandate binds one dimension",
+                reason: "declares both an audience and a trust transition — a sanitizer permits one dimension",
             }),
             (None, None) => Err(ConfigError::SanitizerMandateShape {
                 name: name.to_string(),
-                reason: "declares no transition — give the mandate an `audience` or a `trust` key",
+                reason: "declares no transition — give `permits` an `audience` or a `trust` key",
             }),
         }
     }
@@ -1071,8 +1049,8 @@ impl RawSanitizerMandate {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawAudienceTransition {
-    from: RawIncludes,
-    to: RawExactly,
+    from: Vec<String>,
+    to: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -1084,25 +1062,19 @@ struct RawTrustTransition {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawIncludes {
-    includes: Vec<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RawCast {
     name: String,
     constant: Option<RawConstantLabel>,
     resolver: Option<RawCastResolver>,
     #[serde(default)]
-    scope: RawScope,
+    tags: Vec<String>,
 }
 
 impl RawCast {
     fn convert(self, chain: &TrustChain) -> Result<Cast, ConfigError> {
         let ctx = format!("cast {}", self.name);
         let scope = Scope {
-            tags: self.scope.tags.into_iter().map(TagName::new).collect(),
+            tags: self.tags.into_iter().map(TagName::new).collect(),
         };
         let resolution = match (self.constant, self.resolver) {
             (Some(_), Some(_)) => {
@@ -1159,7 +1131,7 @@ impl RawCastResolver {
                 .iter()
                 .map(|rank| parse_trust(rank, chain, &ctx))
                 .collect::<Result<_, _>>()?,
-            audience: parse_declared_audience(&self.may_cast.audience.cap, &ctx)?,
+            audience: parse_declared_audience(&self.may_cast.audience, &ctx)?,
         })
     }
 }
@@ -1171,27 +1143,21 @@ impl RawCastResolver {
 struct RawMayCast {
     #[serde(default)]
     trust: Vec<String>,
-    audience: RawCap,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawCap {
-    cap: Vec<String>,
+    audience: Vec<String>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConstantLabel {
     trust: String,
-    audience: RawExactly,
+    audience: Vec<String>,
 }
 
 impl RawConstantLabel {
     fn convert(self, chain: &TrustChain, ctx: &str) -> Result<DeclaredLabel, ConfigError> {
         Ok(DeclaredLabel {
             trust: parse_trust(&self.trust, chain, ctx)?,
-            audience: parse_declared_audience(&self.audience.exactly, ctx)?,
+            audience: parse_declared_audience(&self.audience, ctx)?,
         })
     }
 }
@@ -1248,7 +1214,7 @@ fn parse_declared_audience(list: &[String], context: &str) -> Result<DeclaredAud
     if let Some(ph) = list.iter().find(|r| r.starts_with('$')) {
         return Err(ConfigError::BadAudience {
             context: context.to_string(),
-            reason: format!("argument placeholder {ph:?} is only valid in an `includes`"),
+            reason: format!("argument placeholder {ph:?} is only valid in a `contains`"),
         });
     }
     let mut readers = Vec::new();
@@ -1334,14 +1300,14 @@ delta = {}
 
 [[authority]]
 name = "approver"
-[authority.mandate]
-can_cover_trust_to = "trusted"
+[authority.permits]
+trust_below = "trusted"
 
 [[sanitizer]]
 name = "pii"
 on = ["tool_output"]
-[sanitizer.mandate]
-audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
+[sanitizer.permits]
+audience = { from = ["internal"], to = ["public"] }
 
 [deployment]
 dispatch = "enforced"
@@ -1367,11 +1333,11 @@ confined_results = ["lookup"]
             ),
             (
                 "authority",
-                "version = 1\n[[authority]]\nname = \"a\"\nimplementation = { builtin = \"approve\" }\n[authority.mandate]\ncan_cover_trust_to = \"trusted\"\n",
+                "version = 1\n[[authority]]\nname = \"a\"\nimplementation = { builtin = \"approve\" }\n[authority.permits]\ntrust_below = \"trusted\"\n",
             ),
             (
                 "sanitizer",
-                "version = 1\n[[sanitizer]]\nname = \"s\"\non = [\"tool_output\"]\nimplementation = { builtin = \"hosted\" }\n[sanitizer.mandate]\ntrust = { from = \"suspicious\", to = \"trusted\" }\n",
+                "version = 1\n[[sanitizer]]\nname = \"s\"\non = [\"tool_output\"]\nimplementation = { builtin = \"hosted\" }\n[sanitizer.permits]\ntrust = { from = \"suspicious\", to = \"trusted\" }\n",
             ),
             (
                 "dynamic resolver",
@@ -1379,7 +1345,7 @@ confined_results = ["lookup"]
             ),
             (
                 "cast",
-                "version = 1\n[[cast]]\nname = \"c\"\nresolver = { url = \"https://cast.invalid\", may_cast = { trust = [\"trusted\"], audience = { cap = [\"public\"] } } }\n",
+                "version = 1\n[[cast]]\nname = \"c\"\nresolver = { url = \"https://cast.invalid\", may_cast = { trust = [\"trusted\"], audience = [\"public\"] } }\n",
             ),
             (
                 "membership resolver",
@@ -1408,8 +1374,8 @@ confined_results = ["lookup"]
     #[test]
     fn the_reserved_state_is_never_a_declared_reader() {
         for site in [
-            "delta = { audience = { exactly = [\"unknown\"] } }",
-            "requires = { audience = { includes = [\"unknown\"] } }\ndelta = {}",
+            "delta = { audience = [\"unknown\"] }",
+            "requires = { audience = { contains = [\"unknown\"] } }\ndelta = {}",
         ] {
             let policy = format!("version = 1\n[[tool]]\nname = \"send\"\n{site}\n");
             assert!(
@@ -1424,8 +1390,8 @@ confined_results = ["lookup"]
         let policy = "version = 1\n\
              [[tool]]\nname = \"fetch\"\ntags = [\"web\"]\n\
              [[cast]]\nname = \"content-classifier\"\n\
-             resolver = { may_cast = { trust = [\"suspicious\"], audience = { cap = [\"public\"] } } }\n\
-             [cast.scope]\ntags = [\"web\"]\n";
+             resolver = { may_cast = { trust = [\"suspicious\"], audience = [\"public\"] } }\n\
+             tags = [\"web\"]\n";
         let config = Config::from_toml_str(policy).expect("a resolver cast loads");
         let cast = config
             .registry()
@@ -1445,7 +1411,7 @@ confined_results = ["lookup"]
         let policy = "version = 1\n\
              [[tool]]\nname = \"fetch\"\ndelta = { audience = \"unknown\" }\n\
              [[cast]]\nname = \"audience-only\"\n\
-             resolver = { may_cast = { audience = { cap = [\"public\"] } } }\n\
+             resolver = { may_cast = { audience = [\"public\"] } }\n\
              [deployment]\nconfined_results = [\"fetch\"]\n";
         let config = Config::from_toml_str(policy).expect("an audience-only ceiling loads");
         assert!(matches!(
@@ -1457,8 +1423,8 @@ confined_results = ["lookup"]
     #[test]
     fn a_cast_declaring_both_forms_or_neither_is_refused() {
         let both = "version = 1\n[[cast]]\nname = \"c\"\n\
-             constant = { trust = \"suspicious\", audience = { exactly = [\"public\"] } }\n\
-             resolver = { may_cast = { trust = [\"trusted\"], audience = { cap = [\"public\"] } } }\n";
+             constant = { trust = \"suspicious\", audience = [\"public\"] }\n\
+             resolver = { may_cast = { trust = [\"trusted\"], audience = [\"public\"] } }\n";
         let neither = "version = 1\n[[cast]]\nname = \"c\"\n";
         for (case, policy) in [("both", both), ("neither", neither)] {
             assert!(
@@ -1476,7 +1442,7 @@ confined_results = ["lookup"]
         let policy = "version = 1\n\
              [[sanitizer]]\nname = \"attest-schema\"\non = [\"tool_output\"]\n\
              implementation = { url = \"https://attest.invalid\" }\n\
-             [sanitizer.mandate]\ntrust = { from = \"suspicious\", to = \"trusted\" }\n";
+             [sanitizer.permits]\ntrust = { from = \"suspicious\", to = \"trusted\" }\n";
         assert!(matches!(
             Config::from_toml_str(policy),
             Err(ConfigError::ForbiddenInlineBinding { kind: "sanitizer", name }) if name == "attest-schema"
@@ -1490,14 +1456,12 @@ confined_results = ["lookup"]
                 "version = 1\n\
                  [[tool]]\nname = \"post\"\ntags = [\"outbound\"]\ndelta = {{}}\n\
                  [[sanitizer]]\nname = \"redact\"\non = [\"tool_input\"]\n\
-                 scope = {{ tags = [\"outbound\"] }}\n\
-                 [sanitizer.mandate]\n{mandate}\n"
+                 tags = [\"outbound\"]\n\
+                 [sanitizer.permits]\n{mandate}\n"
             )
         };
-        let config = Config::from_toml_str(&policy(
-            "audience = { from = { includes = [\"internal\"] }, to = { exactly = [\"partner\"] } }",
-        ))
-        .expect("an input substitution compiles");
+        let config = Config::from_toml_str(&policy("audience = { from = [\"internal\"], to = [\"partner\"] }"))
+            .expect("an input substitution compiles");
         let sanitizer = config
             .registry()
             .sanitizer(&SanitizerName::new("redact"))
@@ -1512,7 +1476,7 @@ confined_results = ["lookup"]
         ));
         assert!(matches!(
             Config::from_toml_str(
-                &policy("audience = { from = { includes = [\"internal\"] }, to = { exactly = [\"partner\"] } }")
+                &policy("audience = { from = [\"internal\"], to = [\"partner\"] }")
                     .replace("on = [\"tool_input\"]", "on = []")
             ),
             Err(ConfigError::NoSanitizerPoint { name }) if name == "redact"
@@ -1845,7 +1809,7 @@ delta = { trust = "resolver.one.trust", audience = "resolver.two.audience" }
             }
             other => panic!("expected an audience-binding refusal with {expected:?}, got {other:?} for:\n{policy}"),
         };
-        let bindings = ["requires = { audience = { includes = [\"$to\"] } }\ndelta = {}"];
+        let bindings = ["requires = { audience = { contains = [\"$to\"] } }\ndelta = {}"];
         let parameters = [
             ("", PropertyFault::Undeclared),
             (
@@ -1878,7 +1842,7 @@ delta = { trust = "resolver.one.trust", audience = "resolver.two.audience" }
             );
             assert!(Config::from_toml_str(&ok).is_ok(), "must load:\n{ok}");
         }
-        let static_recipients = "version = 1\n[[tool]]\nname = \"send\"\nrequires = { audience = { includes = [\"finance\"] } }\ndelta = {}\n";
+        let static_recipients = "version = 1\n[[tool]]\nname = \"send\"\nrequires = { audience = { contains = [\"finance\"] } }\ndelta = {}\n";
         assert!(Config::from_toml_str(static_recipients).is_ok());
     }
 
@@ -1995,27 +1959,27 @@ name = "directory"
 
 [[tool]]
 name = "read"
-delta = { audience = { exactly = ["auditor", "@team"] } }
+delta = { audience = ["auditor", "@team"] }
 
 [[tool]]
 name = "send"
-requires = { audience = { cap = ["@team"], includes = ["@board"] } }
+requires = { audience = { within = ["@team"], contains = ["@board"] } }
 delta = {}
 
 [[authority]]
 name = "officer"
-[authority.mandate]
-can_cover_readers = { may_add = ["@officers"] }
+[authority.permits]
+audience_missing = ["@officers"]
 
 [[sanitizer]]
 name = "declassify"
 on = ["tool_output"]
-[sanitizer.mandate]
-audience = { from = { includes = ["internal"] }, to = { exactly = ["@team"] } }
+[sanitizer.permits]
+audience = { from = ["internal"], to = ["@team"] }
 
 [[cast]]
 name = "paranoid"
-constant = { trust = "suspicious", audience = { exactly = ["@team"] } }
+constant = { trust = "suspicious", audience = ["@team"] }
 
 [deployment]
 dispatch = "enforced"
@@ -2061,10 +2025,10 @@ confined_results = ["read", "send"]
         ));
 
         for (case, replacement) in [
-            ("bare @", "cap = [\"@\"]"),
-            ("public beside a group", "cap = [\"public\", \"@team\"]"),
+            ("bare @", "within = [\"@\"]"),
+            ("public beside a group", "within = [\"public\", \"@team\"]"),
         ] {
-            let malformed = policy.replace("cap = [\"@team\"]", replacement);
+            let malformed = policy.replace("within = [\"@team\"]", replacement);
             assert!(
                 matches!(Config::from_toml_str(&malformed), Err(ConfigError::BadAudience { .. })),
                 "{case} loads"
@@ -2073,8 +2037,8 @@ confined_results = ["read", "send"]
 
         let base = "version = 1\n[membership]\nname = \"directory\"\n[[tool]]\nname = \"t\"\ndelta = {}\n";
         for site in [
-            "[deployment]\nstarting_label = { audience = { exactly = [\"@team\"] } }\n",
-            "[boundary]\naudience = { exactly = [\"@team\"] }\n",
+            "[deployment]\nstarting_label = { audience = [\"@team\"] }\n",
+            "[boundary]\naudience = [\"@team\"]\n",
         ] {
             assert!(
                 matches!(

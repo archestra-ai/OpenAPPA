@@ -421,7 +421,7 @@ for request, expected in [
             "resolver": "distribution-list-members",
             "args": {"subject": "onyx-steering@northwind.example"},
         },
-        {"version": 1, "result": {"requires.audience": {"includes": readers}}},
+        {"version": 1, "result": {"requires.audience": {"contains": readers}}},
     ),
 ]:
     wire = urllib.request.Request(url, data=json.dumps(request).encode(), headers={"Content-Type": "application/json"})

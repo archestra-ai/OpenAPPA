@@ -99,7 +99,7 @@ def test_resolver_http_protocol_records_request_and_answer() -> None:
         ) as response:
             assert json.load(response) == {
                 "version": 1,
-                "result": {"requires.audience": {"includes": ["requesting_user"]}},
+                "result": {"requires.audience": {"contains": ["requesting_user"]}},
             }
         assert fixture.snapshot() == [{"request": request, "readers": ["requesting_user"]}]
     finally:

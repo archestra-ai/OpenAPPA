@@ -4,7 +4,7 @@ trust_chain = ["suspicious", "internal"]
 
 [policy.boundary]
 trust = "internal"
-audience = { exactly = ["public"] }
+audience = ["public"]
 
 # Branching is an ordinary registered tool: the runtime checks this call like
 # any other, and releasing it is what opens a child trajectory (`BRN-2`,
@@ -17,12 +17,12 @@ parameters = { type = "object", properties = { task = { type = "string", descrip
 [[policy.tool]]
 name = "search_hr"
 parameters = { type = "object", properties = { query = { type = "string", description = "Keyword or phrase to match against file names and contents." } }, required = ["query"], additionalProperties = false }
-delta = { audience = { exactly = ["cfo@northwind.example", "hr-director@northwind.example"] } }
+delta = { audience = ["cfo@northwind.example", "hr-director@northwind.example"] }
 
 [[policy.tool]]
 name = "read_hr"
 parameters = { type = "object", properties = { file = { type = "string", description = "The exact file name to read." } }, required = ["file"], additionalProperties = false }
-delta = { audience = { exactly = ["cfo@northwind.example", "hr-director@northwind.example"] } }
+delta = { audience = ["cfo@northwind.example", "hr-director@northwind.example"] }
 
 [[policy.tool]]
 name = "create_hr"
@@ -32,12 +32,12 @@ delta = {}
 [[policy.tool]]
 name = "search_finance"
 parameters = { type = "object", properties = { query = { type = "string", description = "Keyword or phrase to match against file names and contents." } }, required = ["query"], additionalProperties = false }
-delta = { audience = { exactly = ["cfo@northwind.example", "controller@northwind.example"] } }
+delta = { audience = ["cfo@northwind.example", "controller@northwind.example"] }
 
 [[policy.tool]]
 name = "read_finance"
 parameters = { type = "object", properties = { file = { type = "string", description = "The exact file name to read." } }, required = ["file"], additionalProperties = false }
-delta = { audience = { exactly = ["cfo@northwind.example", "controller@northwind.example"] } }
+delta = { audience = ["cfo@northwind.example", "controller@northwind.example"] }
 
 [[policy.tool]]
 name = "create_finance"
@@ -47,16 +47,20 @@ delta = {}
 [[policy.tool]]
 name = "send_email"
 parameters = { type = "object", properties = { to = { type = "string", description = "Recipient email address." }, subject = { type = "string", description = "Subject line." }, body = { type = "string", description = "Message body." } }, required = ["to", "subject", "body"], additionalProperties = false }
-requires = { trust = "internal", audience = { includes = ["$to"] } }
 effects = ["egress"]
 delta = {}
+[policy.tool.requires]
+trust = "internal"
+audience = { contains = ["$to"] }
 
 [[policy.tool]]
 name = "share_legal_packet"
 parameters = { type = "object", properties = { file = { type = "string", description = "The exact finance file name to share." }, to = { type = "string", description = "Recipient email address." } }, required = ["file", "to"], additionalProperties = false }
-requires = { trust = "internal", audience = { includes = ["$to"] } }
-delta = { audience = { exactly = ["cfo@northwind.example", "controller@northwind.example"] } }
+delta = { audience = ["cfo@northwind.example", "controller@northwind.example"] }
 effects = ["egress"]
+[policy.tool.requires]
+trust = "internal"
+audience = { contains = ["$to"] }
 
 # --- deployment coverage -----------------------------------------------------
 #

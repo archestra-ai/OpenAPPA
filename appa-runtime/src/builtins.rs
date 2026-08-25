@@ -360,10 +360,10 @@ Return only the object required by the supplied JSON Schema. Every result the sc
 `trust_ranks` lists the only trust ranks you may return, ordered from least trusted/most restrictive to most trusted/least restrictive.
 `delta.trust` and `delta.audience` describe the value the call produces. Audience is either `public` or literal reader identifiers. Never emit `public` inside an array or a reader beginning with `@`.
 `requires.trust`, `requires.audience`, and `requires.attention` constrain whether the proposed call may run at all. `requires.trust` is a minimum trust rank.
-`requires.audience` holds `includes` (the current audience must cover those readers), `cap` (the current audience must stay within that audience), or both.
+`requires.audience` holds `contains` (the current audience must cover those readers), `within` (the current audience must stay within that audience), or both.
 `attention_marks` lists the only fresh human-review marks you may return in `requires.attention`; do not repeat static attention marks. If it is empty, return an empty attention array.
 `context` describes the flow as it stands; it is never the answer — do not echo its current audience back.
-For a command that sends data to a destination outside the session (a push, upload, publish, or send), `requires.audience` names the destination's readers under `includes`: a destination readable beyond a known reader set — a hosted repository, a site, a paste service, a mailing list — is `public` unless the command itself proves a narrower readership.
+For a command that sends data to a destination outside the session (a push, upload, publish, or send), `requires.audience` names the destination's readers under `contains`: a destination readable beyond a known reader set — a hosted repository, a site, a paste service, a mailing list — is `public` unless the command itself proves a narrower readership.
 Classify conservatively when `args` does not justify a permissive answer."#;
 
 #[derive(Debug, serde::Deserialize)]
@@ -512,7 +512,7 @@ pub(crate) fn claude_response_schema(
     };
     let required_audience_schema = serde_json::json!({
         "type": "object",
-        "properties": {"includes": audience_schema.clone(), "cap": audience_schema.clone()},
+        "properties": {"contains": audience_schema.clone(), "within": audience_schema.clone()},
         "additionalProperties": false,
         "minProperties": 1
     });

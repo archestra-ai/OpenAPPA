@@ -481,7 +481,7 @@ case "$request" in
   *classifier-0*) printf '%s' '{"structured_output":{"version":1,"result":{"delta.trust":"trusted"}}}' ;;
   *classifier-1*) printf '%s' '{"structured_output":{"version":1,"result":{"delta.audience":"public"}}}' ;;
   *classifier-2*) printf '%s' '{"structured_output":{"version":1,"result":{"requires.trust":"suspicious"}}}' ;;
-  *classifier-3*) printf '%s' '{"structured_output":{"version":1,"result":{"requires.audience":{"cap":"public"}}}}' ;;
+  *classifier-3*) printf '%s' '{"structured_output":{"version":1,"result":{"requires.audience":{"within":"public"}}}}' ;;
   *) printf '%s' '{"structured_output":{"version":1,"result":{"requires.attention":[]}}}' ;;
 esac
 "#,

@@ -15,8 +15,8 @@ dispatch = "enforced"
 name = "hitl"
 hint = "Ask the person running the session."
 
-[policy.authority.mandate]
-attends = ["hitl"]
+[policy.authority.permits]
+attention = ["hitl"]
 
 [externals]
 timeout_ms = 5000
@@ -30,8 +30,14 @@ builtin = "hitl"
 # the shipped exact `cargo test` rule with a fresh approval step.
 [[policy.tool]]
 name = "Bash(command:cargo test)"
-requires = { trust = "trusted", attention = ["hitl"] }
-delta = { trust = "suspicious", audience = { exactly = ["claude-session"] } }
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["hitl"]
+
+[policy.tool.delta]
+trust = "suspicious"
+audience = ["claude-session"]
 
 # A root contract can also replace a battery's fallback with a local resolver.
 [[policy.dynamic_resolver]]

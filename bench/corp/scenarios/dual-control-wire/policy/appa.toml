@@ -3,7 +3,7 @@ version = 1
 trust_chain = ["suspicious", "internal"]
 [policy.boundary]
 trust = "internal"
-audience = { exactly = ["public"] }
+audience = ["public"]
 
 # Branching is an ordinary registered tool: the runtime checks this call like
 # any other, and releasing it is what opens a child trajectory (`BRN-2`,
@@ -42,10 +42,9 @@ effects = ["wire.executed"]
 delta = {}
 [[policy.authority]]
 name = "secondary-wire-approver"
-[policy.authority.mandate]
-attends = ["secondary-approval"]
-[policy.authority.scope]
 tags = ["wire"]
+[policy.authority.permits]
+attention = ["secondary-approval"]
 
 # --- deployment coverage -----------------------------------------------------
 #

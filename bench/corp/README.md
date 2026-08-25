@@ -180,7 +180,7 @@ Scenario-specific tool requirements can be declared in `scenario.toml` to avoid 
 
 ```toml
 [policy.appa.requires]
-create_task_tracker = { trust = "internal", effects = { has = ["egress"] } }
+create_task_tracker = { trust = "internal", effects = { contains = ["egress"] } }
 ```
 
 ---

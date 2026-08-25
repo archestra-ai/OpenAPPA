@@ -2797,8 +2797,8 @@ mod tests {
                 requires = { trust = "resolver.classifier.trust", audience = "resolver.classifier.audience", attention = ["static-review"] }
                 [[authority]]
                 name = "reviewer"
-                [authority.mandate]
-                attends = ["privacy-review"]
+                [authority.permits]
+                attention = ["privacy-review"]
             "#,
         )
         .expect("the tool-level resolver policy compiles");

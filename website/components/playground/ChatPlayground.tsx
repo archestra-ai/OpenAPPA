@@ -259,7 +259,7 @@ const STORY_TOOLS = new Set(["list_recordings", "list_issues", "create_issue", "
 const SHORT_DROP = new Set([
   "[boundary]",
   "[[dynamic_resolver]]",
-  "[authority.mandate]",
+  "[authority.permits]",
   "[authority.implementation]",
   "[sanitizer.implementation]",
 ]);

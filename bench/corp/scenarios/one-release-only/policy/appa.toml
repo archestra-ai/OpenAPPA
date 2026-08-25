@@ -4,7 +4,7 @@ trust_chain = ["suspicious", "internal"]
 
 [policy.boundary]
 trust = "internal"
-audience = { exactly = ["public"] }
+audience = ["public"]
 
 # Branching is an ordinary registered tool: the runtime checks this call like
 # any other, and releasing it is what opens a child trajectory (`BRN-2`,
@@ -22,7 +22,7 @@ delta = {}
 [[policy.tool]]
 name = "read_task_tracker"
 parameters = { type = "object", properties = { file = { type = "string", description = "The exact file name to read." } }, required = ["file"], additionalProperties = false }
-delta = { audience = { exactly = ["customer-success@northwind.example"] } }
+delta = { audience = ["customer-success@northwind.example"] }
 
 [[policy.tool]]
 name = "create_task_tracker"
@@ -32,9 +32,12 @@ delta = {}
 [[policy.tool]]
 name = "send_email"
 parameters = { type = "object", properties = { to = { type = "string", description = "Recipient email address." }, subject = { type = "string", description = "Subject line." }, body = { type = "string", description = "Message body." } }, required = ["to", "subject", "body"], additionalProperties = false }
-requires = { trust = "internal", audience = { includes = ["$to"] }, effects = { has_no = ["release.sent"] } }
 effects = ["release.sent"]
 delta = {}
+[policy.tool.requires]
+trust = "internal"
+audience = { contains = ["$to"] }
+effects = { excludes = ["release.sent"] }
 
 # --- deployment coverage -----------------------------------------------------
 #

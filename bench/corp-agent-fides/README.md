@@ -50,15 +50,15 @@ demo's labels are the same design expressed in two vocabularies:
 | Concept | OpenAPPA (`bench/corp/policies/appa.toml`) | FIDES (this demo) |
 |---|---|---|
 | Taint axis | `trust`: `suspicious` → `internal` | `integrity`: `untrusted` → `trusted` |
-| Audience axis | `audience = { exactly = ["hr"] }` | `confidentiality`: `private` |
+| Audience axis | `audience = ["hr"]` | `confidentiality`: `private` |
 | Forum read | `delta = { trust = "suspicious" }` | result label `integrity=untrusted` |
-| HR read | `delta = { audience = exactly ["hr"] }` | result label `confidentiality=private` |
+| HR read | `delta = { audience = ["hr"] }` | result label `confidentiality=private` |
 | Finance read | restricted reader set | `integrity=trusted, confidentiality=private` |
 | Task/vendor read | `delta = {}` (unconstrained) | `integrity=trusted, confidentiality=public` |
 | The taint fold | monoid fold over the trajectory | `combine_labels` (untrusted & most-private win) |
-| The sink | `send_email` `requires { trust=internal, audience includes $to }` | `send_email` `accepts_untrusted=False`, `max_allowed_confidentiality=public` |
+| The sink | `send_email` `requires { trust=internal, audience contains $to }` | `send_email` `accepts_untrusted=False`, `max_allowed_confidentiality=public` |
 | The ticket | `create_task_tracker` `requires { trust=internal, prior egress }` | `create_task_tracker` `accepts_untrusted=False` (the prior egress has no image) |
-| The forum post | `create_public_forum` `requires { audience includes "public" }` | `create_public_forum` `max_allowed_confidentiality=public`, no integrity gate |
+| The forum post | `create_public_forum` `requires { audience contains "public" }` | `create_public_forum` `max_allowed_confidentiality=public`, no integrity gate |
 | Legal packet composite | finance read + recipient-targeted email in one tool | same pre-call gates; successful result `trusted/private` |
 | Reads in a tainted context | narrowing accepted via a remedy plan | `accepts_untrusted=True` (pure sources can't exfiltrate) |
 
@@ -146,7 +146,7 @@ binary over MCP (skipped, with a message, if no Rust toolchain is available).
 | `./scripts/injection-forum-fides.sh` | **The block**: planted thread → FIDES hides the forum text and refuses `send_email`; `data/email/` stays empty; audit log records it |
 | `./scripts/injection-forum-open.sh` | **The leak** (`--no-defense`): the same attack exfiltrates the HR record |
 | `./scripts/summarize-hr.sh` | Benign: HR reads are `private` but safe to read — the summary returns |
-| `./scripts/email-finance.sh` | Profile override: raise `send_email`'s cap to `private` for the sanctioned finance mail |
+| `./scripts/email-finance.sh` | Profile override: raise `send_email`'s ceiling to `private` for the sanctioned finance mail |
 | `./scripts/reset-email.sh` | Clear the `data/email/` sink |
 | `./scripts/chat.sh` | Interactive REPL |
 

@@ -7,18 +7,30 @@ version = 1
 [[policy.tool]]
 name = "Bash(command:cargo test)"
 requires = { trust = "trusted" }
-delta = { trust = "suspicious", audience = { exactly = ["claude-session"] } }
+
+[policy.tool.delta]
+trust = "suspicious"
+audience = ["claude-session"]
 
 [[policy.tool]]
 name = "Bash(command:git status --short)"
 requires = { trust = "trusted" }
-delta = { trust = "suspicious", audience = { exactly = ["claude-session"] } }
+
+[policy.tool.delta]
+trust = "suspicious"
+audience = ["claude-session"]
 
 # An obviously destructive command always requires fresh approval.
 [[policy.tool]]
 name = "Bash(command:rm -rf *)"
-requires = { trust = "trusted", attention = ["hitl"] }
-delta = { trust = "suspicious", audience = { exactly = ["claude-session"] } }
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["hitl"]
+
+[policy.tool.delta]
+trust = "suspicious"
+audience = ["claude-session"]
 
 # Everything not matched above asks one resolver whether approval is needed.
 [[policy.dynamic_resolver]]
@@ -33,7 +45,9 @@ requires = { trust = "trusted" }
 
 # Command text cannot prove that output is safe to release. Every Bash result
 # is suspicious and restricted to this local session.
-delta = { trust = "suspicious", audience = { exactly = ["claude-session"] } }
+[policy.tool.delta]
+trust = "suspicious"
+audience = ["claude-session"]
 
 # Read labels a path through a separate one-shot resolver. This example uses a
 # deliberately simple rule: a path beginning with `.` is Private.

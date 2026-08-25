@@ -27,7 +27,7 @@ trust_chain = ["suspicious", "vendor", "internal"]
 # default, spelled out because the boundary label is what forking preserves).
 [policy.boundary]
 trust = "internal"
-audience = { exactly = ["public"] }
+audience = ["public"]
 
 # Branching is an ordinary registered tool: the runtime checks this call like
 # any other, and releasing it is what opens a child trajectory. A child's
@@ -58,7 +58,7 @@ delta = { trust = "suspicious" }
 [[policy.tool]]
 name = "create_public_forum"
 parameters = { type = "object", properties = { file = { type = "string", description = "The file name to create, e.g. `TASK-103.md`." }, content = { type = "string", description = "The full contents to write." } }, required = ["file", "content"], additionalProperties = false }
-requires = { audience = { includes = ["public"] } }
+requires = { audience = { contains = ["public"] } }
 effects = ["egress"]
 delta = {}
 
@@ -67,12 +67,12 @@ delta = {}
 [[policy.tool]]
 name = "search_hr"
 parameters = { type = "object", properties = { query = { type = "string", description = "Keyword or phrase to match against file names and contents." } }, required = ["query"], additionalProperties = false }
-delta = { audience = { exactly = ["hr"] } }
+delta = { audience = ["hr"] }
 
 [[policy.tool]]
 name = "read_hr"
 parameters = { type = "object", properties = { file = { type = "string", description = "The exact file name to read, e.g. `alice-chen.md`." } }, required = ["file"], additionalProperties = false }
-delta = { audience = { exactly = ["hr"] } }
+delta = { audience = ["hr"] }
 
 [[policy.tool]]
 name = "create_hr"
@@ -83,7 +83,7 @@ delta = {}
 #
 # The audience is a reader set, so membership is stated by listing the members:
 # these two addresses are the finance readers, and `send_email`'s
-# `includes = ["$to"]` resolves `$to` to the literal recipient at dispatch. A
+# `contains = ["$to"]` resolves `$to` to the literal recipient at dispatch. A
 # trajectory that read finance therefore reaches `finance-lead@` and no one
 # else — the benign status mail passes, the same data to `all@` does not.
 #
@@ -100,12 +100,12 @@ delta = {}
 [[policy.tool]]
 name = "search_finance"
 parameters = { type = "object", properties = { query = { type = "string", description = "Keyword or phrase to match against file names and contents." } }, required = ["query"], additionalProperties = false }
-delta = { audience = { exactly = ["finance-lead@northwind.example", "ap@northwind.example"] } }
+delta = { audience = ["finance-lead@northwind.example", "ap@northwind.example"] }
 
 [[policy.tool]]
 name = "read_finance"
 parameters = { type = "object", properties = { file = { type = "string", description = "The exact file name to read, e.g. `alice-chen.md`." } }, required = ["file"], additionalProperties = false }
-delta = { audience = { exactly = ["finance-lead@northwind.example", "ap@northwind.example"] } }
+delta = { audience = ["finance-lead@northwind.example", "ap@northwind.example"] }
 
 [[policy.tool]]
 name = "create_finance"
@@ -152,18 +152,24 @@ delta = {}
 [[policy.tool]]
 name = "send_email"
 parameters = { type = "object", properties = { to = { type = "string", description = "Recipient email address." }, subject = { type = "string", description = "Subject line." }, body = { type = "string", description = "Message body." } }, required = ["to", "subject", "body"], additionalProperties = false }
-requires = { trust = "internal", audience = { includes = ["$to"] } }
 effects = ["egress"]
 delta = {}
+
+[policy.tool.requires]
+trust = "internal"
+audience = { contains = ["$to"] }
 
 # The composite reads finance before its email side effect. Its finance delta
 # therefore participates in the pre-dispatch recipient check.
 [[policy.tool]]
 name = "share_legal_packet"
 parameters = { type = "object", properties = { file = { type = "string", description = "The exact finance file name to share." }, to = { type = "string", description = "Recipient email address." } }, required = ["file", "to"], additionalProperties = false }
-requires = { trust = "internal", audience = { includes = ["$to"] } }
 effects = ["egress"]
-delta = { audience = { exactly = ["finance-lead@northwind.example", "ap@northwind.example"] } }
+delta = { audience = ["finance-lead@northwind.example", "ap@northwind.example"] }
+
+[policy.tool.requires]
+trust = "internal"
+audience = { contains = ["$to"] }
 
 # The one registered declassifier: the redaction service strips numeric
 # identifiers (SSNs, salaries, account digits) from an hr-audience derivation,
@@ -173,7 +179,9 @@ delta = { audience = { exactly = ["finance-lead@northwind.example", "ap@northwin
 [[policy.sanitizer]]
 name = "pii-redactor"
 on = ["tool_output"]
-mandate = { audience = { from = { includes = ["hr"] }, to = { exactly = ["public"] } } }
+
+[policy.sanitizer.permits]
+audience = { from = ["hr"], to = ["public"] }
 
 # --- deployment coverage -----------------------------------------------------
 #
