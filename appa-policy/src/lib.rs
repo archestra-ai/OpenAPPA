@@ -2049,4 +2049,73 @@ confined_results = ["read", "send"]
             );
         }
     }
+    #[test]
+    fn a_string_token_and_a_reader_list_are_different_audience_shapes() {
+        let base = "version = 1\n[[tool]]\nname = \"t\"\ndelta = {}\n";
+        let starting = |audience: &str| {
+            let policy = format!("{base}[deployment]\nstarting_label = {{ audience = {audience} }}\n");
+            Config::from_toml_str(&policy)
+                .expect("a public starting label loads")
+                .engine()
+                .profile()
+                .starting_label()
+                .clone()
+        };
+        assert_eq!(starting("\"public\""), starting("[\"public\"]"));
+
+        let delta = |audience: &str| {
+            let policy = format!(
+                "version = 1\n[[tool]]\nname = \"t\"\ndelta = {{ audience = {audience} }}\n\
+                 [deployment]\ndispatch = \"enforced\"\nconfined_results = [\"t\"]\n"
+            );
+            Config::from_toml_str(&policy)
+        };
+        let pending = delta("\"unknown\"").expect("the unknown token loads");
+        let tool = pending.registry().tool(&ToolName::new("t")).expect("t registers");
+        assert!(matches!(
+            tool.delta.as_ref().and_then(|d| d.audience.as_ref()),
+            Some(AudienceDelta::PendingCast)
+        ));
+        assert!(matches!(delta("[\"unknown\"]"), Err(ConfigError::BadAudience { .. })));
+        assert!(matches!(delta("[]"), Err(ConfigError::BadAudience { .. })));
+    }
+
+    #[test]
+    fn a_sanitizer_transition_and_a_component_tag_list_keep_every_member() {
+        let policy = "version = 1\n\
+             [membership]\nname = \"directory\"\n\
+             [[tool]]\nname = \"read\"\ntags = [\"hr\", \"crm\"]\ndelta = { audience = [\"alice\", \"bob\"] }\n\
+             [[sanitizer]]\nname = \"redact\"\non = [\"tool_output\"]\ntags = [\"hr\", \"crm\"]\n\
+             [sanitizer.permits]\naudience = { from = [\"alice\", \"@auditors\"], to = [\"alice\", \"@reviewers\"] }\n\
+             [[authority]]\nname = \"officer\"\ntags = [\"hr\", \"crm\"]\n\
+             [authority.permits]\naudience_missing = [\"alice\", \"bob\"]\n\
+             [deployment]\ndispatch = \"enforced\"\nconfined_results = [\"read\"]\n";
+        let config = Config::from_toml_str(policy).expect("lists of more than one member load");
+        let registry = config.registry();
+        let redact = registry
+            .sanitizer(&SanitizerName::new("redact"))
+            .expect("redact registers");
+        assert_eq!(redact.scope.tags.len(), 2);
+        match &redact.transition {
+            DeclaredTransition::Audience { from_includes, to } => {
+                let expected = |group: &str| {
+                    DeclaredAudience::declared([ReaderId::new("alice")], [GroupName::new(group)]).unwrap()
+                };
+                assert_eq!(from_includes, &expected("auditors"));
+                assert_eq!(to, &expected("reviewers"));
+            }
+            other => panic!("expected an audience transition, got {other:?}"),
+        }
+        let officer = registry
+            .authority(&AuthorityName::new("officer"))
+            .expect("officer registers");
+        assert_eq!(officer.scope.tags.len(), 2);
+        assert_eq!(
+            officer.mandate.reader_ceiling,
+            Some(DeclaredAudience::restricted([
+                ReaderId::new("alice"),
+                ReaderId::new("bob")
+            ]))
+        );
+    }
 }
