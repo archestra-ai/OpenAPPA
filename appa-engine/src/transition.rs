@@ -3389,6 +3389,10 @@ impl<'a> Sequence<'a> {
         let before_contract = registry
             .contract(predecessor)
             .ok_or_else(|| TransitionRefusal::UnknownTool(predecessor.tool().as_str().to_string()))?;
+        // A sanitizer rewrites arguments; the tool is never replaced.
+        if call.tool() != predecessor.tool() {
+            return Err(TransitionRefusal::ForgedLabel);
+        }
         if !registry.selection_matches(call) {
             return Err(TransitionRefusal::SanitizerUnapplicable);
         }

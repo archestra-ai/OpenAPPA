@@ -240,6 +240,9 @@ impl<'a> BlockContext<'a> {
             }
         }
         expansions = expansions.inheriting(&engine.recorded_expansions(&decided.resolutions));
+        // A candidate an input hop derived may stand under another contract than the proposal;
+        // the groups that contract reads were resolved by the hop.
+        expansions = expansions.inheriting(&engine.recorded_expansions(views.candidate_resolutions(subject)));
         expansions.require(contract.groups())?;
 
         let stage = views.call_stage(subject);

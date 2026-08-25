@@ -2324,7 +2324,7 @@ impl Engine {
         let standing: Vec<&ResolvedCall> = proposals
             .iter()
             .enumerate()
-            .map(|(position, call)| views.call_candidate(&subject_at(position)).unwrap_or(call))
+            .map(|(position, call)| views.standing_call(&subject_at(position)).unwrap_or(call))
             .collect();
         expansions.require(
             standing
@@ -11426,7 +11426,7 @@ mod tests {
         open_engine_at(
             RegistryConfig {
                 trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-                tools: vec![public, private],
+                tools: vec![public, private, plain_tool("note")],
                 authorities: vec![],
                 sanitizers: vec![
                     input_sanitizer("redact", &["internal"], &["internal", "partner"]),
@@ -11630,12 +11630,21 @@ mod tests {
         assert_eq!(e.validate_replay(&log), Ok(()));
 
         // Replay holds the record to the same rule: the pinned answer is about the rewritten call
-        // and nothing else, and the persisted contract is the one the arguments select.
+        // and nothing else, the persisted contract is the one the arguments select, and the tool
+        // is the one the sanitizer rewrote — another tool's open contract is no place to land.
         let derived_at = log
             .iter()
             .position(|fact| matches!(fact, Fact::CandidateDerived { .. }))
             .expect("the hop derived a candidate");
         for (forged_call, refusal) in [
+            (
+                ResolvedCall::new_keyed(
+                    ToolName::new("note"),
+                    crate::value::ToolContractId::new(0).unwrap(),
+                    released.call.canonical_arguments().clone(),
+                ),
+                TransitionRefusal::ForgedLabel,
+            ),
             (
                 released
                     .call

@@ -107,6 +107,9 @@ pub(crate) struct RecordedCandidate {
     /// the proposal's contract — the proposal is then the call consulted — or where the fold met
     /// no standing call to compare against.
     pub(crate) consulted: Option<ResolvedCall>,
+    /// The group resolutions the hop that derived this candidate consumed: what a later read of
+    /// the candidate under its own contract inherits, as it inherits an offer's.
+    pub(crate) resolutions: Vec<GroupResolution>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -585,6 +588,7 @@ impl Projection {
                     via,
                     derived,
                     lineage,
+                    resolutions,
                     ..
                 } => {
                     if let crate::basis::SubjectKey::Return(id) = subject
@@ -625,6 +629,7 @@ impl Projection {
                             derived: derived.clone(),
                             lineage: lineage.clone(),
                             consulted,
+                            resolutions: resolutions.clone(),
                         },
                     );
                 }
@@ -1363,6 +1368,16 @@ impl Views<'_> {
             .get(subject)
             .and_then(|held| held.consulted.as_ref())
             .or_else(|| self.proposed_call(subject))
+    }
+
+    /// The group resolutions the hop that derived this subject's candidate consumed; empty for a
+    /// subject no hop has touched.
+    pub(crate) fn candidate_resolutions(&self, subject: &SubjectKey) -> &[GroupResolution] {
+        self.projection
+            .candidates
+            .get(subject)
+            .map(|held| held.resolutions.as_slice())
+            .unwrap_or_default()
     }
 
     /// The call this subject stands on now: the candidate an input hop derived, or the proposal

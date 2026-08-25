@@ -1636,23 +1636,24 @@ impl RuntimeEngine {
         resolved: &ResolvedCall,
         evidence: &[ExternalEvidence],
     ) -> Result<(Vec<PinnedToolResolution>, Vec<PinnedMembership>), Resolution> {
-        let tools = self.tool_resolutions_for(view, trajectory, resolved, evidence);
-        let memberships = self.memberships_for(resolved, evidence);
+        let contract = self
+            .engine
+            .registry()
+            .contract(resolved)
+            .expect("a resolved call names its registered contract");
+        let tools = self.tool_resolutions_for(view, trajectory, contract, resolved, evidence);
+        let memberships = self.memberships_for(contract, resolved, evidence);
         match (tools, memberships) {
             (Ok(tool_pins), Ok(memberships)) => Ok((tool_pins, memberships)),
             (Err(Resolution::Feedback(text)), _) | (_, Err(Resolution::Feedback(text))) => {
                 Err(Resolution::Feedback(text))
             }
-            (tools, memberships) => Err(Resolution::Consult(
-                [tools.err(), memberships.map(|_| ()).err()]
-                    .into_iter()
-                    .flatten()
-                    .flat_map(|missing| match missing {
-                        Resolution::Consult(requests) => requests,
-                        Resolution::Feedback(_) => Vec::new(),
-                    })
-                    .collect(),
-            )),
+            (Err(Resolution::Consult(tools)), Err(Resolution::Consult(memberships))) => {
+                Err(Resolution::Consult([tools, memberships].concat()))
+            }
+            (Err(Resolution::Consult(requests)), Ok(_)) | (Ok(_), Err(Resolution::Consult(requests))) => {
+                Err(Resolution::Consult(requests))
+            }
         }
     }
 
@@ -1660,14 +1661,10 @@ impl RuntimeEngine {
         &self,
         view: &EngineView,
         trajectory: &TrajectoryId,
+        contract: &appa_engine::contract::ToolContract,
         resolved: &ResolvedCall,
         evidence: &[ExternalEvidence],
     ) -> Result<Vec<PinnedToolResolution>, Resolution> {
-        let contract = self
-            .engine
-            .registry()
-            .contract(resolved)
-            .expect("a resolved call names its registered contract");
         if contract.uses.is_empty() {
             return Ok(Vec::new());
         }
@@ -1974,12 +1971,10 @@ impl RuntimeEngine {
 
     fn memberships_for(
         &self,
+        contract: &appa_engine::contract::ToolContract,
         resolved: &ResolvedCall,
         evidence: &[ExternalEvidence],
     ) -> Result<Vec<PinnedMembership>, Resolution> {
-        let Some(contract) = self.engine.registry().contract(resolved) else {
-            return Ok(Vec::new());
-        };
         // Same fast path as the dynamic pass: no placeholder, nothing to read.
         if !contract.requires.label.audience.iter().any(|requirement| {
             matches!(
@@ -2911,31 +2906,37 @@ mod tests {
                     .as_bytes(),
             )
             .expect("the call resolves");
-        let (consulted_args, consulted_context) = match engine.tool_resolutions_for(&view, &trajectory, &call, &[]) {
-            Err(Resolution::Consult(requests)) => match requests.as_slice() {
-                [ExternalRequest::ToolResolution { uses, args, context }] => {
-                    assert_eq!(uses.resolver.as_str(), "classifier");
-                    // The resolver declares no inputs, so `args` is the complete call.
-                    assert_eq!(
-                        args,
-                        &serde_json::json!({
-                            "name": "lookup",
-                            "description": "Looks one record up.",
-                            "arguments": {"nested": {"id": 7}, "deep": true},
-                        })
-                    );
-                    assert_eq!(context.trust_ranks, ["suspicious", "trusted"]);
-                    assert_eq!(context.attention_marks, ["privacy-review"]);
-                    assert_eq!(context.static_attention, ["static-review"]);
-                    (
-                        appa_engine::contract::ResolverArgsDigest::of(&appa_engine::params::canonical_bytes(args)),
-                        context.clone(),
-                    )
-                }
-                other => panic!("expected one tool-resolution consult, got {other:?}"),
-            },
-            other => panic!("an unanswered tool resolver must consult, got {other:?}"),
-        };
+        let contract = engine
+            .engine
+            .registry()
+            .contract(&call)
+            .expect("the call names its contract");
+        let (consulted_args, consulted_context) =
+            match engine.tool_resolutions_for(&view, &trajectory, contract, &call, &[]) {
+                Err(Resolution::Consult(requests)) => match requests.as_slice() {
+                    [ExternalRequest::ToolResolution { uses, args, context }] => {
+                        assert_eq!(uses.resolver.as_str(), "classifier");
+                        // The resolver declares no inputs, so `args` is the complete call.
+                        assert_eq!(
+                            args,
+                            &serde_json::json!({
+                                "name": "lookup",
+                                "description": "Looks one record up.",
+                                "arguments": {"nested": {"id": 7}, "deep": true},
+                            })
+                        );
+                        assert_eq!(context.trust_ranks, ["suspicious", "trusted"]);
+                        assert_eq!(context.attention_marks, ["privacy-review"]);
+                        assert_eq!(context.static_attention, ["static-review"]);
+                        (
+                            appa_engine::contract::ResolverArgsDigest::of(&appa_engine::params::canonical_bytes(args)),
+                            context.clone(),
+                        )
+                    }
+                    other => panic!("expected one tool-resolution consult, got {other:?}"),
+                },
+                other => panic!("an unanswered tool resolver must consult, got {other:?}"),
+            };
 
         // An answer given under a different label context is not evidence for this call:
         // the binding consults again instead of replaying it.
@@ -2948,6 +2949,7 @@ mod tests {
             engine.tool_resolutions_for(
                 &view,
                 &trajectory,
+                contract,
                 &call,
                 &[ExternalEvidence::ToolResolution {
                     resolver: "classifier".to_string(),
@@ -2972,6 +2974,7 @@ mod tests {
             .tool_resolutions_for(
                 &view,
                 &trajectory,
+                contract,
                 &call,
                 &[ExternalEvidence::ToolResolution {
                     resolver: "classifier".to_string(),
@@ -3021,6 +3024,7 @@ mod tests {
             engine.tool_resolutions_for(
                 &view,
                 &trajectory,
+                contract,
                 &other_call,
                 &[ExternalEvidence::ToolResolution {
                     resolver: "classifier".to_string(),
