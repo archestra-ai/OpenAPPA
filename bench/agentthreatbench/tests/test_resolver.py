@@ -50,9 +50,7 @@ def test_resolver_matches_upstream_query_selection_and_exact_recipients() -> Non
     ],
 )
 def test_customer_resolver_rejects_queries_rejected_by_upstream_tool(query: str) -> None:
-    fixture = ResolverFixture(
-        [{"name": "Alice Smith", "id": "CX-1", "email": "alice@example.test"}]
-    )
+    fixture = ResolverFixture([{"name": "Alice Smith", "id": "CX-1", "email": "alice@example.test"}])
     try:
         assert fixture.resolve(customer_request(query)) == []
     finally:
