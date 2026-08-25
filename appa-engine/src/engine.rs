@@ -9295,6 +9295,7 @@ mod tests {
                 },
             },
             scope: crate::authority::Scope { tags },
+            hint: None,
         }
     }
 
@@ -10704,6 +10705,7 @@ mod tests {
                 },
             },
             scope: crate::authority::Scope::default(),
+            hint: None,
         };
         let cfg = RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
@@ -10807,6 +10809,7 @@ mod tests {
                 },
             },
             scope: crate::authority::Scope::default(),
+            hint: None,
         };
         let e = open_engine(RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
@@ -10951,6 +10954,7 @@ mod tests {
             scope: crate::authority::Scope {
                 tags: vec![crate::names::TagName::new("web")],
             },
+            hint: None,
         };
         let cfg = RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
@@ -14084,6 +14088,7 @@ mod tests {
                 },
             },
             scope: crate::authority::Scope::default(),
+            hint: None,
         }
     }
 
@@ -15718,6 +15723,7 @@ mod tests {
                 },
             },
             scope: crate::authority::Scope::default(),
+            hint: None,
         };
         let e = open_engine_returning(
             returning_registry(vec![lifting_sanitizer("quarantine")], vec![deaf, classifier_cast()]),
@@ -16222,6 +16228,7 @@ mod tests {
                     scope: crate::authority::Scope {
                         tags: vec![crate::names::TagName::new("files")],
                     },
+                    hint: None,
                 },
             ];
             let e = grouped_engine(cfg, &[], known(TRUSTED, Audience::Public));
@@ -16262,6 +16269,7 @@ mod tests {
                     audience: grouped(&[], &["team"]),
                 }),
                 scope: crate::authority::Scope::default(),
+                hint: None,
             }];
             let e = grouped_engine(cfg, &[], known(TRUSTED, Audience::Public));
             let log = vec![opened(&e)];
@@ -16921,6 +16929,7 @@ mod tests {
                     },
                 },
                 scope: crate::authority::Scope::default(),
+                hint: None,
             };
             let mut cfg = returning_with_directory(vec![], vec![classifier]);
             let fetch = cfg
@@ -16988,6 +16997,7 @@ mod tests {
                     audience: grouped(&[], &["team"]),
                 }),
                 scope: crate::authority::Scope::default(),
+                hint: None,
             };
             let e = open_engine_returning(
                 returning_with_directory(vec![lifting_sanitizer("quarantine")], vec![paranoid]),

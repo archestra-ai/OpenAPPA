@@ -782,6 +782,7 @@ impl Registry {
                     check_declared_readers(&constant.audience, || format!("cast {} constant", cast.name.as_str()))?;
                 }
             }
+            check_hint(cast.hint.as_ref(), || format!("cast {}", cast.name.as_str()))?;
             if casts.iter().any(|earlier| earlier.name == cast.name) {
                 return Err(LoadError::DuplicateCast(cast.name.as_str().to_string()));
             }
@@ -1316,6 +1317,7 @@ mod tests {
             name: CastName::new(name),
             resolution,
             scope: Scope::default(),
+            hint: None,
         };
         let mut may_cast = base();
         may_cast.casts = vec![cast(
@@ -1621,6 +1623,7 @@ mod tests {
             name: CastName::new(name),
             resolution: CastResolution::Constant(DeclaredLabel::literal(label)),
             scope,
+            hint: None,
         }
     }
 
@@ -1634,6 +1637,7 @@ mod tests {
                 },
             },
             scope,
+            hint: None,
         }
     }
 
@@ -1703,6 +1707,7 @@ mod tests {
                 name: CastName::new("fallback"),
                 resolution: grouped(Trust::new(0)),
                 scope: Scope::default(),
+                hint: None,
             },
             resolver_cast("classifier", vec![Trust::new(0)], Audience::Public, Scope::default()),
         ];
@@ -1716,6 +1721,7 @@ mod tests {
             name: CastName::new("mailroom"),
             resolution: grouped(Trust::new(0)),
             scope: scoped(&["mail"]),
+            hint: None,
         }];
         assert!(Registry::build_covered(cfg).is_ok());
 
@@ -1725,6 +1731,7 @@ mod tests {
             name: CastName::new("fallback"),
             resolution: grouped(Trust::new(0)),
             scope: Scope::default(),
+            hint: None,
         }];
         assert!(matches!(
             Registry::build_covered(cfg),
@@ -1863,6 +1870,7 @@ mod tests {
                 },
             },
             scope: Scope::default(),
+            hint: None,
         }];
         assert!(Registry::build_covered(cfg).is_ok());
     }
@@ -2387,6 +2395,7 @@ mod tests {
                 Audience::Public,
             ))),
             scope: Scope::default(),
+            hint: None,
         }];
         assert!(Registry::build_covered(cfg).is_ok());
     }

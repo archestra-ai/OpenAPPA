@@ -1268,6 +1268,7 @@ mod tests {
                 crate::label::EstablishedLabel::new(Trust::new(1), Audience::Public),
             )),
             scope: Scope::default(),
+            hint: None,
         }];
         let profile = covering_profile(&cfg);
         let unscoped = identity(&cfg, &ReturnPolicy::Raw, &profile);
@@ -1307,6 +1308,7 @@ mod tests {
                     crate::label::EstablishedLabel::new(Trust::new(0), Audience::Public),
                 )),
                 scope: Scope::default(),
+                hint: None,
             },
             crate::authority::Cast {
                 name: crate::names::CastName::new("yolo"),
@@ -1314,6 +1316,7 @@ mod tests {
                     crate::label::EstablishedLabel::new(Trust::new(1), Audience::Public),
                 )),
                 scope: Scope::default(),
+                hint: None,
             },
         ];
         let officer = |name: &str| Authority {

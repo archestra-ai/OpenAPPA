@@ -944,6 +944,8 @@ struct RawTrustTransition {
 #[serde(deny_unknown_fields)]
 struct RawCast {
     name: String,
+    #[serde(default)]
+    hint: Option<String>,
     constant: Option<RawConstantLabel>,
     resolver: Option<RawCastResolver>,
     #[serde(default)]
@@ -980,6 +982,7 @@ impl RawCast {
             name: CastName::new(self.name),
             resolution,
             scope,
+            hint: self.hint.map(Hint::new),
         })
     }
 }
@@ -1287,6 +1290,37 @@ confined_results = ["lookup"]
             }
             other => panic!("expected a resolver ceiling, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_cast_hint_registers_advisory_and_bounded() {
+        let with_hint = |hint: &str| {
+            format!(
+                "version = 1\n\
+                 [[tool]]\nname = \"fetch\"\ntags = [\"web\"]\n\
+                 [[cast]]\nname = \"content-classifier\"\nhint = \"{hint}\"\n\
+                 resolver = {{ may_cast = {{ trust = [\"suspicious\"], audience = [\"public\"] }} }}\n\
+                 tags = [\"web\"]\n"
+            )
+        };
+        let hinted = Config::from_toml_str(&with_hint("label fetched pages by their origin")).expect("loads");
+        let cast = hinted
+            .registry()
+            .cast(&CastName::new("content-classifier"))
+            .expect("content-classifier registers");
+        assert_eq!(
+            cast.hint.as_ref().map(Hint::as_str),
+            Some("label fetched pages by their origin")
+        );
+        let bare = with_hint("").replace("hint = \"\"\n", "");
+        assert_eq!(
+            hinted.engine().identity(),
+            Config::from_toml_str(&bare).expect("loads").engine().identity()
+        );
+        assert!(matches!(
+            Config::from_toml_str(&with_hint(&"x".repeat(appa_engine::registry::MAX_HINT_CHARS + 1))),
+            Err(ConfigError::Registry(LoadError::HintTooLong { .. }))
+        ));
     }
 
     #[test]

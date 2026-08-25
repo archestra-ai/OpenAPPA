@@ -613,6 +613,7 @@ mod tests {
             name: CastName::new("paranoid"),
             resolution: CastResolution::Constant(DeclaredLabel::literal(EstablishedLabel::new(SUSPICIOUS, internal()))),
             scope: Scope::default(),
+            hint: None,
         };
         let resolver_cast = Cast {
             name: CastName::new("classifier"),
@@ -626,6 +627,7 @@ mod tests {
                 },
             },
             scope: Scope::default(),
+            hint: None,
         };
         let scan = ToolContract {
             description: Some("A test tool.".to_string()),
@@ -942,6 +944,7 @@ mod tests {
             scope: Scope {
                 tags: vec![crate::names::TagName::new("web")],
             },
+            hint: None,
         };
         let fallback = Cast {
             name: CastName::new("fallback"),
@@ -950,6 +953,7 @@ mod tests {
                 Audience::Public,
             ))),
             scope: Scope::default(),
+            hint: None,
         };
         let reg = Registry::build_covered(RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
@@ -1256,6 +1260,7 @@ mod tests {
                 },
             },
             scope: Scope::default(),
+            hint: None,
         };
         let reg = Registry::build_covered(RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
