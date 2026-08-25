@@ -1,3 +1,6 @@
+mod common;
+use common::serve;
+
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -141,20 +144,9 @@ async fn refused_url() -> String {
     url
 }
 
-async fn stub(router: Router) -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("an ephemeral loopback port binds");
-    let addr = listener.local_addr().expect("the bound address is readable");
-    tokio::spawn(async move {
-        axum::serve(listener, router).await.expect("the stub serves");
-    });
-    format!("http://{addr}")
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn a_2xx_answer_passes_its_body_through_with_exit_0() {
-    let url = stub(Router::new().route("/hook", post(|| async { r#"{"decision":"block","reason":"denied"}"# }))).await;
+    let url = serve(Router::new().route("/hook", post(|| async { r#"{"decision":"block","reason":"denied"}"# }))).await;
     let command = shipped_command();
     let (code, stdout) = tokio::task::spawn_blocking(move || run_hook(&command, &url))
         .await
@@ -165,7 +157,7 @@ async fn a_2xx_answer_passes_its_body_through_with_exit_0() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_server_error_exits_2_instead_of_failing_open() {
-    let url = stub(Router::new().route(
+    let url = serve(Router::new().route(
         "/hook",
         post(|| async { (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom") }),
     ))

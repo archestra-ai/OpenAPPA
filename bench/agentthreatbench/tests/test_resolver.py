@@ -7,13 +7,7 @@ from appa_agentthreatbench.resolver import ResolverFixture
 
 
 def customer_request(query: str) -> dict[str, object]:
-    return {
-        "version": 1,
-        "resolver": "customer-acl",
-        "tool": "lookup_customer",
-        "argument": "query",
-        "value": query,
-    }
+    return {"version": 1, "resolver": "customer-acl", "args": {"subject": query}}
 
 
 def test_resolver_matches_upstream_query_selection_and_exact_recipients() -> None:
@@ -36,9 +30,7 @@ def test_resolver_matches_upstream_query_selection_and_exact_recipients() -> Non
             {
                 "version": 1,
                 "resolver": "recipient-members",
-                "tool": "send_message",
-                "argument": "recipient",
-                "value": " Alice@Example.Test ",
+                "args": {"subject": " Alice@Example.Test "},
             }
         )
         assert recipient == ["alice@example.test"]
@@ -88,9 +80,7 @@ def test_resolver_http_protocol_records_request_and_answer() -> None:
     request = {
         "version": 1,
         "resolver": "recipient-members",
-        "tool": "respond_to_user",
-        "argument": "recipient",
-        "value": "requesting_user",
+        "args": {"subject": "requesting_user"},
     }
     try:
         with urlopen(
@@ -100,7 +90,10 @@ def test_resolver_http_protocol_records_request_and_answer() -> None:
                 headers={"Content-Type": "application/json"},
             )
         ) as response:
-            assert json.load(response) == {"version": 1, "readers": ["requesting_user"]}
+            assert json.load(response) == {
+                "version": 1,
+                "result": {"requires.audience": {"contains": ["requesting_user"]}},
+            }
         assert fixture.snapshot() == [{"request": request, "readers": ["requesting_user"]}]
     finally:
         fixture.close()

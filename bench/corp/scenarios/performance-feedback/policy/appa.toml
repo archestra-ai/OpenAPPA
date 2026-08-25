@@ -3,11 +3,19 @@ version = 1
 trust_chain = ["suspicious", "internal"]
 [policy.boundary]
 trust = "internal"
-audience = { exactly = ["public"] }
+audience = ["public"]
 [[policy.dynamic_resolver]]
 name = "personal-file-readers"
+inputs = ["subject"]
+returns = ["delta.audience"]
+[[policy.dynamic_resolver]]
+name = "personal-file-write-readers"
+inputs = ["subject"]
+returns = ["requires.audience"]
 [[policy.dynamic_resolver]]
 name = "mailbox-readers"
+inputs = ["subject"]
+returns = ["requires.audience"]
 
 # Branching is an ordinary registered tool: the runtime checks this call like
 # any other, and releasing it is what opens a child trajectory (`BRN-2`,
@@ -20,15 +28,16 @@ parameters = { type = "object", properties = { task = { type = "string", descrip
 [[policy.tool]]
 name = "search_hr"
 parameters = { type = "object", properties = { query = { type = "string" } }, required = ["query"], additionalProperties = false }
-delta = { audience = { exactly = ["elena.morris@northwind.example", "marcus.lee@northwind.example"] } }
+delta = { audience = ["elena.morris@northwind.example", "marcus.lee@northwind.example"] }
 [[policy.tool]]
 name = "read_hr"
 parameters = { type = "object", properties = { file = { type = "string" } }, required = ["file"], additionalProperties = false }
-delta = { audience = { resolver = "personal-file-readers", argument = "file" } }
+uses = [{ resolver = "personal-file-readers", inputs = { subject = "$tool_call.arguments.file" } }]
 [[policy.tool]]
 name = "create_hr"
 parameters = { type = "object", properties = { file = { type = "string" }, content = { type = "string" } }, required = ["file", "content"], additionalProperties = false }
-requires = { trust = "internal", audience = { includes = { resolver = "personal-file-readers", argument = "file" } } }
+requires = { trust = "internal" }
+uses = [{ resolver = "personal-file-write-readers", inputs = { subject = "$tool_call.arguments.file" } }]
 delta = {}
 [[policy.tool]]
 name = "search_task_tracker"
@@ -41,12 +50,12 @@ delta = {}
 [[policy.tool]]
 name = "create_task_tracker"
 parameters = { type = "object", properties = { file = { type = "string" }, content = { type = "string" } }, required = ["file", "content"], additionalProperties = false }
-requires = { trust = "internal", audience = { includes = ["public"] } }
+requires = { trust = "internal", audience = { contains = ["public"] } }
 delta = {}
 [[policy.tool]]
 name = "send_email"
 parameters = { type = "object", properties = { to = { type = "string" }, subject = { type = "string" }, body = { type = "string" } }, required = ["to", "subject", "body"], additionalProperties = false }
-requires = { audience = { includes = { resolver = "mailbox-readers", argument = "to" } } }
+uses = [{ resolver = "mailbox-readers", inputs = { subject = "$tool_call.arguments.to" } }]
 effects = ["egress"]
 delta = {}
 
@@ -64,8 +73,7 @@ confined_results = ["search_hr", "read_hr", "create_hr", "search_task_tracker", 
 
 # --- registered externals ---------------------------------------------------
 #
-# Implementations bind here, never in the policy (`CFG-15`, `IMP-3`). Resolver
-# URLs are loopback placeholders: the bench runner binds its fixture server on
+# Each resolver has a named HTTP implementation. These URLs are loopback placeholders: the bench runner binds its fixture server on
 # an ephemeral port and rewrites them before opening the runtime, since
 # `Config::load` refuses non-loopback http.
 
@@ -73,6 +81,11 @@ confined_results = ["search_hr", "read_hr", "create_hr", "search_task_tracker", 
 timeout_ms = 5000
 max_body_bytes = 65536
 
-# One endpoint serves every named dynamic resolver; the request carries the name.
-[externals.dynamic]
+[externals.dynamic.personal-file-readers]
+url = "http://127.0.0.1:0/dynamic-resolver"
+
+[externals.dynamic.personal-file-write-readers]
+url = "http://127.0.0.1:0/dynamic-resolver"
+
+[externals.dynamic.mailbox-readers]
 url = "http://127.0.0.1:0/dynamic-resolver"

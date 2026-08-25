@@ -1,17 +1,13 @@
-use std::path::{Path, PathBuf};
+mod common;
+use common::repo_root;
+
+use std::path::Path;
 
 use appa_runtime::api::{AuditEvent, Runtime, TrajectoryId};
 use appa_runtime::config::Config;
 use appa_runtime::hooks;
 
 const SESSION: &str = "18ebc556-b78f-452b-99ec-487a4f40e824";
-
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("the runtime crate sits one level below the repo root")
-        .to_path_buf()
-}
 
 fn recorded() -> Vec<serde_json::Value> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hooks.jsonl");
@@ -147,7 +143,7 @@ async fn a_sanitized_return_replaces_the_subagents_message_in_the_agent_result()
 [[policy.sanitizer]]
 name = "redactor"
 on = ["tool_output"]
-mandate = { audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } } }
+permits = { audience = { from = ["internal"], to = ["public"] } }
 
 [policy.child]
 return_sanitizer = "redactor"

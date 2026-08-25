@@ -1,0 +1,153 @@
+# Included Slack battery for the claude.ai Slack connector.
+#
+# Plain rules only: one per tool, no argument patterns. Everything read
+# from Slack is private. Every write needs trusted data; one that shows
+# text to other people also needs a person's approval. The root config supplies
+# the `hitl` authority.
+#
+# A root rule placed above these can narrow any of them by argument.
+# Root rules run first. For example, to let replies inside a thread go
+# out without a question:
+#
+#   [[policy.tool]]
+#   name = "mcp__claude_ai_Slack__slack_send_message(thread_ts:*)"
+#   requires = { trust = "trusted" }
+#   delta = {}
+#
+# Or one channel, by its id:
+#
+#   [[policy.tool]]
+#   name = "mcp__claude_ai_Slack__slack_send_message(channel_id:C0ABC123)"
+#   requires = { trust = "trusted" }
+#   delta = {}
+
+[policy]
+version = 1
+
+# --- reads: private ---
+
+[[policy.tool]]
+name = "mcp__claude_ai_Slack__slack_read_channel"
+
+[policy.tool.delta]
+audience = ["private"]
+
+[[policy.tool]]
+name = "mcp__claude_ai_Slack__slack_read_thread"
+
+[policy.tool.delta]
+audience = ["private"]
+
+[[policy.tool]]
+name = "mcp__claude_ai_Slack__slack_read_canvas"
+
+[policy.tool.delta]
+audience = ["private"]
+
+[[policy.tool]]
+name = "mcp__claude_ai_Slack__slack_read_file"
+
+[policy.tool.delta]
+audience = ["private"]
+
+[[policy.tool]]
+name = "mcp__claude_ai_Slack__slack_read_user_profile"
+
+[policy.tool.delta]
+audience = ["private"]
+
+[[policy.tool]]
+name = "mcp__claude_ai_Slack__slack_list_channel_members"
+
+[policy.tool.delta]
+audience = ["private"]
+
+[[policy.tool]]
+name = "mcp__claude_ai_Slack__slack_get_reactions"
+
+[policy.tool.delta]
+audience = ["private"]
+
+[[policy.tool]]
+name = "mcp__claude_ai_Slack__slack_search_public"
+
+[policy.tool.delta]
+audience = ["private"]
+
+[[policy.tool]]
+name = "mcp__claude_ai_Slack__slack_search_public_and_private"
+
+[policy.tool.delta]
+audience = ["private"]
+
+[[policy.tool]]
+name = "mcp__claude_ai_Slack__slack_search_channels"
+
+[policy.tool.delta]
+audience = ["private"]
+
+[[policy.tool]]
+name = "mcp__claude_ai_Slack__slack_search_users"
+
+[policy.tool.delta]
+audience = ["private"]
+
+[[policy.tool]]
+name = "mcp__claude_ai_Slack__slack_search_emojis"
+
+[policy.tool.delta]
+audience = ["private"]
+
+# --- writes nobody else reads yet: trusted data, no approval ---
+
+[[policy.tool]]
+name = "mcp__claude_ai_Slack__slack_add_reaction"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "mcp__claude_ai_Slack__slack_send_message_draft"
+requires = { trust = "trusted" }
+delta = {}
+
+# --- writes other people read: trusted data, a person approves ---
+
+[[policy.tool]]
+name = "mcp__claude_ai_Slack__slack_send_message"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["hitl"]
+
+[[policy.tool]]
+name = "mcp__claude_ai_Slack__slack_schedule_message"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["hitl"]
+
+[[policy.tool]]
+name = "mcp__claude_ai_Slack__slack_create_canvas"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["hitl"]
+
+[[policy.tool]]
+name = "mcp__claude_ai_Slack__slack_update_canvas"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["hitl"]
+
+[[policy.tool]]
+name = "mcp__claude_ai_Slack__slack_create_conversation"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["hitl"]

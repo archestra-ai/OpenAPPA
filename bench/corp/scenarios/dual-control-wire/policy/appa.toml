@@ -3,7 +3,7 @@ version = 1
 trust_chain = ["suspicious", "internal"]
 [policy.boundary]
 trust = "internal"
-audience = { exactly = ["public"] }
+audience = ["public"]
 
 # Branching is an ordinary registered tool: the runtime checks this call like
 # any other, and releasing it is what opens a child trajectory (`BRN-2`,
@@ -24,7 +24,7 @@ delta = {}
 [[policy.tool]]
 name = "create_task_tracker"
 parameters = { type = "object", properties = { file = { type = "string", description = "The file name to create." }, content = { type = "string", description = "The full contents to write." } }, required = ["file", "content"], additionalProperties = false }
-requires = { trust = "internal", audience = { includes = ["public"] } }
+requires = { trust = "internal", audience = { contains = ["public"] } }
 delta = {}
 [[policy.tool]]
 name = "search_finance"
@@ -43,10 +43,9 @@ effects = ["wire.executed"]
 delta = {}
 [[policy.authority]]
 name = "secondary-wire-approver"
-[policy.authority.mandate]
-attends = ["secondary-approval"]
-[policy.authority.scope]
 tags = ["wire"]
+[policy.authority.permits]
+attention = ["secondary-approval"]
 
 # --- deployment coverage -----------------------------------------------------
 #

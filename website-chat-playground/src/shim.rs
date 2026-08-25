@@ -144,35 +144,37 @@ pub struct SanitizerInput {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct DynamicResolverRequest {
     version: u32,
     resolver: String,
-    tool: String,
-    argument: String,
-    value: String,
+    /// Exactly what the policy's `uses` entry selected. This directory declares one input,
+    /// `to`, so that is the only key it reads.
+    args: DynamicResolverArgs,
+}
+
+#[derive(Deserialize)]
+struct DynamicResolverArgs {
+    to: String,
 }
 
 async fn dynamic_resolver(
     axum::Json(request): axum::Json<DynamicResolverRequest>,
 ) -> (StatusCode, axum::Json<serde_json::Value>) {
-    if request.version != 1
-        || request.resolver != "email-recipient-readers"
-        || request.tool != "send_email"
-        || request.argument != "to"
-    {
+    if request.version != 1 || request.resolver != "email-recipient-readers" {
         return (StatusCode::NOT_FOUND, axum::Json(serde_json::json!({})));
     }
 
-    let readers = match request.value.as_str() {
+    let readers = match request.args.to.as_str() {
         "ap-review@corp.example" => vec!["cfo@corp.example", "ap-lead@corp.example"],
         "all@acme.com" => vec!["ceo@acme.com", "staff@acme.com"],
         recipient => vec![recipient],
     };
-    (
-        StatusCode::OK,
-        axum::Json(serde_json::json!({ "version": 1, "readers": readers })),
-    )
+    // The answer carries exactly the result this resolver declares.
+    let answer = serde_json::json!({
+        "version": 1,
+        "result": { "requires.audience": { "contains": readers } }
+    });
+    (StatusCode::OK, axum::Json(answer))
 }
 
 #[derive(Deserialize)]
@@ -453,25 +455,34 @@ mod tests {
         let resolve = |value: &str| DynamicResolverRequest {
             version: 1,
             resolver: "email-recipient-readers".to_string(),
-            tool: "send_email".to_string(),
-            argument: "to".to_string(),
-            value: value.to_string(),
+            args: DynamicResolverArgs { to: value.to_string() },
         };
 
         let (status, axum::Json(answer)) = dynamic_resolver(axum::Json(resolve("ap-review@corp.example"))).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
-            answer["readers"],
+            answer["result"]["requires.audience"]["contains"],
             serde_json::json!(["cfo@corp.example", "ap-lead@corp.example"])
+        );
+        assert_eq!(
+            answer["result"].as_object().map(|result| result.len()),
+            Some(1),
+            "the answer carries exactly the one result this resolver declares"
         );
 
         let (status, axum::Json(answer)) = dynamic_resolver(axum::Json(resolve("all@acme.com"))).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(answer["readers"], serde_json::json!(["ceo@acme.com", "staff@acme.com"]));
+        assert_eq!(
+            answer["result"]["requires.audience"]["contains"],
+            serde_json::json!(["ceo@acme.com", "staff@acme.com"])
+        );
 
         let (status, axum::Json(answer)) = dynamic_resolver(axum::Json(resolve("person@corp.example"))).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(answer["readers"], serde_json::json!(["person@corp.example"]));
+        assert_eq!(
+            answer["result"]["requires.audience"]["contains"],
+            serde_json::json!(["person@corp.example"])
+        );
     }
 
     #[tokio::test]
@@ -479,9 +490,9 @@ mod tests {
         let request = DynamicResolverRequest {
             version: 2,
             resolver: "email-recipient-readers".to_string(),
-            tool: "send_email".to_string(),
-            argument: "to".to_string(),
-            value: "ap-review@corp.example".to_string(),
+            args: DynamicResolverArgs {
+                to: "ap-review@corp.example".to_string(),
+            },
         };
         let (status, _) = dynamic_resolver(axum::Json(request)).await;
         assert_eq!(status, StatusCode::NOT_FOUND);

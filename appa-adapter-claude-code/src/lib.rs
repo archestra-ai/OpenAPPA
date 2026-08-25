@@ -342,7 +342,7 @@ fn render(event: &HookEvent, decision: &HookDecision) -> serde_json::Value {
         HookDecision::Ack => serde_json::json!({}),
         HookDecision::AllowCall { .. } => allow("appa: the call is released"),
         HookDecision::PassControl => allow("appa: the runtime's own control tool"),
-        HookDecision::DenyCall { feedback } => deny(feedback),
+        HookDecision::DenyCall { feedback, .. } => deny(feedback),
         HookDecision::Block { reason } => match replacement(event, &withheld(reason)) {
             Some(replacement) => replaced(replacement, Some(reason)),
             None => block(reason),
@@ -1001,6 +1001,7 @@ mod tests {
                 &event,
                 &HookDecision::DenyCall {
                     feedback: "blocked: the recipient cannot read this".to_string(),
+                    unestablished: Vec::new(),
                 }
             ),
             serde_json::json!({

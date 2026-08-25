@@ -1,0 +1,279 @@
+# GitHub battery: the GitHub MCP server's default toolsets.
+#
+# The default assumes public repositories. Issue, pull-request, and file
+# text is written by whoever pushed it, so every read enters at the low
+# rank of the trust chain, like a fetched web page. Every write publishes
+# to a place anyone can read, so it needs trusted data that may be seen
+# by everyone (audience contains `public`).
+#
+# For a private repository, add root rules that name it; root rules run
+# first. Its reads become private, and its writes accept private data.
+# A rule names one tool and matches one argument, so add one rule per
+# tool you use against that repository — here the issue tools:
+#
+#   [[policy.tool]]
+#   name = "mcp__github__issue_read(repo:my-private-repo)"
+#   delta = { trust = "suspicious", audience = ["private"] }
+#
+#   [[policy.tool]]
+#   name = "mcp__github__issue_write(repo:my-private-repo)"
+#   delta = {}
+#
+#   [policy.tool.requires]
+#   trust = "trusted"
+#   audience = { contains = ["private"] }
+#   #
+# To cover a whole organisation instead, match `owner:my-org`.
+
+[policy]
+version = 1
+
+# --- who am I: no outside content, nothing sent ---
+
+[[policy.tool]]
+name = "mcp__github__get_me"
+delta = {}
+
+[[policy.tool]]
+name = "mcp__github__get_teams"
+delta = {}
+
+[[policy.tool]]
+name = "mcp__github__get_team_members"
+delta = {}
+
+[[policy.tool]]
+name = "mcp__github__search_users"
+delta = {}
+
+# --- reads: content other people wrote ---
+
+[[policy.tool]]
+name = "mcp__github__search_repositories"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "mcp__github__get_file_contents"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "mcp__github__list_branches"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "mcp__github__list_commits"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "mcp__github__get_commit"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "mcp__github__search_code"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "mcp__github__search_commits"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "mcp__github__list_tags"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "mcp__github__get_tag"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "mcp__github__list_releases"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "mcp__github__get_latest_release"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "mcp__github__get_release_by_tag"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "mcp__github__list_repository_collaborators"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "mcp__github__list_issues"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "mcp__github__run_secret_scanning"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "mcp__github__search_issues"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "mcp__github__issue_read"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "mcp__github__get_label"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "mcp__github__list_issue_fields"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "mcp__github__list_issue_types"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "mcp__github__list_pull_requests"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "mcp__github__search_pull_requests"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "mcp__github__pull_request_read"
+delta = { trust = "suspicious" }
+
+# --- writes: the repository is assumed public, so only public data may go in ---
+
+[[policy.tool]]
+name = "mcp__github__create_repository"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["public"] }
+
+[[policy.tool]]
+name = "mcp__github__fork_repository"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["public"] }
+
+[[policy.tool]]
+name = "mcp__github__create_branch"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["public"] }
+
+[[policy.tool]]
+name = "mcp__github__create_or_update_file"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["public"] }
+
+[[policy.tool]]
+name = "mcp__github__push_files"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["public"] }
+
+[[policy.tool]]
+name = "mcp__github__delete_file"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["public"] }
+
+[[policy.tool]]
+name = "mcp__github__issue_write"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["public"] }
+
+[[policy.tool]]
+name = "mcp__github__sub_issue_write"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["public"] }
+
+[[policy.tool]]
+name = "mcp__github__add_issue_comment"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["public"] }
+
+[[policy.tool]]
+name = "mcp__github__create_pull_request"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["public"] }
+
+[[policy.tool]]
+name = "mcp__github__update_pull_request"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["public"] }
+
+[[policy.tool]]
+name = "mcp__github__update_pull_request_branch"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["public"] }
+
+[[policy.tool]]
+name = "mcp__github__merge_pull_request"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["public"] }
+
+[[policy.tool]]
+name = "mcp__github__pull_request_review_write"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["public"] }
+
+[[policy.tool]]
+name = "mcp__github__add_comment_to_pending_review"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["public"] }
+
+[[policy.tool]]
+name = "mcp__github__add_reply_to_pull_request_comment"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["public"] }
+
+[[policy.tool]]
+name = "mcp__github__request_copilot_review"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["public"] }

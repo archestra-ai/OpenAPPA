@@ -80,17 +80,37 @@ fn contract_description(contract: &ToolContract, chain: &TrustChain) -> String {
             match &delta.audience {
                 Some(AudienceDelta::Static(audience)) => clauses.push(format!("output audience={audience:?}")),
                 Some(AudienceDelta::PendingCast) => clauses.push("output audience=unknown".to_string()),
-                Some(AudienceDelta::Dynamic(binding)) => clauses.push(format!(
-                    "output audience=resolver:{}({})",
-                    binding.resolver.as_str(),
-                    binding.argument
-                )),
                 None => {}
             }
             if delta.is_none() {
                 clauses.push("output label is neutral".to_string());
             }
         }
+    }
+    for uses in &contract.uses {
+        let read = match uses.inputs.is_empty() {
+            true => "the complete call".to_string(),
+            false => {
+                let sources: Vec<String> = uses.inputs.values().map(|source| source.spelling()).collect();
+                sources.join(", ")
+            }
+        };
+        let returned: Vec<&str> = uses
+            .returns
+            .iter()
+            .map(|field| match field {
+                appa_engine::contract::ResolverReturn::Trust => "output trust",
+                appa_engine::contract::ResolverReturn::Audience => "output audience",
+                appa_engine::contract::ResolverReturn::RequiredTrust => "a required trust floor",
+                appa_engine::contract::ResolverReturn::RequiredAudience => "required recipients",
+                appa_engine::contract::ResolverReturn::Attention => "review marks",
+            })
+            .collect();
+        clauses.push(format!(
+            "resolver {} classifies {read} into {}",
+            uses.resolver.as_str(),
+            returned.join(", ")
+        ));
     }
     if let Some(trust) = contract.requires.label.trust_floor {
         clauses.push(format!(
@@ -133,7 +153,7 @@ trust_chain = ["suspicious", "internal"]
 [[tool]]
 name = "read_hr"
 parameters = { type = "object", properties = { file = { type = "string" } }, required = ["file"], additionalProperties = false }
-delta = { audience = { exactly = ["hr"] } }
+delta = { audience = ["hr"] }
 
 [[tool]]
 name = "fork"

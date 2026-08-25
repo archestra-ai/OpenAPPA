@@ -154,14 +154,12 @@ body_contains_any = ["4821", "185,000"]   # Trigger substrings (at least one mat
 | `sanitizer_answer` | No | Hosted sanitizer and the source-line markers it removes before returning a derivation. |
 
 #### Dynamic Resolver Configuration
-Dynamic resolver mocks specify mock responses for policy evaluation. A policy names its externals in `[externals]` on loopback port 0 — a loadable URL no listener can own. The runner replaces that origin with its fixture server's address once it binds, keeping the path, which is what the server routes on.
+Dynamic resolver mocks specify mock responses for policy evaluation. A request names its resolver and the exact `args` that resolver's declared inputs selected — never the tool — so `resolver` plus `args` is the whole key. A policy names its externals in `[externals]` on loopback port 0 — a loadable URL no listener can own. The runner replaces that origin with its fixture server's address once it binds, keeping the path, which is what the server routes on.
 
 ```toml
 [[dynamic_resolver_answer]]
 resolver = "document-acl"
-tool = "read_finance"
-argument = "file"
-value = "project-onyx-packet.md"
+args = { subject = "project-onyx-packet.md" }
 readers = ["cfo@northwind.example", "legal-lead@northwind.example"]
 ```
 
@@ -183,7 +181,7 @@ Scenario-specific tool requirements can be declared in `scenario.toml` to avoid 
 
 ```toml
 [policy.appa.requires]
-create_task_tracker = { trust = "internal", effects = { has = ["egress"] } }
+create_task_tracker = { trust = "internal", effects = { contains = ["egress"] } }
 ```
 
 ---

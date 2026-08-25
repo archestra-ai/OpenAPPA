@@ -93,13 +93,16 @@ what was recorded:
 sqlite3 appa.db "SELECT seq, facts FROM logs WHERE root = 'cc:<session-id>' ORDER BY seq;"
 ```
 
-The `appa-runtime status` and `audit` reads answer the same questions
-without SQL, and are the supported way to look.
+`GET /status?trajectory=cc:<session-id>` answers the same questions
+over HTTP without SQL, and is the supported way to look — it is what the
+statusline reads.
 
 ## Things to know
 
-- **A changed policy is a new deployment.** Edit `[policy]` and the
-  old database refuses to open; use a fresh `--db` path.
+- **A changed policy is a new deployment.** Edit `[policy]` and new
+  trajectories open under the edited one. Trajectories already open keep
+  running under the policy they opened with — the runtime recompiles it
+  from the copy stored in their log. The same `--db` path serves both.
 - **Stopping the process blocks protected sessions.** That is the design,
   not a fault. Uninstall the plugin if you want unprotected sessions back.
 - **This crate's `CLAUDE.md`** describes the layout: the process

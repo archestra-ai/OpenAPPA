@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::basis::SubjectKey;
 use crate::candidate::{DerivedCandidate, SanitizerLineage};
-use crate::contract::PinnedDynamicResolution;
+use crate::contract::PinnedToolResolution;
 use crate::fact::{
     BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ForkSnapshot, ObservedResult, ReturnPolicy,
 };
@@ -181,6 +181,9 @@ pub struct Projection {
     occurrences: BTreeMap<(TrajectoryId, CanonicalDigest), u32>,
     dispatch_calls: BTreeMap<DispatchId, ResolvedCall>,
     receiving_bounds: BTreeMap<DispatchId, EstablishedLabel>,
+    /// The narrowing accepted at the check of each dispatch released under an acceptance: the
+    /// one narrowing a pending-cast resolution on that dispatch need not be accepted again.
+    accepted_narrowings: BTreeMap<DispatchId, crate::check::Narrowing>,
     dispatch_resolutions: BTreeMap<DispatchId, Vec<GroupResolution>>,
     subject_dispatches: BTreeMap<crate::basis::SubjectKey, DispatchId>,
     observations: BTreeMap<DispatchId, ObservedResult>,
@@ -228,6 +231,7 @@ impl Projection {
             occurrences: BTreeMap::new(),
             dispatch_calls: BTreeMap::new(),
             receiving_bounds: BTreeMap::new(),
+            accepted_narrowings: BTreeMap::new(),
             dispatch_resolutions: BTreeMap::new(),
             subject_dispatches: BTreeMap::new(),
             observations: BTreeMap::new(),
@@ -313,6 +317,7 @@ impl Projection {
             occurrences,
             dispatch_calls,
             receiving_bounds,
+            accepted_narrowings,
             dispatch_resolutions,
             subject_dispatches,
             observations,
@@ -467,10 +472,11 @@ impl Projection {
                     trajectory,
                     dispatch,
                     tool,
+                    contract,
                     arguments,
                     receiving,
                     proposed_effects,
-                    dynamic_resolutions,
+                    tool_resolutions,
                     memberships,
                     subject,
                     resolutions,
@@ -478,8 +484,8 @@ impl Projection {
                 } => {
                     dispatch_calls.insert(
                         dispatch.clone(),
-                        ResolvedCall::new(tool.clone(), arguments.clone())
-                            .with_dynamic_resolutions(dynamic_resolutions.clone())
+                        ResolvedCall::new_keyed(tool.clone(), *contract, arguments.clone())
+                            .with_tool_resolutions(tool_resolutions.clone())
                             .with_memberships(memberships.clone()),
                     );
                     receiving_bounds.insert(dispatch.clone(), receiving.clone());
@@ -525,7 +531,12 @@ impl Projection {
                         v.label = resolved.clone().into_label();
                     }
                 }
-                Fact::Acceptance { .. } | Fact::Ruling { .. } | Fact::ChildReturnAcceptance { .. } => {}
+                Fact::Acceptance {
+                    dispatch, narrowing, ..
+                } => {
+                    accepted_narrowings.insert(dispatch.clone(), narrowing.clone());
+                }
+                Fact::Ruling { .. } | Fact::ChildReturnAcceptance { .. } => {}
                 Fact::Denial {
                     trajectory,
                     digest,
@@ -829,13 +840,13 @@ pub struct Views<'a> {
 }
 
 impl Views<'_> {
-    /// The dynamic answers a dispatch pinned, read off the canonical call the opening
+    /// The resolver answers a dispatch pinned, read off the canonical call the opening
     /// recorded — the one representation the validator held that record to.
-    pub(crate) fn dynamic_resolutions(&self, dispatch: &DispatchId) -> Option<&[PinnedDynamicResolution]> {
+    pub(crate) fn tool_resolutions(&self, dispatch: &DispatchId) -> Option<&[PinnedToolResolution]> {
         self.projection
             .dispatch_calls
             .get(dispatch)
-            .map(ResolvedCall::dynamic_resolutions)
+            .map(ResolvedCall::tool_resolutions)
     }
 
     pub(crate) fn trajectory(&self) -> &TrajectoryId {
@@ -864,7 +875,7 @@ impl Views<'_> {
 
     /// The canonical call a dispatch released. An outcome names its dispatch, and this
     /// is what the engine reports on — never a call the caller re-supplies.
-    pub(crate) fn dispatch_call(&self, dispatch: &DispatchId) -> Option<&ResolvedCall> {
+    pub fn dispatch_call(&self, dispatch: &DispatchId) -> Option<&ResolvedCall> {
         self.projection.dispatch_calls.get(dispatch)
     }
 
@@ -1281,6 +1292,37 @@ impl Views<'_> {
         }
     }
 
+    /// The call this subject was proposed as, before any input hop rewrote it. A resolver
+    /// answered about this call and is never asked again, so it is the second call a pinned
+    /// answer may be admitted for — see [`crate::check::validate_tool_resolutions`]. `None`
+    /// wherever the record does not name one, which fails the pin closed: a subject that is
+    /// not a call's, a batch this view's trajectory did not decide, or a position that batch
+    /// does not hold.
+    pub(crate) fn proposed_call(&self, subject: &SubjectKey) -> Option<&ResolvedCall> {
+        let SubjectKey::Call {
+            trajectory,
+            batch,
+            position,
+        } = subject
+        else {
+            return None;
+        };
+        if trajectory != self.trajectory() {
+            return None;
+        }
+        let decided = self.decided_batch(batch)?;
+        (&decided.trajectory == trajectory)
+            .then(|| decided.proposals.get(*position as usize))
+            .flatten()
+    }
+
+    /// The call this subject stands on now: the candidate an input hop derived, or the proposal
+    /// where no hop has run. The one home of that precedence — every read of "the call this
+    /// subject is about" goes through it.
+    pub(crate) fn standing_call(&self, subject: &SubjectKey) -> Option<&ResolvedCall> {
+        self.call_candidate(subject).or_else(|| self.proposed_call(subject))
+    }
+
     /// The sanitizers this subject's chain has already spent. Empty for a subject no
     /// hop has touched, so a first hop and an unspent chain read alike.
     pub(crate) fn lineage(&self, subject: &SubjectKey) -> SanitizerLineage {
@@ -1296,6 +1338,12 @@ impl Views<'_> {
     /// a race-dependent second acceptance when the live fold has moved since the opening.
     pub(crate) fn receiving_bound(&self, dispatch: &DispatchId) -> Option<&EstablishedLabel> {
         self.projection.receiving_bounds.get(dispatch)
+    }
+
+    /// The narrowing this dispatch was released under, where its check-time block was cleared
+    /// by an acceptance. `None` where the call narrowed nothing at its check.
+    pub(crate) fn accepted_narrowing(&self, dispatch: &DispatchId) -> Option<&crate::check::Narrowing> {
+        self.projection.accepted_narrowings.get(dispatch)
     }
 
     pub(crate) fn dispatch_resolutions(&self, dispatch: &DispatchId) -> Option<&[GroupResolution]> {
@@ -1349,6 +1397,73 @@ mod tests {
             trajectory: traj(t),
             value,
             provenance: Provenance::ToolResult { dispatch: dispatch(t) },
+        }
+    }
+
+    #[test]
+    fn a_proposal_is_read_back_only_for_the_position_its_own_trajectory_decided() {
+        let proposal = |body: &str| {
+            ResolvedCall::new(
+                ToolName::new("post"),
+                crate::params::test_arguments(&json!({ "body": body })),
+            )
+        };
+        let batch = crate::transition::ProposalBatchId::new("b1");
+        let mut log = vec![opened("a")];
+        log.extend(fork_pair("a", "b", ForkSnapshot::freeze(base(), [], [])));
+        log.push(Fact::ProposalBatchDecided {
+            trajectory: traj("a"),
+            batch: batch.clone(),
+            proposals: vec![proposal("first"), proposal("second")],
+            spawn: None,
+            released: vec![],
+            resolutions: vec![],
+        });
+        let projection = build(&log);
+        let subject = |trajectory: &str, position: u32| SubjectKey::Call {
+            trajectory: traj(trajectory),
+            batch: batch.clone(),
+            position,
+        };
+        let a = traj("a");
+        let views = projection.view(&a);
+
+        assert_eq!(views.proposed_call(&subject("a", 1)), Some(&proposal("second")));
+        assert_eq!(
+            views.proposed_call(&subject("a", 2)),
+            None,
+            "a position the batch does not hold"
+        );
+        assert_eq!(
+            views.proposed_call(&subject("b", 0)),
+            None,
+            "a subject of another trajectory, whatever batch it names"
+        );
+        assert_eq!(
+            projection.view(&traj("b")).proposed_call(&subject("b", 0)),
+            None,
+            "the batch belongs to trajectory a; b decided nothing"
+        );
+        assert_eq!(
+            views.proposed_call(&SubjectKey::Call {
+                trajectory: traj("a"),
+                batch: crate::transition::ProposalBatchId::new("unknown"),
+                position: 0,
+            }),
+            None
+        );
+        let block = crate::value::BlockId::of_proposal(
+            &crate::value::OfferNonce::new([7u8; 32]),
+            &traj("a"),
+            &batch,
+            0,
+            &proposal("first").digest(),
+        );
+        for other in [
+            SubjectKey::Approval(crate::value::OfferId::of_plan(&block, 0, b"plan")),
+            SubjectKey::ConfinedResult(dispatch("a")),
+        ] {
+            assert_eq!(views.proposed_call(&other), None, "a subject that is not a call's");
         }
     }
 
@@ -1442,11 +1557,12 @@ mod tests {
                 trajectory: traj("a"),
                 dispatch: dispatch("a"),
                 tool: ToolName::new("tool"),
+                contract: Default::default(),
                 arguments: crate::params::test_arguments(&json!({ "t": "a" })),
                 proposed_label: EstablishedLabel::top(),
                 receiving: EstablishedLabel::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
-                dynamic_resolutions: Vec::new(),
+                tool_resolutions: Vec::new(),
                 memberships: Vec::new(),
                 subject: crate::basis::fixture_subject(&traj("a")),
                 resolutions: vec![],
@@ -1472,11 +1588,12 @@ mod tests {
                 trajectory: traj("a"),
                 dispatch: dispatch("a"),
                 tool: ToolName::new("tool"),
+                contract: Default::default(),
                 arguments: crate::params::test_arguments(&json!({ "t": "a" })),
                 proposed_label: EstablishedLabel::top(),
                 receiving: EstablishedLabel::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
-                dynamic_resolutions: Vec::new(),
+                tool_resolutions: Vec::new(),
                 memberships: Vec::new(),
                 subject: crate::basis::fixture_subject(&traj("a")),
                 resolutions: vec![],
@@ -1501,11 +1618,12 @@ mod tests {
                 trajectory: traj("a"),
                 dispatch: dispatch("a"),
                 tool: ToolName::new("tool"),
+                contract: Default::default(),
                 arguments: crate::params::test_arguments(&json!({ "t": "a" })),
                 proposed_label: EstablishedLabel::top(),
                 receiving: EstablishedLabel::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
-                dynamic_resolutions: Vec::new(),
+                tool_resolutions: Vec::new(),
                 memberships: Vec::new(),
                 subject: crate::basis::fixture_subject(&traj("a")),
                 resolutions: vec![],
@@ -1894,11 +2012,12 @@ mod tests {
                 trajectory: traj("a"),
                 dispatch: dispatch("a"),
                 tool: ToolName::new("fetch_meeting"),
+                contract: Default::default(),
                 arguments: crate::params::test_arguments(&json!({ "t": "a" })),
                 proposed_label: EstablishedLabel::top(),
                 receiving: EstablishedLabel::top(),
                 proposed_effects: EffectSet::new([]).unwrap(),
-                dynamic_resolutions: Vec::new(),
+                tool_resolutions: Vec::new(),
                 memberships: Vec::new(),
                 subject: crate::basis::fixture_subject(&traj("a")),
                 resolutions: vec![],

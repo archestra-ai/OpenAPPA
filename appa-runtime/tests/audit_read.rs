@@ -1,3 +1,6 @@
+mod common;
+use common::raw;
+
 use std::sync::Arc;
 
 use appa_runtime::api::{AuditEntry, AuditEvent, AuditLabel, DispatchOutcome, OfferId, RemedyOutcome, Runtime};
@@ -13,13 +16,13 @@ trust_chain = ["suspicious", "internal"]
 
 [[policy.tool]]
 name = "publish"
-requires = { audience = { includes = ["public"] } }
+requires = { audience = { contains = ["public"] } }
 effects = ["egress"]
 delta = {}
 
 [[policy.tool]]
 name = "read_hr"
-delta = { audience = { exactly = ["hr"] } }
+delta = { audience = ["hr"] }
 
 [[policy.tool]]
 name = "delegate"
@@ -28,7 +31,7 @@ parameters = { type = "object", properties = { task = { type = "string" } } }
 [[policy.sanitizer]]
 name = "redactor"
 on = ["tool_output"]
-mandate = { audience = { from = { includes = ["hr"] }, to = { exactly = ["public"] } } }
+permits = { audience = { from = ["hr"], to = ["public"] } }
 
 [policy.deployment]
 context_control = true
@@ -41,10 +44,6 @@ max_body_bytes = 4096
 [externals.sanitizers.redactor]
 builtin = "redact-email"
 "#;
-
-fn raw(value: serde_json::Value) -> Box<serde_json::value::RawValue> {
-    serde_json::value::to_raw_value(&value).expect("the fixture serializes")
-}
 
 fn call(tool: &str) -> ProposedCall {
     ProposedCall {
@@ -166,7 +165,7 @@ fn opaque_offer_id(text: &str) -> Option<String> {
 
 fn feedback_of(decision: &HookDecision) -> String {
     match decision {
-        HookDecision::DenyCall { feedback } | HookDecision::Block { reason: feedback } => feedback.clone(),
+        HookDecision::DenyCall { feedback, .. } | HookDecision::Block { reason: feedback } => feedback.clone(),
         other => panic!("expected a refusal carrying feedback, got {other:?}"),
     }
 }
@@ -179,6 +178,8 @@ fn label(trust: &str, audience: &str) -> AuditLabel {
     AuditLabel {
         trust: trust.to_string(),
         audience: audience.to_string(),
+        unresolved_trust: Vec::new(),
+        unresolved_audience: Vec::new(),
     }
 }
 
@@ -343,7 +344,7 @@ delta = { trust = "suspicious" }
 [[policy.sanitizer]]
 name = "attest-schema"
 on = ["tool_output"]
-[policy.sanitizer.mandate]
+[policy.sanitizer.permits]
 trust = { from = "suspicious", to = "trusted" }
 
 [policy.child]

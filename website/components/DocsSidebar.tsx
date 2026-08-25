@@ -11,7 +11,7 @@ import type { TocItem } from "@/lib/docs";
 
 export interface SidebarCategory {
   name: string;
-  docs: { slug: string; title: string }[];
+  docs: { slug: string; title: string; proposal: boolean }[];
 }
 
 export const PLAYGROUND_HREF = "/playground";
@@ -87,6 +87,11 @@ export function DocsSidebar({
                     <li>
                       <Link href={href} aria-current={pathname === href ? "page" : undefined}>
                         {doc.title}
+                        {doc.proposal && (
+                          <span className="sidebar-proposal" aria-label="Proposal">
+                            🚧
+                          </span>
+                        )}
                       </Link>
                     </li>
                     {/* The playground sits with the pages that introduce the

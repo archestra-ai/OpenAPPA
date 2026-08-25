@@ -4,6 +4,8 @@ import path from "path";
 import GithubSlugger from "github-slugger";
 import matter from "gray-matter";
 
+import { PROPOSAL_CLOSE, PROPOSAL_OPEN, proposalSlug } from "@/lib/proposals";
+
 const DOCS_DIR = path.join(process.cwd(), "content", "docs");
 
 export interface DocFrontMatter {
@@ -20,12 +22,14 @@ export interface DocPage {
   order: number;
   description: string;
   content: string;
+  proposal: boolean;
 }
 
 export interface TocItem {
   id: string;
   text: string;
   level: 2 | 3;
+  proposal?: true;
 }
 
 export interface DocCategory {
@@ -46,6 +50,7 @@ export function getAllDocs(): DocPage[] {
       order: fm.order ?? 999,
       description: fm.description ?? "",
       content,
+      proposal: PROPOSAL_OPEN.test(content.trimStart().split("\n", 1)[0]),
     };
   });
   return docs.sort((a, b) => a.order - b.order || a.title.localeCompare(b.title));
@@ -72,12 +77,34 @@ export function generateTableOfContents(content: string): TocItem[] {
   const slugger = new GithubSlugger();
   const items: TocItem[] = [];
   let inCodeBlock = false;
+  let inProposal = false;
+  let inHeader = false;
   for (const line of content.split("\n")) {
     if (line.trimStart().startsWith("```")) {
       inCodeBlock = !inCodeBlock;
       continue;
     }
     if (inCodeBlock) continue;
+
+    /* A proposal contributes its own name and nothing else: the headings
+       inside it structure the proposal, not the page. */
+    if (inProposal) {
+      if (PROPOSAL_CLOSE.test(line)) inProposal = false;
+      else if (line.trim() === "") inHeader = false;
+      else if (inHeader) {
+        const name = /^name\s*:\s*(.+)$/.exec(line.trim());
+        if (name) {
+          items.push({ id: proposalSlug(name[1]), text: name[1].trim(), level: 3, proposal: true });
+        }
+      }
+      continue;
+    }
+    if (PROPOSAL_OPEN.test(line)) {
+      inProposal = true;
+      inHeader = true;
+      continue;
+    }
+
     const match = line.match(/^(#{2,3})\s+(.+)$/);
     if (!match) continue;
     const text = match[2].replace(/`/g, "").trim();

@@ -3,7 +3,7 @@ version = 1
 trust_chain = ["suspicious", "internal"]
 [policy.boundary]
 trust = "internal"
-audience = { exactly = ["public"] }
+audience = ["public"]
 [policy.child]
 return_sanitizer = "demographics-redactor"
 
@@ -18,26 +18,27 @@ parameters = { type = "object", properties = { task = { type = "string", descrip
 [[policy.tool]]
 name = "search_hr"
 parameters = { type = "object", properties = { query = { type = "string" } }, required = ["query"], additionalProperties = false }
-delta = { audience = { exactly = ["promotion-review-private"] } }
+delta = { audience = ["promotion-review-private"] }
 [[policy.tool]]
 name = "read_hr"
 parameters = { type = "object", properties = { file = { type = "string" } }, required = ["file"], additionalProperties = false }
-delta = { audience = { exactly = ["promotion-review-private"] } }
+delta = { audience = ["promotion-review-private"] }
 [[policy.tool]]
 name = "create_hr"
 parameters = { type = "object", properties = { file = { type = "string" }, content = { type = "string" } }, required = ["file", "content"], additionalProperties = false }
-requires = { trust = "internal", audience = { includes = ["promotion-review-private"] } }
+requires = { trust = "internal", audience = { contains = ["promotion-review-private"] } }
 delta = {}
 [[policy.tool]]
 name = "send_email"
 parameters = { type = "object", properties = { to = { type = "string" }, subject = { type = "string" }, body = { type = "string" } }, required = ["to", "subject", "body"], additionalProperties = false }
-requires = { audience = { includes = ["public"] } }
+requires = { audience = { contains = ["public"] } }
 effects = ["egress"]
 delta = {}
 [[policy.sanitizer]]
 name = "demographics-redactor"
 on = ["tool_output"]
-mandate = { audience = { from = { includes = ["promotion-review-private"] }, to = { exactly = ["public"] } } }
+[policy.sanitizer.permits]
+audience = { from = ["promotion-review-private"], to = ["public"] }
 
 # --- deployment coverage -----------------------------------------------------
 #

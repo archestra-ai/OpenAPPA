@@ -68,7 +68,7 @@ def test_python_native_session_resolves_dynamic_source_and_sink_audiences() -> N
         fixture.close()
 
     requests = fixture.snapshot()
-    assert [entry["request"]["value"] for entry in requests] in (
+    assert [entry["request"]["args"]["subject"] for entry in requests] in (
         ["Alice", "alice@example.test", "attacker@example.test"],
         ["Alice", "Alice", "alice@example.test", "attacker@example.test"],
     )
@@ -190,7 +190,7 @@ delta    = {}
 [[sanitizer]]
 name = "attest-schema"
 on   = ["tool_output"]
-[sanitizer.mandate]
+[sanitizer.permits]
 trust = { from = "suspicious", to = "attested" }
 
 [child]
@@ -278,3 +278,22 @@ def test_typed_child_rejects_invalid_returns_without_raw_fallback(invalid: dict[
         session.report("Response delivered", error=False)
     finally:
         session.close()
+
+
+def test_a_blocked_envelope_carries_the_values_no_cast_reaches() -> None:
+    from appa_agentthreatbench.native import Unestablished, _blocked
+
+    envelope = {
+        "kind": "blocked",
+        "feedback": "[appa] blocked",
+        "unestablished": [{"value": 3, "tool": "fetch", "dimensions": ["trust", "audience"]}],
+    }
+    blocked = _blocked(envelope, lambda _feedback: False)
+    assert blocked == Blocked("[appa] blocked", False, (Unestablished(3, "fetch", ("trust", "audience")),))
+
+    bare = _blocked({"kind": "blocked", "feedback": "[appa] blocked"}, lambda _feedback: True)
+    assert bare == Blocked("[appa] blocked", True)
+
+    malformed = {**envelope, "unestablished": [{"value": "3", "tool": None, "dimensions": ["trust"]}]}
+    assert _blocked(malformed, lambda _feedback: False) is None
+    assert _blocked({**envelope, "extra": 1}, lambda _feedback: False) is None

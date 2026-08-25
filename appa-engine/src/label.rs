@@ -58,15 +58,20 @@ impl Trust {
 
 /// A symbolic reader identity — an opaque atom to the pure algebra. The current dialect's
 /// restricted audiences are explicit id-lists (`public` is the one non-list state), so
-/// intersection/subset are exact. Two spellings are reserved — `public` and a leading `@` —
-/// which the algebra must never hold as a reader: a group is expanded to literal IDs by the
-/// membership resolver before a reader set is built. The constructor cannot enforce that, so the
+/// intersection/subset are exact. Three spellings are reserved — `public`, `unknown`, and a
+/// leading `@` — which the algebra must never hold as a reader: the first two are label states,
+/// and a group is expanded to literal IDs by the membership resolver before a reader set is
+/// built. The constructor cannot enforce that, so the
 /// rule is [`is_literal`](ReaderId::is_literal), applied on the ingresses that carry it:
 /// registry declarations at load, cast answers against their ceiling, dynamic resolver answers,
 /// and membership expansions. A `$recipient` argument never reaches the constructor with either
 /// spelling: the check reads `public` and `@group` as what they are first.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ReaderId(String);
+
+/// The spelling of the unestablished state on both dimensions. Reserved: it names neither a
+/// trust rank nor a reader.
+pub const UNKNOWN_STATE: &str = "unknown";
 
 impl ReaderId {
     pub fn new(id: impl Into<String>) -> Self {
@@ -77,11 +82,13 @@ impl ReaderId {
         &self.0
     }
 
-    /// A literal reader ID: `public` is a reserved audience state, never a
-    /// reader, and the `@` mark is reserved for group names, which only a membership resolver may
-    /// expand. A restricted cast resolution must hold literal IDs only.
+    /// A literal reader ID: `public` and `unknown` are reserved label states — the whole
+    /// audience, and a contribution not yet established — never readers, and the `@` mark is
+    /// reserved for group names, which only a membership resolver may expand. Every ingress
+    /// that builds a reader set applies this rule: a declared audience at load, a cast answer
+    /// against its ceiling, a dynamic resolver answer, and a membership expansion.
     pub fn is_literal(&self) -> bool {
-        self.0 != "public" && !self.0.starts_with('@')
+        self.0 != "public" && self.0 != UNKNOWN_STATE && !self.0.starts_with('@')
     }
 }
 

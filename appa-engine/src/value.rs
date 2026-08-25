@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::contract::{DynamicAudienceBinding, PinnedDynamicResolution, PinnedMembership};
+use crate::contract::{PinnedMembership, PinnedToolResolution};
 use crate::label::Label;
 use crate::params::CanonicalArguments;
 
@@ -85,12 +85,12 @@ impl CanonicalDigest {
         for call in calls {
             hasher.update([0u8]);
             hasher.update(call.digest().0);
-            for resolution in &call.dynamic_resolutions {
-                hasher.update(canonical_resolution(resolution));
+            for resolution in &call.tool_resolutions {
+                hasher.update(canonical_json(resolution));
             }
             hasher.update([1u8]);
             for membership in &call.memberships {
-                hasher.update(canonical_membership(membership));
+                hasher.update(canonical_json(membership));
             }
         }
         CanonicalDigest(hasher.finalize().into())
@@ -101,12 +101,8 @@ impl CanonicalDigest {
     }
 }
 
-fn canonical_resolution(resolution: &PinnedDynamicResolution) -> Vec<u8> {
-    serde_json_canonicalizer::to_vec(resolution).expect("a pinned resolution canonicalizes")
-}
-
-fn canonical_membership(membership: &PinnedMembership) -> Vec<u8> {
-    serde_json_canonicalizer::to_vec(membership).expect("a pinned membership canonicalizes")
+fn canonical_json<T: Serialize>(pinned: &T) -> Vec<u8> {
+    serde_json_canonicalizer::to_vec(pinned).expect("a pinned answer canonicalizes")
 }
 
 /// A digest of a raw tool result. Binds a cast resolution or a child-return derivation to the bytes it
@@ -277,10 +273,8 @@ impl OfferId {
             return Err(OfferIdParseError);
         }
         let mut out = [0u8; 32];
-        for (index, chunk) in bytes.chunks_exact(2).enumerate() {
-            let hi = hex_nibble(chunk[0])?;
-            let lo = hex_nibble(chunk[1])?;
-            out[index] = (hi << 4) | lo;
+        for (index, [high, low]) in bytes.as_chunks::<2>().0.iter().enumerate() {
+            out[index] = (hex_nibble(*high)? << 4) | hex_nibble(*low)?;
         }
         Ok(OfferId(out))
     }
@@ -432,11 +426,27 @@ impl LabeledValue {
     }
 }
 
+/// The ordinal of a checkable contract among contracts for the same harness tool.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ToolContractId(u32);
+
+impl ToolContractId {
+    pub(crate) fn new(ordinal: usize) -> Option<Self> {
+        ordinal.try_into().ok().map(ToolContractId)
+    }
+
+    pub(crate) fn ordinal(self) -> usize {
+        self.0 as usize
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ResolvedCall {
     tool: ToolName,
+    contract: ToolContractId,
     arguments: CanonicalArguments,
-    dynamic_resolutions: Vec<PinnedDynamicResolution>,
+    tool_resolutions: Vec<PinnedToolResolution>,
     memberships: Vec<PinnedMembership>,
 }
 
@@ -445,26 +455,28 @@ impl<'de> Deserialize<'de> for ResolvedCall {
         #[derive(Deserialize)]
         struct WireCall {
             tool: ToolName,
+            contract: ToolContractId,
             arguments: CanonicalArguments,
-            dynamic_resolutions: Vec<PinnedDynamicResolution>,
+            #[serde(default)]
+            tool_resolutions: Vec<PinnedToolResolution>,
             #[serde(default)]
             memberships: Vec<PinnedMembership>,
         }
 
         let wire = WireCall::deserialize(deserializer)?;
-        let pinned = wire.dynamic_resolutions.clone();
         let pinned_memberships = wire.memberships.clone();
-        let canonical = ResolvedCall::new(wire.tool, wire.arguments)
-            .with_dynamic_resolutions(wire.dynamic_resolutions)
+        let pinned_tool_resolutions = wire.tool_resolutions.clone();
+        let canonical = ResolvedCall::new_keyed(wire.tool, wire.contract, wire.arguments)
+            .with_tool_resolutions(wire.tool_resolutions)
             .with_memberships(wire.memberships);
-        if canonical.dynamic_resolutions != pinned {
-            return Err(serde::de::Error::custom(
-                "pinned dynamic answers are not in their canonical order",
-            ));
-        }
         if canonical.memberships != pinned_memberships {
             return Err(serde::de::Error::custom(
                 "pinned membership answers are not in their canonical order",
+            ));
+        }
+        if canonical.tool_resolutions != pinned_tool_resolutions {
+            return Err(serde::de::Error::custom(
+                "pinned tool resolutions are not in their canonical order",
             ));
         }
         Ok(canonical)
@@ -472,17 +484,27 @@ impl<'de> Deserialize<'de> for ResolvedCall {
 }
 
 impl ResolvedCall {
+    #[cfg(test)]
     pub(crate) fn new(tool: ToolName, arguments: CanonicalArguments) -> Self {
+        Self::new_keyed(tool, ToolContractId::default(), arguments)
+    }
+
+    pub(crate) fn new_keyed(tool: ToolName, contract: ToolContractId, arguments: CanonicalArguments) -> Self {
         ResolvedCall {
             tool,
+            contract,
             arguments,
-            dynamic_resolutions: Vec::new(),
+            tool_resolutions: Vec::new(),
             memberships: Vec::new(),
         }
     }
 
     pub fn tool(&self) -> &ToolName {
         &self.tool
+    }
+
+    pub fn contract_id(&self) -> ToolContractId {
+        self.contract
     }
 
     pub fn arguments(&self) -> &serde_json::Value {
@@ -493,26 +515,19 @@ impl ResolvedCall {
         &self.arguments
     }
 
-    /// Attach the dynamic answers pinned to this call. Canonical order only: a
+    /// Attach the resolver answers pinned to this call. Canonical order only: a
     /// duplicate binding is not merged here — the boundary refuses it
-    /// ([`crate::check::validate_dynamic_resolutions`]) — so the set the runtime handed over is
-    /// exactly the set the call carries, and which audience a flow targets never depends on the
+    /// ([`crate::check::validate_tool_resolutions`]) — so the set the runtime handed over is
+    /// exactly the set the call carries, and which label a flow commits never depends on the
     /// order two conflicting answers arrived in.
-    pub fn with_dynamic_resolutions(mut self, resolutions: Vec<PinnedDynamicResolution>) -> Self {
-        self.dynamic_resolutions = resolutions;
-        self.dynamic_resolutions.sort_by_cached_key(canonical_resolution);
+    pub fn with_tool_resolutions(mut self, resolutions: Vec<PinnedToolResolution>) -> Self {
+        self.tool_resolutions = resolutions;
+        self.tool_resolutions.sort_by_cached_key(canonical_json);
         self
     }
 
-    pub fn dynamic_resolutions(&self) -> &[PinnedDynamicResolution] {
-        &self.dynamic_resolutions
-    }
-
-    pub fn dynamic_resolution(&self, binding: &DynamicAudienceBinding) -> Option<&crate::label::Audience> {
-        self.dynamic_resolutions
-            .iter()
-            .find(|resolution| resolution.binding() == binding)
-            .map(PinnedDynamicResolution::audience)
+    pub fn tool_resolutions(&self) -> &[PinnedToolResolution] {
+        &self.tool_resolutions
     }
 
     /// Attach the membership answers pinned to this call. Canonical order only: a
@@ -521,7 +536,7 @@ impl ResolvedCall {
     /// the set the call carries.
     pub fn with_memberships(mut self, memberships: Vec<PinnedMembership>) -> Self {
         self.memberships = memberships;
-        self.memberships.sort_by_cached_key(canonical_membership);
+        self.memberships.sort_by_cached_key(canonical_json);
         self
     }
 
@@ -544,23 +559,26 @@ impl ResolvedCall {
     }
 
     /// The call a substitution of this one's arguments renders: the same callee, the
-    /// replacement arguments, and only those pinned answers the replacement leaves standing.
+    /// replacement arguments, the resolver answers this call carries, and only those membership
+    /// answers the replacement leaves standing.
+    ///
+    /// A resolver answers about the call the agent proposed, and a substitution is a registered
+    /// sanitizer's rewrite of that proposal, so the answers ride along here rather than being
+    /// dropped. Riding along is not standing: whether a carried answer is admissible on the
+    /// rewritten call is [`crate::check::validate_tool_resolutions`]'s to decide, against the
+    /// proposal on the record. The engine also refuses a rewrite that would select another ordered
+    /// contract. A membership answer expands the group one argument names, so it survives only
+    /// while that argument's value is unchanged.
     pub(crate) fn substituting(&self, arguments: CanonicalArguments) -> ResolvedCall {
         let unchanged = |argument: &str| arguments.value().get(argument) == self.arguments.value().get(argument);
-        let inherited = self
-            .dynamic_resolutions
-            .iter()
-            .filter(|resolution| unchanged(&resolution.binding().argument))
-            .cloned()
-            .collect();
         let memberships = self
             .memberships
             .iter()
             .filter(|membership| unchanged(membership.argument()))
             .cloned()
             .collect();
-        ResolvedCall::new(self.tool.clone(), arguments)
-            .with_dynamic_resolutions(inherited)
+        ResolvedCall::new_keyed(self.tool.clone(), self.contract, arguments)
+            .with_tool_resolutions(self.tool_resolutions.clone())
             .with_memberships(memberships)
     }
 }
@@ -612,39 +630,89 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_resolution_does_not_enter_the_call_digest() {
-        let binding = DynamicAudienceBinding {
-            resolver: crate::names::DynamicResolverName::new("directory"),
-            argument: "recipient".into(),
+    fn a_substitution_renders_every_resolver_answer_and_judges_none() {
+        let uses = crate::contract::ToolResolverUse {
+            resolver: crate::names::DynamicResolverName::new("classifier"),
+            inputs: std::collections::BTreeMap::new(),
+            returns: [crate::contract::ResolverReturn::Trust].into_iter().collect(),
         };
-        let base = call("send", json!({ "recipient": "room" }));
-        let resolved = base.clone().with_dynamic_resolutions(vec![
-            PinnedDynamicResolution::from_answer(
-                binding,
-                crate::label::Audience::restricted([crate::label::ReaderId::new("alice")]),
+        let contract = crate::contract::ToolContract {
+            name: ToolName::new("lookup"),
+            tags: vec![],
+            description: Some("Looks one thing up.".to_string()),
+            parameters: ToolParameters::open(),
+            uses: vec![uses.clone()],
+            delta: Some(crate::contract::Delta::NONE),
+            emits: Default::default(),
+            requires: Default::default(),
+        };
+        let base = call("lookup", json!({ "id": 7, "deep": true }));
+        let resolved = base.clone().with_tool_resolutions(vec![
+            PinnedToolResolution::from_answer(
+                uses.clone(),
+                contract.resolver_args_digest(&uses, base.canonical_arguments().value()),
+                Some(crate::label::Trust::new(0)),
+                None,
+                None,
+                None,
+                None,
             )
-            .expect("a literal reader set pins"),
+            .expect("the declared answer pins"),
         ]);
-        assert_eq!(base.digest(), resolved.digest());
+        assert_eq!(
+            base.digest(),
+            resolved.digest(),
+            "resolver evidence is not rendered-call identity"
+        );
+        // Whatever the rewrite touches, and whatever shape the use reads: the answers render onto
+        // the substituted call. Whether one of them stands is
+        // [`crate::check::validate_tool_resolutions`]'s, against the proposal on the record.
+        for replacement in [json!({ "deep": true, "id": 7 }), json!({ "id": 8, "deep": true })] {
+            assert_eq!(
+                resolved.substituting(args(replacement)).tool_resolutions(),
+                resolved.tool_resolutions()
+            );
+        }
+    }
+
+    #[test]
+    fn a_pin_free_batch_digest_is_stable_across_the_resolver_model() {
+        // Golden bytes: histories written before tool-level resolvers existed replay
+        // against this exact framing, so a pin-free batch's digest must never move.
+        let base = call("send", json!({ "to": "a" }));
+        let digest = CanonicalDigest::of_batch([&base], None);
+        let hex: String = digest.bytes().iter().map(|byte| format!("{byte:02x}")).collect();
+        assert_eq!(hex, "2ab7f6ab0653cb3d6dfdd732d2e48f7fb00376ab4196904c58c00ca6bd78a99d");
     }
 
     #[test]
     fn pinned_answers_are_a_set_whatever_order_they_arrive_in() {
         let answer = |resolver: &str, reader: &str| {
-            PinnedDynamicResolution::from_answer(
-                DynamicAudienceBinding {
+            PinnedToolResolution::from_answer(
+                crate::contract::ToolResolverUse {
                     resolver: crate::names::DynamicResolverName::new(resolver),
-                    argument: "recipient".into(),
+                    inputs: std::collections::BTreeMap::from([(
+                        "recipient".to_string(),
+                        crate::contract::ToolCallSource::argument("recipient").expect("a plain name is a source"),
+                    )]),
+                    returns: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
                 },
-                crate::label::Audience::restricted([crate::label::ReaderId::new(reader)]),
+                crate::contract::ResolverArgsDigest::of(b""),
+                None,
+                Some(crate::label::Audience::restricted([crate::label::ReaderId::new(
+                    reader,
+                )])),
+                None,
+                None,
+                None,
             )
             .expect("a literal reader set pins")
         };
         let base = call("send", json!({ "recipient": "room" }));
         let one = base
             .clone()
-            .with_dynamic_resolutions(vec![answer("directory", "alice"), answer("acl", "bob")]);
-        let other = base.with_dynamic_resolutions(vec![answer("acl", "bob"), answer("directory", "alice")]);
+            .with_tool_resolutions(vec![answer("directory", "alice"), answer("acl", "bob")]);
+        let other = base.with_tool_resolutions(vec![answer("acl", "bob"), answer("directory", "alice")]);
         assert_eq!(one, other);
         assert_eq!(
             CanonicalDigest::of_batch([&one], None),
@@ -655,17 +723,28 @@ mod tests {
     #[test]
     fn persisted_pinned_answers_refuse_a_non_canonical_spelling() {
         let answer = |resolver: &str| {
-            PinnedDynamicResolution::from_answer(
-                DynamicAudienceBinding {
+            PinnedToolResolution::from_answer(
+                crate::contract::ToolResolverUse {
                     resolver: crate::names::DynamicResolverName::new(resolver),
-                    argument: "recipient".into(),
+                    inputs: std::collections::BTreeMap::from([(
+                        "recipient".to_string(),
+                        crate::contract::ToolCallSource::argument("recipient").expect("a plain name is a source"),
+                    )]),
+                    returns: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
                 },
-                crate::label::Audience::restricted([crate::label::ReaderId::new("alice")]),
+                crate::contract::ResolverArgsDigest::of(b""),
+                None,
+                Some(crate::label::Audience::restricted([crate::label::ReaderId::new(
+                    "alice",
+                )])),
+                None,
+                None,
+                None,
             )
             .expect("a literal reader set pins")
         };
         let canonical = call("send", json!({ "recipient": "room" }))
-            .with_dynamic_resolutions(vec![answer("acl"), answer("directory")]);
+            .with_tool_resolutions(vec![answer("acl"), answer("directory")]);
         let wire = serde_json::to_value(&canonical).expect("a call serializes");
         assert_eq!(
             serde_json::from_value::<ResolvedCall>(wire.clone()).expect("the canonical form round-trips"),
@@ -673,17 +752,17 @@ mod tests {
         );
 
         let mut tampered = wire.clone();
-        tampered["dynamic_resolutions"] =
+        tampered["tool_resolutions"] =
             serde_json::to_value(vec![answer("directory"), answer("acl")]).expect("answers serialize");
         assert!(serde_json::from_value::<ResolvedCall>(tampered).is_err());
 
         let duplicated = vec![answer("acl"), answer("acl"), answer("directory")];
         let mut carried = wire;
-        carried["dynamic_resolutions"] = serde_json::to_value(&duplicated).expect("answers serialize");
+        carried["tool_resolutions"] = serde_json::to_value(&duplicated).expect("answers serialize");
         assert_eq!(
             serde_json::from_value::<ResolvedCall>(carried)
                 .expect("a canonically ordered duplicate is carried, not merged")
-                .dynamic_resolutions(),
+                .tool_resolutions(),
             duplicated.as_slice()
         );
     }

@@ -22,6 +22,11 @@ pub enum PolicyError {
          sanitizer could never derive anything"
     )]
     SanitizerWithoutHint { name: String },
+    #[error(
+        "dynamic resolver {name:?} declares a builtin: this playground answers every resolver \
+         through its own hosted directory, and a builtin would run on the demo host itself"
+    )]
+    BuiltinResolver { name: String },
 }
 
 #[derive(Debug)]
@@ -49,6 +54,14 @@ pub fn check_policy(policy: &str, enabled: &BTreeSet<System>) -> Result<CheckedP
         }
     }
 
+    // A visitor's policy never selects an implementation on this host: a builtin resolver
+    // would start a claude process under the demo service's own account.
+    if let Some((name, _)) = config.dynamic_resolver_builtins().next() {
+        return Err(PolicyError::BuiltinResolver {
+            name: name.as_str().to_string(),
+        });
+    }
+
     let tool_count = config.registry_config().tools.len();
     Ok(CheckedPolicy {
         config,
@@ -64,7 +77,7 @@ mod tests {
     use super::*;
 
     use appa_engine::authority::DeclaredTransition;
-    use appa_engine::contract::{AudienceDelta, AudienceRequirement, RecipientSpec};
+    use appa_engine::contract::AudienceDelta;
     use appa_engine::groups::DeclaredAudience;
     use appa_engine::label::ReaderId;
     use appa_engine::value::ToolName;
@@ -85,7 +98,8 @@ mod tests {
         let invoices = checked
             .config
             .registry()
-            .tool(&ToolName::new("list_invoices"))
+            .variants(&ToolName::new("list_invoices"))
+            .next()
             .expect("the finance system provides list_invoices");
         assert!(matches!(
             invoices.delta.as_ref().and_then(|delta| delta.audience.as_ref()),
@@ -98,12 +112,15 @@ mod tests {
         let email = checked
             .config
             .registry()
-            .tool(&ToolName::new("send_email"))
+            .variants(&ToolName::new("send_email"))
+            .next()
             .expect("the email system provides send_email");
         assert!(matches!(
-            email.requires.label.audience.as_slice(),
-            [AudienceRequirement::Includes(RecipientSpec::Dynamic(binding))]
-                if binding.resolver.as_str() == "email-recipient-readers" && binding.argument == "to"
+            email.uses.as_slice(),
+            [uses]
+                if uses.resolver.as_str() == "email-recipient-readers"
+                    && uses.inputs.get("to")
+                        == Some(&appa_engine::contract::ToolCallSource::argument("to").expect("a plain name is a source"))
         ));
         let sanitizers = &checked.config.registry_config().sanitizers;
         assert_eq!(sanitizers.len(), 2);
@@ -121,6 +138,25 @@ mod tests {
     }
 
     #[test]
+    fn a_builtin_resolver_declaration_is_refused() {
+        let policy = r#"
+version = 1
+[[dynamic_resolver]]
+name = "classify"
+builtin = "claude-code"
+returns = ["delta.trust"]
+[[tool]]
+name = "list_customers"
+description = "Lists the customer records."
+uses = [{ resolver = "classify" }]
+"#;
+        assert!(matches!(
+            check_policy(policy, &systems("crm")),
+            Err(PolicyError::BuiltinResolver { name }) if name == "classify"
+        ));
+    }
+
+    #[test]
     fn a_sanitizer_without_a_hint_is_refused() {
         let policy = r#"
 version = 1
@@ -128,7 +164,7 @@ version = 1
 [[sanitizer]]
 name = "digest"
 on = ["tool_output"]
-mandate.trust = { from = "suspicious", to = "trusted" }
+permits.trust = { from = "suspicious", to = "trusted" }
 "#;
         assert!(matches!(
             check_policy(policy, &systems("crm")),
@@ -174,7 +210,7 @@ delta = {}
 
 [[authority]]
 name = "release-desk"
-mandate = { can_cover_trust_to = "trusted" }
+permits = { trust_below = "trusted" }
 implementation = { resolver = { url = "http://10.0.0.1/exfil" } }
 "#,
                 systems("github"),
@@ -187,10 +223,12 @@ version = 1
 [[dynamic_resolver]]
 name = "directory"
 resolver = { url = "http://169.254.169.254/readers" }
+inputs = ["to"]
+returns = ["requires.audience"]
 
 [[tool]]
 name = "send_email"
-requires = { audience = { includes = { resolver = "directory", argument = "to" } } }
+uses = [{ resolver = "directory", inputs = { to = "$tool_call.arguments.to" } }]
 delta = {}
 "#,
                 systems("email"),
@@ -202,14 +240,14 @@ version = 1
 
 [[tool]]
 name = "list_customers"
-delta = { audience = { exactly = ["crm"] } }
+delta = { audience = ["crm"] }
 
 [[sanitizer]]
 name = "leaky"
 on = ["tool_output"]
 hint = "clean it"
 implementation = { resolver = { url = "http://internal.cluster.local/" } }
-mandate = { audience = { from = { includes = ["crm"] }, to = { exactly = ["public"] } } }
+permits = { audience = { from = ["crm"], to = ["public"] } }
 "#,
                 systems("crm"),
             ),

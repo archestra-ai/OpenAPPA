@@ -32,16 +32,16 @@ before any function body runs. Both are read off the tool declaration for
 internal write is as expressible as a constrained egress:
 
     requires.trust = "internal"            ->  accepts_untrusted=False
-    requires.audience.includes = ["public"] ->  max_allowed_confidentiality=public
+    requires.audience.contains = ["public"] ->  max_allowed_confidentiality=public
 
 The sibling policy constrains three tools, and all three transcribe:
 
-    send_email           trust=internal, audience includes $to
+    send_email           trust=internal, audience contains $to
                              -> accepts_untrusted=False, max_conf=public
     create_task_tracker  trust=internal, prior egress
                              -> accepts_untrusted=False   (the prior does not
                                 transcribe — see "Where the mapping stops")
-    create_public_forum  audience includes "public", no trust floor on purpose
+    create_public_forum  audience contains "public", no trust floor on purpose
                              -> accepts_untrusted=True, max_conf=public
 
 The finance+email composite ``share_legal_packet`` also carries both pre-call
@@ -68,17 +68,17 @@ off the tool definition (``_get_additional_properties(context.function)``) and
 is therefore constant per tool. Despite its name and its
 ``metadata={"user_id": ...}``, ``USER_IDENTITY`` is rung 2 rather than a
 principal: that metadata is never compared to anything, and the ceiling check
-never reads the call's arguments. Raising a sink's cap to ``user_identity``
-does not scope it to an identity — it makes the ceiling unsatisfiable and
+never reads the call's arguments. Raising a sink's ceiling to ``user_identity``
+does not restrict it to an identity — it makes the ceiling unsatisfiable and
 switches the gate off.
 
 APPA's audience is a reader *set*, folded by intersection, and the sink's
-requirement names the recipient: ``audience = { includes = ["$to"] }``
+requirement names the recipient: ``audience = { contains = ["$to"] }``
 resolves ``$to`` to the literal address at dispatch. A ceiling ranks
 sensitivity; a reader set answers "released to whom".
 
 The **hr** row still transcribes exactly, because its audience is one symbolic
-token: ``exactly = ["hr"]`` admits no address, so ``includes($to)`` degenerates
+token: ``audience = ["hr"]`` admits no address, so ``contains = ["$to"]`` degenerates
 there into "is this trajectory still ``Public``?" — which is precisely
 ``max_allowed_confidentiality=public``. Private-or-not is the whole question,
 and a ceiling can ask it.
@@ -128,8 +128,7 @@ but happens after the email side effect. Matching the reader-set policy would
 require splitting the read from the send or a recipient-aware gate.
 
 The second residual is **ordering**. ``create_task_tracker`` demands two things
-in the sibling policy — internal trust *and* a prior egress (``effects = { has =
-["egress"] }``: the change ticket follows the public acknowledgement it responds
+in the sibling policy — internal trust *and* a prior egress (``effects = { contains = ["egress"] }``: the change ticket follows the public acknowledgement it responds
 to). A FIDES context is a fold of two labels and carries no predicate over what
 the trajectory already did, so the trust half transcribes and the ordering half
 has no image at all. This arm therefore refuses a tainted ticket and permits an
@@ -271,7 +270,7 @@ def build_tools(
     #   accepts_untrusted=False          -> refuse a tainted (untrusted) context
     #   max_allowed_confidentiality=public -> refuse writing PRIVATE data outward
     # Together they are the FIDES analogue of APPA's
-    #   requires = { trust = "internal", audience = { includes = ["$to"] } }.
+    #   requires = { trust = "internal", audience = { contains = ["$to"] } }.
     add(
         "send_email",
         send_email,

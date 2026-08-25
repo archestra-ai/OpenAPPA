@@ -119,8 +119,8 @@ def bind_external_urls(policy_toml: str, origin: str) -> str:
     data = tomllib.loads(policy_toml)
     externals = data.get("externals", {})
     bound = 0
-    endpoints = [externals.get("dynamic")]
-    for kind in ("authorities", "sanitizers"):
+    endpoints = []
+    for kind in ("authorities", "sanitizers", "dynamic"):
         endpoints.extend(externals.get(kind, {}).values())
     for endpoint in endpoints:
         if not isinstance(endpoint, dict):

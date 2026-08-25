@@ -33,7 +33,7 @@ from . import AGENT_PROMPT_PROFILES
 from .agents import Agent, PolicyTarget, command_for
 from .checks import CheckResult, evaluate_check, parse_emails
 from .policy import apply_tool_requires, bind_external_urls, prune_policy
-from .scenario import AuthorityAnswer, DynamicResolverAnswer, SanitizerAnswer, Scenario
+from .scenario import AuthorityAnswer, DynamicResolverAnswer, SanitizerAnswer, Scenario, canonical_args
 
 # Best-effort stderr diagnostics (never score inputs): the APPA hook's
 # mediation log lines, the FIDES audit log's BLOCKED lines, and executed
@@ -135,7 +135,9 @@ def _serve_external_fixtures(
         yield None
         return
 
-    dynamic_by_request = {answer.request_key: answer.readers for answer in dynamic_answers}
+    # Each answer carries the result its scenario's policy declares for that resolver, read at
+    # scenario load — the fixture keeps no second copy of the contract.
+    dynamic_by_request = {answer.request_key: (answer.result, answer.readers) for answer in dynamic_answers}
     authority_by_request = {
         (answer.authority, answer.tool): answer.ruling for answer in authority_answers
     }
@@ -159,15 +161,14 @@ def _serve_external_fixtures(
             if isinstance(request, dict) and self.path == "/dynamic-resolver":
                 kind = "dynamic_resolver"
                 name = str(request.get("resolver", ""))
-                key = (
-                    request.get("resolver"),
-                    request.get("tool"),
-                    request.get("argument"),
-                    request.get("value"),
-                )
-                readers = dynamic_by_request.get(key) if request.get("version") == 1 else None
-                if readers is not None:
-                    response = {"version": 1, "readers": list(readers)}
+                # The request carries no tool name: the resolver and the exact `args` it was
+                # sent are the whole key.
+                key = (request.get("resolver"), canonical_args(request.get("args")))
+                answer = dynamic_by_request.get(key) if request.get("version") == 1 else None
+                if answer is not None:
+                    result_name, readers = answer
+                    value: object = list(readers) if result_name == "delta.audience" else {"contains": list(readers)}
+                    response = {"version": 1, "result": {result_name: value}}
             elif isinstance(request, dict) and self.path.startswith("/authority/"):
                 kind = "authority"
                 name = self.path.removeprefix("/authority/")

@@ -32,7 +32,7 @@ sha2 = "0.10"
 thiserror = "2"
 toml = "0.8"
 tracing = "0.1"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time", "macros", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time", "macros", "sync", "process"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 axum = { version = "0.8", default-features = false, features = ["json", "tokio", "http1"] }
 tokio-util = { version = "0.7", default-features = false }

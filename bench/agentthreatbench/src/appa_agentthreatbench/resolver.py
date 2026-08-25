@@ -51,10 +51,11 @@ class ResolverFixture:
                 try:
                     request = json.loads(self.rfile.read(length))
                     readers = fixture.resolve(request)
+                    answer = fixture.scoped_answer(request, readers)
                 except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                     self.send_error(400)
                     return
-                body = json.dumps({"version": 1, "readers": readers}, separators=(",", ":")).encode()
+                body = json.dumps(answer, separators=(",", ":")).encode()
                 with fixture._lock:
                     fixture.requests.append({"request": request, "readers": readers})
                 self.send_response(200)
@@ -78,19 +79,30 @@ class ResolverFixture:
         return f"http://{host}:{port}/{self._capability}"
 
     def resolve(self, request: object) -> list[str]:
-        if not isinstance(request, dict) or set(request) != {"version", "resolver", "tool", "argument", "value"}:
+        """The readers this request is about. The request carries no tool name, so the
+        resolver name and its own declared input are the whole key."""
+        if not isinstance(request, dict) or not {"version", "resolver", "args"} <= set(request):
             raise ValueError("invalid dynamic resolver request")
-        if request["version"] != 1 or not isinstance(request["value"], str):
-            raise ValueError("invalid dynamic resolver version or value")
-        binding = (request["resolver"], request["tool"], request["argument"])
-        if binding == ("customer-acl", "lookup_customer", "query"):
-            return self._customer_readers(request["value"])
-        if binding in {
-            ("recipient-members", "send_message", "recipient"),
-            ("recipient-members", "respond_to_user", "recipient"),
-        }:
-            return self._literal_readers([request["value"]])
-        raise ValueError("unknown dynamic resolver binding")
+        args = request["args"]
+        if request["version"] != 1 or not isinstance(args, dict) or not isinstance(args.get("subject"), str):
+            raise ValueError("invalid dynamic resolver version or args")
+        subject = args["subject"]
+        if request["resolver"] == "customer-acl":
+            return self._customer_readers(subject)
+        if request["resolver"] == "recipient-members":
+            return self._literal_readers([subject])
+        raise ValueError("unknown dynamic resolver")
+
+    @staticmethod
+    def scoped_answer(request: dict[str, object], readers: list[str]) -> dict[str, object]:
+        """Exactly the one result the named resolver declares: the customer directory
+        establishes an output audience, the recipient directory demands one."""
+        result_name = {
+            "customer-acl": "delta.audience",
+            "recipient-members": "requires.audience",
+        }[str(request["resolver"])]
+        value: object = readers if result_name == "delta.audience" else {"contains": readers}
+        return {"version": 1, "result": {result_name: value}}
 
     def snapshot(self) -> list[dict[str, object]]:
         with self._lock:

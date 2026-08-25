@@ -1,7 +1,7 @@
 ---
 title: Advisory Board
-category: Get started
-order: 4
+category: Other
+order: 11
 description: Engineers from different companies, reviewing OpenAPPA as it takes shape.
 ---
 

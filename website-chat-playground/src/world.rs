@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use appa_runtime::config::{Endpoint, Externals, Implementation};
+use appa_runtime::config::{DynamicImplementation, Endpoint, Externals, Implementation};
 
 use crate::systems::System;
 
@@ -160,14 +160,24 @@ pub fn externals_for(policy: &appa_policy::Config, base: &str) -> Externals {
         // The playground serves no classifier route, so a resolver-backed cast stays
         // unbound and refuses the policy at open. Constant casts need no binding.
         casts: std::collections::BTreeMap::new(),
-        dynamic: Some(Endpoint {
-            url: format!("{base}{DYNAMIC_RESOLVER_PATH}"),
-            token: None,
-        }),
+        // The playground routes every named resolver to the same handler.
+        dynamic: policy
+            .dynamic_resolver_names()
+            .map(|name| {
+                (
+                    name.as_str().to_string(),
+                    DynamicImplementation::Resolver(Endpoint {
+                        url: format!("{base}{DYNAMIC_RESOLVER_PATH}"),
+                        token: None,
+                    }),
+                )
+            })
+            .collect(),
         membership: Some(Endpoint {
             url: format!("{base}{MEMBERSHIP_PATH}"),
             token: None,
         }),
+        claude_code: Default::default(),
     }
 }
 
@@ -211,7 +221,7 @@ mod tests {
 version = 1
 [[tool]]
 name  = "list_customers"
-delta = { audience = { exactly = ["crm"] } }
+delta = { audience = ["crm"] }
 "#,
             &systems("crm"),
         )
@@ -223,7 +233,7 @@ delta = { audience = { exactly = ["crm"] } }
             .iter()
             .find(|tool| tool["name"].as_str() == Some("list_customers"))
             .unwrap();
-        assert!(contract["delta"]["audience"].get("exactly").is_some(), "terms survive");
+        assert!(contract["delta"]["audience"].as_array().is_some(), "terms survive");
         assert!(contract.get("parameters").is_some(), "schema injected");
         assert_eq!(merged.defaulted, vec!["create_customer_data"]);
     }

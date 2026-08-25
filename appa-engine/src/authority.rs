@@ -88,8 +88,8 @@ impl Scope {
     ) -> Option<bool> {
         Some(match views.value_provenance(value)? {
             crate::value::Provenance::ToolResult { dispatch } => {
-                let tool = views.dispatch_tool(dispatch)?;
-                self.covers(&registry.tool(tool)?.tags)
+                let call = views.dispatch_call(dispatch)?;
+                self.covers(&registry.contract(call)?.tags)
             }
             crate::value::Provenance::ProviderRun { tool, .. } => {
                 self.covers(&registry.provider_run_contract(tool)?.tags)
@@ -552,7 +552,12 @@ mod tests {
     #[test]
     fn a_resolution_must_hold_literal_reader_ids() {
         let wide = resolver(&[0], Audience::Public);
-        for bad in [readers(&["@hr"]), readers(&["public"]), readers(&["ap@corp", "@hr"])] {
+        for bad in [
+            readers(&["@hr"]),
+            readers(&["public"]),
+            readers(&["unknown"]),
+            readers(&["ap@corp", "@hr"]),
+        ] {
             assert_eq!(
                 wide.validate(&both_unknown(), &answer(0, bad), &Expansions::default()),
                 Err(CastRefusal::NonLiteralReader)

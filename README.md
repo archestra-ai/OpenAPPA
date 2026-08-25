@@ -68,13 +68,18 @@ fastest way to watch a policy make a decision on real work:
 ```sh
 claude plugin marketplace add archestra-ai/OpenAPPA &&
   claude plugin install appa-runtime@appa &&
-  claude "set up APPA"
+  claude /appa-setup
 ```
 
 This installs a `clappa` command that runs Claude Code protected by OpenAPPA;
 plain `claude` sessions stay untouched. Run `/appa-tool-sync` in a plain
 `claude` session to bring your MCP servers into the policy, then start `clappa`
 to try the protected flow.
+
+Setup asks once whether it may count the install — version, OS and architecture,
+nothing that identifies you or your machine. Decline, or say nothing, and it
+sends nothing; `APPA_TELEMETRY=0` refuses it without being asked. The runtime
+never reports anything.
 
 ![A protected Claude Code session refuses to post content from a private meeting recording to a public GitHub repo, and explains why](website/public/images/claude-code-blocked-flow.png)
 

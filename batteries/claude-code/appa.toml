@@ -1,0 +1,76 @@
+# Included Claude Code battery: first matching Bash contract wins.
+
+[policy]
+version = 1
+
+# Exact everyday commands run without a question.
+[[policy.tool]]
+name = "Bash(command:cargo test)"
+requires = { trust = "trusted" }
+
+[policy.tool.delta]
+trust = "suspicious"
+audience = ["private"]
+
+[[policy.tool]]
+name = "Bash(command:cargo check)"
+requires = { trust = "trusted" }
+
+[policy.tool.delta]
+trust = "suspicious"
+audience = ["private"]
+
+[[policy.tool]]
+name = "Bash(command:cargo fmt --check)"
+requires = { trust = "trusted" }
+
+[policy.tool.delta]
+trust = "suspicious"
+audience = ["private"]
+
+[[policy.tool]]
+name = "Bash(command:git status --short)"
+requires = { trust = "trusted" }
+
+[policy.tool.delta]
+trust = "suspicious"
+audience = ["private"]
+
+[[policy.tool]]
+name = "Bash(command:git diff --check)"
+requires = { trust = "trusted" }
+
+[policy.tool.delta]
+trust = "suspicious"
+audience = ["private"]
+
+# Every other command needs a person to approve it.
+[[policy.tool]]
+name = "Bash"
+description = "Runs one shell command and returns its output."
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["hitl"]
+
+# Command text cannot prove that output is safe to release. Every Bash result
+# is suspicious and private.
+[policy.tool.delta]
+trust = "suspicious"
+audience = ["private"]
+
+# Read labels a path through a one-shot resolver. This example uses a
+# deliberately simple rule: a file whose name begins with `.` is private.
+[[policy.dynamic_resolver]]
+name = "claude-code.read-sensitivity"
+returns = ["delta.audience"]
+
+[[policy.tool]]
+name = "Read"
+description = "Reads a file and returns its contents."
+uses = [{ resolver = "claude-code.read-sensitivity" }]
+delta = { trust = "suspicious" }
+
+# The path is relative to this battery configuration.
+[externals.dynamic."claude-code.read-sensitivity"]
+command = ["python3", "./read-sensitivity.py"]

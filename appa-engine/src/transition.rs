@@ -74,10 +74,10 @@ pub struct ProposalBatch {
 pub struct ProposedCall {
     pub tool: crate::value::ToolName,
     pub arguments: Vec<u8>,
-    /// The answers the runtime resolved for this call's dynamic audience bindings, if any.
-    /// They are payload, not decoration: the same tool and arguments under
-    /// different resolved recipients is a different act.
-    pub dynamic_resolutions: Vec<crate::contract::PinnedDynamicResolution>,
+    /// The answers the runtime resolved for this tool's resolver bindings. They are payload,
+    /// not decoration: the same tool and arguments under different resolved answers is a
+    /// different act.
+    pub tool_resolutions: Vec<crate::contract::PinnedToolResolution>,
     /// The membership expansions the runtime resolved for this call's `@group` placeholder
     /// arguments. Payload on the same terms as the dynamic answers.
     pub memberships: Vec<crate::contract::PinnedMembership>,
@@ -398,9 +398,10 @@ pub enum FollowUp {
         spent: Vec<ResolvedCall>,
         settled: Vec<Settled>,
     },
-    /// A call in this batch is blocked only for want of a fact a registered cast could
-    /// establish. Nothing is decided and nothing is appended: a resolution advances the family
-    /// basis, so every release and offer this batch would open must be stamped after it.
+    /// A blocked call in this batch consumes an unestablished value a registered cast could
+    /// establish. Nothing is decided; the batch's own admissions and any cast the evidence
+    /// already carried are appended, and no release or offer is: a resolution advances the
+    /// family basis, so every release and offer this batch would open must be stamped after it.
     ProposalsResolve(Vec<EvidenceRequest>),
     Malformed {
         position: usize,
@@ -424,12 +425,12 @@ pub enum TransitionError {
     MembershipNeeded { needed: Vec<crate::names::GroupName> },
     #[error("membership pin for argument {argument} is not one this call reads")]
     ForeignMembership { argument: String },
-    #[error("the act reads dynamic bindings without answers: {}", needed.iter().map(|binding: &crate::contract::DynamicAudienceBinding| binding.argument.clone()).collect::<Vec<_>>().join(", "))]
-    DynamicAnswerNeeded {
-        needed: Vec<crate::contract::DynamicAudienceBinding>,
-    },
-    #[error("dynamic answer for argument {argument} is not one this call reads")]
-    ForeignDynamicAnswer { argument: String },
+    #[error("the act reads tool-level resolver bindings without answers: {resolvers:?}")]
+    ToolResolutionNeeded { resolvers: Vec<String> },
+    #[error("tool-level resolver answer from {resolver} is not one this call reads")]
+    ForeignToolResolution { resolver: String },
+    #[error("tool-level resolver answer from {resolver} contains a value outside policy")]
+    InvalidToolResolution { resolver: String },
     #[error("the act's membership expansions are not evidence for it: {0}")]
     ForeignExpansion(#[from] crate::groups::ExpansionRefusal),
     #[error(transparent)]
@@ -1147,19 +1148,20 @@ impl<'a> Sequence<'a> {
                 trajectory,
                 dispatch,
                 tool,
+                contract,
                 arguments,
                 proposed_label,
                 receiving,
                 proposed_effects,
-                dynamic_resolutions,
+                tool_resolutions,
                 memberships,
                 subject,
                 resolutions,
             } => {
-                let call = ResolvedCall::new(tool.clone(), arguments.clone())
-                    .with_dynamic_resolutions(dynamic_resolutions.clone())
+                let call = ResolvedCall::new_keyed(tool.clone(), *contract, arguments.clone())
+                    .with_tool_resolutions(tool_resolutions.clone())
                     .with_memberships(memberships.clone());
-                if call.dynamic_resolutions() != dynamic_resolutions.as_slice() {
+                if call.tool_resolutions() != tool_resolutions.as_slice() {
                     return Err(TransitionRefusal::ForgedLabel);
                 }
                 if call.memberships() != memberships.as_slice() {
@@ -1170,24 +1172,44 @@ impl<'a> Sequence<'a> {
                 let contract = self
                     .engine
                     .registry()
-                    .tool(tool)
+                    .keyed_tool(tool, *contract)
                     .ok_or_else(|| TransitionRefusal::UnknownTool(tool.as_str().to_string()))?;
                 if crate::check::validate_memberships(contract, &call).is_err()
                     || crate::check::pins_agree(contract, &call, &expansions).is_err()
                 {
                     return Err(TransitionRefusal::ForgedMembership);
                 }
-                // And its dynamic answers, one per binding the contract spells.
-                if crate::check::validate_dynamic_resolutions(contract, &call).is_err() {
+                let views = self.projection.view(trajectory);
+                // And its resolver answers, one per binding the contract spells. An opening whose
+                // call an input hop rewrote carries the answers given about the proposal it
+                // descends from, so that proposal is the second call they may be about. Every
+                // opening names the call subject its decision released it for, so a record with
+                // no readable proposal is refused rather than judged on the call alone.
+                let proposal = views
+                    .proposed_call(subject)
+                    .ok_or(TransitionRefusal::ForgedResolution)?;
+                if crate::check::validate_tool_resolutions(
+                    self.engine.registry(),
+                    contract,
+                    &call,
+                    crate::check::AnsweredFor::Proposal(proposal),
+                )
+                .is_err()
+                {
                     return Err(TransitionRefusal::ForgedResolution);
                 }
                 if proposed_effects != &contract.emits {
                     return Err(TransitionRefusal::EffectsMismatch);
                 }
-                let views = self.projection.view(trajectory);
                 let current = views.current_label();
                 if proposed_label
-                    != crate::check::committed_label_for_call(contract, &current, &call, &expansions).bound()
+                    != crate::check::committed_label_for_call(
+                        contract,
+                        &current,
+                        crate::check::CallReads::Resolved(&call),
+                        &expansions,
+                    )
+                    .bound()
                     || receiving != current.bound()
                 {
                     return Err(TransitionRefusal::ForgedLabel);
@@ -1537,20 +1559,19 @@ impl<'a> Sequence<'a> {
                 {
                     return Err(TransitionRefusal::ForeignOffer);
                 }
-                let candidate = subject_call(views, subject).ok_or(TransitionRefusal::UnbackedOffer)?;
+                let candidate = views.standing_call(subject).ok_or(TransitionRefusal::UnbackedOffer)?;
                 if candidate.digest() != *call {
                     return Err(TransitionRefusal::UnbackedOffer);
                 }
                 let contract = self
                     .engine
                     .registry()
-                    .tool(candidate.tool())
+                    .contract(candidate)
                     .ok_or_else(|| TransitionRefusal::UnknownTool(candidate.tool().as_str().to_string()))?;
                 let stage = views.call_stage(subject);
                 let role = views.call_role(subject);
                 required(expansions, contract.groups())?;
-                let CheckOutcome::Block(block) =
-                    crate::check::evaluate(contract, views, &candidate, &stage, expansions)
+                let CheckOutcome::Block(block) = crate::check::evaluate(contract, views, candidate, &stage, expansions)
                 else {
                     return Err(TransitionRefusal::UnbackedOffer);
                 };
@@ -1561,7 +1582,7 @@ impl<'a> Sequence<'a> {
                 Ok(crate::plan::plan(
                     self.engine.registry(),
                     views,
-                    &candidate,
+                    candidate,
                     &block,
                     &stage,
                     role,
@@ -1752,7 +1773,7 @@ impl<'a> Sequence<'a> {
             return Err(TransitionRefusal::ApprovalRepeated);
         }
         let offered = &recorded.plan;
-        if subject_call(&views, &recorded.subject).as_ref() != Some(call)
+        if views.standing_call(&recorded.subject) != Some(call)
             || call.digest() != recorded.call
             || plan != &offered.id
             || acceptance.as_ref() != offered.narrowing()
@@ -1769,7 +1790,7 @@ impl<'a> Sequence<'a> {
         let contract = self
             .engine
             .registry()
-            .tool(call.tool())
+            .contract(call)
             .ok_or_else(|| TransitionRefusal::UnknownTool(call.tool().as_str().to_string()))?;
         let live = views.current_label();
         if rulings
@@ -1838,13 +1859,13 @@ impl<'a> Sequence<'a> {
             return Ok(());
         };
         if implied.family {
-            if !declaration.owed.family && !(own_act && declaration.declared.family) {
+            if !(declaration.owed.family || own_act && declaration.declared.family) {
                 return Err(TransitionRefusal::UndeclaredAdvance);
             }
             declaration.owed.family = false;
         }
         for flow in &implied.flows {
-            if !declaration.owed.flows.remove(flow) && !(own_act && declaration.declared.flows.contains(flow)) {
+            if !(declaration.owed.flows.remove(flow) || own_act && declaration.declared.flows.contains(flow)) {
                 return Err(TransitionRefusal::UndeclaredAdvance);
             }
         }
@@ -1941,6 +1962,7 @@ impl<'a> Sequence<'a> {
                 trajectory,
                 dispatch,
                 tool,
+                contract,
                 proposed_effects,
                 ..
             } => {
@@ -1948,7 +1970,7 @@ impl<'a> Sequence<'a> {
                 if !proposed_effects.is_empty() {
                     advance.absorb(&BasisAdvance::family());
                 }
-                if self.result_can_restrict(tool, dispatch) {
+                if self.result_can_restrict(tool, *contract, dispatch) {
                     advance.absorb(&BasisAdvance::flow(trajectory));
                 }
                 advance
@@ -2019,7 +2041,12 @@ impl<'a> Sequence<'a> {
     /// Can this release's result restrict the trajectory, leave it unresolved, or arrive through a
     /// bound sanitizer? An unannotated contract admits at `Unknown`, so it can;
     /// the deliberate neutral `delta = {}` cannot.
-    fn result_can_restrict(&self, tool: &crate::value::ToolName, dispatch: &DispatchId) -> bool {
+    fn result_can_restrict(
+        &self,
+        tool: &crate::value::ToolName,
+        contract_id: crate::value::ToolContractId,
+        dispatch: &DispatchId,
+    ) -> bool {
         if self
             .projection
             .view(dispatch.trajectory())
@@ -2028,7 +2055,7 @@ impl<'a> Sequence<'a> {
         {
             return true;
         }
-        match self.engine.registry().tool(tool) {
+        match self.engine.registry().keyed_tool(tool, contract_id) {
             Some(contract) => contract.delta.as_ref().is_none_or(|delta| !delta.is_none()),
             None => true,
         }
@@ -2089,16 +2116,17 @@ impl<'a> Sequence<'a> {
                 Fact::DispatchOpened {
                     dispatch,
                     tool,
+                    contract,
                     arguments,
-                    dynamic_resolutions,
+                    tool_resolutions,
                     memberships,
                     subject,
                     resolutions,
                     ..
                 },
             ) if dispatch == &next.dispatch => {
-                let opened = ResolvedCall::new(tool.clone(), arguments.clone())
-                    .with_dynamic_resolutions(dynamic_resolutions.clone())
+                let opened = ResolvedCall::new_keyed(tool.clone(), *contract, arguments.clone())
+                    .with_tool_resolutions(tool_resolutions.clone())
                     .with_memberships(memberships.clone());
                 if opened != next.call || subject != &next.subject {
                     return Err(TransitionRefusal::UnbackedDecision);
@@ -2235,15 +2263,30 @@ impl<'a> Sequence<'a> {
             return Err(TransitionRefusal::ForeignAdmission);
         }
         for call in proposals {
-            let contract = self
+            if !self.engine.registry().contains_tool(call.tool()) {
+                return Err(TransitionRefusal::UnknownTool(call.tool().as_str().to_string()));
+            }
+            let (selected, contract) = self
                 .engine
                 .registry()
-                .tool(call.tool())
-                .ok_or_else(|| TransitionRefusal::UnknownTool(call.tool().as_str().to_string()))?;
+                .select_tool(call.tool(), call.arguments())
+                .ok_or(TransitionRefusal::InvalidPayload(
+                    crate::params::ArgumentError::NoMatchingContract,
+                ))?;
+            if selected != call.contract_id() {
+                return Err(TransitionRefusal::MisdecidedBatch);
+            }
             if crate::check::validate_memberships(contract, call).is_err() {
                 return Err(TransitionRefusal::ForgedMembership);
             }
-            if crate::check::validate_dynamic_resolutions(contract, call).is_err() {
+            if crate::check::validate_tool_resolutions(
+                self.engine.registry(),
+                contract,
+                call,
+                crate::check::AnsweredFor::ThisCall,
+            )
+            .is_err()
+            {
                 return Err(TransitionRefusal::ForgedResolution);
             }
         }
@@ -2326,7 +2369,7 @@ impl<'a> Sequence<'a> {
         let contract = self
             .engine
             .registry()
-            .tool(call.tool())
+            .contract(call)
             .ok_or_else(|| TransitionRefusal::UnknownTool(call.tool().as_str().to_string()))?;
         contract
             .parameters
@@ -2476,10 +2519,9 @@ impl<'a> Sequence<'a> {
                         if RawResultDigest::of(value.body.as_str().as_bytes()) != raw_digest {
                             return Err(TransitionRefusal::ForgedLabel);
                         }
-                        let receiving = views
-                            .receiving_bound(dispatch)
-                            .ok_or(TransitionRefusal::UnknownDispatch)?;
-                        if crate::admit::confined_residual(receiving, &resolved.clone().into_label()).is_some() {
+                        let baseline =
+                            crate::admit::cast_baseline(&views, dispatch).ok_or(TransitionRefusal::UnknownDispatch)?;
+                        if crate::admit::confined_residual(&baseline, &resolved.clone().into_label()).is_some() {
                             return Err(TransitionRefusal::AcceptanceMismatch);
                         }
                         resolved.into_label()
@@ -2811,10 +2853,11 @@ impl<'a> Sequence<'a> {
         let fold = views.branch_label(child);
         let dim = registered.transition.dimension();
         let derives = match reason {
-            crate::fact::ReturnRejection::ConsumedDimensionUnresolvable => {
+            crate::fact::ReturnRejection::ConsumedDimensionUnresolvable(unestablished) => {
                 required(&expansions, &crate::plan::cast_selection_groups(self.engine.registry()))?;
                 !fold.is_established(dim)
                     && crate::plan::resolvable_source(self.engine.registry(), &views, &fold, dim, &expansions).is_none()
+                    && *unestablished == crate::check::unestablished_facts(&fold, &[dim])
             }
             crate::fact::ReturnRejection::MandateUnmet => {
                 required(&expansions, registered.groups())?;
@@ -2958,13 +3001,13 @@ impl<'a> Sequence<'a> {
             return Err(TransitionRefusal::ForeignDispatch);
         }
         let views = self.projection.view(trajectory);
-        let tool = views
-            .dispatch_tool(dispatch)
+        let call = views
+            .dispatch_call(dispatch)
             .ok_or(TransitionRefusal::UnknownDispatch)?;
         self.engine
             .registry()
-            .tool(tool)
-            .ok_or_else(|| TransitionRefusal::UnknownTool(tool.as_str().to_string()))
+            .keyed_tool(call.tool(), call.contract_id())
+            .ok_or_else(|| TransitionRefusal::UnknownTool(call.tool().as_str().to_string()))
     }
 
     fn open_dispatch_contract(
@@ -3167,10 +3210,8 @@ impl<'a> Sequence<'a> {
         crate::admit::validate_pending_cast(self.engine.registry(), contract, &raw, cast, &resolved, expansions)
             .map_err(|_| TransitionRefusal::InadmissibleResolution)?;
         let views = self.projection.view(trajectory);
-        let receiving = views
-            .receiving_bound(dispatch)
-            .ok_or(TransitionRefusal::UnknownDispatch)?;
-        match crate::admit::confined_residual(receiving, &value.label) {
+        let baseline = crate::admit::cast_baseline(&views, dispatch).ok_or(TransitionRefusal::UnknownDispatch)?;
+        match crate::admit::confined_residual(&baseline, &value.label) {
             derived_residual @ Some(_) if residual == &derived_residual => Ok(()),
             _ => Err(TransitionRefusal::AcceptanceMismatch),
         }
@@ -3308,7 +3349,7 @@ impl<'a> Sequence<'a> {
         if recorded.plan.hop() != Some(sanitizer) || &recorded.subject != subject {
             return Err(TransitionRefusal::UnbackedOffer);
         }
-        let predecessor = subject_call(&views, subject).ok_or(TransitionRefusal::UnbackedOffer)?;
+        let predecessor = views.standing_call(subject).ok_or(TransitionRefusal::UnbackedOffer)?;
         if predecessor.digest() != recorded.call {
             return Err(TransitionRefusal::UnbackedOffer);
         }
@@ -3324,7 +3365,7 @@ impl<'a> Sequence<'a> {
         let contract = self
             .engine
             .registry()
-            .tool(predecessor.tool())
+            .contract(predecessor)
             .ok_or_else(|| TransitionRefusal::UnknownTool(predecessor.tool().as_str().to_string()))?;
         contract
             .parameters
@@ -3333,7 +3374,20 @@ impl<'a> Sequence<'a> {
         if call != &predecessor.substituting(call.canonical_arguments().clone()) {
             return Err(TransitionRefusal::ForgedLabel);
         }
-        if crate::check::validate_dynamic_resolutions(contract, call).is_err() {
+        if !self.engine.registry().selection_matches(call) {
+            return Err(TransitionRefusal::SanitizerUnapplicable);
+        }
+        // The predecessor comparison binds *which* answers this rewrite carries; this binds what
+        // they may be about — the proposal a resolver was asked about, on the record.
+        let proposal = views.proposed_call(subject).ok_or(TransitionRefusal::UnbackedOffer)?;
+        if crate::check::validate_tool_resolutions(
+            self.engine.registry(),
+            contract,
+            call,
+            crate::check::AnsweredFor::Proposal(proposal),
+        )
+        .is_err()
+        {
             return Err(TransitionRefusal::SanitizerUnapplicable);
         }
 
@@ -3346,7 +3400,7 @@ impl<'a> Sequence<'a> {
         }
         // The check the hop improves reads the callee's declared groups.
         required(expansions, contract.groups())?;
-        let CheckOutcome::Block(before) = crate::check::evaluate(contract, &views, &predecessor, &stage, expansions)
+        let CheckOutcome::Block(before) = crate::check::evaluate(contract, &views, predecessor, &stage, expansions)
         else {
             return Err(TransitionRefusal::UnbackedOffer);
         };
@@ -3432,7 +3486,7 @@ impl<'a> Sequence<'a> {
     fn output_label(&self, trajectory: &TrajectoryId, dispatch: &DispatchId, contract: &ToolContract) -> Label {
         let views = self.projection.view(trajectory);
         contract.output_label_for_resolutions(
-            views.dynamic_resolutions(dispatch).unwrap_or_default(),
+            views.tool_resolutions(dispatch).unwrap_or_default(),
             &self.dispatch_expansions(trajectory, dispatch),
         )
     }
@@ -3474,19 +3528,6 @@ fn taken_offer<'v>(
         return Err(TransitionRefusal::OfferEnded);
     }
     Ok(recorded)
-}
-
-fn subject_call(views: &Views<'_>, subject: &crate::basis::SubjectKey) -> Option<ResolvedCall> {
-    if let Some(candidate) = views.call_candidate(subject) {
-        return Some(candidate.clone());
-    }
-    let crate::basis::SubjectKey::Call { batch, position, .. } = subject else {
-        return None;
-    };
-    let decided = views.decided_batch(batch)?;
-    (&decided.trajectory == views.trajectory())
-        .then(|| decided.proposals.get(*position as usize).cloned())
-        .flatten()
 }
 
 fn confines(sequence: &Sequence<'_>, offer: &crate::value::OfferId, dispatch: &DispatchId) -> bool {
@@ -3632,6 +3673,8 @@ mod tests {
 
     fn note_tool() -> ToolContract {
         ToolContract {
+            description: Some("A test tool.".to_string()),
+            uses: vec![],
             name: ToolName::new("note"),
             tags: vec![],
             delta: Some(crate::contract::Delta::NONE),
@@ -3696,7 +3739,7 @@ mod tests {
                     proposals: vec![ProposedCall {
                         tool: call.tool().clone(),
                         arguments: call.canonical_arguments().canonical_bytes().to_vec(),
-                        dynamic_resolutions: Vec::new(),
+                        tool_resolutions: Vec::new(),
                         memberships: Vec::new(),
                     }],
                     spawn: None,

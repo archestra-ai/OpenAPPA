@@ -40,11 +40,13 @@ pub enum ReturnDerivation {
 }
 
 /// Why a mandatory return sanitizer was inapplicable at submission. Closed and
-/// body-free: the reason names the failed precondition, never the refused bytes.
+/// body-free: the reason names the failed precondition, never the refused bytes. A consumed
+/// dimension no cast can establish names every source unresolved on it by value id, with all
+/// of that source's unresolved dimensions — never a bare verdict.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReturnRejection {
     MandateUnmet,
-    ConsumedDimensionUnresolvable,
+    ConsumedDimensionUnresolvable(Vec<crate::check::UnestablishedFact>),
     PreconditionUnmet,
 }
 
@@ -209,6 +211,7 @@ pub enum Fact {
         trajectory: TrajectoryId,
         dispatch: DispatchId,
         tool: ToolName,
+        contract: crate::value::ToolContractId,
         arguments: crate::params::CanonicalArguments,
         proposed_label: EstablishedLabel,
         /// The established bound this dispatch's result is received against, snapshotted here
@@ -219,7 +222,7 @@ pub enum Fact {
         receiving: EstablishedLabel,
         proposed_effects: EffectSet,
         #[serde(default)]
-        dynamic_resolutions: Vec<crate::contract::PinnedDynamicResolution>,
+        tool_resolutions: Vec<crate::contract::PinnedToolResolution>,
         #[serde(default)]
         memberships: Vec<crate::contract::PinnedMembership>,
         #[serde(default)]

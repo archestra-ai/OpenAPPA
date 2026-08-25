@@ -112,7 +112,7 @@ pub fn service(runtime: Arc<Runtime>) -> StreamableHttpService<RemedyService, Lo
 mod tests {
     use super::*;
     use crate::api::raw;
-    use crate::api::{ProposedCall, ToolCallDecision, testing};
+    use crate::api::{ProposedCall, Runtime, ToolCallDecision};
     use crate::config::Config;
     use appa_runtime_api::HookDecision;
 
@@ -133,7 +133,7 @@ mod tests {
     #[tokio::test]
     async fn an_unknown_offer_gets_one_typed_refusal() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = testing::runtime(config(), dir.path().join("appa.db"));
+        let runtime = Runtime::open(config(), dir.path().join("appa.db"), None).expect("the fixture deployment opens");
         let outcome = runtime
             .execute_remedy(&acting("cc:mcp-test"), OfferId("never-surfaced".to_string()))
             .await;
@@ -149,7 +149,7 @@ mod tests {
     #[tokio::test]
     async fn one_offer_is_claimed_once_at_a_time() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = testing::runtime(config(), dir.path().join("appa.db"));
+        let runtime = Runtime::open(config(), dir.path().join("appa.db"), None).expect("the fixture deployment opens");
         let offer = OfferId("offer-live".to_string());
 
         let claim = runtime.claim_offer(&offer).expect("a free offer is claimable");
@@ -190,8 +190,8 @@ mod tests {
 
             [[policy.authority]]
             name = "approver"
-            [policy.authority.mandate]
-            attends = ["irreversible"]
+            [policy.authority.permits]
+            attention = ["irreversible"]
 
             [externals]
             timeout_ms = 1000
@@ -208,7 +208,7 @@ mod tests {
             crate::api::Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens");
 
         let root = crate::api::TrajectoryId("cc:mcp-test".to_string());
-        let mut session = runtime.create_session(root.clone()).expect("a fresh id opens");
+        let session = runtime.create_session(root.clone()).expect("a fresh id opens");
         let denied = session
             .on_tool_call(
                 ProposedCall {

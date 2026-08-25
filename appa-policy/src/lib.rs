@@ -11,8 +11,8 @@ use appa_engine::authority::{
     SanitizerPoints, Scope,
 };
 use appa_engine::contract::{
-    AudienceDelta, AudienceRequirement, Delta, DynamicAudienceBinding, HistoryRequirement, LabelRequirements,
-    RecipientSpec, Requires, ToolContract,
+    AudienceDelta, AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, RecipientSpec, Requires,
+    ResolverReturn, ToolCallSource, ToolContract,
 };
 use appa_engine::engine::Engine;
 use appa_engine::fact::ReturnPolicy;
@@ -44,15 +44,13 @@ pub enum ConfigError {
     UnsupportedVersion { found: u32 },
     #[error("unknown trust rank {name:?} in {context} (not in the trust chain)")]
     UnknownTrustRank { name: String, context: String },
-    #[error("trust rank name \"unknown\" is reserved: it declares a pending-cast delta dimension")]
-    ReservedRankName,
     #[error("bad reader set in {context}: {reason}")]
     BadAudience { context: String, reason: String },
     #[error("bad sanitizer point {token:?}: expected \"tool_input\" or \"tool_output\"")]
     UnknownSanitizerPoint { token: String },
     #[error("sanitizer {name} declares no application point (`on` is empty)")]
     NoSanitizerPoint { name: String },
-    #[error("sanitizer {name} mandate: {reason}")]
+    #[error("sanitizer {name} permits: {reason}")]
     SanitizerMandateShape { name: String, reason: &'static str },
     #[error("{kind} {name}: {reason}")]
     BadImplementation {
@@ -73,8 +71,42 @@ pub enum ConfigError {
     DuplicateEffect { tool: String, kind: String },
     #[error("duplicate dynamic resolver {0}")]
     DuplicateDynamicResolver(String),
-    #[error("tool {tool} dynamic binding names unregistered resolver {resolver}")]
+    #[error(
+        "dynamic resolver {name} names unknown builtin {builtin:?}; the one stock dynamic builtin is \"claude-code\""
+    )]
+    UnknownDynamicBuiltin { name: String, builtin: String },
+    #[error("tool {tool} uses unregistered resolver {resolver}")]
     UnregisteredDynamicResolver { tool: String, resolver: String },
+    #[error("dynamic resolver name {0:?} is empty")]
+    BadResolverName(String),
+    #[error("dynamic resolver {resolver} repeats returned result {result:?}")]
+    DuplicateResolverReturn { resolver: String, result: String },
+    #[error(
+        "dynamic resolver {resolver} names unknown returned result {result:?}; a resolver returns \"delta.trust\", \"delta.audience\", \"requires.trust\", \"requires.audience\", or \"requires.attention\""
+    )]
+    UnknownResolverReturn { resolver: String, result: String },
+    #[error("dynamic resolver {resolver} repeats input {input:?}")]
+    DuplicateResolverInput { resolver: String, input: String },
+    #[error("dynamic resolver {0} returns nothing; a resolver declares every result it returns")]
+    EmptyResolverReturns(String),
+    #[error(
+        "tool {tool} maps inputs {supplied:?} to resolver {resolver}, which declares {declared:?}; a use maps exactly the declared inputs"
+    )]
+    ResolverInputMismatch {
+        tool: String,
+        resolver: String,
+        declared: Vec<String>,
+        supplied: Vec<String>,
+    },
+    #[error("tool {tool} resolver {resolver} reads input {input} from {spelling:?}, which {0}", appa_engine::contract::UnknownCallSource { spelling: spelling.clone() })]
+    UnknownCallSource {
+        tool: String,
+        resolver: String,
+        input: String,
+        spelling: String,
+    },
+    #[error("{context} expected a mark list, found {found:?}")]
+    BadAttention { context: String, found: String },
     #[error("[limits] planner_cap is 0: a tool's worst case is at least one plan, so a zero cap refuses every tool")]
     ZeroPlannerCap,
     #[error("[deployment] {field}: expected one of {expected}, found {found:?}")]
@@ -91,17 +123,20 @@ pub enum ConfigError {
 
 /// A fully parsed and **fully validated** policy: the opened [`Engine`] — registry, deployment
 /// profile, and policy identity behind the one validated constructor — plus the
-/// normalized declarations. The runtime owns implementation bindings.
+/// normalized declarations. The runtime owns HTTP and command bindings; a resolver that
+/// carries the stock builtin names it on its own declaration.
 #[derive(Clone, Debug)]
 pub struct Config {
     engine: Engine,
     registry_config: RegistryConfig,
     boundary_label: Label,
+    dynamic_resolver_names: BTreeSet<DynamicResolverName>,
+    dynamic_resolver_builtins: BTreeMap<DynamicResolverName, String>,
 }
 
 impl Config {
-    /// Parse the runtime's declaration-only policy TOML. Inline implementation bindings are a
-    /// policy error because the deployment binds them in `[externals]`.
+    /// Parse the policy TOML. HTTP and command bindings remain deployment-owned; the
+    /// supported stock dynamic builtin is selected on the resolver declaration that carries it.
     pub fn from_toml_str(s: &str) -> Result<Config, ConfigError> {
         let raw: RawConfig = toml::from_str(s)?;
         if raw.version != SUPPORTED_VERSION {
@@ -114,18 +149,18 @@ impl Config {
         };
         // Validate the chain up front so `parse_trust` never truncates a rank index into a u8.
         trust_chain.validate()?;
-        // "unknown" in a trust position is the pending-cast token, never a rank name.
-        if trust_chain.rank_of(UNKNOWN_TOKEN).is_some() {
-            return Err(ConfigError::ReservedRankName);
-        }
 
         let boundary_label = match raw.boundary {
             Some(b) => b.convert(&trust_chain)?,
             None => default_boundary_label(&trust_chain),
         };
 
-        let mut dynamic_resolver_names = BTreeSet::new();
+        let mut dynamic_resolver_builtins = BTreeMap::new();
+        let mut declarations: BTreeMap<DynamicResolverName, ResolverDeclaration> = BTreeMap::new();
         for resolver in raw.dynamic_resolver {
+            if resolver.name.is_empty() {
+                return Err(ConfigError::BadResolverName(resolver.name));
+            }
             let name = DynamicResolverName::new(resolver.name);
             if resolver.resolver.is_some() {
                 return Err(ConfigError::ForbiddenInlineBinding {
@@ -133,8 +168,51 @@ impl Config {
                     name: name.as_str().to_string(),
                 });
             }
-            if !dynamic_resolver_names.insert(name.clone()) {
+
+            let mut inputs = BTreeSet::new();
+            for input in resolver.inputs {
+                if !inputs.insert(input.clone()) {
+                    return Err(ConfigError::DuplicateResolverInput {
+                        resolver: name.as_str().to_string(),
+                        input,
+                    });
+                }
+            }
+            let mut returns = BTreeSet::new();
+            for declared in resolver.returns {
+                let Some(result) = ResolverReturn::ALL
+                    .into_iter()
+                    .find(|result| result.wire_name() == declared)
+                else {
+                    return Err(ConfigError::UnknownResolverReturn {
+                        resolver: name.as_str().to_string(),
+                        result: declared,
+                    });
+                };
+                if !returns.insert(result) {
+                    return Err(ConfigError::DuplicateResolverReturn {
+                        resolver: name.as_str().to_string(),
+                        result: declared,
+                    });
+                }
+            }
+            if returns.is_empty() {
+                return Err(ConfigError::EmptyResolverReturns(name.as_str().to_string()));
+            }
+            if declarations
+                .insert(name.clone(), ResolverDeclaration { inputs, returns })
+                .is_some()
+            {
                 return Err(ConfigError::DuplicateDynamicResolver(name.as_str().to_string()));
+            }
+            if let Some(builtin) = resolver.builtin {
+                if builtin != "claude-code" {
+                    return Err(ConfigError::UnknownDynamicBuiltin {
+                        name: name.as_str().to_string(),
+                        builtin,
+                    });
+                }
+                dynamic_resolver_builtins.insert(name, builtin);
             }
         }
         let membership = match raw.membership {
@@ -151,17 +229,7 @@ impl Config {
         };
         let mut tools = Vec::new();
         for t in raw.tool {
-            tools.push(t.convert(&trust_chain)?);
-        }
-        for tool in &tools {
-            for binding in appa_engine::check::dynamic_reads(tool) {
-                if !dynamic_resolver_names.contains(&binding.resolver) {
-                    return Err(ConfigError::UnregisteredDynamicResolver {
-                        tool: tool.name.as_str().into(),
-                        resolver: binding.resolver.as_str().into(),
-                    });
-                }
-            }
+            tools.push(t.convert(&trust_chain, &declarations)?);
         }
 
         let mut authorities = Vec::new();
@@ -242,6 +310,8 @@ impl Config {
             engine,
             registry_config,
             boundary_label,
+            dynamic_resolver_names: declarations.keys().cloned().collect(),
+            dynamic_resolver_builtins,
         })
     }
 
@@ -261,6 +331,19 @@ impl Config {
 
     pub fn registry_config(&self) -> &RegistryConfig {
         &self.registry_config
+    }
+
+    /// Every `[[dynamic_resolver]]` the policy registers — the validated superset of every
+    /// resolver name a tool binding uses.
+    pub fn dynamic_resolver_names(&self) -> impl Iterator<Item = &DynamicResolverName> {
+        self.dynamic_resolver_names.iter()
+    }
+
+    /// The stock builtin each `[[dynamic_resolver]]` that carries one names on its declaration.
+    /// A resolver listed here takes no deployment binding; every other resolver is bound by name
+    /// under `[externals.dynamic]`.
+    pub fn dynamic_resolver_builtins(&self) -> impl Iterator<Item = (&DynamicResolverName, &String)> {
+        self.dynamic_resolver_builtins.iter()
     }
 }
 
@@ -315,7 +398,7 @@ struct RawStartingLabel {
 #[serde(untagged)]
 enum RawStartingAudience {
     Token(String),
-    Exactly(RawExactly),
+    List(Vec<String>),
 }
 
 impl RawDeployment {
@@ -336,13 +419,11 @@ impl RawDeployment {
                     Some(RawStartingAudience::Token(token)) => {
                         return Err(ConfigError::BadDeploymentToken {
                             field: "starting_label audience",
-                            expected: r#""public" or { exactly = [...] }"#,
+                            expected: r#""public" or [...]"#,
                             found: token,
                         });
                     }
-                    Some(RawStartingAudience::Exactly(a)) => {
-                        parse_audience(&a.exactly, "deployment starting_label audience")?
-                    }
+                    Some(RawStartingAudience::List(a)) => parse_audience(&a, "deployment starting_label audience")?,
                 };
                 Label::new(Dim::Known(trust), Dim::Known(audience))
             }
@@ -393,6 +474,18 @@ struct RawLimits {
 struct RawDynamicResolver {
     name: String,
     resolver: Option<toml::Value>,
+    /// The stock in-process implementation this resolver carries. The one supported value is
+    /// `"claude-code"`. A resolver without it is bound by the deployment under `[externals.dynamic]`.
+    builtin: Option<String>,
+    /// The input names a `uses` entry must map. Omitted means this resolver reads the complete
+    /// tool call instead.
+    #[serde(default)]
+    inputs: Vec<String>,
+    /// The results this resolver always returns, each named for the contract field it
+    /// establishes: `delta.trust`, `delta.audience`, `requires.trust`, `requires.audience`,
+    /// `requires.attention`.
+    #[serde(default)]
+    returns: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -413,7 +506,7 @@ struct RawChild {
 #[serde(deny_unknown_fields)]
 struct RawBoundary {
     trust: Option<String>,
-    audience: Option<RawExactly>,
+    audience: Option<Vec<String>>,
 }
 
 impl RawBoundary {
@@ -423,7 +516,7 @@ impl RawBoundary {
             None => top_trust(chain),
         };
         let audience = match self.audience {
-            Some(a) => parse_audience(&a.exactly, "boundary audience")?,
+            Some(a) => parse_audience(&a, "boundary audience")?,
             None => Audience::Public,
         };
         Ok(Label::new(Dim::Known(trust), Dim::Known(audience)))
@@ -442,6 +535,7 @@ fn top_trust(chain: &TrustChain) -> Trust {
 #[serde(deny_unknown_fields)]
 struct RawTool {
     name: String,
+    description: Option<String>,
     #[serde(default)]
     tags: Vec<String>,
     delta: Option<RawDelta>,
@@ -450,12 +544,36 @@ struct RawTool {
     effects: Vec<String>,
     implementation: Option<toml::Value>,
     parameters: Option<serde_json::Value>,
+    #[serde(default)]
+    uses: Vec<RawToolUse>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawToolUse {
+    resolver: String,
+    /// One `$tool_call` source per input the resolver declares. Omitted is the complete-call
+    /// form, legal only for a resolver that declares no inputs.
+    inputs: Option<BTreeMap<String, String>>,
+}
+
+/// What a `[[dynamic_resolver]]` declares: the inputs a `uses` entry must map, and the contract
+/// destinations it owns. Compiled once and copied into every use, so the engine validates an
+/// answer without consulting a table.
+#[derive(Clone, Debug)]
+struct ResolverDeclaration {
+    inputs: BTreeSet<String>,
+    returns: BTreeSet<ResolverReturn>,
 }
 
 impl RawTool {
-    fn convert(self, chain: &TrustChain) -> Result<ToolContract, ConfigError> {
+    fn convert(
+        self,
+        chain: &TrustChain,
+        declarations: &BTreeMap<DynamicResolverName, ResolverDeclaration>,
+    ) -> Result<ToolContract, ConfigError> {
         let ctx = || format!("tool {}", self.name);
-        // No `delta` key at all = unannotated (results admitted at Unknown/Unknown, fail-closed);
+        // No `delta` key and no resolver-owned label field = unannotated (Unknown/Unknown);
         // `delta = {}` = the deliberate neutral annotation. The distinction is the whole point —
         // never collapse an omitted delta into the neutral one.
         let delta = self.delta.map(|d| d.convert(chain, &ctx())).transpose()?;
@@ -482,10 +600,54 @@ impl RawTool {
                 kind: duplicate.0.as_str().to_string(),
             }
         })?;
+        // Only the string-level checks live here: a source outside the five forms never parses,
+        // and a mapping that misses the resolver's declaration is caught against it. Every rule
+        // about what a tool may then read — an unread use, a duplicate destination, a mapped
+        // argument the schema does not require, a description a use reads but the tool omits — is
+        // the registry's (`LoadError`), surfaced via `ConfigError::Registry` when the engine opens.
+        let mut uses = Vec::new();
+        for raw in self.uses {
+            let resolver = DynamicResolverName::new(raw.resolver);
+            let Some(declaration) = declarations.get(&resolver) else {
+                return Err(ConfigError::UnregisteredDynamicResolver {
+                    tool: self.name.clone(),
+                    resolver: resolver.as_str().to_string(),
+                });
+            };
+            let mapped = raw.inputs.unwrap_or_default();
+            let supplied: BTreeSet<String> = mapped.keys().cloned().collect();
+            if supplied != declaration.inputs {
+                return Err(ConfigError::ResolverInputMismatch {
+                    tool: self.name.clone(),
+                    resolver: resolver.as_str().to_string(),
+                    declared: declaration.inputs.iter().cloned().collect(),
+                    supplied: supplied.into_iter().collect(),
+                });
+            }
+            let mut inputs = BTreeMap::new();
+            for (input, spelling) in mapped {
+                let Some(source) = ToolCallSource::parse(&spelling) else {
+                    return Err(ConfigError::UnknownCallSource {
+                        tool: self.name.clone(),
+                        resolver: resolver.as_str().to_string(),
+                        input,
+                        spelling,
+                    });
+                };
+                inputs.insert(input, source);
+            }
+            uses.push(appa_engine::contract::ToolResolverUse {
+                resolver,
+                inputs,
+                returns: declaration.returns.clone(),
+            });
+        }
         Ok(ToolContract {
             name: ToolName::new(self.name),
+            description: self.description,
             tags: self.tags.into_iter().map(TagName::new).collect(),
             parameters,
+            uses,
             delta,
             emits,
             requires,
@@ -504,15 +666,7 @@ struct RawDelta {
 #[serde(untagged)]
 enum RawDeltaAudience {
     Token(String),
-    Exactly(RawExactly),
-    Dynamic(RawDynamicBinding),
-}
-
-#[derive(Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawDynamicBinding {
-    resolver: String,
-    argument: String,
+    List(Vec<String>),
 }
 
 const UNKNOWN_TOKEN: &str = "unknown";
@@ -521,7 +675,7 @@ impl RawDelta {
     fn convert(self, chain: &TrustChain, ctx: &str) -> Result<Delta, ConfigError> {
         let trust = match self.trust.as_deref() {
             Some(UNKNOWN_TOKEN) => Some(Dim::Unknown),
-            Some(name) => Some(Dim::Known(parse_trust(name, chain, ctx)?)),
+            Some(value) => Some(Dim::Known(parse_trust(value, chain, ctx)?)),
             None => None,
         };
         let audience = match self.audience {
@@ -529,69 +683,103 @@ impl RawDelta {
             Some(RawDeltaAudience::Token(token)) => {
                 return Err(ConfigError::BadAudience {
                     context: format!("{ctx} delta audience"),
-                    reason: format!("expected {{ exactly = [...] }} or \"unknown\", found {token:?}"),
+                    reason: format!("expected [...] or \"unknown\", found {token:?}"),
                 });
             }
-            Some(RawDeltaAudience::Exactly(a)) => Some(AudienceDelta::Static(parse_declared_audience(
-                &a.exactly,
+            Some(RawDeltaAudience::List(a)) => Some(AudienceDelta::Static(parse_declared_audience(
+                &a,
                 &format!("{ctx} delta audience"),
             )?)),
-            Some(RawDeltaAudience::Dynamic(b)) => Some(AudienceDelta::Dynamic(b.into_binding())),
             None => None,
         };
         Ok(Delta { trust, audience })
     }
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawExactly {
-    exactly: Vec<String>,
-}
-
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct RawRequires {
     trust: Option<String>,
-    audience: Option<RawRequiresAudience>,
+    audience: Option<RawRequiresAudienceField>,
     effects: Option<RawHistory>,
     #[serde(default)]
-    attention: Vec<String>,
+    attention: Option<RawAttention>,
+}
+
+/// Static `requires.audience`; an attached resolver owns this destination through `returns`.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawRequiresAudienceField {
+    Reference(String),
+    Operators(RawRequiresAudience),
+}
+
+/// Static `requires.attention`; an attached resolver owns this destination through `returns`.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawAttention {
+    Reference(String),
+    Marks(Vec<String>),
 }
 
 impl RawRequires {
     fn convert(self, chain: &TrustChain, ctx: &str) -> Result<Requires, ConfigError> {
         let mut audience = Vec::new();
-        if let Some(a) = self.audience {
-            if let Some(inc) = a.includes {
-                audience.push(AudienceRequirement::Includes(match inc {
-                    RawRecipientSpec::Static(list) => parse_recipient_spec(&list, &format!("{ctx} requires includes"))?,
-                    RawRecipientSpec::Dynamic(binding) => RecipientSpec::Dynamic(binding.into_binding()),
-                }));
+        match self.audience {
+            Some(RawRequiresAudienceField::Reference(value)) => {
+                let context = format!("{ctx} requires audience");
+                return Err(ConfigError::BadAudience {
+                    context,
+                    reason: format!("expected {{ contains = [...] }} or {{ within = [...] }}, found {value:?}"),
+                });
             }
-            if let Some(cap) = a.cap {
-                audience.push(AudienceRequirement::Cap(parse_declared_audience(
-                    &cap,
-                    &format!("{ctx} requires cap"),
-                )?));
+            Some(RawRequiresAudienceField::Operators(a)) => {
+                if let Some(inc) = a.contains {
+                    audience.push(AudienceRequirement::Includes(parse_recipient_spec(
+                        &inc,
+                        &format!("{ctx} requires contains"),
+                    )?));
+                }
+                if let Some(cap) = a.within {
+                    audience.push(AudienceRequirement::Cap(parse_declared_audience(
+                        &cap,
+                        &format!("{ctx} requires within"),
+                    )?));
+                }
             }
+            None => {}
         }
         let mut history = Vec::new();
         if let Some(e) = self.effects {
-            history.extend(e.has.into_iter().map(|k| HistoryRequirement::Prior(EffectKind::new(k))));
             history.extend(
-                e.has_no
+                e.contains
+                    .into_iter()
+                    .map(|k| HistoryRequirement::Prior(EffectKind::new(k))),
+            );
+            history.extend(
+                e.excludes
                     .into_iter()
                     .map(|k| HistoryRequirement::NoPrior(EffectKind::new(k))),
             );
         }
+        let trust_floor = match self.trust.as_deref() {
+            Some(value) => Some(parse_trust(value, chain, ctx)?),
+            None => None,
+        };
+        let attention = match self.attention {
+            Some(RawAttention::Reference(value)) => {
+                return Err(ConfigError::BadAttention {
+                    context: format!("{ctx} requires attention"),
+                    found: value,
+                });
+            }
+            Some(RawAttention::Marks(marks)) => marks.into_iter().map(MarkName::new).collect(),
+            None => Vec::new(),
+        };
         Ok(Requires {
-            label: LabelRequirements {
-                trust_floor: self.trust.map(|t| parse_trust(&t, chain, ctx)).transpose()?,
-                audience,
-            },
+            label: LabelRequirements { trust_floor, audience },
             history,
-            attention: self.attention.into_iter().map(MarkName::new).collect(),
+            attention,
         })
     }
 }
@@ -599,33 +787,17 @@ impl RawRequires {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawRequiresAudience {
-    includes: Option<RawRecipientSpec>,
-    cap: Option<Vec<String>>,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum RawRecipientSpec {
-    Static(Vec<String>),
-    Dynamic(RawDynamicBinding),
-}
-
-impl RawDynamicBinding {
-    fn into_binding(self) -> DynamicAudienceBinding {
-        DynamicAudienceBinding {
-            resolver: DynamicResolverName::new(self.resolver),
-            argument: self.argument,
-        }
-    }
+    contains: Option<Vec<String>>,
+    within: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawHistory {
     #[serde(default)]
-    has: Vec<String>,
+    contains: Vec<String>,
     #[serde(default)]
-    has_no: Vec<String>,
+    excludes: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -635,9 +807,9 @@ struct RawAuthority {
     #[serde(default)]
     hint: Option<String>,
     #[serde(default)]
-    mandate: RawMandate,
+    permits: RawPermits,
     #[serde(default)]
-    scope: RawScope,
+    tags: Vec<String>,
     implementation: Option<toml::Value>,
 }
 
@@ -650,12 +822,12 @@ impl RawAuthority {
             });
         }
         let ctx = format!("authority {}", self.name);
-        let mandate = self.mandate.convert(chain, &ctx)?;
+        let mandate = self.permits.convert(chain, &ctx)?;
         Ok(Authority {
             name: AuthorityName::new(self.name),
             mandate,
             scope: Scope {
-                tags: self.scope.tags.into_iter().map(TagName::new).collect(),
+                tags: self.tags.into_iter().map(TagName::new).collect(),
             },
             hint: self.hint.map(Hint::new),
         })
@@ -664,43 +836,27 @@ impl RawAuthority {
 
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
-struct RawMandate {
-    can_cover_trust_to: Option<String>,
-    can_cover_readers: Option<RawMayAdd>,
+struct RawPermits {
+    trust_below: Option<String>,
+    audience_missing: Option<Vec<String>>,
     #[serde(default)]
-    can_waive: Vec<String>,
+    effects_containing: Vec<String>,
     #[serde(default)]
-    attends: Vec<String>,
+    attention: Vec<String>,
 }
 
-impl RawMandate {
+impl RawPermits {
     fn convert(self, chain: &TrustChain, ctx: &str) -> Result<Mandate, ConfigError> {
         Ok(Mandate {
-            trust_ceiling: self
-                .can_cover_trust_to
-                .map(|t| parse_trust(&t, chain, ctx))
-                .transpose()?,
+            trust_ceiling: self.trust_below.map(|t| parse_trust(&t, chain, ctx)).transpose()?,
             reader_ceiling: self
-                .can_cover_readers
-                .map(|r| parse_declared_audience(&r.may_add, &format!("{ctx} can_cover_readers")))
+                .audience_missing
+                .map(|r| parse_declared_audience(&r, &format!("{ctx} audience_missing")))
                 .transpose()?,
-            waivers: self.can_waive.into_iter().map(EffectKind::new).collect(),
-            attends: self.attends.into_iter().map(MarkName::new).collect(),
+            waivers: self.effects_containing.into_iter().map(EffectKind::new).collect(),
+            attends: self.attention.into_iter().map(MarkName::new).collect(),
         })
     }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawMayAdd {
-    may_add: Vec<String>,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct RawScope {
-    #[serde(default)]
-    tags: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -711,8 +867,8 @@ struct RawSanitizer {
     #[serde(default)]
     hint: Option<String>,
     #[serde(default)]
-    scope: RawScope,
-    mandate: RawSanitizerMandate,
+    tags: Vec<String>,
+    permits: RawSanitizerPermits,
     implementation: Option<toml::Value>,
 }
 
@@ -725,13 +881,13 @@ impl RawSanitizer {
             });
         }
         let on = parse_points(&self.on, &self.name)?;
-        let transition = self.mandate.convert(chain, &self.name)?;
+        let transition = self.permits.convert(chain, &self.name)?;
         Ok(Sanitizer {
             name: SanitizerName::new(self.name),
             on,
             transition,
             scope: Scope {
-                tags: self.scope.tags.into_iter().map(TagName::new).collect(),
+                tags: self.tags.into_iter().map(TagName::new).collect(),
             },
             hint: self.hint.map(Hint::new),
         })
@@ -740,19 +896,19 @@ impl RawSanitizer {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawSanitizerMandate {
+struct RawSanitizerPermits {
     #[serde(default)]
     audience: Option<RawAudienceTransition>,
     #[serde(default)]
     trust: Option<RawTrustTransition>,
 }
 
-impl RawSanitizerMandate {
+impl RawSanitizerPermits {
     fn convert(self, chain: &TrustChain, name: &str) -> Result<DeclaredTransition, ConfigError> {
         match (self.audience, self.trust) {
             (Some(audience), None) => Ok(DeclaredTransition::Audience {
-                from_includes: parse_declared_audience(&audience.from.includes, &format!("sanitizer {name} from"))?,
-                to: parse_declared_audience(&audience.to.exactly, &format!("sanitizer {name} to"))?,
+                from_includes: parse_declared_audience(&audience.from, &format!("sanitizer {name} from"))?,
+                to: parse_declared_audience(&audience.to, &format!("sanitizer {name} to"))?,
             }),
             (None, Some(trust)) => Ok(DeclaredTransition::Trust {
                 from_floor: parse_trust(&trust.from, chain, &format!("sanitizer {name} from"))?,
@@ -760,11 +916,11 @@ impl RawSanitizerMandate {
             }),
             (Some(_), Some(_)) => Err(ConfigError::SanitizerMandateShape {
                 name: name.to_string(),
-                reason: "declares both an audience and a trust transition — a mandate binds one dimension",
+                reason: "declares both an audience and a trust transition — a sanitizer permits one dimension",
             }),
             (None, None) => Err(ConfigError::SanitizerMandateShape {
                 name: name.to_string(),
-                reason: "declares no transition — give the mandate an `audience` or a `trust` key",
+                reason: "declares no transition — give `permits` an `audience` or a `trust` key",
             }),
         }
     }
@@ -773,8 +929,8 @@ impl RawSanitizerMandate {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawAudienceTransition {
-    from: RawIncludes,
-    to: RawExactly,
+    from: Vec<String>,
+    to: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -786,25 +942,19 @@ struct RawTrustTransition {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawIncludes {
-    includes: Vec<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RawCast {
     name: String,
     constant: Option<RawConstantLabel>,
     resolver: Option<RawCastResolver>,
     #[serde(default)]
-    scope: RawScope,
+    tags: Vec<String>,
 }
 
 impl RawCast {
     fn convert(self, chain: &TrustChain) -> Result<Cast, ConfigError> {
         let ctx = format!("cast {}", self.name);
         let scope = Scope {
-            tags: self.scope.tags.into_iter().map(TagName::new).collect(),
+            tags: self.tags.into_iter().map(TagName::new).collect(),
         };
         let resolution = match (self.constant, self.resolver) {
             (Some(_), Some(_)) => {
@@ -861,7 +1011,7 @@ impl RawCastResolver {
                 .iter()
                 .map(|rank| parse_trust(rank, chain, &ctx))
                 .collect::<Result<_, _>>()?,
-            audience: parse_declared_audience(&self.may_cast.audience.cap, &ctx)?,
+            audience: parse_declared_audience(&self.may_cast.audience, &ctx)?,
         })
     }
 }
@@ -873,27 +1023,21 @@ impl RawCastResolver {
 struct RawMayCast {
     #[serde(default)]
     trust: Vec<String>,
-    audience: RawCap,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawCap {
-    cap: Vec<String>,
+    audience: Vec<String>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConstantLabel {
     trust: String,
-    audience: RawExactly,
+    audience: Vec<String>,
 }
 
 impl RawConstantLabel {
     fn convert(self, chain: &TrustChain, ctx: &str) -> Result<DeclaredLabel, ConfigError> {
         Ok(DeclaredLabel {
             trust: parse_trust(&self.trust, chain, ctx)?,
-            audience: parse_declared_audience(&self.audience.exactly, ctx)?,
+            audience: parse_declared_audience(&self.audience, ctx)?,
         })
     }
 }
@@ -950,7 +1094,7 @@ fn parse_declared_audience(list: &[String], context: &str) -> Result<DeclaredAud
     if let Some(ph) = list.iter().find(|r| r.starts_with('$')) {
         return Err(ConfigError::BadAudience {
             context: context.to_string(),
-            reason: format!("argument placeholder {ph:?} is only valid in an `includes`"),
+            reason: format!("argument placeholder {ph:?} is only valid in a `contains`"),
         });
     }
     let mut readers = Vec::new();
@@ -1017,29 +1161,36 @@ mod tests {
 version = 1
 
 [[dynamic_resolver]]
-name = "crm-acl"
+name = "crm-output-acl"
+inputs = ["customer_id"]
+returns = ["delta.audience"]
+
+[[dynamic_resolver]]
+name = "crm-recipient-acl"
+inputs = ["customer_id"]
+returns = ["requires.audience"]
 
 [[tool]]
 name = "lookup"
 parameters = { type = "object", properties = { customer_id = { type = "string" } }, required = ["customer_id"] }
-delta = { audience = { resolver = "crm-acl", argument = "customer_id" } }
+uses = [{ resolver = "crm-output-acl", inputs = { customer_id = "$tool_call.arguments.customer_id" } }]
 
 [[tool]]
 name = "send"
 parameters = { type = "object", properties = { customer_id = { type = "string" } }, required = ["customer_id"] }
-requires = { audience = { includes = { resolver = "crm-acl", argument = "customer_id" } } }
+uses = [{ resolver = "crm-recipient-acl", inputs = { customer_id = "$tool_call.arguments.customer_id" } }]
 delta = {}
 
 [[authority]]
 name = "approver"
-[authority.mandate]
-can_cover_trust_to = "trusted"
+[authority.permits]
+trust_below = "trusted"
 
 [[sanitizer]]
 name = "pii"
 on = ["tool_output"]
-[sanitizer.mandate]
-audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
+[sanitizer.permits]
+audience = { from = ["internal"], to = ["public"] }
 
 [deployment]
 dispatch = "enforced"
@@ -1049,8 +1200,8 @@ confined_results = ["lookup"]
     #[test]
     fn declaration_only_policy_builds_the_engine_registry() {
         let config = Config::from_toml_str(DECLARATIONS).expect("the policy compiles");
-        assert!(config.registry().tool(&ToolName::new("lookup")).is_some());
-        assert!(config.registry().tool(&ToolName::new("send")).is_some());
+        assert!(config.registry().variants(&ToolName::new("lookup")).next().is_some());
+        assert!(config.registry().variants(&ToolName::new("send")).next().is_some());
         assert!(config.registry().authority(&AuthorityName::new("approver")).is_some());
         assert!(config.registry().sanitizer(&SanitizerName::new("pii")).is_some());
         assert_eq!(config.registry_config().tools.len(), 2);
@@ -1065,11 +1216,11 @@ confined_results = ["lookup"]
             ),
             (
                 "authority",
-                "version = 1\n[[authority]]\nname = \"a\"\nimplementation = { builtin = \"approve\" }\n[authority.mandate]\ncan_cover_trust_to = \"trusted\"\n",
+                "version = 1\n[[authority]]\nname = \"a\"\nimplementation = { builtin = \"approve\" }\n[authority.permits]\ntrust_below = \"trusted\"\n",
             ),
             (
                 "sanitizer",
-                "version = 1\n[[sanitizer]]\nname = \"s\"\non = [\"tool_output\"]\nimplementation = { builtin = \"hosted\" }\n[sanitizer.mandate]\ntrust = { from = \"suspicious\", to = \"trusted\" }\n",
+                "version = 1\n[[sanitizer]]\nname = \"s\"\non = [\"tool_output\"]\nimplementation = { builtin = \"hosted\" }\n[sanitizer.permits]\ntrust = { from = \"suspicious\", to = \"trusted\" }\n",
             ),
             (
                 "dynamic resolver",
@@ -1077,7 +1228,7 @@ confined_results = ["lookup"]
             ),
             (
                 "cast",
-                "version = 1\n[[cast]]\nname = \"c\"\nresolver = { url = \"https://cast.invalid\", may_cast = { trust = [\"trusted\"], audience = { cap = [\"public\"] } } }\n",
+                "version = 1\n[[cast]]\nname = \"c\"\nresolver = { url = \"https://cast.invalid\", may_cast = { trust = [\"trusted\"], audience = [\"public\"] } }\n",
             ),
             (
                 "membership resolver",
@@ -1096,12 +1247,34 @@ confined_results = ["lookup"]
     }
 
     #[test]
+    fn the_reserved_rank_name_is_refused_by_the_engine() {
+        assert!(matches!(
+            Config::from_toml_str("version = 1\ntrust_chain = [\"unknown\", \"trusted\"]\n"),
+            Err(ConfigError::Registry(LoadError::ReservedRankName))
+        ));
+    }
+
+    #[test]
+    fn the_reserved_state_is_never_a_declared_reader() {
+        for site in [
+            "delta = { audience = [\"unknown\"] }",
+            "requires = { audience = { contains = [\"unknown\"] } }\ndelta = {}",
+        ] {
+            let policy = format!("version = 1\n[[tool]]\nname = \"send\"\n{site}\n");
+            assert!(
+                matches!(Config::from_toml_str(&policy), Err(ConfigError::BadAudience { .. })),
+                "{site} admitted `unknown` as a reader"
+            );
+        }
+    }
+
+    #[test]
     fn a_resolver_cast_registers_the_ceiling_the_policy_declares() {
         let policy = "version = 1\n\
              [[tool]]\nname = \"fetch\"\ntags = [\"web\"]\n\
              [[cast]]\nname = \"content-classifier\"\n\
-             resolver = { may_cast = { trust = [\"suspicious\"], audience = { cap = [\"public\"] } } }\n\
-             [cast.scope]\ntags = [\"web\"]\n";
+             resolver = { may_cast = { trust = [\"suspicious\"], audience = [\"public\"] } }\n\
+             tags = [\"web\"]\n";
         let config = Config::from_toml_str(policy).expect("a resolver cast loads");
         let cast = config
             .registry()
@@ -1121,7 +1294,7 @@ confined_results = ["lookup"]
         let policy = "version = 1\n\
              [[tool]]\nname = \"fetch\"\ndelta = { audience = \"unknown\" }\n\
              [[cast]]\nname = \"audience-only\"\n\
-             resolver = { may_cast = { audience = { cap = [\"public\"] } } }\n\
+             resolver = { may_cast = { audience = [\"public\"] } }\n\
              [deployment]\nconfined_results = [\"fetch\"]\n";
         let config = Config::from_toml_str(policy).expect("an audience-only ceiling loads");
         assert!(matches!(
@@ -1133,8 +1306,8 @@ confined_results = ["lookup"]
     #[test]
     fn a_cast_declaring_both_forms_or_neither_is_refused() {
         let both = "version = 1\n[[cast]]\nname = \"c\"\n\
-             constant = { trust = \"suspicious\", audience = { exactly = [\"public\"] } }\n\
-             resolver = { may_cast = { trust = [\"trusted\"], audience = { cap = [\"public\"] } } }\n";
+             constant = { trust = \"suspicious\", audience = [\"public\"] }\n\
+             resolver = { may_cast = { trust = [\"trusted\"], audience = [\"public\"] } }\n";
         let neither = "version = 1\n[[cast]]\nname = \"c\"\n";
         for (case, policy) in [("both", both), ("neither", neither)] {
             assert!(
@@ -1152,7 +1325,7 @@ confined_results = ["lookup"]
         let policy = "version = 1\n\
              [[sanitizer]]\nname = \"attest-schema\"\non = [\"tool_output\"]\n\
              implementation = { url = \"https://attest.invalid\" }\n\
-             [sanitizer.mandate]\ntrust = { from = \"suspicious\", to = \"trusted\" }\n";
+             [sanitizer.permits]\ntrust = { from = \"suspicious\", to = \"trusted\" }\n";
         assert!(matches!(
             Config::from_toml_str(policy),
             Err(ConfigError::ForbiddenInlineBinding { kind: "sanitizer", name }) if name == "attest-schema"
@@ -1166,14 +1339,12 @@ confined_results = ["lookup"]
                 "version = 1\n\
                  [[tool]]\nname = \"post\"\ntags = [\"outbound\"]\ndelta = {{}}\n\
                  [[sanitizer]]\nname = \"redact\"\non = [\"tool_input\"]\n\
-                 scope = {{ tags = [\"outbound\"] }}\n\
-                 [sanitizer.mandate]\n{mandate}\n"
+                 tags = [\"outbound\"]\n\
+                 [sanitizer.permits]\n{mandate}\n"
             )
         };
-        let config = Config::from_toml_str(&policy(
-            "audience = { from = { includes = [\"internal\"] }, to = { exactly = [\"partner\"] } }",
-        ))
-        .expect("an input substitution compiles");
+        let config = Config::from_toml_str(&policy("audience = { from = [\"internal\"], to = [\"partner\"] }"))
+            .expect("an input substitution compiles");
         let sanitizer = config
             .registry()
             .sanitizer(&SanitizerName::new("redact"))
@@ -1188,7 +1359,7 @@ confined_results = ["lookup"]
         ));
         assert!(matches!(
             Config::from_toml_str(
-                &policy("audience = { from = { includes = [\"internal\"] }, to = { exactly = [\"partner\"] } }")
+                &policy("audience = { from = [\"internal\"], to = [\"partner\"] }")
                     .replace("on = [\"tool_input\"]", "on = []")
             ),
             Err(ConfigError::NoSanitizerPoint { name }) if name == "redact"
@@ -1207,11 +1378,276 @@ confined_results = ["lookup"]
     }
 
     #[test]
-    fn dynamic_bindings_require_a_registered_name() {
-        let missing_name = DECLARATIONS.replace("[[dynamic_resolver]]\nname = \"crm-acl\"\n", "");
+    fn a_resolver_carries_the_stock_builtin_on_its_declaration() {
+        let policy = |builtin: &str| {
+            format!(
+                "version = 1\n[[dynamic_resolver]]\nname = \"classify\"\nbuiltin = \"{builtin}\"\nreturns = [\"delta.trust\"]\n\
+                 [[dynamic_resolver]]\nname = \"bound\"\nreturns = [\"delta.audience\"]\n"
+            )
+        };
+        let config = Config::from_toml_str(&policy("claude-code")).expect("the stock builtin loads");
+        let builtins: Vec<_> = config
+            .dynamic_resolver_builtins()
+            .map(|(name, builtin)| (name.as_str(), builtin.as_str()))
+            .collect();
+        assert_eq!(builtins, vec![("classify", "claude-code")]);
+        assert_eq!(
+            config.dynamic_resolver_names().count(),
+            2,
+            "a bound resolver still registers"
+        );
+
+        assert!(matches!(
+            Config::from_toml_str(&policy("no-such")),
+            Err(ConfigError::UnknownDynamicBuiltin { name, builtin }) if name == "classify" && builtin == "no-such"
+        ));
+    }
+
+    #[test]
+    fn a_use_requires_a_registered_resolver() {
+        let missing_name = DECLARATIONS.replace(
+            "[[dynamic_resolver]]\nname = \"crm-output-acl\"\ninputs = [\"customer_id\"]\nreturns = [\"delta.audience\"]\n",
+            "",
+        );
         assert!(matches!(
             Config::from_toml_str(&missing_name),
             Err(ConfigError::UnregisteredDynamicResolver { .. })
+        ));
+        assert!(matches!(
+            Config::from_toml_str(
+                "version = 1\n[[tool]]\nname = \"lookup\"\ndescription = \"d\"\n\
+                 uses = [{ resolver = \"classifier\" }]\n"
+            ),
+            Err(ConfigError::UnregisteredDynamicResolver { tool, resolver })
+                if tool == "lookup" && resolver == "classifier"
+        ));
+    }
+
+    #[test]
+    fn an_attached_resolver_owns_every_destination_it_returns() {
+        let policy = r#"
+version = 1
+[[dynamic_resolver]]
+name = "classifier"
+inputs = ["subject"]
+returns = ["delta.trust", "delta.audience", "requires.trust", "requires.audience"]
+[[dynamic_resolver]]
+name = "review"
+returns = ["requires.attention"]
+
+[[tool]]
+name = "lookup"
+description = "Looks one customer up."
+parameters = { type = "object", properties = { id = { type = "string" }, deep = { type = "boolean" } }, required = ["id"] }
+uses = [
+  { resolver = "classifier", inputs = { subject = "$tool_call.arguments.id" } },
+  { resolver = "review" },
+]
+"#;
+        use appa_engine::contract::ResolverReturn;
+        let config = Config::from_toml_str(policy).expect("the policy loads");
+        let tool = config
+            .registry()
+            .variants(&ToolName::new("lookup"))
+            .next()
+            .expect("lookup registers");
+        assert_eq!(tool.uses.len(), 2);
+        let classifier = &tool.uses[0];
+        assert_eq!(classifier.resolver.as_str(), "classifier");
+        assert_eq!(
+            classifier.returns,
+            [
+                ResolverReturn::Trust,
+                ResolverReturn::Audience,
+                ResolverReturn::RequiredTrust,
+                ResolverReturn::RequiredAudience,
+            ]
+            .into_iter()
+            .collect(),
+            "the attachment owns every declared destination"
+        );
+        assert_eq!(
+            classifier.inputs.get("subject"),
+            Some(&appa_engine::contract::ToolCallSource::argument("id").expect("a plain name is a source"))
+        );
+        let review = &tool.uses[1];
+        assert!(
+            review.inputs.is_empty(),
+            "an input-free resolver reads the complete call"
+        );
+        assert_eq!(review.returns, [ResolverReturn::Attention].into_iter().collect());
+    }
+
+    #[test]
+    fn resolver_ownership_cannot_overlap() {
+        let policy = r#"
+version = 1
+[[dynamic_resolver]]
+name = "one"
+returns = ["delta.trust"]
+[[dynamic_resolver]]
+name = "two"
+returns = ["delta.trust"]
+
+[[tool]]
+name = "lookup"
+description = "Looks one customer up."
+uses = [{ resolver = "one" }, { resolver = "two" }]
+"#;
+        assert!(matches!(
+            Config::from_toml_str(policy),
+            Err(ConfigError::Registry(LoadError::DuplicateResolverDestination { destination, .. }))
+                if destination == "delta.trust"
+        ));
+
+        let static_overlap = policy.replace(
+            "uses = [{ resolver = \"one\" }, { resolver = \"two\" }]",
+            "uses = [{ resolver = \"one\" }]\ndelta = { trust = \"trusted\" }",
+        );
+        assert!(matches!(
+            Config::from_toml_str(&static_overlap),
+            Err(ConfigError::Registry(LoadError::DuplicateResolverDestination { destination, .. }))
+                if destination == "delta.trust"
+        ));
+    }
+
+    #[test]
+    fn a_resolver_declares_every_result_it_returns() {
+        let policy = |returns: &str| format!("version = 1\n[[dynamic_resolver]]\nname = \"r\"\nreturns = {returns}\n");
+        assert!(matches!(
+            Config::from_toml_str(&policy("[]")),
+            Err(ConfigError::EmptyResolverReturns(name)) if name == "r"
+        ));
+        assert!(matches!(
+            Config::from_toml_str(&policy("[\"delta.trust\", \"delta.trust\"]")),
+            Err(ConfigError::DuplicateResolverReturn { .. })
+        ));
+        // An unscoped name does not name a result: the scope is part of it.
+        for unknown in ["[\"trust\"]", "[\"delta.effects\"]", "[\"requires.history\"]"] {
+            assert!(
+                matches!(
+                    Config::from_toml_str(&policy(unknown)),
+                    Err(ConfigError::UnknownResolverReturn { .. })
+                ),
+                "{unknown} must not name a result"
+            );
+        }
+    }
+
+    #[test]
+    fn a_use_maps_exactly_the_inputs_its_resolver_declares() {
+        let policy = |inputs: &str, mapped: &str| {
+            format!(
+                "version = 1\n[[dynamic_resolver]]\nname = \"r\"\ninputs = {inputs}\nreturns = [\"delta.trust\"]\n\
+                 [[tool]]\nname = \"lookup\"\ndescription = \"d\"\n\
+                 parameters = {{ type = \"object\", properties = {{ id = {{ type = \"string\" }} }}, required = [\"id\"] }}\n\
+                 uses = [{{ resolver = \"r\"{mapped} }}]\n"
+            )
+        };
+        // Every declared input is mapped, and no other.
+        assert!(
+            Config::from_toml_str(&policy(
+                "[\"subject\"]",
+                ", inputs = { subject = \"$tool_call.arguments.id\" }"
+            ))
+            .is_ok()
+        );
+        assert!(Config::from_toml_str(&policy("[]", "")).is_ok());
+        for (inputs, mapped) in [
+            ("[\"subject\"]", ""),
+            ("[]", ", inputs = { subject = \"$tool_call.arguments.id\" }"),
+            (
+                "[\"subject\"]",
+                ", inputs = { subject = \"$tool_call.arguments.id\", extra = \"$tool_call.name\" }",
+            ),
+            (
+                "[\"subject\", \"other\"]",
+                ", inputs = { subject = \"$tool_call.arguments.id\" }",
+            ),
+        ] {
+            let text = policy(inputs, mapped);
+            assert!(
+                matches!(
+                    Config::from_toml_str(&text),
+                    Err(ConfigError::ResolverInputMismatch { .. })
+                ),
+                "must refuse:\n{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_input_reads_one_of_the_five_tool_call_values() {
+        let policy = |spelling: &str| {
+            format!(
+                "version = 1\n[[dynamic_resolver]]\nname = \"r\"\ninputs = [\"subject\"]\nreturns = [\"delta.trust\"]\n\
+                 [[tool]]\nname = \"lookup\"\ndescription = \"d\"\n\
+                 parameters = {{ type = \"object\", properties = {{ id = {{ type = \"string\" }} }}, required = [\"id\"] }}\n\
+                 uses = [{{ resolver = \"r\", inputs = {{ subject = \"{spelling}\" }} }}]\n\
+                 "
+            )
+        };
+        for supported in [
+            "$tool_call",
+            "$tool_call.name",
+            "$tool_call.description",
+            "$tool_call.arguments",
+            "$tool_call.arguments.id",
+        ] {
+            assert!(
+                Config::from_toml_str(&policy(supported)).is_ok(),
+                "{supported} is a tool-call value"
+            );
+        }
+        for unsupported in [
+            "$tool",
+            "$tool_call.foo",
+            "$tool_call.arguments.id.deep",
+            "$tool_call.arguments.",
+            "id",
+        ] {
+            assert!(
+                matches!(
+                    Config::from_toml_str(&policy(unsupported)),
+                    Err(ConfigError::UnknownCallSource { spelling, .. }) if spelling == unsupported
+                ),
+                "{unsupported} is not a tool-call value"
+            );
+        }
+    }
+
+    #[test]
+    fn resolver_result_references_are_not_policy_syntax() {
+        let policy = "version = 1\n[[dynamic_resolver]]\nname = \"r\"\nreturns = [\"delta.trust\"]\n\
+            [[tool]]\nname = \"lookup\"\nuses = [{ resolver = \"r\" }]\n\
+            delta = { trust = \"resolver.r.trust\" }\n";
+        assert!(matches!(
+            Config::from_toml_str(policy),
+            Err(ConfigError::UnknownTrustRank { name, .. }) if name == "resolver.r.trust"
+        ));
+    }
+
+    #[test]
+    fn a_resolver_name_is_an_opaque_non_empty_string() {
+        let policy = "version = 1\n[[dynamic_resolver]]\nname = \"a.b\"\nreturns = [\"delta.trust\"]\n\
+            [[tool]]\nname = \"lookup\"\ndescription = \"Looks up a value.\"\nuses = [{ resolver = \"a.b\" }]\n";
+        assert!(Config::from_toml_str(policy).is_ok());
+        assert!(matches!(
+            Config::from_toml_str("version = 1\n[[dynamic_resolver]]\nname = \"\"\nreturns = [\"delta.trust\"]\n"),
+            Err(ConfigError::BadResolverName(name)) if name.is_empty()
+        ));
+    }
+
+    #[test]
+    fn a_tool_uses_each_resolver_once() {
+        let policy = "version = 1\n\
+             [[dynamic_resolver]]\nname = \"r\"\nreturns = [\"delta.trust\", \"delta.audience\"]\n\
+             [[tool]]\nname = \"lookup\"\ndescription = \"d\"\n\
+             uses = [{ resolver = \"r\" }, { resolver = \"r\" }]\n\
+             ";
+        assert!(matches!(
+            Config::from_toml_str(policy),
+            Err(ConfigError::Registry(LoadError::DuplicateToolResolver { .. }))
         ));
     }
 
@@ -1225,11 +1661,7 @@ confined_results = ["lookup"]
             }
             other => panic!("expected an audience-binding refusal with {expected:?}, got {other:?} for:\n{policy}"),
         };
-        let bindings = [
-            "requires = { audience = { includes = [\"$to\"] } }\ndelta = {}",
-            "requires = { audience = { includes = { resolver = \"directory\", argument = \"to\" } } }\ndelta = {}",
-            "delta = { audience = { resolver = \"directory\", argument = \"to\" } }",
-        ];
+        let bindings = ["requires = { audience = { contains = [\"$to\"] } }\ndelta = {}"];
         let parameters = [
             ("", PropertyFault::Undeclared),
             (
@@ -1250,9 +1682,7 @@ confined_results = ["lookup"]
             ),
         ];
         let policy = |binding: &str, parameters: &str| {
-            format!(
-                "version = 1\n[[dynamic_resolver]]\nname = \"directory\"\n[[tool]]\nname = \"send\"\n{parameters}\n{binding}\n"
-            )
+            format!("version = 1\n[[tool]]\nname = \"send\"\n{parameters}\n{binding}\n")
         };
         for binding in bindings {
             for (parameters, expected) in parameters {
@@ -1264,7 +1694,7 @@ confined_results = ["lookup"]
             );
             assert!(Config::from_toml_str(&ok).is_ok(), "must load:\n{ok}");
         }
-        let static_recipients = "version = 1\n[[tool]]\nname = \"send\"\nrequires = { audience = { includes = [\"finance\"] } }\ndelta = {}\n";
+        let static_recipients = "version = 1\n[[tool]]\nname = \"send\"\nrequires = { audience = { contains = [\"finance\"] } }\ndelta = {}\n";
         assert!(Config::from_toml_str(static_recipients).is_ok());
     }
 
@@ -1358,7 +1788,8 @@ confined_results = ["lookup"]
         .expect("the schema compiles");
         let tool = config
             .registry()
-            .tool(&ToolName::new("t"))
+            .variants(&ToolName::new("t"))
+            .next()
             .expect("the tool is registered");
         assert_eq!(
             tool.parameters.normalized(),
@@ -1381,27 +1812,27 @@ name = "directory"
 
 [[tool]]
 name = "read"
-delta = { audience = { exactly = ["auditor", "@team"] } }
+delta = { audience = ["auditor", "@team"] }
 
 [[tool]]
 name = "send"
-requires = { audience = { cap = ["@team"], includes = ["@board"] } }
+requires = { audience = { within = ["@team"], contains = ["@board"] } }
 delta = {}
 
 [[authority]]
 name = "officer"
-[authority.mandate]
-can_cover_readers = { may_add = ["@officers"] }
+[authority.permits]
+audience_missing = ["@officers"]
 
 [[sanitizer]]
 name = "declassify"
 on = ["tool_output"]
-[sanitizer.mandate]
-audience = { from = { includes = ["internal"] }, to = { exactly = ["@team"] } }
+[sanitizer.permits]
+audience = { from = ["internal"], to = ["@team"] }
 
 [[cast]]
 name = "paranoid"
-constant = { trust = "suspicious", audience = { exactly = ["@team"] } }
+constant = { trust = "suspicious", audience = ["@team"] }
 
 [deployment]
 dispatch = "enforced"
@@ -1417,7 +1848,10 @@ confined_results = ["read", "send"]
                 GroupName::new("team")
             ]
         );
-        let read = registry.tool(&ToolName::new("read")).expect("read registers");
+        let read = registry
+            .variants(&ToolName::new("read"))
+            .next()
+            .expect("read registers");
         assert_eq!(
             read.delta.as_ref().and_then(|delta| delta.audience.as_ref()),
             Some(&AudienceDelta::Static(
@@ -1447,10 +1881,10 @@ confined_results = ["read", "send"]
         ));
 
         for (case, replacement) in [
-            ("bare @", "cap = [\"@\"]"),
-            ("public beside a group", "cap = [\"public\", \"@team\"]"),
+            ("bare @", "within = [\"@\"]"),
+            ("public beside a group", "within = [\"public\", \"@team\"]"),
         ] {
-            let malformed = policy.replace("cap = [\"@team\"]", replacement);
+            let malformed = policy.replace("within = [\"@team\"]", replacement);
             assert!(
                 matches!(Config::from_toml_str(&malformed), Err(ConfigError::BadAudience { .. })),
                 "{case} loads"
@@ -1459,8 +1893,8 @@ confined_results = ["read", "send"]
 
         let base = "version = 1\n[membership]\nname = \"directory\"\n[[tool]]\nname = \"t\"\ndelta = {}\n";
         for site in [
-            "[deployment]\nstarting_label = { audience = { exactly = [\"@team\"] } }\n",
-            "[boundary]\naudience = { exactly = [\"@team\"] }\n",
+            "[deployment]\nstarting_label = { audience = [\"@team\"] }\n",
+            "[boundary]\naudience = [\"@team\"]\n",
         ] {
             assert!(
                 matches!(
@@ -1470,5 +1904,78 @@ confined_results = ["read", "send"]
                 "{site} loads"
             );
         }
+    }
+    #[test]
+    fn a_string_token_and_a_reader_list_are_different_audience_shapes() {
+        let base = "version = 1\n[[tool]]\nname = \"t\"\ndelta = {}\n";
+        let starting = |audience: &str| {
+            let policy = format!("{base}[deployment]\nstarting_label = {{ audience = {audience} }}\n");
+            Config::from_toml_str(&policy)
+                .expect("a public starting label loads")
+                .engine()
+                .profile()
+                .starting_label()
+                .clone()
+        };
+        assert_eq!(starting("\"public\""), starting("[\"public\"]"));
+
+        let delta = |audience: &str| {
+            let policy = format!(
+                "version = 1\n[[tool]]\nname = \"t\"\ndelta = {{ audience = {audience} }}\n\
+                 [deployment]\ndispatch = \"enforced\"\nconfined_results = [\"t\"]\n"
+            );
+            Config::from_toml_str(&policy)
+        };
+        let pending = delta("\"unknown\"").expect("the unknown token loads");
+        let tool = pending
+            .registry()
+            .tools()
+            .find(|tool| tool.name.as_str() == "t")
+            .expect("t registers");
+        assert!(matches!(
+            tool.delta.as_ref().and_then(|d| d.audience.as_ref()),
+            Some(AudienceDelta::PendingCast)
+        ));
+        assert!(matches!(delta("[\"unknown\"]"), Err(ConfigError::BadAudience { .. })));
+        assert!(matches!(delta("[]"), Err(ConfigError::BadAudience { .. })));
+    }
+
+    #[test]
+    fn a_sanitizer_transition_and_a_component_tag_list_keep_every_member() {
+        let policy = "version = 1\n\
+             [membership]\nname = \"directory\"\n\
+             [[tool]]\nname = \"read\"\ntags = [\"hr\", \"crm\"]\ndelta = { audience = [\"alice\", \"bob\"] }\n\
+             [[sanitizer]]\nname = \"redact\"\non = [\"tool_output\"]\ntags = [\"hr\", \"crm\"]\n\
+             [sanitizer.permits]\naudience = { from = [\"alice\", \"@auditors\"], to = [\"alice\", \"@reviewers\"] }\n\
+             [[authority]]\nname = \"officer\"\ntags = [\"hr\", \"crm\"]\n\
+             [authority.permits]\naudience_missing = [\"alice\", \"bob\"]\n\
+             [deployment]\ndispatch = \"enforced\"\nconfined_results = [\"read\"]\n";
+        let config = Config::from_toml_str(policy).expect("lists of more than one member load");
+        let registry = config.registry();
+        let redact = registry
+            .sanitizer(&SanitizerName::new("redact"))
+            .expect("redact registers");
+        assert_eq!(redact.scope.tags.len(), 2);
+        match &redact.transition {
+            DeclaredTransition::Audience { from_includes, to } => {
+                let expected = |group: &str| {
+                    DeclaredAudience::declared([ReaderId::new("alice")], [GroupName::new(group)]).unwrap()
+                };
+                assert_eq!(from_includes, &expected("auditors"));
+                assert_eq!(to, &expected("reviewers"));
+            }
+            other => panic!("expected an audience transition, got {other:?}"),
+        }
+        let officer = registry
+            .authority(&AuthorityName::new("officer"))
+            .expect("officer registers");
+        assert_eq!(officer.scope.tags.len(), 2);
+        assert_eq!(
+            officer.mandate.reader_ceiling,
+            Some(DeclaredAudience::restricted([
+                ReaderId::new("alice"),
+                ReaderId::new("bob")
+            ]))
+        );
     }
 }

@@ -27,6 +27,7 @@
     "mcp-handler": "^2.1.0",
     "nanoid": "^6.0.1",
     "next": "^15.5.0",
+    "posthog-js": "^1.417.3",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-markdown": "^10.1.0",

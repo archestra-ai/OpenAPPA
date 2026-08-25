@@ -1,3 +1,6 @@
+mod common;
+use common::raw;
+
 use std::sync::Arc;
 
 use appa_runtime::api::{AuditEvent, DispatchOutcome, OfferId, RemedyOutcome, Runtime};
@@ -10,19 +13,19 @@ version = 1
 
 [[policy.tool]]
 name = "read_hr"
-delta = { audience = { exactly = ["hr"] } }
+delta = { audience = ["hr"] }
 
 [[policy.tool]]
 name = "send"
 parameters = { type = "object", properties = { body = { type = "string" } }, required = ["body"] }
-requires = { audience = { includes = ["public"] } }
+requires = { audience = { contains = ["public"] } }
 effects = ["egress"]
 delta = {}
 
 [[policy.sanitizer]]
 name = "redactor"
 on = ["tool_input"]
-mandate = { audience = { from = { includes = ["hr"] }, to = { exactly = ["public"] } } }
+permits = { audience = { from = ["hr"], to = ["public"] } }
 
 [externals]
 timeout_ms = 1000
@@ -34,17 +37,6 @@ builtin = "redact-email"
 
 const RAW_BODY: &str = "mail alice@corp.example today";
 const REDACTED_BODY: &str = "mail [redacted-email] today";
-
-fn raw(value: serde_json::Value) -> Box<serde_json::value::RawValue> {
-    serde_json::value::to_raw_value(&value).expect("the fixture serializes")
-}
-
-fn acting() -> Actor {
-    Actor {
-        root: root(),
-        child: None,
-    }
-}
 
 fn root() -> TrajectoryId {
     TrajectoryId("substitution-test".to_string())
@@ -99,7 +91,7 @@ async fn report(runtime: &Arc<Runtime>, call: ProposedCall, body: &str) -> HookD
 
 fn feedback_of(decision: &HookDecision) -> String {
     match decision {
-        HookDecision::DenyCall { feedback } => feedback.clone(),
+        HookDecision::DenyCall { feedback, .. } => feedback.clone(),
         other => panic!("expected a deny carrying feedback, got {other:?}"),
     }
 }
@@ -129,7 +121,7 @@ async fn narrowed_and_blocked(dir: &tempfile::TempDir) -> (Arc<Runtime>, OfferId
     let blocked = propose(&runtime, read_hr()).await;
     let accept = last_offer(&feedback_of(&blocked));
     assert!(matches!(
-        runtime.execute_remedy(&acting(), accept).await,
+        runtime.execute_remedy(&actor(), accept).await,
         RemedyOutcome::Authorized { .. }
     ));
     assert_eq!(
@@ -148,7 +140,7 @@ async fn the_replaced_call_runs_through_the_hooks_and_closes() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let (runtime, hop) = narrowed_and_blocked(&dir).await;
 
-    let RemedyOutcome::Substituted { call } = runtime.execute_remedy(&acting(), hop.clone()).await else {
+    let RemedyOutcome::Substituted { call } = runtime.execute_remedy(&actor(), hop.clone()).await else {
         panic!("the input sanitizer's hop substitutes the call");
     };
     assert_eq!(call.tool, "send");
@@ -164,7 +156,7 @@ async fn the_replaced_call_runs_through_the_hooks_and_closes() {
     assert_eq!(report(&runtime, send(REDACTED_BODY), "sent").await, HookDecision::Ack);
 
     assert!(matches!(
-        runtime.execute_remedy(&acting(), hop).await,
+        runtime.execute_remedy(&actor(), hop).await,
         RemedyOutcome::Declined { .. }
     ));
     assert!(matches!(
@@ -197,7 +189,7 @@ async fn another_call_abandons_the_standing_replaced_call() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let (runtime, hop) = narrowed_and_blocked(&dir).await;
     assert!(matches!(
-        runtime.execute_remedy(&acting(), hop).await,
+        runtime.execute_remedy(&actor(), hop).await,
         RemedyOutcome::Substituted { .. }
     ));
 
@@ -234,7 +226,7 @@ async fn the_standing_replaced_call_survives_a_reopen() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let (runtime, hop) = narrowed_and_blocked(&dir).await;
     assert!(matches!(
-        runtime.execute_remedy(&acting(), hop).await,
+        runtime.execute_remedy(&actor(), hop).await,
         RemedyOutcome::Substituted { .. }
     ));
     drop(runtime);

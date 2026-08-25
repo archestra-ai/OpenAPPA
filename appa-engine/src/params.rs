@@ -106,6 +106,8 @@ pub enum ArgumentError {
     UnsafeInteger,
     #[error("arguments do not satisfy the tool's registered schema: {0}")]
     Schema(String),
+    #[error("arguments match no registered contract")]
+    NoMatchingContract,
     #[error("persisted argument payload is not in canonical form")]
     NotCanonical,
 }
@@ -223,6 +225,20 @@ impl ToolParameters {
             Some(_) => Err(PropertyFault::NotString),
         }
     }
+
+    /// Whether `name` is a required top-level property of any type — the shape a resolver input
+    /// mapped from `$tool_call.arguments.<name>` must point at. The resolver receives whatever
+    /// JSON value the argument holds, so only presence has to be guaranteed before the call is
+    /// resolved. Nesting does not count: only the root object's own properties are read.
+    pub(crate) fn required_property(&self, name: &str) -> Result<(), PropertyFault> {
+        match self.root.properties.contains_key(name) {
+            false => Err(PropertyFault::Undeclared),
+            true => match self.root.required.iter().any(|required| required == name) {
+                true => Ok(()),
+                false => Err(PropertyFault::Optional),
+            },
+        }
+    }
 }
 
 /// Why a top-level property is not the required string an audience argument binding needs.
@@ -233,7 +249,7 @@ pub enum PropertyFault {
     Undeclared,
     #[error("is declared but not with `type = \"string\"`")]
     NotString,
-    #[error("is a string but not listed in `required`")]
+    #[error("is declared but not listed in `required`")]
     Optional,
 }
 
@@ -789,6 +805,12 @@ pub struct CanonicalArguments {
 }
 
 impl CanonicalArguments {
+    /// Strictly parse and canonicalize one argument object without applying a tool schema.
+    /// Contract selection reads this value before the selected contract validates it.
+    pub(crate) fn parse(bytes: &[u8]) -> Result<Self, ArgumentError> {
+        Self::from_raw_unchecked(bytes)
+    }
+
     /// The engine construction path: one raw JSON object, strictly scanned and
     /// schema-validated.
     pub(crate) fn from_raw(bytes: &[u8], parameters: &ToolParameters) -> Result<Self, ArgumentError> {
@@ -830,7 +852,7 @@ impl CanonicalArguments {
 
 /// A default-feature `serde_json::Value` always canonicalizes: keys are strings and every
 /// representable number is a finite binary64 or exact integer.
-pub(crate) fn canonical_bytes(value: &Value) -> Vec<u8> {
+pub fn canonical_bytes(value: &Value) -> Vec<u8> {
     serde_json_canonicalizer::to_vec(value).expect("a serde_json::Value canonicalizes")
 }
 

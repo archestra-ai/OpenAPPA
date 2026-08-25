@@ -416,20 +416,29 @@ from pathlib import Path
 
 policy_path = Path(sys.argv[sys.argv.index("--policy") + 1])
 policy = tomllib.loads(policy_path.read_text())
-url = policy["externals"]["dynamic"]["url"]
+readers = ["cfo@northwind.example", "legal-lead@northwind.example"]
 for request, expected in [
     (
-        {"version": 1, "resolver": "document-acl", "tool": "share_legal_packet", "argument": "file", "value": "project-onyx-packet.md"},
-        ["cfo@northwind.example", "legal-lead@northwind.example"],
+        {
+            "version": 1,
+            "resolver": "document-acl",
+            "args": {"subject": "project-onyx-packet.md"},
+        },
+        {"version": 1, "result": {"delta.audience": readers}},
     ),
     (
-        {"version": 1, "resolver": "distribution-list-members", "tool": "share_legal_packet", "argument": "to", "value": "onyx-steering@northwind.example"},
-        ["cfo@northwind.example", "legal-lead@northwind.example"],
+        {
+            "version": 1,
+            "resolver": "distribution-list-members",
+            "args": {"subject": "onyx-steering@northwind.example"},
+        },
+        {"version": 1, "result": {"requires.audience": {"contains": readers}}},
     ),
 ]:
+    url = policy["externals"]["dynamic"][request["resolver"]]["url"]
     wire = urllib.request.Request(url, data=json.dumps(request).encode(), headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(wire) as response:
-        assert json.load(response) == {"version": 1, "readers": expected}
+        assert json.load(response) == expected
 '''
     )
     script.chmod(0o755)
@@ -445,7 +454,10 @@ for request, expected in [
 
     assert result.error is None
     staged = tomllib.loads((episode_dir / "policy.toml").read_text())
-    assert staged["externals"]["dynamic"]["url"].endswith("/dynamic-resolver")
+    assert all(
+        endpoint["url"].endswith("/dynamic-resolver")
+        for endpoint in staged["externals"]["dynamic"].values()
+    )
     requests = [json.loads(line) for line in (episode_dir / "external-requests.jsonl").read_text().splitlines()]
     assert len(requests) == 2
     assert all(record["kind"] == "dynamic_resolver" for record in requests)

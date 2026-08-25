@@ -1,6 +1,6 @@
 //! The engine boundary: the one module that speaks to `appa-engine`.
 //!
-//! [`EngineSeam::rebuild_view`] turns the store's opaque batch rows back into
+//! [`RuntimeEngine::rebuild_view`] turns the store's opaque batch rows back into
 //! typed facts and refuses the log before it is trusted: the log opens under
 //! this root's own policy, and
 //! [`appa_engine::engine::Engine::view`] then admits every record through the
@@ -8,7 +8,7 @@
 //! not have followed one another never reaches a decision. Because
 //! this runtime stores no view and rebuilds from the durable log on every
 //! event, that decode step is the store-reopen trust
-//! gate. [`EngineSeam::handle`] then translates one runtime event onto
+//! gate. [`RuntimeEngine::handle`] then translates one runtime event onto
 //! [`appa_engine::engine::Engine::handle`], the engine's one mutation
 //! boundary, and translates its typed follow-up back into a delivery. It
 //! returns one decision: an optional fact batch to append under
@@ -16,15 +16,15 @@
 //! vocabulary here is delivery adaptation, not policy: every
 //! admissibility judgment is the engine's.
 //!
-//! Beside `handle` the seam makes projection reads — which branch has ended,
+//! Beside `handle` the boundary makes projection reads — which branch has ended,
 //! which dispatches it has open, what its label renders as. They gate nothing
 //! and append nothing. One of them is not a read at all:
-//! [`EngineSeam::opens_a_second_dispatch`] is this deployment's own host
+//! [`RuntimeEngine::opens_a_second_dispatch`] is this deployment's own host
 //! policy, which the engine deliberately does not enforce.
 //!
 //! External evidence is typed before it reaches an engine input:
-//! an authority verdict, a sanitizer derivation, a dynamic-resolver reader
-//! set. A missing or malformed answer stays runtime-side and fails closed
+//! an authority verdict, a sanitizer derivation, or a dynamic-resolver answer.
+//! A missing or malformed answer stays runtime-side and fails closed
 //! — no no-answer variant ever enters an engine operation.
 //!
 //! Offers are engine-derived remedies and engine-owned facts: the runtime
@@ -35,20 +35,16 @@
 //! the plan from the live views and matches it by value, so an offer whose
 //! basis has moved declines instead of executing.
 
-use std::collections::BTreeMap;
-#[cfg(test)]
-use std::sync::Mutex;
-
 use appa_engine::candidate::DerivedVia;
 use appa_engine::check::UnestablishedFact;
-use appa_engine::contract::{PinnedDynamicResolution, PinnedMembership};
+use appa_engine::contract::{PinnedMembership, PinnedToolResolution, RequiredAudience, ToolResolverUse};
 pub(crate) use appa_engine::engine::ForkStatus;
 use appa_engine::engine::{Engine, EngineError};
 use appa_engine::execute::{AuthorityEvidence, AuthorityReview};
 use appa_engine::fact::{BoundaryKind, CloseOutcome, EffectSet, Fact, ReturnDerivation};
 use appa_engine::groups::GroupExpansion;
-use appa_engine::label::{Audience, Dim, Dimension, EstablishedLabel, Label, PartialLabel, ReaderId, Trust};
-use appa_engine::names::GroupName;
+use appa_engine::label::{Audience, Dimension, EstablishedLabel, Label, PartialLabel, ReaderId, Trust};
+use appa_engine::names::{GroupName, MarkName};
 use appa_engine::plan::{ExecutableRemedyPlan, PlanId, PlannedBlock, RemedyPlan, RequiredRuling};
 use appa_engine::profile::PolicyFileKey as EnginePolicyFileKey;
 use appa_engine::projection::Views;
@@ -59,21 +55,22 @@ use appa_engine::transition::Blocked as CoreBlocked;
 /// the event or passed with the read.
 pub(crate) use appa_engine::transition::EngineView;
 use appa_engine::transition::{
-    ApplicableCast, ChildFollowUp, ChildReport, ChildSubmission, Confined, EngineDecision as CoreDecision,
-    EngineEvent as CoreEvent, Evidence, EvidenceRequest, FollowUp, ForkBinding, OfferConsult, OfferExecution,
-    OfferFollowUp, OfferOutcome, OutcomeBody as CoreOutcomeBody, OutcomeFollowUp, PendingReturnStage, ProposalBatch,
-    ProposalBatchId, ProposedCall as CoreProposedCall, Released, SpawnMark, ToolOutcome as CoreToolOutcome, ToolReport,
-    TransitionError, TransitionRefusal, ValidatedFactBatch,
+    ApplicableCast, ChildFollowUp, ChildReport, ChildSubmission, EngineEvent as CoreEvent, Evidence, EvidenceRequest,
+    FollowUp, ForkBinding, OfferConsult, OfferExecution, OfferFollowUp, OfferOutcome, OutcomeBody as CoreOutcomeBody,
+    OutcomeFollowUp, ProposalBatch, ProposalBatchId, ProposedCall as CoreProposedCall, Released, SpawnMark,
+    ToolOutcome as CoreToolOutcome, ToolReport, TransitionError, TransitionRefusal, ValidatedFactBatch,
 };
 use appa_engine::value::{
-    DispatchId as EngineDispatchId, ForkId, OfferId as EngineOfferId, OfferNonce as EngineOfferNonce, Provenance,
-    RawResultDigest, ResolvedCall, ToolName, ValueBody, ValueId,
+    ChildReturnId, DispatchId as EngineDispatchId, ForkId, OfferId as EngineOfferId, OfferNonce as EngineOfferNonce,
+    Provenance, RawResultDigest, ResolvedCall, ToolName, TrajectoryId as EngineTrajectoryId, ValueBody, ValueId,
 };
 use appa_eventlog::Log;
+use appa_runtime_api::{LabelDimension, UnestablishedValue};
+use std::collections::BTreeMap;
 
 use crate::api::OutcomeBody;
-pub(crate) use crate::api::{DispatchId, OfferId, ProposedCall, SpawnBinding, ToolOutcome, TrajectoryId};
-use crate::external::{CastAnswer, CastAudience};
+pub(crate) use crate::api::{OfferId, ProposedCall, SpawnBinding, ToolOutcome, TrajectoryId};
+use crate::external::{CastAnswer, CastAudience, ToolResolutionAnswer, ToolResolutionContext};
 
 /// One fresh 256-bit random number per act that can surface offers; the
 /// runtime mixes it into every `OfferId` it mints.
@@ -84,7 +81,6 @@ pub struct OfferNonce(pub [u8; 32]);
 /// execute, delivered verbatim.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReleasedCall {
-    pub dispatch: DispatchId,
     pub tool: String,
     pub bytes: Vec<u8>,
     /// The spawn binding, when this release prepared a fork: the
@@ -98,6 +94,8 @@ pub struct ReleasedCall {
 pub struct Feedback {
     pub text: String,
     pub offers: Vec<OfferId>,
+    /// The sources the block names as unestablished, typed; `text` says the same in prose.
+    pub unestablished: Vec<UnestablishedValue>,
 }
 
 /// One external consult the session must resolve before the same semantic
@@ -114,11 +112,11 @@ pub enum ExternalRequest {
         source: RawResultDigest,
         body: ValueBody,
     },
-    Dynamic {
-        resolver: String,
-        tool: String,
-        argument: String,
-        value: String,
+    ToolResolution {
+        uses: ToolResolverUse,
+        /// Exactly what this use selected: the value the request carries as `args`.
+        args: serde_json::Value,
+        context: ToolResolutionContext,
     },
     Membership {
         resolver: String,
@@ -128,17 +126,46 @@ pub enum ExternalRequest {
     /// registration order and a constant among them arrives already resolved, so the
     /// session answers it without a call.
     PendingCast {
-        casts: Vec<ApplicableCast>,
         source: RawResultDigest,
-        body: ValueBody,
+        ask: CastAsk,
     },
     /// Classify one admitted value a blocked act reads. Same cascade, same order: the two
     /// asks differ only in what the answer resolves.
     Cast {
-        casts: Vec<ApplicableCast>,
         value: ValueId,
-        body: ValueBody,
+        ask: CastAsk,
     },
+}
+
+/// One cast ask as the session answers it: the casts still to try, in registration order,
+/// and what every classifier consult carries beside the cast's name — the value's bytes, the
+/// tool whose result the value is (a child return has none), and the label context a tool
+/// resolver also receives. Evidence carries the ask it answers, so an answer the engine
+/// refuses is followed by the ask's next cast without recomputing anything.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CastAsk {
+    pub casts: Vec<ApplicableCast>,
+    pub body: ValueBody,
+    pub tool: Option<String>,
+    pub context: ToolResolutionContext,
+}
+
+impl CastAsk {
+    /// The same ask continued past `cast`: only the casts registered after it are left.
+    fn after(&self, cast: &str) -> CastAsk {
+        CastAsk {
+            casts: self
+                .casts
+                .iter()
+                .skip_while(|applicable| applicable.name.as_str() != cast)
+                .skip(1)
+                .cloned()
+                .collect(),
+            body: self.body.clone(),
+            tool: self.tool.clone(),
+            context: self.context.clone(),
+        }
+    }
 }
 
 /// One cast's answer as the session obtained it.
@@ -171,25 +198,74 @@ pub enum ExternalEvidence {
         source: RawResultDigest,
         derived: Option<String>,
     },
-    Dynamic {
+    ToolResolution {
         resolver: String,
-        argument: String,
-        readers: Option<Vec<String>>,
+        /// The `args` the classifier answered for, by digest. Evidence matches that value only,
+        /// so two calls sharing a resolver and a context never take each other's answer.
+        args: appa_engine::contract::ResolverArgsDigest,
+        answer: ToolResolutionAnswer,
+        /// The label context the classifier answered under. Evidence matches only while the
+        /// call's current context is the one it described; a moved trajectory consults again.
+        context: ToolResolutionContext,
     },
     Membership {
         resolver: String,
         group: String,
         readers: Option<Vec<String>>,
     },
-    /// `None` means every applicable cast was asked and none answered usably.
+    /// `None` means every cast the ask still carried was asked and none answered usably.
     PendingCast {
         source: RawResultDigest,
         verdict: Option<CastVerdict>,
+        ask: CastAsk,
     },
     Cast {
         value: ValueId,
         verdict: Option<CastVerdict>,
+        ask: CastAsk,
     },
+}
+
+impl ExternalEvidence {
+    /// Does this answer the same cast ask as `other`? A later answer for the same source
+    /// supersedes the earlier one: the cascade continued past a refused cast.
+    pub(crate) fn answers_same_ask(&self, other: &ExternalEvidence) -> bool {
+        match (self, other) {
+            (ExternalEvidence::Cast { value: mine, .. }, ExternalEvidence::Cast { value: theirs, .. }) => {
+                mine == theirs
+            }
+            (
+                ExternalEvidence::PendingCast { source: mine, .. },
+                ExternalEvidence::PendingCast { source: theirs, .. },
+            ) => mine == theirs,
+            _ => false,
+        }
+    }
+
+    /// The ask continued past the cast that gave this answer, for an answer the engine
+    /// refused. An ask with no cast left is still repeated: the session answers it with no
+    /// answer, which supersedes the refused one and ends the cascade.
+    fn continued(&self) -> Option<ExternalRequest> {
+        match self {
+            ExternalEvidence::Cast {
+                value,
+                verdict: Some(verdict),
+                ask,
+            } => Some(ExternalRequest::Cast {
+                value: *value,
+                ask: ask.after(&verdict.cast),
+            }),
+            ExternalEvidence::PendingCast {
+                source,
+                verdict: Some(verdict),
+                ask,
+            } => Some(ExternalRequest::PendingCast {
+                source: *source,
+                ask: ask.after(&verdict.cast),
+            }),
+            _ => None,
+        }
+    }
 }
 
 /// An authority's wire verdict: `{"ruling": "approve"|"deny"}`; anything
@@ -213,8 +289,9 @@ impl AuthorityVerdict {
     }
 }
 
-/// One session event in the seam's vocabulary. The session constructs it; the
-/// seam translates it onto the engine's `handle` boundary and back.
+/// One session event in the engine boundary's vocabulary. The session
+/// constructs it; [`RuntimeEngine::handle`] translates it onto the
+/// engine's own `handle` boundary and back.
 #[derive(Debug, Clone)]
 pub enum EngineEvent {
     ModelResponse {
@@ -288,7 +365,7 @@ impl EngineDecision {
     }
 }
 
-/// Why the seam refused an event outright. Model-visible outcomes (a deny, a
+/// Why the engine boundary refused an event outright. Model-visible outcomes (a deny, a
 /// declined offer) are decisions, not refusals; a refusal means the event
 /// cannot be processed as it stands.
 #[derive(Debug, thiserror::Error)]
@@ -318,15 +395,20 @@ pub struct TrajectoryStatus {
     pub trajectory: String,
     pub trust: String,
     pub audience: String,
+    /// The ids of the admitted values whose trust is still unresolved. `trust` is the
+    /// established bound: every known restriction, readable while these stand.
+    pub unresolved_trust: Vec<u64>,
+    pub unresolved_audience: Vec<u64>,
 }
 
-/// One label rendered for a display surface: chain names and reader ids as
-/// plain strings, per dimension, with `unknown` where a source is still
-/// unresolved.
+/// One label rendered for a display surface: the established bound per dimension as chain
+/// names and reader ids, plus the ids of the sources still unresolved on it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct AuditLabel {
     pub trust: String,
     pub audience: String,
+    pub unresolved_trust: Vec<u64>,
+    pub unresolved_audience: Vec<u64>,
 }
 
 /// One decision the family log recorded, in log order (the
@@ -434,7 +516,7 @@ pub enum PolicyEngine<'a> {
 }
 
 impl PolicyEngine<'_> {
-    fn engine(&self) -> &RuntimeEngine {
+    pub(crate) fn engine(&self) -> &RuntimeEngine {
         match self {
             PolicyEngine::Resident(engine) => engine,
             PolicyEngine::Retired(engine) => engine,
@@ -448,50 +530,67 @@ impl PolicyEngine<'_> {
     }
 }
 
-/// The one engine boundary the session drives: who decides,
-/// and nothing else. The deciding engine arrives per call as a
-/// [`PolicyEngine`], because a family decides under the policy its root
-/// opened with, which a configuration reload does not change.
-/// The runtime holds no offer state — offers are the
-/// engine's durable facts, routed by id.
-pub enum EngineSeam {
-    Real,
-    #[cfg(test)]
-    Test(TestSeam),
+/// What a root's opening record binds it to: the policy file it
+/// opened under and the identity that file must still compile to. `None`
+/// when the log does not open with its opening record, which the trust
+/// gate refuses in full a moment later. Read before the deciding engine
+/// is known, because it is what names it.
+pub(crate) fn opened_under(log: &Log) -> Option<Opened> {
+    match log.facts().first() {
+        Some(Fact::TrajectoryOpened {
+            policy_digest,
+            policy_file_key,
+            ..
+        }) => Some(Opened {
+            policy_file_key: policy_file_key.as_str().to_string(),
+            policy_identity: hex(policy_digest.bytes()),
+        }),
+        _ => None,
+    }
 }
 
-impl EngineSeam {
+/// The one engine boundary the session drives: the immutable
+/// registry-backed decision core, plus the reads of one rebuilt view
+/// the runtime needs to route an event. It owns every judgment and
+/// every fact; the runtime holds no engine state, and offers are the
+/// engine's own durable facts. A family decides under the policy its
+/// root opened with, so the deciding engine arrives per event as a
+/// [`PolicyEngine`], which a configuration reload does not change.
+pub struct RuntimeEngine {
+    engine: Engine,
+}
+
+impl RuntimeEngine {
+    pub fn new(engine: Engine) -> RuntimeEngine {
+        RuntimeEngine { engine }
+    }
+
+    /// The opening of a fresh root: this engine's opening batch bound to the
+    /// exact bytes of the policy file the root opens under. It takes
+    /// the bytes, not a key, because the key on the opening record is the
+    /// engine's own type and is derived here — at the one boundary that names
+    /// the engine crate.
+    pub fn root_opening(&self, trajectory: &TrajectoryId, policy_file: &[u8]) -> Vec<Fact> {
+        self.engine
+            .open_trajectory(&engine_id(trajectory), EnginePolicyFileKey::of(policy_file))
+            .expect("the engine's own opening batch validates against the empty log")
+            .into_unsealed()
+    }
+
     /// Refuse one root's log before it is trusted, including the
     /// opening gate: the log's first record must be this root's opening under
     /// exactly the deciding engine's policy. The root is the log's own, so a
     /// view cannot be built against a log it does not describe.
-    pub fn rebuild_view(&self, policy: &PolicyEngine<'_>, log: &Log) -> Result<EngineView, EngineRefusal> {
-        policy.engine().rebuild_view(log)
-    }
-
-    /// What a root's opening record binds it to: the policy file it
-    /// opened under and the identity that file must still compile to. `None`
-    /// when the log does not open with its opening record, which the trust
-    /// gate refuses in full a moment later.
-    pub fn opened_under(&self, log: &Log) -> Option<Opened> {
-        match log.facts().first() {
-            Some(Fact::TrajectoryOpened {
-                policy_digest,
-                policy_file_key,
-                ..
-            }) => Some(Opened {
-                policy_file_key: policy_file_key.as_str().to_string(),
-                policy_identity: hex(policy_digest.bytes()),
-            }),
-            _ => None,
-        }
+    pub(crate) fn rebuild_view(&self, log: &Log) -> Result<EngineView, EngineRefusal> {
+        let root = TrajectoryId(log.root().as_str().to_string());
+        self.validated(log.facts().to_vec(), &root, log.basis())
     }
 
     /// Where this trajectory stands in the log:
     /// never opened — the root by its opening record, a child by its fork
     /// binding — still taking events, or ended. The one replay-derived
     /// answer; the runtime keeps no flag of its own.
-    pub fn liveness(&self, view: &EngineView, trajectory: &TrajectoryId) -> Liveness {
+    pub(crate) fn liveness(&self, view: &EngineView, trajectory: &TrajectoryId) -> Liveness {
         let id = engine_id(trajectory);
         match view.views(&id) {
             None => Liveness::Unopened,
@@ -500,7 +599,7 @@ impl EngineSeam {
         }
     }
 
-    pub fn parent_of(&self, view: &EngineView, child: &TrajectoryId) -> Option<TrajectoryId> {
+    pub(crate) fn parent_of(&self, view: &EngineView, child: &TrajectoryId) -> Option<TrajectoryId> {
         let child = engine_id(child);
         view.views(&child)?
             .parent_of(&child)
@@ -509,7 +608,7 @@ impl EngineSeam {
 
     /// Would applying this batch leave the trajectory with more than one
     /// dispatch open?
-    pub fn opens_a_second_dispatch(&self, view: &EngineView, trajectory: &TrajectoryId, facts: &[Fact]) -> bool {
+    pub(crate) fn opens_a_second_dispatch(&self, view: &EngineView, trajectory: &TrajectoryId, facts: &[Fact]) -> bool {
         let owner = engine_id(trajectory);
         let mut open: std::collections::BTreeSet<_> = view
             .views(&owner)
@@ -532,7 +631,7 @@ impl EngineSeam {
     }
 
     /// Which trajectory pursues this offer.
-    pub fn offer_pursuer(&self, view: &EngineView, offer: &OfferId) -> Option<TrajectoryId> {
+    pub(crate) fn offer_pursuer(&self, view: &EngineView, offer: &OfferId) -> Option<TrajectoryId> {
         let engine_offer = parse_offer(offer)?;
         let surfaced = view.offer_trajectory(&engine_offer)?.clone();
         let views = view.views(&surfaced)?;
@@ -548,7 +647,7 @@ impl EngineSeam {
     /// canonical bytes each released. The payload is
     /// persisted once, on the opening record, so this is where a live call is
     /// read back — the runtime keeps no row of its own.
-    pub fn open_dispatches(&self, view: &EngineView, trajectory: &TrajectoryId) -> Vec<OpenDispatch> {
+    pub(crate) fn open_dispatches(&self, view: &EngineView, trajectory: &TrajectoryId) -> Vec<OpenDispatch> {
         let owner = engine_id(trajectory);
         let Some(views) = view.views(&owner) else {
             return Vec::new();
@@ -569,7 +668,7 @@ impl EngineSeam {
     /// so that dispatch names a call the harness never proposed — which
     /// is exactly what tells the runtime to hand it out rather than to
     /// refuse the next proposal as a second call in flight.
-    pub fn substituted_release(&self, view: &EngineView, trajectory: &TrajectoryId) -> Option<OpenDispatch> {
+    pub(crate) fn substituted_release(&self, view: &EngineView, trajectory: &TrajectoryId) -> Option<OpenDispatch> {
         let owner = engine_id(trajectory);
         let views = view.views(&owner)?;
         views
@@ -582,129 +681,25 @@ impl EngineSeam {
             })
     }
 
-    pub fn handle(
-        &self,
-        policy: &PolicyEngine<'_>,
-        view: &EngineView,
-        trajectory: &TrajectoryId,
-        event: EngineEvent,
-    ) -> Result<EngineDecision, EngineRefusal> {
-        match self {
-            EngineSeam::Real => policy.engine().handle(view, trajectory, event),
-            #[cfg(test)]
-            EngineSeam::Test(seam) => Ok(seam.next(event)),
-        }
+    /// Where one fork stands in the rebuilt view. The runtime uses it
+    /// to find the family's forks still open for binding, and the child
+    /// a spawn's fork was bound to when that spawn's result arrives.
+    pub(crate) fn fork_status(&self, view: &EngineView, fork: &ForkId) -> ForkStatus {
+        self.engine.fork_status(view, fork)
     }
 
-    /// The canonical bytes of one proposed call, for the byte-exact dispatch
-    /// matching of provider-run tools. `None` when the call cannot canonicalize — an
-    /// unknown tool or schema-invalid arguments never match a dispatched
-    /// call, whose bytes the engine validated.
-    pub fn canonical_bytes(&self, policy: &PolicyEngine<'_>, call: &ProposedCall) -> Option<Vec<u8>> {
-        match self {
-            EngineSeam::Real => policy.engine().canonical_bytes(call),
-            #[cfg(test)]
-            EngineSeam::Test(_) => serde_json::to_vec(call).ok(),
-        }
-    }
-
-    #[cfg(test)]
-    pub fn enqueue(&self, decision: EngineDecision) {
-        match self {
-            EngineSeam::Test(seam) => seam.enqueue(decision),
-            EngineSeam::Real => panic!("only the test seam takes enqueued decisions"),
-        }
-    }
-
-    #[cfg(test)]
-    pub fn seen(&self) -> Vec<EngineEvent> {
-        match self {
-            EngineSeam::Test(seam) => seam.seen(),
-            EngineSeam::Real => panic!("only the test seam records seen events"),
-        }
-    }
-
-    /// Render one trajectory's current label from the rebuilt view, for the
-    /// statusline. A projection read: no engine event, no fact, nothing
-    /// gated.
-    pub fn trajectory_status(
-        &self,
-        policy: &PolicyEngine<'_>,
-        view: &EngineView,
-        trajectory: &TrajectoryId,
-    ) -> Option<TrajectoryStatus> {
-        match self {
-            EngineSeam::Real => policy.engine().trajectory_status(view, trajectory),
-            #[cfg(test)]
-            EngineSeam::Test(_) => Some(TrajectoryStatus {
-                trajectory: String::new(),
-                trust: String::new(),
-                audience: String::new(),
-            }),
-        }
-    }
-
-    /// Where one fork stands in the rebuilt view: a
-    /// projection read on the real compiled engine in both modes,
-    /// because what it reads is the log itself. The runtime uses it to find
-    /// the family's forks still open for binding, and the child a spawn's fork
-    /// was bound to when that spawn's result arrives.
-    pub fn fork_status(&self, policy: &PolicyEngine<'_>, view: &EngineView, fork: &ForkId) -> ForkStatus {
-        policy.engine().engine.fork_status(view, fork)
-    }
-
-    /// The family's forks in flight: prepared, bound to
-    /// no child, their spawn dispatch still open. A projection read
-    /// on the real compiled engine in both modes; the runtime binds a child
-    /// start that names no spawn to the one fork here.
-    pub fn forks_in_flight(&self, policy: &PolicyEngine<'_>, view: &EngineView) -> Vec<ForkId> {
-        policy.engine().engine.forks_in_flight(view)
+    /// The family's forks in flight: prepared, bound to no child, their
+    /// spawn dispatch still open. The runtime binds a child start that
+    /// names no spawn to the one fork here.
+    pub(crate) fn forks_in_flight(&self, view: &EngineView) -> Vec<ForkId> {
+        self.engine.forks_in_flight(view)
     }
 
     /// The fork one child was bound to, or `None` for a trajectory
-    /// the family never forked. A projection read on the real
-    /// compiled engine in both modes, for a child start the harness delivers
-    /// again: it names the fork it already bound.
-    pub fn fork_of(&self, policy: &PolicyEngine<'_>, view: &EngineView, child: &TrajectoryId) -> Option<ForkId> {
-        policy.engine().engine.fork_of(view, &engine_id(child))
-    }
-
-    /// Render the family's recorded decisions from its persisted log. Like
-    /// [`EngineSeam::trajectory_status`], a projection read — and
-    /// like the replay gates, it runs on the real compiled engine in both
-    /// modes, because what it renders is the log itself.
-    pub fn audit(&self, policy: &PolicyEngine<'_>, log: &Log) -> Result<Option<Vec<AuditEntry>>, EngineRefusal> {
-        policy.engine().audit(log)
-    }
-}
-
-/// The real engine behind the seam: the immutable registry-backed decision
-/// core. It owns every judgment and every fact; the runtime holds
-/// no engine state, and offers are the engine's own durable facts.
-pub struct RuntimeEngine {
-    engine: Engine,
-}
-
-impl RuntimeEngine {
-    pub fn new(engine: Engine) -> RuntimeEngine {
-        RuntimeEngine { engine }
-    }
-
-    /// The opening of a fresh root: this engine's opening batch bound to the
-    /// exact bytes of the policy file the root opens under. It takes
-    /// the bytes, not a key, because the key on the opening record is the
-    /// engine's own type and is derived here — at the one boundary that names
-    /// the engine crate.
-    pub fn root_opening(&self, trajectory: &TrajectoryId, policy_file: &[u8]) -> Vec<Fact> {
-        self.engine
-            .open_trajectory(&engine_id(trajectory), EnginePolicyFileKey::of(policy_file))
-            .expect("the engine's own opening batch validates against the empty log")
-            .into_unsealed()
-    }
-
-    fn rebuild_view(&self, log: &Log) -> Result<EngineView, EngineRefusal> {
-        let root = TrajectoryId(log.root().as_str().to_string());
-        self.validated(log.facts().to_vec(), &root, log.basis())
+    /// the family never forked — for a child start the harness
+    /// delivers again: it names the fork it already bound.
+    pub(crate) fn fork_of(&self, view: &EngineView, child: &TrajectoryId) -> Option<ForkId> {
+        self.engine.fork_of(view, &engine_id(child))
     }
 
     fn validated(&self, facts: Vec<Fact>, family: &TrajectoryId, revision: u64) -> Result<EngineView, EngineRefusal> {
@@ -720,7 +715,11 @@ impl RuntimeEngine {
             })
     }
 
-    fn canonical_bytes(&self, call: &ProposedCall) -> Option<Vec<u8>> {
+    /// The canonical bytes of one proposed call, for the byte-exact dispatch
+    /// matching of provider-run tools. `None` when the call cannot canonicalize — an
+    /// unknown tool or schema-invalid arguments never match a dispatched
+    /// call, whose bytes the engine validated.
+    pub(crate) fn canonical_bytes(&self, call: &ProposedCall) -> Option<Vec<u8>> {
         let resolved = self
             .engine
             .resolve_call(ToolName::new(call.tool.clone()), call.arguments.get().as_bytes())
@@ -728,65 +727,98 @@ impl RuntimeEngine {
         Some(resolved.canonical_arguments().canonical_bytes().to_vec())
     }
 
-    fn trajectory_status(&self, view: &EngineView, trajectory: &TrajectoryId) -> Option<TrajectoryStatus> {
+    /// Render one trajectory's current label from the rebuilt view, for the
+    /// statusline. A projection read: no engine event, no fact, nothing
+    /// gated.
+    pub(crate) fn trajectory_status(&self, view: &EngineView, trajectory: &TrajectoryId) -> Option<TrajectoryStatus> {
         let current = view.views(&engine_id(trajectory))?.current_label();
-        let label = self.render_label(&as_label(&current))?;
+        let label = self.render_label(&current)?;
         Some(TrajectoryStatus {
             trajectory: terminal_safe(&trajectory.0),
             trust: label.trust,
             audience: label.audience,
+            unresolved_trust: label.unresolved_trust,
+            unresolved_audience: label.unresolved_audience,
         })
     }
 
-    fn render_label(&self, label: &Label) -> Option<AuditLabel> {
+    /// The established bound by name, and the ids of the sources still unresolved beside
+    /// it: an unresolved source never hides a known restriction.
+    fn render_label(&self, label: &PartialLabel) -> Option<AuditLabel> {
         let chain = self.engine.registry().trust_chain();
-        let trust = match label.trust {
-            Dim::Known(bound) if bound == Trust::new(u8::MAX) => chain
+        let bound = label.bound();
+        let trust = if bound.trust == Trust::new(u8::MAX) {
+            chain
                 .name_of(Trust::new((chain.len() - 1) as u8))
                 .expect("a validated chain names its top rank")
-                .to_string(),
-            Dim::Known(bound) => match chain.name_of(bound) {
+                .to_string()
+        } else {
+            match chain.name_of(bound.trust) {
                 Some(name) => name.to_string(),
                 None => {
-                    tracing::warn!(rank = bound.rank(), "render refused: the trust bound has no chain name");
+                    tracing::warn!(
+                        rank = bound.trust.rank(),
+                        "render refused: the trust bound has no chain name"
+                    );
                     return None;
                 }
-            },
-            Dim::Unknown => "unknown".to_string(),
+            }
         };
-        let audience = match &label.audience {
-            Dim::Known(audience) => audience_wire(audience),
-            Dim::Unknown => "unknown".to_string(),
-        };
+        let unresolved = |dim| label.unresolved(dim).map(ValueId::index).collect();
         Some(AuditLabel {
             trust: terminal_safe(&trust),
-            audience: terminal_safe(&audience),
+            audience: terminal_safe(&audience_wire(&bound.audience)),
+            unresolved_trust: unresolved(Dimension::Trust),
+            unresolved_audience: unresolved(Dimension::Audience),
         })
     }
 
-    fn audit(&self, log: &Log) -> Result<Option<Vec<AuditEntry>>, EngineRefusal> {
+    /// Render the family's recorded decisions from its persisted log. Like
+    /// [`RuntimeEngine::trajectory_status`], a projection read.
+    pub(crate) fn audit(&self, log: &Log) -> Result<Option<Vec<AuditEntry>>, EngineRefusal> {
         let facts = log.facts().to_vec();
         let root = TrajectoryId(log.root().as_str().to_string());
         // The validator takes the records; this read keeps its own copy of
         // them, which is why the audit — and only the audit — clones a log.
         self.validated(facts.clone(), &root, log.basis())?;
-        let mut prepared: std::collections::HashMap<ForkId, (String, Label)> = std::collections::HashMap::new();
+        let mut prepared: std::collections::HashMap<ForkId, (String, PartialLabel)> = std::collections::HashMap::new();
+        // A value's id is its admission's position in the family log, as the projection
+        // numbers it; a child return is cited by the admission its merge appended.
+        let mut returned: std::collections::HashMap<ChildReturnId, ValueId> = std::collections::HashMap::new();
+        let mut admissions: u64 = 0;
         for fact in &facts {
-            if let Fact::ForkPrepared {
-                fork,
-                snapshot,
-                trajectory,
-                ..
-            } = fact
-            {
-                prepared.insert(
-                    fork.clone(),
-                    (terminal_safe(trajectory.as_str()), as_label(snapshot.seed())),
-                );
+            match fact {
+                Fact::ForkPrepared {
+                    fork,
+                    snapshot,
+                    trajectory,
+                    ..
+                } => {
+                    prepared.insert(
+                        fork.clone(),
+                        (terminal_safe(trajectory.as_str()), snapshot.seed().clone()),
+                    );
+                }
+                Fact::ValueAdmitted { provenance, .. } => {
+                    if let Provenance::ChildReturn { id, .. } = provenance {
+                        returned.insert(id.clone(), ValueId::new(admissions));
+                    }
+                    admissions += 1;
+                }
+                _ => {}
             }
         }
+        let mut admissions: u64 = 0;
         let mut entries = Vec::new();
         for fact in &facts {
+            let admitted = match fact {
+                Fact::ValueAdmitted { .. } => {
+                    admissions += 1;
+                    Some(ValueId::new(admissions - 1))
+                }
+                Fact::ChildReturn { id, .. } => returned.get(id).copied(),
+                _ => None,
+            };
             let event = match fact {
                 Fact::ForkOpened { fork, .. } => match prepared.get(fork) {
                     Some((parent, seed)) => match self.render_label(seed) {
@@ -800,7 +832,7 @@ impl RuntimeEngine {
                     // A child opened with no recorded preparation in this read.
                     None => continue,
                 },
-                _ => match self.audit_event(fact) {
+                _ => match self.audit_event(fact, admitted) {
                     Some(Some(event)) => event,
                     // A record the audit does not show.
                     Some(None) => continue,
@@ -816,7 +848,8 @@ impl RuntimeEngine {
         Ok(Some(entries))
     }
 
-    fn audit_event(&self, fact: &Fact) -> Option<Option<AuditEvent>> {
+    /// `admitted` is the id of the value this fact admits, where it admits one.
+    fn audit_event(&self, fact: &Fact, admitted: Option<ValueId>) -> Option<Option<AuditEvent>> {
         let event = match fact {
             Fact::DispatchOpened {
                 tool,
@@ -825,7 +858,7 @@ impl RuntimeEngine {
                 ..
             } => AuditEvent::Released {
                 tool: terminal_safe(tool.as_str()),
-                label: self.render_label(&proposed_label.clone().into_label())?,
+                label: self.render_label(&PartialLabel::established(proposed_label.clone()))?,
                 effects: effect_names(proposed_effects),
             },
             Fact::DispatchSucceeded { effects, .. } => AuditEvent::EffectsCommitted {
@@ -841,7 +874,10 @@ impl RuntimeEngine {
                 },
             },
             Fact::ValueAdmitted { value, .. } => AuditEvent::Admitted {
-                label: self.render_label(&value.label)?,
+                label: self.render_label(&value_fold(
+                    admitted.expect("the audit numbers every admission it reads"),
+                    &value.label,
+                ))?,
             },
             Fact::Ruling { authority, .. } => AuditEvent::Ruled {
                 authority: terminal_safe(authority.as_str()),
@@ -852,13 +888,13 @@ impl RuntimeEngine {
             Fact::Acceptance { narrowing, .. }
             | Fact::ChildReturnAcceptance { narrowing, .. }
             | Fact::CandidateAccepted { narrowing, .. } => AuditEvent::Narrowed {
-                from: self.render_label(&narrowing.from.clone().into_label())?,
-                to: self.render_label(&narrowing.to.clone().into_label())?,
+                from: self.render_label(&PartialLabel::established(narrowing.from.clone()))?,
+                to: self.render_label(&PartialLabel::established(narrowing.to.clone()))?,
             },
             Fact::CastApplied { cast, resolved, .. } | Fact::OutputCastApplied { cast, resolved, .. } => {
                 AuditEvent::Cast {
                     cast: terminal_safe(cast.as_str()),
-                    resolved: self.render_label(&resolved.clone().into_label())?,
+                    resolved: self.render_label(&PartialLabel::established(resolved.clone()))?,
                 }
             }
             Fact::OutputSanitizerBound { sanitizer, .. } => AuditEvent::SanitizerBound {
@@ -875,7 +911,10 @@ impl RuntimeEngine {
                     ReturnDerivation::Raw => None,
                     ReturnDerivation::Sanitized { sanitizer, .. } => Some(terminal_safe(sanitizer.as_str())),
                 },
-                label: self.render_label(&value.label)?,
+                label: self.render_label(&value_fold(
+                    admitted.expect("a merge admits the value its crossing carries"),
+                    &value.label,
+                ))?,
             },
             Fact::Boundary { kind, .. } => match kind {
                 BoundaryKind::Merge { .. } => AuditEvent::Merged,
@@ -897,7 +936,7 @@ impl RuntimeEngine {
         Some(Some(event))
     }
 
-    fn handle(
+    pub(crate) fn handle(
         &self,
         view: &EngineView,
         trajectory: &TrajectoryId,
@@ -941,14 +980,13 @@ impl RuntimeEngine {
         entropy: &OfferNonce,
         spawn: bool,
     ) -> Result<EngineDecision, EngineRefusal> {
-        let (pins, memberships) = match (
-            self.resolve_dynamics(call, evidence),
-            self.resolve_memberships(call, evidence),
-        ) {
-            (Ok(pins), Ok(memberships)) => (pins, memberships),
+        let tools = self.resolve_tool_resolutions(view, trajectory, call, evidence);
+        let memberships = self.resolve_memberships(call, evidence);
+        let (tool_pins, memberships) = match (tools, memberships) {
+            (Ok(tool_pins), Ok(memberships)) => (tool_pins, memberships),
             (Err(Resolution::Feedback(text)), _) | (_, Err(Resolution::Feedback(text))) => return Ok(deny(text)),
-            (dynamics, memberships) => {
-                let requests = [dynamics.err(), memberships.map(|_| ()).err()]
+            (tools, memberships) => {
+                let requests = [tools.err(), memberships.map(|_| ()).err()]
                     .into_iter()
                     .flatten()
                     .flat_map(|missing| match missing {
@@ -962,22 +1000,33 @@ impl RuntimeEngine {
         let proposed = CoreProposedCall {
             tool: ToolName::new(call.tool.clone()),
             arguments: call.arguments.get().as_bytes().to_vec(),
-            dynamic_resolutions: pins,
+            tool_resolutions: tool_pins,
             memberships,
         };
         let expansions = self.membership_evidence(evidence);
-        let decided = if spawn {
-            match self.decide_proposal(view, trajectory, proposed.clone(), entropy, true, &expansions, evidence) {
-                Ok(decision) => Ok(decision),
-                Err(TransitionError::SpawnUncontrolled) => {
-                    self.decide_proposal(view, trajectory, proposed, entropy, false, &expansions, evidence)
-                }
-                Err(error) => Err(error),
+        // A deployment that does not control context releases the marked call
+        // unmarked, so the batch may be decided twice. The mark is all that
+        // differs between the two attempts.
+        let judge = |evidence: &[ExternalEvidence]| {
+            let decide = |marked: bool| {
+                let batch = ProposalBatch {
+                    id: batch_id(entropy),
+                    trajectory: engine_id(trajectory),
+                    provider_results: Vec::new(),
+                    proposals: vec![proposed.clone()],
+                    spawn: marked.then(|| SpawnMark::at(0)),
+                    offer_nonce: engine_nonce(entropy),
+                    evidence: cast_evidence(self.engine.registry().trust_chain(), evidence),
+                    expansions: expansions.expansions(),
+                };
+                self.engine.handle(view, CoreEvent::Proposals(batch))
+            };
+            match decide(spawn) {
+                Err(TransitionError::SpawnUncontrolled) if spawn => decide(false),
+                decided => decided,
             }
-        } else {
-            self.decide_proposal(view, trajectory, proposed, entropy, false, &expansions, evidence)
         };
-        let decision = match decided {
+        let decision = match judge(evidence) {
             Ok(decision) => decision,
             Err(TransitionError::MembershipNeeded { needed }) => {
                 return match self.membership_consult(&expansions, needed)? {
@@ -987,41 +1036,23 @@ impl RuntimeEngine {
                     MembershipConsult::Unresolved(group) => Ok(deny(unresolved_group(&call.tool, &group))),
                 };
             }
-            Err(TransitionError::InadmissibleResolution) => {
-                return Ok(deny(
-                    "[appa] the classifier's answer was not admissible; the call is blocked and may be proposed again"
-                        .to_string(),
-                ));
+            Err(error) if refused_cast(&error) => {
+                let continued = continued_casts(evidence, |subset| {
+                    judge(subset).is_err_and(|error| refused_cast(&error))
+                });
+                return Ok(match continued.is_empty() {
+                    true => deny(
+                        "[appa] the classifier's answer was not admissible; the call is not decided and may be proposed again"
+                            .to_string(),
+                    ),
+                    false => EngineDecision::deliver(Next::ResolveExternal(continued)),
+                });
             }
             Err(error) => return Err(proposal_refusal(error)),
         };
         let append = decision.append.map(ValidatedFactBatch::into_unsealed);
         let then = self.deliver_proposals(view, trajectory, decision.follow_up, evidence)?;
         Ok(EngineDecision { append, then })
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn decide_proposal(
-        &self,
-        view: &EngineView,
-        trajectory: &TrajectoryId,
-        proposed: CoreProposedCall,
-        entropy: &OfferNonce,
-        spawn: bool,
-        expansions: &MembershipEvidence,
-        external: &[ExternalEvidence],
-    ) -> Result<CoreDecision, TransitionError> {
-        let batch = ProposalBatch {
-            id: batch_id(entropy),
-            trajectory: engine_id(trajectory),
-            provider_results: Vec::new(),
-            proposals: vec![proposed],
-            spawn: spawn.then(|| SpawnMark::at(0)),
-            offer_nonce: engine_nonce(entropy),
-            evidence: cast_evidence(self.engine.registry().trust_chain(), external),
-            expansions: expansions.expansions(),
-        };
-        self.engine.handle(view, CoreEvent::Proposals(batch))
     }
 
     fn deliver_proposals(
@@ -1034,9 +1065,10 @@ impl RuntimeEngine {
         match follow_up {
             // The engine wants a value classified before it decides. Every ask goes out in one
             // round so a batch naming several unresolved sources costs one redrive, not one per
-            // source; a cast already asked and unanswered blocks instead of being asked again.
+            // source; a cast already asked and unanswered is not asked again.
             FollowUp::ProposalsResolve(requests) => {
                 let chain = self.engine.registry().trust_chain();
+                let acting = engine_id(trajectory);
                 let mut consults = Vec::new();
                 for request in requests {
                     let EvidenceRequest::Cast { casts, value, body } = request else {
@@ -1045,12 +1077,13 @@ impl RuntimeEngine {
                         });
                     };
                     match cast_state(chain, evidence, value) {
-                        CastAnswerState::Missing => consults.push(ExternalRequest::Cast { casts, value, body }),
+                        CastAnswerState::Missing => consults.push(ExternalRequest::Cast {
+                            value,
+                            ask: self.cast_ask(view, &acting, value_source(view, &acting, value), casts, body),
+                        }),
+                        CastAnswerState::Unreadable(continued) => consults.push(*continued),
                         CastAnswerState::NoAnswer | CastAnswerState::Resolved => {
-                            return Ok(deny_next(
-                                "[appa] no registered cast could establish what this call reads; the call is blocked"
-                                    .to_string(),
-                            ));
+                            return Ok(deny_next(NO_CAST_ANSWERED.to_string()));
                         }
                     }
                 }
@@ -1098,7 +1131,18 @@ impl RuntimeEngine {
             .views(&owner)
             .expect("a block is delivered for the opened trajectory whose proposal the engine decided");
         let (text, offers) = self.rendered_block(&views, block);
-        Feedback { text, offers }
+        let unestablished = block
+            .block
+            .raw
+            .unestablished
+            .iter()
+            .map(|fact| unestablished_value(&views, fact))
+            .collect();
+        Feedback {
+            text,
+            offers,
+            unestablished,
+        }
     }
 
     fn rendered_block(&self, views: &Views, block: &CoreBlocked) -> (String, Vec<OfferId>) {
@@ -1120,30 +1164,40 @@ impl RuntimeEngine {
         entropy: &OfferNonce,
     ) -> Result<EngineDecision, EngineRefusal> {
         let expansions = self.membership_evidence(evidence);
-        let report = ToolReport {
-            dispatch: dispatch.clone(),
-            outcome: engine_outcome(outcome),
-            evidence: [
-                sanitizer_evidence(evidence),
-                cast_evidence(self.engine.registry().trust_chain(), evidence),
-            ]
-            .concat(),
-            offer_nonce: engine_nonce(entropy),
-            expansions: expansions.expansions(),
+        let judge = |evidence: &[ExternalEvidence]| {
+            let report = ToolReport {
+                dispatch: dispatch.clone(),
+                outcome: engine_outcome(outcome),
+                evidence: [
+                    sanitizer_evidence(evidence),
+                    cast_evidence(self.engine.registry().trust_chain(), evidence),
+                ]
+                .concat(),
+                offer_nonce: engine_nonce(entropy),
+                expansions: expansions.expansions(),
+            };
+            self.engine.handle(view, CoreEvent::Outcome(report))
         };
-        let decision = match self.engine.handle(view, CoreEvent::Outcome(report)) {
+        let decision = match judge(evidence) {
             Ok(decision) => decision,
             // A classifier's answer the engine will not admit — over its ceiling, out of
             // scope, or disagreeing with a dimension already established. The classifier
-            // misbehaved; the log is not in question, so the result is withheld and the
-            // report stays repeatable rather than refusing the session.
-            Err(TransitionError::InadmissibleResolution) => {
-                return Ok(EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
-                    feedback:
-                        "[appa] the classifier's answer was not admissible; the result is withheld and may be retried"
-                            .to_string(),
-                    offers: Vec::new(),
-                })));
+            // misbehaved; the log is not in question, so the cascade continues with the
+            // cast registered after it, and the report stays repeatable rather than
+            // refusing the session.
+            Err(error) if refused_cast(&error) => {
+                let continued = continued_casts(evidence, |subset| {
+                    judge(subset).is_err_and(|error| refused_cast(&error))
+                });
+                return Ok(match continued.is_empty() {
+                    true => EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
+                        feedback:
+                            "[appa] the classifier's answer was not admissible; the result is withheld and may be retried"
+                                .to_string(),
+                        offers: Vec::new(),
+                    })),
+                    false => EngineDecision::deliver(Next::ResolveExternal(continued)),
+                });
             }
             Err(TransitionError::MembershipNeeded { needed }) => {
                 return match self.membership_consult(&expansions, needed)? {
@@ -1167,15 +1221,19 @@ impl RuntimeEngine {
             FollowUp::Outcome(OutcomeFollowUp::Closed { admitted }) => {
                 Next::PresentToModel(outcome_presentation(outcome, admitted))
             }
-            FollowUp::Outcome(OutcomeFollowUp::Resolve(request)) => resolve_or_withhold(
-                self.engine.registry().trust_chain(),
+            FollowUp::Outcome(OutcomeFollowUp::Resolve(request)) => self.resolve_or_withhold(
+                view,
+                dispatch.trajectory(),
+                Some(dispatch),
                 request,
                 evidence,
                 "[appa] no registered cast or sanitizer answered; the result is withheld and may be retried",
             )?,
-            FollowUp::Outcome(OutcomeFollowUp::Staged(confined)) => {
-                Next::PresentToModel(self.confined_delivery(&confined))
-            }
+            FollowUp::Outcome(OutcomeFollowUp::Staged(confined)) => Next::PresentToModel(self.stage_delivery(
+                "[appa] the cleaned result still narrows this session.",
+                &confined.residual,
+                &confined.offers,
+            )),
             other => {
                 return Err(EngineRefusal::Invariant {
                     detail: format!("an outcome produced a non-outcome follow-up: {other:?}"),
@@ -1302,10 +1360,16 @@ impl RuntimeEngine {
             FollowUp::Offer(OfferFollowUp::Substituted { block }) => {
                 Next::PresentToModel(self.offer_block_delivery(&views, &block))
             }
-            FollowUp::Offer(OfferFollowUp::Staged(confined)) => Next::PresentToModel(self.confined_delivery(&confined)),
-            FollowUp::Offer(OfferFollowUp::ReturnStaged(stage)) => {
-                Next::PresentToModel(self.return_stage_delivery(&stage))
-            }
+            FollowUp::Offer(OfferFollowUp::Staged(confined)) => Next::PresentToModel(self.stage_delivery(
+                "[appa] the cleaned result still narrows this session.",
+                &confined.residual,
+                &confined.offers,
+            )),
+            FollowUp::Offer(OfferFollowUp::ReturnStaged(stage)) => Next::PresentToModel(self.stage_delivery(
+                "[appa] the child's return still narrows this session.",
+                &stage.residual,
+                &stage.offers,
+            )),
             FollowUp::Offer(OfferFollowUp::Released(release)) => Next::InvokeTool(released(&release)),
             FollowUp::Offer(OfferFollowUp::Settled(_)) => Next::PresentToModel(Presentation::Declined {
                 feedback: "[appa] the call this offer released is already settled; propose a fresh call".to_string(),
@@ -1376,25 +1440,18 @@ impl RuntimeEngine {
         Presentation::Blocked { feedback, offers }
     }
 
-    fn confined_delivery(&self, confined: &Confined) -> Presentation {
-        let offers: Vec<OfferId> = confined.offers.iter().map(|(offer, _)| offer_id(offer)).collect();
-        let feedback = stage_feedback(
-            "[appa] the cleaned result still narrows this session.",
-            &confined.residual,
-            &offers,
-            self.engine.registry().trust_chain(),
-        );
-        Presentation::Blocked { feedback, offers }
-    }
-
-    fn return_stage_delivery(&self, stage: &PendingReturnStage) -> Presentation {
-        let offers: Vec<OfferId> = stage.offers.iter().map(|(offer, _)| offer_id(offer)).collect();
-        let feedback = stage_feedback(
-            "[appa] the child's return still narrows this session.",
-            &stage.residual,
-            &offers,
-            self.engine.registry().trust_chain(),
-        );
+    /// One staged delivery: the narrowing the model must still accept,
+    /// and the remedies the stage opened for it. The headline names
+    /// what was staged; below it a tool result and a child return read
+    /// the same.
+    fn stage_delivery(
+        &self,
+        headline: &str,
+        residual: &appa_engine::check::Narrowing,
+        staged: &[(EngineOfferId, PlanId)],
+    ) -> Presentation {
+        let offers: Vec<OfferId> = staged.iter().map(|(offer, _)| offer_id(offer)).collect();
+        let feedback = stage_feedback(headline, residual, &offers, self.engine.registry().trust_chain());
         Presentation::Blocked { feedback, offers }
     }
 
@@ -1445,27 +1502,36 @@ impl RuntimeEngine {
             },
         };
         let expansions = self.membership_evidence(evidence);
-        let report = ChildReport {
-            child: engine_id(child),
-            fork,
-            submission,
-            evidence: [
-                sanitizer_evidence(evidence),
-                cast_evidence(self.engine.registry().trust_chain(), evidence),
-            ]
-            .concat(),
-            offer_nonce: engine_nonce(entropy),
-            expansions: expansions.expansions(),
+        let judge = |evidence: &[ExternalEvidence]| {
+            let report = ChildReport {
+                child: engine_id(child),
+                fork: fork.clone(),
+                submission: submission.clone(),
+                evidence: [
+                    sanitizer_evidence(evidence),
+                    cast_evidence(self.engine.registry().trust_chain(), evidence),
+                ]
+                .concat(),
+                offer_nonce: engine_nonce(entropy),
+                expansions: expansions.expansions(),
+            };
+            self.engine.handle(view, CoreEvent::ChildReturn(report))
         };
-        let decision = match self.engine.handle(view, CoreEvent::ChildReturn(report)) {
+        let decision = match judge(evidence) {
             Ok(decision) => decision,
-            Err(TransitionError::InadmissibleResolution) => {
-                return Ok(EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
-                    feedback:
-                        "[appa] the classifier's answer was not admissible; the return is withheld and may be retried"
-                            .to_string(),
-                    offers: Vec::new(),
-                })));
+            Err(error) if refused_cast(&error) => {
+                let continued = continued_casts(evidence, |subset| {
+                    judge(subset).is_err_and(|error| refused_cast(&error))
+                });
+                return Ok(match continued.is_empty() {
+                    true => EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
+                        feedback:
+                            "[appa] the classifier's answer was not admissible; the return is withheld and may be retried"
+                                .to_string(),
+                        offers: Vec::new(),
+                    })),
+                    false => EngineDecision::deliver(Next::ResolveExternal(continued)),
+                });
             }
             Err(TransitionError::MembershipNeeded { needed }) => {
                 return match self.membership_consult(&expansions, needed)? {
@@ -1490,13 +1556,19 @@ impl RuntimeEngine {
                 value: admitted.as_str().to_string(),
             }),
             FollowUp::Child(ChildFollowUp::Ended) => Next::PresentToModel(Presentation::NoValue),
-            FollowUp::Child(ChildFollowUp::Pending(stage)) => Next::PresentToModel(self.return_stage_delivery(&stage)),
+            FollowUp::Child(ChildFollowUp::Pending(stage)) => Next::PresentToModel(self.stage_delivery(
+                "[appa] the child's return still narrows this session.",
+                &stage.residual,
+                &stage.offers,
+            )),
             FollowUp::Child(ChildFollowUp::Rejected { reason }) => Next::PresentToModel(Presentation::Blocked {
                 feedback: format!("[appa] the child's return could not cross: {reason:?}"),
                 offers: Vec::new(),
             }),
-            FollowUp::Child(ChildFollowUp::Resolve(request)) => resolve_or_withhold(
-                self.engine.registry().trust_chain(),
+            FollowUp::Child(ChildFollowUp::Resolve(request)) => self.resolve_or_withhold(
+                view,
+                &engine_id(child),
+                None,
                 request,
                 evidence,
                 "[appa] no registered cast or return sanitizer answered; the return is withheld and may be retried",
@@ -1510,63 +1582,99 @@ impl RuntimeEngine {
         Ok(EngineDecision { append, then })
     }
 
-    fn resolve_dynamics(
+    fn resolve_tool_resolutions(
         &self,
+        view: &EngineView,
+        trajectory: &TrajectoryId,
         call: &ProposedCall,
         evidence: &[ExternalEvidence],
-    ) -> Result<Vec<PinnedDynamicResolution>, Resolution> {
+    ) -> Result<Vec<PinnedToolResolution>, Resolution> {
         let tool = ToolName::new(call.tool.clone());
-        let Some(contract) = self.engine.registry().tool(&tool) else {
-            return Err(Resolution::Feedback(format!(
-                "[appa] unknown tool {}: not in this deployment's policy",
-                call.tool
-            )));
-        };
-        let bindings = appa_engine::check::dynamic_reads(contract);
-        if bindings.is_empty() {
+        let resolved = self
+            .engine
+            .resolve_call(tool, call.arguments.get().as_bytes())
+            .map_err(|error| Resolution::Feedback(malformed_feedback(&error)))?;
+        let contract = self
+            .engine
+            .registry()
+            .contract(&resolved)
+            .expect("a resolved call names its registered contract");
+        if contract.uses.is_empty() {
             return Ok(Vec::new());
         }
-        let Ok(resolved) = self.engine.resolve_call(tool, call.arguments.get().as_bytes()) else {
-            return Ok(Vec::new());
-        };
+        let chain = self.engine.registry().trust_chain();
+        // The consult payload — the canonical arguments and the classifier context — is also
+        // the clock resolver evidence is matched against: an answer given under a context this
+        // view no longer shows, or for other arguments, is not evidence for this call, and the
+        // use consults again.
+        let current_context = self.tool_resolution_context(view, trajectory, contract);
         let mut pins = Vec::new();
         let mut requests = Vec::new();
-        for binding in &bindings {
-            let Some(argument_value) = resolved.arguments().get(&binding.argument).and_then(|v| v.as_str()) else {
-                return Err(Resolution::Feedback(unresolved_recipient(
-                    &call.tool,
-                    &binding.argument,
-                )));
-            };
+        for uses in &contract.uses {
+            let args = contract.resolver_args(uses, resolved.arguments());
+            let asked = contract.resolver_args_digest(uses, resolved.arguments());
             let answer = evidence.iter().find_map(|entry| match entry {
-                ExternalEvidence::Dynamic {
+                ExternalEvidence::ToolResolution {
                     resolver,
-                    argument,
-                    readers,
-                } if *resolver == binding.resolver.as_str() && *argument == binding.argument => Some(readers.clone()),
+                    args: answered_for,
+                    answer,
+                    context,
+                } if resolver == uses.resolver.as_str() && *answered_for == asked && *context == current_context => {
+                    Some(answer.clone())
+                }
                 _ => None,
             });
             match answer {
-                None => requests.push(ExternalRequest::Dynamic {
-                    resolver: binding.resolver.as_str().to_string(),
-                    tool: call.tool.clone(),
-                    argument: binding.argument.clone(),
-                    value: argument_value.to_string(),
-                }),
-                Some(None) => {
-                    return Err(Resolution::Feedback(unresolved_recipient(
-                        &call.tool,
-                        &binding.argument,
-                    )));
+                None => {
+                    requests.push(ExternalRequest::ToolResolution {
+                        uses: uses.clone(),
+                        args,
+                        context: current_context.clone(),
+                    });
                 }
-                Some(Some(readers)) => {
-                    let audience = Audience::restricted(readers.into_iter().map(ReaderId::new));
-                    match PinnedDynamicResolution::from_answer(binding.clone(), audience) {
+                Some(answer) => {
+                    let rank = |name: &str, what: &str| {
+                        chain.rank_of(name).ok_or_else(|| {
+                            Resolution::Feedback(format!(
+                                "[appa] {}: dynamic resolver {} returned an unknown {what}",
+                                call.tool,
+                                uses.resolver.as_str()
+                            ))
+                        })
+                    };
+                    let trust = answer
+                        .trust
+                        .as_deref()
+                        .map(|name| rank(name, "trust rank"))
+                        .transpose()?;
+                    let audience = answer.audience.as_ref().map(resolved_audience);
+                    let required_trust = answer
+                        .required_trust
+                        .as_deref()
+                        .map(|name| rank(name, "required trust rank"))
+                        .transpose()?;
+                    let required_audience = answer.required_audience.as_ref().map(|required| RequiredAudience {
+                        includes: required.includes.as_ref().map(resolved_audience),
+                        cap: required.cap.as_ref().map(resolved_audience),
+                    });
+                    let attention = answer
+                        .attention
+                        .map(|marks| marks.into_iter().map(MarkName::new).collect());
+                    match PinnedToolResolution::from_answer(
+                        uses.clone(),
+                        asked,
+                        trust,
+                        audience,
+                        required_trust,
+                        required_audience,
+                        attention,
+                    ) {
                         Some(pin) => pins.push(pin),
                         None => {
-                            return Err(Resolution::Feedback(unresolved_recipient(
-                                &call.tool,
-                                &binding.argument,
+                            return Err(Resolution::Feedback(format!(
+                                "[appa] {}: dynamic resolver {} returned malformed fields",
+                                call.tool,
+                                uses.resolver.as_str()
                             )));
                         }
                     }
@@ -1577,6 +1685,164 @@ impl RuntimeEngine {
             return Err(Resolution::Consult(requests));
         }
         Ok(pins)
+    }
+
+    /// What a tool-resolution consult carries beside the binding: the call's canonical
+    /// argument object and the trajectory's current label context.
+    fn tool_resolution_context(
+        &self,
+        view: &EngineView,
+        trajectory: &TrajectoryId,
+        contract: &appa_engine::contract::ToolContract,
+    ) -> ToolResolutionContext {
+        let static_attention = contract
+            .requires
+            .attention
+            .iter()
+            .map(|mark| mark.as_str().to_string())
+            .collect();
+        self.label_context(view, &engine_id(trajectory), static_attention)
+    }
+
+    /// The label context every classifier consult carries — a tool resolver's and a cast's
+    /// alike: the trajectory's current bound, whether either dimension is still unresolved,
+    /// and the names the policy defines. `static_attention` is what the policy already
+    /// requires of the tool named beside it.
+    fn label_context(
+        &self,
+        view: &EngineView,
+        trajectory: &EngineTrajectoryId,
+        static_attention: Vec<String>,
+    ) -> ToolResolutionContext {
+        let current = view
+            .views(trajectory)
+            .expect("the event's trajectory was validated as open")
+            .current_label();
+        let bound = current.bound();
+        let chain = self.engine.registry().trust_chain();
+        ToolResolutionContext {
+            current_trust: chain
+                .name_of(bound.trust)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("unnamed-rank-{}", bound.trust.rank())),
+            current_trust_rank: bound.trust.rank(),
+            current_audience: match &bound.audience {
+                Audience::Public => serde_json::Value::String("public".to_string()),
+                Audience::Restricted(readers) => serde_json::Value::Array(
+                    readers
+                        .iter()
+                        .map(|reader| serde_json::Value::String(reader.as_str().to_string()))
+                        .collect(),
+                ),
+            },
+            trust_unresolved: !current.is_established(Dimension::Trust),
+            audience_unresolved: !current.is_established(Dimension::Audience),
+            trust_ranks: (0..chain.len())
+                .filter_map(|rank| chain.name_of(Trust::new(rank as u8)).map(str::to_string))
+                .collect(),
+            attention_marks: self
+                .engine
+                .registry()
+                .attention_marks()
+                .map(|mark| mark.as_str().to_string())
+                .collect(),
+            static_attention,
+        }
+    }
+
+    /// One cast ask, ready for the session: the casts the engine selected, the value's bytes,
+    /// the tool whose result it is, and the label context of the trajectory acting.
+    fn cast_ask(
+        &self,
+        view: &EngineView,
+        trajectory: &EngineTrajectoryId,
+        source: CastSource,
+        casts: Vec<ApplicableCast>,
+        body: ValueBody,
+    ) -> CastAsk {
+        let CastSource { tool, call } = source;
+        let static_attention = call
+            .as_ref()
+            .and_then(|call| self.engine.registry().contract(call))
+            .map(|contract| {
+                contract
+                    .requires
+                    .attention
+                    .iter()
+                    .map(|mark| mark.as_str().to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        CastAsk {
+            casts,
+            body,
+            tool: tool.map(|tool| tool.as_str().to_string()),
+            context: self.label_context(view, trajectory, static_attention),
+        }
+    }
+
+    /// The next step for an evidence request an outcome or a return raised: the ask, or the
+    /// withheld presentation where every applicable answer was already obtained. `dispatch`
+    /// is the one a pending cast classifies the result of.
+    fn resolve_or_withhold(
+        &self,
+        view: &EngineView,
+        trajectory: &EngineTrajectoryId,
+        dispatch: Option<&EngineDispatchId>,
+        request: EvidenceRequest,
+        evidence: &[ExternalEvidence],
+        withheld: &str,
+    ) -> Result<Next, EngineRefusal> {
+        let chain = self.engine.registry().trust_chain();
+        let blocked = || {
+            Ok(Next::PresentToModel(Presentation::Blocked {
+                feedback: withheld.to_string(),
+                offers: Vec::new(),
+            }))
+        };
+        match request {
+            EvidenceRequest::Sanitizer {
+                sanitizer,
+                source,
+                body,
+            } => {
+                if matches!(
+                    sanitizer_derivation(evidence, sanitizer.as_str(), &source),
+                    SanitizerAnswer::NoAnswer
+                ) {
+                    return blocked();
+                }
+                Ok(Next::ResolveExternal(vec![ExternalRequest::Sanitizer {
+                    sanitizer: sanitizer.as_str().to_string(),
+                    source,
+                    body,
+                }]))
+            }
+            EvidenceRequest::PendingCast { casts, source, body } => {
+                match pending_cast_state(chain, evidence, &source) {
+                    CastAnswerState::Missing => {
+                        let call = dispatch.and_then(|dispatch| {
+                            view.views(trajectory)
+                                .and_then(|views| views.dispatch_call(dispatch).cloned())
+                        });
+                        Ok(Next::ResolveExternal(vec![ExternalRequest::PendingCast {
+                            source,
+                            ask: self.cast_ask(view, trajectory, CastSource::from_call(call), casts, body),
+                        }]))
+                    }
+                    CastAnswerState::Unreadable(continued) => Ok(Next::ResolveExternal(vec![*continued])),
+                    CastAnswerState::NoAnswer | CastAnswerState::Resolved => blocked(),
+                }
+            }
+            EvidenceRequest::Cast { casts, value, body } => match cast_state(chain, evidence, value) {
+                CastAnswerState::Missing => Ok(Next::ResolveExternal(vec![ExternalRequest::Cast {
+                    value,
+                    ask: self.cast_ask(view, trajectory, value_source(view, trajectory, value), casts, body),
+                }])),
+                CastAnswerState::Unreadable(continued) => Ok(Next::ResolveExternal(vec![*continued])),
+                CastAnswerState::NoAnswer | CastAnswerState::Resolved => blocked(),
+            },
+        }
     }
 
     fn membership_evidence(&self, evidence: &[ExternalEvidence]) -> MembershipEvidence {
@@ -1643,7 +1909,10 @@ impl RuntimeEngine {
         evidence: &[ExternalEvidence],
     ) -> Result<Vec<PinnedMembership>, Resolution> {
         let tool = ToolName::new(call.tool.clone());
-        let Some(contract) = self.engine.registry().tool(&tool) else {
+        let Ok(resolved) = self.engine.resolve_call(tool, call.arguments.get().as_bytes()) else {
+            return Ok(Vec::new());
+        };
+        let Some(contract) = self.engine.registry().contract(&resolved) else {
             return Ok(Vec::new());
         };
         // Same fast path as the dynamic pass: no placeholder, nothing to read.
@@ -1657,9 +1926,6 @@ impl RuntimeEngine {
         }) {
             return Ok(Vec::new());
         }
-        let Ok(resolved) = self.engine.resolve_call(tool, call.arguments.get().as_bytes()) else {
-            return Ok(Vec::new());
-        };
         let reads = appa_engine::check::group_reads(contract, &resolved);
         if reads.is_empty() {
             return Ok(Vec::new());
@@ -1709,12 +1975,6 @@ impl RuntimeEngine {
     }
 }
 
-fn unresolved_recipient(tool: &str, argument: &str) -> String {
-    format!(
-        "[appa] {tool}: the recipients of {argument} could not be resolved; the call was not checked — propose it again later"
-    )
-}
-
 fn unresolved_group(tool: &str, group: &GroupName) -> String {
     format!(
         "[appa] {tool}: membership of {group} could not be resolved; the call was not checked — propose it again later"
@@ -1733,6 +1993,7 @@ enum SanitizerAnswer {
     Derived(ValueBody),
 }
 
+#[derive(Debug)]
 enum Resolution {
     Feedback(String),
     Consult(Vec<ExternalRequest>),
@@ -1764,6 +2025,7 @@ fn deny_next(text: String) -> Next {
         feedback: vec![Feedback {
             text,
             offers: Vec::new(),
+            unestablished: Vec::new(),
         }],
     }
 }
@@ -1786,13 +2048,6 @@ fn engine_nonce(entropy: &OfferNonce) -> EngineOfferNonce {
 
 fn batch_id(entropy: &OfferNonce) -> ProposalBatchId {
     ProposalBatchId::new(hex(&entropy.0))
-}
-
-/// One engine dispatch id as the harness carries it (`T31`): the released call
-/// quotes it so the harness can name the call it is reporting. Nothing reads it
-/// back — an outcome is matched against the dispatches the log shows open.
-pub(crate) fn dispatch_wire(dispatch: &EngineDispatchId) -> String {
-    serde_json::to_string(dispatch).expect("an engine dispatch id serializes")
 }
 
 fn fork_binding(fork: &ForkId) -> SpawnBinding {
@@ -1860,7 +2115,6 @@ pub(crate) fn minted_offers(log: &Log, trajectory: &TrajectoryId) -> Vec<OfferId
 
 fn released(release: &Released) -> ReleasedCall {
     ReleasedCall {
-        dispatch: DispatchId(dispatch_wire(&release.dispatch)),
         tool: release.call.tool().as_str().to_string(),
         bytes: release.call.canonical_arguments().canonical_bytes().to_vec(),
         fork: release.fork.as_ref().map(fork_binding),
@@ -1910,14 +2164,61 @@ fn outcome_presentation(outcome: &ToolOutcome, admitted: Option<ValueBody>) -> P
     }
 }
 
-/// Whether the session has an answer for a cast the engine asked about. The three states
-/// are what stops a redrive loop: an answer the policy cannot read is `NoAnswer`, never a
-/// fresh request, so a classifier naming a rank outside the chain withholds once instead
-/// of being asked forever.
+/// Whether the session has an answer for a cast the engine asked about. The states are what
+/// stops a redrive loop: an answer the policy cannot read — a rank outside the chain — is
+/// `Unreadable`, and the ask continues past the cast that gave it rather than being repeated,
+/// so a classifier that cannot be read is asked once.
 enum CastAnswerState {
     Missing,
     NoAnswer,
+    Unreadable(Box<ExternalRequest>),
     Resolved,
+}
+
+/// Did the engine refuse a submitted cast answer — over its ceiling, out of scope, or
+/// disagreeing with a dimension already established? A pending cast reports it as one
+/// refusal; a lazily driven cast names the reason. Either way the log is untouched.
+fn refused_cast(error: &TransitionError) -> bool {
+    matches!(
+        error,
+        TransitionError::InadmissibleResolution | TransitionError::Resolution(_)
+    )
+}
+
+/// The feedback for a call whose casts were all asked and none established the value.
+const NO_CAST_ANSWERED: &str = "[appa] no registered cast could establish what this call reads; the call is not decided yet and may be proposed again";
+
+/// Which submitted cast answers the engine refused, continued past the refusing cast. The
+/// refusal names no answer, so each one is judged on its own beside the non-cast evidence
+/// — the core validates every submitted answer before it asks for a missing one — and a
+/// single submitted answer is the refused one without a second judgment.
+fn continued_casts(
+    evidence: &[ExternalEvidence],
+    refuses: impl Fn(&[ExternalEvidence]) -> bool,
+) -> Vec<ExternalRequest> {
+    let (answers, rest): (Vec<ExternalEvidence>, Vec<ExternalEvidence>) =
+        evidence.iter().cloned().partition(|entry| entry.continued().is_some());
+    let refused = |answer: &ExternalEvidence| {
+        if answers.len() == 1 {
+            return true;
+        }
+        let mut alone = rest.clone();
+        alone.push(answer.clone());
+        refuses(&alone)
+    };
+    answers
+        .iter()
+        .filter(|answer| refused(answer))
+        .filter_map(ExternalEvidence::continued)
+        .collect()
+}
+
+/// The engine-side audience a classifier's wire audience resolves to.
+fn resolved_audience(audience: &CastAudience) -> Audience {
+    match audience {
+        CastAudience::Public => Audience::Public,
+        CastAudience::Readers(readers) => Audience::restricted(readers.iter().map(ReaderId::new)),
+    }
 }
 
 fn cast_label(chain: &TrustChain, verdict: &CastVerdict) -> Option<EstablishedLabel> {
@@ -1925,11 +2226,7 @@ fn cast_label(chain: &TrustChain, verdict: &CastVerdict) -> Option<EstablishedLa
         CastLabel::Declared(label) => Some(label.clone()),
         CastLabel::Classified(answer) => {
             let trust = chain.rank_of(&answer.trust)?;
-            let audience = match &answer.audience {
-                CastAudience::Public => Audience::Public,
-                CastAudience::Readers(readers) => Audience::restricted(readers.iter().map(ReaderId::new)),
-            };
-            Some(EstablishedLabel::new(trust, audience))
+            Some(EstablishedLabel::new(trust, resolved_audience(&answer.audience)))
         }
     }
 }
@@ -1941,6 +2238,7 @@ fn cast_evidence(chain: &TrustChain, evidence: &[ExternalEvidence]) -> Vec<Evide
             ExternalEvidence::PendingCast {
                 source,
                 verdict: Some(verdict),
+                ..
             } => Some(Evidence::PendingCast {
                 cast: appa_engine::names::CastName::new(verdict.cast.clone()),
                 source: *source,
@@ -1949,6 +2247,7 @@ fn cast_evidence(chain: &TrustChain, evidence: &[ExternalEvidence]) -> Vec<Evide
             ExternalEvidence::Cast {
                 value,
                 verdict: Some(verdict),
+                ..
             } => Some(Evidence::Cast {
                 cast: appa_engine::names::CastName::new(verdict.cast.clone()),
                 value: *value,
@@ -1964,13 +2263,11 @@ fn pending_cast_state(chain: &TrustChain, evidence: &[ExternalEvidence], source:
         if let ExternalEvidence::PendingCast {
             source: reported,
             verdict,
+            ..
         } = entry
             && reported == source
         {
-            return match verdict.as_ref().and_then(|verdict| cast_label(chain, verdict)) {
-                Some(_) => CastAnswerState::Resolved,
-                None => CastAnswerState::NoAnswer,
-            };
+            return answer_state(chain, entry, verdict.as_ref());
         }
     }
     CastAnswerState::Missing
@@ -1981,16 +2278,27 @@ fn cast_state(chain: &TrustChain, evidence: &[ExternalEvidence], value: ValueId)
         if let ExternalEvidence::Cast {
             value: reported,
             verdict,
+            ..
         } = entry
             && *reported == value
         {
-            return match verdict.as_ref().and_then(|verdict| cast_label(chain, verdict)) {
-                Some(_) => CastAnswerState::Resolved,
-                None => CastAnswerState::NoAnswer,
-            };
+            return answer_state(chain, entry, verdict.as_ref());
         }
     }
     CastAnswerState::Missing
+}
+
+fn answer_state(chain: &TrustChain, entry: &ExternalEvidence, verdict: Option<&CastVerdict>) -> CastAnswerState {
+    match verdict {
+        None => CastAnswerState::NoAnswer,
+        Some(verdict) => match cast_label(chain, verdict) {
+            Some(_) => CastAnswerState::Resolved,
+            None => match entry.continued() {
+                Some(continued) => CastAnswerState::Unreadable(Box::new(continued)),
+                None => CastAnswerState::NoAnswer,
+            },
+        },
+    }
 }
 
 fn sanitizer_evidence(evidence: &[ExternalEvidence]) -> Vec<Evidence> {
@@ -2039,58 +2347,6 @@ fn authority_verdict(evidence: &[ExternalEvidence], name: &str) -> Option<(Autho
         } if authority == name => Some((*verdict, review.clone())),
         _ => None,
     })
-}
-
-fn resolve_or_withhold(
-    chain: &TrustChain,
-    request: EvidenceRequest,
-    evidence: &[ExternalEvidence],
-    withheld: &str,
-) -> Result<Next, EngineRefusal> {
-    match request {
-        EvidenceRequest::Sanitizer {
-            sanitizer,
-            source,
-            body,
-        } => {
-            if matches!(
-                sanitizer_derivation(evidence, sanitizer.as_str(), &source),
-                SanitizerAnswer::NoAnswer
-            ) {
-                return Ok(Next::PresentToModel(Presentation::Blocked {
-                    feedback: withheld.to_string(),
-                    offers: Vec::new(),
-                }));
-            }
-            Ok(Next::ResolveExternal(vec![ExternalRequest::Sanitizer {
-                sanitizer: sanitizer.as_str().to_string(),
-                source,
-                body,
-            }]))
-        }
-        EvidenceRequest::PendingCast { casts, source, body } => match pending_cast_state(chain, evidence, &source) {
-            CastAnswerState::Missing => Ok(Next::ResolveExternal(vec![ExternalRequest::PendingCast {
-                casts,
-                source,
-                body,
-            }])),
-            CastAnswerState::NoAnswer | CastAnswerState::Resolved => Ok(Next::PresentToModel(Presentation::Blocked {
-                feedback: withheld.to_string(),
-                offers: Vec::new(),
-            })),
-        },
-        EvidenceRequest::Cast { casts, value, body } => match cast_state(chain, evidence, value) {
-            CastAnswerState::Missing => Ok(Next::ResolveExternal(vec![ExternalRequest::Cast {
-                casts,
-                value,
-                body,
-            }])),
-            CastAnswerState::NoAnswer | CastAnswerState::Resolved => Ok(Next::PresentToModel(Presentation::Blocked {
-                feedback: withheld.to_string(),
-                offers: Vec::new(),
-            })),
-        },
-    }
 }
 
 fn malformed_feedback(error: &EngineError) -> String {
@@ -2200,18 +2456,12 @@ fn authority_payload(
     })
 }
 
-fn as_label(fold: &PartialLabel) -> Label {
-    let bound = fold.bound();
-    Label::new(
-        match fold.is_established(Dimension::Trust) {
-            true => Dim::Known(bound.trust),
-            false => Dim::Unknown,
-        },
-        match fold.is_established(Dimension::Audience) {
-            true => Dim::Known(bound.audience.clone()),
-            false => Dim::Unknown,
-        },
-    )
+/// One admitted value's own contribution as a fold: a known dimension is the bound, an
+/// unknown one names the value itself as the unresolved source.
+fn value_fold(id: ValueId, label: &Label) -> PartialLabel {
+    let mut fold = PartialLabel::established(EstablishedLabel::top());
+    fold.fold_value(id, label);
+    fold
 }
 
 fn effect_names(effects: &EffectSet) -> Vec<String> {
@@ -2332,6 +2582,65 @@ fn unestablished_source(views: &Views, value: ValueId) -> String {
     match source {
         Some(source) => format!("{source} ({value:?})"),
         None => format!("value {value:?}"),
+    }
+}
+
+/// The tool whose result `value` is, as a cast's classifier is told it. A child return
+/// originates from no tool.
+/// The tool a cast classifies a value of, and the call that produced it where a dispatch did:
+/// under ordered contracts the call, not the name, selects the contract whose requirements
+/// the classifier sees. A provider-run value names its tool; no dispatch released it.
+#[derive(Default)]
+struct CastSource {
+    tool: Option<ToolName>,
+    call: Option<ResolvedCall>,
+}
+
+impl CastSource {
+    fn from_call(call: Option<ResolvedCall>) -> Self {
+        CastSource {
+            tool: call.as_ref().map(|call| call.tool().clone()),
+            call,
+        }
+    }
+}
+
+fn value_source(view: &EngineView, trajectory: &EngineTrajectoryId, value: ValueId) -> CastSource {
+    let Some(views) = view.views(trajectory) else {
+        return CastSource::default();
+    };
+    match views.value_provenance(value) {
+        Some(Provenance::ToolResult { dispatch }) => CastSource::from_call(views.dispatch_call(dispatch).cloned()),
+        Some(Provenance::ProviderRun { tool, .. }) => CastSource {
+            tool: Some(tool.clone()),
+            call: None,
+        },
+        Some(Provenance::ChildReturn { .. }) | None => CastSource::default(),
+    }
+}
+
+/// The typed form of one unestablished source, under the same ownership rule as the prose:
+/// a value the receiving trajectory did not admit itself is cited by id alone.
+fn unestablished_value(views: &Views, fact: &UnestablishedFact) -> UnestablishedValue {
+    let tool = match views.owns_value(fact.value) {
+        false => None,
+        true => match views.value_provenance(fact.value) {
+            Some(Provenance::ToolResult { dispatch }) => views.dispatch_tool(dispatch).map(ToolName::as_str),
+            Some(Provenance::ProviderRun { tool, .. }) => Some(tool.as_str()),
+            Some(Provenance::ChildReturn { .. }) | None => None,
+        },
+    };
+    UnestablishedValue {
+        value: fact.value.index(),
+        tool: tool.map(terminal_safe),
+        dimensions: fact
+            .dimensions
+            .iter()
+            .map(|dim| match dim {
+                Dimension::Trust => LabelDimension::Trust,
+                Dimension::Audience => LabelDimension::Audience,
+            })
+            .collect(),
     }
 }
 
@@ -2476,130 +2785,180 @@ fn block_feedback(views: &Views, planned: &PlannedBlock, offers: &[(OfferId, Pla
     lines.join("\n")
 }
 
-/// The tests' seam: a test enqueues the exact decision for each event; the
-/// queue is the behavior. Session tests pin orchestration — commit ordering,
-/// conflict replay, evidence loops — not engine policy, which the
-/// real-engine tests pin against compiled policies.
-#[cfg(test)]
-pub struct TestSeam {
-    queue: Mutex<std::collections::VecDeque<EngineDecision>>,
-    seen: Mutex<Vec<EngineEvent>>,
-}
-
-#[cfg(test)]
-impl TestSeam {
-    pub fn new() -> TestSeam {
-        TestSeam {
-            queue: Mutex::new(std::collections::VecDeque::new()),
-            seen: Mutex::new(Vec::new()),
-        }
-    }
-
-    pub fn enqueue(&self, decision: EngineDecision) {
-        self.queue
-            .lock()
-            .expect("the test queue mutex is never poisoned")
-            .push_back(decision);
-    }
-
-    pub fn seen(&self) -> Vec<EngineEvent> {
-        self.seen.lock().expect("the seen mutex is never poisoned").clone()
-    }
-
-    fn next(&self, event: EngineEvent) -> EngineDecision {
-        self.seen.lock().expect("the seen mutex is never poisoned").push(event);
-        self.queue
-            .lock()
-            .expect("the test queue mutex is never poisoned")
-            .pop_front()
-            .expect("a test enqueued a decision for every event it drives")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        ExternalEvidence, ExternalRequest, OfferId, ProposedCall, Resolution, RuntimeEngine, audience_wire,
-        remedy_instruction, remedy_lines, terminal_safe,
+        ExternalEvidence, ExternalRequest, OfferId, ProposedCall, Resolution, RuntimeEngine, TrajectoryId,
+        audience_wire, remedy_instruction, remedy_lines, terminal_safe,
     };
+    use crate::external::{CastAudience, RequiredAudienceAnswer, ToolResolutionAnswer};
+    use appa_engine::contract::RequiredAudience;
     use appa_engine::label::{Audience, ReaderId};
     use appa_engine::plan::{ExecutableRemedyPlan, PlanId, PlannedBlock, RemedyPlan, RemedyStep};
     use std::collections::BTreeSet;
 
-    fn dynamic_engine() -> RuntimeEngine {
+    #[test]
+    fn one_tool_resolver_can_pin_delta_and_requirements_from_all_arguments() {
         let policy = appa_policy::Config::from_toml_str(
             r#"
                 version = 1
                 [[dynamic_resolver]]
-                name = "directory"
+                name = "classifier"
+                returns = ["delta.trust", "delta.audience", "requires.trust", "requires.audience"]
                 [[tool]]
-                name = "send"
-                parameters = { type = "object", properties = { to = { type = "string" } }, required = ["to"] }
-                delta = { audience = { resolver = "directory", argument = "to" } }
+                name = "lookup"
+                description = "Looks one record up."
+                uses = [{ resolver = "classifier" }]
+                # The tool keeps its own attention mark: `requires.attention` has one owner, and
+                # here it is the policy, so the classifier sees the mark under `static_attention`.
+                requires = { attention = ["static-review"] }
+                [[authority]]
+                name = "reviewer"
+                [authority.permits]
+                attention = ["privacy-review"]
             "#,
         )
-        .expect("the fixture policy compiles");
-        RuntimeEngine::new(policy.engine().clone())
-    }
-
-    fn send(arguments: serde_json::Value) -> ProposedCall {
-        ProposedCall {
-            tool: "send".to_string(),
-            arguments: serde_json::value::RawValue::from_string(arguments.to_string())
-                .expect("the fixture arguments serialize"),
-        }
-    }
-
-    fn answered(readers: Option<Vec<String>>) -> ExternalEvidence {
-        ExternalEvidence::Dynamic {
-            resolver: "directory".to_string(),
-            argument: "to".to_string(),
-            readers,
-        }
-    }
-
-    #[test]
-    fn only_a_successful_dynamic_answer_becomes_a_pin() {
-        let e = dynamic_engine();
-        let call = send(serde_json::json!({ "to": "hr" }));
-
-        match e.resolve_dynamics(&call, &[]) {
-            Err(Resolution::Consult(requests)) => assert_eq!(
-                requests,
-                vec![ExternalRequest::Dynamic {
-                    resolver: "directory".to_string(),
-                    tool: "send".to_string(),
-                    argument: "to".to_string(),
-                    value: "hr".to_string(),
-                }]
-            ),
-            _ => panic!("an unanswered binding consults its resolver"),
-        }
-
-        let unchecked = |evidence: &[ExternalEvidence], call: &ProposedCall| matches!(e.resolve_dynamics(call, evidence), Err(Resolution::Feedback(text)) if text.contains("send"));
-        assert!(unchecked(&[answered(None)], &call), "no answer checks nothing");
-        assert!(
-            unchecked(&[answered(Some(vec!["@finance".to_string()]))], &call),
-            "an answer naming no literal reader set is not evidence either"
-        );
-        assert!(
-            e.resolve_dynamics(&send(serde_json::json!({ "to": 7 })), &[])
-                .is_ok_and(|pins| pins.is_empty())
-        );
-
-        let pinned = |evidence: &[ExternalEvidence]| match e.resolve_dynamics(&call, evidence) {
-            Ok(pins) => pins.iter().map(|pin| pin.audience().clone()).collect::<Vec<_>>(),
-            Err(_) => panic!("a successful answer pins"),
+        .expect("the tool-level resolver policy compiles");
+        let engine = RuntimeEngine::new(policy.engine().clone());
+        let trajectory = TrajectoryId("root".to_string());
+        let view = engine
+            .validated(engine.root_opening(&trajectory, b"test policy"), &trajectory, 0)
+            .expect("the root opening builds a view");
+        let call = ProposedCall {
+            tool: "lookup".to_string(),
+            arguments: serde_json::value::RawValue::from_string(
+                serde_json::json!({"nested": {"id": 7}, "deep": true}).to_string(),
+            )
+            .expect("arguments serialize"),
         };
+        let (consulted_args, consulted_context) = match engine.resolve_tool_resolutions(&view, &trajectory, &call, &[])
+        {
+            Err(Resolution::Consult(requests)) => match requests.as_slice() {
+                [ExternalRequest::ToolResolution { uses, args, context }] => {
+                    assert_eq!(uses.resolver.as_str(), "classifier");
+                    // The resolver declares no inputs, so `args` is the complete call.
+                    assert_eq!(
+                        args,
+                        &serde_json::json!({
+                            "name": "lookup",
+                            "description": "Looks one record up.",
+                            "arguments": {"nested": {"id": 7}, "deep": true},
+                        })
+                    );
+                    assert_eq!(context.trust_ranks, ["suspicious", "trusted"]);
+                    assert_eq!(context.attention_marks, ["privacy-review"]);
+                    assert_eq!(context.static_attention, ["static-review"]);
+                    (
+                        appa_engine::contract::ResolverArgsDigest::of(&appa_engine::params::canonical_bytes(args)),
+                        context.clone(),
+                    )
+                }
+                other => panic!("expected one tool-resolution consult, got {other:?}"),
+            },
+            other => panic!("an unanswered tool resolver must consult, got {other:?}"),
+        };
+
+        // An answer given under a different label context is not evidence for this call:
+        // the binding consults again instead of replaying it.
+        let foreign_context = crate::external::ToolResolutionContext {
+            current_trust: "suspicious".to_string(),
+            current_trust_rank: 0,
+            ..consulted_context.clone()
+        };
+        assert!(matches!(
+            engine.resolve_tool_resolutions(
+                &view,
+                &trajectory,
+                &call,
+                &[ExternalEvidence::ToolResolution {
+                    resolver: "classifier".to_string(),
+                    args: consulted_args,
+                    answer: ToolResolutionAnswer {
+                        trust: Some("suspicious".to_string()),
+                        audience: Some(CastAudience::Public),
+                        required_trust: Some("trusted".to_string()),
+                        required_audience: Some(RequiredAudienceAnswer {
+                            includes: Some(CastAudience::Readers(vec!["support".to_string()])),
+                            cap: Some(CastAudience::Public),
+                        }),
+                        attention: None,
+                    },
+                    context: foreign_context,
+                }],
+            ),
+            Err(Resolution::Consult(_))
+        ));
+
+        let pins = engine
+            .resolve_tool_resolutions(
+                &view,
+                &trajectory,
+                &call,
+                &[ExternalEvidence::ToolResolution {
+                    resolver: "classifier".to_string(),
+                    args: consulted_args,
+                    answer: ToolResolutionAnswer {
+                        trust: Some("suspicious".to_string()),
+                        audience: Some(CastAudience::Public),
+                        required_trust: Some("trusted".to_string()),
+                        required_audience: Some(RequiredAudienceAnswer {
+                            includes: Some(CastAudience::Readers(vec!["support".to_string()])),
+                            cap: Some(CastAudience::Public),
+                        }),
+                        attention: None,
+                    },
+                    context: consulted_context.clone(),
+                }],
+            )
+            .expect("a complete answer pins");
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0].trust(), Some(appa_engine::label::Trust::new(0)));
+        assert_eq!(pins[0].audience(), Some(&Audience::Public));
+        assert_eq!(pins[0].required_trust(), Some(appa_engine::label::Trust::new(1)));
         assert_eq!(
-            pinned(&[answered(Some(vec!["hr".to_string()]))]),
-            vec![Audience::restricted([ReaderId::new("hr")])]
+            pins[0].required_audience(),
+            Some(&RequiredAudience {
+                includes: Some(Audience::restricted([ReaderId::new("support")])),
+                cap: Some(Audience::Public),
+            })
         );
-        assert_eq!(
-            pinned(&[answered(Some(Vec::new()))]),
-            vec![Audience::restricted([])],
-            "an empty reader set is a successful answer, not the absence of one"
+        assert!(
+            pins[0].attention().is_empty(),
+            "this resolver returns no attention result: `requires.attention` is the policy's"
         );
+
+        // An answer given for other arguments is not evidence for this call either: the
+        // resolver is consulted again rather than handed a sibling's classification.
+        let other_call = ProposedCall {
+            tool: "lookup".to_string(),
+            arguments: serde_json::value::RawValue::from_string(
+                serde_json::json!({"nested": {"id": 8}, "deep": true}).to_string(),
+            )
+            .expect("arguments serialize"),
+        };
+        assert!(matches!(
+            engine.resolve_tool_resolutions(
+                &view,
+                &trajectory,
+                &other_call,
+                &[ExternalEvidence::ToolResolution {
+                    resolver: "classifier".to_string(),
+                    args: consulted_args,
+                    answer: ToolResolutionAnswer {
+                        trust: Some("suspicious".to_string()),
+                        audience: Some(CastAudience::Public),
+                        required_trust: Some("trusted".to_string()),
+                        required_audience: Some(RequiredAudienceAnswer {
+                            includes: Some(CastAudience::Readers(vec!["support".to_string()])),
+                            cap: Some(CastAudience::Public),
+                        }),
+                        attention: None,
+                    },
+                    context: consulted_context,
+                }],
+            ),
+            Err(Resolution::Consult(_))
+        ));
     }
 
     #[test]

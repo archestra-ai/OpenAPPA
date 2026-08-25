@@ -1,14 +1,10 @@
+mod common;
+use common::repo_root;
+
 use std::path::{Path, PathBuf};
 
 use appa_runtime::api::Runtime;
 use appa_runtime::config::Config;
-
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("the runtime crate sits one level below the repo root")
-        .to_path_buf()
-}
 
 fn toml_files(dir: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
@@ -39,4 +35,10 @@ fn every_shipped_example_opens() {
     for path in &examples {
         opens(path);
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn the_complete_battery_example_opens() {
+    opens(&repo_root().join("examples/claude-code-battery/appa.toml"));
 }

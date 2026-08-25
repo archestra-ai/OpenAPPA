@@ -557,7 +557,7 @@ delta = {}
 [[sanitizer]]
 name = "attest-schema"
 on = ["tool_output"]
-[sanitizer.mandate]
+[sanitizer.permits]
 trust = { from = "suspicious", to = "attested" }
 
 [child]
@@ -599,7 +599,7 @@ delta = {}
 [[sanitizer]]
 name = "attest-schema"
 on = ["tool_output"]
-[sanitizer.mandate]
+[sanitizer.permits]
 trust = { from = "suspicious", to = "internal" }
 
 [child]
@@ -612,22 +612,26 @@ version = 1
 
 [[dynamic_resolver]]
 name = "customer-acl"
+inputs = ["subject"]
+returns = ["delta.audience"]
 
 [[dynamic_resolver]]
 name = "recipient-members"
+inputs = ["subject"]
+returns = ["requires.audience"]
 
 [[tool]]
 name = "lookup_customer"
 parameters = { type = "object", properties = { query = { type = "string" } }, \
 required = ["query"], additionalProperties = false }
-delta = { audience = { resolver = "customer-acl", argument = "query" } }
+uses = [{ resolver = "customer-acl", inputs = { subject = "$tool_call.arguments.query" } }]
 
 [[tool]]
 name = "send_message"
 parameters = { type = "object", \
 properties = { recipient = { type = "string" }, body = { type = "string" } }, \
 required = ["recipient", "body"], additionalProperties = false }
-requires = { audience = { includes = { resolver = "recipient-members", argument = "recipient" } } }
+uses = [{ resolver = "recipient-members", inputs = { subject = "$tool_call.arguments.recipient" } }]
 effects = ["message.sent"]
 delta = {}
 
@@ -640,7 +644,7 @@ name = "respond_to_user"
 parameters = { type = "object", \
 properties = { recipient = { type = "string" }, body = { type = "string" } }, \
 required = ["recipient", "body"], additionalProperties = false }
-requires = { audience = { includes = { resolver = "recipient-members", argument = "recipient" } } }
+uses = [{ resolver = "recipient-members", inputs = { subject = "$tool_call.arguments.recipient" } }]
 effects = ["response.delivered"]
 delta = {}
 """
@@ -650,7 +654,10 @@ def guarded_externals(resolver_url: str | None = None) -> str | None:
     if resolver_url is None:
         return None
     return f"""\
-[dynamic]
+[dynamic.customer-acl]
+url = {json.dumps(resolver_url)}
+
+[dynamic.recipient-members]
 url = {json.dumps(resolver_url)}
 """
 

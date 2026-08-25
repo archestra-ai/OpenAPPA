@@ -66,7 +66,7 @@ def test_prune_preserves_tool_annotations() -> None:
     policy = AGENTS["appa"].policy_file.read_text()
     by_name = {tool["name"]: tool for tool in _tools_of(prune_policy(policy, ("hr", "public_forum", "email")))}
     assert by_name["read_public_forum"]["delta"] == {"trust": "suspicious"}
-    assert by_name["read_hr"]["delta"] == {"audience": {"exactly": ["hr"]}}
+    assert by_name["read_hr"]["delta"] == {"audience": ["hr"]}
     assert by_name["send_email"]["requires"]["trust"] == "internal"
     assert by_name["send_email"]["effects"] == ["egress"]
 
@@ -107,11 +107,14 @@ def test_prune_keeps_tools_only_when_all_required_systems_are_enabled(
     assert _tool_names(prune_policy(policy, systems)) == expected
 
 
-def test_shared_policy_gates_the_ticket_on_trust_alone() -> None:
-    """The prior-egress gate is one scenario's posture, not every episode's tax."""
+def test_shared_policy_gates_the_ticket_on_trust_and_destination_audience() -> None:
+    """Persistent writes must not launder content into a wider-reader store."""
     tools = _tools_of(AGENTS["appa"].policy_file.read_text())
     ticket = next(tool for tool in tools if tool["name"] == "create_task_tracker")
-    assert ticket["requires"] == {"trust": "internal"}
+    assert ticket["requires"] == {
+        "trust": "internal",
+        "audience": {"contains": ["public"]},
+    }
 
 
 def test_scenario_requires_override_reaches_the_pruned_policy() -> None:
@@ -122,21 +125,25 @@ def test_scenario_requires_override_reaches_the_pruned_policy() -> None:
     by_name = {tool["name"]: tool for tool in _tools_of(applied)}
     assert by_name["create_task_tracker"]["requires"] == {
         "trust": "internal",
-        "effects": {"has": ["egress"]},
+        "audience": {"contains": ["public"]},
+        "effects": {"contains": ["egress"]},
     }
     # The override is scoped to the tool it names and to the arm that declared
     # it: the sibling emitter and the open baseline are untouched.
-    assert by_name["create_public_forum"]["requires"] == {"audience": {"includes": ["public"]}}
+    assert by_name["create_public_forum"]["requires"] == {"audience": {"contains": ["public"]}}
     assert scenario.policy_requires.get("open") is None
 
 
-def test_scenarios_without_an_override_pay_no_gate() -> None:
+def test_scenarios_without_an_override_keep_the_shared_sink_gate() -> None:
     scenario = load_scenario(SCENARIOS_DIR / "check-hr-record")
     pruned = prune_policy(AGENTS["appa"].policy_file.read_text(), scenario.systems)
     applied = apply_tool_requires(pruned, scenario.policy_requires.get("appa", {}))
 
     by_name = {tool["name"]: tool for tool in _tools_of(applied)}
-    assert by_name["create_task_tracker"]["requires"] == {"trust": "internal"}
+    assert by_name["create_task_tracker"]["requires"] == {
+        "trust": "internal",
+        "audience": {"contains": ["public"]},
+    }
 
 
 def test_overriding_an_absent_tool_is_refused() -> None:

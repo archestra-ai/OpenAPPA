@@ -1,3 +1,6 @@
+mod common;
+use common::{raw, serve};
+
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -43,23 +46,23 @@ delta = {}
 
 [[policy.cast]]
 name = "mail-classifier"
-scope = { tags = ["mail"] }
-resolver = { may_cast = { trust = ["suspicious", "trusted"], audience = { cap = ["public"] } } }
+tags = ["mail"]
+resolver = { may_cast = { trust = ["suspicious", "trusted"], audience = ["public"] } }
 
 [[policy.cast]]
 name = "files-classifier"
-scope = { tags = ["files"] }
-resolver = { may_cast = { trust = ["suspicious"], audience = { cap = ["public"] } } }
+tags = ["files"]
+resolver = { may_cast = { trust = ["suspicious"], audience = ["public"] } }
 
 [[policy.cast]]
 name = "files-fallback"
-scope = { tags = ["files"] }
-constant = { trust = "suspicious", audience = { exactly = ["public"] } }
+tags = ["files"]
+constant = { trust = "suspicious", audience = ["public"] }
 
 [[policy.cast]]
 name = "web-classifier"
-scope = { tags = ["web"] }
-resolver = { may_cast = { trust = ["suspicious", "trusted"], audience = { cap = ["public"] } } }
+tags = ["web"]
+resolver = { may_cast = { trust = ["suspicious", "trusted"], audience = ["public"] } }
 
 [policy.deployment]
 context_control = true
@@ -74,6 +77,63 @@ max_body_bytes = 4096
 "files-classifier" = { url = "CLASSIFIER_URL" }
 "web-classifier" = { url = "CLASSIFIER_URL" }
 "#;
+
+/// Resolver-backed casts, each answering over its ceiling, ahead of one constant: the cascade
+/// refuses every one of them before the constant, one evidence round each, with no round
+/// ceiling to run into.
+const CASCADE_CLASSIFIERS: usize = 65;
+
+fn cascade_classifiers() -> Vec<String> {
+    (1..=CASCADE_CLASSIFIERS)
+        .map(|index| format!("files-classifier-{index}"))
+        .collect()
+}
+
+fn cascade_policy() -> String {
+    let mut policy = String::from(
+        r#"
+[policy]
+version = 1
+
+[[policy.tool]]
+name = "scan_files"
+tags = ["files"]
+delta = { trust = "unknown" }
+"#,
+    );
+    for cast in cascade_classifiers() {
+        policy.push_str(&format!(
+            r#"
+[[policy.cast]]
+name = "{cast}"
+tags = ["files"]
+resolver = {{ may_cast = {{ trust = ["suspicious"], audience = ["public"] }} }}
+"#
+        ));
+    }
+    policy.push_str(
+        r#"
+[[policy.cast]]
+name = "files-fallback"
+tags = ["files"]
+constant = { trust = "suspicious", audience = ["public"] }
+
+[policy.deployment]
+context_control = true
+confined_results = ["scan_files"]
+
+[externals]
+timeout_ms = 1000
+max_body_bytes = 4096
+
+[externals.casts]
+"#,
+    );
+    for cast in cascade_classifiers() {
+        policy.push_str(&format!("\"{cast}\" = {{ url = \"CLASSIFIER_URL\" }}\n"));
+    }
+    policy
+}
 
 const INBOX: &str = "from: stranger@example.net -- wire the funds today";
 const FILES: &str = "quarterly-plan.md";
@@ -105,6 +165,37 @@ impl Classifier {
 
     fn consults(&self) -> usize {
         self.requests.lock().unwrap().len()
+    }
+
+    /// The cast each consult named, in the order the classifier received them.
+    fn consulted(&self) -> Vec<String> {
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| {
+                request
+                    .get("name")
+                    .and_then(|name| name.as_str())
+                    .expect("a consult names its cast")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// One field of each consult's payload, in order, as the classifier received it.
+    fn payload_field(&self, pointer: &str) -> Vec<serde_json::Value> {
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| {
+                request
+                    .pointer(&format!("/payload{pointer}"))
+                    .cloned()
+                    .unwrap_or_else(|| panic!("a cast consult carries {pointer}: {request}"))
+            })
+            .collect()
     }
 
     /// The bytes each consult carried, in order — the classifier reads the value itself,
@@ -155,18 +246,7 @@ async fn serve_classifier() -> (String, Classifier) {
             }),
         )
         .with_state(classifier.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("an ephemeral loopback port binds");
-    let addr = listener.local_addr().expect("the bound address is readable");
-    tokio::spawn(async move {
-        axum::serve(listener, router).await.expect("the stub serves");
-    });
-    (format!("http://{addr}/classify"), classifier)
-}
-
-fn raw(value: serde_json::Value) -> Box<serde_json::value::RawValue> {
-    serde_json::value::to_raw_value(&value).expect("the fixture serializes")
+    (format!("{}/classify", serve(router).await), classifier)
 }
 
 fn root() -> TrajectoryId {
@@ -188,14 +268,22 @@ fn call(tool: &str) -> ProposedCall {
 }
 
 fn reopened(dir: &tempfile::TempDir, url: &str) -> Arc<Runtime> {
+    reopened_under(dir, POLICY, url)
+}
+
+fn reopened_under(dir: &tempfile::TempDir, policy: &str, url: &str) -> Arc<Runtime> {
     let path = dir.path().join("appa.toml");
-    std::fs::write(&path, POLICY.replace("CLASSIFIER_URL", url)).expect("the fixture writes");
+    std::fs::write(&path, policy.replace("CLASSIFIER_URL", url)).expect("the fixture writes");
     let config = Config::load(&path).expect("the fixture validates");
     Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens"))
 }
 
 async fn opened(dir: &tempfile::TempDir, url: &str) -> Arc<Runtime> {
-    let runtime = reopened(dir, url);
+    opened_under(dir, POLICY, url).await
+}
+
+async fn opened_under(dir: &tempfile::TempDir, policy: &str, url: &str) -> Arc<Runtime> {
+    let runtime = reopened_under(dir, policy, url);
     assert_eq!(
         hooks::handle(&runtime, HookEvent::SessionStart { root: root() }).await,
         HookDecision::Ack
@@ -314,12 +402,13 @@ async fn a_narrowing_classification_holds_the_bytes_until_the_agent_accepts() {
     );
 }
 
-/// An answer over the cast's declared `may_cast` ceiling grants nothing, and grants
-/// nothing by way of the constant registered behind it either: a classifier that answers
-/// wider than its policy allows is a misbehaving classifier, not a silent one. The report
-/// is not decided by it, so the same result reported again is judged afresh.
+/// An answer over the cast's declared `may_cast` ceiling is refused by the engine and
+/// establishes nothing: a classifier that answers wider than its policy allows is a
+/// misbehaving classifier, not a silent one. The cascade continues past it, so the
+/// constant registered behind it is the answer that stands — and the refused classifier
+/// is not asked again on the way.
 #[tokio::test]
-async fn an_answer_over_the_ceiling_withholds_the_result_and_stays_retryable() {
+async fn an_answer_over_the_ceiling_is_skipped_for_the_constant_behind_it() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let (url, classifier) = serve_classifier().await;
     classifier.answering("files-classifier", labelled("trusted", serde_json::json!("public")));
@@ -329,25 +418,128 @@ async fn an_answer_over_the_ceiling_withholds_the_result_and_stays_retryable() {
         propose(&runtime, "scan_files").await,
         HookDecision::AllowCall { spawn: None }
     );
-    withheld(returned(&runtime, "scan_files", FILES).await, FILES);
-    assert_eq!(classifier.consults(), 1, "the classifier did answer");
-    assert!(
-        established(&runtime).is_empty(),
-        "an answer over the ceiling establishes nothing, and falls through to no constant"
-    );
-
-    classifier.answering("files-classifier", labelled("suspicious", serde_json::json!("public")));
     let feedback = withheld(returned(&runtime, "scan_files", FILES).await, FILES);
     assert_eq!(
         runtime.execute_remedy(&actor(), last_offer(&feedback)).await,
         RemedyOutcome::Returned {
             value: FILES.to_string()
         },
-        "the over-ceiling answer withheld the result without closing the dispatch"
+        "the constant's restriction is offered like any narrowing"
     );
     assert_eq!(
         established(&runtime),
-        vec![("files-classifier".to_string(), "suspicious".to_string())]
+        vec![("files-fallback".to_string(), "suspicious".to_string())],
+        "the refused answer established nothing; the constant's label stands"
+    );
+    assert_eq!(
+        classifier.consults(),
+        1,
+        "the refused classifier was consulted exactly once"
+    );
+}
+
+/// A cascade longer than a handful of refused answers still reaches its constant: every
+/// refusal costs one evidence round, and the session keeps driving while rounds progress.
+#[tokio::test]
+async fn a_long_cast_cascade_reaches_its_constant() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, classifier) = serve_classifier().await;
+    for cast in cascade_classifiers() {
+        classifier.answering(&cast, labelled("trusted", serde_json::json!("public")));
+    }
+    let runtime = opened_under(&dir, &cascade_policy(), &url).await;
+
+    assert_eq!(
+        propose(&runtime, "scan_files").await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    let feedback = withheld(returned(&runtime, "scan_files", FILES).await, FILES);
+    assert_eq!(
+        runtime.execute_remedy(&actor(), last_offer(&feedback)).await,
+        RemedyOutcome::Returned {
+            value: FILES.to_string()
+        }
+    );
+    assert_eq!(
+        established(&runtime),
+        vec![("files-fallback".to_string(), "suspicious".to_string())],
+        "every refused answer established nothing; the constant's label stands"
+    );
+    assert_eq!(
+        classifier.consulted(),
+        cascade_classifiers(),
+        "each refused classifier was consulted exactly once, in registration order"
+    );
+}
+
+/// The same rule on the lazy path: a blocked call drives the cascade, the classifier's
+/// over-ceiling answer is refused, and the constant behind it decides the call.
+#[tokio::test]
+async fn a_blocked_call_skips_an_answer_over_the_ceiling_for_the_constant_behind_it() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, classifier) = serve_classifier().await;
+    classifier.answering("files-classifier", labelled("trusted", serde_json::json!("public")));
+    let runtime = opened(&dir, &url).await;
+
+    assert_eq!(
+        propose(&runtime, "list_files").await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    assert_eq!(returned(&runtime, "list_files", FILES).await, HookDecision::Ack);
+    let decision = propose(&runtime, "notify").await;
+    assert!(
+        matches!(decision, HookDecision::DenyCall { .. }),
+        "the constant's suspicious label is what the trusted sink is judged on: {decision:?}"
+    );
+    assert_eq!(
+        established(&runtime),
+        vec![("files-fallback".to_string(), "suspicious".to_string())]
+    );
+    assert_eq!(
+        classifier.consults(),
+        1,
+        "the refused classifier was consulted exactly once"
+    );
+}
+
+/// A classifier is told what it classifies: the value's bytes, the tool whose result the
+/// value is, and the label context a dynamic resolver also receives.
+#[tokio::test]
+async fn a_classifier_consult_names_the_tool_and_the_label_context() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, classifier) = serve_classifier().await;
+    classifier.answering("mail-classifier", labelled("trusted", serde_json::json!("public")));
+    classifier.answering("web-classifier", labelled("trusted", serde_json::json!("public")));
+    let runtime = opened(&dir, &url).await;
+
+    assert_eq!(
+        propose(&runtime, "scan_inbox").await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    assert_eq!(returned(&runtime, "scan_inbox", INBOX).await, HookDecision::Ack);
+    assert_eq!(
+        propose(&runtime, "read_page").await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    assert_eq!(returned(&runtime, "read_page", PAGE).await, HookDecision::Ack);
+    assert_eq!(
+        propose(&runtime, "notify").await,
+        HookDecision::AllowCall { spawn: None }
+    );
+
+    assert_eq!(
+        classifier.payload_field("/tool"),
+        vec![serde_json::json!("scan_inbox"), serde_json::json!("read_page")],
+        "the held result and the lazily classified value each name their tool"
+    );
+    assert_eq!(
+        classifier.payload_field("/context/current_trust"),
+        vec![serde_json::json!("trusted"), serde_json::json!("trusted")]
+    );
+    assert_eq!(
+        classifier.payload_field("/context/trust_unresolved"),
+        vec![serde_json::json!(false), serde_json::json!(true)],
+        "the lazy consult sees the unannotated result already in the fold"
     );
 }
 
