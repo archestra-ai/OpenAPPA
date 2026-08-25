@@ -3124,7 +3124,12 @@ impl Engine {
             return Ok(OfferFollowUp::Invalidated);
         };
         if views.pending_block(&recorded.subject).is_some() {
-            return Ok(match self.reblocked(views, recorded, execution, expansions)? {
+            // The candidate may stand under another contract than the offer was planned on; the
+            // groups that contract reads were resolved by the hop that derived it.
+            let expansions = expansions
+                .clone()
+                .inheriting(&self.recorded_expansions(views.candidate_resolutions(&recorded.subject)));
+            return Ok(match self.reblocked(views, recorded, execution, &expansions)? {
                 Some(block) => OfferFollowUp::Substituted { block: Box::new(block) },
                 None => OfferFollowUp::Invalidated,
             });
