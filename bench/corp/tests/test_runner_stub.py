@@ -334,11 +334,14 @@ def test_command_routes_staged_policy_by_typed_target(tmp_path: Path) -> None:
     policy_path = episode_dir / "staged-policy"
     arguments = {"prompt": "task", "model": "model", "episode_dir": episode_dir}
 
-    for name in ("appa", "appa-nofork", "appa-open"):
+    for name in ("appa", "appa-nofork", "appa-noremedy", "appa-open"):
         command = command_for(AGENTS[name], policy_path=policy_path, **arguments)
         assert command[command.index("--policy") + 1] == str(policy_path.resolve())
         assert command[command.index("--status-file") + 1] == str((episode_dir / "agent-status.json").resolve())
         assert "--profile" not in command
+
+    assert "--max-forks" in command_for(AGENTS["appa-nofork"], policy_path=policy_path, **arguments)
+    assert "--no-remedies" in command_for(AGENTS["appa-noremedy"], policy_path=policy_path, **arguments)
 
     for name in ("fides-middleware", "fides-native", "fides-open"):
         command = command_for(AGENTS[name], policy_path=policy_path, **arguments)

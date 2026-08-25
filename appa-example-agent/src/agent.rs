@@ -111,6 +111,7 @@ pub struct Agent {
     head: TranscriptHead,
     spawn: Option<SpawnTool>,
     limits: Limits,
+    remedies: bool,
     observer: Option<tokio::sync::mpsc::Sender<Recorded>>,
 }
 
@@ -124,6 +125,7 @@ impl Agent {
             head: TranscriptHead::default(),
             spawn: None,
             limits: Limits::default(),
+            remedies: true,
             observer: None,
         }
     }
@@ -142,6 +144,15 @@ impl Agent {
 
     pub fn with_limits(mut self, limits: Limits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// Keep policy enforcement but expose no remedy control path. Blocking
+    /// feedback is reduced to a terminal denial so opaque offer ids and the
+    /// absent control tool are never presented to the model.
+    pub fn without_remedies(mut self) -> Self {
+        self.remedies = false;
+        self.catalogue = self.catalogue.without_control_tool();
         self
     }
 
@@ -414,7 +425,7 @@ impl Run<'_> {
         match hooks::handle(&self.agent.runtime, event).await {
             HookDecision::AllowCall { spawn } => self.run_released(frame, &id, proposed, spawn).await,
             HookDecision::DenyCall { feedback, .. } => {
-                let feedback = self.with_spawn_context(frame, feedback);
+                let feedback = self.block_feedback(frame, feedback);
                 self.record(
                     frame,
                     Record::Blocked {
@@ -507,6 +518,7 @@ impl Run<'_> {
             HookDecision::Ack => (spawn_closed(), said),
             HookDecision::ChildReturn { value } => (spawn_closed(), Some(value)),
             HookDecision::Block { reason } => {
+                let reason = self.block_feedback(&parent.frame, reason);
                 self.record(&parent.frame, Record::ReturnBlocked { reason: reason.clone() })
                     .await;
                 (
@@ -530,6 +542,15 @@ impl Run<'_> {
             .transcript
             .push(WireMessage::tool_result(&parent.reply_to, reply));
         Ok(())
+    }
+
+    fn block_feedback(&self, frame: &Frame, feedback: String) -> String {
+        if self.agent.remedies {
+            self.with_spawn_context(frame, feedback)
+        } else {
+            "[appa] Blocked by policy. This operation cannot run in the current trajectory; continue with permitted work or report it as unresolved."
+                .to_string()
+        }
     }
 
     async fn report(

@@ -248,6 +248,46 @@ audience = ["public"]
 }
 
 #[tokio::test]
+async fn a_no_remedy_agent_advertises_only_host_tools_and_leaves_the_call_blocked() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let policy = r#"
+version = 1
+
+[[policy.tool]]
+name = "read_hr"
+delta = { audience = ["hr"] }
+
+[policy.boundary]
+audience = ["public"]
+"#;
+    let host = ToolHost::default();
+    host.answers("read_hr", "Alice Chen, SSN 4821-9930");
+    let provider = Provider::default();
+    provider
+        .calls("read_hr", serde_json::json!({"who": "alice"}))
+        .says("The read was blocked.");
+
+    let agent = agent(runtime(&dir, policy, ""), &provider, &host, &["read_hr"])
+        .await
+        .without_remedies();
+    agent.run(root(), "Who is Alice?", Default::default()).await;
+
+    assert!(host.calls().is_empty());
+    let requests = provider.requests();
+    let advertised: Vec<&str> = requests[0]["tools"]
+        .as_array()
+        .expect("the request advertises tools")
+        .iter()
+        .map(|tool| tool["function"]["name"].as_str().expect("a tool name"))
+        .collect();
+    assert_eq!(advertised, vec!["read_hr"]);
+    let feedback = provider.tool_result(1, "call_0");
+    assert!(feedback.contains("Blocked by policy"));
+    assert!(!feedback.contains("execute_remedy_plan"));
+    assert!(harness::offer_id(&feedback).is_none());
+}
+
+#[tokio::test]
 async fn an_uncarried_output_crosses_as_the_engine_s_account_of_it() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let host = ToolHost::default();
