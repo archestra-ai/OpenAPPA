@@ -30,16 +30,36 @@ OpenAPPA to do differently.
   entries, comments, reader names, external bindings, and batteries.
 - Use short sentences. Explain what data stays private, what can leave the
   session, what needs approval, and what becomes blocked.
-- Talk about outcomes, not config machinery. Do not mention include lists,
-  rule ordering, TOML fields, reader names, labels, or authority wiring unless
-  the user explicitly asks for technical details. Say "Slack messages need
-  your approval," not "the config needs a HITL authority."
+- Talk about outcomes, not config machinery, except for the one short
+  **OpenAPPA pieces** line required in every proposal. Do not mention include
+  lists, rule ordering, TOML fields, reader names, labels, or authority wiring
+  unless the user explicitly asks for technical details. Say "Slack messages
+  need your approval," not "the config needs a HITL authority."
+- Every proposal must name the OpenAPPA primitives it uses: battery, tool
+  contract, dynamic resolver, membership resolver, authority, sanitizer, or
+  cast. When a command or service implements a primitive, state which one. For
+  example: "OpenAPPA pieces: tool contract and a dynamic resolver backed by
+  `gh`."
 - Use ordinary descriptions, not invented category names. Never say "stale
   root rules." If relevant, say: "These tools are in your config but were not
   detected in this session: <names>. I'll leave them unchanged."
 - Show TOML only when the user asks for it.
 - Ask one focused question at a time. Do not make the user classify every tool
   when its name and description already make the answer clear.
+- Configure the installed OpenAPPA only. Never inspect OpenAPPA source code,
+  tests, Git history, local repository checkouts, or implementation details.
+  Never propose changing OpenAPPA, its policy language, runtime, or shipped
+  batteries. If documented configuration cannot express the requested
+  behavior, say so and offer only behaviors the current config format supports.
+
+For OpenAPPA configuration, read only:
+
+- the live root config and included files relevant to the request;
+- a matched battery's `appa.toml` and README;
+- the relevant section of the installed `contracts.md` guide.
+
+If these sources do not establish the syntax or behavior, stop. Do not search
+the OpenAPPA repository for an answer.
 
 ## Find the live config
 
@@ -142,6 +162,9 @@ Group the proposal by server. Show:
 - installed tools that will remain blocked;
 - every configured MCP server whose tools could not be detected.
 
+Add one short **OpenAPPA pieces** line that names every primitive the proposal
+uses. Do not list file plumbing such as include paths.
+
 Do not mention config entries that were not detected unless they affect the
 user's requested outcome.
 
@@ -187,9 +210,11 @@ not guess.
 2. For policy syntax or behavior that the current config does not demonstrate,
    consult the relevant section of
    `~/.claude/plugins/marketplaces/appa/website/content/docs/contracts.md`.
-   Do not guess syntax.
+   If it is unavailable, tell the user the guide could not be found. Do not
+   guess syntax, search for an OpenAPPA checkout, or inspect source code.
 3. Explain three things: what happens now, what you propose, and the practical
-   effect. Ask only for a decision that changes the result.
+   effect. Add one short **OpenAPPA pieces** line naming every primitive used.
+   Ask only for a decision that changes the result.
 4. If a battery would help, propose it with the same one-sentence rule used in
    `init` mode. Existing root rules still take priority.
 5. End with: **Approve, or tell me what to change.** Wait for the reply.
@@ -214,7 +239,19 @@ The runtime checks the whole config before installing it. If reload is
 refused, the previous config keeps serving. Explain the error plainly and fix
 it. Ask for approval again if the fix changes the behavior the user approved.
 
-Finish with what changed and what it protects. If the config changed, add:
+After a successful reload, give a brief human-readable summary of the behavior
+now in effect. Use one to three short sentences or bullets. Say what information
+is now treated as private or suspicious and where private information can or
+cannot go. For example:
+
+> Information from shared Slack channels is now treated as suspicious.
+>
+> Private information cannot be sent to public GitHub repositories.
+
+Do not lead with rule counts, file paths, TOML, backups, or primitive names.
+Mention an important remaining limitation in one short sentence when needed.
+
+If the config changed, add:
 
 > Start a new `clappa` session to use the updated policy; this session keeps
 > the policy it started with.
