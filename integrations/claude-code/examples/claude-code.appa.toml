@@ -208,6 +208,13 @@ delta = { trust = "suspicious" }
 name = "WebSearch"
 delta = { trust = "suspicious" }
 
+# The deployment controls what a subagent starts from: the harness gives
+# every subagent exactly the prompt the parent's spawn call carried, and
+# nothing else of the parent's context. That is what lets the runtime
+# check the subagent's return as a branch of the parent.
+[policy.deployment]
+context_control = true
+
 # Batteries can require fresh `hitl` attention before a tool runs. This
 # authority asks the person running the Claude Code session and can satisfy
 # that requirement for one tool call.
@@ -217,13 +224,6 @@ hint = "Ask the person running this session."
 
 [policy.authority.permits]
 attention = ["hitl"]
-
-# The deployment controls what a subagent starts from: the harness gives
-# every subagent exactly the prompt the parent's spawn call carried, and
-# nothing else of the parent's context. That is what lets the runtime
-# check the subagent's return as a branch of the parent.
-[policy.deployment]
-context_control = true
 
 [externals]
 timeout_ms = 5000
