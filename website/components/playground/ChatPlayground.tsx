@@ -1358,7 +1358,10 @@ export function ChatPlayground() {
     }
     if (item.t === "user")
       return (
-        <Message className="max-w-[85%]" from="user" key={item.id}>
+        /* `ph-mask` keeps whatever the reader typed out of session replay:
+           this bubble is their own text rendered back as page content, which
+           input masking does not cover. */
+        <Message className="max-w-[85%] ph-mask" from="user" key={item.id}>
           <MessageContent>{item.text}</MessageContent>
         </Message>
       );

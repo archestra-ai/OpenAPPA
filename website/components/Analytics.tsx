@@ -62,7 +62,15 @@ const CONFIG = {
      explicitly.
 
      Everything a reader types is masked before it leaves the page. The pages
-     are public; what people type into them is not. */
+     are public; what people type into them is not.
+
+     That takes two things, and the second is easy to miss: `maskAllInputs`
+     covers the value sitting in an <input>, but not text the page echoes back
+     out of it — the search view's "No results found for …" line, or a
+     playground message rendered as a bubble. Those are ordinary page text by
+     the time the recorder sees them, so they carry the `ph-mask` class
+     (PostHog's default mask-text class) at their render sites. A new surface
+     that displays something the reader typed needs that class too. */
   session_recording: {
     maskAllInputs: true,
   },

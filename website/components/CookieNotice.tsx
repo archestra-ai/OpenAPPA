@@ -70,8 +70,8 @@ export function CookieNotice() {
       aria-label="Analytics consent"
     >
       <p className="cookie-notice-text">
-        We would like to count visits and record browsing sessions so we know which parts of
-        OpenAPPA people actually read, and where they get stuck. Anything you type is masked
+        We would like to understand how these pages are used, so we know which parts of
+        OpenAPPA people actually read and where they get stuck. Anything you type is masked
         before it leaves the page. No advertising, no third-party sharing.
       </p>
       <div className="cookie-notice-actions">
