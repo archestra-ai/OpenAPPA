@@ -1,4 +1,4 @@
-# Claude Code Bash and Read battery
+# Claude Code battery
 
 Use this battery for Claude Code sessions that need policy-aware shell commands
 and automatic privacy labels for local file reads.
