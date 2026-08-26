@@ -40,7 +40,7 @@ jobs:
             executable: appa-runtime
             asset: appa-runtime-x86_64-unknown-linux-gnu
             archive: appa-runtime-x86_64-unknown-linux-gnu.tar.gz
-          - runner: ubuntu-24.04-arm
+          - runner: ubuntu-22.04-arm
             os: Linux
             arch: arm64
             target: aarch64-unknown-linux-gnu
@@ -178,7 +178,8 @@ jobs:
               test -f claude-code/plugin/.mcp.json
               test -f claude-code/plugin/hooks/hooks.json
               test -f claude-code/plugin/hooks/session-context.md
-              test -f claude-code/plugin/skills/appa-tool-sync/SKILL.md
+              test -f claude-code/plugin/skills/appa-guide/SKILL.md
+              test -f claude-code/plugin/skills/appa-setup/SKILL.md
               test -x claude-code/plugin/statusline.sh
               exit 0
             fi
@@ -254,8 +255,11 @@ jobs:
             if (-not (Test-Path (Join-Path $package "claude-code/plugin/statusline.ps1"))) {
               throw "Extracted package does not contain the Windows Claude Code statusline"
             }
-            if (-not (Test-Path (Join-Path $package "claude-code/plugin/skills/appa-tool-sync/SKILL.md"))) {
-              throw "Extracted package does not contain the Claude Code tool-sync skill"
+            if (-not (Test-Path (Join-Path $package "claude-code/plugin/skills/appa-guide/SKILL.md"))) {
+              throw "Extracted package does not contain the Claude Code appa-guide skill"
+            }
+            if (-not (Test-Path (Join-Path $package "claude-code/plugin/skills/appa-setup/SKILL.md"))) {
+              throw "Extracted package does not contain the Claude Code appa-setup skill"
             }
           } finally {
             $process.Refresh()
