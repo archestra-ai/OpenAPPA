@@ -54,6 +54,7 @@ const STATIC_SECTIONS = [
   { title: "Authorities", url: "/contracts#authorities", docTitle: "Policy reference" },
   { title: "Sanitizers", url: "/contracts#sanitizers", docTitle: "Policy reference" },
   { title: "Casts", url: "/contracts#casts", docTitle: "Policy reference" },
+  { title: "Externals", url: "/contracts#externals", docTitle: "Policy reference" },
   { title: "Empirical evaluation", url: "/evaluation#summary-of-empirical-findings", docTitle: "Evaluating OpenAPPA" },
 ];
 
@@ -82,6 +83,9 @@ export const GLOSSARY_TERMS = [
   "constant",
   "resolver",
   "may_cast",
+  "hint",
+  "declaration",
+  "artifact",
   "return_sanitizer",
   "narrowing",
   "remedy_plans",

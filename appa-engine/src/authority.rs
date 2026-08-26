@@ -8,7 +8,7 @@ use crate::groups::{DeclaredAudience, Expansions};
 use crate::label::{Adequacy, Audience, Dim, Dimension, EstablishedLabel, Label, ReaderId, Trust};
 use crate::names::{AuthorityName, CastName, GroupName, MarkName, SanitizerName, TagName};
 
-/// Operator prose on a registered authority or sanitizer: why this entry exists, in the
+/// Operator prose on a registered authority, sanitizer, or cast: why this entry exists, in the
 /// deployer's own words. It travels with every remedy plan naming the entity, so an agent chooses
 /// among plans on stated purpose rather than on a bare name, and a reviewer reads the intent beside
 /// the mandate. Advisory only: a hint NEVER enters a check, an enumeration, or an ordering, and it
@@ -413,6 +413,8 @@ pub struct Cast {
     pub resolution: CastResolution,
     #[serde(default)]
     pub scope: Scope,
+    #[serde(default)]
+    pub hint: Option<Hint>,
 }
 
 impl Sanitizer {

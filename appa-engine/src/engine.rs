@@ -372,11 +372,12 @@ impl Engine {
                         sanitizer: sanitizer.clone(),
                         source,
                         body,
+                        tool: None,
                     })
                 }
                 None => Ok(OfferConsult::Accept),
             },
-            crate::basis::SubjectKey::ConfinedResult(_) => match recorded.plan.hop() {
+            crate::basis::SubjectKey::ConfinedResult(dispatch) => match recorded.plan.hop() {
                 Some(sanitizer) => {
                     let DerivedCandidate::Result { value, .. } =
                         views.candidate(&recorded.subject).ok_or(TransitionError::StaleOffer)?
@@ -389,6 +390,7 @@ impl Engine {
                         sanitizer: sanitizer.clone(),
                         source,
                         body,
+                        tool: views.dispatch_tool(dispatch).cloned(),
                     })
                 }
                 None => Ok(OfferConsult::Accept),
@@ -5756,6 +5758,7 @@ mod tests {
                 sanitizer: crate::names::SanitizerName::new("scrubber"),
                 source: crate::value::RawResultDigest::of(derived.as_str().as_bytes()),
                 body: derived.clone(),
+                tool: Some(ToolName::new("fetch")),
             }),
         );
         assert_eq!(
@@ -9295,6 +9298,7 @@ mod tests {
                 },
             },
             scope: crate::authority::Scope { tags },
+            hint: None,
         }
     }
 
@@ -10704,6 +10708,7 @@ mod tests {
                 },
             },
             scope: crate::authority::Scope::default(),
+            hint: None,
         };
         let cfg = RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
@@ -10807,6 +10812,7 @@ mod tests {
                 },
             },
             scope: crate::authority::Scope::default(),
+            hint: None,
         };
         let e = open_engine(RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
@@ -10951,6 +10957,7 @@ mod tests {
             scope: crate::authority::Scope {
                 tags: vec![crate::names::TagName::new("web")],
             },
+            hint: None,
         };
         let cfg = RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
@@ -14092,6 +14099,7 @@ mod tests {
                 },
             },
             scope: crate::authority::Scope::default(),
+            hint: None,
         }
     }
 
@@ -15726,6 +15734,7 @@ mod tests {
                 },
             },
             scope: crate::authority::Scope::default(),
+            hint: None,
         };
         let e = open_engine_returning(
             returning_registry(vec![lifting_sanitizer("quarantine")], vec![deaf, classifier_cast()]),
@@ -16230,6 +16239,7 @@ mod tests {
                     scope: crate::authority::Scope {
                         tags: vec![crate::names::TagName::new("files")],
                     },
+                    hint: None,
                 },
             ];
             let e = grouped_engine(cfg, &[], known(TRUSTED, Audience::Public));
@@ -16270,6 +16280,7 @@ mod tests {
                     audience: grouped(&[], &["team"]),
                 }),
                 scope: crate::authority::Scope::default(),
+                hint: None,
             }];
             let e = grouped_engine(cfg, &[], known(TRUSTED, Audience::Public));
             let log = vec![opened(&e)];
@@ -16929,6 +16940,7 @@ mod tests {
                     },
                 },
                 scope: crate::authority::Scope::default(),
+                hint: None,
             };
             let mut cfg = returning_with_directory(vec![], vec![classifier]);
             let fetch = cfg
@@ -16996,6 +17008,7 @@ mod tests {
                     audience: grouped(&[], &["team"]),
                 }),
                 scope: crate::authority::Scope::default(),
+                hint: None,
             };
             let e = open_engine_returning(
                 returning_with_directory(vec![lifting_sanitizer("quarantine")], vec![paranoid]),

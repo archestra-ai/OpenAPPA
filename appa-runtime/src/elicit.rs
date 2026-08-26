@@ -10,10 +10,10 @@
 //! is task-local — it does not survive a `tokio::spawn`. That rule is
 //! MCP's own SEP-2260, not an APPA rule id.
 //!
-//! What crosses is the staged review: the exact
-//! tool, the canonical arguments the engine would dispatch, the call
-//! digest, the trajectory label fold at review time, and the gaps the
-//! ruling would cover. The model's account of what it is doing never
+//! What crosses is the same consult every other authority receives:
+//! the authority's declaration and the artifact — the exact tool, the
+//! canonical arguments the engine would dispatch, and the requirements
+//! the ruling would cover. The model's account of what it is doing never
 //! reaches the reviewer, and the reviewer's answer never passes back
 //! through the model.
 //!
@@ -51,6 +51,7 @@ use rmcp::model::{
 };
 use rmcp::service::{ElicitationMode, PeerRequestOptions, RequestContext, RoleServer, ServiceError};
 
+use crate::consult::{AudienceRequirement, AuthorityArtifact, AuthorityDeclaration, Requirement};
 use crate::external::{ConsultOutcome, NoAnswerReason};
 
 /// The open `execute_remedy_plan` request, and the one way back to the
@@ -73,10 +74,15 @@ impl Elicitation {
         Elicitation { request, timeout }
     }
 
-    /// Ask the reviewer to rule on one staged review, and return the
-    /// answer in the same shape the authority wire uses, so a component
+    /// Ask the reviewer to rule on one consult, and return the answer
+    /// in the same shape the authority wire uses, so a component
     /// switched between backends yields identical evidence.
-    pub async fn ask(&self, payload: &serde_json::Value) -> ConsultOutcome {
+    pub async fn ask(
+        &self,
+        authority: &str,
+        declaration: &AuthorityDeclaration,
+        artifact: &AuthorityArtifact,
+    ) -> ConsultOutcome {
         let peer = &self.request.peer;
         if !peer.supported_elicitation_modes().contains(&ElicitationMode::Form) {
             tracing::warn!(
@@ -87,7 +93,7 @@ impl Elicitation {
         }
         let request = ElicitRequestParams::FormElicitationParams {
             meta: None,
-            message: review_text(payload),
+            message: review_text(authority, declaration, artifact),
             // No fields: the action is the answer.
             requested_schema: ElicitationSchema::builder()
                 .build()
@@ -166,21 +172,20 @@ impl Elicitation {
     }
 }
 
-fn review_text(payload: &serde_json::Value) -> String {
-    let field = |key: &str| payload.get(key).and_then(|value| value.as_str()).unwrap_or("(unknown)");
-    let arguments = match payload.get("arguments") {
-        Some(value) => serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()),
-        None => "(none)".to_string(),
-    };
-    let gaps = match payload.get("gaps").and_then(|value| value.as_array()) {
-        Some(gaps) if !gaps.is_empty() => gaps
+/// The review as the person reads it: a pure rendering of the consult, nothing from the
+/// trajectory beside it.
+fn review_text(authority: &str, declaration: &AuthorityDeclaration, artifact: &AuthorityArtifact) -> String {
+    let arguments =
+        serde_json::to_string_pretty(&artifact.arguments).unwrap_or_else(|_| artifact.arguments.to_string());
+    let requirements = match artifact.requirements.as_slice() {
+        [] => "  (none)".to_string(),
+        requirements => requirements
             .iter()
-            .map(|gap| format!("  - {}", gap.as_str().unwrap_or("(unreadable)")))
+            .map(|requirement| format!("  - {}", requirement_text(requirement)))
             .collect::<Vec<_>>()
             .join("\n"),
-        _ => "  (none)".to_string(),
     };
-    let hint = match payload.get("hint").and_then(|value| value.as_str()) {
+    let hint = match &declaration.hint {
         Some(hint) => format!("{hint}\n"),
         None => String::new(),
     };
@@ -191,113 +196,32 @@ fn review_text(payload: &serde_json::Value) -> String {
          Tool: {tool}\n\
          Arguments:\n{arguments}\n\
          \n\
-         What this ruling would cover:\n{gaps}\n\
-         \n\
-         Trajectory label at review time:\n{label}\n\
-         Call digest: {digest}\n\
+         What this ruling would cover:\n{requirements}\n\
          \n\
          Accept only if this exact call, with these exact arguments, \
          may run. Decline refuses it. Cancel answers nothing and \
          leaves the call blocked. The agent's own description of what \
          it is doing is not shown here on purpose.",
-        authority = field("authority"),
-        tool = field("tool"),
-        label = label_text(payload.get("trajectory_label")),
-        digest = field("digest"),
+        tool = artifact.tool,
     )
 }
 
-fn label_text(label: Option<&serde_json::Value>) -> String {
-    let Some(label) = label else {
-        return "  (unknown)".to_string();
-    };
-    let trust = match label.get("trust").and_then(|value| value.as_str()) {
-        Some(rank) => rank.to_string(),
-        None => "(unnamed rank)".to_string(),
-    };
-    let readers = match label.get("audience") {
-        Some(serde_json::Value::String(public)) => public.clone(),
-        Some(serde_json::Value::Array(readers)) if !readers.is_empty() => readers
-            .iter()
-            .filter_map(|reader| reader.as_str())
-            .collect::<Vec<_>>()
-            .join(", "),
-        // An empty reader set is a label nothing can be released to.
-        Some(serde_json::Value::Array(_)) => "nobody".to_string(),
-        _ => "(unknown)".to_string(),
-    };
-    let mut text = format!("  trust: {trust}\n  readers: {readers}");
-    for (key, dimension) in [("unresolved_trust", "trust"), ("unresolved_audience", "readers")] {
-        let count = label.get(key).and_then(|value| value.as_array()).map_or(0, Vec::len);
-        if count > 0 {
-            let plural = if count == 1 { "source is" } else { "sources are" };
-            text.push_str(&format!("\n  {count} {plural} still unresolved for {dimension}"));
-        }
+fn requirement_text(requirement: &Requirement) -> String {
+    match requirement {
+        Requirement::Trust { required } => format!("trust must reach {required}"),
+        Requirement::Audience {
+            required: AudienceRequirement::Public,
+        } => "the readers must be the public audience".to_string(),
+        Requirement::Audience {
+            required: AudienceRequirement::Readers(count),
+        } => format!("the readers must include {count} required recipient(s)"),
+        Requirement::Effect { excludes } => format!("no prior {excludes} effect may have happened"),
+        Requirement::Attention { mark } => format!("attention: {mark}"),
     }
-    text
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    fn payload() -> serde_json::Value {
-        serde_json::json!({
-            "authority": "operator",
-            "hint": "The person at the keyboard.",
-            "tool": "send_report",
-            "digest": "ab12",
-            "trajectory_label": {
-                "trust": "suspicious",
-                "audience": ["private"],
-                "unresolved_trust": [3],
-                "unresolved_audience": [],
-            },
-            "arguments": {"to": "finance@corp.example"},
-            "gaps": ["trust is Suspicious, below the required floor Trusted"],
-        })
-    }
-
-    #[test]
-    fn the_review_carries_the_call_identity_and_its_gaps() {
-        let text = review_text(&payload());
-        assert!(text.contains("send_report"), "the tool is named");
-        assert!(
-            text.contains("finance@corp.example"),
-            "the canonical arguments are shown"
-        );
-        assert!(text.contains("below the required floor"), "the gap is stated");
-        assert!(text.contains("ab12"), "the digest is shown");
-        assert!(text.contains("operator"), "the authority is named");
-    }
-
-    #[test]
-    fn the_review_carries_the_authoritys_hint() {
-        assert!(review_text(&payload()).contains("The person at the keyboard."));
-    }
-
-    #[test]
-    fn the_label_reads_as_prose_not_as_a_debug_string() {
-        let text = review_text(&payload());
-        assert!(text.contains("trust: suspicious"), "the bound rank is named");
-        assert!(text.contains("readers: private"), "the bound readers are named");
-        assert!(
-            text.contains("1 source is still unresolved for trust"),
-            "an unresolved source is stated, singular: {text}"
-        );
-        assert!(
-            !text.contains("unresolved_audience"),
-            "a dimension with nothing unresolved stays silent"
-        );
-        assert!(!text.contains("PartialLabel"), "no engine type leaks into the review");
-    }
-
-    #[test]
-    fn an_unrestricted_audience_reads_as_public() {
-        let text = label_text(Some(&serde_json::json!({"trust": "trusted", "audience": "public"})));
-        assert!(text.contains("readers: public"));
-    }
-
     #[test]
     fn the_review_never_leaves_the_handler_task() {
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -315,13 +239,5 @@ mod tests {
                 "{module} must not spawn: the elicitation would lose its originating request",
             );
         }
-    }
-
-    #[test]
-    fn a_thin_payload_still_renders() {
-        let text = review_text(&serde_json::json!({"tool": "Bash"}));
-        assert!(text.contains("Bash"));
-        assert!(text.contains("(none)"), "absent gaps read as none");
-        assert!(text.contains("(unknown)"), "an absent label says so");
     }
 }

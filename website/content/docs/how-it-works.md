@@ -38,13 +38,13 @@ A root configuration can include reusable policy fragments. Root declarations ru
 
 Several contracts can name the same tool. OpenAPPA checks them in declaration order and uses the first contract whose argument patterns all match. A selector can name several arguments: separate the `argument:pattern` clauses with commas. A bare name is the fallback.
 
-Dynamic judgment—such as regex filters, ML classifiers, or human approval queues—lives in registered components. Authorities and sanitizers run as HTTP endpoints (`resolver`) or in-process modules (`builtin`). Each declares what it `permits`, and that declaration bounds its power. Casts declare a fixed label or use a resolver under a `may_cast` ceiling. An authority may omit its deployment binding. It then returns no answer, so a remedy that names it cannot release a call.
+Dynamic judgment—such as regex filters, ML classifiers, model judges, or human approval queues—lives in registered components. The policy registers each by name; the deployment binds an authority, sanitizer, or cast under `[externals.<kind>.<name>]` to an HTTP endpoint (`url`), a local command (`command`), or a `builtin`: a stock implementation, a model transport (`claude-code` on a Claude subscription, `llm` on an API key), or a deployer module. A membership resolver is bound the same way to `url` or `command`, never a builtin; so is a dynamic resolver, unless it names a model transport on its own declaration. An authority or sanitizer declares what it `permits`, and that declaration bounds its power. Casts declare a fixed label or use a resolver under a `may_cast` ceiling. An authority may omit its deployment binding. It then returns no answer, so a remedy that names it cannot release a call.
 
 A tool can also use dynamic resolvers that classify each proposed call before dispatch. A resolver declares the inputs it reads and the contract fields it owns through `returns`: `delta.trust` and `delta.audience` for the output label, and `requires.trust`, `requires.audience`, and `requires.attention` for call-time constraints. Attaching the resolver through `uses` assigns every declared field to it. The tool maps each declared input from the proposed call. Without an explicit mapping, the resolver receives the complete call: the tool name, its description when the policy declares one, and the arguments object.
 
-A resolver that carries the stock Claude Code classifier names it on its declaration with `builtin = "claude-code"`. Every other resolver is bound by name to an HTTP endpoint or a Unix command under `[externals.dynamic.<name>]`. Every request carries the policy's trust chain and the attention marks that authorities name under `permits.attention`. Trust answers must select a rank from that chain. Attention answers must select literal marks from that set, which preserves per-mark authority routing. A resolver has no `permits` or ceiling of its own, so its returned evidence is part of the trusted deployment boundary.
+A resolver that carries a stock model builtin names it on its declaration with `builtin = "claude-code"` or `builtin = "llm"` and takes no `[externals.dynamic]` binding. Every other resolver is bound by name under `[externals.dynamic.<name>]` to an HTTP endpoint or a Unix command. Every consult carries the resolver's declaration — its `returns`, the policy's trust chain, and the attention marks that authorities name under `permits.attention` — and the `args` it classifies, never the trajectory's label or history. Trust answers must select a rank from that chain. Attention answers must select literal marks from that set, which preserves per-mark authority routing. A resolver has no `permits` or ceiling of its own, so its returned evidence is part of the trusted deployment boundary.
 
-On Unix systems, a local command receives one JSON request on standard input and returns one JSON answer on standard output. OpenAPPA invokes its argument list directly, without a shell. The shared external timeout and byte limit bound the complete exchange. OpenAPPA rejects a command binding when the platform cannot run it safely. A command failure returns no answer, so the tool does not run.
+Every transport and every kind receive the same consult: the component's declaration and the value it judges. On Unix systems, a local command receives that one JSON consult on standard input and returns one JSON answer on standard output. OpenAPPA invokes its argument list directly, without a shell. The shared external timeout and byte limit bound the complete exchange. OpenAPPA rejects a command binding when the platform cannot run it safely. A command failure returns no answer, so the tool does not run.
 
 ### A resolver's answer is pinned to the call it classified
 
@@ -122,12 +122,14 @@ audience_missing = ["public"]              # a call missing any reader, up to pu
 ```
 
 The policy names the components. The deployment says who performs them, in a
-separate `[externals]` table — so swapping a redactor or moving approval to a
-person changes no policy:
+separate `[externals]` table, one `[externals.<kind>.<name>]` entry per
+registered name — so swapping a redactor or moving approval to a person
+changes no policy:
 
 ```toml
 [externals.sanitizers.remove_pii]
-url = "https://pii.corp/redact"
+url       = "https://pii.corp/redact"
+token_env = "APPA_PII_TOKEN"               # sent as a bearer token
 
 [externals.authorities.user]
 builtin = "hitl"                           # ask a person
@@ -180,7 +182,7 @@ Unannotated tools return data with an **Unknown** label state, representing unve
 
 An Unknown label state does not halt execution on its own: an unannotated result is admitted, and the trajectory keeps working, until a consumer of that dimension reads it — a tool contract's `requires` clause, a sanitizer's applicability or `permits` check, or a pending-cast admission. Each of those fails closed. When a `requires` clause checks the value, OpenAPPA triggers the registered **cast** for that value—resolving the label using a fixed rule or an external classifier—and validates the result against the cast's declared ceiling. If no cast reaches the value, it remains Unknown: the dependent call is blocked, and the block names the source under `unestablished`. If a registered cast gives no answer, nothing is decided or recorded, and the call can be tried again. This allows teams to annotate high-risk tools first and expand policy coverage incrementally.
 
-To inspect data before the LLM sees it, a tool contract can declare a pending dimension with `delta = { trust = "unknown" }`. When configured in `confined_results`, the runtime withholds the raw result while the cast evaluates the payload. If the cast resolves to a non-restricting label, the data is delivered directly; if it restricts the label, OpenAPPA offers the agent a narrowing choice before delivery.
+To inspect data before the LLM sees it, a tool contract can declare a pending dimension with `delta = { trust = "unknown" }`. When configured in `confined_results`, the runtime withholds the raw result while the cast evaluates the value. If the cast resolves to a non-restricting label, the data is delivered directly; if it restricts the label, OpenAPPA offers the agent a narrowing choice before delivery.
 
 ## Deploy at the gateway alone, or add components for full coverage
 
@@ -207,7 +209,7 @@ OpenAPPA's guarantees hold within defined system boundaries:
 4. **Log is durable and strictly ordered**: Security tracking relies on a persistent, append-only log.
 5. **The harness executes faithfully where unenforced**: When tool proxies or hooks are not configured, the agent framework is expected to run approved calls as returned.
 
-In short: declarative tool contracts set automatic bounds, while registered components — services or builtins — handle dynamic cases like human approvals or content scanners. As long as the execution log is persisted, OpenAPPA ensures every decision remains provable and auditable under your team's security policy.
+In short: declarative tool contracts set automatic bounds, while registered components — services, local commands, or builtins, model transports among them — handle dynamic cases like human approvals or content scanners. As long as the execution log is persisted, OpenAPPA ensures every decision remains provable and auditable under your team's security policy.
 
 ## Existing checks map onto registered engine components
 
@@ -216,16 +218,16 @@ Deployments migrate existing security controls into OpenAPPA by registering them
 | Existing Security Control | OpenAPPA Component |
 |---|---|
 | Human review / HITL prompts | `builtin = "hitl"` Authority |
-| Custom approval webhooks / LLM evaluators | Authority Resolver |
-| Content scanners & trust classifiers | Cast Resolver |
-| Argument-aware trust, audience, and review classification | Tool-level Dynamic Resolver (an HTTP endpoint or an in-process builtin) |
-| Regex / ML PII scrubbers & redactors | Sanitizer (`builtin = "redact-email"`, your own builtin module, or a resolver) |
+| Custom approval webhooks / LLM evaluators | Authority (`url`, `command`, or a model: `builtin = "claude-code"` or `builtin = "llm"`) |
+| Content scanners & trust classifiers | Cast (`url`, `command`, or a model builtin) under a `may_cast` ceiling |
+| Argument-aware trust, audience, and review classification | Tool-level Dynamic Resolver (an endpoint, a command, or a model builtin) |
+| Regex / ML PII scrubbers & redactors | Sanitizer (`builtin = "redact-email"`, your own builtin module, a model builtin, an endpoint, or a command) |
 | Directory / IAM group lookups | Membership Resolver |
 | Imperative `if/else` access checks | Tool Contracts |
 
 Registering security controls as OpenAPPA components prevents prompt injections from bypassing policy. Because the engine evaluates structured tool dispatches at the boundary rather than model output text, a compromised model cannot talk its way past policy rules.
 
-Crucially, an authority or sanitizer can do only what its `permits` declares, and a cast only what its `may_cast` ceiling allows: even if an ML classifier or third-party scanner makes a mistake, it cannot grant permissions beyond its pre-configured limit. Resolvers carry no `permits`: a membership resolver supplies trusted directory data, and a dynamic resolver supplies trusted classification over the proposed call. OpenAPPA validates resolver answers for valid schema and policy vocabulary (literal reader IDs, declared trust ranks, attended attention marks). Register resolvers only for services you trust as part of your deployment. Declaring tool bounds in contracts replaces scattered guardrail scripts and manual `if` checks across your codebase.
+Crucially, an authority or sanitizer can do only what its `permits` declares, and a cast only what its `may_cast` ceiling allows: even if an ML classifier or third-party scanner makes a mistake, it cannot grant permissions beyond its pre-configured limit. Resolvers carry no `permits`: a membership resolver supplies trusted directory data, and a dynamic resolver supplies trusted classification over the proposed call. OpenAPPA validates resolver answers for valid schema and policy vocabulary (literal reader IDs, declared trust ranks, attended attention marks). Register resolvers only for services you trust as part of your deployment. A consult never carries the trajectory: a component sees its own declaration and the value it judges, so a model bound as an authority, sanitizer, or cast rules within the same `permits` or `may_cast` as any service, and a model bound as a dynamic resolver is trusted classifier evidence like any other. Declaring tool bounds in contracts replaces scattered guardrail scripts and manual `if` checks across your codebase.
 
 ## Operational impact: How OpenAPPA simplifies security
 

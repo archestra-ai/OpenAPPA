@@ -767,6 +767,7 @@ mod tests {
                 name: CastName::new("classify"),
                 resolution: CastResolution::Constant(DeclaredLabel::literal(established(SUSPICIOUS, Audience::Public))),
                 scope: Scope::default(),
+                hint: None,
             }],
             membership: None,
         })

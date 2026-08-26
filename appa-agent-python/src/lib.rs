@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use appa_runtime::api::{OfferId, RemedyOutcome, Runtime};
-use appa_runtime::config::{Config, DynamicImplementation, Endpoint, Externals};
+use appa_runtime::config::{Binding, Config, ExternalBindings};
 use appa_runtime::hooks;
 use appa_runtime_api::{
     Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, SpawnBinding, SpawnRef, ToolOutcome, TrajectoryId,
@@ -157,8 +157,9 @@ struct ExternalsConfig {
     max_body_bytes: Option<usize>,
     #[serde(default)]
     dynamic: BTreeMap<String, EndpointConfig>,
+    /// The directory endpoint of the policy's membership resolver, by resolver name.
     #[serde(default)]
-    membership: Option<EndpointConfig>,
+    membership: BTreeMap<String, EndpointConfig>,
     /// The classifier endpoint of every resolver-backed cast, by cast name.
     #[serde(default)]
     casts: BTreeMap<String, EndpointConfig>,
@@ -193,56 +194,33 @@ impl SessionInner {
         let externals = if let Some(externals_toml) = externals_toml {
             let parsed: ExternalsConfig =
                 toml::from_str(externals_toml).map_err(|error| format!("invalid externals TOML: {error}"))?;
-            Externals {
-                timeout: Duration::from_millis(parsed.timeout_ms.unwrap_or(30_000)),
-                review_timeout: Duration::from_millis(parsed.review_timeout_ms.unwrap_or(600_000)),
-                max_body_bytes: parsed.max_body_bytes.unwrap_or(MAX_BODY_BYTES),
-                authorities: Default::default(),
-                sanitizers: Default::default(),
-                casts: parsed
-                    .casts
-                    .into_iter()
-                    .map(|(cast, endpoint)| {
-                        (
-                            cast,
-                            Endpoint {
-                                url: endpoint.url,
-                                token: None,
-                            },
-                        )
-                    })
-                    .collect(),
-                dynamic: parsed
-                    .dynamic
+            let mut bindings = ExternalBindings::new(
+                Duration::from_millis(parsed.timeout_ms.unwrap_or(30_000)),
+                parsed.max_body_bytes.unwrap_or(MAX_BODY_BYTES),
+            );
+            bindings.review_timeout_ms = parsed.review_timeout_ms.unwrap_or(600_000);
+            let bound = |endpoints: BTreeMap<String, EndpointConfig>| -> BTreeMap<String, Binding> {
+                endpoints
                     .into_iter()
                     .map(|(name, endpoint)| {
                         (
                             name,
-                            DynamicImplementation::Resolver(Endpoint {
+                            Binding::Url {
                                 url: endpoint.url,
-                                token: None,
-                            }),
+                                token_env: None,
+                            },
                         )
                     })
-                    .collect(),
-                membership: parsed.membership.map(|e| Endpoint {
-                    url: e.url,
-                    token: None,
-                }),
-                claude_code: Default::default(),
-            }
+                    .collect()
+            };
+            bindings.casts = bound(parsed.casts);
+            bindings.dynamic = bound(parsed.dynamic);
+            bindings.membership = bound(parsed.membership);
+            bindings
         } else {
-            Externals {
-                timeout: CONSULT_TIMEOUT,
-                review_timeout: CONSULT_TIMEOUT,
-                max_body_bytes: MAX_BODY_BYTES,
-                authorities: Default::default(),
-                sanitizers: Default::default(),
-                casts: Default::default(),
-                dynamic: Default::default(),
-                membership: None,
-                claude_code: Default::default(),
-            }
+            let mut bindings = ExternalBindings::new(CONSULT_TIMEOUT, MAX_BODY_BYTES);
+            bindings.review_timeout_ms = CONSULT_TIMEOUT.as_millis() as u64;
+            bindings
         };
         let config = Config::embedded(policy, externals).map_err(|error| error.to_string())?;
         let runtime = Runtime::open(config, store.path().join("appa.db"), None).map_err(|error| error.to_string())?;

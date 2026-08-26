@@ -183,15 +183,15 @@ impl Classifier {
             .collect()
     }
 
-    /// One field of each consult's payload, in order, as the classifier received it.
-    fn payload_field(&self, pointer: &str) -> Vec<serde_json::Value> {
+    /// One field of each consult, in order, as the classifier received it.
+    fn field(&self, pointer: &str) -> Vec<serde_json::Value> {
         self.requests
             .lock()
             .unwrap()
             .iter()
             .map(|request| {
                 request
-                    .pointer(&format!("/payload{pointer}"))
+                    .pointer(pointer)
                     .cloned()
                     .unwrap_or_else(|| panic!("a cast consult carries {pointer}: {request}"))
             })
@@ -207,7 +207,7 @@ impl Classifier {
             .iter()
             .map(|request| {
                 request
-                    .pointer("/payload/body")
+                    .pointer("/artifact/body")
                     .and_then(|body| body.as_str())
                     .expect("a cast consult carries the value body")
                     .to_string()
@@ -502,10 +502,11 @@ async fn a_blocked_call_skips_an_answer_over_the_ceiling_for_the_constant_behind
     );
 }
 
-/// A classifier is told what it classifies: the value's bytes, the tool whose result the
-/// value is, and the label context a dynamic resolver also receives.
+/// A classifier is told what it classifies and what it may say: the value's bytes as the
+/// artifact, and the policy's declaration — the ceiling and the tool whose result the value
+/// is. Nothing about the trajectory rides along.
 #[tokio::test]
-async fn a_classifier_consult_names_the_tool_and_the_label_context() {
+async fn a_classifier_consult_carries_the_declaration_and_the_bytes_alone() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let (url, classifier) = serve_classifier().await;
     classifier.answering("mail-classifier", labelled("trusted", serde_json::json!("public")));
@@ -527,20 +528,41 @@ async fn a_classifier_consult_names_the_tool_and_the_label_context() {
         HookDecision::AllowCall { spawn: None }
     );
 
+    assert_eq!(classifier.field("/kind"), vec![serde_json::json!("cast"); 2]);
     assert_eq!(
-        classifier.payload_field("/tool"),
+        classifier.field("/name"),
+        vec![
+            serde_json::json!("mail-classifier"),
+            serde_json::json!("web-classifier")
+        ]
+    );
+    assert_eq!(
+        classifier.field("/declaration/tool/name"),
         vec![serde_json::json!("scan_inbox"), serde_json::json!("read_page")],
         "the held result and the lazily classified value each name their tool"
     );
     assert_eq!(
-        classifier.payload_field("/context/current_trust"),
-        vec![serde_json::json!("trusted"), serde_json::json!("trusted")]
+        classifier.field("/declaration/may_cast"),
+        vec![serde_json::json!({ "trust": ["suspicious", "trusted"], "audience": "public" }); 2],
+        "the ceiling the cast may label within is the declaration"
     );
     assert_eq!(
-        classifier.payload_field("/context/trust_unresolved"),
-        vec![serde_json::json!(false), serde_json::json!(true)],
-        "the lazy consult sees the unannotated result already in the fold"
+        classifier.field("/artifact"),
+        vec![
+            serde_json::json!({ "body": INBOX }),
+            serde_json::json!({ "body": PAGE })
+        ],
+        "the artifact is the value's bytes and nothing else"
     );
+    for request in classifier.requests.lock().unwrap().iter() {
+        let keys: Vec<&str> = request
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, ["artifact", "declaration", "kind", "name", "version"]);
+    }
 }
 
 /// A classifier that cannot speak is skipped, so a constant registered behind it is the

@@ -214,7 +214,8 @@ confined_results = ["search_public_forum", "read_public_forum", "create_public_f
 timeout_ms = 5000
 max_body_bytes = 65536
 
-# `redact-numbers` is not a stock builtin — the runtime ships `redact-email` —
+# `redact-numbers` is not a stock builtin — the runtime ships `redact-email`,
+# `hitl`, `approve`, and the model transports `claude-code` and `llm` —
 # so the corporate agent serves it from the loopback shim it already runs for
 # its tools. Port 0 marks the origin as unbound: whoever hosts the external
 # rewrites the origin after its listener binds and keeps the path, which is

@@ -3,8 +3,10 @@
 use serde::Deserialize;
 
 /// The ABI version this crate generates. The loader requires exact
-/// equality before resolving any other symbol.
-pub const ABI_VERSION: u32 = 1;
+/// equality before resolving any other symbol, so a module built against
+/// an earlier request shape is refused when the deployment opens, never
+/// left to fail every consult.
+pub const ABI_VERSION: u32 = 2;
 
 pub const KIND_AUTHORITY: u32 = 1;
 pub const KIND_SANITIZER: u32 = 2;
@@ -27,18 +29,22 @@ pub struct DescriptorV1 {
 }
 
 /// One consult, as the author function sees it: which registered
-/// component is being consulted, and the consult payload. The same
-/// request the HTTP wire carries (`{"version":1,"kind","name","payload"}`),
-/// with the transport framing already stripped.
+/// component is being consulted, what the policy declared about it, and
+/// the artifact it judges. The same request the HTTP wire carries
+/// (`{"version":1,"kind","name","declaration","artifact"}`), with the
+/// transport framing already stripped.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BuiltinInput {
     /// The registered component under consult (e.g. the authority name
     /// from the deployment's externals configuration) — one module may
     /// back several components and distinguish them here.
     pub component: String,
-    /// The consult payload, exactly as an HTTP implementation would
-    /// receive it.
-    pub payload: serde_json::Value,
+    /// The component's declaration, exactly as an HTTP implementation
+    /// would receive it.
+    pub declaration: serde_json::Value,
+    /// The artifact under judgment, exactly as an HTTP implementation
+    /// would receive it.
+    pub artifact: serde_json::Value,
 }
 
 /// The author function declined to answer. The runtime treats it as a
@@ -65,7 +71,8 @@ struct RequestEnvelope {
     version: u32,
     kind: String,
     name: String,
-    payload: serde_json::Value,
+    declaration: serde_json::Value,
+    artifact: serde_json::Value,
 }
 
 /// Support functions the export macros call. Not part of the authoring
@@ -170,7 +177,8 @@ pub mod __support {
         }
         let builtin_input = BuiltinInput {
             component: envelope.name,
-            payload: envelope.payload,
+            declaration: envelope.declaration,
+            artifact: envelope.artifact,
         };
         let answer = match func(&builtin_input) {
             Ok(answer) => answer,
@@ -241,12 +249,13 @@ mod tests {
     use super::*;
 
     fn echo(input: &BuiltinInput) -> Result<serde_json::Value, BuiltinError> {
-        match input.payload.get("mode").and_then(|mode| mode.as_str()) {
+        match input.artifact.get("mode").and_then(|mode| mode.as_str()) {
             Some("error") => Err(BuiltinError::new("declined")),
             Some("panic") => panic!("a deliberate test panic"),
             _ => Ok(serde_json::json!({
                 "component": input.component,
-                "payload": input.payload,
+                "declaration": input.declaration,
+                "artifact": input.artifact,
             })),
         }
     }
@@ -270,12 +279,13 @@ mod tests {
         (status, output)
     }
 
-    fn request(payload: serde_json::Value) -> Vec<u8> {
+    fn request(artifact: serde_json::Value) -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({
             "version": 1,
             "kind": "sanitizer",
             "name": "pii",
-            "payload": payload,
+            "declaration": {"on": "tool_output"},
+            "artifact": artifact,
         }))
         .expect("the request envelope serializes")
     }
@@ -290,12 +300,13 @@ mod tests {
     }
 
     #[test]
-    fn a_successful_answer_carries_the_component_and_payload() {
+    fn a_successful_answer_carries_the_component_declaration_and_artifact() {
         let (status, body) = call(&request(serde_json::json!({"value": "x"})), 4096);
         assert_eq!(status, STATUS_OK);
         let answer: serde_json::Value = serde_json::from_slice(&body).expect("the answer is JSON");
         assert_eq!(answer["component"], "pii");
-        assert_eq!(answer["payload"]["value"], "x");
+        assert_eq!(answer["declaration"]["on"], "tool_output");
+        assert_eq!(answer["artifact"]["value"], "x");
     }
 
     #[test]
@@ -313,7 +324,7 @@ mod tests {
         assert_eq!((status, body.len()), (STATUS_INVALID_INPUT, 0));
 
         let envelope = serde_json::to_vec(&serde_json::json!({
-            "version": 2, "kind": "sanitizer", "name": "pii", "payload": {},
+            "version": 2, "kind": "sanitizer", "name": "pii", "declaration": {}, "artifact": {},
         }))
         .expect("the envelope serializes");
         let (status, body) = call(&envelope, 4096);
@@ -324,7 +335,7 @@ mod tests {
         assert_eq!((status, body.len()), (STATUS_INVALID_INPUT, 0));
 
         let envelope = serde_json::to_vec(&serde_json::json!({
-            "version": 1, "kind": "authority", "name": "pii", "payload": {},
+            "version": 1, "kind": "authority", "name": "pii", "declaration": {}, "artifact": {},
         }))
         .expect("the envelope serializes");
         let (status, body) = call(&envelope, 4096);

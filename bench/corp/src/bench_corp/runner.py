@@ -109,18 +109,18 @@ def _terminate_group(process: subprocess.Popen) -> None:
             continue
 
 
-def _consult_payload(request: dict, kind: str, name: str) -> dict:
-    """The payload of a consult envelope addressed to this external.
+def _consult_artifact(request: dict, kind: str, name: str) -> dict:
+    """The artifact of a consult envelope addressed to this external.
 
-    An authority or sanitizer consult arrives wrapped: the envelope names the
-    kind and the component, and the inner payload is what that component reads.
-    An envelope addressed elsewhere yields nothing to match on, so the fixture
+    Every consult arrives wrapped: the envelope names the kind and the
+    component, and the artifact is the value that component judges. An
+    envelope addressed elsewhere yields nothing to match on, so the fixture
     answers 404 — and no answer grants nothing.
     """
     if request.get("version") != 1 or request.get("kind") != kind or request.get("name") != name:
         return {}
-    payload = request.get("payload")
-    return payload if isinstance(payload, dict) else {}
+    artifact = request.get("artifact")
+    return artifact if isinstance(artifact, dict) else {}
 
 
 @contextlib.contextmanager
@@ -160,28 +160,29 @@ def _serve_external_fixtures(
 
             if isinstance(request, dict) and self.path == "/dynamic-resolver":
                 kind = "dynamic_resolver"
-                name = str(request.get("resolver", ""))
+                name = str(request.get("name", ""))
                 # The request carries no tool name: the resolver and the exact `args` it was
                 # sent are the whole key.
-                key = (request.get("resolver"), canonical_args(request.get("args")))
-                answer = dynamic_by_request.get(key) if request.get("version") == 1 else None
+                artifact = _consult_artifact(request, "dynamic", name)
+                key = (name, canonical_args(artifact.get("args")))
+                answer = dynamic_by_request.get(key) if artifact else None
                 if answer is not None:
                     result_name, readers = answer
                     value: object = list(readers) if result_name == "delta.audience" else {"contains": list(readers)}
-                    response = {"version": 1, "result": {result_name: value}}
+                    response = {"version": 1, "answer": {result_name: value}}
             elif isinstance(request, dict) and self.path.startswith("/authority/"):
                 kind = "authority"
                 name = self.path.removeprefix("/authority/")
-                payload = _consult_payload(request, kind, name)
-                ruling = authority_by_request.get((payload.get("authority"), payload.get("tool")))
+                artifact = _consult_artifact(request, kind, name)
+                ruling = authority_by_request.get((name, artifact.get("tool"))) if artifact else None
                 if ruling is not None:
                     response = {"version": 1, "answer": {"ruling": ruling}}
             elif isinstance(request, dict) and self.path.startswith("/sanitizer/"):
                 kind = "sanitizer"
                 name = self.path.removeprefix("/sanitizer/")
-                payload = _consult_payload(request, kind, name)
+                artifact = _consult_artifact(request, kind, name)
                 answer = sanitizer_by_name.get(name)
-                body = payload.get("body")
+                body = artifact.get("body")
                 if answer is not None and isinstance(body, str):
                     derived = "".join(
                         line

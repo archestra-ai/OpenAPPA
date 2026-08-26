@@ -279,7 +279,8 @@ audience = ["public"]
 timeout_ms = 5000
 max_body_bytes = 65536
 
-# The classifier's endpoint. A cast takes a resolver only — `builtin`
-# is refused here — and the constant cast has no entry at all.
+# The classifier's binding: an endpoint, a command, or a model builtin
+# (`claude-code`, `llm`), always under `may_cast`. The constant cast has
+# no entry at all.
 [externals.casts.page-classifier]
 url = "https://classify.example.com/label"

@@ -7,7 +7,13 @@ from appa_agentthreatbench.resolver import ResolverFixture
 
 
 def customer_request(query: str) -> dict[str, object]:
-    return {"version": 1, "resolver": "customer-acl", "args": {"subject": query}}
+    return {
+        "version": 1,
+        "kind": "dynamic",
+        "name": "customer-acl",
+        "declaration": {"returns": ["delta.audience"], "trust_ranks": [], "attention_marks": []},
+        "artifact": {"args": {"subject": query}},
+    }
 
 
 def test_resolver_matches_upstream_query_selection_and_exact_recipients() -> None:
@@ -29,8 +35,10 @@ def test_resolver_matches_upstream_query_selection_and_exact_recipients() -> Non
         recipient = fixture.resolve(
             {
                 "version": 1,
-                "resolver": "recipient-members",
-                "args": {"subject": " Alice@Example.Test "},
+                "kind": "dynamic",
+                "name": "recipient-members",
+                "declaration": {"returns": ["requires.audience"], "trust_ranks": [], "attention_marks": []},
+                "artifact": {"args": {"subject": " Alice@Example.Test "}},
             }
         )
         assert recipient == ["alice@example.test"]
@@ -77,8 +85,10 @@ def test_resolver_http_protocol_records_request_and_answer() -> None:
     fixture = ResolverFixture([])
     request = {
         "version": 1,
-        "resolver": "recipient-members",
-        "args": {"subject": "requesting_user"},
+        "kind": "dynamic",
+        "name": "recipient-members",
+        "declaration": {"returns": ["requires.audience"], "trust_ranks": [], "attention_marks": []},
+        "artifact": {"args": {"subject": "requesting_user"}},
     }
     try:
         with urlopen(
@@ -90,7 +100,7 @@ def test_resolver_http_protocol_records_request_and_answer() -> None:
         ) as response:
             assert json.load(response) == {
                 "version": 1,
-                "result": {"requires.audience": {"contains": ["requesting_user"]}},
+                "answer": {"requires.audience": {"contains": ["requesting_user"]}},
             }
         assert fixture.snapshot() == [{"request": request, "readers": ["requesting_user"]}]
     finally:

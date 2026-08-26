@@ -72,7 +72,7 @@ pub enum ConfigError {
     #[error("duplicate dynamic resolver {0}")]
     DuplicateDynamicResolver(String),
     #[error(
-        "dynamic resolver {name} names unknown builtin {builtin:?}; the one stock dynamic builtin is \"claude-code\""
+        "dynamic resolver {name} names unknown builtin {builtin:?}; the stock dynamic builtins are \"claude-code\" and \"llm\""
     )]
     UnknownDynamicBuiltin { name: String, builtin: String },
     #[error("tool {tool} uses unregistered resolver {resolver}")]
@@ -121,22 +121,49 @@ pub enum ConfigError {
     Registry(#[from] LoadError),
 }
 
+/// The stock model transports a `[[dynamic_resolver]]` may name on its declaration with
+/// `builtin`. Closed: the runtime compiles both in. A resolver that names one takes no
+/// deployment binding; every other resolver is bound by the deployment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DynamicBuiltin {
+    ClaudeCode,
+    Llm,
+}
+
+impl DynamicBuiltin {
+    pub const ALL: [DynamicBuiltin; 2] = [DynamicBuiltin::ClaudeCode, DynamicBuiltin::Llm];
+
+    /// The name a policy writes: `claude-code` or `llm`.
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            DynamicBuiltin::ClaudeCode => "claude-code",
+            DynamicBuiltin::Llm => "llm",
+        }
+    }
+
+    fn parse(name: &str) -> Option<DynamicBuiltin> {
+        DynamicBuiltin::ALL
+            .into_iter()
+            .find(|builtin| builtin.wire_name() == name)
+    }
+}
+
 /// A fully parsed and **fully validated** policy: the opened [`Engine`] — registry, deployment
 /// profile, and policy identity behind the one validated constructor — plus the
 /// normalized declarations. The runtime owns HTTP and command bindings; a resolver that
-/// carries the stock builtin names it on its own declaration.
+/// carries a stock builtin names it on its own declaration.
 #[derive(Clone, Debug)]
 pub struct Config {
     engine: Engine,
     registry_config: RegistryConfig,
     boundary_label: Label,
-    dynamic_resolver_names: BTreeSet<DynamicResolverName>,
-    dynamic_resolver_builtins: BTreeMap<DynamicResolverName, String>,
+    /// Every registered `[[dynamic_resolver]]`, with the stock builtin it names, if any.
+    dynamic_resolvers: BTreeMap<DynamicResolverName, Option<DynamicBuiltin>>,
 }
 
 impl Config {
-    /// Parse the policy TOML. HTTP and command bindings remain deployment-owned; the
-    /// supported stock dynamic builtin is selected on the resolver declaration that carries it.
+    /// Parse the policy TOML. HTTP and command bindings remain deployment-owned; a stock
+    /// dynamic builtin is selected on the resolver declaration that carries it.
     pub fn from_toml_str(s: &str) -> Result<Config, ConfigError> {
         let raw: RawConfig = toml::from_str(s)?;
         if raw.version != SUPPORTED_VERSION {
@@ -155,7 +182,7 @@ impl Config {
             None => default_boundary_label(&trust_chain),
         };
 
-        let mut dynamic_resolver_builtins = BTreeMap::new();
+        let mut dynamic_resolvers = BTreeMap::new();
         let mut declarations: BTreeMap<DynamicResolverName, ResolverDeclaration> = BTreeMap::new();
         for resolver in raw.dynamic_resolver {
             if resolver.name.is_empty() {
@@ -205,15 +232,19 @@ impl Config {
             {
                 return Err(ConfigError::DuplicateDynamicResolver(name.as_str().to_string()));
             }
-            if let Some(builtin) = resolver.builtin {
-                if builtin != "claude-code" {
-                    return Err(ConfigError::UnknownDynamicBuiltin {
-                        name: name.as_str().to_string(),
-                        builtin,
-                    });
-                }
-                dynamic_resolver_builtins.insert(name, builtin);
-            }
+            let builtin = match resolver.builtin {
+                Some(builtin) => match DynamicBuiltin::parse(&builtin) {
+                    Some(builtin) => Some(builtin),
+                    None => {
+                        return Err(ConfigError::UnknownDynamicBuiltin {
+                            name: name.as_str().to_string(),
+                            builtin,
+                        });
+                    }
+                },
+                None => None,
+            };
+            dynamic_resolvers.insert(name, builtin);
         }
         let membership = match raw.membership {
             Some(membership) => {
@@ -310,8 +341,7 @@ impl Config {
             engine,
             registry_config,
             boundary_label,
-            dynamic_resolver_names: declarations.keys().cloned().collect(),
-            dynamic_resolver_builtins,
+            dynamic_resolvers,
         })
     }
 
@@ -336,14 +366,14 @@ impl Config {
     /// Every `[[dynamic_resolver]]` the policy registers — the validated superset of every
     /// resolver name a tool binding uses.
     pub fn dynamic_resolver_names(&self) -> impl Iterator<Item = &DynamicResolverName> {
-        self.dynamic_resolver_names.iter()
+        self.dynamic_resolvers.keys()
     }
 
-    /// The stock builtin each `[[dynamic_resolver]]` that carries one names on its declaration.
-    /// A resolver listed here takes no deployment binding; every other resolver is bound by name
-    /// under `[externals.dynamic]`.
-    pub fn dynamic_resolver_builtins(&self) -> impl Iterator<Item = (&DynamicResolverName, &String)> {
-        self.dynamic_resolver_builtins.iter()
+    /// Every `[[dynamic_resolver]]` with the stock builtin it names on its declaration. A
+    /// resolver that names one takes no deployment binding; every other resolver is bound by
+    /// name under `[externals.dynamic]`.
+    pub fn dynamic_resolvers(&self) -> impl Iterator<Item = (&DynamicResolverName, Option<DynamicBuiltin>)> {
+        self.dynamic_resolvers.iter().map(|(name, builtin)| (name, *builtin))
     }
 }
 
@@ -474,8 +504,8 @@ struct RawLimits {
 struct RawDynamicResolver {
     name: String,
     resolver: Option<toml::Value>,
-    /// The stock in-process implementation this resolver carries. The one supported value is
-    /// `"claude-code"`. A resolver without it is bound by the deployment under `[externals.dynamic]`.
+    /// The stock model transport this resolver carries: `"claude-code"` or `"llm"`. A resolver
+    /// without it is bound by the deployment under `[externals.dynamic]`.
     builtin: Option<String>,
     /// The input names a `uses` entry must map. Omitted means this resolver reads the complete
     /// tool call instead.
@@ -944,6 +974,8 @@ struct RawTrustTransition {
 #[serde(deny_unknown_fields)]
 struct RawCast {
     name: String,
+    #[serde(default)]
+    hint: Option<String>,
     constant: Option<RawConstantLabel>,
     resolver: Option<RawCastResolver>,
     #[serde(default)]
@@ -980,6 +1012,7 @@ impl RawCast {
             name: CastName::new(self.name),
             resolution,
             scope,
+            hint: self.hint.map(Hint::new),
         })
     }
 }
@@ -1290,6 +1323,37 @@ confined_results = ["lookup"]
     }
 
     #[test]
+    fn a_cast_hint_registers_advisory_and_bounded() {
+        let with_hint = |hint: &str| {
+            format!(
+                "version = 1\n\
+                 [[tool]]\nname = \"fetch\"\ntags = [\"web\"]\n\
+                 [[cast]]\nname = \"content-classifier\"\nhint = \"{hint}\"\n\
+                 resolver = {{ may_cast = {{ trust = [\"suspicious\"], audience = [\"public\"] }} }}\n\
+                 tags = [\"web\"]\n"
+            )
+        };
+        let hinted = Config::from_toml_str(&with_hint("label fetched pages by their origin")).expect("loads");
+        let cast = hinted
+            .registry()
+            .cast(&CastName::new("content-classifier"))
+            .expect("content-classifier registers");
+        assert_eq!(
+            cast.hint.as_ref().map(Hint::as_str),
+            Some("label fetched pages by their origin")
+        );
+        let bare = with_hint("").replace("hint = \"\"\n", "");
+        assert_eq!(
+            hinted.engine().identity(),
+            Config::from_toml_str(&bare).expect("loads").engine().identity()
+        );
+        assert!(matches!(
+            Config::from_toml_str(&with_hint(&"x".repeat(appa_engine::registry::MAX_HINT_CHARS + 1))),
+            Err(ConfigError::Registry(LoadError::HintTooLong { .. }))
+        ));
+    }
+
+    #[test]
     fn a_may_cast_omitting_trust_admits_no_unresolved_trust() {
         let policy = "version = 1\n\
              [[tool]]\nname = \"fetch\"\ndelta = { audience = \"unknown\" }\n\
@@ -1385,17 +1449,18 @@ confined_results = ["lookup"]
                  [[dynamic_resolver]]\nname = \"bound\"\nreturns = [\"delta.audience\"]\n"
             )
         };
-        let config = Config::from_toml_str(&policy("claude-code")).expect("the stock builtin loads");
-        let builtins: Vec<_> = config
-            .dynamic_resolver_builtins()
-            .map(|(name, builtin)| (name.as_str(), builtin.as_str()))
-            .collect();
-        assert_eq!(builtins, vec![("classify", "claude-code")]);
-        assert_eq!(
-            config.dynamic_resolver_names().count(),
-            2,
-            "a bound resolver still registers"
-        );
+        for expected in DynamicBuiltin::ALL {
+            let config = Config::from_toml_str(&policy(expected.wire_name())).expect("the stock builtin loads");
+            let resolvers: Vec<_> = config
+                .dynamic_resolvers()
+                .map(|(name, builtin)| (name.as_str(), builtin))
+                .collect();
+            assert_eq!(
+                resolvers,
+                vec![("bound", None), ("classify", Some(expected))],
+                "a bound resolver still registers"
+            );
+        }
 
         assert!(matches!(
             Config::from_toml_str(&policy("no-such")),

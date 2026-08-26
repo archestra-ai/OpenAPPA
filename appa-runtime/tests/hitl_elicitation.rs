@@ -189,7 +189,7 @@ async fn dynamic_deployment() -> Deployment {
     let resolver = axum::Router::new().route(
         "/",
         axum::routing::post(|| async {
-            r#"{"version":1,"result":{"delta.trust":"suspicious","requires.trust":"trusted","requires.attention":["operator-signoff"]}}"#
+            r#"{"version":1,"answer":{"delta.trust":"suspicious","requires.trust":"trusted","requires.attention":["operator-signoff"]}}"#
         }),
     );
     tokio::spawn(async move {
@@ -376,10 +376,6 @@ async fn one_hitl_ruling_clears_dynamic_trust_and_attention() {
     assert!(
         review.contains("operator-signoff"),
         "the review names the attention mark: {review}"
-    );
-    assert!(
-        review.contains("below the required floor"),
-        "the review names the trust floor: {review}"
     );
     assert!(
         review.contains("cat .env"),

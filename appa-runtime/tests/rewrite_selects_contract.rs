@@ -66,6 +66,8 @@ url = "{base}/sanitize"
 struct Stubs {
     /// Every request the resolver received.
     consults: Arc<Mutex<Vec<serde_json::Value>>>,
+    /// Every request the sanitizer received.
+    sanitizations: Arc<Mutex<Vec<serde_json::Value>>>,
     /// The argument object the sanitizer answers with.
     rewrite: Arc<Mutex<serde_json::Value>>,
 }
@@ -73,6 +75,7 @@ struct Stubs {
 async fn serve_stubs(rewrite: serde_json::Value) -> (String, Stubs) {
     let stubs = Stubs {
         consults: Arc::new(Mutex::new(Vec::new())),
+        sanitizations: Arc::new(Mutex::new(Vec::new())),
         rewrite: Arc::new(Mutex::new(rewrite)),
     };
     let router = Router::new()
@@ -83,13 +86,15 @@ async fn serve_stubs(rewrite: serde_json::Value) -> (String, Stubs) {
                 stubs.consults.lock().unwrap().push(request);
                 axum::Json(serde_json::json!({
                     "version": 1,
-                    "result": { "requires.audience": { "contains": ["partner"] } },
+                    "answer": { "requires.audience": { "contains": ["partner"] } },
                 }))
             }),
         )
         .route(
             "/sanitize",
-            post(|State(stubs): State<Stubs>| async move {
+            post(|State(stubs): State<Stubs>, body: String| async move {
+                let request: serde_json::Value = serde_json::from_str(&body).expect("the request is JSON");
+                stubs.sanitizations.lock().unwrap().push(request);
                 let rewrite = stubs.rewrite.lock().unwrap().to_string();
                 axum::Json(serde_json::json!({ "version": 1, "answer": { "body": rewrite } }))
             }),
@@ -237,7 +242,7 @@ async fn a_rewrite_into_the_public_contract_consults_its_resolver_about_the_rewr
         "the public contract's resolver is consulted once, about the rewrite"
     );
     assert_eq!(
-        consults[0]["args"],
+        consults[0]["artifact"]["args"],
         serde_json::json!({ "name": "read_file", "arguments": { "path": "public/q3.md" } })
     );
 
@@ -289,6 +294,20 @@ async fn a_rewrite_within_the_public_contract_keeps_the_proposals_answer() {
     assert_eq!(
         rewritten_path(runtime.execute_remedy(&actor(), hop).await),
         "public/q4.md"
+    );
+    // The sanitizer was asked over the wire about the call it rewrites: the input point,
+    // the callee and its arguments, and the schema the rewrite must still satisfy.
+    let sanitizations = stubs.sanitizations.lock().unwrap().clone();
+    assert_eq!(sanitizations.len(), 1);
+    assert_eq!(sanitizations[0]["declaration"]["on"], "tool_input");
+    assert_eq!(
+        sanitizations[0]["declaration"]["parameters"]["required"],
+        serde_json::json!(["path"])
+    );
+    assert_eq!(sanitizations[0]["artifact"]["tool"], "read_file");
+    assert_eq!(
+        sanitizations[0]["artifact"]["body"],
+        serde_json::json!({ "path": "public/q3.md" }).to_string()
     );
     assert_eq!(
         stubs.consults.lock().unwrap().len(),

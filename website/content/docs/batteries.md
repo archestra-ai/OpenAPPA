@@ -113,18 +113,18 @@ command = ["python3", "./read-sensitivity.py"]
 
 ### Run a local resolver
 
-On Unix systems, OpenAPPA starts the command only when the selected tool rule uses the resolver. It writes one JSON request, reads one JSON result, then waits for the script to exit. Other platforms reject the command binding when the configuration loads.
+On Unix systems, OpenAPPA starts the command only when the selected tool rule uses the resolver. It writes one JSON consult, reads one JSON answer, then waits for the script to exit. Other platforms reject the command binding when the configuration loads.
 
-Request:
+Consult:
 
 ```json
-{"version":1,"resolver":"claude-code.read-sensitivity","args":{"name":"Read","arguments":{"file_path":".env"}}}
+{"version":1,"kind":"dynamic","name":"claude-code.read-sensitivity","declaration":{"returns":["delta.audience"],"trust_ranks":["suspicious","trusted"],"attention_marks":[]},"artifact":{"args":{"name":"Read","arguments":{"file_path":".env"}}}}
 ```
 
-Result:
+Answer:
 
 ```json
-{"version":1,"result":{"delta.audience":["private"]}}
+{"version":1,"answer":{"delta.audience":["private"]}}
 ```
 
 The resolver can be any program. Here is a Python example:
@@ -135,16 +135,16 @@ import sys
 from pathlib import PurePath
 
 request = json.load(sys.stdin)
-file_path = request["args"]["arguments"]["file_path"]
+file_path = request["artifact"]["args"]["arguments"]["file_path"]
 audience = ["private"] if PurePath(file_path).name.startswith(".") else "public"
 
 json.dump(
-    {"version": 1, "result": {"delta.audience": audience}},
+    {"version": 1, "answer": {"delta.audience": audience}},
     sys.stdout,
 )
 ```
 
-`args` is the complete call: `name`, `description` when the tool declares one, and `arguments`. The `Read` rule above declares none, so the request carries none. A battery resolver must check the version, resolver name, tool name, and argument types. It must exit with an error for bad input.
+`artifact.args` is the complete call: `name`, `description` when the tool declares one, and `arguments`. The `Read` rule above declares none, so the consult carries none. `declaration` is the resolver's own registration — its `returns` and the policy vocabulary its answer must use. A battery resolver must check the version, `kind`, `name`, tool name, and argument types. It must exit with an error for bad input.
 
 OpenAPPA runs the command without a shell. The script path is relative to the battery config. Its folder is the working folder.
 

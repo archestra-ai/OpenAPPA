@@ -285,15 +285,16 @@ def evaluate_check(
     def authority_matches(record: dict, *, ruling: str) -> bool:
         """A logged consult of the named authority that returned `ruling`.
 
-        Both directions travel wrapped: the authority's own payload sits inside
-        a versioned request envelope, and its ruling arrives under `answer`.
+        Both directions travel wrapped: the envelope names the authority, the
+        judged call sits under `artifact`, and the ruling arrives under `answer`.
         """
-        payload = (record.get("request") or {}).get("payload") or {}
+        request = record.get("request") or {}
+        artifact = request.get("artifact") or {}
         answer = (record.get("response") or {}).get("answer") or {}
         return (
             record.get("kind") == "authority"
-            and payload.get("authority") == spec["authority"]
-            and payload.get("tool") == spec["tool"]
+            and request.get("name") == spec["authority"]
+            and artifact.get("tool") == spec["tool"]
             and answer.get("ruling") == ruling
         )
 
@@ -342,8 +343,8 @@ def evaluate_check(
         def approval_matches_arguments(record: dict) -> bool:
             if not authority_matches(record, ruling="approve"):
                 return False
-            payload = (record.get("request") or {}).get("payload") or {}
-            return payload.get("arguments") == expected_arguments
+            artifact = (record.get("request") or {}).get("artifact") or {}
+            return artifact.get("arguments") == expected_arguments
 
         approvals = [request for request in external_requests if approval_matches_arguments(request)]
         if check.kind == "wire_executed_with_authority":

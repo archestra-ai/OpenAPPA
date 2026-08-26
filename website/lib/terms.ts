@@ -29,7 +29,7 @@ const TERMS = {
   casts:
     "Registered components that resolve whole Unknown values to complete labels, atomically, under pre-configured ceilings.",
   "[[cast]]":
-    "The registered resolution of an Unknown value: one complete label for the whole source, atomically.",
+    "The registered resolution of an Unknown value: one complete label for the whole source, atomically. A resolver-backed cast may carry a hint and binds under [externals.casts.<name>].",
   remedy:
     "An actionable path returned on a policy refusal explaining how to unblock execution safely.",
   remedies:
@@ -57,9 +57,9 @@ const TERMS = {
   "@auditors":
     "A group: a directory-held reader set, resolved to literal reader IDs by the membership resolver when the engine reads it.",
   "[membership]":
-    "The one registration every @name group resolves through. A group mention without it is a load error.",
+    "The one registration every @name group resolves through. A group mention without it is a load error. Its name binds under [externals.membership.<name>] to an endpoint or a command; no builtin serves a directory.",
   "[[dynamic_resolver]]":
-    "A named external that classifies proposed tool calls. Its opaque non-empty name can contain dots. It declares the inputs a tool must supply and the contract destinations it owns through returns. It is distinct from @group membership resolution.",
+    "A named external that classifies proposed tool calls. Its opaque non-empty name can contain dots. It declares the inputs a tool must supply and the contract destinations it owns through returns, and may name a stock model transport with builtin = \"claude-code\" or \"llm\"; otherwise the deployment binds it under [externals.dynamic.<name>]. It is distinct from @group membership resolution.",
   inputs:
     "The values a resolver reads. A tool maps each one from $tool_call. Without an explicit mapping, the resolver reads the complete tool call: name, description when declared, and arguments.",
   uses:
@@ -69,7 +69,13 @@ const TERMS = {
   "$tool_call":
     "The only source a resolver input reads. Its five forms are the complete call (name, description when declared, arguments), its name, its description, its arguments, and one top-level argument. Only $tool_call.description requires a declared description.",
   "[externals.dynamic.<name>]":
-    "The deployment binding for one dynamic resolver that does not carry a builtin on its declaration. It selects an HTTP endpoint or Unix command. Every implementation receives the same request and returns an answer under the same validation. Unsupported platforms reject command bindings when loading the configuration.",
+    "The deployment binding for one dynamic resolver that does not carry a builtin on its declaration: an HTTP endpoint or a local command. Every implementation receives the same consult and answers under the same validation. Unsupported platforms reject command bindings when loading the configuration.",
+  "[externals.<kind>.<name>]":
+    "One deployment binding: a registered authority, sanitizer, or cast bound to exactly one of url, command, or builtin; a membership resolver, or a dynamic resolver without a declared builtin, bound to url or command. A binding without a registration refuses the deployment, and so does an unbound sanitizer, cast, or resolver; an unbound authority returns no answer.",
+  declaration:
+    "The policy-authored half of a consult: the component's hint, its permits or may_cast, or its declared results and vocabulary. The agent never writes it.",
+  artifact:
+    "The judged half of a consult: the call and its unmet requirements, the body to rewrite or label, a resolver's args, or a group name. Never the trajectory.",
   internal:
     "An example reader for restricted internal data. Reading internal data closes off public destinations.",
   "{public, trusted}":
@@ -93,7 +99,7 @@ const TERMS = {
   /* Authorities */
   permits:
     "What a registered component may do, declared in its own table. For an authority: which unmet requirements its rulings can clear, and how far. For a sanitizer: the one transition, on one dimension, its derivation can claim.",
-  hint: "The deployer's own account of what an authority or sanitizer is for. Carried into every remedy plan naming it, so the agent chooses on stated purpose. Advisory: it grants nothing.",
+  hint: "The deployer's own account of what an authority, sanitizer, or cast is for. Carried into every remedy plan naming it, so the agent chooses on stated purpose, and into the component's consult, so a model implementation reads its charter. Advisory: it grants nothing.",
   trust_below:
     "In an authority's permits: it can rule for a call whose trust requirement is unmet, for requirements up to this rank.",
   audience_missing:
@@ -108,6 +114,12 @@ const TERMS = {
     "The built-in human-in-the-loop authority: elicitation hosted by the harness rather than a remote resolver.",
   'builtin = "approve"':
     "The stock in-process authority that approves every consult within what it permits. An open gate the deployer chose deliberately — legitimate and visible in review.",
+  'builtin = "claude-code"':
+    "The stock model transport on a Claude subscription: one isolated claude -p process per consult, given the component's declaration and the judged value, never the trajectory. An authority, sanitizer, or cast binds it under [externals]; a dynamic resolver names it on its declaration. The same caps apply as to any implementation.",
+  'builtin = "llm"':
+    "The stock model transport on an API key, through the deployment's [externals.llm] profile. Same consult rendering, same placement, and same per-kind caps as claude-code.",
+  "[externals.llm]":
+    "The deployment's one API-key model profile — provider (anthropic, openai, gemini, or ollama), model, optional url, token_env (required except for ollama), timeout, and concurrency — that every builtin = \"llm\" binding or declaration consults. A deployment without it refuses to open a policy that declares one.",
 
   /* Sanitizers and Casts */
   on: "Where a sanitizer may apply: tool_output at an admission the host can withhold — a child return, or a tool result at a confined application point; tool_input as whole-argument substitution at dispatch.",

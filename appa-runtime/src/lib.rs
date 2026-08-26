@@ -6,6 +6,8 @@ pub mod hooks;
 pub mod mcp;
 
 mod builtins;
+mod consult;
 mod elicit;
 mod engine;
 mod external;
+mod llm;

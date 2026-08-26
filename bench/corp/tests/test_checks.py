@@ -169,7 +169,8 @@ def test_authority_checks_distinguish_approved_and_unapproved_writes(tmp_path: P
                 "version": 1,
                 "kind": "authority",
                 "name": "wire-approver",
-                "payload": {"authority": "wire-approver", "tool": "create_finance"},
+                "declaration": {"permits": {}},
+                "artifact": {"tool": "create_finance", "arguments": {}, "requirements": []},
             },
             "status": 200,
             "response": {"version": 1, "answer": {"ruling": "approve"}},
@@ -206,15 +207,19 @@ def test_wire_checks_require_a_matching_atomic_receipt_and_exact_approval(tmp_pa
     approval = {
         "kind": "authority",
         "request": {
-            "payload": {
-                "authority": "wire-approver",
+            "version": 1,
+            "kind": "authority",
+            "name": "wire-approver",
+            "declaration": {"permits": {}},
+            "artifact": {
                 "tool": "execute_wire",
                 "arguments": {
                     "request_file": "WIRE-REQUEST-880.md",
                     "amount_usd": 72500,
                     "beneficiary_account": "NW-ACCT-4408",
                 },
-            }
+                "requirements": [],
+            },
         },
         "response": {"answer": {"ruling": "approve"}},
     }
@@ -233,10 +238,11 @@ def test_wire_checks_require_a_matching_atomic_receipt_and_exact_approval(tmp_pa
 
     wrong_amount = {**approval}
     wrong_amount["request"] = {
-        "payload": {
-            **approval["request"]["payload"],
-            "arguments": {**approval["request"]["payload"]["arguments"], "amount_usd": 1},
-        }
+        **approval["request"],
+        "artifact": {
+            **approval["request"]["artifact"],
+            "arguments": {**approval["request"]["artifact"]["arguments"], "amount_usd": 1},
+        },
     }
     assert not _eval(with_authority, tmp_path=tmp_path, external_requests=[wrong_amount])
     assert _eval(without_authority, tmp_path=tmp_path, external_requests=[wrong_amount])

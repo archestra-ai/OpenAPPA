@@ -38,7 +38,7 @@ delta = {}
 timeout_ms = 1000
 max_body_bytes = 4096
 
-[externals.membership]
+[externals.membership.directory]
 url = "MEMBERSHIP_URL"
 "#;
 
@@ -78,7 +78,7 @@ async fn serve_directory() -> (String, Directory) {
                 match directory.answer.lock().unwrap().clone() {
                     Answer::Readers(readers) => (
                         axum::http::StatusCode::OK,
-                        serde_json::json!({ "version": 1, "readers": readers }).to_string(),
+                        serde_json::json!({ "version": 1, "answer": { "readers": readers } }).to_string(),
                     ),
                     Answer::Down => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom".to_string()),
                 }
@@ -198,8 +198,9 @@ async fn a_group_argument_is_checked_against_the_directorys_answer() {
     let requests = directory.requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0]["version"], 1);
-    assert_eq!(requests[0]["resolver"], "directory");
-    assert_eq!(requests[0]["group"], "team");
+    assert_eq!(requests[0]["kind"], "membership");
+    assert_eq!(requests[0]["name"], "directory");
+    assert_eq!(requests[0]["artifact"], serde_json::json!({ "group": "team" }));
 
     directory.set(Answer::Readers(vec!["alice", "carol"]));
     assert!(matches!(
@@ -214,7 +215,7 @@ async fn a_group_argument_is_checked_against_the_directorys_answer() {
         HookDecision::AllowCall { spawn: None }
     );
     ran(&runtime, send("@nobody")).await;
-    assert_eq!(directory.requests()[2]["group"], "nobody");
+    assert_eq!(directory.requests()[2]["artifact"]["group"], "nobody");
 }
 
 #[tokio::test]
@@ -266,7 +267,7 @@ async fn public_and_literal_arguments_never_consult_the_directory() {
 fn a_registered_membership_resolver_must_be_bound() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let path = dir.path().join("appa.toml");
-    let unbound = POLICY.replace("[externals.membership]\nurl = \"MEMBERSHIP_URL\"\n", "");
+    let unbound = POLICY.replace("[externals.membership.directory]\nurl = \"MEMBERSHIP_URL\"\n", "");
     std::fs::write(&path, unbound).expect("the fixture writes");
     let config = Config::load(&path).expect("the file validates");
     assert!(matches!(
@@ -296,7 +297,7 @@ async fn a_cap_written_with_a_group_is_read_per_act_from_the_directory() {
     );
     let requests = directory.requests();
     assert_eq!(requests.len(), 1, "one act, one consult per group");
-    assert_eq!(requests[0]["group"], "team");
+    assert_eq!(requests[0]["artifact"]["group"], "team");
     ran(&runtime, send_capped()).await;
 
     directory.set(Answer::Readers(vec!["carol"]));

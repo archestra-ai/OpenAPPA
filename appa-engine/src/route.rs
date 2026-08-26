@@ -1506,6 +1506,7 @@ mod tests {
         let castable = Deployment::of(tools)
             .casts(vec![Cast {
                 name: CastName::new("vouch"),
+                hint: None,
                 resolution: CastResolution::Constant(DeclaredLabel {
                     trust: TRUSTED,
                     audience: DeclaredAudience::Public,
@@ -1538,6 +1539,7 @@ mod tests {
         ])
         .casts(vec![Cast {
             name: CastName::new("vouch"),
+            hint: None,
             resolution: CastResolution::Constant(DeclaredLabel {
                 trust: TRUSTED,
                 audience: DeclaredAudience::declared([], [board.clone()]).unwrap(),

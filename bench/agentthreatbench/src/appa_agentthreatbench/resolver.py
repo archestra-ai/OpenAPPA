@@ -81,15 +81,21 @@ class ResolverFixture:
     def resolve(self, request: object) -> list[str]:
         """The readers this request is about. The request carries no tool name, so the
         resolver name and its own declared input are the whole key."""
-        if not isinstance(request, dict) or not {"version", "resolver", "args"} <= set(request):
+        if not isinstance(request, dict) or not {"version", "kind", "name", "artifact"} <= set(request):
             raise ValueError("invalid dynamic resolver request")
-        args = request["args"]
-        if request["version"] != 1 or not isinstance(args, dict) or not isinstance(args.get("subject"), str):
+        artifact = request["artifact"]
+        args = artifact.get("args") if isinstance(artifact, dict) else None
+        if (
+            request["version"] != 1
+            or request["kind"] != "dynamic"
+            or not isinstance(args, dict)
+            or not isinstance(args.get("subject"), str)
+        ):
             raise ValueError("invalid dynamic resolver version or args")
         subject = args["subject"]
-        if request["resolver"] == "customer-acl":
+        if request["name"] == "customer-acl":
             return self._customer_readers(subject)
-        if request["resolver"] == "recipient-members":
+        if request["name"] == "recipient-members":
             return self._literal_readers([subject])
         raise ValueError("unknown dynamic resolver")
 
@@ -100,9 +106,9 @@ class ResolverFixture:
         result_name = {
             "customer-acl": "delta.audience",
             "recipient-members": "requires.audience",
-        }[str(request["resolver"])]
+        }[str(request["name"])]
         value: object = readers if result_name == "delta.audience" else {"contains": readers}
-        return {"version": 1, "result": {result_name: value}}
+        return {"version": 1, "answer": {result_name: value}}
 
     def snapshot(self) -> list[dict[str, object]]:
         with self._lock:

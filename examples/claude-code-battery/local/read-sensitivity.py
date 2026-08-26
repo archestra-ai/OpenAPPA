@@ -7,10 +7,13 @@ def main():
 
     if request.get("version") != 1:
         raise ValueError("unsupported request version")
-    if request.get("resolver") != "local.read-sensitivity":
+    if request.get("kind") != "dynamic":
+        raise ValueError("unexpected consult kind")
+    if request.get("name") != "local.read-sensitivity":
         raise ValueError("unexpected resolver name")
 
-    args = request.get("args")
+    artifact = request.get("artifact")
+    args = artifact.get("args") if isinstance(artifact, dict) else None
     if not isinstance(args, dict) or args.get("name") != "Read":
         raise ValueError("args.name must be Read")
     arguments = args.get("arguments")
@@ -23,7 +26,7 @@ def main():
     )
     audience = ["private"] if sensitive else "public"
     json.dump(
-        {"version": 1, "result": {"delta.audience": audience}},
+        {"version": 1, "answer": {"delta.audience": audience}},
         sys.stdout,
     )
     sys.stdout.write("\n")
