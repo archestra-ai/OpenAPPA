@@ -3238,9 +3238,9 @@ mod tests {
             "x\u{FFFD}rlo\u{FFFD}z\u{FFFD}"
         );
         assert_eq!(terminal_safe("tru\u{200B}sted"), "tru\u{FFFD}sted");
-        assert_ne!(
+        assert_eq!(
             terminal_safe("tru\u{206A}sted"),
-            "trusted",
+            "tru\u{FFFD}sted",
             "the full Cf range replaces"
         );
     }
