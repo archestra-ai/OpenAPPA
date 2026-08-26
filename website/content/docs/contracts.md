@@ -220,7 +220,7 @@ builtin = "claude-code"
 returns = ["delta.trust"]
 ```
 
-A dynamic resolver has no `permits` and no ceiling. Its answer is trusted classifier evidence, whichever transport serves it, and every transport passes the same exact-shape, policy-vocabulary, audience, and pin validation. A pinned recheck and a replay never consult it again.
+A dynamic resolver has no `permits` and no ceiling. Its answer is trusted classifier evidence, whichever transport serves it, and every transport passes the same exact-shape, policy-vocabulary, audience, and pin validation. A pinned recheck and a replay never consult it again, and neither does a later proposal under the same contract with the same resolver inputs while an offer or an approval prepared for the pinned call stands in the trajectory.
 
 The consult's declaration is the resolver's vocabulary; its artifact is `args`. For the one-argument example above:
 
@@ -261,7 +261,7 @@ Response, from an endpoint or a command:
 
 `version` must match the consult. `answer` holds every result the resolver declared, keyed by the result's own name — including a result this tool does not read. A model builtin answers the same object without the envelope.
 
-OpenAPPA rejects a missing result, an extra result, and a `null` result. It rejects an extra key beside `version` and `answer`. Trust and attention values must come from the declaration, whether or not the tool reads them: a result no field reads establishes nothing, but the record keeps it, so it answers to the same vocabulary. `delta.audience` is `"public"` or a list of reader names, and never a group. `requires.audience` is an object with `contains`, `within`, or both: `{"contains": [...], "within": [...]}`. An empty reader list is a valid, maximally restrictive answer. An empty attention list is valid, and it is the only valid attention answer when `attention_marks` is empty.
+OpenAPPA rejects a missing result, an extra result, and a `null` result. It rejects an extra key beside `version` and `answer`. Trust and attention values must come from the declaration, whether or not the tool reads them: a result no field reads establishes nothing, but the record keeps it, so it answers to the same vocabulary. `delta.audience` is `"public"` or a list of reader names, and never a group. `requires.audience` is an object with `contains`, `within`, or both: `{"contains": [...], "within": [...]}`. An empty reader list is a valid, maximally restrictive answer. An empty attention list is valid, and it is the only valid attention answer when `attention_marks` is empty. A model transport's dynamic answer may name only readers that appear in `args`: the artifact is the only input a model has, so any other reader is invented. Command and endpoint resolvers answer from directories of their own and are not held to this.
 
 ### Deployment coverage
 

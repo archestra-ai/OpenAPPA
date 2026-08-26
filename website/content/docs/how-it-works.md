@@ -142,7 +142,7 @@ Where policy needs dynamic runtime context (such as evaluating document ACLs, re
 
 - **Input mapping**: A resolver receives declared arguments from the proposed call (e.g. `subject = "document.pdf"`).
 - **Contract fields**: The resolver supplies specific fields of the tool contract (`delta.audience`, `requires.trust`, etc.).
-- **Pinned verification**: A resolver's validated answer is permanently pinned to the exact inputs it evaluated, guaranteeing deterministic execution logs and immutable audit replay.
+- **Pinned verification**: A resolver's validated answer is permanently pinned to the exact inputs it evaluated, and a later proposal under the same contract with the same inputs reuses it instead of consulting again while an offer or approval prepared for the pinned call stands, guaranteeing deterministic execution logs and immutable audit replay.
 
 *(For complete syntax on ordered contracts, argument matching, and resolver schemas, see the [Policy reference](/contracts).)*
 

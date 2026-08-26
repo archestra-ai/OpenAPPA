@@ -1005,7 +1005,13 @@ impl RuntimeEngine {
             Ok(resolved) => resolved,
             Err(error) => return Ok(deny(malformed_feedback(&error))),
         };
-        let (tool_pins, memberships) = match self.answers_for(&resolved, evidence) {
+        let owner = engine_id(trajectory);
+        let Some(views) = view.views(&owner) else {
+            return Err(EngineRefusal::Invariant {
+                detail: "deciding a proposal for a trajectory the log has not opened".to_string(),
+            });
+        };
+        let (tool_pins, memberships) = match self.answers_for(&views, &resolved, evidence) {
             Ok(answers) => answers,
             Err(Resolution::Feedback(text)) => return Ok(deny(text)),
             Err(Resolution::Consult(requests)) => return Ok(EngineDecision::deliver(Next::ResolveExternal(requests))),
@@ -1310,7 +1316,7 @@ impl RuntimeEngine {
                     .resolve_call(call.tool().clone(), derived.as_str().as_bytes())
                 {
                     Ok(rewritten) if rewritten.contract_id() != call.contract_id() => {
-                        match self.answers_for(&rewritten, evidence) {
+                        match self.answers_for(&views, &rewritten, evidence) {
                             Ok(answers) => answers,
                             Err(Resolution::Consult(requests)) => {
                                 return Ok(EngineDecision::deliver(Next::ResolveExternal(requests)));
@@ -1637,6 +1643,7 @@ impl RuntimeEngine {
     /// consults still owed: the resolvers it uses and the placeholder groups its arguments name.
     fn answers_for(
         &self,
+        views: &Views,
         resolved: &ResolvedCall,
         evidence: &[ExternalEvidence],
     ) -> Result<(Vec<PinnedToolResolution>, Vec<PinnedMembership>), Resolution> {
@@ -1645,7 +1652,7 @@ impl RuntimeEngine {
             .registry()
             .contract(resolved)
             .expect("a resolved call names its registered contract");
-        let tools = self.tool_resolutions_for(contract, resolved, evidence);
+        let tools = self.tool_resolutions_for(views, contract, resolved, evidence);
         let memberships = self.memberships_for(contract, resolved, evidence);
         match (tools, memberships) {
             (Ok(tool_pins), Ok(memberships)) => Ok((tool_pins, memberships)),
@@ -1664,6 +1671,7 @@ impl RuntimeEngine {
 
     fn tool_resolutions_for(
         &self,
+        views: &Views,
         contract: &appa_engine::contract::ToolContract,
         resolved: &ResolvedCall,
         evidence: &[ExternalEvidence],
@@ -1680,6 +1688,15 @@ impl RuntimeEngine {
         for uses in &contract.uses {
             let args = contract.resolver_args(uses, resolved.arguments());
             let asked = contract.resolver_args_digest(uses, resolved.arguments());
+            // A classification pinned to this call in an act the trajectory still has
+            // prepared — an open offer, an unspent approval — stands: the re-proposal spells
+            // the call the act was prepared for, and a resolver that may answer differently
+            // twice is not asked twice. The record outranks evidence for the same arguments,
+            // so one standing act never carries two answers for one subject.
+            if let Some(pin) = views.pinned_tool_resolution(resolved, uses, asked) {
+                pins.push(pin.clone());
+                continue;
+            }
             let answer = evidence.iter().find_map(|entry| match entry {
                 ExternalEvidence::ToolResolution {
                     resolver,
@@ -1689,13 +1706,11 @@ impl RuntimeEngine {
                 _ => None,
             });
             match answer {
-                None => {
-                    requests.push(ExternalRequest::ToolResolution {
-                        uses: uses.clone(),
-                        args,
-                        declaration: self.dynamic_declaration(uses),
-                    });
-                }
+                None => requests.push(ExternalRequest::ToolResolution {
+                    uses: uses.clone(),
+                    args,
+                    declaration: self.dynamic_declaration(uses),
+                }),
                 Some(answer) => {
                     let rank = |name: &str, what: &str| {
                         chain.rank_of(name).ok_or_else(|| {
@@ -2836,8 +2851,9 @@ fn block_feedback(views: &Views, planned: &PlannedBlock, offers: &[(OfferId, Pla
 #[cfg(test)]
 mod tests {
     use super::{
-        ExternalEvidence, ExternalRequest, OfferId, Resolution, RuntimeEngine, SanitizerSubject, audience_wire,
-        remedy_instruction, remedy_lines, terminal_safe,
+        EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Next, OfferId, OfferNonce, ProposedCall,
+        Resolution, RuntimeEngine, SanitizerSubject, TrajectoryId, audience_wire, engine_id, remedy_instruction,
+        remedy_lines, terminal_safe,
     };
     use crate::consult::{DynamicAnswer, RequiredAudienceAnswer, SanitizerPoint, WireAudience};
     use appa_engine::contract::RequiredAudience;
@@ -2901,9 +2917,18 @@ mod tests {
         assert_eq!(artifact.tool, None, "a child return originates from no tool");
     }
 
-    #[test]
-    fn one_tool_resolver_can_pin_delta_and_requirements_from_all_arguments() {
-        let policy = appa_policy::Config::from_toml_str(
+    fn opened_view(engine: &RuntimeEngine, trajectory: &TrajectoryId) -> EngineView {
+        let opening = engine.root_opening(trajectory, b"policy");
+        engine.validated(opening, trajectory, 1).expect("the opening validates")
+    }
+
+    fn classifier_policy() -> appa_policy::Config {
+        classifier_policy_permitting("privacy-review")
+    }
+
+    /// The tool-level resolver policy with one authority permitting `mark`.
+    fn classifier_policy_permitting(mark: &str) -> appa_policy::Config {
+        appa_policy::Config::from_toml_str(&format!(
             r#"
                 version = 1
                 [[dynamic_resolver]]
@@ -2912,17 +2937,138 @@ mod tests {
                 [[tool]]
                 name = "lookup"
                 description = "Looks one record up."
-                uses = [{ resolver = "classifier" }]
+                uses = [{{ resolver = "classifier" }}]
                 # The tool keeps its own attention mark: `requires.attention` has one owner, and
                 # here it is the policy, so the classifier never sees the mark.
-                requires = { attention = ["static-review"] }
+                requires = {{ attention = ["static-review"] }}
                 [[authority]]
                 name = "reviewer"
                 [authority.permits]
-                attention = ["privacy-review"]
-            "#,
-        )
-        .expect("the tool-level resolver policy compiles");
+                attention = ["{mark}"]
+            "#
+        ))
+        .expect("the tool-level resolver policy compiles")
+    }
+
+    #[test]
+    fn a_recorded_classification_answers_the_re_proposal_without_a_consult() {
+        // The reviewer can clear the tool's own mark, so the classified call blocks with an
+        // offer that stands for the re-proposal.
+        let engine = RuntimeEngine::new(classifier_policy_permitting("static-review").engine().clone());
+        let trajectory = TrajectoryId("t".to_string());
+        let opening = engine.root_opening(&trajectory, b"policy");
+        let view = engine
+            .validated(opening.clone(), &trajectory, 1)
+            .expect("the opening validates");
+        let call = ProposedCall {
+            tool: "lookup".to_string(),
+            arguments: serde_json::value::RawValue::from_string(r#"{"id": 7}"#.to_string()).expect("valid JSON"),
+        };
+        let propose = |view: &EngineView, evidence: Vec<ExternalEvidence>| {
+            engine
+                .handle(
+                    view,
+                    &trajectory,
+                    EngineEvent::ModelResponse {
+                        call: call.clone(),
+                        evidence,
+                        entropy: OfferNonce([7u8; 32]),
+                        spawn: false,
+                    },
+                )
+                .expect("the proposal is handled")
+        };
+
+        let first = propose(&view, Vec::new());
+        let asked = match &first.then {
+            Next::ResolveExternal(requests) => match requests.as_slice() {
+                [ExternalRequest::ToolResolution { args, .. }] => {
+                    appa_engine::contract::ResolverArgsDigest::of(&appa_engine::params::canonical_bytes(args))
+                }
+                other => panic!("the first proposal consults the classifier once, not {other:?}"),
+            },
+            other => panic!("an unanswered resolver consults, not {other:?}"),
+        };
+        assert!(
+            first.append.is_none(),
+            "nothing is decided before the classifier answers"
+        );
+
+        let answer = DynamicAnswer {
+            trust: Some("trusted".to_string()),
+            audience: Some(WireAudience::Readers(vec!["support".to_string()])),
+            required_trust: Some("trusted".to_string()),
+            required_audience: Some(RequiredAudienceAnswer {
+                includes: None,
+                cap: Some(WireAudience::Public),
+            }),
+            attention: None,
+        };
+        let decided = propose(
+            &view,
+            vec![ExternalEvidence::ToolResolution {
+                resolver: "classifier".to_string(),
+                args: asked,
+                answer,
+            }],
+        );
+        let recorded = decided.append.expect("the answered proposal is decided and recorded");
+        let log = [opening, recorded].concat();
+        let view = engine
+            .validated(log, &trajectory, 2)
+            .expect("the decided log validates");
+
+        let again = propose(&view, Vec::new());
+        assert!(
+            !matches!(again.then, Next::ResolveExternal(_)),
+            "the offer the classified call was blocked with stands, so its pin answers the re-proposal"
+        );
+        let owner = engine_id(&trajectory);
+        let views = view.views(&owner).expect("the root is opened");
+        let resolved = engine
+            .engine
+            .resolve_call(ToolName::new("lookup"), br#"{"id": 7}"#)
+            .expect("the call resolves");
+        let contract = engine
+            .engine
+            .registry()
+            .contract(&resolved)
+            .expect("the call names its contract");
+        let pins = engine
+            .tool_resolutions_for(&views, contract, &resolved, &[])
+            .expect("the recorded answer pins without evidence");
+        assert_eq!(pins.len(), 1);
+        assert_eq!(
+            pins[0].audience(),
+            Some(&Audience::restricted([ReaderId::new("support")]))
+        );
+        assert_eq!(pins[0].required_trust(), Some(appa_engine::label::Trust::new(1)));
+
+        // Evidence for arguments the trajectory already classified is not a second answer:
+        // the record outranks it, so the trajectory never pins two answers for one subject.
+        let contradicting = ExternalEvidence::ToolResolution {
+            resolver: "classifier".to_string(),
+            args: asked,
+            answer: DynamicAnswer {
+                trust: Some("suspicious".to_string()),
+                audience: Some(WireAudience::Public),
+                required_trust: Some("suspicious".to_string()),
+                required_audience: Some(RequiredAudienceAnswer {
+                    includes: None,
+                    cap: Some(WireAudience::Public),
+                }),
+                attention: None,
+            },
+        };
+        let pinned = engine
+            .tool_resolutions_for(&views, contract, &resolved, &[contradicting])
+            .expect("the recorded answer pins over contradicting evidence");
+        assert_eq!(pinned, pins);
+    }
+
+    #[test]
+    fn one_tool_resolver_can_pin_delta_and_requirements_from_all_arguments() {
+        let policy = classifier_policy();
         let engine = RuntimeEngine::new(policy.engine().clone());
         let call = engine
             .engine
@@ -2938,7 +3084,11 @@ mod tests {
             .registry()
             .contract(&call)
             .expect("the call names its contract");
-        let consulted_args = match engine.tool_resolutions_for(contract, &call, &[]) {
+        let trajectory = TrajectoryId("t".to_string());
+        let view = opened_view(&engine, &trajectory);
+        let owner = engine_id(&trajectory);
+        let views = view.views(&owner).expect("the root is opened");
+        let consulted_args = match engine.tool_resolutions_for(&views, contract, &call, &[]) {
             Err(Resolution::Consult(requests)) => match requests.as_slice() {
                 [
                     ExternalRequest::ToolResolution {
@@ -2984,6 +3134,7 @@ mod tests {
         };
         let pins = engine
             .tool_resolutions_for(
+                &views,
                 contract,
                 &call,
                 &[ExternalEvidence::ToolResolution {
@@ -3022,6 +3173,7 @@ mod tests {
             .expect("the call resolves");
         assert!(matches!(
             engine.tool_resolutions_for(
+                &views,
                 contract,
                 &other_call,
                 &[ExternalEvidence::ToolResolution {
