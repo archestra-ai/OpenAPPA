@@ -66,9 +66,25 @@ requires = { trust = "trusted", attention = ["hitl"] }
 delta = {}
 ```
 
-Text inside parentheses selects one top-level string argument. `*` matches any text. Use `\*`, `\)`, and `\\` for literal characters.
+Text inside parentheses selects top-level string arguments. Write one or more `argument:pattern` clauses and separate them with commas. The contract matches only when every clause matches.
 
-A missing or non-string argument does not match. A bare tool name matches every argument object and is typically the fallback.
+```toml
+[[tool]]
+name = "mcp__github__fork_repository(owner:archestra-ai,repo:website)"
+requires = { trust = "trusted" }
+delta = {}
+```
+
+`*` matches any text. Four escapes match a literal character: `\*`, `\)`, `\,`, and `\\`. A backslash before any other character is an error, and the policy does not load.
+
+TOML reads backslashes too, so a selector escape passes through two layers. A basic string, in double quotes, needs every selector backslash doubled: `\\*`, `\\)`, `\\,`, `\\\\`. A literal string, in single quotes, passes backslashes through unchanged, so write the selector escape directly.
+
+```toml
+name = "search(query:a\\,b)"   # a basic string doubles the backslash
+name = 'search(query:a\,b)'    # a literal string does not
+```
+
+A missing or non-string argument does not match. Clause order does not change the result: `tool(owner:x,repo:y)` and `tool(repo:y,owner:x)` are the same contract. A selector can name each argument only once. A bare tool name matches every argument object and is typically the fallback.
 
 OpenAPPA selects the contract before it validates that contract's `parameters` schema. A schema failure does not continue to a later contract. A `tool_input` rewrite is judged by the contract its rewritten arguments select: a rewrite that stays in its contract keeps the resolver answers of the call last consulted; one that selects another contract is a new call under that contract, and its resolvers are consulted for the rewritten arguments. Provider-run tools cannot use argument selectors.
 

@@ -11327,6 +11327,14 @@ mod tests {
         assert_ne!(identity(&["read(path:private*)", "read"]), base);
         assert_eq!(identity(&["read(path:secret**)", "read"]), base);
         assert_eq!(identity(&["read", "send"]), identity(&["send", "read"]));
+
+        // A conjunction is commutative, so clause order is spelling, not policy: the two
+        // spellings are one matcher and one identity. Naming another argument is not.
+        let conjunction = identity(&["read(path:secret*,mode:rw)", "read"]);
+        assert_eq!(identity(&["read(mode:rw,path:secret*)", "read"]), conjunction);
+        assert_ne!(conjunction, base, "a second clause is a different predicate");
+        assert_ne!(identity(&["read(path:secret*,mode:ro)", "read"]), conjunction);
+        assert_ne!(identity(&["read(path:secret*,scope:rw)", "read"]), conjunction);
     }
 
     #[test]

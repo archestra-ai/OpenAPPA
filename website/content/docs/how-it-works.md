@@ -36,7 +36,7 @@ Policy definitions remain strictly declarative TOML configurations. Instead of w
 
 A root configuration can include reusable policy fragments. Root declarations run first. Included declarations follow in the listed order. Included files add declarations and named external bindings; they cannot replace root-wide settings or include more files.
 
-Several contracts can name the same tool. OpenAPPA checks them in declaration order and uses the first matching argument pattern. A bare name is the fallback.
+Several contracts can name the same tool. OpenAPPA checks them in declaration order and uses the first contract whose argument patterns all match. A selector can name several arguments: separate the `argument:pattern` clauses with commas. A bare name is the fallback.
 
 Dynamic judgment—such as regex filters, ML classifiers, or human approval queues—lives in registered components. Authorities and sanitizers run as HTTP endpoints (`resolver`) or in-process modules (`builtin`). Each declares what it `permits`, and that declaration bounds its power. Casts declare a fixed label or use a resolver under a `may_cast` ceiling. An authority may omit its deployment binding. It then returns no answer, so a remedy that names it cannot release a call.
 
