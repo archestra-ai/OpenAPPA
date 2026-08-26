@@ -1006,7 +1006,7 @@ pub(crate) fn raw(value: serde_json::Value) -> Box<serde_json::value::RawValue> 
 }
 #[cfg(test)]
 mod real_engine_tests {
-    use super::super::{OpenError, OutcomeBody, Runtime, SessionError};
+    use super::super::{OpenError, OutcomeBody, Runtime};
     use super::*;
     use crate::api::{
         LabelDimension, RemedyDecision, SpawnBinding, ToolCallDecision, ToolOutcome, ToolResultDecision,
@@ -1215,7 +1215,7 @@ starting_label = { trust = "suspicious" }
         assert!(runtime.live(&root(), &root()).is_ok());
         assert!(matches!(
             runtime.live(&root(), &TrajectoryId("cc:never-bound".to_string())),
-            Err(SessionError::Unknown),
+            Err(EventError::UnknownTrajectory),
         ));
     }
 
@@ -2028,7 +2028,7 @@ context_control = false
         );
         assert!(matches!(
             runtime.live(&root(), &TrajectoryId("cc:child".to_string())),
-            Err(SessionError::Ended),
+            Err(EventError::TrajectoryEnded),
         ));
     }
 
@@ -2070,7 +2070,7 @@ context_control = false
         );
         assert!(matches!(
             runtime.live(&root(), &TrajectoryId("cc:child".to_string())),
-            Err(SessionError::Ended),
+            Err(EventError::TrajectoryEnded),
         ));
 
         session
@@ -2902,7 +2902,7 @@ confined_child_return = true
         };
         assert!(matches!(
             runtime.live(&root(), &TrajectoryId("cc:child".to_string())),
-            Err(SessionError::Ended),
+            Err(EventError::TrajectoryEnded),
         ));
     }
 
@@ -3797,7 +3797,7 @@ context_control = true
             }),
         );
         assert!(
-            matches!(runtime.live(&root(), &child("c1")), Err(SessionError::Ended)),
+            matches!(runtime.live(&root(), &child("c1")), Err(EventError::TrajectoryEnded)),
             "the child ended at its return",
         );
         assert!(!dispatch_open(&runtime, &root()), "the spawn dispatch closed");
@@ -4089,7 +4089,10 @@ context_control = true
             .on_child_end(Some("done".to_string()))
             .await
             .expect("with nothing in flight the same end crosses");
-        assert!(matches!(runtime.live(&root(), &child("c1")), Err(SessionError::Ended)));
+        assert!(matches!(
+            runtime.live(&root(), &child("c1")),
+            Err(EventError::TrajectoryEnded)
+        ));
     }
 
     /// The harness refused the released call at its permission prompt,
@@ -4374,7 +4377,7 @@ context_control = true
         runtime.create_session(root()).expect("a fresh id opens");
         assert!(matches!(
             runtime.create_session(root()),
-            Err(SessionError::AlreadyExists),
+            Err(EventError::TrajectoryExists),
         ));
         assert!(runtime.session(&root(), &root()).is_ok());
         assert!(matches!(
@@ -4382,7 +4385,7 @@ context_control = true
                 &TrajectoryId("cc:ghost".to_string()),
                 &TrajectoryId("cc:ghost".to_string())
             ),
-            Err(SessionError::Unknown),
+            Err(EventError::UnknownTrajectory),
         ));
     }
 
