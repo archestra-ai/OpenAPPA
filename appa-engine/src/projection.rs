@@ -810,6 +810,16 @@ impl Projection {
         fold
     }
 
+    /// Would admitting a value at `label` move this trajectory's partial label? An admission
+    /// joins the local sources unmasked, so the fold after it is the fold before it with the
+    /// value folded in under the id the admission takes.
+    pub(crate) fn admission_moves_label(&self, trajectory: &TrajectoryId, label: &Label) -> bool {
+        let before = self.fold_for(trajectory);
+        let mut after = before.clone();
+        after.fold_value(ValueId::new(self.values.len() as u64), label);
+        after != before
+    }
+
     fn freeze_basis(&self, trajectory: &TrajectoryId) -> ForkSnapshot {
         ForkSnapshot::freeze(
             self.opened_base(trajectory),
@@ -902,6 +912,45 @@ impl Views<'_> {
             .dispatch_calls
             .get(dispatch)
             .map(ResolvedCall::tool_resolutions)
+    }
+
+    /// The answer a resolver pinned, under this call's tool and contract, to the same resolver
+    /// inputs, in a proposal this trajectory still has an act prepared on: an open offer that
+    /// stands at its basis, or an approval it has not spent. The re-proposal that pursues the
+    /// offer or spends the approval spells the call they were prepared for instead of
+    /// consulting again. Once nothing stands on the pinned call, a new proposal is classified
+    /// afresh: a directory may have changed since. Standing acts whose pins disagree name no
+    /// single answer.
+    pub fn pinned_tool_resolution(
+        &self,
+        call: &ResolvedCall,
+        uses: &crate::contract::ToolResolverUse,
+        args: crate::contract::ResolverArgsDigest,
+    ) -> Option<&PinnedToolResolution> {
+        let offered = self
+            .projection
+            .offers
+            .values()
+            .filter(|open| {
+                &open.trajectory == self.trajectory && open.end.is_none() && open.basis == self.basis_for(&open.subject)
+            })
+            .filter_map(|open| self.proposed_call(&open.subject));
+        let approved = self
+            .projection
+            .approvals
+            .iter()
+            .filter(|(offer, approval)| {
+                &approval.trajectory == self.trajectory
+                    && approval.basis == self.basis_for(&SubjectKey::Approval(**offer))
+            })
+            .map(|(_, approval)| &approval.call);
+        let mut pins = offered
+            .chain(approved)
+            .filter(|standing| standing.tool() == call.tool() && standing.contract_id() == call.contract_id())
+            .flat_map(ResolvedCall::tool_resolutions)
+            .filter(|pin| pin.uses() == uses && pin.args() == args);
+        let first = pins.next()?;
+        pins.all(|pin| pin == first).then_some(first)
     }
 
     pub(crate) fn trajectory(&self) -> &TrajectoryId {
@@ -1465,6 +1514,70 @@ mod tests {
             value,
             provenance: Provenance::ToolResult { dispatch: dispatch(t) },
         }
+    }
+
+    #[test]
+    fn an_admission_moves_the_label_when_it_narrows_the_bound_or_leaves_a_dimension_pending() {
+        let identity = || LabeledValue::new(ValueBody::new("body"), base().into_label());
+        let log = vec![opened("a"), admit("a", identity())];
+        let projection = Projection::build(&log, 2);
+        assert!(
+            !projection.admission_moves_label(&traj("a"), &identity().label),
+            "a value at the trajectory's own label folds to the same label"
+        );
+        assert!(projection.admission_moves_label(&traj("a"), &labeled(1, Audience::Public).label));
+        assert!(projection.admission_moves_label(
+            &traj("a"),
+            &labeled(3, Audience::restricted([ReaderId::new("internal")])).label
+        ));
+        let pending = Label::new(Dim::Unknown, Dim::Known(Audience::Public));
+        assert!(
+            projection.admission_moves_label(&traj("a"), &pending),
+            "a pending dimension adds an unresolved source while the bound stays"
+        );
+    }
+
+    #[test]
+    fn a_pinned_resolution_is_not_reused_once_no_act_stands_on_its_call() {
+        use crate::contract::{PinnedToolResolution, ResolverArgsDigest, ResolverReturn, ToolResolverUse};
+        use crate::names::DynamicResolverName;
+
+        let uses = ToolResolverUse {
+            resolver: DynamicResolverName::new("classifier"),
+            inputs: BTreeMap::new(),
+            returns: [ResolverReturn::Audience].into_iter().collect(),
+        };
+        let args = ResolverArgsDigest::of(&crate::params::canonical_bytes(&json!({ "id": 7 })));
+        let pin = PinnedToolResolution::from_answer(
+            uses.clone(),
+            args,
+            None,
+            Some(Audience::restricted([ReaderId::new("support")])),
+            None,
+            None,
+            None,
+        )
+        .expect("the declared audience answer pins");
+        let call = ResolvedCall::new(
+            ToolName::new("lookup"),
+            crate::params::test_arguments(&json!({ "id": 7 })),
+        );
+        let log = vec![
+            opened("a"),
+            Fact::ProposalBatchDecided {
+                trajectory: traj("a"),
+                batch: crate::transition::ProposalBatchId::new("b1"),
+                proposals: vec![call.clone().with_tool_resolutions(vec![pin])],
+                spawn: None,
+                released: vec![],
+                resolutions: vec![],
+            },
+        ];
+        assert_eq!(
+            build(&log).view(&traj("a")).pinned_tool_resolution(&call, &uses, args),
+            None,
+            "a decided call with no open offer and no unspent approval is history, not a standing act"
+        );
     }
 
     #[test]

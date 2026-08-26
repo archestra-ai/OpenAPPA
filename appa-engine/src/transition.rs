@@ -2018,10 +2018,20 @@ impl<'a> Sequence<'a> {
                 );
                 advance
             }
+            // An admission moves the flow only when it moves the trajectory's label. A block and
+            // its remedies are derived from that label, so a value that leaves it where it was — a
+            // metadata read, a public file — changes nothing an open offer was derived from, and
+            // the offer stands. Effects move the family, as for a release.
             Fact::ValueAdmitted {
-                trajectory, provenance, ..
+                trajectory,
+                value,
+                provenance,
             } => {
-                let mut advance = BasisAdvance::flow(trajectory);
+                let mut advance = if self.projection.admission_moves_label(trajectory, &value.label) {
+                    BasisAdvance::flow(trajectory)
+                } else {
+                    BasisAdvance::default()
+                };
                 if let Provenance::ProviderRun { effects, .. } = provenance {
                     advance.absorb(&self.effect_advance(!effects.is_empty()));
                 }

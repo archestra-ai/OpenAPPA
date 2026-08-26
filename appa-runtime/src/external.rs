@@ -18,7 +18,7 @@ use crate::config::{
     CLAUDE_CODE_BUILTIN, DynamicImplementation, Endpoint, Externals, Implementation, LLM_BUILTIN, ResolverCommand,
     Section,
 };
-use crate::consult::{Consult, ConsultBody, ConsultKind, ModelPrompt};
+use crate::consult::{Consult, ConsultBody, ConsultKind, ModelPrompt, dynamic_answer_reads_readers_from};
 use crate::elicit::Elicitation;
 use crate::llm::{LlmBackend, LlmGate};
 use appa_policy::DynamicBuiltin;
@@ -57,6 +57,21 @@ pub enum ConsultOutcome {
 struct ConsultResponse {
     version: u32,
     answer: serde_json::Value,
+}
+
+/// A model transport's dynamic answer may name only readers it read in the artifact: that is
+/// the one input it has, so any other reader is invented and the consult has no answer.
+fn grounded_model_answer(consult: &Consult, answer: serde_json::Value) -> Result<serde_json::Value, NoAnswerReason> {
+    match &consult.body {
+        ConsultBody::Dynamic { artifact, .. } if !dynamic_answer_reads_readers_from(&answer, &artifact.args) => {
+            tracing::debug!(
+                name = consult.name,
+                "a model named a reader its artifact does not carry"
+            );
+            Err(NoAnswerReason::Malformed)
+        }
+        _ => Ok(answer),
+    }
 }
 
 fn read_answer(body: &[u8]) -> Result<serde_json::Value, NoAnswerReason> {
@@ -267,9 +282,15 @@ impl ExternalServices {
                     Err(NoAnswerReason::Unreachable)
                 }
             },
-            Backend::ClaudeCode(claude) => self.consult_claude(claude, consult).await,
+            Backend::ClaudeCode(claude) => self
+                .consult_claude(claude, consult)
+                .await
+                .and_then(|answer| grounded_model_answer(consult, answer)),
             Backend::Llm(llm) => match ModelPrompt::new(consult) {
-                Some(prompt) => llm.consult(&prompt).await,
+                Some(prompt) => llm
+                    .consult(&prompt)
+                    .await
+                    .and_then(|answer| grounded_model_answer(consult, answer)),
                 None => Err(NoAnswerReason::Unregistered),
             },
         };
@@ -1486,8 +1507,10 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             run("/definitely/missing/claude".into(), 1000, 1024).await,
             Err(NoAnswerReason::Unreachable)
         );
+        // Budgets that expect the child to run are generous: under concurrent spawning a
+        // shell can take over a second to start, and that is not the failure under test.
         assert_eq!(
-            run(fake_claude(dir.path(), "exit 7"), 1000, 1024).await,
+            run(fake_claude(dir.path(), "exit 7"), 5000, 1024).await,
             Err(NoAnswerReason::Transport)
         );
         assert_eq!(
@@ -1503,7 +1526,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         );
         assert_eq!(run(flood, 5000, 8).await, Err(NoAnswerReason::Oversized));
         assert_eq!(
-            run(fake_claude(dir.path(), "printf '{}'"), 1000, 1024).await,
+            run(fake_claude(dir.path(), "printf '{}'"), 5000, 1024).await,
             Err(NoAnswerReason::Malformed)
         );
     }
@@ -1831,6 +1854,91 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
 
     fn declared(name: &str, builtin: DynamicBuiltin) -> BTreeMap<String, DynamicBuiltin> {
         BTreeMap::from([(name.to_string(), builtin)])
+    }
+
+    /// A dynamic answer naming `reader` in both audience results, as a model would return it.
+    fn reader_answer(reader: &str) -> serde_json::Value {
+        serde_json::json!({
+            "delta.trust": "trusted",
+            "delta.audience": [reader],
+            "requires.trust": "trusted",
+            "requires.audience": { "within": [reader] },
+            "requires.attention": [],
+        })
+    }
+
+    fn mail_call() -> serde_json::Value {
+        serde_json::json!({
+            "name": "Bash",
+            "arguments": { "command": "mail -s hi bob@example.com < notes.txt" },
+        })
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_claude_dynamic_answer_is_held_to_the_readers_its_artifact_carries() {
+        let dir = tempfile::tempdir().expect("a fixture directory is created");
+        for (reader, expected) in [
+            (
+                "bob@example.com",
+                ConsultOutcome::Answer(reader_answer("bob@example.com")),
+            ),
+            ("ops@example.com", ConsultOutcome::NoAnswer(NoAnswerReason::Malformed)),
+        ] {
+            let result = serde_json::json!({ "type": "result", "structured_output": reader_answer(reader) });
+            let mut config = externals(None, 2000, 65_536);
+            config.claude_code.command = fake_claude(dir.path(), &format!("printf '%s' '{result}'"));
+            let services = services_declaring(config, declared("judge", DynamicBuiltin::ClaudeCode));
+            assert_eq!(
+                services.consult(&dynamic_consult("judge", mail_call()), None).await,
+                expected,
+                "reader {reader}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_llm_dynamic_answer_is_held_to_the_readers_its_artifact_carries() {
+        for (reader, expected) in [
+            (
+                "bob@example.com",
+                ConsultOutcome::Answer(reader_answer("bob@example.com")),
+            ),
+            ("ops@example.com", ConsultOutcome::NoAnswer(NoAnswerReason::Malformed)),
+        ] {
+            let text = reader_answer(reader).to_string();
+            let url = stub(Router::new().route(
+                "/v1/messages",
+                post(move || {
+                    let text = text.clone();
+                    async move {
+                        serde_json::json!({
+                            "id": "msg_1", "type": "message", "role": "assistant", "model": "m",
+                            "content": [{ "type": "text", "text": text }],
+                            "stop_reason": "end_turn", "stop_sequence": null,
+                            "usage": { "input_tokens": 1, "output_tokens": 1 },
+                        })
+                        .to_string()
+                    }
+                }),
+            ))
+            .await;
+            let mut config = externals(None, 2000, 65_536);
+            config.llm = Some(crate::config::LlmProfile {
+                provider: crate::config::LlmProvider::Anthropic,
+                model: "m".to_string(),
+                url: Some(url),
+                token: Some(Token::new("sekret".to_string())),
+                timeout: None,
+                max_concurrent: 2,
+            });
+            let services = services_declaring(config, declared("judge", DynamicBuiltin::Llm));
+            assert_eq!(
+                services.consult(&dynamic_consult("judge", mail_call()), None).await,
+                expected,
+                "reader {reader}"
+            );
+        }
     }
 
     #[tokio::test]

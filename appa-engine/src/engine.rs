@@ -218,10 +218,20 @@ impl Engine {
         advance: crate::basis::BasisAdvance,
         facts: Vec<Fact>,
     ) -> Vec<Fact> {
-        let stamps = facts
-            .iter()
-            .any(|fact| matches!(fact, Fact::OfferOpened { .. } | Fact::CallApproved { .. }));
-        if advance.is_empty() && !stamps {
+        // A record bound to the act it lands under — an offer, an approval, a provider
+        // admission — needs the act declared over it even when nothing moves.
+        let bound = facts.iter().any(|fact| {
+            matches!(
+                fact,
+                Fact::OfferOpened { .. }
+                    | Fact::CallApproved { .. }
+                    | Fact::ValueAdmitted {
+                        provenance: crate::value::Provenance::ProviderRun { .. },
+                        ..
+                    }
+            )
+        });
+        if advance.is_empty() && !bound {
             return facts;
         }
         let trajectory = facts
@@ -5261,14 +5271,13 @@ mod tests {
             })
         );
         let facts = closed.append.expect("the close appends").facts().to_vec();
-        assert!(matches!(
-            facts.as_slice(),
-            [
-                Fact::BasisAdvanced { .. },
-                Fact::DispatchClosed { .. },
-                Fact::ValueAdmitted { .. }
-            ]
-        ));
+        assert!(
+            matches!(
+                facts.as_slice(),
+                [Fact::DispatchClosed { .. }, Fact::ValueAdmitted { .. }]
+            ),
+            "a result that leaves the label where it was moves no basis, so the close declares no advance: {facts:?}"
+        );
 
         let after = e.view(&traj(), [log, facts].concat(), 3).unwrap();
         let repeat = e
@@ -9503,7 +9512,6 @@ mod tests {
             matches!(
                 facts.as_slice(),
                 [
-                    Fact::BasisAdvanced { .. },
                     Fact::DispatchClosed {
                         outcome: crate::fact::CloseOutcome::Success { effects },
                         ..
@@ -12998,14 +13006,25 @@ mod tests {
     }
 
     #[test]
-    fn a_provider_admission_advances_flow_and_the_family_whose_effects_it_records() {
+    fn a_provider_admission_advances_flow_only_when_it_moves_the_label_and_family_only_for_its_effects() {
         let e = engine_with_provider_run(
-            vec![plain_tool("quiet"), {
-                let mut emitting = plain_tool("loud");
-                emitting.emits = EffectSet::new([EffectKind::new("k")]).unwrap();
-                emitting
-            }],
-            &["quiet", "loud"],
+            vec![
+                plain_tool("quiet"),
+                {
+                    let mut emitting = plain_tool("loud");
+                    emitting.emits = EffectSet::new([EffectKind::new("k")]).unwrap();
+                    emitting
+                },
+                {
+                    let mut narrowing = plain_tool("internal");
+                    narrowing.delta = Some(Delta {
+                        trust: None,
+                        audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")])).into()),
+                    });
+                    narrowing
+                },
+            ],
+            &["quiet", "loud", "internal"],
         );
         let log = opening_log(&e);
         let declared = |tool: &str| {
@@ -13021,12 +13040,89 @@ mod tests {
             }
         };
         let quiet = declared("quiet");
-        assert!(quiet.flows.contains(&traj()));
+        assert!(
+            quiet.flows.is_empty(),
+            "an admission at the identity label moves no flow: nothing an open offer reads changed"
+        );
         assert!(
             !quiet.family,
             "an observation with no declared effects moves no family state"
         );
-        assert!(declared("loud").family);
+        let loud = declared("loud");
+        assert!(loud.family);
+        assert!(loud.flows.is_empty(), "effects move the family, not the flow");
+        assert!(
+            declared("internal").flows.contains(&traj()),
+            "an admission that narrows the label moves the flow"
+        );
+    }
+
+    mod admission_law {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// Provider-run tools whose results meet the fold at the identity or narrow one known
+        /// dimension. A pending dimension is not a provider-run construct; that case is the
+        /// projection's own unit test.
+        const TOOLS: [&str; 3] = ["identity", "suspicious", "internal"];
+
+        fn labeled_tool(name: &str) -> ToolContract {
+            let mut tool = plain_tool(name);
+            tool.delta = Some(match name {
+                "identity" => Delta::NONE,
+                "suspicious" => Delta {
+                    trust: Some(Dim::Known(Trust::new(0))),
+                    audience: None,
+                },
+                "internal" => Delta {
+                    trust: None,
+                    audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")])).into()),
+                },
+                other => panic!("no labeled tool named {other}"),
+            });
+            tool
+        }
+
+        proptest! {
+            /// Effect-free admissions move neither family nor subject, so across them an open
+            /// offer stays current exactly while the trajectory's partial label — bound and
+            /// pending sources alike — stays where the offer found it.
+            #[test]
+            fn an_offer_outlives_exactly_the_admissions_that_leave_the_label_unchanged(
+                admitted in prop::collection::vec(0usize..TOOLS.len(), 0..4),
+            ) {
+                let mut tools = vec![crm_tool()];
+                tools.extend(TOOLS.iter().map(|name| labeled_tool(name)));
+                let e = engine_with_provider_run(tools, &TOOLS);
+                let log = opening_log(&e);
+                let opened = appended_facts(blocked_batch(&e, &log, "b1", nonce()));
+                let offer = opened_offers(&opened)[0].0;
+                let mut log = [log, opened].concat();
+                let label_of = |log: &[Fact]| {
+                    e.view(&traj(), log.to_vec(), log.len() as u64)
+                        .expect("the log replays")
+                        .views(&traj())
+                        .expect("the root is opened")
+                        .current_label()
+                };
+                let at_open = label_of(&log);
+                for (i, tool) in admitted.iter().enumerate() {
+                    let decision = e
+                        .handle(
+                            &viewing(&e, &log),
+                            batch(&format!("b{}", i + 2), vec![exposed(TOOLS[*tool], "a body")], Vec::new()),
+                        )
+                        .expect("an admission-only batch decides");
+                    log.extend(appended_facts(decision));
+                }
+                let now = label_of(&log);
+                let stale = matches!(
+                    execute_offer(&e, &log, offer, OfferOutcome::Approved(Vec::new())),
+                    Err(TransitionError::StaleOffer)
+                );
+                prop_assert_eq!(stale, now != at_open);
+            }
+        }
     }
 
     #[test]
@@ -13235,7 +13331,7 @@ mod tests {
     }
 
     #[test]
-    fn an_exposed_admission_stales_the_approval_its_own_batch_would_spend() {
+    fn an_identity_admission_leaves_the_approval_its_own_batch_spends_current() {
         let e = engine_with_provider_run(vec![crm_tool(), plain_tool("seen")], &["seen"]);
         let log = opening_log(&e);
         let opened = appended_facts(blocked_batch(&e, &log, "b1", nonce()));
@@ -13257,8 +13353,12 @@ mod tests {
             )
             .expect("the batch decides");
         let (released, blocked) = answered(&decision);
-        assert!(released.is_empty(), "the approval was stale before the proposal");
-        assert_eq!(blocked_names(blocked), ["get_ticket"]);
+        assert_eq!(
+            tool_names(released),
+            ["get_ticket"],
+            "an admission at the identity label leaves the approval current, and the batch spends it"
+        );
+        assert!(blocked.is_empty());
         assert_eq!(
             e.validate_replay(&[log.clone(), appended_facts(decision)].concat()),
             Ok(())
@@ -13290,10 +13390,11 @@ mod tests {
                 },
             },
         );
-        assert_eq!(
-            e.validate_replay(&[log, spliced].concat()),
-            Err(TransitionRefusal::MisdecidedBatch)
-        );
+        // Under its own declared act, at the next position, with the contract's label and
+        // effects, an identity-label provider admission is a record the engine could have
+        // produced from a batch that carried the result: nothing distinguishes the splice from
+        // that log, and it moves no basis, so replay has nothing to refuse.
+        assert_eq!(e.validate_replay(&[log, spliced].concat()), Ok(()));
     }
 
     #[test]
