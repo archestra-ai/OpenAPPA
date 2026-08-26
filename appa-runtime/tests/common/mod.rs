@@ -22,6 +22,20 @@ pub fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
+/// Every offer a feedback body names, in the order the feedback lists
+/// them. Which end a suite takes is its own assertion: a remedy plan
+/// that stages several offers surfaces one line each.
+pub fn offers(feedback: &str) -> Vec<appa_runtime::api::OfferId> {
+    feedback
+        .lines()
+        .filter_map(|line| {
+            let after = line.split("offer_id:").nth(1)?;
+            let rest = after.trim_start().strip_prefix('"')?;
+            Some(appa_runtime::api::OfferId(rest[..rest.find('"')?].to_string()))
+        })
+        .collect()
+}
+
 /// Serve one router on an ephemeral loopback port for the rest of the
 /// test, and answer with its base URL.
 pub async fn serve(router: axum::Router) -> String {

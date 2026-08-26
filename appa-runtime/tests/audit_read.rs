@@ -1,5 +1,5 @@
 mod common;
-use common::raw;
+use common::{offers, raw};
 
 use std::sync::Arc;
 
@@ -149,18 +149,14 @@ async fn open_child(runtime: &Arc<Runtime>, spawn: ProposedCall) -> HookDecision
 }
 
 fn first_offer(feedback: &str) -> OfferId {
-    OfferId(opaque_offer_id(feedback).unwrap_or_else(|| panic!("no offer id in feedback: {feedback}")))
+    offers(feedback)
+        .first()
+        .cloned()
+        .unwrap_or_else(|| panic!("no offer id in feedback: {feedback}"))
 }
 
 fn all_offers(feedback: &str) -> Vec<OfferId> {
-    feedback.lines().filter_map(opaque_offer_id).map(OfferId).collect()
-}
-
-fn opaque_offer_id(text: &str) -> Option<String> {
-    let after = text.split("offer_id:").nth(1)?;
-    let rest = after.trim_start().strip_prefix('"')?;
-    let end = rest.find('"')?;
-    Some(rest[..end].to_string())
+    offers(feedback)
 }
 
 fn feedback_of(decision: &HookDecision) -> String {

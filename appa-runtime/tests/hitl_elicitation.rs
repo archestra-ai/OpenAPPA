@@ -1,5 +1,5 @@
 mod common;
-use common::raw;
+use common::{offers, raw};
 
 use std::sync::Arc;
 
@@ -295,13 +295,11 @@ builtin = "hitl"
 }
 
 fn offer_id(feedback: &str) -> String {
-    let after = feedback
-        .split("offer_id:")
-        .nth(1)
-        .unwrap_or_else(|| panic!("the feedback surfaces an offer id: {feedback}"));
-    let rest = after.trim_start().strip_prefix('"').expect("the offer id is quoted");
-    let end = rest.find('"').expect("the offer id closes its quote");
-    rest[..end].to_string()
+    offers(feedback)
+        .first()
+        .unwrap_or_else(|| panic!("the feedback surfaces an offer id: {feedback}"))
+        .0
+        .clone()
 }
 
 async fn execute<H: ClientHandler>(deployment: &Deployment, reviewer: H) -> String {

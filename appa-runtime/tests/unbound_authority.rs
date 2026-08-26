@@ -2,7 +2,7 @@
 //! remedy that names the authority leaves its offer standing.
 
 mod common;
-use common::raw;
+use common::{offers, raw};
 
 use std::sync::Arc;
 
@@ -64,14 +64,9 @@ fn offer_of(decision: &HookDecision) -> OfferId {
     let HookDecision::DenyCall { feedback, .. } = decision else {
         panic!("expected a deny carrying feedback, got {decision:?}")
     };
-    feedback
-        .lines()
-        .filter_map(|line| {
-            let after = line.split("offer_id:").nth(1)?;
-            let rest = after.trim_start().strip_prefix('"')?;
-            Some(OfferId(rest[..rest.find('"')?].to_string()))
-        })
-        .next_back()
+    offers(feedback)
+        .last()
+        .cloned()
         .unwrap_or_else(|| panic!("no offer id in feedback: {feedback}"))
 }
 

@@ -1,5 +1,5 @@
 mod common;
-use common::{raw, serve};
+use common::{offers, raw, serve};
 
 use std::sync::{Arc, Mutex};
 
@@ -143,14 +143,9 @@ async fn ran(runtime: &Arc<Runtime>, call: ProposedCall) {
 }
 
 fn last_offer(feedback: &str) -> appa_runtime::api::OfferId {
-    feedback
-        .lines()
-        .filter_map(|line| {
-            let after = line.split("offer_id:").nth(1)?;
-            let rest = after.trim_start().strip_prefix('"')?;
-            Some(appa_runtime::api::OfferId(rest[..rest.find('"')?].to_string()))
-        })
-        .next_back()
+    offers(feedback)
+        .last()
+        .cloned()
         .unwrap_or_else(|| panic!("no offer id in feedback: {feedback}"))
 }
 
