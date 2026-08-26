@@ -14,13 +14,6 @@ It covers two built-in tools:
   sensitive symlink targets produce private content. Other paths produce public
   content. The resolver does not block the read or lower its trust.
 
-Choose it when Claude Code uses Bash for varied development work that cannot be
-covered by a safe fixed command list, and when file confidentiality depends on
-the path being read.
-
-This is an information-flow policy, not a shell sandbox. Use an operating-system
-sandbox when commands must be prevented from reaching files or the network.
-
 ## Add it to a deployment
 
 ```toml
