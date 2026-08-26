@@ -176,11 +176,17 @@ command = ["python3", "./read-sensitivity.py"]
 
 `README.md` matches the first rule, so `read-sensitivity.py` does not run.
 
-The resolver returns `["private"]` for a file whose name starts with `.` and `"public"` for any other path. It checks the file name, not the whole path: Claude Code passes absolute paths, which always start with `/`.
+The resolver returns `["private"]` for hidden paths, credential and private-key
+names, system-secret locations, and sensitive symlink targets. It returns
+`"public"` for other paths.
 
-This only controls approval. It does not make Bash output Public. The output stays inside the Claude session.
+The Claude Code battery also sends each Bash call to its `claude-code` model
+resolver. The resolver classifies the trust and audience requirements of the
+command. Bash output remains suspicious and private.
 
-Bash can read files and open network connections on its own. Use an operating-system sandbox to protect credentials and network access.
+This classification is not an operating-system sandbox. Bash can read files
+and open network connections. Use a sandbox to protect credentials and network
+access.
 
 ## Customise batteries for your own setup
 
@@ -196,8 +202,13 @@ include = [
 version = 1
 
 [[policy.tool]]
-name = "Bash(command:cargo test)"
-requires = { trust = "trusted", attention = ["hitl"] }
+name = "Bash(command:kubectl)"
+requires = { attention = ["blocked"] }
+delta = { trust = "suspicious", audience = ["private"] }
+
+[[policy.tool]]
+name = "Bash(command:kubectl *)"
+requires = { attention = ["blocked"] }
 delta = { trust = "suspicious", audience = ["private"] }
 
 [[policy.dynamic_resolver]]
@@ -213,7 +224,9 @@ delta = { trust = "suspicious" }
 command = ["python3", "./local/read-sensitivity.py"]
 ```
 
-The root asks for approval before `cargo test`. It also uses a local script for `Read`.
+No authority permits `blocked`, so both `kubectl` contracts have no remedy.
+Every other Bash call reaches the battery's model resolver. The root also uses
+a local script for `Read`.
 
 The battery files stay unchanged.
 

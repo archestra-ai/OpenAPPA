@@ -1,66 +1,110 @@
-# Included Claude Code battery: first matching Bash contract wins.
+# Claude Code battery. Root contracts run before these defaults.
 
 [policy]
 version = 1
 
-# Exact everyday commands run without a question.
+# Starting a subagent is this harness's spawn. A background subagent reports
+# its result outside the parent's tool result, where no hook can check it.
 [[policy.tool]]
-name = "Bash(command:cargo test)"
-requires = { trust = "trusted" }
-
-[policy.tool.delta]
-trust = "suspicious"
-audience = ["private"]
+name = "Agent"
+parameters = { type = "object", additionalProperties = true, properties = { run_in_background = { type = "boolean", const = false } } }
+delta = {}
 
 [[policy.tool]]
-name = "Bash(command:cargo check)"
-requires = { trust = "trusted" }
-
-[policy.tool.delta]
-trust = "suspicious"
-audience = ["private"]
+name = "AskUserQuestion"
+delta = {}
 
 [[policy.tool]]
-name = "Bash(command:cargo fmt --check)"
-requires = { trust = "trusted" }
+name = "Artifact"
+delta = {}
 
-[policy.tool.delta]
-trust = "suspicious"
-audience = ["private"]
+# The model classifies what trust and audience the proposed command requires.
+# It does not certify the command's output: every Bash result stays suspicious
+# and private.
+[[policy.dynamic_resolver]]
+name = "claude-code.bash-requirements"
+builtin = "claude-code"
+returns = ["requires.trust", "requires.audience"]
 
-[[policy.tool]]
-name = "Bash(command:git status --short)"
-requires = { trust = "trusted" }
-
-[policy.tool.delta]
-trust = "suspicious"
-audience = ["private"]
-
-[[policy.tool]]
-name = "Bash(command:git diff --check)"
-requires = { trust = "trusted" }
-
-[policy.tool.delta]
-trust = "suspicious"
-audience = ["private"]
-
-# Every other command needs a person to approve it.
 [[policy.tool]]
 name = "Bash"
 description = "Runs one shell command and returns its output."
+uses = [{ resolver = "claude-code.bash-requirements" }]
+delta = { trust = "suspicious", audience = ["private"] }
 
-[policy.tool.requires]
-trust = "trusted"
-attention = ["hitl"]
+[[policy.tool]]
+name = "BashOutput"
+delta = { trust = "suspicious", audience = ["private"] }
 
-# Command text cannot prove that output is safe to release. Every Bash result
-# is suspicious and private.
-[policy.tool.delta]
-trust = "suspicious"
-audience = ["private"]
+[[policy.tool]]
+name = "CronCreate"
+delta = {}
 
-# Read labels a path through a one-shot resolver. This example uses a
-# deliberately simple rule: a file whose name begins with `.` is private.
+[[policy.tool]]
+name = "CronDelete"
+delta = {}
+
+[[policy.tool]]
+name = "CronList"
+delta = {}
+
+[[policy.tool]]
+name = "Edit"
+delta = {}
+
+[[policy.tool]]
+name = "EnterPlanMode"
+delta = {}
+
+[[policy.tool]]
+name = "EnterWorktree"
+delta = {}
+
+[[policy.tool]]
+name = "ExitPlanMode"
+delta = {}
+
+[[policy.tool]]
+name = "ExitWorktree"
+delta = {}
+
+[[policy.tool]]
+name = "Glob"
+delta = {}
+
+[[policy.tool]]
+name = "Grep"
+delta = {}
+
+[[policy.tool]]
+name = "KillShell"
+delta = {}
+
+[[policy.tool]]
+name = "LSP"
+delta = {}
+
+[[policy.tool]]
+name = "ListAgents"
+delta = {}
+
+[[policy.tool]]
+name = "ListMcpResourcesTool"
+delta = {}
+
+[[policy.tool]]
+name = "Monitor"
+delta = {}
+
+[[policy.tool]]
+name = "NotebookEdit"
+delta = {}
+
+[[policy.tool]]
+name = "PushNotification"
+delta = {}
+
+# Read labels each path through the battery's local resolver.
 [[policy.dynamic_resolver]]
 name = "claude-code.read-sensitivity"
 returns = ["delta.audience"]
@@ -71,6 +115,93 @@ description = "Reads a file and returns its contents."
 uses = [{ resolver = "claude-code.read-sensitivity" }]
 delta = { trust = "suspicious" }
 
-# The path is relative to this battery configuration.
+[[policy.tool]]
+name = "ReadMcpResourceDirTool"
+delta = {}
+
+[[policy.tool]]
+name = "ReadMcpResourceTool"
+delta = {}
+
+[[policy.tool]]
+name = "ReportFindings"
+delta = {}
+
+[[policy.tool]]
+name = "ScheduleWakeup"
+delta = {}
+
+[[policy.tool]]
+name = "SendMessage"
+delta = {}
+
+[[policy.tool]]
+name = "SendUserFile"
+delta = {}
+
+[[policy.tool]]
+name = "Skill"
+delta = {}
+
+[[policy.tool]]
+name = "SlashCommand"
+delta = {}
+
+# `Task` is the earlier name of `Agent`: the same spawn, the same contract.
+[[policy.tool]]
+name = "Task"
+parameters = { type = "object", additionalProperties = true, properties = { run_in_background = { type = "boolean", const = false } } }
+delta = {}
+
+[[policy.tool]]
+name = "TaskCreate"
+delta = {}
+
+[[policy.tool]]
+name = "TaskGet"
+delta = {}
+
+[[policy.tool]]
+name = "TaskList"
+delta = {}
+
+[[policy.tool]]
+name = "TaskOutput"
+delta = {}
+
+[[policy.tool]]
+name = "TaskStop"
+delta = {}
+
+[[policy.tool]]
+name = "TaskUpdate"
+delta = {}
+
+[[policy.tool]]
+name = "TodoWrite"
+delta = {}
+
+[[policy.tool]]
+name = "ToolSearch"
+delta = {}
+
+[[policy.tool]]
+name = "Workflow"
+delta = {}
+
+[[policy.tool]]
+name = "Write"
+delta = {}
+
+# Web pages and search results are authored outside the session.
+[[policy.tool]]
+name = "WebFetch"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "WebSearch"
+delta = { trust = "suspicious" }
+
+# The script path is relative to this battery file.
 [externals.dynamic."claude-code.read-sensitivity"]
 command = ["python3", "./read-sensitivity.py"]

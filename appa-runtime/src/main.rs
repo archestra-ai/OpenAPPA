@@ -18,7 +18,9 @@ use appa_runtime::config::Config;
 use appa_runtime::{hooks, mcp};
 use appa_runtime_api::Codec;
 
-const DEFAULT_CONFIG: &str = include_str!("../../integrations/claude-code/examples/claude-code.appa.toml");
+const DEFAULT_CONFIG: &str = include_str!("../defaults/appa.toml");
+const DEFAULT_CLAUDE_CODE_BATTERY: &str = include_str!("../../batteries/claude-code/appa.toml");
+const DEFAULT_CLAUDE_CODE_BATTERY_FILE: &str = "batteries/claude-code/appa.toml";
 
 fn ensure_default_config(path: &Path) -> io::Result<bool> {
     let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
@@ -26,9 +28,37 @@ fn ensure_default_config(path: &Path) -> io::Result<bool> {
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
         Err(error) => return Err(error),
     };
-    if let Err(error) = file.write_all(DEFAULT_CONFIG.as_bytes()).and_then(|()| file.sync_all()) {
+
+    let battery_path = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(DEFAULT_CLAUDE_CODE_BATTERY_FILE);
+    let mut battery_created = false;
+    let write = (|| {
+        if let Some(parent) = battery_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut battery = match OpenOptions::new().write(true).create_new(true).open(&battery_path) {
+            Ok(battery) => {
+                battery_created = true;
+                battery
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                return file.write_all(DEFAULT_CONFIG.as_bytes()).and_then(|()| file.sync_all());
+            }
+            Err(error) => return Err(error),
+        };
+        battery
+            .write_all(DEFAULT_CLAUDE_CODE_BATTERY.as_bytes())
+            .and_then(|()| battery.sync_all())?;
+        file.write_all(DEFAULT_CONFIG.as_bytes()).and_then(|()| file.sync_all())
+    })();
+    if let Err(error) = write {
         drop(file);
         let _ = fs::remove_file(path);
+        if battery_created {
+            let _ = fs::remove_file(battery_path);
+        }
         return Err(error);
     }
     Ok(true)
@@ -267,6 +297,11 @@ mod tests {
         assert_eq!(
             fs::read_to_string(&path).expect("default config is readable"),
             DEFAULT_CONFIG
+        );
+        assert_eq!(
+            fs::read_to_string(directory.path().join(DEFAULT_CLAUDE_CODE_BATTERY_FILE))
+                .expect("default battery is readable"),
+            DEFAULT_CLAUDE_CODE_BATTERY
         );
         Config::load(&path).expect("the embedded default config validates");
 

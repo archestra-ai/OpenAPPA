@@ -8,7 +8,7 @@ it.
 
 | Battery | Covers | Resolvers |
 | --- | --- | --- |
-| `claude-code/` | `Bash` and `Read` in a Claude Code session | `read-sensitivity.py` decides who may see a file's contents |
+| `claude-code/` | Claude Code's built-in tools | The Claude Code model classifies Bash requirements; `read-sensitivity.py` labels file contents |
 | `slack/` | the claude.ai Slack connector, all 19 tools: read, search, send, canvases | none |
 | `github/` | the GitHub MCP server's default tool sets: profile, repositories, issues, pull requests, users (44 tools) | none |
 | `grain/` | the Grain MCP server: meetings, transcripts, notes, deals, clips, stories, collections, workspace admin (49 tools) | none |

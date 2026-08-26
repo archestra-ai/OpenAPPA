@@ -1,27 +1,55 @@
 # Claude Code battery
 
-Rules for two Claude Code tools: `Bash` and `Read`. Add it to your root
-config with `include`, then override any rule by writing your own above
-it in the root file.
+Default contracts for Claude Code's built-in tools. A root configuration can
+include this battery and override any contract with an earlier root rule.
 
 ## Files
 
-**`appa.toml`** — five exact `Bash` commands run without a question:
-`cargo test`, `cargo check`, `cargo fmt --check`, `git status --short`,
-`git diff --check`. Every other `Bash` command needs a person to
-approve. Bash output is always treated as untrusted and private. Every
-`Read` goes to `read-sensitivity.py`.
+**`appa.toml`** names the Claude Code built-in tools. Most results keep their
+current label. `WebFetch` and `WebSearch` produce suspicious results.
 
-**`read-sensitivity.py`** — called on every `Read` tool call, before the
-file is read. Receives the tool name and its arguments (`file_path`,
-plus `offset` and `limit` if given) and decides who may see the file's
-contents. Hidden paths, credential and private-key files, system secret
-locations, and sensitive symlink targets are private. Other paths are
-public. The resolver only labels the returned value; it does not block
-the read.
+Every `Bash` call goes to the `claude-code` model builtin before dispatch. The
+model classifies the trust and audience that the command requires. Bash output
+is always suspicious and private; classifying the command does not certify its
+result.
 
-## Change the behaviour
+Every `Read` call goes to `read-sensitivity.py`. Hidden paths, credential and
+private-key files, system-secret locations, and sensitive symlink targets are
+private. Other paths are public. The resolver labels the returned value; it
+does not block the read.
 
-Edit a script and the next call uses the new version. No restart.
-To change a rule, put a rule with the same tool name in your root
-config; root rules run first.
+## Override a default
+
+Root rules run before included battery rules. Put an override in the root
+configuration without editing the battery.
+
+For example, these two rules block `kubectl` with and without arguments:
+
+```toml
+include = ["batteries/claude-code/appa.toml"]
+
+[policy]
+version = 1
+
+[[policy.tool]]
+name = "Bash(command:kubectl)"
+requires = { attention = ["blocked"] }
+delta = { trust = "suspicious", audience = ["private"] }
+
+[[policy.tool]]
+name = "Bash(command:kubectl *)"
+requires = { attention = ["blocked"] }
+delta = { trust = "suspicious", audience = ["private"] }
+```
+
+No authority permits the `blocked` mark, so these contracts have no remedy.
+All other Bash commands reach the battery's model classifier.
+
+The same first-match rule can replace the Bash classifier, change a result
+label, or add a requirement for any other tool.
+
+## Boundary
+
+The Bash classifier applies OpenAPPA's declared information-flow requirements.
+It is not an operating-system sandbox. Use a sandbox when Bash must not access
+credentials, the network, or files outside a workspace.

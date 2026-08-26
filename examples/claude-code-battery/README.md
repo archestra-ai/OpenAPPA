@@ -24,20 +24,21 @@ The root `appa.toml` supplies deployment-wide settings and includes both
 shipped battery configurations. Root matcher rows always run before included
 files. Included files run in `include` order, and rows within each file retain
 source order. This gives the root explicit precedence without depending on the
-physical position of its `include` key. The root also defines the one `hitl`
-Authority used by every battery.
+physical position of its `include` key. The root also defines the `hitl`
+Authority used by the Slack battery and the local Bash override.
 
-The root demonstrates two customizations. It changes the shipped `cargo test`
-rule to require fresh `hitl` attention. It also replaces the shipped `Read`
-default with `local.read-sensitivity`, implemented by the script in `local/`.
+The root demonstrates two customizations. It bypasses the shipped Bash model
+classifier for `cargo test` and requires fresh `hitl` attention. It also
+replaces the shipped `Read` default with `local.read-sensitivity`, implemented
+by the script in `local/`.
 The local resolver keeps `.env.example` Public, restricts other dot-prefixed
 paths, and additionally restricts `clients/`.
 
 This command-based example requires a Unix system.
 
-The Claude Code battery uses first-match Bash contracts. Exact everyday
-commands run without a question; every other command needs fresh `hitl`
-attention. No script is involved.
+The Claude Code battery sends every Bash command to the Claude Code model
+builtin. The model classifies the command's required trust and audience before
+dispatch. Bash output remains suspicious and private.
 
 The `Read` rule invokes `read-sensitivity.py` for one call. OpenAPPA writes
 one JSON request to standard input, reads one JSON answer from standard
@@ -47,18 +48,15 @@ tool call in `args` — `name`, `description` when the tool declares one, and
 `returns` apply directly to the tool contract. No schema, input mapping, or
 result expression is needed for this default.
 
-The Bash rules control only whether a command needs fresh human review. They
-do not make Bash a network boundary and never label Bash output Public. A
-Claude Code deployment using this battery must run Bash in an OS sandbox that
-denies network access and protects credentials and OpenAPPA files. Network
-ingress should use `WebFetch` instead of Bash `curl`.
+The Bash resolver controls declared information flows. It is not a shell or
+network sandbox and never labels Bash output Public. A Claude Code deployment
+must use an OS sandbox to deny network access and protect credentials and
+OpenAPPA files. Network ingress should use `WebFetch` instead of Bash `curl`.
 
 The Claude Code battery also labels `Read` results through
-`read-sensitivity.py`. For this deliberately small example, a path beginning
-with `.` is restricted to `private`; every other path is Public. This is
-only an example rule. A production resolver must canonicalize paths and account
-for hidden path components, symlinks, Git state, and files outside the working
-directory.
+`read-sensitivity.py`. Hidden paths, credential and private-key names, system
+secret locations, and sensitive symlink targets are private. Other paths are
+Public.
 
 The Slack battery needs no script. Every message needs trusted data and fresh
 `hitl` attention. A deployment lets a channel through by adding a rule for it
