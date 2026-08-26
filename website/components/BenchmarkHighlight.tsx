@@ -30,7 +30,7 @@ export function BenchmarkHighlight() {
             Task completion <span className="bench-chart-hint">tasks completed</span>
           </figcaption>
           <BenchRow name="OpenAPPA" pct={89} isSubject />
-          <BenchRow name="Defended FIDES" pct={41} />
+          <BenchRow name="FIDES (Microsoft)" pct={41} />
         </figure>
 
         <figure className="bench-chart">
@@ -38,7 +38,7 @@ export function BenchmarkHighlight() {
             Attacks that succeeded <span className="bench-chart-hint">lower is better</span>
           </figcaption>
           <BenchRow name="OpenAPPA" pct={0} isSubject />
-          <BenchRow name="Defended FIDES" pct={31} />
+          <BenchRow name="FIDES (Microsoft)" pct={31} />
         </figure>
       </div>
 
