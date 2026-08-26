@@ -361,9 +361,12 @@ struct ClaudeResultEnvelope {
 /// consult's time budget.
 #[derive(Debug, Clone)]
 pub(crate) struct ClaudeCodeBackend {
+    #[cfg(unix)]
     pub(crate) command: std::path::PathBuf,
+    #[cfg(unix)]
     pub(crate) model: String,
     pub(crate) timeout: std::time::Duration,
+    #[cfg(unix)]
     pub(crate) max_body_bytes: usize,
 }
 

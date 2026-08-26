@@ -172,9 +172,12 @@ impl ExternalServices {
             .build()
             .expect("the reqwest client builds: no TLS or resolver overrides are set");
         let claude = ClaudeCodeBackend {
+            #[cfg(unix)]
             command: config.claude_code.command.clone(),
+            #[cfg(unix)]
             model: config.claude_code.model.clone(),
             timeout: config.claude_code.timeout.unwrap_or(config.timeout),
+            #[cfg(unix)]
             max_body_bytes: config.max_body_bytes,
         };
         let llm = config
