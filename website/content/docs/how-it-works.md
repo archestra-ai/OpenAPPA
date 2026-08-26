@@ -20,7 +20,7 @@ Because policy checks happen prospectively before tools run, sensitive data is n
 OpenAPPA operates on three runtime concepts:
 
 1. **Security Labels** (`label`)  
-   Attached to every running trajectory. A label tracks audience (which reader IDs are authorized to receive the trajectory's data) and trust rank (whether data comes from a vetted internal source or untrusted external inputs).
+   Attached to every running trajectory. A label tracks audience (which reader IDs are authorized to receive the trajectory's data) and trust rank (whether data comes from a vetted internal source or untrusted external data).
 
 2. **Tool Contracts** (`delta` & `requires`)  
    Declarative rules configured per tool. Reading data restricts the trajectory's label (`delta`), while invoking an outbound tool verifies that the destination is permitted by the trajectory's current label (`requires`).
