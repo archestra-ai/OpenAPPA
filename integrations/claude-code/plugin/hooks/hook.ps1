@@ -30,20 +30,78 @@ $runtimeUrl = if ($env:APPA_RUNTIME_URL) {
     "http://127.0.0.1:8787"
 }
 
-function Test-RuntimeHealthy {
+function Get-HealthAnswer {
     try {
-        (Invoke-RestMethod -Uri "$runtimeUrl/health" -TimeoutSec 1 -UseBasicParsing) -eq "ok"
+        [string](Invoke-RestMethod -Uri "$runtimeUrl/health" -TimeoutSec 1 -UseBasicParsing)
     } catch {
-        $false
+        ""
     }
+}
+
+# A runtime the user runs at a URL of their own (APPA_RUNTIME_URL, the
+# development setup) is theirs to restart: it is healthy while it
+# answers, stale or not. The starter replaces only the default deployment.
+function Test-RuntimeHealthy {
+    $answer = Get-HealthAnswer
+    if ($answer -eq "ok") {
+        return $true
+    }
+    ($answer -like "stale *") -and [bool]$env:APPA_RUNTIME_URL
+}
+
+# A runtime answers `stale <pid>` once an install replaced its binary on
+# disk: the process still serves the build it started from. Stopping it
+# makes the install take effect, at the cost of the protected sessions
+# already open, whose hooks fail closed until the start answers. The pid
+# arrives in an HTTP body from whoever holds the port, so only a process
+# named appa-runtime is ever stopped. Returns $true once the port refuses
+# or another starter has already replaced the runtime, $false when the
+# stale runtime cannot be stopped.
+function Stop-StaleRuntime {
+    $answer = Get-HealthAnswer
+    if ($answer -notmatch '^stale ([1-9][0-9]*)$') {
+        return $true
+    }
+    $stalePid = [int]$Matches[1]
+    # No process at that pid: a concurrent starter already stopped it, and
+    # the wait below sees the port refuse or that starter's replacement.
+    $process = Get-Process -Id $stalePid -ErrorAction SilentlyContinue
+    if ($null -ne $process) {
+        if ($process.ProcessName -ne "appa-runtime") {
+            [Console]::Error.WriteLine("appa protection: pid $stalePid is not appa-runtime; not stopping it")
+            return $false
+        }
+        Stop-Process -Id $stalePid -ErrorAction SilentlyContinue
+    }
+    $deadline = (Get-Date).AddSeconds(10)
+    while ((Get-Date) -lt $deadline) {
+        $now = Get-HealthAnswer
+        if ($now -eq "" -or $now -eq "ok") {
+            return $true
+        }
+        if ($now -ne $answer) {
+            [Console]::Error.WriteLine("appa protection: $runtimeUrl answers neither ok nor the stale runtime being stopped")
+            return $false
+        }
+        Start-Sleep -Seconds 1
+    }
+    [Console]::Error.WriteLine("appa protection: the stale runtime at $runtimeUrl (pid $stalePid) did not stop")
+    $false
 }
 
 # SessionStart starts the installed runtime when nothing healthy answers,
 # so a protected session works without any service setup, and the last step
-# of the install starts it through -EnsureRuntime. Installing the binary is
+# of the install starts it through -EnsureRuntime. A runtime whose binary
+# an install replaced is stopped first. Installing the binary is
 # not this script's job: the appa-setup skill does that when the user
 # asks.
 function Start-RuntimeIfDown {
+    if (Test-RuntimeHealthy) {
+        return
+    }
+    if (-not (Stop-StaleRuntime)) {
+        return
+    }
     if (Test-RuntimeHealthy) {
         return
     }

@@ -25,9 +25,12 @@ the mascot alone instead of runtime status.
 The install and every protected session share one starter,
 `hooks/ensure-runtime.sh` (on Windows, `hook.ps1 -EnsureRuntime`): it
 launches the installed `appa-runtime` when nothing healthy answers
-`/health` and returns only once one does. The last step of the install
-runs it, so a protected session normally finds the runtime already up and
-its SessionStart start is a single health probe. When the binary is not
+`/health` and returns only once one does. A running runtime answers
+`stale <pid>` once an install replaced its binary on disk; the starter
+stops that process and starts the installed build in its place. The
+last step of the install runs it, so a protected session normally finds
+the runtime already up and its SessionStart start is a single health
+probe. When the binary is not
 installed at all, the `appa-setup` skill installs it:
 `skills/appa-setup/SKILL.md` tells the model how to download, verify,
 install, and start the release binary, under the session's
