@@ -41,7 +41,7 @@ serde_json = "1"
 serde_json_canonicalizer = "0.3"
 sha2 = "0.10"
 thiserror = "2"
-toml = "0.8"
+toml = "1.1"
 tracing = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time", "macros", "sync", "process"] }
 # 0.13 is the version rig-core speaks: one reqwest in the graph rather than two
