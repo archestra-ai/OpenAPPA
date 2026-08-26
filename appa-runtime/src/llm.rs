@@ -47,11 +47,11 @@ pub struct LlmBackend {
 }
 
 /// The permit pool every `llm` consult of a runtime draws on, bounded by `max_concurrent`
-/// of the profile last loaded. A reload that raises the bound widens the pool at once; one
-/// that lowers it reclaims permits as in-flight consults release them, so the old and the
-/// new deployment snapshot never exceed the new bound together.
+/// of the profile the runtime serves. A reload that raises the bound widens the pool at
+/// once; one that lowers it reclaims permits as in-flight consults release them, so the
+/// old and the new deployment snapshot never exceed the new bound together.
 pub(crate) struct LlmGate {
-    permits: tokio::sync::Semaphore,
+    permits: Arc<tokio::sync::Semaphore>,
     shape: std::sync::Mutex<GateShape>,
 }
 
@@ -65,9 +65,14 @@ struct GateShape {
 impl LlmGate {
     pub(crate) fn new(bound: usize) -> LlmGate {
         LlmGate {
-            permits: tokio::sync::Semaphore::new(bound),
+            permits: Arc::new(tokio::sync::Semaphore::new(bound)),
             shape: std::sync::Mutex::new(GateShape { bound, owed: 0 }),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn available(&self) -> usize {
+        self.permits.available_permits()
     }
 
     pub(crate) fn resize(&self, bound: usize) {
@@ -82,9 +87,36 @@ impl LlmGate {
         }
         shape.bound = bound;
     }
+}
 
-    fn release(&self, permit: tokio::sync::SemaphorePermit<'_>) {
-        let mut shape = self.shape.lock().expect("the llm gate mutex is never poisoned");
+/// One consult's permit. Dropping it — on an answer, a timeout, or a consult cancelled
+/// mid-flight alike — settles a narrowed gate's debt before the permit can return.
+struct LlmPermit {
+    gate: Arc<LlmGate>,
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+impl LlmPermit {
+    async fn acquire(gate: &Arc<LlmGate>) -> LlmPermit {
+        let permit = gate
+            .permits
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("the llm consult gate is never closed");
+        LlmPermit {
+            gate: Arc::clone(gate),
+            permit: Some(permit),
+        }
+    }
+}
+
+impl Drop for LlmPermit {
+    fn drop(&mut self) {
+        let Some(permit) = self.permit.take() else {
+            return;
+        };
+        let mut shape = self.gate.shape.lock().expect("the llm gate mutex is never poisoned");
         if shape.owed > 0 {
             shape.owed -= 1;
             permit.forget();
@@ -177,7 +209,6 @@ impl LlmBackend {
                 LlmClient::Ollama(builder.build().map_err(failed)?)
             }
         };
-        gate.resize(profile.max_concurrent);
         Ok(LlmBackend {
             client,
             model: profile.model.clone(),
@@ -191,15 +222,15 @@ impl LlmBackend {
     /// the pool spends the same budget the consult itself would.
     pub async fn consult(&self, prompt: &ModelPrompt) -> Result<serde_json::Value, NoAnswerReason> {
         let deadline = tokio::time::Instant::now() + self.timeout;
-        let permit = match tokio::time::timeout_at(deadline, self.gate.permits.acquire()).await {
-            Ok(permit) => permit.expect("the llm consult gate is never closed"),
+        let permit = match tokio::time::timeout_at(deadline, LlmPermit::acquire(&self.gate)).await {
+            Ok(permit) => permit,
             Err(_) => {
                 tracing::warn!("the llm consult gate stayed saturated for the whole budget");
                 return Err(NoAnswerReason::Timeout);
             }
         };
         let answered = tokio::time::timeout_at(deadline, self.prompt(prompt)).await;
-        self.gate.release(permit);
+        drop(permit);
         match answered {
             Err(_) => Err(NoAnswerReason::Timeout),
             Ok(Err(error)) => {
@@ -391,6 +422,7 @@ mod tests {
         max_body_bytes: usize,
         gate: Arc<LlmGate>,
     ) -> LlmBackend {
+        gate.resize(max_concurrent);
         LlmBackend::new(
             &profile(provider, Some(url), Some("sekret"), max_concurrent),
             Duration::from_secs(5),
@@ -583,8 +615,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_narrowed_gate_reclaims_permits_as_consults_in_flight_release_them() {
-        let gate = LlmGate::new(2);
+    async fn a_narrowed_gate_reclaims_permits_as_consults_in_flight_let_go_of_them() {
+        let gate = Arc::new(LlmGate::new(2));
         gate.resize(3);
         assert_eq!(
             gate.permits.available_permits(),
@@ -592,21 +624,22 @@ mod tests {
             "a wider bound is available at once"
         );
 
-        let first = gate.permits.acquire().await.expect("the gate is open");
-        let second = gate.permits.acquire().await.expect("the gate is open");
+        let first = LlmPermit::acquire(&gate).await;
+        let second = LlmPermit::acquire(&gate).await;
         gate.resize(1);
         assert_eq!(
             gate.permits.available_permits(),
             0,
             "the one permit not in flight is forgotten; the bound is owed one more"
         );
-        gate.release(first);
+        // A consult cancelled mid-flight drops its permit the same way an answered one does.
+        drop(first);
         assert_eq!(
             gate.permits.available_permits(),
             0,
-            "the first release settles the debt"
+            "the first permit let go settles the debt"
         );
-        gate.release(second);
+        drop(second);
         assert_eq!(gate.permits.available_permits(), 1, "the pool is the new bound");
 
         gate.resize(2);

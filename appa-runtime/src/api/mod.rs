@@ -419,6 +419,7 @@ impl Runtime {
             crate::builtins::load(modules.as_deref()).map_err(|error| OpenError::Modules(error.to_string()))?;
         let gates = ConsultGates::per_runtime();
         let deployment = Deployment::load(config, &modules, gates.clone())?;
+        gates.serve_llm(deployment.externals.llm_bound());
         let store = LogStore::open(Backend::Sqlite { path: db }).map_err(|error| match error {
             appa_eventlog::OpenError::Damaged { path, detail } => OpenError::Damaged(format!("{path}: {detail}")),
             error @ appa_eventlog::OpenError::ForeignSchema { .. } => OpenError::Damaged(error.to_string()),
@@ -446,6 +447,7 @@ impl Runtime {
         let deployment = Deployment::load(config, &self.inner.modules, self.inner.gates.clone())?;
         let identity = deployment.resident().identity_hex();
         let deployment = Arc::new(deployment);
+        self.inner.gates.serve_llm(deployment.externals.llm_bound());
         let previous = {
             let mut serving = self
                 .inner
@@ -1237,5 +1239,53 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             runtime.reload(claude_config(policy)),
             Err(OpenError::LlmNotConfigured(name)) if name == "classifier"
         ));
+    }
+
+    #[test]
+    fn the_llm_gate_follows_the_serving_deployment_and_never_a_refused_one() {
+        let policy = r#"
+            version = 1
+            [[dynamic_resolver]]
+            name = "classifier"
+            builtin = "llm"
+            returns = ["delta.trust"]
+            [[authority]]
+            name = "auditor"
+            [authority.permits]
+            attention = ["irreversible"]
+        "#;
+        let with_pool = |max_concurrent: u32| {
+            let mut bindings = ExternalBindings::new(Duration::from_secs(30), 65_536);
+            bindings.llm = Some(LlmBinding {
+                provider: LlmProvider::Ollama,
+                model: "llama".to_string(),
+                url: None,
+                token_env: None,
+                timeout_ms: None,
+                max_concurrent: Some(max_concurrent),
+            });
+            Config::embedded(policy.to_string(), bindings).expect("the embedded configuration parses")
+        };
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(with_pool(2), dir.path().join("appa.db"), None).expect("the deployment opens");
+        assert_eq!(runtime.inner.gates.llm_permits(), 2);
+
+        // A candidate that validates but cannot build its externals declares a wider pool
+        // and never serves: the gate stays as the serving deployment declared it.
+        let mut refused = with_pool(5);
+        refused.externals.authorities.insert(
+            "auditor".to_string(),
+            crate::config::Implementation::Builtin("no-such".to_string()),
+        );
+        assert!(matches!(runtime.reload(refused), Err(OpenError::Modules(_))));
+        assert_eq!(runtime.inner.gates.llm_permits(), 2);
+
+        assert!(runtime.reload(with_pool(3)).is_ok());
+        assert_eq!(runtime.inner.gates.llm_permits(), 3);
+        assert!(
+            runtime.reload(claude_config(policy)).is_err(),
+            "no profile, no declared llm"
+        );
+        assert_eq!(runtime.inner.gates.llm_permits(), 3);
     }
 }

@@ -99,6 +99,9 @@ pub struct ExternalServices {
     max_body_bytes: usize,
     backends: BTreeMap<ConsultKind, BTreeMap<String, Backend>>,
     gates: ConsultGates,
+    /// `max_concurrent` of the `[externals.llm]` profile, or 0 without one: the bound the
+    /// runtime's llm gate takes once this deployment serves.
+    llm_bound: usize,
 }
 
 /// How many claude-code consults may run at once across a runtime — a subprocess whose
@@ -112,7 +115,7 @@ const COMMAND_CONSULT_PERMITS: usize = 8;
 /// The per-runtime gates on consults that cost a process or a provider request, shared by
 /// every deployment snapshot the runtime serves: a reload's old and new snapshots contend
 /// on the same permits. The llm gate takes its bound from the `[externals.llm]` profile
-/// of the deployment last loaded.
+/// of the deployment serving — a refused reload leaves it untouched.
 #[derive(Clone)]
 pub(crate) struct ConsultGates {
     claude: Arc<tokio::sync::Semaphore>,
@@ -132,9 +135,24 @@ impl ConsultGates {
             llm: Arc::new(LlmGate::new(0)),
         }
     }
+
+    /// Bound the llm pool as the deployment about to serve declares: `max_concurrent` of
+    /// its `[externals.llm]` profile, or nothing without one.
+    pub(crate) fn serve_llm(&self, max_concurrent: usize) {
+        self.llm.resize(max_concurrent);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn llm_permits(&self) -> usize {
+        self.llm.available()
+    }
 }
 
 impl ExternalServices {
+    pub(crate) fn llm_bound(&self) -> usize {
+        self.llm_bound
+    }
+
     #[cfg(test)]
     pub(crate) fn claude_permits(&self) -> &Arc<tokio::sync::Semaphore> {
         &self.gates.claude
@@ -216,11 +234,13 @@ impl ExternalServices {
             dynamic.insert(name, backend);
         }
         backends.insert(ConsultKind::Dynamic, dynamic);
+        let llm_bound = config.llm.as_ref().map_or(0, |profile| profile.max_concurrent);
         Ok(ExternalServices {
             http,
             timeout: config.timeout,
             max_body_bytes: config.max_body_bytes,
             backends,
+            llm_bound,
             gates,
         })
     }
@@ -819,13 +839,11 @@ mod tests {
 
     /// Services over `config` with `dynamic_builtins` declared on the policy side.
     fn services_declaring(config: Externals, dynamic_builtins: BTreeMap<String, DynamicBuiltin>) -> ExternalServices {
-        ExternalServices::new(
-            config,
-            &ModuleRegistry::empty(),
-            dynamic_builtins,
-            ConsultGates::of(4, 8),
-        )
-        .expect("no builtin references are configured")
+        let gates = ConsultGates::of(4, 8);
+        let services = ExternalServices::new(config, &ModuleRegistry::empty(), dynamic_builtins, gates.clone())
+            .expect("no builtin references are configured");
+        gates.serve_llm(services.llm_bound());
+        services
     }
 
     fn services(url: Option<String>, timeout_ms: u64, cap: usize) -> ExternalServices {
@@ -948,6 +966,7 @@ mod tests {
                     }
                     "sanitizer" => {
                         assert_eq!(request["declaration"]["on"], "tool_output");
+                        assert_eq!(request["artifact"]["tool"], "read_file");
                         assert_eq!(request["artifact"]["body"], "raw");
                         r#"{"version":1,"answer":{"body":"clean"}}"#
                     }
