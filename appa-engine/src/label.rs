@@ -487,7 +487,20 @@ mod tests {
         fn fully_established_start_decides_every_test(start in established_strategy()) {
             let partial = PartialLabel::established(start.clone());
             prop_assert!(partial.is_fully_established());
+            // The rank above the start is out of reach; `Adequacy::Unresolved` is what a
+            // consumed dimension would answer, so both arms below prove the start decides.
             prop_assert_eq!(partial.meets_floor(start.trust), Adequacy::Holds);
+            prop_assert_eq!(partial.meets_floor(Trust::new(start.trust.rank() + 1)), Adequacy::Fails);
+            // A cap naming only a reader the alphabet never generates admits exactly the
+            // empty restricted audience, so the expectation is decided by the start alone.
+            let outside = Audience::restricted([ReaderId::new("z".to_string())]);
+            let admitted = match &start.audience {
+                Audience::Restricted(readers) if readers.is_empty() => Adequacy::Holds,
+                Audience::Public | Audience::Restricted(_) => Adequacy::Fails,
+            };
+            prop_assert_eq!(partial.within_cap(&outside), admitted);
+            // Every established audience is within a Public cap, the empty restricted one
+            // and Public itself included; only a generated bound reaches those two.
             prop_assert_eq!(partial.within_cap(&Audience::Public), Adequacy::Holds);
         }
     }
