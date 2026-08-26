@@ -27,12 +27,13 @@ receives it, in the `Agent` tool's result.
   `statusline.sh` plus `statusline.ps1`.
 - `.claude-plugin/marketplace.json` — the marketplace manifest;
   `claude plugin marketplace add` points at this directory.
-- `examples/claude-code.appa.toml` — a complete starting deployment that
-  includes the Claude Code battery. Bash requirements are classified by the
-  Claude Code model builtin, Read results use the battery's path resolver,
-  and background subagents are refused.
-- `examples/claude-code-hitl.appa.toml` — a standalone GitHub MCP
-  example, with issue writes requiring human sign-off over MCP elicitation.
+- `examples/claude-code.appa.toml` — a complete starting policy: every
+  built-in Claude Code tool released with the neutral annotation, web
+  tool results marked suspicious, subagents run as children of the
+  session and background subagents refused.
+- `examples/claude-code-hitl.appa.toml` — the same plus GitHub MCP
+  tools, with issue writes requiring a human sign-off served over MCP
+  elicitation.
 
 ## Install
 
@@ -136,7 +137,8 @@ with `APPA_RUNTIME_URL` — the hooks, the MCP server, and the statusline
 all follow it:
 
 ```sh
-nohup cargo run --bin appa-runtime -- --config integrations/claude-code/examples/claude-code.appa.toml --db appa.db --listen 127.0.0.1:8788 >appa-runtime.log 2>&1 &
+cp integrations/claude-code/examples/claude-code.appa.toml appa.toml
+nohup cargo run --bin appa-runtime -- --config appa.toml --db appa.db --listen 127.0.0.1:8788 >appa-runtime.log 2>&1 &
 APPA_GATE=1 APPA_RUNTIME_URL=http://127.0.0.1:8788 claude --plugin-dir integrations/claude-code/plugin
 ```
 

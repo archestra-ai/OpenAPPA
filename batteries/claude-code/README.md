@@ -1,62 +1,34 @@
-# Claude Code battery
+# Claude Code Bash and Read battery
 
-Default contracts for Claude Code's built-in tools. A root configuration can
-include this battery and override any contract with an earlier root rule.
+Use this battery for Claude Code sessions that need policy-aware shell commands
+and automatic privacy labels for local file reads.
 
-## Files
+It covers two built-in tools:
 
-**`appa.toml`** applies these defaults:
+- **Bash** — Before a command runs, the Claude Code model decides what trust,
+  audience, and fresh attention the command requires. It also labels the
+  command's output for trust and audience. This lets later tools distinguish,
+  for example, public build output from private or suspicious command output.
+- **Read** — Before a file is read, a local Python resolver checks its path.
+  Hidden paths, credential files, private keys, system-secret locations, and
+  sensitive symlink targets produce private content. Other paths produce public
+  content. The resolver does not block the read or lower its trust.
 
-- `Agent` may start foreground subagents. Background subagents are refused
-  because their results bypass the parent's checked tool return.
-- Every `Bash` call is classified by the Claude Code model before execution.
-  The classifier decides the command output's trust and audience and what
-  trust and audience the command is allowed to receive.
-- Every `Read` result is classified by `read-sensitivity.py`. Hidden paths,
-  credential and private-key files, system-secret locations, and sensitive
-  symlink targets are private. Other paths are public. This labels the returned
-  file content; it does not block the read or add a trust restriction.
-- `WebFetch` and `WebSearch` results are suspicious because their content comes
-  from outside the session.
-- The remaining covered built-in tools add no information-flow restriction or
-  dispatch requirement.
+Choose it when Claude Code uses Bash for varied development work that cannot be
+covered by a safe fixed command list, and when file confidentiality depends on
+the path being read.
 
-A deployment can override any of these behaviors: allow a particular
-background-agent shape, replace either classifier, block selected Bash
-commands, change a tool's result label, or add dispatch requirements.
+This is an information-flow policy, not a shell sandbox. Use an operating-system
+sandbox when commands must be prevented from reaching files or the network.
 
-## Override a default
-
-Root rules run before included battery rules. Put an override in the root
-configuration without editing the battery.
-
-For example, these two rules block `kubectl` with and without arguments:
+## Add it to a deployment
 
 ```toml
 include = ["batteries/claude-code/appa.toml"]
 
 [policy]
 version = 1
-
-[[policy.tool]]
-name = "Bash(command:kubectl)"
-requires = { attention = ["blocked"] }
-delta = { trust = "suspicious", audience = ["private"] }
-
-[[policy.tool]]
-name = "Bash(command:kubectl *)"
-requires = { attention = ["blocked"] }
-delta = { trust = "suspicious", audience = ["private"] }
 ```
 
-No authority permits the `blocked` mark, so these contracts have no remedy.
-All other Bash commands reach the battery's model classifier.
-
-The same first-match rule can replace the Bash classifier, change a result
-label, or add a requirement for any other tool.
-
-## Boundary
-
-The Bash classifier applies OpenAPPA's declared information-flow requirements.
-It is not an operating-system sandbox. Use a sandbox when Bash must not access
-credentials, the network, or files outside a workspace.
+Root rules take precedence over the battery. Add a root rule when a particular
+Bash command or Read path needs stricter, looser, or fully blocked behavior.

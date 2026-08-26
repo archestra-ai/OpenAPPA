@@ -19,22 +19,6 @@ use appa_runtime::{hooks, mcp};
 use appa_runtime_api::Codec;
 
 const DEFAULT_CONFIG: &str = include_str!("../../integrations/claude-code/examples/claude-code.appa.toml");
-const SOURCE_BATTERY_INCLUDE: &str = "../../../batteries/claude-code/appa.toml";
-const INSTALLED_BATTERY_INCLUDE: &str = "batteries/claude-code/appa.toml";
-
-struct DefaultAsset {
-    path: &'static str,
-    contents: &'static str,
-}
-
-const DEFAULT_ASSETS: &[DefaultAsset] = &[DefaultAsset {
-    path: "batteries/claude-code/appa.toml",
-    contents: include_str!("../../batteries/claude-code/appa.toml"),
-}];
-
-fn installed_default_config() -> String {
-    DEFAULT_CONFIG.replacen(SOURCE_BATTERY_INCLUDE, INSTALLED_BATTERY_INCLUDE, 1)
-}
 
 fn ensure_default_config(path: &Path) -> io::Result<bool> {
     let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
@@ -42,34 +26,9 @@ fn ensure_default_config(path: &Path) -> io::Result<bool> {
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
         Err(error) => return Err(error),
     };
-
-    let root = path.parent().unwrap_or_else(|| Path::new("."));
-    let config = installed_default_config();
-    let mut created_assets = Vec::new();
-    let write = (|| {
-        for asset in DEFAULT_ASSETS {
-            let asset_path = root.join(asset.path);
-            if let Some(parent) = asset_path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            let mut output = match OpenOptions::new().write(true).create_new(true).open(&asset_path) {
-                Ok(output) => output,
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(error),
-            };
-            created_assets.push(asset_path);
-            output
-                .write_all(asset.contents.as_bytes())
-                .and_then(|()| output.sync_all())?;
-        }
-        file.write_all(config.as_bytes()).and_then(|()| file.sync_all())
-    })();
-    if let Err(error) = write {
+    if let Err(error) = file.write_all(DEFAULT_CONFIG.as_bytes()).and_then(|()| file.sync_all()) {
         drop(file);
         let _ = fs::remove_file(path);
-        for asset in created_assets {
-            let _ = fs::remove_file(asset);
-        }
         return Err(error);
     }
     Ok(true)
@@ -307,11 +266,7 @@ mod tests {
         assert!(ensure_default_config(&path).expect("default config is created"));
         assert_eq!(
             fs::read_to_string(&path).expect("default config is readable"),
-            installed_default_config()
-        );
-        assert_eq!(
-            fs::read_to_string(directory.path().join(DEFAULT_ASSETS[0].path)).expect("default battery is readable"),
-            DEFAULT_ASSETS[0].contents
+            DEFAULT_CONFIG
         );
         Config::load(&path).expect("the embedded default config validates");
 
@@ -329,6 +284,35 @@ mod tests {
         assert!(require_loopback(&"[::1]:8787".parse().expect("parses")).is_ok());
         assert!(require_loopback(&"0.0.0.0:8787".parse().expect("parses")).is_err());
         assert!(require_loopback(&"192.168.1.10:8787".parse().expect("parses")).is_err());
+    }
+
+    #[test]
+    fn a_context_controlling_deployment_must_pin_its_subagents_to_the_foreground() {
+        let examples = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../integrations/claude-code/examples");
+        for name in ["claude-code.appa.toml", "claude-code-hitl.appa.toml"] {
+            let path = examples.join(name);
+            let config = Config::load(&path).unwrap_or_else(|error| panic!("{name} does not load: {error}"));
+            let policy = config.policy_file().value();
+            assert!(
+                refuse_unobservable_returns(Adapter::ClaudeCode, policy).is_ok(),
+                "{name}"
+            );
+            let mut unpinned = policy.clone();
+            for tool in unpinned["tool"].as_array_mut().expect("the tools table") {
+                if tool["name"].as_str() == Some("Task") {
+                    tool.as_table_mut().expect("a tool table").remove("parameters");
+                }
+            }
+            assert!(
+                refuse_unobservable_returns(Adapter::ClaudeCode, &unpinned).is_err(),
+                "{name}"
+            );
+            unpinned["deployment"]["context_control"] = toml::Value::Boolean(false);
+            assert!(
+                refuse_unobservable_returns(Adapter::ClaudeCode, &unpinned).is_ok(),
+                "{name}"
+            );
+        }
     }
 
     #[test]
