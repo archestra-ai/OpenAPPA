@@ -109,7 +109,9 @@ into it.
 
 A protected session starts the installed runtime at SessionStart when
 nothing healthy answers `/health` — normally a no-op, because the install
-left it running — then blocks every action while the runtime is
+left it running — or replaces a runtime that answers `stale <pid>`,
+which a running process does once an install replaced its binary on
+disk. It then blocks every action while the runtime is
 unavailable. When the binary is not installed at all,
 the `appa-setup` skill installs it: invoked with `/appa-setup`, it has
 the model download the release archive for the current system, verify
@@ -122,7 +124,10 @@ brings it back. Check the runtime with:
 curl -sS -m 2 http://127.0.0.1:8787/health
 ```
 
-The command must print `ok`.
+The command must print `ok`. It prints `stale <pid>` when the binary
+was installed again after this runtime started; the next protected
+session start replaces the process, and so does running the starter
+by hand.
 
 The default policy names only Claude Code's built-in tools. APPA blocks every
 installed MCP tool until the policy names it. Start `clappa` and run
@@ -142,7 +147,8 @@ nohup cargo run --bin appa-runtime -- --config appa.toml --db appa.db --listen 1
 APPA_GATE=1 APPA_RUNTIME_URL=http://127.0.0.1:8788 claude --plugin-dir integrations/claude-code/plugin
 ```
 
-The last command is interactive and belongs to the user: a Claude
+The starter leaves a runtime at a URL of your own alone, stale or not:
+after a rebuild, restart it yourself. The last command is interactive and belongs to the user: a Claude
 session performing this setup runs the first two and prints the third.
 
 `APPA_RUNTIME_URL` is fixed at session launch, like `APPA_GATE`: a

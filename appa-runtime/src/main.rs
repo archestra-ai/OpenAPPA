@@ -8,6 +8,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use axum::extract::State;
 use axum::routing::{get, post};
@@ -130,12 +131,45 @@ fn log_level(verbose: u8) -> &'static str {
     }
 }
 
+/// The executable this process runs, as it stood on disk when the process started. An install
+/// that replaces the file leaves this process serving the old build; `/health` reports the
+/// replacement so the plugin's starter replaces the process too.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ExecutableAtStart {
+    path: PathBuf,
+    len: u64,
+    modified: SystemTime,
+}
+
+impl ExecutableAtStart {
+    fn snapshot(path: PathBuf) -> Option<Self> {
+        let metadata = fs::metadata(&path).ok()?;
+        let modified = metadata.modified().ok()?;
+        Some(Self {
+            path,
+            len: metadata.len(),
+            modified,
+        })
+    }
+
+    fn of_this_process() -> Option<Self> {
+        std::env::current_exe().ok().and_then(Self::snapshot)
+    }
+
+    /// Whether a different file now stands at the executable's path. A path that cannot be
+    /// read is not a replacement: there is nothing newer to run.
+    fn is_replaced(&self) -> bool {
+        Self::snapshot(self.path.clone()).is_some_and(|now| now != *self)
+    }
+}
+
 #[derive(Clone)]
 struct AppState {
     runtime: Arc<Runtime>,
     codec: Codec,
     config: PathBuf,
     adapter: Adapter,
+    executable: Option<ExecutableAtStart>,
 }
 
 async fn hook(
@@ -147,8 +181,17 @@ async fn hook(
     (status, axum::Json(body))
 }
 
-async fn health() -> &'static str {
-    "ok"
+/// `ok` while this process serves the executable installed on disk; `stale <pid>` once an
+/// install replaced that file, naming the process to stop before starting the new build.
+async fn health(State(state): State<AppState>) -> String {
+    health_answer(state.executable.as_ref(), std::process::id())
+}
+
+fn health_answer(executable: Option<&ExecutableAtStart>, pid: u32) -> String {
+    match executable {
+        Some(executable) if executable.is_replaced() => format!("stale {pid}"),
+        _ => "ok".to_owned(),
+    }
 }
 
 async fn reload(State(state): State<AppState>) -> Result<axum::Json<Reloaded>, (axum::http::StatusCode, String)> {
@@ -228,6 +271,7 @@ async fn main() -> ExitCode {
         codec: args.adapter.codec(),
         config: args.config,
         adapter: args.adapter,
+        executable: ExecutableAtStart::of_this_process(),
     };
     let app = axum::Router::new()
         .route("/health", get(health))
@@ -313,6 +357,29 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn health_reports_a_replaced_executable_by_the_pid_to_stop() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("appa-runtime");
+        fs::write(&path, "build one").expect("the executable is written");
+        let started = ExecutableAtStart::snapshot(path.clone()).expect("the executable is readable");
+
+        assert_eq!(health_answer(Some(&started), 41), "ok");
+        assert_eq!(health_answer(None, 41), "ok");
+
+        let later = started.modified + std::time::Duration::from_secs(2);
+        fs::File::open(&path)
+            .and_then(|file| file.set_modified(later))
+            .expect("the executable's timestamp is moved");
+        assert_eq!(health_answer(Some(&started), 41), "stale 41");
+
+        fs::write(&path, "build two, longer").expect("the executable is replaced");
+        assert_eq!(health_answer(Some(&started), 41), "stale 41");
+
+        fs::remove_file(&path).expect("the executable is removed");
+        assert_eq!(health_answer(Some(&started), 41), "ok");
     }
 
     #[test]
