@@ -343,8 +343,8 @@ def evaluate_check(
         def approval_matches_arguments(record: dict) -> bool:
             if not authority_matches(record, ruling="approve"):
                 return False
-            payload = (record.get("request") or {}).get("payload") or {}
-            return payload.get("arguments") == expected_arguments
+            artifact = (record.get("request") or {}).get("artifact") or {}
+            return artifact.get("arguments") == expected_arguments
 
         approvals = [request for request in external_requests if approval_matches_arguments(request)]
         if check.kind == "wire_executed_with_authority":

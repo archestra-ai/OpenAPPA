@@ -68,7 +68,7 @@ def test_python_native_session_resolves_dynamic_source_and_sink_audiences() -> N
         fixture.close()
 
     requests = fixture.snapshot()
-    assert [entry["request"]["args"]["subject"] for entry in requests] in (
+    assert [entry["request"]["artifact"]["args"]["subject"] for entry in requests] in (
         ["Alice", "alice@example.test", "attacker@example.test"],
         ["Alice", "Alice", "alice@example.test", "attacker@example.test"],
     )

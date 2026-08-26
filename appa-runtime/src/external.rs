@@ -540,8 +540,17 @@ pub(crate) async fn exchange_with_child(
 
     let mut stdin = child.stdin.take().ok_or(NoAnswerReason::Transport)?;
     let mut stdout = child.stdout.take().ok_or(NoAnswerReason::Transport)?;
-    stdin.write_all(input).await.map_err(|_| NoAnswerReason::Transport)?;
-    stdin.shutdown().await.map_err(|_| NoAnswerReason::Transport)?;
+    // A child may answer without reading its input and close stdin first. A broken pipe
+    // here is that early close, not a transport fault: the exit and the answer still decide.
+    let written = match stdin.write_all(input).await {
+        Ok(()) => stdin.shutdown().await,
+        Err(error) => Err(error),
+    };
+    if let Err(error) = written
+        && error.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        return Err(NoAnswerReason::Transport);
+    }
     drop(stdin);
 
     // Read under the cap before anything waits: a child writing past it is reported
@@ -1096,6 +1105,22 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             assert!(std::time::Instant::now() < gone_by, "the helper outlived the consult");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_command_that_answers_without_reading_its_input_is_answered() {
+        let dir = tempfile::tempdir().expect("a fixture directory is created");
+        let services = command_services(
+            dir.path(),
+            "printf '%s' '{\"version\":1,\"answer\":{\"delta.trust\":\"trusted\"}}'\n",
+            3000,
+            1024,
+        );
+        // Far past any pipe buffer: the write can finish only once the child reads, and it never does.
+        let consult = dynamic_consult("classifier", serde_json::json!({"path": "x".repeat(1 << 20)}));
+        let outcome = services.consult(&consult, None).await;
+        assert!(matches!(outcome, ConsultOutcome::Answer(_)), "{outcome:?}");
     }
 
     #[cfg(unix)]
