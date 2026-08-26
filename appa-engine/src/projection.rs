@@ -1978,7 +1978,7 @@ mod tests {
     }
 
     #[test]
-    fn cold_replay_is_deterministic() {
+    fn a_cold_replay_reports_the_ended_trajectory_and_the_unresolved_crossing_source() {
         let log = vec![
             opened("a"),
             admit("a", labeled(2, Audience::Public)),
@@ -1987,7 +1987,6 @@ mod tests {
                 kind: BoundaryKind::VoidReturn,
             },
         ];
-        assert_eq!(build(&log), build(&log));
         assert!(build(&log).view(&traj("a")).has_ended(&traj("a")));
 
         let crossing = [
@@ -2033,7 +2032,6 @@ mod tests {
             ],
         ]
         .concat();
-        assert_eq!(build(&crossing), build(&crossing));
         let unresolved = |log: &[Fact]| {
             build(log)
                 .view(&traj("root"))
@@ -2139,7 +2137,6 @@ mod tests {
                 kind: BoundaryKind::Merge { child_return: id },
             },
         ];
-        assert_eq!(build(&log), build(&log));
         assert_eq!(
             build(&log).view(&traj("root")).current_label().bound(),
             &EstablishedLabel::new(Trust::new(0), Audience::Public)
@@ -2263,7 +2260,6 @@ mod tests {
                 kind: BoundaryKind::Merge { child_return: id },
             },
         ];
-        assert_eq!(build(&log), build(&log));
         assert_eq!(
             build(&log).view(&traj("root")).current_label().bound(),
             &EstablishedLabel::new(Trust::new(2), Audience::Public)

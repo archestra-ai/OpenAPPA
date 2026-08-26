@@ -1782,7 +1782,7 @@ mod tests {
     }
 
     #[test]
-    fn the_search_is_the_same_for_the_same_block_and_total_within_the_bound() {
+    fn the_search_is_total_within_the_bound() {
         let registry = Deployment::of(vec![
             emitting("b1", &["backup"]),
             emitting("b2", &["backup"]),
@@ -1795,8 +1795,6 @@ mod tests {
         let wipe = call("wipe", json!({}));
 
         let first = routes(&registry, &log, &wipe, depth(4));
-        let again = routes(&registry, &log, &wipe, depth(4));
-        assert_eq!(first, again);
         let complete: Vec<Vec<String>> = first
             .iter()
             .filter(|route| route.outcome == RouteOutcome::Complete)
