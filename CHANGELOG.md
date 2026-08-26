@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.4.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.3.0...v0.4.0) (2026-08-26)
+
+
+### Features
+
+* **batteries:** classify sensitive read paths ([#90](https://github.com/archestra-ai/OpenAPPA/issues/90)) ([06279bb](https://github.com/archestra-ai/OpenAPPA/commit/06279bb9ca7a49f655513166df31224f29bf78bb))
+* **engine:** match several arguments in one tool selector ([#87](https://github.com/archestra-ai/OpenAPPA/issues/87)) ([be3a559](https://github.com/archestra-ai/OpenAPPA/commit/be3a559dda37ffd4af279d286843c52ffb09a769))
+* wire every external component the same way, and let a model answer any of them ([#83](https://github.com/archestra-ai/OpenAPPA/issues/83)) ([b51784e](https://github.com/archestra-ai/OpenAPPA/commit/b51784e34d4765efc02fd33aae37ae7b4f14b50f))
+
+
+### Bug Fixes
+
+* **ci:** unblock the release binary build ([#86](https://github.com/archestra-ai/OpenAPPA/issues/86)) ([1e42524](https://github.com/archestra-ai/OpenAPPA/commit/1e425246c2fc06c913814c2f048b325c96a52280))
+
 ## [0.3.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.2.0...v0.3.0) (2026-08-26)
 
 
