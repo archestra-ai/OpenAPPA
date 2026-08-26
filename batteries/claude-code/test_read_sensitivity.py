@@ -54,8 +54,20 @@ class ReadSensitivityTests(unittest.TestCase):
     def test_protocol_returns_private_audience(self):
         request = {
             "version": 1,
-            "resolver": "claude-code.read-sensitivity",
-            "args": {"name": "Read", "arguments": {"file_path": "/workspace/.env"}},
+            "kind": "dynamic",
+            "name": "claude-code.read-sensitivity",
+            "declaration": {
+                "returns": ["delta.audience"],
+                "trust_ranks": ["suspicious", "trusted"],
+                "attention_marks": [],
+            },
+            "artifact": {
+                "args": {
+                    "name": "Read",
+                    "description": "Reads a file and returns its contents.",
+                    "arguments": {"file_path": "/workspace/.env"},
+                }
+            },
         }
         result = subprocess.run(
             [sys.executable, str(SCRIPT)],
@@ -67,7 +79,7 @@ class ReadSensitivityTests(unittest.TestCase):
 
         self.assertEqual(
             json.loads(result.stdout),
-            {"version": 1, "result": {"delta.audience": ["private"]}},
+            {"version": 1, "answer": {"delta.audience": ["private"]}},
         )
 
 

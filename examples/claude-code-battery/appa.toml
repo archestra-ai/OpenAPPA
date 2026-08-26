@@ -26,8 +26,8 @@ max_body_bytes = 65536
 [externals.authorities.hitl]
 builtin = "hitl"
 
-# Root contracts run before every included battery. This local rule overrides
-# the shipped exact `cargo test` rule with a fresh approval step.
+# Root contracts run before every included battery. This local rule bypasses
+# the shipped Bash classifier for `cargo test` and adds a fresh approval step.
 [[policy.tool]]
 name = "Bash(command:cargo test)"
 
@@ -39,7 +39,7 @@ attention = ["hitl"]
 trust = "suspicious"
 audience = ["private"]
 
-# A root contract can also replace a battery's fallback with a local resolver.
+# A root contract can also replace the battery's Read rule with a local resolver.
 [[policy.dynamic_resolver]]
 name = "local.read-sensitivity"
 returns = ["delta.audience"]

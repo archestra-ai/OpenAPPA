@@ -1,27 +1,57 @@
 # Claude Code battery
 
-Rules for two Claude Code tools: `Bash` and `Read`. Add it to your root
-config with `include`, then override any rule by writing your own above
-it in the root file.
+Use this battery for Claude Code sessions that need policy-aware shell commands
+and automatic privacy labels for local file reads.
 
-## Files
+It covers two built-in tools:
 
-**`appa.toml`** — five exact `Bash` commands run without a question:
-`cargo test`, `cargo check`, `cargo fmt --check`, `git status --short`,
-`git diff --check`. Every other `Bash` command needs a person to
-approve. Bash output is always treated as untrusted and private. Every
-`Read` goes to `read-sensitivity.py`.
+- **Bash** — Before a command runs, the Claude Code model decides what trust,
+  audience, and fresh attention the command requires. It also labels the
+  command's output for trust and audience. This lets later tools distinguish,
+  for example, public build output from private or suspicious command output.
+- **Read** — Before a file is read, a local Python resolver checks its path.
+  Hidden paths, credential files, private keys, system-secret locations, and
+  sensitive symlink targets produce private content. Other paths produce public
+  content. The resolver does not block the read or lower its trust.
 
-**`read-sensitivity.py`** — called on every `Read` tool call, before the
-file is read. Receives the tool name and its arguments (`file_path`,
-plus `offset` and `limit` if given) and decides who may see the file's
-contents. Hidden paths, credential and private-key files, system secret
-locations, and sensitive symlink targets are private. Other paths are
-public. The resolver only labels the returned value; it does not block
-the read.
+## Add it to a deployment
 
-## Change the behaviour
+```toml
+include = ["batteries/claude-code/appa.toml"]
 
-Edit a script and the next call uses the new version. No restart.
-To change a rule, put a rule with the same tool name in your root
-config; root rules run first.
+[policy]
+version = 1
+```
+
+Root rules take precedence over the battery. Add a root rule when a particular
+Bash command or Read path needs stricter, looser, or fully blocked behavior.
+
+## Example override
+
+If needed, the battery can be overridden from the root config. For example,
+these root rules require fresh human approval for every `kubectl` command:
+
+```toml
+[[policy.tool]]
+name = "Bash(command:kubectl)"
+requires = { attention = ["hitl"] }
+delta = { trust = "suspicious", audience = ["private"] }
+
+[[policy.tool]]
+name = "Bash(command:kubectl *)"
+requires = { attention = ["hitl"] }
+delta = { trust = "suspicious", audience = ["private"] }
+
+[[policy.authority]]
+name = "operator"
+hint = "Ask the person running this Claude Code session."
+
+[policy.authority.permits]
+attention = ["hitl"]
+
+[externals.authorities.operator]
+builtin = "hitl"
+```
+
+The first rule matches bare `kubectl`; the second matches `kubectl` followed by
+arguments. Other Bash commands continue to use the battery's model classifier.
