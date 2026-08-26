@@ -44,6 +44,14 @@ def test_shipped_scenarios_load() -> None:
         assert scenario.prompt
 
 
+def test_standalone_corp_systems_corpus_ships() -> None:
+    corpus = SCENARIOS_DIR.parent.parent / "corp-systems" / "data"
+    systems = {path.name for path in corpus.iterdir() if path.is_dir()}
+    assert systems == {"finance", "hr", "public_forum", "task_tracker", "vendor"}
+    for system in systems:
+        assert any((corpus / system).glob("*.md")), f"{system}/ has no corpus files"
+
+
 def _by_name() -> dict:
     return {s.name: s for s in discover_scenarios(SCENARIOS_DIR)}
 

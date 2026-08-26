@@ -19,9 +19,9 @@ appa-arxiv.tar.gz
 # Custom target dirs (CARGO_TARGET_DIR from tooling)
 target-*/
 .envrc
-# Benchmark local data, runs, and caches
+# Repository-root local data plus benchmark runs and caches
 runs/
-data/
+/data/
 bench/**/runs/
 bench/**/.venv/
 bench/**/__pycache__/
@@ -38,4 +38,3 @@ __pycache__/
 .DS_Store
 /tmp/
 /appa-mcp*
-
