@@ -56,8 +56,10 @@ For OpenAPPA configuration, read only:
 
 - the live root config and included files relevant to the request;
 - a matched battery's `appa.toml` and README;
-- the relevant section of the official policy guide at
-  <https://www.openappa.com/contracts>.
+- the relevant section of the installed guide at
+  `~/.claude/plugins/marketplaces/appa/website/content/docs/contracts.md`;
+- if that guide is unavailable or does not answer the question, the relevant
+  section of <https://www.openappa.com/contracts>.
 
 If these sources do not establish the syntax or behavior, stop. Do not search
 the OpenAPPA repository for an answer.
@@ -209,8 +211,11 @@ not guess.
 1. Read the root config and only the included files relevant to the requested
    changes.
 2. For policy syntax or behavior that the current config does not demonstrate,
-   consult the relevant section of <https://www.openappa.com/contracts>. Do
-   not guess syntax, search for an OpenAPPA checkout, or inspect source code.
+   first consult the relevant section of
+   `~/.claude/plugins/marketplaces/appa/website/content/docs/contracts.md`.
+   If it is unavailable or does not answer the question, consult the relevant
+   section of <https://www.openappa.com/contracts>. Do not guess syntax, search
+   for an OpenAPPA checkout, or inspect source code.
 3. Explain three things: what happens now, what you propose, and the practical
    effect. Add one short **OpenAPPA pieces** line naming every primitive used.
    Ask only for a decision that changes the result.
