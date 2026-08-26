@@ -105,6 +105,9 @@ If the current config changes a battery's default behavior, describe the
 resulting behavior in plain English. Do not explain the rule ordering unless
 the user asks.
 
+Check what each matched battery expects the root config to provide. Record
+anything missing that the battery or complete config needs in order to work.
+
 ### Cover the remaining tools
 
 Create root rules only for installed tools that neither the root config nor a
@@ -149,6 +152,12 @@ the server or fold it into a list of individual tools.
 When tools named in the config were not detected, use their exact names and
 say only that they were not detected in this session and will be left
 unchanged. Do not call them stale, removed, obsolete, or uninstalled.
+
+At the end of the proposal, add **Needed for this to work** when any required
+support is missing. Group every missing requirement there and propose the
+concrete fix. For example: "Slack needs your approval before publishing, but
+approval is not set up yet. I'll add it." Do not merely report "no HITL
+authority," and do not mix missing requirements with unchanged rules.
 
 End with: **Approve, or tell me what to change.** Wait for the reply.
 

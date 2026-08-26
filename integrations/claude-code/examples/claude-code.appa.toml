@@ -215,6 +215,20 @@ delta = { trust = "suspicious" }
 [policy.deployment]
 context_control = true
 
+# Batteries can require fresh `hitl` attention before a tool runs. This
+# authority asks the person running the Claude Code session and can satisfy
+# that requirement for one tool call.
+[[policy.authority]]
+name = "hitl"
+hint = "Ask the person running this session."
+
+[policy.authority.permits]
+attention = ["hitl"]
+
 [externals]
 timeout_ms = 5000
+review_timeout_ms = 600000
 max_body_bytes = 65536
+
+[externals.authorities.hitl]
+builtin = "hitl"
