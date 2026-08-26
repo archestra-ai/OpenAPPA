@@ -181,11 +181,12 @@ impl ExternalServices {
         dynamic_builtins: BTreeMap<String, DynamicBuiltin>,
         gates: ConsultGates,
     ) -> Result<ExternalServices, ModulesError> {
+        crate::tls::install_crypto_provider();
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(config.timeout)
             .build()
-            .expect("the reqwest client builds: no TLS or resolver overrides are set");
+            .expect("the reqwest client builds: the crypto provider is installed above");
         let claude = ClaudeCodeBackend {
             #[cfg(unix)]
             command: config.claude_code.command.clone(),

@@ -4,6 +4,7 @@ pub mod api;
 pub mod config;
 pub mod hooks;
 pub mod mcp;
+pub mod tls;
 
 mod builtins;
 mod consult;
