@@ -26,6 +26,7 @@ pub mod engine;
 pub mod execute;
 pub mod fact;
 pub mod groups;
+mod hex32;
 pub mod label;
 pub mod names;
 pub mod params;

@@ -177,7 +177,7 @@ impl From<ToolCallSource> for String {
 /// value itself: the arguments and the `uses` entry are both already on the record, so the value
 /// is re-derivable, and a tool with several resolvers would otherwise persist a copy per resolver.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct ResolverArgsDigest([u8; 32]);
+pub struct ResolverArgsDigest(#[serde(with = "crate::hex32")] [u8; 32]);
 
 impl ResolverArgsDigest {
     pub fn of(canonical: &[u8]) -> Self {

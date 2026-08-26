@@ -295,7 +295,7 @@ impl PolicyFileKey {
 /// the semantic sequences (the trust chain's rank order, authority registration order), sorts
 /// true maps and sets, and excludes source syntax, runtime bindings, `[limits]`, and hints.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PolicyIdentityV1([u8; 32]);
+pub struct PolicyIdentityV1(#[serde(with = "crate::hex32")] [u8; 32]);
 
 impl PolicyIdentityV1 {
     pub fn of(registry: &RegistryConfig, child_return: &ReturnPolicy, profile: &DeploymentProfile) -> Self {
