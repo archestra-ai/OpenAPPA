@@ -16,8 +16,12 @@ const STORAGE_KEY = "openappa-analytics-consent";
 /* Bump when the answer stops meaning what it meant — a new tool, a new purpose
    — so previous answers lapse and readers are asked again about the new thing.
    Do not bump for copy or styling changes; that would nag readers who already
-   answered the same question. */
-const CONSENT_VERSION = "1";
+   answered the same question.
+
+   "2": session replay joined what consent covers. A "yes" to version "1" was a
+   yes to being counted under a notice that promised no session recording, so
+   it cannot stand in for a yes to being recorded. */
+const CONSENT_VERSION = "2";
 
 export type ConsentDecision = "granted" | "denied";
 

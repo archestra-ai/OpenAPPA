@@ -49,14 +49,26 @@ const CONFIG = {
      pageview effect below sends them instead. */
   capture_pageview: false,
   capture_pageleave: true,
-  /* Both of these record far more about a reader than counting them requires,
-     which is all this site is trying to do. */
+  /* Heatmaps record more about a reader than this site gets value from.
+     Replay is different — see below. */
   capture_heatmaps: false,
-  disable_session_recording: true,
+  /* Session replay, so we can see where readers get stuck rather than just
+     which pages they open. The recorder arms only when the project's remote
+     config says recording is on — the "Record user sessions" toggle in
+     PostHog — which is why `advanced_disable_flags` is no longer set here:
+     with that request disabled the SDK never hears the toggle, and nothing
+     records. Consent still comes first; none of this module runs before the
+     reader says yes, and the notice in `CookieNotice.tsx` names recording
+     explicitly.
+
+     Everything a reader types is masked before it leaves the page. The pages
+     are public; what people type into them is not. */
+  session_recording: {
+    maskAllInputs: true,
+  },
   /* The site drives none of these. Turning them off is not a privacy control —
      consent has already been given by the time we get here — it just avoids
      requests and runtime work for features nothing on the site consumes. */
-  advanced_disable_flags: true,
   disable_surveys: true,
   disable_web_experiments: true,
 } as const;
