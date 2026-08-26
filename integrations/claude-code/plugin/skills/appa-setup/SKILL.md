@@ -54,7 +54,7 @@ Resolve both paths in a shell; do not guess.
 
 8. Start the runtime and confirm it answers. First ask whether one already runs: `curl -sS -m 2 http://127.0.0.1:8787/health`, or `$APPA_RUNTIME_URL/health` when that variable is set.
 
-   - Nothing answers — the usual case on a first install. Start it with the plugin's own starter, `sh "<plugin files>/hooks/ensure-runtime.sh"`, taking `<plugin files>` from the path resolved above. On native Windows, run `powershell.exe -NoProfile -File "<plugin files>\hooks\hook.ps1" -EnsureRuntime`. The starter runs the installed binary and exits 0 only after `/health` answers `ok`; every protected session start runs the same script. Then repeat the `/health` request yourself and report what it printed. The first start also writes the default policy, so step 9's `/appa-tool-sync` tip has a file to work on.
+   - Nothing answers — the usual case on a first install. Start it with the plugin's own starter, `sh "<plugin files>/hooks/ensure-runtime.sh"`, taking `<plugin files>` from the path resolved above. On native Windows, run `powershell.exe -NoProfile -File "<plugin files>\hooks\hook.ps1" -EnsureRuntime`. The starter runs the installed binary and exits 0 only after `/health` answers `ok`; every protected session start runs the same script. Then repeat the `/health` request yourself and report what it printed. The first start also writes the default policy, so step 10's `/appa-guide init` tip has a file to work on.
    - The request prints `ok` — a runtime from an earlier install is still running. Its version is not readable over HTTP, so do not report the binary you just installed as the running one. Tell the user to stop the old process and to ask for this step again: `pkill -f appa-runtime`, on Windows `Stop-Process -Name appa-runtime`. Warn them that stopping it blocks every protected session that is already open, because the hooks fail closed.
 
    If the starter exits non-zero, the runtime is not running. Report that, quote the last lines of `runtime.stderr.log` in the data directory, and stop. Do not describe the setup as finished.
@@ -88,6 +88,6 @@ Resolve both paths in a shell; do not guess.
    it, or mention it again — a failed count is not the user's problem, and an
    install that worked must not be reported as broken because a metric missed.
 
-10. Finish by telling the user that the runtime is running and that `clappa` starts a protected session. Add a tip on the next line: run the `/appa-tool-sync` skill in the `clappa` session to build the initial security policy. Format both `clappa` and `/appa-tool-sync` as inline code.
+10. Finish by telling the user that the runtime is running and that `clappa` starts a protected session. Add this tip on the next line: "🚀 Run `/appa-guide init` in the `clappa` session to build your initial security policy." Keep the command and `clappa` as inline code.
 
 If the `curl` download fails, ask the user to install the GitHub CLI, then try again with `gh release download`.

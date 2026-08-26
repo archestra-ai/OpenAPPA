@@ -22,9 +22,8 @@ receives it, in the `Agent` tool's result.
 ## What is here
 
 - `plugin/` — the Claude Code plugin: `hooks/hooks.json`, the `appa`
-  MCP server (`.mcp.json`), the `appa-tool-sync` skill (declares
-  installed MCP tools in the running runtime's policy and marks which
-  of them read private data or send data outward), and
+  MCP server (`.mcp.json`), the `appa-guide` skill (builds the initial
+  tool policy and guides later config changes), and
   `statusline.sh` plus `statusline.ps1`.
 - `.claude-plugin/marketplace.json` — the marketplace manifest;
   `claude plugin marketplace add` points at this directory.
@@ -127,7 +126,7 @@ The command must print `ok`.
 
 The default policy names only Claude Code's built-in tools. APPA blocks every
 installed MCP tool until the policy names it. Start `clappa` and run
-`/appa-tool-sync`. The skill exists only in protected sessions. It inventories MCP
+`/appa-guide init`. The skill exists only in protected sessions. It inventories MCP
 servers, proposes one policy entry per tool, and marks which tools read data
 that must stay in the session or send data outward. It asks once about servers
 it cannot judge. You review the complete proposal before it writes anything.
