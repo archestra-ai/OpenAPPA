@@ -83,7 +83,11 @@ export function SearchModal({ isOpen, onClose }: { isOpen: boolean; onClose: () 
         {query.trim() !== "" && (
           <div className="search-results">
             {results.length === 0 ? (
-              <div className="search-empty">No results found for &ldquo;{query}&rdquo;</div>
+              /* `ph-mask` is PostHog's default mask-text class: session replay
+                 records this element's text as asterisks. Masking the input
+                 itself is not enough — this line echoes what was typed back
+                 into the DOM, where it is ordinary page text. */
+              <div className="search-empty ph-mask">No results found for &ldquo;{query}&rdquo;</div>
             ) : (
               results.map((result, idx) => (
                 <a
