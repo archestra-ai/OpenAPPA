@@ -980,22 +980,17 @@ impl RuntimeEngine {
         entropy: &OfferNonce,
         spawn: bool,
     ) -> Result<EngineDecision, EngineRefusal> {
-        let tools = self.resolve_tool_resolutions(view, trajectory, call, evidence);
-        let memberships = self.resolve_memberships(call, evidence);
-        let (tool_pins, memberships) = match (tools, memberships) {
-            (Ok(tool_pins), Ok(memberships)) => (tool_pins, memberships),
-            (Err(Resolution::Feedback(text)), _) | (_, Err(Resolution::Feedback(text))) => return Ok(deny(text)),
-            (tools, memberships) => {
-                let requests = [tools.err(), memberships.map(|_| ()).err()]
-                    .into_iter()
-                    .flatten()
-                    .flat_map(|missing| match missing {
-                        Resolution::Consult(requests) => requests,
-                        Resolution::Feedback(_) => Vec::new(),
-                    })
-                    .collect();
-                return Ok(EngineDecision::deliver(Next::ResolveExternal(requests)));
-            }
+        let resolved = match self
+            .engine
+            .resolve_call(ToolName::new(call.tool.clone()), call.arguments.get().as_bytes())
+        {
+            Ok(resolved) => resolved,
+            Err(error) => return Ok(deny(malformed_feedback(&error))),
+        };
+        let (tool_pins, memberships) = match self.answers_for(view, trajectory, &resolved, evidence) {
+            Ok(answers) => answers,
+            Err(Resolution::Feedback(text)) => return Ok(deny(text)),
+            Err(Resolution::Consult(requests)) => return Ok(EngineDecision::deliver(Next::ResolveExternal(requests))),
         };
         let proposed = CoreProposedCall {
             tool: ToolName::new(call.tool.clone()),
@@ -1274,31 +1269,53 @@ impl RuntimeEngine {
             }
             OfferConsult::Replay(outcome) => outcome,
             OfferConsult::Accept => OfferOutcome::Approved(Vec::new()),
+            OfferConsult::Rewrite { sanitizer, call } => {
+                let arguments = call.canonical_arguments();
+                let source = RawResultDigest::of(arguments.canonical_bytes());
+                let derived =
+                    match sanitizer_derived(evidence, &sanitizer, source, ValueBody::new(arguments.canonical_text())) {
+                        Ok(derived) => derived,
+                        Err(next) => return Ok(next),
+                    };
+                // A rewrite whose arguments select another ordered contract is a new call under
+                // it: that contract's resolvers and placeholder groups are consulted about the
+                // rewritten arguments before the engine judges it. A rewrite that stays in its
+                // contract carries the call's own answers, and a derivation the engine cannot
+                // mint a call from is the engine's to refuse.
+                let (tool_resolutions, memberships) = match self
+                    .engine
+                    .resolve_call(call.tool().clone(), derived.as_str().as_bytes())
+                {
+                    Ok(rewritten) if rewritten.contract_id() != call.contract_id() => {
+                        match self.answers_for(view, trajectory, &rewritten, evidence) {
+                            Ok(answers) => answers,
+                            Err(Resolution::Consult(requests)) => {
+                                return Ok(EngineDecision::deliver(Next::ResolveExternal(requests)));
+                            }
+                            Err(Resolution::Feedback(text)) => return Ok(no_answer(text)),
+                        }
+                    }
+                    Ok(_) | Err(_) => (Vec::new(), Vec::new()),
+                };
+                OfferOutcome::Derived(Evidence::Rewrite {
+                    sanitizer,
+                    source,
+                    derived,
+                    tool_resolutions,
+                    memberships,
+                })
+            }
             OfferConsult::Sanitizer {
                 sanitizer,
                 source,
                 body,
-            } => match sanitizer_derivation(evidence, sanitizer.as_str(), &source) {
-                SanitizerAnswer::Missing => {
-                    return Ok(EngineDecision::deliver(Next::ResolveExternal(vec![
-                        ExternalRequest::Sanitizer {
-                            sanitizer: sanitizer.as_str().to_string(),
-                            source,
-                            body,
-                        },
-                    ])));
-                }
-                SanitizerAnswer::NoAnswer => {
-                    return Ok(no_answer(format!(
-                        "[appa] sanitizer {} gave no answer; the offer stands and may be executed again",
-                        sanitizer.as_str()
-                    )));
-                }
-                SanitizerAnswer::Derived(derived) => OfferOutcome::Derived(Evidence::Sanitizer {
+            } => match sanitizer_derived(evidence, &sanitizer, source, body) {
+                Ok(derived) => OfferOutcome::Derived(Evidence::Sanitizer {
                     sanitizer,
                     source,
                     derived,
                 }),
+                Err(next) => return Ok(next),
             },
             OfferConsult::Authorities { call, required } => {
                 match self.offer_authorities(&views, &engine_offer, &call, &required, evidence) {
@@ -1582,23 +1599,45 @@ impl RuntimeEngine {
         Ok(EngineDecision { append, then })
     }
 
-    fn resolve_tool_resolutions(
+    /// Every answer a call's contract declares, from the evidence gathered so far, or the
+    /// consults still owed: the resolvers it uses and the placeholder groups its arguments name.
+    fn answers_for(
         &self,
         view: &EngineView,
         trajectory: &TrajectoryId,
-        call: &ProposedCall,
+        resolved: &ResolvedCall,
         evidence: &[ExternalEvidence],
-    ) -> Result<Vec<PinnedToolResolution>, Resolution> {
-        let tool = ToolName::new(call.tool.clone());
-        let resolved = self
-            .engine
-            .resolve_call(tool, call.arguments.get().as_bytes())
-            .map_err(|error| Resolution::Feedback(malformed_feedback(&error)))?;
+    ) -> Result<(Vec<PinnedToolResolution>, Vec<PinnedMembership>), Resolution> {
         let contract = self
             .engine
             .registry()
-            .contract(&resolved)
+            .contract(resolved)
             .expect("a resolved call names its registered contract");
+        let tools = self.tool_resolutions_for(view, trajectory, contract, resolved, evidence);
+        let memberships = self.memberships_for(contract, resolved, evidence);
+        match (tools, memberships) {
+            (Ok(tool_pins), Ok(memberships)) => Ok((tool_pins, memberships)),
+            (Err(Resolution::Feedback(text)), _) | (_, Err(Resolution::Feedback(text))) => {
+                Err(Resolution::Feedback(text))
+            }
+            (Err(Resolution::Consult(mut tools)), Err(Resolution::Consult(memberships))) => {
+                tools.extend(memberships);
+                Err(Resolution::Consult(tools))
+            }
+            (Err(Resolution::Consult(requests)), Ok(_)) | (Ok(_), Err(Resolution::Consult(requests))) => {
+                Err(Resolution::Consult(requests))
+            }
+        }
+    }
+
+    fn tool_resolutions_for(
+        &self,
+        view: &EngineView,
+        trajectory: &TrajectoryId,
+        contract: &appa_engine::contract::ToolContract,
+        resolved: &ResolvedCall,
+        evidence: &[ExternalEvidence],
+    ) -> Result<Vec<PinnedToolResolution>, Resolution> {
         if contract.uses.is_empty() {
             return Ok(Vec::new());
         }
@@ -1637,7 +1676,7 @@ impl RuntimeEngine {
                         chain.rank_of(name).ok_or_else(|| {
                             Resolution::Feedback(format!(
                                 "[appa] {}: dynamic resolver {} returned an unknown {what}",
-                                call.tool,
+                                resolved.tool().as_str(),
                                 uses.resolver.as_str()
                             ))
                         })
@@ -1673,7 +1712,7 @@ impl RuntimeEngine {
                         None => {
                             return Err(Resolution::Feedback(format!(
                                 "[appa] {}: dynamic resolver {} returned malformed fields",
-                                call.tool,
+                                resolved.tool().as_str(),
                                 uses.resolver.as_str()
                             )));
                         }
@@ -1903,18 +1942,12 @@ impl RuntimeEngine {
         ))
     }
 
-    fn resolve_memberships(
+    fn memberships_for(
         &self,
-        call: &ProposedCall,
+        contract: &appa_engine::contract::ToolContract,
+        resolved: &ResolvedCall,
         evidence: &[ExternalEvidence],
     ) -> Result<Vec<PinnedMembership>, Resolution> {
-        let tool = ToolName::new(call.tool.clone());
-        let Ok(resolved) = self.engine.resolve_call(tool, call.arguments.get().as_bytes()) else {
-            return Ok(Vec::new());
-        };
-        let Some(contract) = self.engine.registry().contract(&resolved) else {
-            return Ok(Vec::new());
-        };
         // Same fast path as the dynamic pass: no placeholder, nothing to read.
         if !contract.requires.label.audience.iter().any(|requirement| {
             matches!(
@@ -1926,7 +1959,7 @@ impl RuntimeEngine {
         }) {
             return Ok(Vec::new());
         }
-        let reads = appa_engine::check::group_reads(contract, &resolved);
+        let reads = appa_engine::check::group_reads(contract, resolved);
         if reads.is_empty() {
             return Ok(Vec::new());
         }
@@ -1934,7 +1967,9 @@ impl RuntimeEngine {
             let read = &reads[0];
             return Err(Resolution::Feedback(format!(
                 "[appa] {}: argument {} names {}, but this deployment registers no membership resolver; the call was not checked",
-                call.tool, read.argument, read.group
+                resolved.tool().as_str(),
+                read.argument,
+                read.group
             )));
         };
         let mut pins = Vec::new();
@@ -1962,10 +1997,20 @@ impl RuntimeEngine {
                 Some(Some(readers)) => {
                     match PinnedMembership::new(read.argument.clone(), readers.into_iter().map(ReaderId::new)) {
                         Ok(pin) => pins.push(pin),
-                        Err(_) => return Err(Resolution::Feedback(unresolved_group(&call.tool, &read.group))),
+                        Err(_) => {
+                            return Err(Resolution::Feedback(unresolved_group(
+                                resolved.tool().as_str(),
+                                &read.group,
+                            )));
+                        }
                     }
                 }
-                Some(None) => return Err(Resolution::Feedback(unresolved_group(&call.tool, &read.group))),
+                Some(None) => {
+                    return Err(Resolution::Feedback(unresolved_group(
+                        resolved.tool().as_str(),
+                        &read.group,
+                    )));
+                }
             }
         }
         if !requests.is_empty() {
@@ -2317,6 +2362,30 @@ fn sanitizer_evidence(evidence: &[ExternalEvidence]) -> Vec<Evidence> {
             _ => None,
         })
         .collect()
+}
+
+/// The sanitizer's derivation from the evidence gathered so far, or what the offer does without
+/// one: asks for it, or stands for a later deliberate retry after the sanitizer gave no answer.
+fn sanitizer_derived(
+    evidence: &[ExternalEvidence],
+    sanitizer: &appa_engine::names::SanitizerName,
+    source: RawResultDigest,
+    body: ValueBody,
+) -> Result<ValueBody, EngineDecision> {
+    match sanitizer_derivation(evidence, sanitizer.as_str(), &source) {
+        SanitizerAnswer::Derived(derived) => Ok(derived),
+        SanitizerAnswer::Missing => Err(EngineDecision::deliver(Next::ResolveExternal(vec![
+            ExternalRequest::Sanitizer {
+                sanitizer: sanitizer.as_str().to_string(),
+                source,
+                body,
+            },
+        ]))),
+        SanitizerAnswer::NoAnswer => Err(no_answer(format!(
+            "[appa] sanitizer {} gave no answer; the offer stands and may be executed again",
+            sanitizer.as_str()
+        ))),
+    }
 }
 
 fn sanitizer_derivation(evidence: &[ExternalEvidence], name: &str, source: &RawResultDigest) -> SanitizerAnswer {
@@ -2788,13 +2857,14 @@ fn block_feedback(views: &Views, planned: &PlannedBlock, offers: &[(OfferId, Pla
 #[cfg(test)]
 mod tests {
     use super::{
-        ExternalEvidence, ExternalRequest, OfferId, ProposedCall, Resolution, RuntimeEngine, TrajectoryId,
-        audience_wire, remedy_instruction, remedy_lines, terminal_safe,
+        ExternalEvidence, ExternalRequest, OfferId, Resolution, RuntimeEngine, TrajectoryId, audience_wire,
+        remedy_instruction, remedy_lines, terminal_safe,
     };
     use crate::external::{CastAudience, RequiredAudienceAnswer, ToolResolutionAnswer};
     use appa_engine::contract::RequiredAudience;
     use appa_engine::label::{Audience, ReaderId};
     use appa_engine::plan::{ExecutableRemedyPlan, PlanId, PlannedBlock, RemedyPlan, RemedyStep};
+    use appa_engine::value::ToolName;
     use std::collections::BTreeSet;
 
     #[test]
@@ -2824,39 +2894,46 @@ mod tests {
         let view = engine
             .validated(engine.root_opening(&trajectory, b"test policy"), &trajectory, 0)
             .expect("the root opening builds a view");
-        let call = ProposedCall {
-            tool: "lookup".to_string(),
-            arguments: serde_json::value::RawValue::from_string(
-                serde_json::json!({"nested": {"id": 7}, "deep": true}).to_string(),
+        let call = engine
+            .engine
+            .resolve_call(
+                ToolName::new("lookup"),
+                serde_json::json!({"nested": {"id": 7}, "deep": true})
+                    .to_string()
+                    .as_bytes(),
             )
-            .expect("arguments serialize"),
-        };
-        let (consulted_args, consulted_context) = match engine.resolve_tool_resolutions(&view, &trajectory, &call, &[])
-        {
-            Err(Resolution::Consult(requests)) => match requests.as_slice() {
-                [ExternalRequest::ToolResolution { uses, args, context }] => {
-                    assert_eq!(uses.resolver.as_str(), "classifier");
-                    // The resolver declares no inputs, so `args` is the complete call.
-                    assert_eq!(
-                        args,
-                        &serde_json::json!({
-                            "name": "lookup",
-                            "description": "Looks one record up.",
-                            "arguments": {"nested": {"id": 7}, "deep": true},
-                        })
-                    );
-                    assert_eq!(context.trust_ranks, ["suspicious", "trusted"]);
-                    assert_eq!(context.attention_marks, ["privacy-review"]);
-                    assert_eq!(context.static_attention, ["static-review"]);
-                    (
-                        appa_engine::contract::ResolverArgsDigest::of(&appa_engine::params::canonical_bytes(args)),
-                        context.clone(),
-                    )
-                }
-                other => panic!("expected one tool-resolution consult, got {other:?}"),
-            },
-            other => panic!("an unanswered tool resolver must consult, got {other:?}"),
-        };
+            .expect("the call resolves");
+        let contract = engine
+            .engine
+            .registry()
+            .contract(&call)
+            .expect("the call names its contract");
+        let (consulted_args, consulted_context) =
+            match engine.tool_resolutions_for(&view, &trajectory, contract, &call, &[]) {
+                Err(Resolution::Consult(requests)) => match requests.as_slice() {
+                    [ExternalRequest::ToolResolution { uses, args, context }] => {
+                        assert_eq!(uses.resolver.as_str(), "classifier");
+                        // The resolver declares no inputs, so `args` is the complete call.
+                        assert_eq!(
+                            args,
+                            &serde_json::json!({
+                                "name": "lookup",
+                                "description": "Looks one record up.",
+                                "arguments": {"nested": {"id": 7}, "deep": true},
+                            })
+                        );
+                        assert_eq!(context.trust_ranks, ["suspicious", "trusted"]);
+                        assert_eq!(context.attention_marks, ["privacy-review"]);
+                        assert_eq!(context.static_attention, ["static-review"]);
+                        (
+                            appa_engine::contract::ResolverArgsDigest::of(&appa_engine::params::canonical_bytes(args)),
+                            context.clone(),
+                        )
+                    }
+                    other => panic!("expected one tool-resolution consult, got {other:?}"),
+                },
+                other => panic!("an unanswered tool resolver must consult, got {other:?}"),
+            };
 
         // An answer given under a different label context is not evidence for this call:
         // the binding consults again instead of replaying it.
@@ -2866,9 +2943,10 @@ mod tests {
             ..consulted_context.clone()
         };
         assert!(matches!(
-            engine.resolve_tool_resolutions(
+            engine.tool_resolutions_for(
                 &view,
                 &trajectory,
+                contract,
                 &call,
                 &[ExternalEvidence::ToolResolution {
                     resolver: "classifier".to_string(),
@@ -2890,9 +2968,10 @@ mod tests {
         ));
 
         let pins = engine
-            .resolve_tool_resolutions(
+            .tool_resolutions_for(
                 &view,
                 &trajectory,
+                contract,
                 &call,
                 &[ExternalEvidence::ToolResolution {
                     resolver: "classifier".to_string(),
@@ -2929,17 +3008,20 @@ mod tests {
 
         // An answer given for other arguments is not evidence for this call either: the
         // resolver is consulted again rather than handed a sibling's classification.
-        let other_call = ProposedCall {
-            tool: "lookup".to_string(),
-            arguments: serde_json::value::RawValue::from_string(
-                serde_json::json!({"nested": {"id": 8}, "deep": true}).to_string(),
+        let other_call = engine
+            .engine
+            .resolve_call(
+                ToolName::new("lookup"),
+                serde_json::json!({"nested": {"id": 8}, "deep": true})
+                    .to_string()
+                    .as_bytes(),
             )
-            .expect("arguments serialize"),
-        };
+            .expect("the call resolves");
         assert!(matches!(
-            engine.resolve_tool_resolutions(
+            engine.tool_resolutions_for(
                 &view,
                 &trajectory,
+                contract,
                 &other_call,
                 &[ExternalEvidence::ToolResolution {
                     resolver: "classifier".to_string(),

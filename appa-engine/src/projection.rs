@@ -102,6 +102,14 @@ pub(crate) struct RecordedCandidate {
     pub(crate) via: crate::candidate::DerivedVia,
     pub(crate) derived: DerivedCandidate,
     pub(crate) lineage: SanitizerLineage,
+    /// The rewritten call the resolvers were last consulted about, where an input hop selected
+    /// another ordered contract on the way to this candidate. `None` where every hop stayed in
+    /// the proposal's contract — the proposal is then the call consulted — or where the fold met
+    /// no standing call to compare against.
+    pub(crate) consulted: Option<ResolvedCall>,
+    /// The group resolutions the hop that derived this candidate consumed: what a later read of
+    /// the candidate under its own contract inherits, as it inherits an offer's.
+    pub(crate) resolutions: Vec<GroupResolution>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -216,6 +224,26 @@ pub struct Projection {
     offers: BTreeMap<crate::value::OfferId, RecordedOffer>,
     approvals: BTreeMap<crate::value::OfferId, PreparedApproval>,
     versions: crate::basis::Versions,
+}
+
+/// The proposal a call subject names in the batches a trajectory decided: the batch it names,
+/// decided by the subject's own trajectory, at the position it names.
+fn proposal_of<'a>(
+    decided: &'a BTreeMap<crate::transition::ProposalBatchId, DecidedBatch>,
+    subject: &SubjectKey,
+) -> Option<&'a ResolvedCall> {
+    let SubjectKey::Call {
+        trajectory,
+        batch,
+        position,
+    } = subject
+    else {
+        return None;
+    };
+    let decided = decided.get(batch)?;
+    (&decided.trajectory == trajectory)
+        .then(|| decided.proposals.get(*position as usize))
+        .flatten()
 }
 
 impl Projection {
@@ -560,6 +588,7 @@ impl Projection {
                     via,
                     derived,
                     lineage,
+                    resolutions,
                     ..
                 } => {
                     if let crate::basis::SubjectKey::Return(id) = subject
@@ -572,12 +601,38 @@ impl Projection {
                             .derivation_unresolved
                             .extend(derivation_unresolved.iter().copied());
                     }
+                    // A rewrite that selects another ordered contract was consulted afresh and
+                    // is the call the answers of every later same-contract rewrite are about;
+                    // one that stays in its contract carries its predecessor's. Read before this
+                    // candidate replaces the one it descends from.
+                    let consulted = match derived {
+                        DerivedCandidate::Call { call, .. } => {
+                            let held = candidates.get(subject);
+                            let standing = held
+                                .and_then(|held| match &held.derived {
+                                    DerivedCandidate::Call { call, .. } => Some(call),
+                                    DerivedCandidate::Result { .. } | DerivedCandidate::Return { .. } => None,
+                                })
+                                .or_else(|| proposal_of(decided, subject));
+                            match standing {
+                                Some(standing) if standing.contract_id() != call.contract_id() => Some(call.clone()),
+                                Some(_) => held.and_then(|held| held.consulted.clone()),
+                                None => None,
+                            }
+                        }
+                        DerivedCandidate::Result { .. } | DerivedCandidate::Return { .. } => None,
+                    };
                     candidates.insert(
                         subject.clone(),
                         RecordedCandidate {
                             via: via.clone(),
                             derived: derived.clone(),
                             lineage: lineage.clone(),
+                            consulted,
+                            resolutions: match derived {
+                                DerivedCandidate::Call { .. } => resolutions.clone(),
+                                DerivedCandidate::Result { .. } | DerivedCandidate::Return { .. } => Vec::new(),
+                            },
                         },
                     );
                 }
@@ -1292,28 +1347,40 @@ impl Views<'_> {
         }
     }
 
-    /// The call this subject was proposed as, before any input hop rewrote it. A resolver
-    /// answered about this call and is never asked again, so it is the second call a pinned
-    /// answer may be admitted for — see [`crate::check::validate_tool_resolutions`]. `None`
-    /// wherever the record does not name one, which fails the pin closed: a subject that is
-    /// not a call's, a batch this view's trajectory did not decide, or a position that batch
-    /// does not hold.
+    /// The call this subject was proposed as, before any input hop rewrote it. `None` wherever
+    /// the record does not name one: a subject that is not a call's, a batch this view's
+    /// trajectory did not decide, or a position that batch does not hold.
     pub(crate) fn proposed_call(&self, subject: &SubjectKey) -> Option<&ResolvedCall> {
-        let SubjectKey::Call {
-            trajectory,
-            batch,
-            position,
-        } = subject
-        else {
+        let SubjectKey::Call { trajectory, .. } = subject else {
             return None;
         };
         if trajectory != self.trajectory() {
             return None;
         }
-        let decided = self.decided_batch(batch)?;
-        (&decided.trajectory == trajectory)
-            .then(|| decided.proposals.get(*position as usize))
-            .flatten()
+        proposal_of(&self.projection.decided, subject)
+    }
+
+    /// The call this subject's resolvers were last consulted about: the proposal, or the latest
+    /// input hop whose rewrite selected another ordered contract. A same-contract rewrite carries
+    /// that call's answers without consulting again, so it is the call those answers may be about —
+    /// see [`crate::check::validate_tool_resolutions`]. `None` wherever the record does not name
+    /// one, which fails the pin closed.
+    pub(crate) fn consulted_call(&self, subject: &SubjectKey) -> Option<&ResolvedCall> {
+        self.projection
+            .candidates
+            .get(subject)
+            .and_then(|held| held.consulted.as_ref())
+            .or_else(|| self.proposed_call(subject))
+    }
+
+    /// The group resolutions the hop that derived this subject's candidate consumed; empty for a
+    /// subject no hop has touched.
+    pub(crate) fn candidate_resolutions(&self, subject: &SubjectKey) -> &[GroupResolution] {
+        self.projection
+            .candidates
+            .get(subject)
+            .map(|held| held.resolutions.as_slice())
+            .unwrap_or_default()
     }
 
     /// The call this subject stands on now: the candidate an input hop derived, or the proposal
@@ -1465,6 +1532,92 @@ mod tests {
         ] {
             assert_eq!(views.proposed_call(&other), None, "a subject that is not a call's");
         }
+    }
+
+    #[test]
+    fn the_consulted_call_is_the_proposal_until_a_hop_selects_another_contract() {
+        let read = |path: &str, contract: usize| {
+            ResolvedCall::new_keyed(
+                ToolName::new("read"),
+                crate::value::ToolContractId::new(contract).unwrap(),
+                crate::params::test_arguments(&json!({ "path": path })),
+            )
+        };
+        let batch = crate::transition::ProposalBatchId::new("b1");
+        let subject = |trajectory: &str| SubjectKey::Call {
+            trajectory: traj(trajectory),
+            batch: batch.clone(),
+            position: 0,
+        };
+        let block = crate::value::BlockId::of_proposal(
+            &crate::value::OfferNonce::new([7u8; 32]),
+            &traj("a"),
+            &batch,
+            0,
+            &read("private/q3.md", 1).digest(),
+        );
+        let hop = |trajectory: &str, call: ResolvedCall| Fact::CandidateDerived {
+            trajectory: traj(trajectory),
+            subject: subject(trajectory),
+            via: crate::candidate::DerivedVia::Sanitizer {
+                name: SanitizerName::new("redact"),
+                transition: crate::authority::Transition::Audience {
+                    from_includes: Audience::Public,
+                    to: Audience::Public,
+                },
+            },
+            derived: DerivedCandidate::Call {
+                source: crate::value::RawResultDigest::of(&[]),
+                from: crate::value::OfferId::of_plan(&block, 0, b"plan"),
+                call,
+                label: base().into_label(),
+            },
+            lineage: SanitizerLineage::default(),
+            resolutions: vec![],
+        };
+        let consulted = |log: &[Fact], trajectory: &str| {
+            build(log)
+                .view(&traj(trajectory))
+                .consulted_call(&subject(trajectory))
+                .cloned()
+        };
+
+        let mut log = vec![opened("a")];
+        log.extend(fork_pair("a", "b", ForkSnapshot::freeze(base(), [], [])));
+        log.push(Fact::ProposalBatchDecided {
+            trajectory: traj("a"),
+            batch: batch.clone(),
+            proposals: vec![read("private/q3.md", 1)],
+            spawn: None,
+            released: vec![],
+            resolutions: vec![],
+        });
+        assert_eq!(consulted(&log, "a"), Some(read("private/q3.md", 1)), "the proposal");
+        log.push(hop("a", read("private/q4.md", 1)));
+        assert_eq!(
+            consulted(&log, "a"),
+            Some(read("private/q3.md", 1)),
+            "a hop within the contract"
+        );
+        log.push(hop("a", read("public/q3.md", 0)));
+        assert_eq!(
+            consulted(&log, "a"),
+            Some(read("public/q3.md", 0)),
+            "a hop that selects another"
+        );
+        log.push(hop("a", read("public/q4.md", 0)));
+        assert_eq!(
+            consulted(&log, "a"),
+            Some(read("public/q3.md", 0)),
+            "and a hop within that one"
+        );
+        log.push(hop("a", read("private/q5.md", 1)));
+        assert_eq!(consulted(&log, "a"), Some(read("private/q5.md", 1)), "back again");
+
+        // A candidate on a subject whose batch its own trajectory never decided has no standing
+        // call to compare against: no consulted call, never the candidate itself, and no panic.
+        log.push(hop("b", read("public/q3.md", 0)));
+        assert_eq!(consulted(&log, "b"), None);
     }
 
     #[test]

@@ -460,31 +460,33 @@ pub(crate) enum ToolResolutionRefusal {
     OutsidePolicy(String),
 }
 
-/// Which calls a checked call's pinned answers may have been given for. A resolver answers once,
-/// about the call the agent proposed, and an input-substitution remedy rewrites that call's
-/// arguments through a registered sanitizer without consulting again — so a rewritten call's
-/// answers were given for the proposal it descends from, not for its own arguments.
+/// Which call a checked call's pinned answers may have been given for. A resolver is consulted
+/// about a proposal, and again about a sanitizer's rewrite of it only when the rewritten arguments
+/// select another ordered contract; a rewrite that stays in its contract carries the answers of the
+/// call last consulted without consulting again — so its answers were given for that call, not for
+/// its own arguments.
 ///
 /// This settles what a pinned answer may be *about*. What the answer itself says is bound to the
 /// record elsewhere, by the complete-[`ResolvedCall`] comparisons a substitution and an opening
 /// each pass; neither check stands in for the other.
 pub(crate) enum AnsweredFor<'a> {
-    /// The call is the proposal. Every pin rebuilds this call's own arguments or it is foreign.
+    /// The call was consulted about itself: a proposal, or a rewrite that selected another
+    /// contract. Every pin rebuilds this call's own arguments or it is foreign.
     ThisCall,
-    /// The proposal on the record this call descends from. A pin rebuilds either call's
-    /// arguments. A caller that cannot read the proposal refuses its own record rather than
-    /// falling back here.
-    Proposal(&'a ResolvedCall),
+    /// The call on the record the resolvers were last consulted about, which this call descends
+    /// from through rewrites within one contract. A pin rebuilds that call's arguments. A caller
+    /// that cannot read it refuses its own record rather than falling back here.
+    Consulted(&'a ResolvedCall),
 }
 
 impl AnsweredFor<'_> {
     /// The call a pin must rebuild the `args` of. One call, not a set: a pin is only ever created
-    /// about a proposal, so where a proposal is on the record it is the whole test — a rewritten
-    /// call that happens to rebuild its own `args` rebuilds the proposal's too.
+    /// about the call consulted, so where that call is on the record it is the whole test — a
+    /// rewritten call that happens to rebuild its own `args` rebuilds the consulted call's too.
     fn reference<'a>(&'a self, call: &'a ResolvedCall) -> &'a ResolvedCall {
         match self {
             AnsweredFor::ThisCall => call,
-            AnsweredFor::Proposal(proposal) => proposal,
+            AnsweredFor::Consulted(consulted) => consulted,
         }
     }
 }
@@ -840,7 +842,7 @@ mod tests {
     }
 
     #[test]
-    fn an_answer_is_evidence_only_for_the_call_or_the_proposal_it_was_given_about() {
+    fn an_answer_is_evidence_only_for_the_call_or_the_consulted_call_it_was_given_about() {
         use crate::names::DynamicResolverName;
         use crate::registry::{Registry, RegistryConfig};
         use crate::value::ToolName;
@@ -925,37 +927,38 @@ mod tests {
             ),
             Err(ToolResolutionRefusal::Foreign(resolver)) if resolver == "acl"
         ));
-        // A sanitizer rewrote `payroll.md` into `packet.md`. The answer is about the proposal on
-        // the record, so it stands on the rewrite the resolver was never asked about.
+        // A sanitizer rewrote `payroll.md` into `packet.md` within one contract. The answer is
+        // about the call last consulted, on the record, so it stands on the rewrite the resolver
+        // was never asked about.
         assert!(
             validate_tool_resolutions(
                 &registry,
                 contract,
                 &packet.clone().with_tool_resolutions(vec![answer_for("payroll.md")]),
-                AnsweredFor::Proposal(&payroll),
+                AnsweredFor::Consulted(&payroll),
             )
             .is_ok()
         );
-        // A third file the resolver was asked about neither: naming a proposal does not admit an
-        // answer about some other call.
+        // A third file the resolver was asked about neither: naming the consulted call does not
+        // admit an answer about some other call.
         assert!(matches!(
             validate_tool_resolutions(
                 &registry,
                 contract,
                 &packet.clone().with_tool_resolutions(vec![answer_for("ledger.md")]),
-                AnsweredFor::Proposal(&payroll),
+                AnsweredFor::Consulted(&payroll),
             ),
             Err(ToolResolutionRefusal::Foreign(resolver)) if resolver == "acl"
         ));
-        // Nor an answer about the rewrite itself. A resolver is asked about a proposal and never
-        // about a rewrite of one, so an answer that rebuilds only the rewrite came from nowhere
-        // this record names.
+        // Nor an answer about the rewrite itself. A rewrite within one contract is never
+        // consulted about, so an answer that rebuilds only the rewrite came from nowhere this
+        // record names.
         assert!(matches!(
             validate_tool_resolutions(
                 &registry,
                 contract,
                 &packet.with_tool_resolutions(vec![answer_for("packet.md")]),
-                AnsweredFor::Proposal(&payroll),
+                AnsweredFor::Consulted(&payroll),
             ),
             Err(ToolResolutionRefusal::Foreign(resolver)) if resolver == "acl"
         ));
