@@ -37,7 +37,7 @@ const TERMS = {
 
   /* Tool contracts */
   "Tool(argument:pattern)":
-    "An ordered tool contract selector. OpenAPPA uses the first contract whose top-level string argument matches the pattern. An asterisk matches any text; a bare tool name is the fallback. A sanitizer rewrite that selects another contract is judged as a new call under it.",
+    "An ordered tool contract selector. A selector holds one or more comma-separated argument:pattern clauses, and a contract matches only when every clause matches its own top-level string argument. OpenAPPA uses the first matching contract. An asterisk matches any text; a bare tool name is the fallback. A sanitizer rewrite that selects another contract is judged as a new call under it.",
   delta:
     "The label contribution of an admitted call result. A delta never expands permissions: it intersects reader sets, lowers the trust rank, or leaves the trajectory label unchanged.",
   requires:

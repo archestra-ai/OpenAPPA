@@ -73,7 +73,7 @@ requires = { trust = "trusted", attention = ["hitl"] }
 delta = {}
 ```
 
-Text inside parentheses matches one argument. `*` matches any text.
+Text inside parentheses matches arguments. Write one or more `argument:pattern` clauses and separate them with commas; every clause must match. `*` matches any text.
 
 A bare tool name is the default. It matches when no earlier rule did.
 

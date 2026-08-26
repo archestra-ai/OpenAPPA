@@ -15,10 +15,29 @@ use crate::value::{ToolContractId, ToolName};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(crate) enum ToolMatcher {
     Bare,
-    Argument {
-        argument: String,
-        pattern: Vec<PatternPart>,
-    },
+    Arguments(ArgumentPatterns),
+}
+
+/// A non-empty conjunction of argument patterns, keyed by argument name. The map is the
+/// normal form: a conjunction is commutative and one argument carries one pattern, so
+/// `tool(owner:x,repo:y)` and `tool(repo:y,owner:x)` are the same matcher and the same
+/// policy identity. Non-emptiness is the constructor's invariant, so a matcher that would
+/// match every call vacuously cannot be built — that is what [`ToolMatcher::Bare`] is.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct ArgumentPatterns(BTreeMap<String, Vec<PatternPart>>);
+
+impl ArgumentPatterns {
+    /// The clause that proves a conjunction holds at least one: a conjunction is built from
+    /// it outwards, so the empty state has no constructor at all.
+    fn first(argument: String, pattern: Vec<PatternPart>) -> ArgumentPatterns {
+        ArgumentPatterns(BTreeMap::from([(argument, pattern)]))
+    }
+
+    /// Add a conjunct. `None` when `argument` is already declared: one argument carries one
+    /// pattern, so a repeated name is an authoring mistake rather than a second conjunct.
+    fn and(&mut self, argument: String, pattern: Vec<PatternPart>) -> Option<()> {
+        self.0.insert(argument, pattern).is_none().then_some(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -28,13 +47,31 @@ pub(crate) enum PatternPart {
 }
 
 impl ToolMatcher {
+    /// Every declared clause must match: the argument is present, it is a string, and its
+    /// value matches that clause's pattern. A missing or non-string argument does not match.
     fn matches(&self, arguments: &serde_json::Value) -> bool {
         match self {
             ToolMatcher::Bare => true,
-            ToolMatcher::Argument { argument, pattern } => arguments
-                .get(argument)
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|value| wildcard_matches(pattern, value)),
+            ToolMatcher::Arguments(ArgumentPatterns(clauses)) => {
+                let clause_matches = |(argument, pattern): (&String, &Vec<PatternPart>)| {
+                    arguments
+                        .get(argument)
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|value| wildcard_matches(pattern, value))
+                };
+                // Clauses that reject on a lookup run before clauses that scan the value. A
+                // conjunction is commutative, so this moves cost and never the answer: an
+                // absent argument or a literal mismatch rejects the selector without reading
+                // a long value at all. Argument-name order is the normal form the identity
+                // digest reads, never an evaluation order, and normalizing it is exactly what
+                // takes this choice away from the policy author.
+                let scans = |pattern: &[PatternPart]| pattern.contains(&PatternPart::Wildcard);
+                clauses
+                    .iter()
+                    .filter(|(_, pattern)| !scans(pattern))
+                    .all(clause_matches)
+                    && clauses.iter().filter(|(_, pattern)| scans(pattern)).all(clause_matches)
+            }
         }
     }
 }
@@ -78,63 +115,67 @@ fn push_wildcard(parts: &mut Vec<PatternPart>, literal: &mut String) {
     }
 }
 
-fn parse_contract_name(authored: &str) -> Result<(ToolName, ToolMatcher), LoadError> {
-    if !authored.contains(['(', ')']) {
-        return (!authored.is_empty())
-            .then(|| (ToolName::new(authored), ToolMatcher::Bare))
-            .ok_or_else(|| LoadError::MalformedToolSelector(authored.to_string()));
-    }
-    let Some(open) = authored.find('(') else {
-        return Err(LoadError::MalformedToolSelector(authored.into()));
-    };
-    let tool = &authored[..open];
-    let rest = &authored[open + 1..];
-    let Some(colon) = rest.find(':') else {
-        return Err(LoadError::MalformedToolSelector(authored.into()));
-    };
-    let argument = &rest[..colon];
-    let pattern_source = &rest[colon + 1..];
-    if tool.is_empty()
-        || tool.contains(['(', ')'])
-        || argument.is_empty()
-        || argument
-            .chars()
-            .any(|c| matches!(c, ':' | '(' | ')' | '\\') || c.is_control())
-    {
-        return Err(LoadError::MalformedToolSelector(authored.into()));
-    }
-    let mut chars = pattern_source.chars().peekable();
-    let mut parts = Vec::new();
-    let mut literal = String::new();
-    let mut closed = false;
-    while let Some(ch) = chars.next() {
-        match ch {
-            '*' => push_wildcard(&mut parts, &mut literal),
-            '\\' => match chars.next() {
-                Some(next @ ('*' | ')' | '\\')) => literal.push(next),
-                _ => return Err(LoadError::MalformedToolSelector(authored.into())),
-            },
-            ')' if chars.peek().is_none() => {
-                closed = true;
-                break;
-            }
-            ')' => return Err(LoadError::MalformedToolSelector(authored.into())),
-            other => literal.push(other),
+/// One `argument:pattern` clause, read from `chars` up to an unescaped `,` or the selector's
+/// closing `)`. Returns the clause and whether the selector closed here; `None` is a
+/// malformed clause.
+fn parse_clause(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<(String, Vec<PatternPart>, bool)> {
+    let mut argument = String::new();
+    loop {
+        match chars.next()? {
+            ':' => break,
+            // An argument name carries no escapes, so a backslash is malformed rather than
+            // an escape here, and the clause and selector delimiters cannot appear in one.
+            c if matches!(c, '(' | ')' | ',' | '\\') || c.is_control() => return None,
+            c => argument.push(c),
         }
     }
-    if !closed {
-        return Err(LoadError::MalformedToolSelector(authored.into()));
+    if argument.is_empty() {
+        return None;
     }
+    let mut parts = Vec::new();
+    let mut literal = String::new();
+    let closed = loop {
+        match chars.next()? {
+            '*' => push_wildcard(&mut parts, &mut literal),
+            '\\' => match chars.next()? {
+                next @ ('*' | ')' | '\\' | ',') => literal.push(next),
+                _ => return None,
+            },
+            ',' => break false,
+            ')' if chars.peek().is_none() => break true,
+            ')' => return None,
+            other => literal.push(other),
+        }
+    };
     if !literal.is_empty() {
         parts.push(PatternPart::Literal(literal));
     }
-    Ok((
-        ToolName::new(tool),
-        ToolMatcher::Argument {
-            argument: argument.into(),
-            pattern: parts,
-        },
-    ))
+    Some((argument, parts, closed))
+}
+
+/// Split an authored contract name into the tool it names and the matcher that selects it:
+/// `Tool` alone, or `Tool(argument:pattern[,argument:pattern...])`.
+fn parse_contract_name(authored: &str) -> Result<(ToolName, ToolMatcher), LoadError> {
+    let malformed = || LoadError::MalformedToolSelector(authored.to_string());
+    if !authored.contains(['(', ')']) {
+        return (!authored.is_empty())
+            .then(|| (ToolName::new(authored), ToolMatcher::Bare))
+            .ok_or_else(malformed);
+    }
+    let open = authored.find('(').ok_or_else(malformed)?;
+    let tool = &authored[..open];
+    if tool.is_empty() || tool.contains(')') {
+        return Err(malformed());
+    }
+    let mut chars = authored[open + 1..].chars().peekable();
+    let (argument, pattern, mut closed) = parse_clause(&mut chars).ok_or_else(malformed)?;
+    let mut clauses = ArgumentPatterns::first(argument, pattern);
+    while !closed {
+        let (argument, pattern, next) = parse_clause(&mut chars).ok_or_else(malformed)?;
+        clauses.and(argument, pattern).ok_or_else(malformed)?;
+        closed = next;
+    }
+    Ok((ToolName::new(tool), ToolMatcher::Arguments(clauses)))
 }
 
 #[cfg(test)]
@@ -1522,6 +1563,64 @@ mod tests {
 
         let multiple = parsed("read(path:*ab*bc)").expect("the selector is valid");
         assert!(multiple.matches(&arguments("xxabyyabzzbc")));
+
+        let dotted = parsed("read(a.b:x)").expect("a dotted argument name is valid");
+        assert!(dotted.matches(&serde_json::json!({ "a.b": "x" })));
+    }
+
+    /// The conjunction: a selector may name several arguments, and a call is selected only
+    /// when every one of them is present, a string, and matches its own pattern. The repo
+    /// case is `fork_repository(owner:archestra-ai,repo:website)`, which must not reach
+    /// another account's repository that happens to carry the same name.
+    #[test]
+    fn every_argument_clause_must_match_for_the_contract_to_select() {
+        let parsed = |name| parse_contract_name(name).map(|(_, matcher)| matcher);
+        let call = |owner, repo| serde_json::json!({ "owner": owner, "repo": repo });
+
+        // One clause still ignores every argument it does not name.
+        let repo_only = parsed("fork(repo:website)").expect("the selector is valid");
+        assert!(repo_only.matches(&call("archestra-ai", "website")));
+        assert!(repo_only.matches(&call("somebody-else", "website")));
+
+        let both = parsed("fork(owner:archestra-ai,repo:website)").expect("the selector is valid");
+        assert!(both.matches(&call("archestra-ai", "website")));
+        assert!(
+            !both.matches(&call("somebody-else", "website")),
+            "a foreign owner is out"
+        );
+        assert!(
+            !both.matches(&call("archestra-ai", "docs")),
+            "another repository is out"
+        );
+
+        // A clause whose argument is missing or is not a string fails the conjunction, the
+        // same as a single-argument selector does.
+        assert!(!both.matches(&serde_json::json!({ "repo": "website" })));
+        assert!(!both.matches(&serde_json::json!({ "owner": "archestra-ai" })));
+        assert!(!both.matches(&serde_json::json!({ "owner": 1, "repo": "website" })));
+        assert!(!both.matches(&serde_json::json!({ "owner": "archestra-ai", "repo": null })));
+
+        // Wildcards run independently per clause.
+        let wild = parsed("fork(owner:archestra-*,repo:web*)").expect("the selector is valid");
+        assert!(wild.matches(&call("archestra-ai", "website")));
+        assert!(wild.matches(&call("archestra-labs", "webhooks")));
+        assert!(!wild.matches(&call("archestra-ai", "docs")));
+        assert!(!wild.matches(&call("elsewhere", "website")));
+
+        // A comma separates clauses, so a literal comma is escaped. The clause after it is
+        // still read as a clause, not as pattern text.
+        let comma = parsed(r"search(query:a\,b)").expect("an escaped comma is valid");
+        assert!(comma.matches(&serde_json::json!({ "query": "a,b" })));
+        assert!(!comma.matches(&serde_json::json!({ "query": "ab" })));
+        let mixed = parsed(r"search(query:a\,b,scope:repo)").expect("the selector is valid");
+        assert!(mixed.matches(&serde_json::json!({ "query": "a,b", "scope": "repo" })));
+        assert!(!mixed.matches(&serde_json::json!({ "query": "a,b" })));
+
+        // Clause order carries no meaning, so the two spellings are one matcher.
+        assert_eq!(
+            parsed("fork(owner:archestra-ai,repo:website)").expect("the selector is valid"),
+            parsed("fork(repo:website,owner:archestra-ai)").expect("the selector is valid"),
+        );
     }
 
     #[test]
@@ -1540,6 +1639,20 @@ mod tests {
             "read(a(b:c)",
             "read(a\\:x)",
             "read(a\n:x)",
+            // A conjunction holds at least one clause, and every clause holds a name, a
+            // colon, and nothing empty between the commas.
+            "read()",
+            "read(a:x,)",
+            "read(,a:x)",
+            "read(a:x,,b:y)",
+            "read(a:x,b)",
+            "read(a:x,:y)",
+            "read(a:x,b(c:y)",
+            "read(a:x,b\\:y)",
+            // One argument carries one pattern, so a repeated name is refused rather than
+            // silently overwritten.
+            "read(a:x,a:y)",
+            "read(a:x,a:x)",
         ] {
             assert!(
                 matches!(parse_contract_name(malformed), Err(LoadError::MalformedToolSelector(_))),
