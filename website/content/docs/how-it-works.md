@@ -48,6 +48,8 @@ The current label is computed directly from all values admitted so far—combini
 label = admittedLabels.reduce(narrow, startingLabel)   // narrow only ever restricts
 ```
 
+This monotonic structure provides a **formally provable non-interference guarantee**: because label transitions strictly narrow permitted reader sets over an execution trace, sensitive data is mathematically prevented from leaking to unauthorized destinations across arbitrary multi-step tool sequences.
+
 ## Worked example: preserve reach or approve the exact call
 
 To see how this works in practice, consider an agent configured with three tools: `get_ticket_from_crm`, `send_email`, and `file_github_issue`:
@@ -83,24 +85,7 @@ name = "user"
 audience_missing = ["public"]                                # user can approve public egress
 ```
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-The policy names the components. The deployment says who performs them, in a
-separate `[externals]` table, one `[externals.<kind>.<name>]` entry per
-registered name — so swapping a redactor or moving approval to a person
-changes no policy:
-||||||| parent of 408e63a (docs: restructure how-it-works for high digestibility with early worked examples)
-The policy names the components. The deployment says who performs them, in a
-separate `[externals]` table — so swapping a redactor or moving approval to a
-person changes no policy:
-=======
-The policy declares the security bounds. The deployment specifies who executes them in a separate `[externals]` table (e.g. binding `user` to a human approval prompt or `remove_pii` to an HTTP scrubber):
->>>>>>> 408e63a (docs: restructure how-it-works for high digestibility with early worked examples)
-||||||| parent of 647b548 (docs: drop operational impact and tighten terminology in how-it-works)
-The policy declares the security bounds. The deployment specifies who executes them in a separate `[externals]` table (e.g. binding `user` to a human approval prompt or `remove_pii` to an HTTP scrubber):
-=======
 The policy declares the security bounds. The deployment specifies who executes them in a separate `[externals]` table (e.g. binding `user` to a human approval prompt or `remove_pii` to an HTTP sanitizer endpoint):
->>>>>>> 647b548 (docs: drop operational impact and tighten terminology in how-it-works)
 
 ```toml
 [externals.sanitizers.remove_pii]
