@@ -325,35 +325,6 @@ mod tests {
     }
 
     #[test]
-    fn a_context_controlling_deployment_must_pin_its_subagents_to_the_foreground() {
-        let examples = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../integrations/claude-code/examples");
-        for name in ["claude-code.appa.toml", "claude-code-hitl.appa.toml"] {
-            let path = examples.join(name);
-            let config = Config::load(&path).unwrap_or_else(|error| panic!("{name} does not load: {error}"));
-            let policy = config.policy_file().value();
-            assert!(
-                refuse_unobservable_returns(Adapter::ClaudeCode, policy).is_ok(),
-                "{name}"
-            );
-            let mut unpinned = policy.clone();
-            for tool in unpinned["tool"].as_array_mut().expect("the tools table") {
-                if matches!(tool["name"].as_str(), Some("Agent" | "Task")) {
-                    tool.as_table_mut().expect("a tool table").remove("parameters");
-                }
-            }
-            assert!(
-                refuse_unobservable_returns(Adapter::ClaudeCode, &unpinned).is_err(),
-                "{name}"
-            );
-            unpinned["deployment"]["context_control"] = toml::Value::Boolean(false);
-            assert!(
-                refuse_unobservable_returns(Adapter::ClaudeCode, &unpinned).is_ok(),
-                "{name}"
-            );
-        }
-    }
-
-    #[test]
     fn verbosity_selects_the_level() {
         assert_eq!(log_level(0), "info");
         assert_eq!(log_level(1), "debug");

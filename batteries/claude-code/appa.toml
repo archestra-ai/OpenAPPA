@@ -31,6 +31,10 @@ description = "Runs one shell command and returns its output."
 uses = [{ resolver = "claude-code.bash-requirements" }]
 
 [[policy.tool]]
+name = "BashOutput"
+delta = {}
+
+[[policy.tool]]
 name = "CronCreate"
 delta = {}
 
@@ -139,6 +143,12 @@ delta = {}
 
 [[policy.tool]]
 name = "SlashCommand"
+delta = {}
+
+# `Task` is the earlier name of `Agent`: the same spawn, the same contract.
+[[policy.tool]]
+name = "Task"
+parameters = { type = "object", additionalProperties = true, properties = { run_in_background = { type = "boolean", const = false } } }
 delta = {}
 
 [[policy.tool]]
