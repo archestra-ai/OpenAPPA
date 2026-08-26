@@ -26,10 +26,10 @@ version = 1
 Root rules take precedence over the battery. Add a root rule when a particular
 Bash command or Read path needs stricter, looser, or fully blocked behavior.
 
-## Require approval for kubectl
+## Example override
 
-Add these rules to the root config to require fresh human approval for every
-`kubectl` command:
+If needed, the battery can be overridden from the root config. For example,
+these root rules require fresh human approval for every `kubectl` command:
 
 ```toml
 [[policy.tool]]
