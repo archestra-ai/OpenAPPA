@@ -750,6 +750,94 @@ command = "{command}"
     );
 }
 
+/// One Ollama-shaped model endpoint on loopback: every `/api/chat` call is counted and
+/// answered with `content`, the JSON text a structured-output consult expects.
+async fn serve_ollama(content: &'static str) -> (String, Arc<Mutex<Vec<serde_json::Value>>>) {
+    let requests: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&requests);
+    let router = Router::new().route(
+        "/api/chat",
+        post(move |body: String| {
+            let seen = Arc::clone(&seen);
+            async move {
+                let request: serde_json::Value = serde_json::from_str(&body).expect("the request is JSON");
+                seen.lock().unwrap().push(request);
+                serde_json::json!({
+                    "model": "m",
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "message": { "role": "assistant", "content": content },
+                    "done": true,
+                    "done_reason": "stop",
+                })
+                .to_string()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("an ephemeral loopback port binds");
+    let addr = listener.local_addr().expect("the bound address is readable");
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.expect("the stub serves");
+    });
+    (format!("http://{addr}"), requests)
+}
+
+/// A resolver that names `builtin = "llm"` on its declaration is served by the
+/// deployment's `[externals.llm]` profile and by nothing under `[externals.dynamic]`: the
+/// endpoint bound for another resolver sees no request.
+#[tokio::test]
+async fn a_declared_llm_resolver_consults_the_llm_profile_and_no_binding() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (endpoint_url, classifier) = serve_classifier().await;
+    let (llm_url, llm_requests) = serve_ollama("{\"delta.trust\":\"trusted\"}").await;
+    let config = format!(
+        r#"
+[policy]
+version = 1
+
+[[policy.dynamic_resolver]]
+name = "classifier"
+builtin = "llm"
+returns = ["delta.trust"]
+
+[[policy.dynamic_resolver]]
+name = "other"
+returns = ["delta.audience"]
+
+[[policy.tool]]
+name = "fetch"
+description = "Fetches one URL and returns its body."
+parameters = {{ type = "object", properties = {{ url = {{ type = "string" }} }}, required = ["url"] }}
+uses = [{{ resolver = "classifier" }}]
+
+[externals]
+timeout_ms = 5000
+max_body_bytes = 65536
+
+[externals.dynamic.other]
+url = "{endpoint_url}"
+
+[externals.llm]
+provider = "ollama"
+model = "m"
+url = "{llm_url}"
+"#
+    );
+    let runtime = open_runtime(&dir, &config).await;
+    assert_eq!(
+        propose(&runtime, fetch("https://a.example")).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    let consults = llm_requests.lock().unwrap().clone();
+    assert_eq!(consults.len(), 1, "the profile answered the one consult");
+    assert_eq!(consults[0]["model"], "m", "the profile's model is the one consulted");
+    assert!(
+        classifier.requests().is_empty(),
+        "the declared resolver never reached a dynamic binding"
+    );
+}
+
 #[tokio::test]
 async fn a_builtin_resolver_never_touches_an_http_endpoint() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");

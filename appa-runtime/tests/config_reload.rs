@@ -183,6 +183,73 @@ async fn a_refused_edit_changes_nothing_and_the_gate_keeps_deciding() {
     }
 }
 
+/// The `notes` tool beside one dynamic resolver that names `builtin` on its declaration,
+/// over the given `[externals]` entries.
+fn declaring(builtin: &str, externals: &str) -> String {
+    policy_with(&format!(
+        "[[policy.tool]]\nname = \"notes\"\n[[policy.dynamic_resolver]]\nname = \"classify\"\nbuiltin = \"{builtin}\"\nreturns = [\"delta.trust\"]\n"
+    )) + externals
+}
+
+/// A declared builtin the deployment cannot serve refuses to open, refuses to reload, and
+/// a refused reload leaves the running deployment serving.
+#[tokio::test]
+async fn a_declared_builtin_the_deployment_cannot_serve_refuses_open_and_reload() {
+    let bound: fn(&OpenError) -> bool =
+        |error| matches!(error, OpenError::BoundBuiltinResolver(name) if name == "classify");
+    let no_profile: fn(&OpenError) -> bool =
+        |error| matches!(error, OpenError::LlmNotConfigured(name) if name == "classify");
+    let no_platform: fn(&OpenError) -> bool =
+        |error| matches!(error, OpenError::UnsupportedClaudeCodePlatform(name) if name == "classify");
+    let mut cases = vec![
+        (
+            "a builtin resolver that is also bound",
+            declaring(
+                "claude-code",
+                "[externals.dynamic.classify]\nurl = \"https://classify.internal\"\n",
+            ),
+            bound,
+        ),
+        (
+            "an llm resolver with no [externals.llm]",
+            declaring("llm", ""),
+            no_profile,
+        ),
+    ];
+    if !cfg!(unix) {
+        cases.push((
+            "a claude-code resolver off Unix",
+            declaring("claude-code", ""),
+            no_platform,
+        ));
+    }
+
+    let deployment = Deployment::open(&with_notes()).expect("the fixture opens");
+    let root = TrajectoryId("reload:unservable".to_string());
+    start(&deployment.runtime, &root).await;
+    for (case, policy, gate) in cases {
+        let Err(refusal) = Deployment::open(&policy) else {
+            panic!("{case} must refuse to open");
+        };
+        assert!(gate(&refusal), "{case} refused opening at the wrong gate: {refusal}");
+
+        let refusal = deployment
+            .reload(&policy)
+            .expect_err(&format!("{case} must refuse the reload"));
+        assert!(gate(&refusal), "{case} refused the reload at the wrong gate: {refusal}");
+        assert!(
+            allowed(&propose_notes(&deployment.runtime, &root).await),
+            "{case}: the running deployment must keep serving"
+        );
+        let fresh = TrajectoryId(format!("reload:unservable:{}", case.len()));
+        start(&deployment.runtime, &fresh).await;
+        assert!(
+            allowed(&propose_notes(&deployment.runtime, &fresh).await),
+            "{case}: a fresh root must still bind the file that was serving"
+        );
+    }
+}
+
 #[tokio::test]
 async fn reload_rereads_includes_and_a_broken_include_keeps_the_previous_deployment() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");

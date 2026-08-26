@@ -573,20 +573,20 @@ pub(crate) async fn exchange_with_child(
     let mut stdout = child.stdout.take().ok_or(NoAnswerReason::Transport)?;
     // A child may answer without reading its input and close stdin first. A broken pipe
     // here is that early close, not a transport fault: the exit and the answer still decide.
-    let written = match stdin.write_all(input).await {
-        Ok(()) => stdin.shutdown().await,
-        Err(error) => Err(error),
+    let write = async {
+        let written = match stdin.write_all(input).await {
+            Ok(()) => stdin.shutdown().await,
+            Err(error) => Err(error),
+        };
+        drop(stdin);
+        match written {
+            Err(error) if error.kind() != std::io::ErrorKind::BrokenPipe => Err(NoAnswerReason::Transport),
+            _ => Ok(()),
+        }
     };
-    if let Err(error) = written
-        && error.kind() != std::io::ErrorKind::BrokenPipe
-    {
-        return Err(NoAnswerReason::Transport);
-    }
-    drop(stdin);
-
     // Read under the cap before anything waits: a child writing past it is reported
     // oversized at once, so a full pipe can never wedge the exchange into the timeout.
-    let output = async {
+    let read = async {
         let mut bytes = Vec::new();
         let mut chunk = [0u8; 8192];
         loop {
@@ -598,6 +598,21 @@ pub(crate) async fn exchange_with_child(
                 return Err(NoAnswerReason::Oversized);
             }
             bytes.extend_from_slice(&chunk[..read]);
+        }
+    };
+    // The write and the read run together: a child that answers past the pipe's capacity
+    // before draining its input would otherwise block the parent's write, and the two
+    // would wait on each other until the deadline. The read ending — answer, EOF, or
+    // oversized — settles the exchange whatever the write is doing.
+    let output = async {
+        tokio::pin!(write);
+        tokio::pin!(read);
+        tokio::select! {
+            bytes = &mut read => bytes,
+            written = &mut write => {
+                written?;
+                read.await
+            }
         }
     };
     tokio::pin!(output);
@@ -1170,6 +1185,25 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         let consult = dynamic_consult("classifier", serde_json::json!({"path": "x".repeat(1 << 20)}));
         let outcome = services.consult(&consult, None).await;
         assert!(matches!(outcome, ConsultOutcome::Answer(_)), "{outcome:?}");
+    }
+
+    /// The parent writes a consult far past the pipe's capacity while the child writes an
+    /// answer past it too, before draining its input: neither side may wait for the other.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_command_that_answers_at_length_before_draining_its_input_is_answered() {
+        let dir = tempfile::tempdir().expect("a fixture directory is created");
+        let script = "printf '%s' '{\"version\":1,\"answer\":{\"delta.trust\":\"trusted\",\"pad\":\"'\n\
+                      head -c 200000 /dev/zero | tr '\\0' x\nprintf '%s' '\"}}'\ncat > /dev/null\n";
+        let services = command_services(dir.path(), script, 3000, 1 << 20);
+        let consult = dynamic_consult("classifier", serde_json::json!({"path": "x".repeat(1 << 20)}));
+        let started = std::time::Instant::now();
+        let outcome = services.consult(&consult, None).await;
+        assert!(matches!(outcome, ConsultOutcome::Answer(_)), "{outcome:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the exchange never waited on itself"
+        );
     }
 
     #[cfg(unix)]
