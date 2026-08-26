@@ -53,9 +53,8 @@ const STATIC_SECTIONS = [
   { title: "Tools", url: "/contracts#tools", docTitle: "Policy reference" },
   { title: "Authorities", url: "/contracts#authorities", docTitle: "Policy reference" },
   { title: "Sanitizers", url: "/contracts#sanitizers", docTitle: "Policy reference" },
-  { title: "Casts", url: "/contracts#casts", docTitle: "Policy reference" },
   { title: "Externals", url: "/contracts#externals", docTitle: "Policy reference" },
-  { title: "Empirical evaluation", url: "/evaluation#summary-of-empirical-findings", docTitle: "Evaluating OpenAPPA" },
+  { title: "Empirical evaluation", url: "/evaluation#bench-corp-realistic-enterprise-workflows", docTitle: "Evaluating OpenAPPA" },
 ];
 
 export const GLOSSARY_TERMS = [

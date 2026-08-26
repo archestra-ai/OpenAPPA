@@ -8,7 +8,7 @@ export function BenchmarkHighlight() {
       <div className="bench-charts">
         <figure className="bench-chart">
           <figcaption className="bench-chart-title">
-            Safe utility <span className="bench-chart-hint">tasks completed safely</span>
+            Task completion <span className="bench-chart-hint">tasks completed</span>
           </figcaption>
           <div className="bench-row subject">
             <span className="bench-row-name">OpenAPPA</span>
@@ -20,9 +20,9 @@ export function BenchmarkHighlight() {
           <div className="bench-row">
             <span className="bench-row-name">Defended FIDES</span>
             <span className="bench-track">
-              <span className="bench-bar" style={{ width: "17%" }} />
+              <span className="bench-bar" style={{ width: "45%" }} />
             </span>
-            <span className="bench-row-value">9–17%</span>
+            <span className="bench-row-value">37–45%</span>
           </div>
         </figure>
 
@@ -49,8 +49,8 @@ export function BenchmarkHighlight() {
 
       <p className="bench-panel-foot">
         Across three models and 20 Bench-Corp workflows, guarded OpenAPPA retained high task
-        completion without a successful observed attack. Full methodology and limitations are
-        reported in the paper.
+        completion (88–90%) without a single observed policy breach. Full methodology and limitations
+        are reported in the paper.
       </p>
       <Link className="bench-panel-link" href="/evaluation">
         Read the full benchmark results →

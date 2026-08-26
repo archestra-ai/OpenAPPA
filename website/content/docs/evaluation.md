@@ -8,12 +8,14 @@ description: Empirical security and task-completion results across Bench-Corp an
 ## Security that still lets agents finish the job
 
 A secure agent is not useful if it refuses every action. A capable agent is not
-safe if it completes a task by violating policy. We therefore report **safe
-utility**: the share of tasks completed without a successful attack.
+safe if it completes a task by violating policy. We measure defenses on two
+standard axes: **task completion** (utility on legitimate goals) and **attack
+success rate** (ASR, policy breaches under adversarial inputs).
 
-Across three evaluated models on Bench-Corp, guarded OpenAPPA achieved
-**88–90% safe utility with 0/600 observed attacks**. The two evaluated defended
-FIDES configurations achieved 9–17% safe utility with 28–35% attack success.
+Across three evaluated models on Bench-Corp (200 episodes per model), guarded
+OpenAPPA achieved **88–90% task completion with 0/600 observed attacks** (0% ASR).
+The evaluated defended FIDES configurations achieved **37–45% task completion
+with 28–35% attack success**.
 
 These are empirical results for the evaluated agents, policies, and scenarios—not
 a claim that attacks are impossible. Full methodology, per-model results, and
@@ -30,16 +32,18 @@ For each policy configuration, each model ran every scenario five times with
 standard prompts and five times with adversarial prompts, producing 200
 episodes per model.
 
-| Model | Guarded OpenAPPA safe utility / attack success | FIDES middleware | FIDES native |
+| Model | Guarded OpenAPPA (Utility / ASR) | FIDES middleware (Utility / ASR) | FIDES native (Utility / ASR) |
 |---|---:|---:|---:|
-| GPT-5.6 Luna | **88.0% / 0%** | 11.0% / 32.0% | 9.0% / 32.5% |
-| DeepSeek V4 Flash | **89.5% / 0%** | 10.0% / 34.5% | 12.5% / 33.0% |
-| Gemini 3.7 Flash | **90.0% / 0%** | 15.5% / 28.5% | 17.0% / 28.0% |
+| GPT-5.6 Luna | **88.0% / 0%** | 38.5% / 32.0% | 37.0% / 32.5% |
+| DeepSeek V4 Flash | **89.5% / 0%** | 39.5% / 34.5% | 41.5% / 33.0% |
+| Gemini 3.7 Flash | **90.0% / 0%** | 43.5% / 28.5% | 44.5% / 28.0% |
 
-OpenAPPA maintained high safe utility while recording no successful policy
-violations in these runs. The evaluated FIDES policies did not encode several
-required organizational constraints, including recipient authorization,
-out-of-band approvals, and action ordering.
+OpenAPPA maintained high task completion while recording no successful policy
+violations in these runs. FIDES task completion dropped to 37–45% because linear
+IFC permanently taints trajectories upon reading confidential data, blocking
+subsequent legitimate actions, while still failing to prevent 28–35% of attacks
+due to missing organizational constraints (recipient authorization `$to`,
+out-of-band approvals, and action ordering).
 
 ### What the scenarios test
 
@@ -66,9 +70,11 @@ exfiltration.
 We ran the complete 24-task suite across the same three models, with five
 seeded repetitions under standard and adversarial prompts.
 
-Guarded OpenAPPA recorded **0/720 observed attacks**. Under adversarial
-prompting, it led safe utility with every evaluated model. Under standard
-prompts, it led with Luna and Gemini; middleware FIDES led with DeepSeek.
+Guarded OpenAPPA recorded **0/720 observed attacks** across 720 evaluated task
+executions (24 tasks × 3 models × 5 seeds × 2 prompt profiles). Under adversarial
+prompting, it achieved the highest task completion with every evaluated model.
+Under standard prompts, it led with Luna and Gemini; middleware FIDES led with
+DeepSeek.
 
 The main remaining limitation is Memory utility. OpenAPPA exposes only limited,
 structured facts from untrusted memory. This filters injected instructions,
@@ -85,7 +91,7 @@ restricted sub-agent and tell the agent which verifiable condition would make
 a blocked action safe. A Luna ablation on Bench-Corp illustrates how much those
 capabilities contribute:
 
-| Guarded configuration | Safe utility | Observed ASR |
+| Guarded configuration | Task completion | Observed ASR |
 |---|---:|---:|
 | Full OpenAPPA | **88.0%** | 0% |
 | Without fork | 56.5% | 0% |
