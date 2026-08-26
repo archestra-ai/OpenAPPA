@@ -53,7 +53,7 @@ export function Header({ fullBleed = false }: { fullBleed?: boolean }) {
           <Link href="/" className="nav-docs">
             Docs
           </Link>
-          <a href="https://arxiv.org/abs/2607.24625" target="_blank" rel="noreferrer">
+          <a href="/paper" target="_blank" rel="noreferrer">
             Paper
           </a>
           <a href="https://github.com/archestra-ai/openappa" target="_blank" rel="noreferrer">

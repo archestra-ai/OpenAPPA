@@ -11,7 +11,7 @@
 [How it works](https://openappa.com/how-it-works) ·
 [Policy reference](https://openappa.com/contracts) ·
 [Benchmarks](https://openappa.com/evaluation) ·
-[Paper](https://arxiv.org/abs/2607.24625) ·
+[Paper](https://openappa.com/paper) ·
 [Discord](https://discord.gg/B5fmSxHKZ7)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE.md)
@@ -41,24 +41,22 @@ across those surfaces is the active work.
 
 Agent security has to be measured on two axes at once: an agent that permits
 unauthorized flows is unsafe, and an agent that refuses valid work is useless.
-Bench-Corp — multi-step enterprise workflows across HR, finance and support —
-with GPT-5.6 Luna, 35 episodes per arm:
+We measure **task completion** (utility on legitimate goals) and **attack
+success rate** (ASR, policy breaches under adversarial inputs).
 
-| Prompts | Policy arm | Task completion | Attack success | Security pass |
-|---|---|---:|---:|---:|
-| Standard | **OpenAPPA** | **94.3%** | **0%** | **100%** |
-| | FIDES | 28.6% | 22.9% | 77.1% |
-| | Unprotected | 74.3% | 28.6% | 71.4% |
-| ChaosMonkey (adversarial) | **OpenAPPA** | **91.4%** | **0%** | **100%** |
-| | FIDES | 28.6% | 28.6% | 71.4% |
-| | Unprotected | 65.7% | 28.6% | 71.4% |
+Across 20 multi-step enterprise workflows in Bench-Corp (200 episodes per model):
 
-The [AgentThreatBench](https://github.com/UKGovernmentBEIS/inspect_evals/tree/main/src/inspect_evals/agent_threat_bench)
-comparison — stock, permissive, guarded OpenAPPA, middleware-only FIDES and FIDES-native — lives in
-[`bench/agentthreatbench`](bench/agentthreatbench/).
+| Model | Guarded OpenAPPA (Utility / ASR) | FIDES middleware (Utility / ASR) | FIDES native (Utility / ASR) |
+|---|---:|---:|---:|
+| GPT-5.6 Luna | **88.0% / 0%** | 38.5% / 32.0% | 37.0% / 32.5% |
+| DeepSeek V4 Flash | **89.5% / 0%** | 39.5% / 34.5% | 41.5% / 33.0% |
+| Gemini 3.7 Flash | **90.0% / 0%** | 43.5% / 28.5% | 44.5% / 28.0% |
 
-Methodology, TAU-bench and AgentThreatBench results:
-[Benchmarks](https://openappa.com/evaluation).
+Across the complete 24-task [AgentThreatBench](https://github.com/UKGovernmentBEIS/inspect_evals/tree/main/src/inspect_evals/agent_threat_bench)
+suite (OWASP Top 10 for Agentic Applications), guarded OpenAPPA recorded **0/720 observed attacks**
+and led task completion under adversarial prompts across all three models.
+
+Full methodology, ablations, and paper: [Benchmarks](https://openappa.com/evaluation).
 
 ## Try it: Claude Code
 
@@ -91,7 +89,7 @@ integration](https://openappa.com/claude-code) ·
 
 OpenAPPA is a **preview and an RFC**. The model is settled enough to build
 against and deliberately open to argument — config and wire surfaces may break
-without shims. Read the [paper](https://arxiv.org/abs/2607.24625), then open an
+without shims. Read the [paper](https://openappa.com/paper), then open an
 issue — or come argue in the [Discord](https://discord.gg/B5fmSxHKZ7).
 
 ## License

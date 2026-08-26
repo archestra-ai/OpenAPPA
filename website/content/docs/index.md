@@ -13,12 +13,11 @@ By now there is plenty of research on how to build agents that cannot leak sensi
 
 And yet a gap remains between these ideas on paper and the ability to apply them in a concrete environment, in a concrete product or company:
 
-- How do I describe agent security in plain language?
-- How do I enforce it on the agents I already have?
-- How do I monitor it in production?
-- How do I scale it in my organizations?
+- How do I describe security rules in plain language?
+- How do blocked agents recover instead of failing?
+- How do I deploy, monitor, and scale across my platform?
 
-OpenAPPA answers all four.
+OpenAPPA answers all three.
 
 :::benchmark-highlight:::
 
