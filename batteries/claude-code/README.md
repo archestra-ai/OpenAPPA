@@ -25,3 +25,33 @@ version = 1
 
 Root rules take precedence over the battery. Add a root rule when a particular
 Bash command or Read path needs stricter, looser, or fully blocked behavior.
+
+## Require approval for kubectl
+
+Add these rules to the root config to require fresh human approval for every
+`kubectl` command:
+
+```toml
+[[policy.tool]]
+name = "Bash(command:kubectl)"
+requires = { attention = ["hitl"] }
+delta = { trust = "suspicious", audience = ["private"] }
+
+[[policy.tool]]
+name = "Bash(command:kubectl *)"
+requires = { attention = ["hitl"] }
+delta = { trust = "suspicious", audience = ["private"] }
+
+[[policy.authority]]
+name = "operator"
+hint = "Ask the person running this Claude Code session."
+
+[policy.authority.permits]
+attention = ["hitl"]
+
+[externals.authorities.operator]
+builtin = "hitl"
+```
+
+The first rule matches bare `kubectl`; the second matches `kubectl` followed by
+arguments. Other Bash commands continue to use the battery's model classifier.
