@@ -21,8 +21,6 @@ receives it, in the `Agent` tool's result.
 
 ## What is here
 
-- `appa.toml` — the root configuration template embedded by the runtime for
-  first-start installation; it includes the bundled Claude Code battery.
 - `plugin/` — the Claude Code plugin: `hooks/hooks.json`, the `appa`
   MCP server (`.mcp.json`), the `appa-guide` skill (builds the initial
   tool policy and guides later config changes), and

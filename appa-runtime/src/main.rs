@@ -18,7 +18,9 @@ use appa_runtime::config::Config;
 use appa_runtime::{hooks, mcp};
 use appa_runtime_api::Codec;
 
-const DEFAULT_CONFIG: &str = include_str!("../../integrations/claude-code/appa.toml");
+const DEFAULT_CONFIG: &str = include_str!("../../integrations/claude-code/examples/claude-code.appa.toml");
+const SOURCE_BATTERY_INCLUDE: &str = "../../../batteries/claude-code/appa.toml";
+const INSTALLED_BATTERY_INCLUDE: &str = "batteries/claude-code/appa.toml";
 
 struct DefaultAsset {
     path: &'static str,
@@ -30,6 +32,10 @@ const DEFAULT_ASSETS: &[DefaultAsset] = &[DefaultAsset {
     contents: include_str!("../../batteries/claude-code/appa.toml"),
 }];
 
+fn installed_default_config() -> String {
+    DEFAULT_CONFIG.replacen(SOURCE_BATTERY_INCLUDE, INSTALLED_BATTERY_INCLUDE, 1)
+}
+
 fn ensure_default_config(path: &Path) -> io::Result<bool> {
     let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
         Ok(file) => file,
@@ -38,6 +44,7 @@ fn ensure_default_config(path: &Path) -> io::Result<bool> {
     };
 
     let root = path.parent().unwrap_or_else(|| Path::new("."));
+    let config = installed_default_config();
     let mut created_assets = Vec::new();
     let write = (|| {
         for asset in DEFAULT_ASSETS {
@@ -55,7 +62,7 @@ fn ensure_default_config(path: &Path) -> io::Result<bool> {
                 .write_all(asset.contents.as_bytes())
                 .and_then(|()| output.sync_all())?;
         }
-        file.write_all(DEFAULT_CONFIG.as_bytes()).and_then(|()| file.sync_all())
+        file.write_all(config.as_bytes()).and_then(|()| file.sync_all())
     })();
     if let Err(error) = write {
         drop(file);
@@ -300,7 +307,7 @@ mod tests {
         assert!(ensure_default_config(&path).expect("default config is created"));
         assert_eq!(
             fs::read_to_string(&path).expect("default config is readable"),
-            DEFAULT_CONFIG
+            installed_default_config()
         );
         assert_eq!(
             fs::read_to_string(directory.path().join(DEFAULT_ASSETS[0].path)).expect("default battery is readable"),
