@@ -20,7 +20,7 @@ Because policy checks happen prospectively before tools run, sensitive data is n
 OpenAPPA operates on three runtime concepts:
 
 1. **Security Labels** (`label`)  
-   Attached to every running trajectory. A label tracks audience (which reader IDs are authorized to receive the trajectory's data) and trust rank (whether data comes from a vetted internal source or unvetted web content).
+   Attached to every running trajectory. A label tracks audience (which reader IDs are authorized to receive the trajectory's data) and trust rank (whether data comes from a vetted internal source or untrusted external inputs).
 
 2. **Tool Contracts** (`delta` & `requires`)  
    Declarative rules configured per tool. Reading data restricts the trajectory's label (`delta`), while invoking an outbound tool verifies that the destination is permitted by the trajectory's current label (`requires`).
@@ -28,7 +28,7 @@ OpenAPPA operates on three runtime concepts:
 3. **Policy Remedies** (`remedy_plans`)  
    When a proposed tool dispatch exceeds the trajectory's current permissions, OpenAPPA returns a structured refusal containing actionable remedy plans:
    - Narrowing: accept restricted reach to continue internal tasks.
-   - Sanitizers: run a redactor or scrubber to clean data and preserve reach.
+   - Sanitizers: clean data through a registered sanitizer to preserve reach.
    - Authorities: request targeted approval (e.g. human-in-the-loop) for an out-of-bounds call.
    - Child Branches: spin off a sub-execution to isolate sensitive reads from the main workflow.
 
@@ -36,7 +36,7 @@ OpenAPPA operates on three runtime concepts:
 
 A tool contract declares a `delta` to define how fetching its result restricts the agent's current security label. A `delta` can only restrict permissions—it intersects allowed readers, lowers trust levels, or leaves the label unchanged.
 
-Because permissions only tighten over time, **data cannot be laundered** by passing it through intermediate steps or LLM prompts. Reading internal system records permanently marks the execution context as internal, and ingesting unvetted web content permanently drops its trust level.
+Because permissions only tighten over time, **data cannot be laundered** by passing it through intermediate steps or LLM prompts. Reading internal system records permanently marks the execution context as internal, and ingesting untrusted external data permanently drops its trust level.
 
 Restricting permissions doesn't mean blocking external work: an `authority` can approve a specific outbound call without changing the overall label, or the agent can spin off a child execution to isolate sensitive reads from its main workflow.
 
@@ -84,6 +84,7 @@ audience_missing = ["public"]                                # user can approve 
 ```
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 The policy names the components. The deployment says who performs them, in a
 separate `[externals]` table, one `[externals.<kind>.<name>]` entry per
 registered name — so swapping a redactor or moving approval to a person
@@ -95,6 +96,11 @@ person changes no policy:
 =======
 The policy declares the security bounds. The deployment specifies who executes them in a separate `[externals]` table (e.g. binding `user` to a human approval prompt or `remove_pii` to an HTTP scrubber):
 >>>>>>> 408e63a (docs: restructure how-it-works for high digestibility with early worked examples)
+||||||| parent of 647b548 (docs: drop operational impact and tighten terminology in how-it-works)
+The policy declares the security bounds. The deployment specifies who executes them in a separate `[externals]` table (e.g. binding `user` to a human approval prompt or `remove_pii` to an HTTP scrubber):
+=======
+The policy declares the security bounds. The deployment specifies who executes them in a separate `[externals]` table (e.g. binding `user` to a human approval prompt or `remove_pii` to an HTTP sanitizer endpoint):
+>>>>>>> 647b548 (docs: drop operational impact and tighten terminology in how-it-works)
 
 ```toml
 [externals.sanitizers.remove_pii]
@@ -121,7 +127,7 @@ If the agent accepts narrowing to `internal` and later attempts `send_email(body
 
 ## Sub-agents isolate sensitive reads
 
-Reading an untrusted web page, a poisoned forum post, or a confidential HR record normally restricts the entire agent session. Child trajectories isolate these label modifications within host-managed sub-executions.
+Reading untrusted external files, third-party APIs, or confidential internal records normally restricts the entire agent session. Child trajectories isolate these label modifications within host-managed sub-executions.
 
 A child process can read and reason over raw, untrusted data in its own sandboxed context without restricting the parent. When the child completes, it returns only a clean, bounded answer across the merge boundary. The main agent stays clean and retains its full reach to interact with public tools. Parent and child branches share a single append-only log so that all sends and approvals remain globally auditable.
 
@@ -129,7 +135,7 @@ A child process can read and reason over raw, untrusted data in its own sandboxe
 
 Traditional guardrails act like a brick wall: they throw a generic exception that leaves the agent confused, trapped in retry loops, or crashed. OpenAPPA acts like a detour sign.
 
-When an action cannot proceed as proposed, OpenAPPA returns a typed refusal listing the exact prerequisites needed to proceed safely: requesting authority approval, scrubbing data with a sanitizer, running a prerequisite tool, or accepting a narrowing prompt. The agent takes the structured hint, executes the remedy, and completes its task.
+When an action cannot proceed as proposed, OpenAPPA returns a typed refusal listing the exact prerequisites needed to proceed safely: requesting authority approval, cleaning data with a sanitizer, running a prerequisite tool, or accepting a narrowing prompt. The agent takes the structured hint, executes the remedy, and completes its task.
 
 :::fig-remedy-plan:::
 
@@ -206,17 +212,6 @@ You don't need to throw away existing security controls. OpenAPPA unifies them a
 | Imperative `if/else` access checks | Tool Contracts (`delta` & `requires`) |
 
 Crucially, an authority or sanitizer can do only what its `permits` declares, and a cast only what its `may_cast` ceiling allows. Even if a third-party scanner or classifier makes a mistake, it cannot grant permissions beyond its pre-configured ceiling.
-
-## Operational impact: How OpenAPPA simplifies security
-
-Adopting OpenAPPA shifts your security model from manual code checks to formal algebraic guarantees:
-
-| Dimension | Traditional Guardrails (Before) | OpenAPPA Model (After) |
-|---|---|---|
-| **Policy Verification** | Unverifiable `if/else` checks: impossible to prove whether manual rules cover multi-step tool sequences. | **Mathematical provability**: deterministic label algebra guarantees information-flow safety across any tool sequence. |
-| **Agent Reliability** | **Brick wall failures**: generic `403` exceptions crash agents and drop task completion to 41%. | **Guided recovery**: structured remedy plans guide agents around blocks, maintaining 89% task completion. |
-| **Taint Containment** | **Coarse session locking**: reading one sensitive file permanently blocks all future public actions. | **Branch-isolated reach**: child sub-agents isolate risky reads without restricting parent capabilities. |
-| **Adoption Pace** | All-or-nothing requirement: every endpoint must be audited before launch. | **Incremental rollout**: annotate high-risk tools on day one; `Unknown` labels handle unannotated tools safely. |
 
 ## Next steps
 
