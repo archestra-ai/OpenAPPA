@@ -29,8 +29,12 @@ OpenAPPA to do differently.
 - Make the smallest change that achieves the request. Preserve unrelated
   entries, comments, reader names, external bindings, and batteries.
 - Use short sentences. Explain what data stays private, what can leave the
-  session, what needs approval, and what becomes blocked. Show TOML only when
-  it helps the user make a decision.
+  session, what needs approval, and what becomes blocked.
+- Talk about outcomes, not config machinery. Do not mention include lists,
+  rule ordering, TOML fields, reader names, labels, or authority wiring unless
+  the user explicitly asks for technical details. Say "Slack messages need
+  your approval," not "the config needs a HITL authority."
+- Show TOML only when the user asks for it.
 - Ask one focused question at a time. Do not make the user classify every tool
   when its name and description already make the answer clear.
 
@@ -89,8 +93,9 @@ covers, what protection it adds, and any important assumption. Keep it under
 >
 > GitHub battery — Assumes every repository is public and prevents private data from leaking to GitHub.
 
-If root rules overlap the battery, say separately that those root rules stay
-unchanged and continue to take priority.
+If the current config changes a battery's default behavior, describe the
+resulting behavior in plain English. Do not explain the rule ordering unless
+the user asks.
 
 ### Cover the remaining tools
 
@@ -106,18 +111,27 @@ matched battery covers.
   `delta = {}`.
 - Every new tool entry needs `delta`, including entries with `requires`.
 
-If a server's purpose is unclear, ask once which listed servers can return
-private data. Group them in one question.
+### Ask about ambiguity
+
+Use tool names and descriptions when their behavior is clear. If you still
+cannot tell which servers can return data that should stay private, ask the
+user once. Put every unclear server in one grouped question. Do not guess and
+do not ask about each tool separately.
+
+Wait for the answer before showing the proposal. This answer does not replace
+the approval required below. If nothing is unclear, do not ask.
 
 ### Propose, then apply
 
 Group the proposal by server. Show:
 
 - batteries to add, each with its one-sentence explanation;
-- existing root rules that remain in control;
-- new root rules for uncovered tools and their plain-English effect;
-- installed tools that will remain blocked;
-- stale root rules, which remain unless the user asks to remove them.
+- existing behavior that stays unchanged, but only when it affects the result;
+- how the remaining installed tools will behave;
+- installed tools that will remain blocked.
+
+Do not mention unchanged or stale config entries unless they affect the user's
+requested outcome.
 
 End with: **Approve, or tell me what to change.** Wait for the reply.
 
@@ -128,13 +142,19 @@ After approval:
    the marketplace clone when present; otherwise fetch every file in that
    battery directory from GitHub so its supporting scripts are included. Leave
    an existing copied battery unchanged unless the user asked to refresh it.
-2. Add the approved uncovered-tool rules to the root config. Do not remove
+2. Add any root support the battery requires, such as its human-approval
+   authority. This is part of making the approved behavior work; describe the
+   behavior to the user, not this wiring.
+3. Add the approved uncovered-tool rules to the root config. Do not remove
    overlapping root rules; they intentionally override batteries.
-3. Reload and report the result as described below.
+4. Reload and report the result as described below.
 
 ## Adjust the current config
 
 Start from the user's requested outcome, not from a full tool rescan.
+
+If the requested outcome is ambiguous, ask one focused question and wait. Do
+not guess.
 
 1. Read the root config and only the included files relevant to the requested
    changes.
