@@ -158,6 +158,14 @@ pub struct Externals {
     pub llm: Option<LlmProfile>,
 }
 
+impl Externals {
+    /// How many `llm` consults this deployment lets run at once: `max_concurrent` of its
+    /// profile, none without one.
+    pub(crate) fn llm_bound(&self) -> usize {
+        self.llm.as_ref().map_or(0, |profile| profile.max_concurrent)
+    }
+}
+
 /// How this deployment runs the stock `claude-code` builtin. `command` overrides the
 /// executable (a service environment often strips `PATH`); `model` pins the model the
 /// consult runs on; `timeout` bounds one consult on its own budget instead of the shared

@@ -419,7 +419,7 @@ impl Runtime {
             crate::builtins::load(modules.as_deref()).map_err(|error| OpenError::Modules(error.to_string()))?;
         let gates = ConsultGates::per_runtime();
         let deployment = Deployment::load(config, &modules, gates.clone())?;
-        gates.serve_llm(deployment.externals.llm_bound());
+        gates.serve_llm(deployment.config.externals.llm_bound());
         let store = LogStore::open(Backend::Sqlite { path: db }).map_err(|error| match error {
             appa_eventlog::OpenError::Damaged { path, detail } => OpenError::Damaged(format!("{path}: {detail}")),
             error @ appa_eventlog::OpenError::ForeignSchema { .. } => OpenError::Damaged(error.to_string()),
@@ -447,13 +447,16 @@ impl Runtime {
         let deployment = Deployment::load(config, &self.inner.modules, self.inner.gates.clone())?;
         let identity = deployment.resident().identity_hex();
         let deployment = Arc::new(deployment);
-        self.inner.gates.serve_llm(deployment.externals.llm_bound());
+        // The gate's bound and the serving snapshot change as one transition under the
+        // deployment lock, so two reloads racing cannot leave the gate bound by the
+        // deployment that lost.
         let previous = {
             let mut serving = self
                 .inner
                 .deployment
                 .write()
                 .expect("the deployment lock is never poisoned: no panic runs while it is held");
+            self.inner.gates.serve_llm(deployment.config.externals.llm_bound());
             std::mem::replace(&mut *serving, Arc::clone(&deployment))
         };
         let key = crate::engine::policy_file_key(deployment.config.policy_file().bytes());
@@ -1287,5 +1290,28 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             "no profile, no declared llm"
         );
         assert_eq!(runtime.inner.gates.llm_permits(), 3);
+
+        // Reloads racing from several threads: whichever deployment ends up serving, the
+        // gate is bound as that deployment declares.
+        std::thread::scope(|scope| {
+            for round in 0..8u32 {
+                let runtime = &runtime;
+                let with_pool = &with_pool;
+                scope.spawn(move || {
+                    runtime
+                        .reload(with_pool(2 + round % 4))
+                        .expect("every candidate is a complete deployment");
+                });
+            }
+        });
+        let serving = runtime
+            .inner
+            .deployment
+            .read()
+            .expect("the deployment lock is never poisoned")
+            .config
+            .externals
+            .llm_bound();
+        assert_eq!(runtime.inner.gates.llm_permits(), serving);
     }
 }

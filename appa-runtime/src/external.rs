@@ -99,9 +99,6 @@ pub struct ExternalServices {
     max_body_bytes: usize,
     backends: BTreeMap<ConsultKind, BTreeMap<String, Backend>>,
     gates: ConsultGates,
-    /// `max_concurrent` of the `[externals.llm]` profile, or 0 without one: the bound the
-    /// runtime's llm gate takes once this deployment serves.
-    llm_bound: usize,
 }
 
 /// How many claude-code consults may run at once across a runtime — a subprocess whose
@@ -149,10 +146,6 @@ impl ConsultGates {
 }
 
 impl ExternalServices {
-    pub(crate) fn llm_bound(&self) -> usize {
-        self.llm_bound
-    }
-
     #[cfg(test)]
     pub(crate) fn claude_permits(&self) -> &Arc<tokio::sync::Semaphore> {
         &self.gates.claude
@@ -234,13 +227,11 @@ impl ExternalServices {
             dynamic.insert(name, backend);
         }
         backends.insert(ConsultKind::Dynamic, dynamic);
-        let llm_bound = config.llm.as_ref().map_or(0, |profile| profile.max_concurrent);
         Ok(ExternalServices {
             http,
             timeout: config.timeout,
             max_body_bytes: config.max_body_bytes,
             backends,
-            llm_bound,
             gates,
         })
     }
@@ -840,10 +831,9 @@ mod tests {
     /// Services over `config` with `dynamic_builtins` declared on the policy side.
     fn services_declaring(config: Externals, dynamic_builtins: BTreeMap<String, DynamicBuiltin>) -> ExternalServices {
         let gates = ConsultGates::of(4, 8);
-        let services = ExternalServices::new(config, &ModuleRegistry::empty(), dynamic_builtins, gates.clone())
-            .expect("no builtin references are configured");
-        gates.serve_llm(services.llm_bound());
-        services
+        gates.serve_llm(config.llm_bound());
+        ExternalServices::new(config, &ModuleRegistry::empty(), dynamic_builtins, gates)
+            .expect("no builtin references are configured")
     }
 
     fn services(url: Option<String>, timeout_ms: u64, cap: usize) -> ExternalServices {
