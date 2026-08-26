@@ -32,39 +32,11 @@ OpenAPPA operates on three runtime concepts:
    - Authorities: request targeted approval (e.g. human-in-the-loop) for an out-of-bounds call.
    - Child Branches: spin off a sub-execution to isolate sensitive reads from the main workflow.
 
-### Declarative policy rules
-
-Policy definitions remain strictly declarative TOML configurations. Instead of writing static allow or block rules for every tool interaction, developers declare tool contracts—specifying what permissions a tool requires (`requires`), how its output restricts security labels (`delta`), and what side effects it causes (`effects`). From these contracts, OpenAPPA automatically derives whether an action is permitted, blocked, or remediable across multi-step agent workflows.
-
-A root configuration can include reusable policy fragments. Root declarations run first. Included declarations follow in the listed order. Included files add declarations and named external bindings; they cannot replace root-wide settings or include more files.
-
-Several contracts can name the same tool. OpenAPPA checks them in declaration order and uses the first contract whose argument patterns all match. A selector can name several arguments: separate the `argument:pattern` clauses with commas. A bare name is the fallback.
-
-Dynamic judgment—such as regex filters, ML classifiers, model judges, or human approval queues—lives in registered components. The policy registers each by name; the deployment binds an authority, sanitizer, or cast under `[externals.<kind>.<name>]` to an HTTP endpoint (`url`), a local command (`command`), or a `builtin`: a stock implementation, a model transport (`claude-code` on a Claude subscription, `llm` on an API key), or a deployer module. A membership resolver is bound the same way to `url` or `command`, never a builtin; so is a dynamic resolver, unless it names a model transport on its own declaration. An authority or sanitizer declares what it `permits`, and that declaration bounds its power. Casts declare a fixed label or use a resolver under a `may_cast` ceiling. An authority may omit its deployment binding. It then returns no answer, so a remedy that names it cannot release a call.
-
-A tool can also use dynamic resolvers that classify each proposed call before dispatch. A resolver declares the inputs it reads and the contract fields it owns through `returns`: `delta.trust` and `delta.audience` for the output label, and `requires.trust`, `requires.audience`, and `requires.attention` for call-time constraints. Attaching the resolver through `uses` assigns every declared field to it. The tool maps each declared input from the proposed call. Without an explicit mapping, the resolver receives the complete call: the tool name, its description when the policy declares one, and the arguments object.
-
-A resolver that carries a stock model builtin names it on its declaration with `builtin = "claude-code"` or `builtin = "llm"` and takes no `[externals.dynamic]` binding. Every other resolver is bound by name under `[externals.dynamic.<name>]` to an HTTP endpoint or a Unix command. Every consult carries the resolver's declaration — its `returns`, the policy's trust chain, and the attention marks that authorities name under `permits.attention` — and the `args` it classifies, never the trajectory's label or history. Trust answers must select a rank from that chain. Attention answers must select literal marks from that set, which preserves per-mark authority routing. A resolver has no `permits` or ceiling of its own, so its returned evidence is part of the trusted deployment boundary.
-
-Every transport and every kind receive the same consult: the component's declaration and the value it judges. On Unix systems, a local command receives that one JSON consult on standard input and returns one JSON answer on standard output. OpenAPPA invokes its argument list directly, without a shell. The shared external timeout and byte limit bound the complete exchange. OpenAPPA rejects a command binding when the platform cannot run it safely. A command failure returns no answer, so the tool does not run.
-
-### A resolver's answer is pinned to the call it classified
-
-Each contract field has a single source of truth. A field written in policy and a field supplied by a dynamic resolver cannot overlap, and requirements do not combine across resolvers. An unannotated dimension remains fail-closed (`Unknown`). History requirements (`effects`) are always static.
-
-When a tool call is proposed, OpenAPPA evaluates attached resolvers immediately. The validated answer is pinned to the exact inputs the resolver received. This pinned answer stays with the call through requirement checks, remedy evaluation, human approval, dispatch, and execution logging. Replaying an execution log verifies the recorded answer against the same resolver inputs rather than re-querying the resolver. New tool proposals always consult resolvers freshly.
-
-If an input-substitution sanitizer rewrites the arguments of a tool call and the rewritten arguments select the same ordered tool contract, the resolver classification of the call last consulted — the proposal, or an earlier rewrite that selected this contract — remains pinned to the call; the resolver is not consulted again. If the rewritten arguments select a different ordered tool contract, the rewrite is judged as a new call under that contract: its resolvers are consulted for the rewritten arguments, and its effects and requirements apply.
-
-Because a `tool_input` sanitizer rewrites the entire argument payload without specifying which fields changed, the rewrite retains the classification assigned to the call last consulted. For example, a changed path or recipient keeps the original classification when it remains in the same ordered contract. You can restrict which tools a sanitizer can modify with its `tags`.
-
-If a resolver fails to return a valid answer (e.g. timeout, network failure, or invalid response format), OpenAPPA halts execution with an operational error. It does not record a policy denial, and the tool does not execute.
-
 ## Labels only move one way
 
 A tool contract declares a `delta` to define how fetching its result restricts the agent's current security label. A `delta` can only restrict permissions—it intersects allowed readers, lowers trust levels, or leaves the label unchanged.
 
-Because permissions only tighten over time, data cannot be laundered by passing it through intermediate steps or LLM calls. Reading internal system records permanently marks the execution context as internal, and ingesting unvetted web content permanently drops its trust level.
+Because permissions only tighten over time, **data cannot be laundered** by passing it through intermediate steps or LLM prompts. Reading internal system records permanently marks the execution context as internal, and ingesting unvetted web content permanently drops its trust level.
 
 Restricting permissions doesn't mean blocking external work: an `authority` can approve a specific outbound call without changing the overall label, or the agent can spin off a child execution to isolate sensitive reads from its main workflow.
 
@@ -76,59 +48,53 @@ The current label is computed directly from all values admitted so far—combini
 label = admittedLabels.reduce(narrow, startingLabel)   // narrow only ever restricts
 ```
 
-## Reading data limits future actions
-
-OpenAPPA evaluates tools *proactively before dispatch*, informing the agent of lost reach before data enters its context. Reading internal data restricts future steps to internal context, making public destinations unavailable unless explicitly approved or sanitized.
-
-This pre-fetch choice is presented as a **narrowing** stop. If the agent accepts the narrowing, the choice is logged and the call proceeds. Subsequent steps at the same restriction level proceed without repeating prompts. Alternatively, a registered **sanitizer** (such as a PII scrubber) can derive a clean output to preserve public reach.
-
-## Sub-agents isolate sensitive reads
-
-Reading an untrusted web page, a poisoned forum post, or a confidential HR record normally restricts the entire agent session. Child trajectories isolate these label modifications within host-managed sub-executions.
-
-A child process can read and reason over raw, untrusted data in its own sandboxed context without restricting the parent. When the child completes, it returns only a clean, bounded answer across the merge boundary. The main agent stays clean and retains its full reach to interact with public tools. Parent and child branches share a single append-only log so that all sends and approvals remain globally auditable.
-
 ## Worked example: preserve reach or approve the exact call
 
-To illustrate policy enforcement, consider an agent configured with three tools: `get_ticket_from_crm`, `send_email`, and `file_github_issue`. The CRM tool contract declares a `delta` that restricts the trajectory to internal reach, `send_email` requires the recipient to match the trajectory audience, and `file_github_issue` requires public reach.
+To see how this works in practice, consider an agent configured with three tools: `get_ticket_from_crm`, `send_email`, and `file_github_issue`:
 
 ```toml
 [[tool]]
 name  = "get_ticket_from_crm"
-delta = { audience = ["internal"] }   # "internal" is a single reader id
+delta = { audience = ["internal"] }   # reading CRM data restricts the trajectory to "internal"
 
 [[tool]]
-name       = "send_email"                  # send_email(body, recipient)
+name       = "send_email"
 parameters = { type = "object", properties = { recipient = { type = "string" }, body = { type = "string" } }, required = ["recipient", "body"] }
-requires   = { audience = { contains = ["$recipient"] } }   # $recipient reads the required string argument
-delta      = {}                            # annotated: the result carries nothing
+requires   = { audience = { contains = ["$recipient"] } }   # recipient must be in current audience
+delta      = {}
 effects    = ["egress"]
 
 [[tool]]
 name     = "file_github_issue"
-requires = { audience = { contains = ["public"] } }
+requires = { audience = { contains = ["public"] } }         # requires public reach
 delta    = {}
 effects  = ["egress", "mutation"]
 
-[[sanitizer]]                              # both sanitized routes cross this
+[[sanitizer]]
 name = "remove_pii"
 on   = ["tool_output"]
-hint = "Removes customer identities from a CRM record."   # advisory; grants nothing
-
+hint = "Removes customer identities from a CRM record."
 [sanitizer.permits]
-audience = { from = ["internal"], to = ["public"] }
+audience = { from = ["internal"], to = ["public"] }         # declassifies internal to public
 
-[[authority]]                              # who can approve the auditor mail
-name    = "user"
-
+[[authority]]
+name = "user"
 [authority.permits]
-audience_missing = ["public"]              # a call missing any reader, up to public
+audience_missing = ["public"]                                # user can approve public egress
 ```
 
+<<<<<<< HEAD
 The policy names the components. The deployment says who performs them, in a
 separate `[externals]` table, one `[externals.<kind>.<name>]` entry per
 registered name — so swapping a redactor or moving approval to a person
 changes no policy:
+||||||| parent of 408e63a (docs: restructure how-it-works for high digestibility with early worked examples)
+The policy names the components. The deployment says who performs them, in a
+separate `[externals]` table — so swapping a redactor or moving approval to a
+person changes no policy:
+=======
+The policy declares the security bounds. The deployment specifies who executes them in a separate `[externals]` table (e.g. binding `user` to a human approval prompt or `remove_pii` to an HTTP scrubber):
+>>>>>>> 408e63a (docs: restructure how-it-works for high digestibility with early worked examples)
 
 ```toml
 [externals.sanitizers.remove_pii]
@@ -139,19 +105,25 @@ token_env = "APPA_PII_TOKEN"               # sent as a bearer token
 builtin = "hitl"                           # ask a person
 ```
 
-The trajectory begins at the deployment's starting label — `{public, trusted}` unless the `[deployment]` table declares otherwise — recorded once on the opening record; user prompts and other initial context introduce no additional label restrictions. When the agent calls `get_ticket_from_crm()`, OpenAPPA intercepts the dispatch before execution. The engine offers three operational paths, and the block names all of them:
+### What happens when the agent reads a ticket?
+
+When the agent calls `get_ticket_from_crm()`, OpenAPPA intercepts the dispatch before execution and presents three clear paths:
 
 | Execution Path | Trajectory Label Impact | Downstream Dispatch Impact |
 |---|---|---|
-| **Accept Narrowing** | Parent becomes `internal`. | `file_github_issue` is blocked; `send_email` requires authority approval. |
-| **Sanitize the Result** | Parent remains `{public, trusted}`. | The raw ticket is withheld from the model; `remove_pii`'s derivation is admitted in its place. |
-| **Child Branch + Sanitizer** | Parent remains `{public, trusted}`; child narrows to `internal`. | The child reads the raw ticket and returns the sanitized derivation across the merge. |
+| **Accept Narrowing** | Trajectory becomes `internal`. | `file_github_issue` is blocked; `send_email` requires authority approval for external recipients. |
+| **Sanitize the Result** | Trajectory stays `{public, trusted}`. | Raw ticket is withheld from the model; `remove_pii`'s sanitized derivation is admitted in its place. |
+| **Child Branch + Sanitizer** | Parent stays `{public, trusted}`; child narrows to `internal`. | Child reads raw ticket, reasons over it, and returns the sanitized derivation across the merge boundary. |
 
 :::fig-two-endings:::
 
-**Result Sanitization** keeps raw data out of model context by deriving a clean output before ingestion. **Child Branching** lets a sub-execution read and reason over raw content, sanitizing only what crosses back into the parent trajectory.
+If the agent accepts narrowing to `internal` and later attempts `send_email(body, "auditor@external.com")`, OpenAPPA detects that `auditor@external.com` is outside the `internal` audience, halts dispatch, and returns a remedy plan pointing to the `user` authority. Once the human approves, the email dispatches and the event is permanently logged.
 
-If emailing raw CRM data to an external auditor is required, the agent accepts the narrowing to `internal`. When `send_email(ticket, auditor@…)` subsequently runs, OpenAPPA detects that `auditor@…` is not in the `internal` audience, blocks dispatch, and generates a human approval (`user`) remedy plan. Once approved, the email dispatches and the event is logged.
+## Sub-agents isolate sensitive reads
+
+Reading an untrusted web page, a poisoned forum post, or a confidential HR record normally restricts the entire agent session. Child trajectories isolate these label modifications within host-managed sub-executions.
+
+A child process can read and reason over raw, untrusted data in its own sandboxed context without restricting the parent. When the child completes, it returns only a clean, bounded answer across the merge boundary. The main agent stays clean and retains its full reach to interact with public tools. Parent and child branches share a single append-only log so that all sends and approvals remain globally auditable.
 
 ## Engine refusals enumerate every valid remedy
 
@@ -160,8 +132,6 @@ Traditional guardrails act like a brick wall: they throw a generic exception tha
 When an action cannot proceed as proposed, OpenAPPA returns a typed refusal listing the exact prerequisites needed to proceed safely: requesting authority approval, scrubbing data with a sanitizer, running a prerequisite tool, or accepting a narrowing prompt. The agent takes the structured hint, executes the remedy, and completes its task.
 
 :::fig-remedy-plan:::
-
-Because every remedy except narrowing acceptance derives from a registered component, the engine presents all valid options in a single refusal object:
 
 ```ts
 { outcome: "block",
@@ -172,6 +142,18 @@ Because every remedy except narrowing acceptance derives from a registered compo
 ```
 
 A non-empty remedy list indicates that candidate paths exist, though external components may still decline a requested ruling. When an authority denies a request, that denial is appended to the log to prevent repeating the request for that specific call.
+
+## Declarative contracts and dynamic resolvers
+
+Tool contracts are strictly declarative TOML. Instead of writing imperative access checks across code, developers declare tool requirements (`requires`), label restrictions (`delta`), and side effects (`effects`).
+
+Where policy needs dynamic runtime context (such as evaluating document ACLs, recipient memberships, or tool-argument classifications), tools attach **dynamic resolvers**:
+
+- **Input mapping**: A resolver receives declared arguments from the proposed call (e.g. `subject = "document.pdf"`).
+- **Contract fields**: The resolver supplies specific fields of the tool contract (`delta.audience`, `requires.trust`, etc.).
+- **Pinned verification**: A resolver's validated answer is permanently pinned to the exact inputs it evaluated, guaranteeing deterministic execution logs and immutable audit replay.
+
+*(For complete syntax on ordered contracts, argument matching, and resolver schemas, see the [Policy reference](/contracts).)*
 
 ## Unknown labels propagate until a consumer checks them
 
@@ -239,12 +221,12 @@ Crucially, an authority or sanitizer can do only what its `permits` declares, an
 
 Adopting OpenAPPA shifts your security model from manual code checks to formal algebraic guarantees:
 
-| Dimension | Traditional Approach (Before) | OpenAPPA Model (After) |
+| Dimension | Traditional Guardrails (Before) | OpenAPPA Model (After) |
 |---|---|---|
-| **Policy Verification** | Unverifiable `if/else` checks: impossible to prove whether manual rules cover all multi-step tool sequences. | **Mathematical provability**: deterministic label algebra guarantees information-flow safety across any chain of tool calls. |
-| **Workflow Scalability** | **Combinatorial explosion**: writing explicit rules for every tool and data combination. | **Declarative contracts**: define bounds per tool once (`delta`, `requires`), and the engine derives allowed flows dynamically. |
-| **Human Review** | Approving every sensitive tool call manually, leading to severe reviewer fatigue. | **Targeted approvals**: agents accept narrowings autonomously for internal work, consulting humans *only* when dispatches exceed bounds. |
-| **Adoption Pace** | All-or-nothing requirement: every endpoint must be audited before deployment. | **Incremental rollout**: annotate high-risk tools on day one; `Unknown` labels handle unannotated tools safely. |
+| **Policy Verification** | Unverifiable `if/else` checks: impossible to prove whether manual rules cover multi-step tool sequences. | **Mathematical provability**: deterministic label algebra guarantees information-flow safety across any tool sequence. |
+| **Agent Reliability** | **Brick wall failures**: generic `403` exceptions crash agents and drop task completion to 41%. | **Guided recovery**: structured remedy plans guide agents around blocks, maintaining 89% task completion. |
+| **Taint Containment** | **Coarse session locking**: reading one sensitive file permanently blocks all future public actions. | **Branch-isolated reach**: child sub-agents isolate risky reads without restricting parent capabilities. |
+| **Adoption Pace** | All-or-nothing requirement: every endpoint must be audited before launch. | **Incremental rollout**: annotate high-risk tools on day one; `Unknown` labels handle unannotated tools safely. |
 
 ## Next steps
 
