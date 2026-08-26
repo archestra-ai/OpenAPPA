@@ -646,7 +646,7 @@ pub(crate) fn narrowing_remedies(
     if !registry.profile().confines_result(&contract.name) {
         return settlements;
     }
-    let output = contract.output_label_for_call(call, expansions);
+    let output = contract.output_label_for_resolutions(call.tool_resolutions(), expansions);
     for sanitizer in applicable_output_sanitizers(registry, contract, &output, expansions) {
         if sanitized_commit(current, &output, sanitizer, expansions).is_none() {
             continue;
@@ -961,7 +961,7 @@ pub(crate) fn bound_contribution(
     expansions: &Expansions,
 ) -> Option<EstablishedLabel> {
     let derived = registry.sanitizer(sanitizer)?.derive_output(
-        &contract.output_label_for_call(call, expansions),
+        &contract.output_label_for_resolutions(call.tool_resolutions(), expansions),
         &contract.tags,
         expansions,
     )?;

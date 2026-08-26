@@ -733,19 +733,13 @@ impl ToolContract {
         )
     }
 
-    /// The output label with a proposed call's pinned resolver answers applied.
-    /// Only a successful answer enters the engine, and every binding a contract spells carries one
-    /// by the time a call is checked — [`crate::check::validate_tool_resolutions`] refuses the
-    /// proposal otherwise, before any fact, and replay holds a persisted call to the same rule.
-    pub(crate) fn output_label_for_call(&self, call: &crate::value::ResolvedCall, expansions: &Expansions) -> Label {
-        let mut label = self.output_label(expansions);
-        apply_tool_resolutions(&mut label, call.tool_resolutions());
-        label
-    }
-
-    /// The output label recovered from the resolver answers persisted on a dispatch. Admission —
-    /// and the runtime composing a whole-source pending-cast answer against it — uses
-    /// this form, never the caller's in-memory resolution.
+    /// The output label with a set of pinned resolver answers applied. Admission — and the runtime
+    /// composing a whole-source pending-cast answer against it — passes the answers persisted on
+    /// the dispatch, never the caller's in-memory resolution. Plan construction passes the proposed
+    /// call's own: only a successful answer enters the engine, and every binding a contract spells
+    /// carries one by the time a call is checked — [`crate::check::validate_tool_resolutions`]
+    /// refuses the proposal otherwise, before any fact, and replay holds a persisted call to the
+    /// same rule.
     pub fn output_label_for_resolutions(
         &self,
         tool_resolutions: &[PinnedToolResolution],

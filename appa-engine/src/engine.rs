@@ -3596,14 +3596,6 @@ impl Engine {
         branch::submit_child_return(&self.registry, parent, child, &body, &Expansions::default())
     }
 
-    /// Record a child's void return: the child-attributed terminal that ends the branch and
-    /// crosses no value — no merge, no label contribution. A branch ends at most once.
-    /// See [`crate::branch`].
-    #[cfg(test)]
-    pub(crate) fn submit_void_return(&self, parent: &Views, child: &TrajectoryId) -> Result<Vec<Fact>, BranchError> {
-        branch::submit_void_return(parent, child)
-    }
-
     fn dispatch_contract(&self, views: &Views, dispatch: &DispatchId) -> Result<&ToolContract, TransitionError> {
         let call = views.dispatch_call(dispatch).ok_or(TransitionError::UnknownDispatch)?;
         self.validated_contract(call).map_err(TransitionError::Call)
@@ -9165,8 +9157,7 @@ mod tests {
         let e = engine_at(vec![crm_tool()], known(TRUSTED, internal));
         let mut log = vec![opened(&e)];
         log.extend(forked_child(&e, &log.clone(), &child));
-        let ended = e
-            .submit_void_return(&Projection::build(&log, log.len() as u64).view(&traj()), &child)
+        let ended = branch::submit_void_return(&Projection::build(&log, log.len() as u64).view(&traj()), &child)
             .expect("the child ends with no value");
         log.extend(ended);
         let view = e.view(&traj(), log.clone(), log.len() as u64).unwrap();
