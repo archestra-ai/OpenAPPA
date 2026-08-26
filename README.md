@@ -11,7 +11,7 @@
 [How it works](https://openappa.com/how-it-works) ·
 [Policy reference](https://openappa.com/contracts) ·
 [Benchmarks](https://openappa.com/evaluation) ·
-[Paper](https://arxiv.org/abs/2607.24625) ·
+[Paper](https://openappa.com/paper) ·
 [Discord](https://discord.gg/B5fmSxHKZ7)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE.md)
@@ -89,7 +89,7 @@ integration](https://openappa.com/claude-code) ·
 
 OpenAPPA is a **preview and an RFC**. The model is settled enough to build
 against and deliberately open to argument — config and wire surfaces may break
-without shims. Read the [paper](https://arxiv.org/abs/2607.24625), then open an
+without shims. Read the [paper](https://openappa.com/paper), then open an
 issue — or come argue in the [Discord](https://discord.gg/B5fmSxHKZ7).
 
 ## License

@@ -19,7 +19,7 @@ with 28–35% attack success**.
 
 These are empirical results for the evaluated agents, policies, and scenarios—not
 a claim that attacks are impossible. Full methodology, per-model results, and
-limitations are available in the [OpenAPPA paper](https://arxiv.org/abs/2607.24625).
+limitations are available in the [OpenAPPA paper](/paper).
 
 ## Bench-Corp: realistic enterprise workflows
 
@@ -103,7 +103,7 @@ agent finish legitimate work without relaxing enforcement.
 
 ## Learn more
 
-The [OpenAPPA paper](https://arxiv.org/abs/2607.24625) contains the complete
+The [OpenAPPA paper](/paper) contains the complete
 tables, benchmark protocol, model-specific variance, scoring adaptations, and
 limitations. The benchmark harnesses and checked-in scenarios are available in
 the [`bench/` directory](https://github.com/archestra-ai/OpenAPPA/tree/main/bench).

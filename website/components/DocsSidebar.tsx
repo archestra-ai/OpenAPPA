@@ -64,7 +64,7 @@ export function DocsSidebar({
             <span>Search documentation</span>
           </button>
           <div className="sidebar-chrome-row">
-            <a href="https://arxiv.org/abs/2607.24625" target="_blank" rel="noreferrer">
+            <a href="/paper" target="_blank" rel="noreferrer">
               Paper
             </a>
             <a href="https://github.com/archestra-ai/openappa" target="_blank" rel="noreferrer">

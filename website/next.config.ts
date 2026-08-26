@@ -37,6 +37,7 @@ const nextConfig: NextConfig = {
       { source: "/docs", destination: "/", permanent: true },
       { source: "/docs/:slug", destination: "/:slug", permanent: true },
       { source: "/chat", destination: "/playground", permanent: true },
+      { source: "/paper", destination: "/paper.pdf", permanent: false },
     ];
   },
 };
