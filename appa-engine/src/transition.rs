@@ -980,7 +980,7 @@ fn required<'a>(
 fn settled(menu: Option<MenuDebt>) -> Result<(), TransitionRefusal> {
     match menu {
         Some(debt) if debt.offered.len() != debt.menu.len() => Err(TransitionRefusal::IncompleteMenu),
-        Some(_) | None => Ok(()),
+        _ => Ok(()),
     }
 }
 
@@ -2910,13 +2910,12 @@ impl<'a> Sequence<'a> {
         match kind {
             BoundaryKind::Merge { child_return } => {
                 let views = self.projection.view(trajectory);
-                let crossed = views
+                views
                     .child_return(child_return)
                     .ok_or(TransitionRefusal::UnknownReturn)?;
                 if views.parent_of(child_return.child()) != Some(trajectory) {
                     return Err(TransitionRefusal::ForeignTrajectory);
                 }
-                let _ = crossed;
                 let crossing = self
                     .crossed
                     .get_mut(child_return)
@@ -3502,7 +3501,7 @@ impl<'a> Sequence<'a> {
         if self.admitted.contains(dispatch) || self.derived.contains_key(dispatch) {
             return Err(TransitionRefusal::RepeatAdmission);
         }
-        let confined = views.is_open(dispatch) && views.is_succeeded(dispatch);
+        let confined = views.is_succeeded(dispatch);
         let admissible = match settles {
             true => confined || views.closed_successfully(dispatch),
             false => confined,
