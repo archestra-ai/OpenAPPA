@@ -18,7 +18,7 @@ use appa_runtime::config::Config;
 use appa_runtime::{hooks, mcp};
 use appa_runtime_api::Codec;
 
-const DEFAULT_CONFIG: &str = include_str!("../defaults/appa.toml");
+const DEFAULT_CONFIG: &str = include_str!("../../integrations/claude-code/appa.toml");
 
 struct DefaultAsset {
     path: &'static str,

@@ -1,4 +1,4 @@
-# Default OpenAPPA deployment for Claude Code.
+# OpenAPPA deployment for Claude Code.
 # The runtime writes the included battery under `batteries/` on first start.
 
 include = ["batteries/claude-code/appa.toml"]
