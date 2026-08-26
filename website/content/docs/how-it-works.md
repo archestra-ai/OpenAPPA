@@ -172,50 +172,40 @@ An Unknown label state does not halt execution on its own: an unannotated result
 
 To inspect data before the LLM sees it, a tool contract can declare a pending dimension with `delta = { trust = "unknown" }`. When configured in `confined_results`, the runtime withholds the raw result while the cast evaluates the value. If the cast resolves to a non-restricting label, the data is delivered directly; if it restricts the label, OpenAPPA offers the agent a narrowing choice before delivery.
 
-## Deploy at the gateway alone, or add components for full coverage
+## Deployment: Where OpenAPPA fits in your stack
 
-OpenAPPA's baseline deployment is an inference gateway: configure your agent framework to route model requests through the gateway and pass a trajectory token on each request. The gateway intercepts tool calls before returning the model's response to the agent, preventing refused calls from ever executing.
+You can drop OpenAPPA into your architecture at three levels:
 
-The gateway mints a trajectory token at the start of a conversation, returns it in the response, and tracks accumulated labels across turns. In this mode, input sanitizers rewrite tool arguments transparently, while output sanitizers and pending casts withhold raw data from the model.
-
-A standalone gateway provides immediate protection, while optional deployment components can close remaining exposure vectors:
-
-| Feature | Purpose | Implementation Options |
+| Deployment Option | How it works | Best for |
 |---|---|---|
-| **Session identity** | Binds requests to an execution trajectory so accumulated labels are tracked accurately | Harness hook identifying the session, or a gateway-minted trajectory token |
-| **Execution enforcement** | Ensures only approved tool calls execute, exactly once | Tool proxy validating one-time execution tokens (remote tools), or pre-tool execution hooks (local tools) |
-| **Raw withholding** | Prevents the model from seeing unsanitized outputs or unclassified data | Gateway payload replacement on the next request, tool proxy rewrites, or post-tool hooks |
-| **Branching** | Isolates sub-agent reads and controls returns via `submit_result` | Harness lifecycle hooks with an agent adapter, or gateway-routed sub-agent traffic |
-| **Provider-run tools** | Mediates tools executed directly inside provider inference calls | Declare tools in policy: exposed results are labeled upon admission, and outbound provider queries are audited as declared open vectors |
+| **LLM Gateway** | Point your agent's `BASE_URL` to OpenAPPA. It intercepts tool calls directly in the inference stream. | Zero-code integration across existing agent stacks. |
+| **Agent Middleware / Hooks** | Add pre-tool hooks inside your agent loop (e.g. Claude Code, LangChain, PydanticAI). | Local CLI tools and custom Python/TypeScript agents. |
+| **Tool Proxy** | Run OpenAPPA in front of your remote APIs or MCP servers. | Shared enterprise tool infrastructure and microservices. |
 
-## Model guarantees depend on five explicit assumptions
+## Threat model: What OpenAPPA protects
 
-OpenAPPA's guarantees hold within defined system boundaries:
-1. **Benign but confusable agent**: Protection focuses on preventing unintended data leaks and prompt injection exploits; intentional covert channel exfiltration by the model itself is out of scope.
-2. **Attacks arrive via ingested data**: Pre-vetted trusted sources are trusted by configuration; compromised internal data is not caught.
-3. **Registered components are correct**: What a component `permits`, or a cast's `may_cast` ceiling, bounds its power, but misconfigured endpoints void their specific guarantees.
-4. **Log is durable and strictly ordered**: Security tracking relies on a persistent, append-only log.
-5. **The harness executes faithfully where unenforced**: When tool proxies or hooks are not configured, the agent framework is expected to run approved calls as returned.
+OpenAPPA is designed for real-world enterprise agent workflows:
 
-In short: declarative tool contracts set automatic bounds, while registered components — services, local commands, or builtins, model transports among them — handle dynamic cases like human approvals or content scanners. As long as the execution log is persisted, OpenAPPA ensures every decision remains provable and auditable under your team's security policy.
+- **What it protects against:** Prompt injections, poisoned external data, confused agent actions, and accidental data leaks across multi-step workflows.
+- **How it stops attacks:** At the deterministic runtime boundary. Even if the LLM is completely tricked by an attacker, unauthorized tool calls physically cannot dispatch.
+- **System boundaries:** Pre-vetted internal data is trusted by configuration. Custom authorities (like human review queues) are trusted within their declared permissions.
+- **Auditability:** Every check, dispatch, and remedy decision is recorded in an append-only, tamper-evident log for post-hoc audit and deterministic replay.
 
-## Existing checks map onto registered engine components
+## Migrating existing controls to OpenAPPA
 
-Deployments migrate existing security controls into OpenAPPA by registering them as policy components, each with an explicit `permits` table or `may_cast` ceiling:
+You don't need to throw away existing security controls. OpenAPPA unifies them as declarative policy components:
 
 | Existing Security Control | OpenAPPA Component |
 |---|---|
 | Human review / HITL prompts | `builtin = "hitl"` Authority |
-| Custom approval webhooks / LLM evaluators | Authority (`url`, `command`, or a model: `builtin = "claude-code"` or `builtin = "llm"`) |
-| Content scanners & trust classifiers | Cast (`url`, `command`, or a model builtin) under a `may_cast` ceiling |
-| Argument-aware trust, audience, and review classification | Tool-level Dynamic Resolver (an endpoint, a command, or a model builtin) |
-| Regex / ML PII scrubbers & redactors | Sanitizer (`builtin = "redact-email"`, your own builtin module, a model builtin, an endpoint, or a command) |
+| Custom approval webhooks / LLM evaluators | Authority (`url`, `command`, or model builtin) |
+| Content scanners & trust classifiers | Cast (`url`, `command`, or model builtin) under a `may_cast` ceiling |
+| Argument-aware trust, audience, and review classification | Dynamic Resolver (endpoint, command, or model builtin) |
+| PII redactors & sanitizers | Sanitizer (`builtin = "redact-email"` or custom resolver) |
 | Directory / IAM group lookups | Membership Resolver |
-| Imperative `if/else` access checks | Tool Contracts |
+| Imperative `if/else` access checks | Tool Contracts (`delta` & `requires`) |
 
-Registering security controls as OpenAPPA components prevents prompt injections from bypassing policy. Because the engine evaluates structured tool dispatches at the boundary rather than model output text, a compromised model cannot talk its way past policy rules.
-
-Crucially, an authority or sanitizer can do only what its `permits` declares, and a cast only what its `may_cast` ceiling allows: even if an ML classifier or third-party scanner makes a mistake, it cannot grant permissions beyond its pre-configured limit. Resolvers carry no `permits`: a membership resolver supplies trusted directory data, and a dynamic resolver supplies trusted classification over the proposed call. OpenAPPA validates resolver answers for valid schema and policy vocabulary (literal reader IDs, declared trust ranks, attended attention marks). Register resolvers only for services you trust as part of your deployment. A consult never carries the trajectory: a component sees its own declaration and the value it judges, so a model bound as an authority, sanitizer, or cast rules within the same `permits` or `may_cast` as any service, and a model bound as a dynamic resolver is trusted classifier evidence like any other. Declaring tool bounds in contracts replaces scattered guardrail scripts and manual `if` checks across your codebase.
+Crucially, an authority or sanitizer can do only what its `permits` declares, and a cast only what its `may_cast` ceiling allows. Even if a third-party scanner or classifier makes a mistake, it cannot grant permissions beyond its pre-configured ceiling.
 
 ## Operational impact: How OpenAPPA simplifies security
 
