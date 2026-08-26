@@ -37,8 +37,8 @@ paths, and additionally restricts `clients/`.
 This command-based example requires a Unix system.
 
 The Claude Code battery sends every Bash command to the Claude Code model
-builtin. The model classifies the command's required trust and audience before
-dispatch. Bash output remains suspicious and private.
+builtin. The model classifies the command's output label and its required trust
+and audience before dispatch.
 
 The `Read` rule invokes `read-sensitivity.py` for one call. OpenAPPA writes
 one JSON request to standard input, reads one JSON answer from standard
@@ -49,9 +49,9 @@ tool call in `args` — `name`, `description` when the tool declares one, and
 result expression is needed for this default.
 
 The Bash resolver controls declared information flows. It is not a shell or
-network sandbox and never labels Bash output Public. A Claude Code deployment
-must use an OS sandbox to deny network access and protect credentials and
-OpenAPPA files. Network ingress should use `WebFetch` instead of Bash `curl`.
+network sandbox. A Claude Code deployment must use an OS sandbox to deny
+network access and protect credentials and OpenAPPA files. Network ingress
+should use `WebFetch` instead of Bash `curl`.
 
 The Claude Code battery also labels `Read` results through
 `read-sensitivity.py`. Hidden paths, credential and private-key names, system

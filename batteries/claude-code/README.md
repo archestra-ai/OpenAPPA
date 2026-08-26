@@ -5,18 +5,25 @@ include this battery and override any contract with an earlier root rule.
 
 ## Files
 
-**`appa.toml`** names the Claude Code built-in tools. Most results keep their
-current label. `WebFetch` and `WebSearch` produce suspicious results.
+**`appa.toml`** applies these defaults:
 
-Every `Bash` call goes to the `claude-code` model builtin before dispatch. The
-model classifies the trust and audience that the command requires. Bash output
-is always suspicious and private; classifying the command does not certify its
-result.
+- `Agent` may start foreground subagents. Background subagents are refused
+  because their results bypass the parent's checked tool return.
+- Every `Bash` call is classified by the Claude Code model before execution.
+  The classifier decides the command output's trust and audience and what
+  trust and audience the command is allowed to receive.
+- Every `Read` result is classified by `read-sensitivity.py`. Hidden paths,
+  credential and private-key files, system-secret locations, and sensitive
+  symlink targets are private. Other paths are public. This labels the returned
+  file content; it does not block the read or add a trust restriction.
+- `WebFetch` and `WebSearch` results are suspicious because their content comes
+  from outside the session.
+- The remaining covered built-in tools add no information-flow restriction or
+  dispatch requirement.
 
-Every `Read` call goes to `read-sensitivity.py`. Hidden paths, credential and
-private-key files, system-secret locations, and sensitive symlink targets are
-private. Other paths are public. The resolver labels the returned value; it
-does not block the read.
+A deployment can override any of these behaviors: allow a particular
+background-agent shape, replace either classifier, block selected Bash
+commands, change a tool's result label, or add dispatch requirements.
 
 ## Override a default
 

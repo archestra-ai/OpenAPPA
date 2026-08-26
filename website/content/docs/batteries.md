@@ -105,7 +105,7 @@ returns = ["delta.audience"]
 [[policy.tool]]
 name = "Read"
 uses = [{ resolver = "claude-code.read-sensitivity" }]
-delta = { trust = "suspicious" }
+delta = {}
 
 [externals.dynamic."claude-code.read-sensitivity"]
 command = ["python3", "./read-sensitivity.py"]
@@ -168,7 +168,7 @@ returns = ["delta.audience"]
 [[policy.tool]]
 name = "Read"
 uses = [{ resolver = "claude-code.read-sensitivity" }]
-delta = { trust = "suspicious" }
+delta = {}
 
 [externals.dynamic."claude-code.read-sensitivity"]
 command = ["python3", "./read-sensitivity.py"]
@@ -181,8 +181,8 @@ names, system-secret locations, and sensitive symlink targets. It returns
 `"public"` for other paths.
 
 The Claude Code battery also sends each Bash call to its `claude-code` model
-resolver. The resolver classifies the trust and audience requirements of the
-command. Bash output remains suspicious and private.
+resolver. The resolver classifies the command's output trust and audience and
+its trust and audience requirements.
 
 This classification is not an operating-system sandbox. Bash can read files
 and open network connections. Use a sandbox to protect credentials and network
@@ -218,7 +218,7 @@ returns = ["delta.audience"]
 [[policy.tool]]
 name = "Read"
 uses = [{ resolver = "local.read-sensitivity" }]
-delta = { trust = "suspicious" }
+delta = {}
 
 [externals.dynamic."local.read-sensitivity"]
 command = ["python3", "./local/read-sensitivity.py"]

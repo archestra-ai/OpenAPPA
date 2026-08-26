@@ -19,8 +19,16 @@ use appa_runtime::{hooks, mcp};
 use appa_runtime_api::Codec;
 
 const DEFAULT_CONFIG: &str = include_str!("../defaults/appa.toml");
-const DEFAULT_CLAUDE_CODE_BATTERY: &str = include_str!("../../batteries/claude-code/appa.toml");
-const DEFAULT_CLAUDE_CODE_BATTERY_FILE: &str = "batteries/claude-code/appa.toml";
+
+struct DefaultAsset {
+    path: &'static str,
+    contents: &'static str,
+}
+
+const DEFAULT_ASSETS: &[DefaultAsset] = &[DefaultAsset {
+    path: "batteries/claude-code/appa.toml",
+    contents: include_str!("../../batteries/claude-code/appa.toml"),
+}];
 
 fn ensure_default_config(path: &Path) -> io::Result<bool> {
     let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
@@ -29,35 +37,31 @@ fn ensure_default_config(path: &Path) -> io::Result<bool> {
         Err(error) => return Err(error),
     };
 
-    let battery_path = path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(DEFAULT_CLAUDE_CODE_BATTERY_FILE);
-    let mut battery_created = false;
+    let root = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut created_assets = Vec::new();
     let write = (|| {
-        if let Some(parent) = battery_path.parent() {
-            fs::create_dir_all(parent)?;
+        for asset in DEFAULT_ASSETS {
+            let asset_path = root.join(asset.path);
+            if let Some(parent) = asset_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let mut output = match OpenOptions::new().write(true).create_new(true).open(&asset_path) {
+                Ok(output) => output,
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            };
+            created_assets.push(asset_path);
+            output
+                .write_all(asset.contents.as_bytes())
+                .and_then(|()| output.sync_all())?;
         }
-        let mut battery = match OpenOptions::new().write(true).create_new(true).open(&battery_path) {
-            Ok(battery) => {
-                battery_created = true;
-                battery
-            }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                return file.write_all(DEFAULT_CONFIG.as_bytes()).and_then(|()| file.sync_all());
-            }
-            Err(error) => return Err(error),
-        };
-        battery
-            .write_all(DEFAULT_CLAUDE_CODE_BATTERY.as_bytes())
-            .and_then(|()| battery.sync_all())?;
         file.write_all(DEFAULT_CONFIG.as_bytes()).and_then(|()| file.sync_all())
     })();
     if let Err(error) = write {
         drop(file);
         let _ = fs::remove_file(path);
-        if battery_created {
-            let _ = fs::remove_file(battery_path);
+        for asset in created_assets {
+            let _ = fs::remove_file(asset);
         }
         return Err(error);
     }
@@ -299,9 +303,8 @@ mod tests {
             DEFAULT_CONFIG
         );
         assert_eq!(
-            fs::read_to_string(directory.path().join(DEFAULT_CLAUDE_CODE_BATTERY_FILE))
-                .expect("default battery is readable"),
-            DEFAULT_CLAUDE_CODE_BATTERY
+            fs::read_to_string(directory.path().join(DEFAULT_ASSETS[0].path)).expect("default battery is readable"),
+            DEFAULT_ASSETS[0].contents
         );
         Config::load(&path).expect("the embedded default config validates");
 
@@ -334,7 +337,7 @@ mod tests {
             );
             let mut unpinned = policy.clone();
             for tool in unpinned["tool"].as_array_mut().expect("the tools table") {
-                if tool["name"].as_str() == Some("Task") {
+                if matches!(tool["name"].as_str(), Some("Agent" | "Task")) {
                     tool.as_table_mut().expect("a tool table").remove("parameters");
                 }
             }

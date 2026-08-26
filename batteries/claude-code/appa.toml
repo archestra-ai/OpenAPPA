@@ -18,23 +18,17 @@ delta = {}
 name = "Artifact"
 delta = {}
 
-# The model classifies what trust and audience the proposed command requires.
-# It does not certify the command's output: every Bash result stays suspicious
-# and private.
+# The model classifies both the proposed command's output label and the trust
+# and audience that the call requires.
 [[policy.dynamic_resolver]]
 name = "claude-code.bash-requirements"
 builtin = "claude-code"
-returns = ["requires.trust", "requires.audience"]
+returns = ["delta.trust", "delta.audience", "requires.trust", "requires.audience"]
 
 [[policy.tool]]
 name = "Bash"
 description = "Runs one shell command and returns its output."
 uses = [{ resolver = "claude-code.bash-requirements" }]
-delta = { trust = "suspicious", audience = ["private"] }
-
-[[policy.tool]]
-name = "BashOutput"
-delta = { trust = "suspicious", audience = ["private"] }
 
 [[policy.tool]]
 name = "CronCreate"
@@ -113,7 +107,7 @@ returns = ["delta.audience"]
 name = "Read"
 description = "Reads a file and returns its contents."
 uses = [{ resolver = "claude-code.read-sensitivity" }]
-delta = { trust = "suspicious" }
+delta = {}
 
 [[policy.tool]]
 name = "ReadMcpResourceDirTool"
@@ -145,12 +139,6 @@ delta = {}
 
 [[policy.tool]]
 name = "SlashCommand"
-delta = {}
-
-# `Task` is the earlier name of `Agent`: the same spawn, the same contract.
-[[policy.tool]]
-name = "Task"
-parameters = { type = "object", additionalProperties = true, properties = { run_in_background = { type = "boolean", const = false } } }
 delta = {}
 
 [[policy.tool]]
