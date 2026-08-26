@@ -38,7 +38,7 @@ A root configuration can include reusable policy fragments. Root declarations ru
 
 Several contracts can name the same tool. OpenAPPA checks them in declaration order and uses the first matching argument pattern. A bare name is the fallback.
 
-Dynamic judgment—such as regex filters, ML classifiers, or human approval queues—lives in registered components. Authorities and sanitizers run as HTTP endpoints (`resolver`) or in-process modules (`builtin`). Each declares what it `permits`, and that declaration bounds its power. Casts declare a fixed label or use a resolver under a `may_cast` ceiling.
+Dynamic judgment—such as regex filters, ML classifiers, or human approval queues—lives in registered components. Authorities and sanitizers run as HTTP endpoints (`resolver`) or in-process modules (`builtin`). Each declares what it `permits`, and that declaration bounds its power. Casts declare a fixed label or use a resolver under a `may_cast` ceiling. An authority may omit its deployment binding. It then returns no answer, so a remedy that names it cannot release a call.
 
 A tool can also use dynamic resolvers that classify each proposed call before dispatch. A resolver declares the inputs it reads and the contract fields it owns through `returns`: `delta.trust` and `delta.audience` for the output label, and `requires.trust`, `requires.audience`, and `requires.attention` for call-time constraints. Attaching the resolver through `uses` assigns every declared field to it. The tool maps each declared input from the proposed call. Without an explicit mapping, the resolver receives the complete call: the tool name, its description when the policy declares one, and the arguments object.
 

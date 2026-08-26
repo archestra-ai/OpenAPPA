@@ -17,9 +17,9 @@ const TERMS = {
   log:
     "The append-only execution history recording tool dispatches, narrowing acceptances, authority approvals, and denials.",
   authority:
-    "A registered external component (such as a human review prompt or approval service) empowered to approve specific out-of-bounds actions.",
+    "A policy component empowered to approve specific out-of-bounds actions. A deployment binding provides its judgment; without one, it returns no answer and cannot release a call.",
   authorities:
-    "Registered external components empowered to approve specific out-of-bounds actions, each within what its permits table declares.",
+    "Policy components empowered to approve specific out-of-bounds actions, each within what its permits table declares. An unbound authority returns no answer.",
   sanitizer:
     "A registered component (such as a PII scrubber or schema validator) that derives cleaner outputs to restore lost reach or raise trust.",
   sanitizers:

@@ -1099,7 +1099,7 @@ builtin = "approve"
     }
 
     #[test]
-    fn a_policy_naming_an_unbound_external_refuses_open() {
+    fn a_policy_naming_an_unbound_authority_opens() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let policy = r#"
 version = 1
@@ -1108,10 +1108,7 @@ name = "approver"
 [policy.authority.permits]
 attention = ["irreversible"]
 "#;
-        assert!(matches!(
-            Runtime::open(config_with(policy, None), dir.path().join("appa.db"), None),
-            Err(OpenError::UnboundExternal { kind: "authority", .. }),
-        ));
+        assert!(Runtime::open(config_with(policy, None), dir.path().join("appa.db"), None).is_ok());
     }
 
     #[test]
