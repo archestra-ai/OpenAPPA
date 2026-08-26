@@ -57,7 +57,9 @@ authorities and sanitizers, a `builtin` (stock, a model transport, or a
 module from `--modules-dir`); a cast's `builtin` is a model transport
 only. A dynamic resolver names a model transport on its own
 `[[dynamic_resolver]]` declaration with `builtin = "claude-code"` or
-`builtin = "llm"`.
+`builtin = "llm"`. An authority may stay unbound and then returns no
+answer; every other registered name needs its entry, and an entry no
+declaration registers refuses to start.
 
 `integrations/claude-code/examples/claude-code.appa.toml` is a
 complete starting point: it releases every built-in Claude Code tool

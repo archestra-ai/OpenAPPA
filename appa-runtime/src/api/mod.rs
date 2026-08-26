@@ -853,11 +853,12 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
         }
     }
 
-    // Each registered name is bound, and each binding names a registered component. A
-    // binding nothing registers would never be consulted, so the deployment is refused
-    // rather than left believing an implementation runs. The one exception is a dynamic
-    // resolver that names a stock builtin on its declaration: it is complete as written.
-    bound_exactly(
+    // Each binding names a registered component: a binding nothing registers would never
+    // be consulted, so the deployment is refused rather than left believing an
+    // implementation runs. Each registered name is bound, with two exceptions: an
+    // authority may stay unbound and then returns no answer, and a dynamic resolver that
+    // names a stock builtin on its declaration is complete as written.
+    no_undeclared(
         "authority",
         rc.authorities.iter().map(|authority| authority.name.as_str()),
         &externals.authorities,
@@ -940,6 +941,15 @@ fn bound_exactly<'a, Implementation>(
             name: (*name).to_string(),
         });
     }
+    no_undeclared(kind, registered.into_iter(), bound)
+}
+
+fn no_undeclared<'a, Implementation>(
+    kind: &'static str,
+    registered: impl Iterator<Item = &'a str>,
+    bound: &std::collections::BTreeMap<String, Implementation>,
+) -> Result<(), OpenError> {
+    let registered: std::collections::BTreeSet<&str> = registered.collect();
     if let Some(name) = bound.keys().find(|name| !registered.contains(name.as_str())) {
         return Err(OpenError::UndeclaredExternal {
             kind,
@@ -1115,6 +1125,34 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             .dynamic
             .insert("other-classifier".to_string(), endpoint());
         assert!(load(config).is_ok());
+    }
+
+    #[test]
+    fn an_authority_may_stay_unbound_but_its_binding_must_be_declared() {
+        let policy = r#"
+            version = 1
+            [[authority]]
+            name = "reviewer"
+            [authority.permits]
+            attention = ["irreversible"]
+        "#;
+        assert!(
+            load(claude_config(policy)).is_ok(),
+            "an unbound authority answers nothing"
+        );
+
+        let mut extra = claude_config(policy);
+        extra.externals.authorities.insert(
+            "auditor".to_string(),
+            crate::config::Implementation::Resolver(Endpoint {
+                url: "https://auditor.example".to_string(),
+                token: None,
+            }),
+        );
+        assert!(matches!(
+            load(extra),
+            Err(OpenError::UndeclaredExternal { kind: "authority", .. })
+        ));
     }
 
     #[test]

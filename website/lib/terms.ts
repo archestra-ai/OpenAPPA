@@ -71,7 +71,7 @@ const TERMS = {
   "[externals.dynamic.<name>]":
     "The deployment binding for one dynamic resolver that does not carry a builtin on its declaration: an HTTP endpoint or a local command. Every implementation receives the same consult and answers under the same validation. Unsupported platforms reject command bindings when loading the configuration.",
   "[externals.<kind>.<name>]":
-    "One deployment binding: a registered authority, sanitizer, or cast bound to exactly one of url, command, or builtin; a membership resolver, or a dynamic resolver without a declared builtin, bound to url or command. A registered name without a binding, or a binding without a registration, refuses the deployment.",
+    "One deployment binding: a registered authority, sanitizer, or cast bound to exactly one of url, command, or builtin; a membership resolver, or a dynamic resolver without a declared builtin, bound to url or command. A binding without a registration refuses the deployment, and so does an unbound sanitizer, cast, or resolver; an unbound authority returns no answer.",
   declaration:
     "The policy-authored half of a consult: the component's hint, its permits or may_cast, or its declared results and vocabulary. The agent never writes it.",
   artifact:

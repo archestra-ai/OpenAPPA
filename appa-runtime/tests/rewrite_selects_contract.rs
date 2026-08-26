@@ -83,7 +83,7 @@ async fn serve_stubs(rewrite: serde_json::Value) -> (String, Stubs) {
                 stubs.consults.lock().unwrap().push(request);
                 axum::Json(serde_json::json!({
                     "version": 1,
-                    "result": { "requires.audience": { "contains": ["partner"] } },
+                    "answer": { "requires.audience": { "contains": ["partner"] } },
                 }))
             }),
         )
@@ -237,7 +237,7 @@ async fn a_rewrite_into_the_public_contract_consults_its_resolver_about_the_rewr
         "the public contract's resolver is consulted once, about the rewrite"
     );
     assert_eq!(
-        consults[0]["args"],
+        consults[0]["artifact"]["args"],
         serde_json::json!({ "name": "read_file", "arguments": { "path": "public/q3.md" } })
     );
 
