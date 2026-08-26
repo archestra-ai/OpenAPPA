@@ -9,9 +9,11 @@ description: Deterministic security guarantees, flow tracking, and how agents se
 
 OpenAPPA sits between an agent and its tools to answer one question before every action: *is this data allowed to go to this destination?*
 
-Powered by **APPA** (Agentic Permissions Policy Algebra), it provides a formal system to track data sensitivity and trust as an agent executes. When an action would violate policy, OpenAPPA does not simply throw a generic error. Instead, it calculates exact label flow and presents the agent with valid, actionable remedy plans—such as requesting human approval, scrubbing sensitive fields, or isolating reads in a sub-execution—so the agent can self-correct and finish its task safely.
+Powered by **APPA** (Agentic Permissions Policy Algebra), it provides a formal system to track data sensitivity and trust deterministically across heterogeneous tools. Security context, policy labels, and audit trails flow entirely out-of-band—outside the agent's prompt and token stream. Because enforcement lives at the runtime boundary rather than inside the model's context, prompt injections cannot alter or bypass policy rules.
 
-Because policy checks happen prospectively (before actions execute), sensitive data is never exposed to unauthorized tools, and the agent is never left stranded mid-workflow.
+When an action cannot proceed as proposed, OpenAPPA does not simply throw a dead-end error. It returns a structured **remedy plan**—such as requesting human approval, scrubbing sensitive fields, or isolating reads in a sub-execution—giving the agent the exact playbook to self-correct and finish its task safely.
+
+Because policy checks happen prospectively before tools run, sensitive data is never exposed to unauthorized tools, and the agent is never left stranded mid-workflow.
 
 ### The core mental model
 
@@ -82,7 +84,9 @@ This pre-fetch choice is presented as a **narrowing** stop. If the agent accepts
 
 ## Sub-agents isolate sensitive reads
 
-Child trajectories isolate label modifications within host-managed sub-executions. A child starts with the parent trajectory's current label, but any data read within the child narrows the child's label exclusively. When the child completes, it returns a single value across its boundary that folds into the parent trajectory like any other tool read. If that raw return would narrow the parent, the merge stops at the boundary until accepted directly or cleaned through a registered `sanitizer`. Parent and child branches share a single append-only log so that all sends and approvals remain globally auditable.
+Reading an untrusted web page, a poisoned forum post, or a confidential HR record normally restricts the entire agent session. Child trajectories isolate these label modifications within host-managed sub-executions.
+
+A child process can read and reason over raw, untrusted data in its own sandboxed context without restricting the parent. When the child completes, it returns only a clean, bounded answer across the merge boundary. The main agent stays clean and retains its full reach to interact with public tools. Parent and child branches share a single append-only log so that all sends and approvals remain globally auditable.
 
 ## Worked example: preserve reach or approve the exact call
 
@@ -151,7 +155,9 @@ If emailing raw CRM data to an external auditor is required, the agent accepts t
 
 ## Engine refusals enumerate every valid remedy
 
-When OpenAPPA refuses an action, it does not leave the agent stranded. If no remedy plans exist, the action is fundamentally unreachable under the current policy. When valid alternatives exist, OpenAPPA returns a structured refusal listing every available remedy: requesting authority approval, scrubbing data with a sanitizer, running a prerequisite tool, or accepting a narrowing prompt.
+Traditional guardrails act like a brick wall: they throw a generic exception that leaves the agent confused, trapped in retry loops, or crashed. OpenAPPA acts like a detour sign.
+
+When an action cannot proceed as proposed, OpenAPPA returns a typed refusal listing the exact prerequisites needed to proceed safely: requesting authority approval, scrubbing data with a sanitizer, running a prerequisite tool, or accepting a narrowing prompt. The agent takes the structured hint, executes the remedy, and completes its task.
 
 :::fig-remedy-plan:::
 
@@ -244,3 +250,4 @@ Adopting OpenAPPA shifts your security model from manual code checks to formal a
 
 - [Reading a policy](/contracts): Guide to reviewing and writing policy configuration.
 - [Benchmarks](/evaluation): Empirical paper results on multi-step workflows and bench-corp.
+- [OpenAPPA Paper](/paper): Formal information-flow model, theorems, and experimental methodology.
