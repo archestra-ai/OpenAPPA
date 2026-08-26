@@ -41,6 +41,9 @@ jobs:
           jq -e .plugins .claude-plugin/marketplace.json >/dev/null
           jq -e .plugins integrations/claude-code/.claude-plugin/marketplace.json >/dev/null
 
+      - name: Test battery resolvers
+        run: python3 -m unittest discover -s batteries/claude-code -p 'test_*.py'
+
   rust-checks:
     name: Rust Checks
     runs-on: ubuntu-latest
