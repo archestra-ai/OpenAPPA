@@ -24,6 +24,17 @@ publish = false
 [workspace.lints.rust]
 dead_code = "deny"
 
+# Sized for a binary people install and ship, not for a numeric hot loop. Most of
+# this binary is monomorphized generic code, so `s` cuts build time and size
+# together; the gating path is bounded by inference and tool latency, not codegen.
+# `panic` stays at the default unwind: a module crate built in this workspace
+# needs it to contain a panic at its `extern "C"` boundary (see appa-builtin).
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 16
+strip = "symbols"
+
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -33,7 +44,15 @@ thiserror = "2"
 toml = "0.8"
 tracing = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time", "macros", "sync", "process"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# 0.13 is the version rig-core speaks: one reqwest in the graph rather than two
+# whole HTTP stacks. `rustls-no-provider` leaves the crypto provider to `rustls`
+# below and keeps the platform verifier, so roots still come from the OS store.
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
+# The one crypto provider behind every rustls client here. Naming exactly one
+# provider feature is what lets rustls install it as the process default, so no
+# caller installs it by hand. aws-lc-rs is deliberately absent: it is a second C
+# and assembly toolchain on the install path for no capability ring lacks.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 axum = { version = "0.8", default-features = false, features = ["json", "tokio", "http1"] }
 tokio-util = { version = "0.7", default-features = false }
 appa-engine = { path = "appa-engine" }

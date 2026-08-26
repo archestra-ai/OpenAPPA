@@ -43,8 +43,12 @@ toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
-rig-core = { version = "0.42", default-features = false, features = ["reqwest", "rustls"] }
+# Not rig-core's `rustls` feature: it pins reqwest to aws-lc-rs, which would put a
+# second crypto provider beside the workspace's ring. TLS still comes from reqwest.
+rig-core = { version = "0.42", default-features = false, features = ["reqwest"] }
 rig-agent = { version = "0.42", default-features = false }
+# Depended on only to name the crypto provider; see the workspace manifest.
+rustls = { workspace = true }
 
 [dev-dependencies]
 # The fail points the orchestration tests drive. A dev-dependency, so they are

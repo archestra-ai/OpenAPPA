@@ -10,6 +10,7 @@ pub struct HttpClient(reqwest::Client);
 
 impl HttpClient {
     pub fn new() -> Self {
+        appa_runtime::tls::install_crypto_provider();
         HttpClient(
             reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
@@ -19,6 +20,7 @@ impl HttpClient {
     }
 
     pub fn loopback() -> Self {
+        appa_runtime::tls::install_crypto_provider();
         HttpClient(
             reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())

@@ -174,6 +174,9 @@ impl LlmBackend {
         max_body_bytes: usize,
         gate: Arc<LlmGate>,
     ) -> Result<LlmBackend, LlmClientError> {
+        // Every provider client below builds a reqwest client of rig's own, so the
+        // provider must be in place before the first of them is constructed.
+        crate::tls::install_crypto_provider();
         let token = profile.token.as_ref().map(|token| token.reveal()).unwrap_or("");
         let failed = |error: rig_core::http_client::Error| LlmClientError {
             provider: profile.provider.as_str(),

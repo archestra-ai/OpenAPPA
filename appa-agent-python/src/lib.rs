@@ -760,6 +760,7 @@ fn encode(response: impl Serialize) -> Result<String, String> {
 }
 
 fn loopback_client() -> Result<reqwest::Client, String> {
+    appa_runtime::tls::install_crypto_provider();
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
