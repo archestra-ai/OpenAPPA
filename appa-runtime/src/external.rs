@@ -20,7 +20,7 @@ use crate::config::{
 };
 use crate::consult::{Consult, ConsultBody, ConsultKind, ModelPrompt};
 use crate::elicit::Elicitation;
-use crate::llm::LlmBackend;
+use crate::llm::{LlmBackend, LlmGate};
 use appa_policy::DynamicBuiltin;
 
 const HITL: &str = "hitl";
@@ -109,13 +109,15 @@ const CLAUDE_CONSULT_PERMITS: usize = 4;
 /// pending consults fan out together, and each is a process.
 const COMMAND_CONSULT_PERMITS: usize = 8;
 
-/// The per-runtime gates on consults that cost a process, shared by every deployment
-/// snapshot the runtime serves: a reload's old and new snapshots contend on the same
-/// permits.
+/// The per-runtime gates on consults that cost a process or a provider request, shared by
+/// every deployment snapshot the runtime serves: a reload's old and new snapshots contend
+/// on the same permits. The llm gate takes its bound from the `[externals.llm]` profile
+/// of the deployment last loaded.
 #[derive(Clone)]
 pub(crate) struct ConsultGates {
     claude: Arc<tokio::sync::Semaphore>,
     command: Arc<tokio::sync::Semaphore>,
+    llm: Arc<LlmGate>,
 }
 
 impl ConsultGates {
@@ -127,6 +129,7 @@ impl ConsultGates {
         ConsultGates {
             claude: Arc::new(tokio::sync::Semaphore::new(claude)),
             command: Arc::new(tokio::sync::Semaphore::new(command)),
+            llm: Arc::new(LlmGate::new(0)),
         }
     }
 }
@@ -166,7 +169,7 @@ impl ExternalServices {
         let llm = config
             .llm
             .as_ref()
-            .map(|profile| LlmBackend::new(profile, config.timeout, config.max_body_bytes))
+            .map(|profile| LlmBackend::new(profile, config.timeout, config.max_body_bytes, gates.llm.clone()))
             .transpose()
             .map_err(|error| ModulesError::LlmClient(error.to_string()))?;
         let tables = [

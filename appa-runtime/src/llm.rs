@@ -36,14 +36,60 @@ fn answer_budget(input: &str, max_body_bytes: usize) -> u64 {
 }
 
 /// One provider client built from the `[externals.llm]` profile at open, shared by every
-/// `builtin = "llm"` entry of the deployment together with the profile's permit pool.
+/// `builtin = "llm"` entry of the deployment, drawing on the runtime's one llm gate.
 #[derive(Clone)]
 pub struct LlmBackend {
     client: LlmClient,
     model: String,
     timeout: Duration,
     max_body_bytes: usize,
-    permits: Arc<tokio::sync::Semaphore>,
+    gate: Arc<LlmGate>,
+}
+
+/// The permit pool every `llm` consult of a runtime draws on, bounded by `max_concurrent`
+/// of the profile last loaded. A reload that raises the bound widens the pool at once; one
+/// that lowers it reclaims permits as in-flight consults release them, so the old and the
+/// new deployment snapshot never exceed the new bound together.
+pub(crate) struct LlmGate {
+    permits: tokio::sync::Semaphore,
+    shape: std::sync::Mutex<GateShape>,
+}
+
+/// The pool's bound and the permits a shrink still owes: the semaphore holds
+/// `bound + owed` permits in total, available or in flight.
+struct GateShape {
+    bound: usize,
+    owed: usize,
+}
+
+impl LlmGate {
+    pub(crate) fn new(bound: usize) -> LlmGate {
+        LlmGate {
+            permits: tokio::sync::Semaphore::new(bound),
+            shape: std::sync::Mutex::new(GateShape { bound, owed: 0 }),
+        }
+    }
+
+    pub(crate) fn resize(&self, bound: usize) {
+        let mut shape = self.shape.lock().expect("the llm gate mutex is never poisoned");
+        let total = shape.bound + shape.owed;
+        if bound >= total {
+            self.permits.add_permits(bound - total);
+            shape.owed = 0;
+        } else {
+            shape.owed = total - bound;
+            shape.owed -= self.permits.forget_permits(shape.owed);
+        }
+        shape.bound = bound;
+    }
+
+    fn release(&self, permit: tokio::sync::SemaphorePermit<'_>) {
+        let mut shape = self.shape.lock().expect("the llm gate mutex is never poisoned");
+        if shape.owed > 0 {
+            shape.owed -= 1;
+            permit.forget();
+        }
+    }
 }
 
 impl std::fmt::Debug for LlmBackend {
@@ -90,10 +136,11 @@ impl LlmBackend {
     /// Build the provider client once. `shared_timeout` is the deployment's machine-consult
     /// budget, used when the profile declares none of its own; `max_body_bytes` is the
     /// deployment's cap on any answer, model answers included.
-    pub fn new(
+    pub(crate) fn new(
         profile: &LlmProfile,
         shared_timeout: Duration,
         max_body_bytes: usize,
+        gate: Arc<LlmGate>,
     ) -> Result<LlmBackend, LlmClientError> {
         let token = profile.token.as_ref().map(|token| token.reveal()).unwrap_or("");
         let failed = |error: rig_core::http_client::Error| LlmClientError {
@@ -130,12 +177,13 @@ impl LlmBackend {
                 LlmClient::Ollama(builder.build().map_err(failed)?)
             }
         };
+        gate.resize(profile.max_concurrent);
         Ok(LlmBackend {
             client,
             model: profile.model.clone(),
             timeout: profile.timeout.unwrap_or(shared_timeout),
             max_body_bytes,
-            permits: Arc::new(tokio::sync::Semaphore::new(profile.max_concurrent)),
+            gate,
         })
     }
 
@@ -143,7 +191,7 @@ impl LlmBackend {
     /// the pool spends the same budget the consult itself would.
     pub async fn consult(&self, prompt: &ModelPrompt) -> Result<serde_json::Value, NoAnswerReason> {
         let deadline = tokio::time::Instant::now() + self.timeout;
-        let permit = match tokio::time::timeout_at(deadline, self.permits.acquire()).await {
+        let permit = match tokio::time::timeout_at(deadline, self.gate.permits.acquire()).await {
             Ok(permit) => permit.expect("the llm consult gate is never closed"),
             Err(_) => {
                 tracing::warn!("the llm consult gate stayed saturated for the whole budget");
@@ -151,7 +199,7 @@ impl LlmBackend {
             }
         };
         let answered = tokio::time::timeout_at(deadline, self.prompt(prompt)).await;
-        drop(permit);
+        self.gate.release(permit);
         match answered {
             Err(_) => Err(NoAnswerReason::Timeout),
             Ok(Err(error)) => {
@@ -333,10 +381,21 @@ mod tests {
     }
 
     fn built_under(provider: LlmProvider, url: String, max_concurrent: usize, max_body_bytes: usize) -> LlmBackend {
+        built_over(provider, url, max_concurrent, max_body_bytes, Arc::new(LlmGate::new(0)))
+    }
+
+    fn built_over(
+        provider: LlmProvider,
+        url: String,
+        max_concurrent: usize,
+        max_body_bytes: usize,
+        gate: Arc<LlmGate>,
+    ) -> LlmBackend {
         LlmBackend::new(
             &profile(provider, Some(url), Some("sekret"), max_concurrent),
             Duration::from_secs(5),
             max_body_bytes,
+            gate,
         )
         .expect("the backend builds")
     }
@@ -436,11 +495,12 @@ mod tests {
     #[test]
     fn gemini_and_ollama_profiles_build_without_a_network() {
         let gemini = profile(LlmProvider::Gemini, None, Some("sekret"), 2);
-        assert!(LlmBackend::new(&gemini, Duration::from_secs(1), 65_536).is_ok());
+        let gate = || Arc::new(LlmGate::new(0));
+        assert!(LlmBackend::new(&gemini, Duration::from_secs(1), 65_536, gate()).is_ok());
         let ollama = profile(LlmProvider::Ollama, None, None, 2);
-        assert!(LlmBackend::new(&ollama, Duration::from_secs(1), 65_536).is_ok());
+        assert!(LlmBackend::new(&ollama, Duration::from_secs(1), 65_536, gate()).is_ok());
         let pinned = profile(LlmProvider::Ollama, Some("http://127.0.0.1:11434".to_string()), None, 2);
-        assert!(LlmBackend::new(&pinned, Duration::from_secs(1), 65_536).is_ok());
+        assert!(LlmBackend::new(&pinned, Duration::from_secs(1), 65_536, gate()).is_ok());
     }
 
     #[tokio::test]
@@ -490,19 +550,66 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_profile_pool_bounds_concurrent_consults() {
+    async fn the_runtime_gate_bounds_concurrent_consults_across_deployment_snapshots() {
         let (addr, stub) = serve("/v1/messages", anthropic_reply, Duration::from_millis(100)).await;
         stub.answering(StubAnswer::Text("{\"ruling\":\"approve\"}".to_string()));
-        let backend = built(LlmProvider::Anthropic, format!("http://{addr}"), 1);
+        let gate = Arc::new(LlmGate::new(0));
+        // The snapshot before a reload and the one after it: the same runtime gate, the
+        // profile's bound applied by whichever loaded last.
+        let before = built_over(
+            LlmProvider::Anthropic,
+            format!("http://{addr}"),
+            4,
+            65_536,
+            gate.clone(),
+        );
+        let after = built_over(LlmProvider::Anthropic, format!("http://{addr}"), 1, 65_536, gate);
 
         let ask = prompt();
-        let answers = futures_util::future::join_all((0..3).map(|_| backend.consult(&ask))).await;
+        let answers = futures_util::future::join_all([
+            before.consult(&ask),
+            after.consult(&ask),
+            before.consult(&ask),
+            after.consult(&ask),
+        ])
+        .await;
         assert!(answers.iter().all(Result::is_ok), "{answers:?}");
         assert_eq!(
             stub.max_in_flight.load(Ordering::SeqCst),
             1,
-            "one permit, one request at a time"
+            "one permit, one request at a time, whichever snapshot asks"
         );
-        assert_eq!(stub.requests().len(), 3);
+        assert_eq!(stub.requests().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn a_narrowed_gate_reclaims_permits_as_consults_in_flight_release_them() {
+        let gate = LlmGate::new(2);
+        gate.resize(3);
+        assert_eq!(
+            gate.permits.available_permits(),
+            3,
+            "a wider bound is available at once"
+        );
+
+        let first = gate.permits.acquire().await.expect("the gate is open");
+        let second = gate.permits.acquire().await.expect("the gate is open");
+        gate.resize(1);
+        assert_eq!(
+            gate.permits.available_permits(),
+            0,
+            "the one permit not in flight is forgotten; the bound is owed one more"
+        );
+        gate.release(first);
+        assert_eq!(
+            gate.permits.available_permits(),
+            0,
+            "the first release settles the debt"
+        );
+        gate.release(second);
+        assert_eq!(gate.permits.available_permits(), 1, "the pool is the new bound");
+
+        gate.resize(2);
+        assert_eq!(gate.permits.available_permits(), 2);
     }
 }

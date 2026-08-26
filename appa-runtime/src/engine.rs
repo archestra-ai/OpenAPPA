@@ -2836,15 +2836,70 @@ fn block_feedback(views: &Views, planned: &PlannedBlock, offers: &[(OfferId, Pla
 #[cfg(test)]
 mod tests {
     use super::{
-        ExternalEvidence, ExternalRequest, OfferId, Resolution, RuntimeEngine, audience_wire, remedy_instruction,
-        remedy_lines, terminal_safe,
+        ExternalEvidence, ExternalRequest, OfferId, Resolution, RuntimeEngine, SanitizerSubject, audience_wire,
+        remedy_instruction, remedy_lines, terminal_safe,
     };
-    use crate::consult::{DynamicAnswer, RequiredAudienceAnswer, WireAudience};
+    use crate::consult::{DynamicAnswer, RequiredAudienceAnswer, SanitizerPoint, WireAudience};
     use appa_engine::contract::RequiredAudience;
     use appa_engine::label::{Audience, ReaderId};
     use appa_engine::plan::{ExecutableRemedyPlan, PlanId, PlannedBlock, RemedyPlan, RemedyStep};
-    use appa_engine::value::ToolName;
+    use appa_engine::value::{RawResultDigest, ToolName, ValueBody};
     use std::collections::BTreeSet;
+
+    #[test]
+    fn a_sanitizer_consult_names_its_point_and_the_tool_the_value_belongs_to() {
+        let policy = appa_policy::Config::from_toml_str(
+            r#"
+                version = 1
+                [deployment]
+                confined_child_return = true
+                [[tool]]
+                name = "fetch"
+                parameters = { type = "object", properties = { url = { type = "string" } }, required = ["url"] }
+                delta = {}
+                [[sanitizer]]
+                name = "scrub"
+                on = ["tool_input", "tool_output"]
+                permits = { audience = { from = ["hr"], to = ["public"] } }
+            "#,
+        )
+        .expect("the sanitizer policy compiles");
+        let engine = RuntimeEngine::new(policy.engine().clone());
+        let scrub = appa_engine::names::SanitizerName::new("scrub");
+        let request = |subject: SanitizerSubject<'_>| match engine.sanitizer_request(
+            &scrub,
+            RawResultDigest::of(b"raw"),
+            ValueBody::new("raw"),
+            subject,
+        ) {
+            ExternalRequest::Sanitizer {
+                declaration, artifact, ..
+            } => (declaration, artifact),
+            other => panic!("a sanitizer request, got {other:?}"),
+        };
+
+        let call = engine
+            .engine
+            .resolve_call(ToolName::new("fetch"), br#"{"url":"https://example.test"}"#)
+            .expect("the call resolves");
+        let (declaration, artifact) = request(SanitizerSubject::Input { call: &call });
+        assert_eq!(declaration.on, SanitizerPoint::ToolInput);
+        assert_eq!(artifact.tool.as_deref(), Some("fetch"));
+        assert_eq!(artifact.body, "raw");
+        let parameters = declaration.parameters.expect("a rewrite carries the contract's schema");
+        assert_eq!(parameters["required"], serde_json::json!(["url"]));
+
+        let (declaration, artifact) = request(SanitizerSubject::Output {
+            tool: Some(ToolName::new("fetch")),
+        });
+        assert_eq!(declaration.on, SanitizerPoint::ToolOutput);
+        assert_eq!(artifact.tool.as_deref(), Some("fetch"));
+        assert_eq!(declaration.parameters, None, "a result's schema is nobody's to satisfy");
+
+        let (declaration, artifact) = request(SanitizerSubject::Output { tool: None });
+        assert_eq!(declaration.on, SanitizerPoint::ToolOutput);
+        assert_eq!(artifact.tool, None, "a child return originates from no tool");
+    }
 
     #[test]
     fn one_tool_resolver_can_pin_delta_and_requirements_from_all_arguments() {
