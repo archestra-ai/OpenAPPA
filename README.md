@@ -72,7 +72,7 @@ claude plugin marketplace add archestra-ai/OpenAPPA &&
 ```
 
 This installs a `clappa` command that runs Claude Code protected by OpenAPPA;
-plain `claude` sessions stay untouched. Run `/appa-tool-sync` in a plain
+plain `claude` sessions stay untouched. Run `/appa-guide init` in a plain
 `claude` session to bring your MCP servers into the policy, then start `clappa`
 to try the protected flow.
 

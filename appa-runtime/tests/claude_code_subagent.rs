@@ -44,7 +44,13 @@ fn deployment(policy_extra: &str, externals_extra: &str) -> Runtime {
     let (policy, externals) = example
         .split_once("[externals]")
         .expect("the example carries an [externals] table");
-    let text = format!("{policy}{policy_extra}\n[externals]{externals}\n{externals_extra}");
+    let deployment = "[policy.deployment]\ncontext_control = true\n";
+    let (before_deployment, after_deployment) = policy
+        .split_once(deployment)
+        .expect("the example carries the context-controlling deployment");
+    let text = format!(
+        "{before_deployment}{deployment}{policy_extra}\n{after_deployment}[externals]{externals}\n{externals_extra}"
+    );
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let path = dir.path().join("appa.toml");
     std::fs::write(&path, text).expect("the deployment writes");

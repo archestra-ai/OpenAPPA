@@ -30,7 +30,7 @@ claude
 ```
 
 ```text
-/appa-tool-sync
+/appa-guide init
 ```
 
 The skill inspects the MCP servers and tools available to Claude Code. It uses their declared purpose to identify what they read and which actions can send data outside the session. When a data boundary is unclear, it asks you one focused question.

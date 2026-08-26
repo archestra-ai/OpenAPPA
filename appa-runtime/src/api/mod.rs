@@ -876,15 +876,6 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
             _ => {}
         }
     }
-    for authority in &rc.authorities {
-        let name = authority.name.as_str();
-        if !externals.authorities.contains_key(name) {
-            return Err(OpenError::UnboundExternal {
-                kind: "authority",
-                name: name.to_string(),
-            });
-        }
-    }
     if externals
         .sanitizers
         .contains_key(appa_engine::names::SanitizerName::ATTEST_SCHEMA)

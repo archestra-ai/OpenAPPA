@@ -345,6 +345,9 @@ url = "https://approver.corp/rule"
 # builtin = "approve"                          # In-process auto-approval
 ```
 
+A missing authority binding does not stop the deployment. That authority
+returns no answer, so a remedy that names it cannot release the call.
+
 ### Authority implementation modes
 
 | Implementation | Description | Audit Properties |
