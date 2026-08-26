@@ -51,7 +51,7 @@ impl ValueId {
 /// A collision-resistant digest of the canonical rendered call (tool + resolved arguments). Two
 /// calls with the same digest are the same call; a ruling is scoped to one digest.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct CanonicalDigest([u8; 32]);
+pub struct CanonicalDigest(#[serde(with = "crate::hex32")] [u8; 32]);
 
 impl CanonicalDigest {
     /// Digest the canonical rendered call: domain-separated over the tool name and the
@@ -108,7 +108,7 @@ fn canonical_json<T: Serialize>(pinned: &T) -> Vec<u8> {
 /// A digest of a raw tool result. Binds a cast resolution or a child-return derivation to the bytes it
 /// derived from, so a later differing result cannot silently reuse an old derivative.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct RawResultDigest([u8; 32]);
+pub struct RawResultDigest(#[serde(with = "crate::hex32")] [u8; 32]);
 
 impl RawResultDigest {
     pub fn of(bytes: &[u8]) -> Self {
@@ -164,7 +164,7 @@ impl OfferNonce {
 /// the block is about. Fresh per surfaced block: the same call blocked again under a new act gets
 /// a new one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct BlockId([u8; 32]);
+pub struct BlockId(#[serde(with = "crate::hex32")] [u8; 32]);
 
 impl BlockId {
     /// The block one proposal's refusal surfaces. Bound to the deciding act and the exact position
@@ -234,7 +234,7 @@ impl BlockId {
 /// trajectory may execute an offer is the runtime's question, answered from the harness channel
 /// and never from this value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct OfferId([u8; 32]);
+pub struct OfferId(#[serde(with = "crate::hex32")] [u8; 32]);
 
 impl OfferId {
     /// One plan of one block: its deterministic position in the derived order, and the canonical
@@ -257,26 +257,14 @@ impl OfferId {
     /// The offer's lowercase-hex wire form. Runtime surfaces this string to the model and routes
     /// `execute_remedy_plan` by it; the id itself stays engine-derived.
     pub fn to_hex(&self) -> String {
-        let mut hex = String::with_capacity(64);
-        for byte in &self.0 {
-            hex.push_str(&format!("{byte:02x}"));
-        }
-        hex
+        crate::hex32::encode(&self.0)
     }
 
     /// Parse an offer id the model named back into its 32 bytes. Untrusted input: a wrong length or
     /// a non-hex character is refused, never guessed. A well-formed id this family never
     /// opened is not this parser's concern — the engine refuses it as an unknown offer.
     pub fn from_hex(text: &str) -> Result<OfferId, OfferIdParseError> {
-        let bytes = text.as_bytes();
-        if bytes.len() != 64 {
-            return Err(OfferIdParseError);
-        }
-        let mut out = [0u8; 32];
-        for (index, [high, low]) in bytes.as_chunks::<2>().0.iter().enumerate() {
-            out[index] = (hex_nibble(*high)? << 4) | hex_nibble(*low)?;
-        }
-        Ok(OfferId(out))
+        crate::hex32::decode(text).map(OfferId).ok_or(OfferIdParseError)
     }
 }
 
@@ -285,14 +273,6 @@ impl OfferId {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("an offer id is 64 lowercase-hex characters")]
 pub struct OfferIdParseError;
-
-fn hex_nibble(byte: u8) -> Result<u8, OfferIdParseError> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        _ => Err(OfferIdParseError),
-    }
-}
 
 /// Identifies one dispatch of one call within a trajectory. The occurrence counter distinguishes a
 /// repeated identical call — a second `transfer(A, $1)` is a new dispatch, not a re-issue.
@@ -616,6 +596,28 @@ mod tests {
         assert_eq!(OfferId::from_hex("abc"), Err(OfferIdParseError));
         assert_eq!(OfferId::from_hex(&"g".repeat(64)), Err(OfferIdParseError));
         assert_eq!(OfferId::from_hex(&"AB".repeat(32)), Err(OfferIdParseError));
+    }
+
+    #[test]
+    fn every_identity_takes_its_hex_form_on_the_record() {
+        let block = BlockId([7u8; 32]);
+        let offer = OfferId::of_plan(&block, 3, b"plan-bytes");
+        let raw = RawResultDigest::of(b"result");
+        let canonical = call("transfer", json!({ "to": "alice" })).digest();
+
+        assert_eq!(json!(offer), json!(offer.to_hex()));
+        assert_eq!(json!(block), json!(crate::hex32::encode(block.bytes())));
+        assert_eq!(json!(raw), json!(crate::hex32::encode(raw.bytes())));
+        assert_eq!(json!(canonical), json!(crate::hex32::encode(canonical.bytes())));
+
+        assert_eq!(
+            serde_json::from_value::<OfferId>(json!(offer)).expect("an offer id reads back"),
+            offer
+        );
+        assert_eq!(
+            serde_json::from_value::<BlockId>(json!(block)).expect("a block id reads back"),
+            block
+        );
     }
 
     #[test]
