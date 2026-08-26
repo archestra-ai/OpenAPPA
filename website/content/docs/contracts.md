@@ -195,7 +195,7 @@ Ownership, pinning, and what a `tool_input` sanitizer can do to a pinned answer 
 
 #### Implementing a resolver
 
-A resolver either carries its implementation or leaves it to the deployment. A resolver that carries a stock model builtin names it on its declaration with `builtin = "claude-code"` or `builtin = "llm"` and takes no `[externals.dynamic]` binding. Every other resolver is bound by name under `[externals.dynamic.<name>]` to an HTTP endpoint or a Unix command. [Externals](#externals) has the binding rule, the transports, and the consult every kind shares. A registered resolver without a binding, a binding no `[[dynamic_resolver]]` registers, and a binding for a resolver that carries a builtin are all load errors.
+A resolver either carries its implementation or leaves it to the deployment. A resolver that carries a stock model builtin names it on its declaration with `builtin = "claude-code"` or `builtin = "llm"` and takes no `[externals.dynamic]` binding. Every other resolver is bound by name under `[externals.dynamic.<name>]` to an HTTP endpoint or a Unix command. [Externals](#externals) has the binding rule, the transports, and the consult every kind shares. `builtin` under `[externals.dynamic.<name>]` is a configuration error. A registered resolver without a binding, a binding no `[[dynamic_resolver]]` registers, a binding for a resolver that carries a builtin, and a declared builtin the deployment cannot serve — `llm` without `[externals.llm]`, `claude-code` where no Unix process group exists — refuse the deployment when it opens and when it reloads.
 
 ```toml
 [[dynamic_resolver]]
@@ -507,7 +507,7 @@ A tool contract can also declare a pending dimension with `delta = { trust = "un
 
 ## Externals
 
-The policy registers components by name. The deployment binds each name in the `[externals]` table, under one rule for every kind:
+The policy registers components by name. The deployment binds each name in the `[externals]` table:
 
 ```toml
 [externals]
@@ -525,13 +525,13 @@ builtin = "redact-email"
 command = ["/usr/local/bin/classify", "--json"]
 
 [externals.dynamic.classify-customer]
-builtin = "llm"
+url = "https://classifier.corp/label"
 
 [externals.membership.corp-directory]
 url = "https://directory.corp/members"
 ```
 
-An entry is `[externals.<kind>.<name>]`, with `<kind>` one of `authorities`, `sanitizers`, `casts`, `dynamic`, or `membership`, and exactly one of `url`, `command`, or `builtin`. A registered name without a binding, and a binding whose name no declaration registers, are both load errors, for every kind. A constant cast and the reserved `attest-schema` sanitizer take no entry. An included fragment can add entries; the root-wide settings (`timeout_ms`, `max_body_bytes`, `review_timeout_ms`, `[externals.claude_code]`, `[externals.llm]`) stay in the root, and the same name in two files is an error.
+An entry is `[externals.<kind>.<name>]`, with `<kind>` one of `authorities`, `sanitizers`, `casts`, `dynamic`, or `membership`. An authority, sanitizer, or cast entry takes exactly one of `url`, `command`, or `builtin`. A dynamic or membership entry takes exactly one of `url` or `command`; `builtin` there is a configuration error. A dynamic resolver that names `builtin = "claude-code"` or `builtin = "llm"` on its `[[dynamic_resolver]]` declaration takes no entry, and neither do a constant cast and the reserved `attest-schema` sanitizer. A registered name without its entry, and an entry whose name no declaration registers, refuse the deployment when it opens. An included fragment can add entries, and it can declare a dynamic resolver with a builtin: every deployment that includes it then serves that builtin — `[externals.llm]` for `llm`, a Unix host for `claude-code`. The root-wide settings (`timeout_ms`, `max_body_bytes`, `review_timeout_ms`, `[externals.claude_code]`, `[externals.llm]`) stay in the root, and the same name in two files is an error.
 
 ### Transports
 
@@ -542,8 +542,8 @@ An entry is `[externals.<kind>.<name>]`, with `<kind>` one of `authorities`, `sa
 | `builtin = "hitl"` | authorities | The harness asks a person. |
 | `builtin = "approve"` | authorities | Approves within `permits`. |
 | `builtin = "redact-email"` | sanitizers | Replaces email addresses with a placeholder. |
-| `builtin = "claude-code"` | authorities, sanitizers, casts, dynamic | Unix only. One isolated `claude -p` process per consult, tuned in `[externals.claude_code]`. |
-| `builtin = "llm"` | authorities, sanitizers, casts, dynamic | The API-key profile in `[externals.llm]`. |
+| `builtin = "claude-code"` | authorities, sanitizers, casts; a dynamic resolver names it on its declaration | Unix only. One isolated `claude -p` process per consult, tuned in `[externals.claude_code]`. |
+| `builtin = "llm"` | authorities, sanitizers, casts; a dynamic resolver names it on its declaration | The API-key profile in `[externals.llm]`. |
 | `builtin = "<module>"` | authorities, sanitizers | A deployer module from `--modules-dir`, called in-process. |
 
 ### The consult

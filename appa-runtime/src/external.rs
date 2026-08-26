@@ -14,10 +14,14 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::builtins::{ClaudeCodeBackend, LoadedModule, MODULE_OUTPUT_CEILING, ModuleRegistry, ModulesError, Stock};
-use crate::config::{CLAUDE_CODE_BUILTIN, Endpoint, Externals, Implementation, LLM_BUILTIN, ResolverCommand, Section};
+use crate::config::{
+    CLAUDE_CODE_BUILTIN, DynamicImplementation, Endpoint, Externals, Implementation, LLM_BUILTIN, ResolverCommand,
+    Section,
+};
 use crate::consult::{Consult, ConsultBody, ConsultKind, ModelPrompt};
 use crate::elicit::Elicitation;
 use crate::llm::LlmBackend;
+use appa_policy::DynamicBuiltin;
 
 const HITL: &str = "hitl";
 
@@ -139,9 +143,13 @@ impl ExternalServices {
     /// implementation name. The registry is borrowed, not consumed: it
     /// loads once at open and outlives every deployment a configuration
     /// reload installs.
+    ///
+    /// `dynamic_builtins` names every policy resolver that carries a `builtin` on its
+    /// declaration; the deployment binds every other resolver in `config.dynamic`.
     pub fn new(
         config: Externals,
         registry: &ModuleRegistry,
+        dynamic_builtins: BTreeMap<String, DynamicBuiltin>,
         gates: ConsultGates,
     ) -> Result<ExternalServices, ModulesError> {
         let http = reqwest::Client::builder()
@@ -165,7 +173,6 @@ impl ExternalServices {
             (Section::Authorities, config.authorities),
             (Section::Sanitizers, config.sanitizers),
             (Section::Casts, config.casts),
-            (Section::Dynamic, config.dynamic),
             (Section::Membership, config.membership),
         ];
         let mut backends: BTreeMap<ConsultKind, BTreeMap<String, Backend>> = BTreeMap::new();
@@ -183,6 +190,29 @@ impl ExternalServices {
             }
             backends.insert(kind_of(section), resolved);
         }
+        let mut dynamic: BTreeMap<String, Backend> = config
+            .dynamic
+            .into_iter()
+            .map(|(name, implementation)| {
+                let backend = match implementation {
+                    DynamicImplementation::Resolver(endpoint) => Backend::Url(endpoint),
+                    DynamicImplementation::Command(command) => Backend::Command(command),
+                };
+                (name, backend)
+            })
+            .collect();
+        for (name, builtin) in dynamic_builtins {
+            let backend = builtin_backend(
+                Section::Dynamic,
+                &name,
+                builtin.wire_name().to_string(),
+                registry,
+                &claude,
+                llm.as_ref(),
+            )?;
+            dynamic.insert(name, backend);
+        }
+        backends.insert(ConsultKind::Dynamic, dynamic);
         Ok(ExternalServices {
             http,
             timeout: config.timeout,
@@ -363,7 +393,8 @@ impl ExternalServices {
 }
 
 /// Resolve one `builtin` name for one section: the stock implementations and the model
-/// transport by name, then the loaded modules of the section's kind.
+/// transports by name, then the loaded modules of the section's kind. A dynamic resolver
+/// reaches here from its policy declaration, the other kinds from their bindings.
 fn builtin_backend(
     section: Section,
     name: &str,
@@ -737,11 +768,19 @@ mod tests {
     /// Bindings with `classifier` and `review` dynamic resolvers and the `directory`
     /// membership resolver all served by `url`, when one is given.
     fn externals(url: Option<String>, timeout_ms: u64, cap: usize) -> Externals {
-        let bound = |names: &[&str]| -> BTreeMap<String, Implementation> {
-            url.iter()
-                .flat_map(|url| names.iter().map(move |name| (name.to_string(), endpoint(url))))
-                .collect()
-        };
+        let dynamic = url
+            .iter()
+            .flat_map(|url| {
+                ["classifier", "review"].into_iter().map(move |name| {
+                    let endpoint = DynamicImplementation::Resolver(Endpoint {
+                        url: url.to_string(),
+                        token: None,
+                    });
+                    (name.to_string(), endpoint)
+                })
+            })
+            .collect();
+        let membership = url.iter().map(|url| ("directory".to_string(), endpoint(url))).collect();
         Externals {
             timeout: Duration::from_millis(timeout_ms),
             review_timeout: Duration::from_millis(timeout_ms),
@@ -749,16 +788,26 @@ mod tests {
             authorities: BTreeMap::new(),
             sanitizers: BTreeMap::new(),
             casts: BTreeMap::new(),
-            dynamic: bound(&["classifier", "review"]),
-            membership: bound(&["directory"]),
+            dynamic,
+            membership,
             claude_code: Default::default(),
             llm: None,
         }
     }
 
     fn services_over(config: Externals) -> ExternalServices {
-        ExternalServices::new(config, &ModuleRegistry::empty(), ConsultGates::of(4, 8))
-            .expect("no builtin references are configured")
+        services_declaring(config, BTreeMap::new())
+    }
+
+    /// Services over `config` with `dynamic_builtins` declared on the policy side.
+    fn services_declaring(config: Externals, dynamic_builtins: BTreeMap<String, DynamicBuiltin>) -> ExternalServices {
+        ExternalServices::new(
+            config,
+            &ModuleRegistry::empty(),
+            dynamic_builtins,
+            ConsultGates::of(4, 8),
+        )
+        .expect("no builtin references are configured")
     }
 
     fn services(url: Option<String>, timeout_ms: u64, cap: usize) -> ExternalServices {
@@ -957,21 +1006,20 @@ mod tests {
     fn command_config(dir: &std::path::Path, script: &str, timeout_ms: u64, cap: usize) -> Externals {
         std::fs::write(dir.join("resolver.sh"), script).expect("the resolver script writes");
         let mut config = externals(None, timeout_ms, cap);
-        let command = |name: &str| {
-            (
-                name.to_string(),
-                Implementation::Command(ResolverCommand {
-                    argv: vec![
-                        "/bin/sh".to_string(),
-                        "resolver.sh".to_string(),
-                        "one argument".to_string(),
-                    ],
-                    cwd: dir.to_path_buf(),
-                }),
-            )
+        let command = || ResolverCommand {
+            argv: vec![
+                "/bin/sh".to_string(),
+                "resolver.sh".to_string(),
+                "one argument".to_string(),
+            ],
+            cwd: dir.to_path_buf(),
         };
-        config.dynamic.extend([command("classifier")]);
-        config.authorities.extend([command("security")]);
+        config
+            .dynamic
+            .insert("classifier".to_string(), DynamicImplementation::Command(command()));
+        config
+            .authorities
+            .insert("security".to_string(), Implementation::Command(command()));
         config
     }
 
@@ -986,6 +1034,7 @@ mod tests {
             let services = ExternalServices::new(
                 command_config(dir.path(), script, 5000, 1024),
                 &ModuleRegistry::empty(),
+                BTreeMap::new(),
                 ConsultGates::of(4, command_permits),
             )
             .expect("no builtin references are configured");
@@ -1130,7 +1179,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         let mut missing = externals(None, 1000, 1024);
         missing.dynamic.insert(
             "classifier".to_string(),
-            Implementation::Command(ResolverCommand {
+            DynamicImplementation::Command(ResolverCommand {
                 argv: vec!["/definitely/missing/resolver".to_string()],
                 cwd: dir.path().to_path_buf(),
             }),
@@ -1420,18 +1469,13 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         );
         let mut config = externals(None, 2000, 65_536);
         config.claude_code.command = command;
-        for section in [
-            &mut config.authorities,
-            &mut config.sanitizers,
-            &mut config.casts,
-            &mut config.dynamic,
-        ] {
+        for section in [&mut config.authorities, &mut config.sanitizers, &mut config.casts] {
             section.insert(
                 "judge".to_string(),
                 Implementation::Builtin(CLAUDE_CODE_BUILTIN.to_string()),
             );
         }
-        let services = services_over(config);
+        let services = services_declaring(config, declared("judge", DynamicBuiltin::ClaudeCode));
         assert_eq!(
             services
                 .consult(&authority_consult("judge", serde_json::json!({})), None)
@@ -1455,7 +1499,12 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             Implementation::Builtin(CLAUDE_CODE_BUILTIN.to_string()),
         );
         assert!(matches!(
-            ExternalServices::new(config, &ModuleRegistry::empty(), ConsultGates::of(4, 8)),
+            ExternalServices::new(
+                config,
+                &ModuleRegistry::empty(),
+                BTreeMap::new(),
+                ConsultGates::of(4, 8)
+            ),
             Err(ModulesError::UnknownBuiltin {
                 section: "membership",
                 ..
@@ -1488,15 +1537,10 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         };
         let mut config = externals(None, 2000, 65_536);
         config.llm = Some(profile.clone());
-        for section in [
-            &mut config.authorities,
-            &mut config.sanitizers,
-            &mut config.casts,
-            &mut config.dynamic,
-        ] {
+        for section in [&mut config.authorities, &mut config.sanitizers, &mut config.casts] {
             section.insert("judge".to_string(), Implementation::Builtin(LLM_BUILTIN.to_string()));
         }
-        let services = services_over(config);
+        let services = services_declaring(config, declared("judge", DynamicBuiltin::Llm));
         assert_eq!(
             services
                 .consult(&authority_consult("judge", serde_json::json!({})), None)
@@ -1520,7 +1564,12 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             .membership
             .insert("judge".to_string(), Implementation::Builtin(LLM_BUILTIN.to_string()));
         assert!(matches!(
-            ExternalServices::new(config, &ModuleRegistry::empty(), ConsultGates::of(4, 8)),
+            ExternalServices::new(
+                config,
+                &ModuleRegistry::empty(),
+                BTreeMap::new(),
+                ConsultGates::of(4, 8)
+            ),
             Err(ModulesError::UnknownBuiltin {
                 section: "membership",
                 ..
@@ -1731,13 +1780,22 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         );
     }
 
+    fn declared(name: &str, builtin: DynamicBuiltin) -> BTreeMap<String, DynamicBuiltin> {
+        BTreeMap::from([(name.to_string(), builtin)])
+    }
+
     #[tokio::test]
     async fn a_dangling_builtin_reference_refuses_the_services() {
         let mut config = externals(None, 2000, 65536);
         config
             .authorities
             .insert("auto".to_string(), Implementation::Builtin("no-such".to_string()));
-        match ExternalServices::new(config, &ModuleRegistry::empty(), ConsultGates::of(4, 8)) {
+        match ExternalServices::new(
+            config,
+            &ModuleRegistry::empty(),
+            BTreeMap::new(),
+            ConsultGates::of(4, 8),
+        ) {
             Err(ModulesError::UnknownBuiltin { section, name, builtin }) => {
                 assert_eq!(
                     (section, name.as_str(), builtin.as_str()),
@@ -1755,17 +1813,20 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             ("sanitizers", "approve"),
             ("authorities", "redact-email"),
             ("casts", "hitl"),
-            ("dynamic", "approve"),
         ] {
             let mut config = externals(None, 2000, 65536);
             let table = match section {
                 "sanitizers" => &mut config.sanitizers,
                 "authorities" => &mut config.authorities,
-                "casts" => &mut config.casts,
-                _ => &mut config.dynamic,
+                _ => &mut config.casts,
             };
             table.insert("x".to_string(), Implementation::Builtin(builtin.to_string()));
-            match ExternalServices::new(config, &ModuleRegistry::empty(), ConsultGates::of(4, 8)) {
+            match ExternalServices::new(
+                config,
+                &ModuleRegistry::empty(),
+                BTreeMap::new(),
+                ConsultGates::of(4, 8),
+            ) {
                 Err(ModulesError::UnknownBuiltin { section: refused, .. }) => assert_eq!(refused, section),
                 Err(other) => panic!("{section}/{builtin} must refuse as unknown, got {other}"),
                 Ok(_) => panic!("{section}/{builtin} must refuse"),
@@ -1831,8 +1892,8 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         config
             .authorities
             .insert("auto".to_string(), Implementation::Builtin(implementation.to_string()));
-        let services =
-            ExternalServices::new(config, &registry, ConsultGates::of(4, 8)).expect("the module reference resolves");
+        let services = ExternalServices::new(config, &registry, BTreeMap::new(), ConsultGates::of(4, 8))
+            .expect("the module reference resolves");
         (services, dir)
     }
 

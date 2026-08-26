@@ -65,7 +65,7 @@ Installing the plugin does not force every Claude Code session through OpenAPPA.
 
 ## Use Claude Code as a dynamic classifier
 
-OpenAPPA can also call the installed Claude Code CLI as a model builtin: `builtin = "claude-code"` serves an authority, a sanitizer, a cast, or a tool-level dynamic resolver, and `builtin = "llm"` serves the same four kinds through an API-key profile in `[externals.llm]`. This example binds a dynamic resolver. When a tool attaches the resolver with `uses`, the resolver directly owns every `delta` and `requires` destination in its `returns` declaration. The tool does not reference those results in its fields.
+OpenAPPA can also call the installed Claude Code CLI as a model builtin: an authority, a sanitizer, or a cast binds `builtin = "claude-code"` under `[externals]`, and a tool-level dynamic resolver names it on its own declaration; `builtin = "llm"` serves the same four kinds through an API-key profile in `[externals.llm]`. This example declares a dynamic resolver. When a tool attaches the resolver with `uses`, the resolver directly owns every `delta` and `requires` destination in its `returns` declaration. The tool does not reference those results in its fields.
 
 ```toml
 [[dynamic_resolver]]
@@ -102,11 +102,13 @@ The runtime uses the current user's Claude Code authentication. It starts one fr
 
 A model dynamic resolver is a trusted classifier rather than a sandboxed policy authority: there is no additional ceiling on its answer, and argument-level prompt-injection resistance is best-effort. Bound as an authority, sanitizer, or cast, the same model rules only within that component's `permits` or `may_cast`, like any other implementation. Process errors, timeouts, invalid fields, and trust or attention values outside policy produce no answer: the call is not checked, nothing is recorded, and the failure surfaces operationally — never as a policy denial.
 
-To serve the same resolver from an API key instead of the subscription, bind `builtin = "llm"` and add one profile per deployment:
+To serve the same resolver from an API key instead of the subscription, declare `builtin = "llm"` and add one profile per deployment:
 
 ```toml
-[externals.dynamic.classify-customer]
+[[dynamic_resolver]]
+name    = "classify-customer"
 builtin = "llm"
+returns = ["delta.trust", "delta.audience", "requires.trust", "requires.audience", "requires.attention"]
 
 [externals.llm]
 provider       = "anthropic"        # anthropic | openai | gemini | ollama

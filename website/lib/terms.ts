@@ -59,7 +59,7 @@ const TERMS = {
   "[membership]":
     "The one registration every @name group resolves through. A group mention without it is a load error. Its name binds under [externals.membership.<name>] to an endpoint or a command; no builtin serves a directory.",
   "[[dynamic_resolver]]":
-    "A named external that classifies proposed tool calls. Its opaque non-empty name can contain dots. It declares the inputs a tool must supply and the contract destinations it owns through returns. It is distinct from @group membership resolution.",
+    "A named external that classifies proposed tool calls. Its opaque non-empty name can contain dots. It declares the inputs a tool must supply and the contract destinations it owns through returns, and may name a stock model transport with builtin = \"claude-code\" or \"llm\"; otherwise the deployment binds it under [externals.dynamic.<name>]. It is distinct from @group membership resolution.",
   inputs:
     "The values a resolver reads. A tool maps each one from $tool_call. Without an explicit mapping, the resolver reads the complete tool call: name, description when declared, and arguments.",
   uses:
@@ -115,11 +115,11 @@ const TERMS = {
   'builtin = "approve"':
     "The stock in-process authority that approves every consult within what it permits. An open gate the deployer chose deliberately — legitimate and visible in review.",
   'builtin = "claude-code"':
-    "The stock model transport on a Claude subscription: one isolated claude -p process per consult, given the component's declaration and the judged value, never the trajectory. Serves authorities, sanitizers, casts, and dynamic resolvers under the same caps as any implementation.",
+    "The stock model transport on a Claude subscription: one isolated claude -p process per consult, given the component's declaration and the judged value, never the trajectory. An authority, sanitizer, or cast binds it under [externals]; a dynamic resolver names it on its declaration. The same caps apply as to any implementation.",
   'builtin = "llm"':
-    "The stock model transport on an API key, through the deployment's [externals.llm] profile. Same consult rendering and same per-kind caps as claude-code.",
+    "The stock model transport on an API key, through the deployment's [externals.llm] profile. Same consult rendering, same placement, and same per-kind caps as claude-code.",
   "[externals.llm]":
-    "The deployment's one API-key model profile — provider (anthropic, openai, gemini, or ollama), model, optional url, token_env (required except for ollama), timeout, and concurrency — that every builtin = \"llm\" binding consults.",
+    "The deployment's one API-key model profile — provider (anthropic, openai, gemini, or ollama), model, optional url, token_env (required except for ollama), timeout, and concurrency — that every builtin = \"llm\" binding or declaration consults. A deployment without it refuses to open a policy that declares one.",
 
   /* Sanitizers and Casts */
   on: "Where a sanitizer may apply: tool_output at an admission the host can withhold — a child return, or a tool result at a confined application point; tool_input as whole-argument substitution at dispatch.",

@@ -49,11 +49,14 @@ timeout_ms = 5000
 max_body_bytes = 65536
 ```
 
-Implementation bindings live in `[externals]`, never inline in the
-policy: one `[externals.<kind>.<name>]` entry per registered authority,
-sanitizer, cast, dynamic resolver, or membership resolver, bound to a
-`url`, a `command`, or a `builtin` (stock, a model transport, or a
-module from `--modules-dir`).
+Implementation bindings live in `[externals]`: one
+`[externals.<kind>.<name>]` entry per registered authority, sanitizer,
+cast, or membership resolver, and per dynamic resolver that names no
+`builtin` on its declaration — bound to a `url`, a `command`, or, for
+authorities, sanitizers, and casts, a `builtin` (stock, a model
+transport, or a module from `--modules-dir`). A dynamic resolver names
+a model transport on its own `[[dynamic_resolver]]` declaration with
+`builtin = "claude-code"` or `builtin = "llm"`.
 
 `integrations/claude-code/examples/claude-code.appa.toml` is a
 complete starting point: it releases every built-in Claude Code tool

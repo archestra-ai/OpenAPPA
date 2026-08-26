@@ -139,21 +139,26 @@ mod tests {
 
     #[test]
     fn a_builtin_resolver_declaration_is_refused() {
-        let policy = r#"
+        for builtin in appa_policy::DynamicBuiltin::ALL {
+            let policy = format!(
+                r#"
 version = 1
 [[dynamic_resolver]]
 name = "classify"
-builtin = "claude-code"
+builtin = "{}"
 returns = ["delta.trust"]
 [[tool]]
 name = "list_customers"
 description = "Lists the customer records."
-uses = [{ resolver = "classify" }]
-"#;
-        assert!(matches!(
-            check_policy(policy, &systems("crm")),
-            Err(PolicyError::BuiltinResolver { name }) if name == "classify"
-        ));
+uses = [{{ resolver = "classify" }}]
+"#,
+                builtin.wire_name()
+            );
+            assert!(matches!(
+                check_policy(&policy, &systems("crm")),
+                Err(PolicyError::BuiltinResolver { name }) if name == "classify"
+            ));
+        }
     }
 
     #[test]

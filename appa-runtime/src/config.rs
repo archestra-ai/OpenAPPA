@@ -147,7 +147,9 @@ pub struct Externals {
     /// A resolver-backed `[[cast]]` binds here; a constant cast is answered from the policy
     /// and binds nothing.
     pub casts: BTreeMap<String, Implementation>,
-    pub dynamic: BTreeMap<String, Implementation>,
+    /// One implementation per policy-declared dynamic resolver that names no `builtin` on
+    /// its declaration. A resolver that carries a stock builtin takes no entry here.
+    pub dynamic: BTreeMap<String, DynamicImplementation>,
     /// The one resolver the policy's `[membership]` registers, under its name.
     pub membership: BTreeMap<String, Implementation>,
     /// Deployment knobs for the stock `claude-code` builtin.
@@ -203,6 +205,14 @@ pub enum Implementation {
     Resolver(Endpoint),
     Command(ResolverCommand),
     Builtin(String),
+}
+
+/// How one deployment-bound dynamic resolver runs: an HTTP endpoint or a local command.
+/// A stock builtin is named on the policy declaration, never bound here.
+#[derive(Debug, Clone)]
+pub enum DynamicImplementation {
+    Resolver(Endpoint),
+    Command(ResolverCommand),
 }
 
 /// A command binding's argv and the directory of the config that declared it.
@@ -382,9 +392,20 @@ impl Section {
 
     /// Whether `builtin` is a name this section may bind. Authorities and sanitizers take
     /// the stock names, the model builtins, and any module-grammar name (the module's
-    /// presence is checked when the deployment opens); casts and dynamic resolvers take
-    /// only the model builtins; a membership resolver is never a builtin.
+    /// presence is checked when the deployment opens); casts take only the model builtins;
+    /// a dynamic resolver names a stock builtin on its policy declaration instead, and a
+    /// membership resolver is never a builtin.
     fn check_builtin(self, name: &str, builtin: &str) -> Result<(), ConfigError> {
+        let allowed = match self {
+            Section::Dynamic | Section::Membership => {
+                return Err(ConfigError::BuiltinNotAllowed {
+                    section: self.name(),
+                    name: name.to_string(),
+                });
+            }
+            Section::Authorities | Section::Sanitizers => crate::builtins::valid_implementation_name(builtin),
+            Section::Casts => builtin == CLAUDE_CODE_BUILTIN || builtin == LLM_BUILTIN,
+        };
         // The subscription transport is a local process under a process group, which only
         // Unix provides; like a `command`, it is refused where it cannot be cleaned up.
         #[cfg(not(unix))]
@@ -394,17 +415,6 @@ impl Section {
                 name: name.to_string(),
             });
         }
-        let model_builtin = builtin == CLAUDE_CODE_BUILTIN || builtin == LLM_BUILTIN;
-        let allowed = match self {
-            Section::Authorities | Section::Sanitizers => crate::builtins::valid_implementation_name(builtin),
-            Section::Casts | Section::Dynamic => model_builtin,
-            Section::Membership => {
-                return Err(ConfigError::BuiltinNotAllowed {
-                    section: self.name(),
-                    name: name.to_string(),
-                });
-            }
-        };
         if !allowed {
             return Err(ConfigError::InvalidBuiltinName {
                 section: self.name(),
@@ -650,7 +660,10 @@ impl Config {
                 authorities: resolve(Section::Authorities, authorities)?,
                 sanitizers: resolve(Section::Sanitizers, sanitizers)?,
                 casts: resolve(Section::Casts, casts)?,
-                dynamic: resolve(Section::Dynamic, dynamic)?,
+                dynamic: resolve(Section::Dynamic, dynamic)?
+                    .into_iter()
+                    .map(|(name, implementation)| (name, dynamic_implementation(implementation)))
+                    .collect(),
                 membership: resolve(Section::Membership, membership)?,
                 claude_code: resolve_claude_code(claude_code)?,
                 llm,
@@ -1004,6 +1017,15 @@ fn compose_include(
     Ok(())
 }
 
+/// A dynamic binding after `Section::Dynamic` refused every `builtin` at parse.
+fn dynamic_implementation(implementation: Implementation) -> DynamicImplementation {
+    match implementation {
+        Implementation::Resolver(endpoint) => DynamicImplementation::Resolver(endpoint),
+        Implementation::Command(command) => DynamicImplementation::Command(command),
+        Implementation::Builtin(_) => unreachable!("Section::Dynamic refuses every builtin"),
+    }
+}
+
 fn resolve_bindings(
     section: Section,
     raw: BTreeMap<String, RawBinding>,
@@ -1236,14 +1258,35 @@ mod tests {
         Config::validate(text.to_string(), raw, Path::new("."), lookup)
     }
 
-    fn bindings(section: Section, config: &Config) -> &BTreeMap<String, Implementation> {
-        match section {
+    /// The transport one resolved entry selected, the same view over every section.
+    enum Bound<'a> {
+        Url,
+        Command(&'a ResolverCommand),
+        Builtin(&'a str),
+    }
+
+    fn bound<'a>(section: Section, config: &'a Config, name: &str) -> Option<Bound<'a>> {
+        let table = match section {
             Section::Authorities => &config.externals.authorities,
             Section::Sanitizers => &config.externals.sanitizers,
             Section::Casts => &config.externals.casts,
-            Section::Dynamic => &config.externals.dynamic,
             Section::Membership => &config.externals.membership,
-        }
+            Section::Dynamic => {
+                return config
+                    .externals
+                    .dynamic
+                    .get(name)
+                    .map(|implementation| match implementation {
+                        DynamicImplementation::Resolver(_) => Bound::Url,
+                        DynamicImplementation::Command(command) => Bound::Command(command),
+                    });
+            }
+        };
+        table.get(name).map(|implementation| match implementation {
+            Implementation::Resolver(_) => Bound::Url,
+            Implementation::Command(command) => Bound::Command(command),
+            Implementation::Builtin(builtin) => Bound::Builtin(builtin),
+        })
     }
 
     #[test]
@@ -1329,7 +1372,7 @@ mod tests {
         })
         .expect("the fixture with a set secret validates");
         assert!(!format!("{:?}", config.externals).contains("sekret"));
-        let Some(Implementation::Resolver(dynamic)) = config.externals.dynamic.get("classifier") else {
+        let Some(DynamicImplementation::Resolver(dynamic)) = config.externals.dynamic.get("classifier") else {
             panic!("the named dynamic endpoint is set")
         };
         let token = dynamic.token.as_ref().expect("the token resolved");
@@ -1379,18 +1422,12 @@ mod tests {
         };
         for section in Section::ALL {
             let config = parse(&entry(section, "url = \"https://x.internal\"")).expect("a url binds everywhere");
-            assert!(matches!(
-                bindings(section, &config).get("x"),
-                Some(Implementation::Resolver(_))
-            ));
+            assert!(matches!(bound(section, &config, "x"), Some(Bound::Url)));
             #[cfg(unix)]
             {
                 let config =
                     parse(&entry(section, "command = [\"python3\", \"x.py\"]")).expect("a command binds everywhere");
-                assert!(matches!(
-                    bindings(section, &config).get("x"),
-                    Some(Implementation::Command(_))
-                ));
+                assert!(matches!(bound(section, &config, "x"), Some(Bound::Command(_))));
             }
             assert!(
                 matches!(
@@ -1407,8 +1444,8 @@ mod tests {
             let config =
                 cell(section, builtin).unwrap_or_else(|error| panic!("{} takes {builtin}: {error}", section.name()));
             assert!(matches!(
-                bindings(section, &config).get("x"),
-                Some(Implementation::Builtin(name)) if name == builtin
+                bound(section, &config, "x"),
+                Some(Bound::Builtin(name)) if name == builtin
             ));
         };
         let refuses = |section: Section, builtin: &str| {
@@ -1423,33 +1460,27 @@ mod tests {
                 accepts(section, builtin);
             }
         }
-        for section in [Section::Casts, Section::Dynamic] {
-            for builtin in ["claude-code", "llm"] {
-                accepts(section, builtin);
-            }
-            for builtin in ["hitl", "approve", "redact-email", "some-module"] {
-                refuses(section, builtin);
-            }
+        for builtin in ["claude-code", "llm"] {
+            accepts(Section::Casts, builtin);
         }
-        for builtin in ["hitl", "approve", "redact-email", "claude-code", "llm", "some-module"] {
-            assert!(
-                matches!(
-                    cell(Section::Membership, builtin),
-                    Err(ConfigError::BuiltinNotAllowed { .. })
-                ),
-                "membership must refuse builtin {builtin}"
-            );
+        for builtin in ["hitl", "approve", "redact-email", "some-module"] {
+            refuses(Section::Casts, builtin);
+        }
+        // A dynamic resolver names a stock builtin on its declaration, never here.
+        for section in [Section::Dynamic, Section::Membership] {
+            for builtin in ["hitl", "approve", "redact-email", "claude-code", "llm", "some-module"] {
+                assert!(
+                    matches!(cell(section, builtin), Err(ConfigError::BuiltinNotAllowed { .. })),
+                    "{} must refuse builtin {builtin}",
+                    section.name()
+                );
+            }
         }
     }
 
     #[test]
     fn the_llm_builtin_needs_the_llm_table() {
-        for section in [
-            Section::Authorities,
-            Section::Sanitizers,
-            Section::Casts,
-            Section::Dynamic,
-        ] {
+        for section in [Section::Authorities, Section::Sanitizers, Section::Casts] {
             let text = format!("{MINIMAL}\n[externals.{}.x]\nbuiltin = \"llm\"\n", section.name());
             assert!(
                 matches!(parse(&text), Err(ConfigError::LlmNotConfigured { .. })),
@@ -1561,7 +1592,7 @@ mod tests {
     #[cfg(not(unix))]
     #[test]
     fn the_claude_code_builtin_is_refused_on_an_unsupported_platform() {
-        let text = format!("{MINIMAL}\n[externals.dynamic.classifier]\nbuiltin = \"claude-code\"\n");
+        let text = format!("{MINIMAL}\n[externals.casts.classifier]\nbuiltin = \"claude-code\"\n");
         assert!(matches!(
             parse(&text),
             Err(ConfigError::UnsupportedClaudeCodePlatform { name, .. }) if name == "classifier"
@@ -1670,8 +1701,8 @@ mod tests {
 
         let config = Config::load(&dir.path().join("appa.toml")).expect("composed config loads");
         let command_cwd =
-            |section: Section, name: &str| match bindings(section, &config).get(name).expect("binding is present") {
-                Implementation::Command(command) => command.cwd.clone(),
+            |section: Section, name: &str| match bound(section, &config, name).expect("binding is present") {
+                Bound::Command(command) => command.cwd.clone(),
                 _ => panic!("binding is a command"),
             };
         let canonical = std::fs::canonicalize(dir.path()).expect("canonical temp directory");
@@ -1885,7 +1916,7 @@ mod tests {
                 &root,
                 format!(
                     "include = [{includes}]\n[policy]\nversion = 1\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n\
-                     [externals.dynamic.classifier]\nbuiltin = \"claude-code\"\n\
+                     [externals.dynamic.classifier]\nurl = \"https://classifier.internal\"\n\
                      [externals.authorities.desk]\nurl = \"https://desk.internal\"\n"
                 ),
             )
@@ -1910,7 +1941,7 @@ mod tests {
             )
             .expect("write fragment entry");
             let config = Config::load(&root).expect("a fragment adds an entry to any section");
-            assert!(bindings(section, &config).contains_key("fresh"), "{}", section.name());
+            assert!(bound(section, &config, "fresh").is_some(), "{}", section.name());
         }
 
         for (section, name) in [("dynamic", "classifier"), ("authorities", "desk")] {
