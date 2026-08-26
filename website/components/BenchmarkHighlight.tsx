@@ -2,30 +2,19 @@ import Link from "next/link";
 
 interface BenchRowProps {
   name: string;
-  min: number;
-  max: number;
-  label: string;
+  pct: number;
+  label?: string;
   isSubject?: boolean;
 }
 
-function BenchRow({ name, min, max, label, isSubject }: BenchRowProps) {
+function BenchRow({ name, pct, label, isSubject }: BenchRowProps) {
   return (
     <div className={`bench-row${isSubject ? " subject" : ""}`}>
       <span className="bench-row-name">{name}</span>
       <span className="bench-track">
-        {max > 0 && (
-          <>
-            <span className="bench-bar" style={{ width: `${min}%` }} />
-            {max > min && (
-              <span
-                className="bench-bar-interval"
-                style={{ left: `${min}%`, width: `${max - min}%` }}
-              />
-            )}
-          </>
-        )}
+        {pct > 0 && <span className="bench-bar" style={{ width: `${pct}%` }} />}
       </span>
-      <span className="bench-row-value">{label}</span>
+      <span className="bench-row-value">{label ?? `${pct}%`}</span>
     </div>
   );
 }
@@ -40,45 +29,23 @@ export function BenchmarkHighlight() {
           <figcaption className="bench-chart-title">
             Task completion <span className="bench-chart-hint">tasks completed</span>
           </figcaption>
-          <BenchRow
-            name="OpenAPPA"
-            min={88}
-            max={90}
-            label="88–90%"
-            isSubject
-          />
-          <BenchRow
-            name="Defended FIDES"
-            min={37}
-            max={45}
-            label="37–45%"
-          />
+          <BenchRow name="OpenAPPA" pct={89} isSubject />
+          <BenchRow name="Defended FIDES" pct={41} />
         </figure>
 
         <figure className="bench-chart">
           <figcaption className="bench-chart-title">
             Attacks that succeeded <span className="bench-chart-hint">lower is better</span>
           </figcaption>
-          <BenchRow
-            name="OpenAPPA"
-            min={0}
-            max={0}
-            label="0%"
-            isSubject
-          />
-          <BenchRow
-            name="Defended FIDES"
-            min={28}
-            max={35}
-            label="28–35%"
-          />
+          <BenchRow name="OpenAPPA" pct={0} isSubject />
+          <BenchRow name="Defended FIDES" pct={31} />
         </figure>
       </div>
 
       <p className="bench-panel-foot">
-        Across three models and 20 Bench-Corp workflows, guarded OpenAPPA retained high task
-        completion (88–90%) without a single observed policy breach. Full methodology and limitations
-        are reported in the paper.
+        Across 600 evaluated episodes over three frontier models in Bench-Corp, guarded OpenAPPA
+        retained 89% task completion without a single observed policy breach. Full model breakdown
+        and methodology are reported in the paper.
       </p>
       <Link className="bench-panel-link" href="/evaluation">
         Read the full benchmark results →
