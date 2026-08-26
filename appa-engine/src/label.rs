@@ -314,18 +314,6 @@ impl PartialLabel {
         self.bound = self.bound.combine(by);
     }
 
-    pub fn combine(&self, other: &PartialLabel) -> PartialLabel {
-        PartialLabel {
-            bound: self.bound.combine(&other.bound),
-            unresolved_trust: self.unresolved_trust.union(&other.unresolved_trust).copied().collect(),
-            unresolved_audience: self
-                .unresolved_audience
-                .union(&other.unresolved_audience)
-                .copied()
-                .collect(),
-        }
-    }
-
     /// The established bound: every known restriction, readable even while sources
     /// stay unresolved. The narrowing check and sanitizer residual comparisons read
     /// exactly this.
@@ -424,34 +412,38 @@ mod tests {
 
     proptest! {
         #[test]
-        fn combine_is_commutative(a in partial_strategy(), b in partial_strategy()) {
+        fn combine_is_commutative(a in established_strategy(), b in established_strategy()) {
             prop_assert_eq!(a.combine(&b), b.combine(&a));
         }
 
         #[test]
-        fn combine_is_associative(a in partial_strategy(), b in partial_strategy(), c in partial_strategy()) {
+        fn combine_is_associative(
+            a in established_strategy(),
+            b in established_strategy(),
+            c in established_strategy(),
+        ) {
             prop_assert_eq!(a.combine(&b).combine(&c), a.combine(&b.combine(&c)));
         }
 
         #[test]
-        fn combine_is_idempotent(a in partial_strategy()) {
+        fn combine_is_idempotent(a in established_strategy()) {
             prop_assert_eq!(a.combine(&a), a.clone());
         }
 
         #[test]
-        fn established_top_is_identity(a in partial_strategy()) {
-            let identity = PartialLabel::established(EstablishedLabel::top());
+        fn established_top_is_identity(a in established_strategy()) {
+            let identity = EstablishedLabel::top();
             prop_assert_eq!(identity.combine(&a), a.clone());
             prop_assert_eq!(a.combine(&identity), a.clone());
         }
 
         #[test]
-        fn combine_never_widens(a in partial_strategy(), b in partial_strategy()) {
+        fn combine_never_widens(a in established_strategy(), b in established_strategy()) {
             let folded = a.combine(&b);
-            prop_assert!(folded.bound().trust <= a.bound().trust);
-            prop_assert!(folded.bound().trust <= b.bound().trust);
-            prop_assert!(folded.bound().audience.within(&a.bound().audience));
-            prop_assert!(folded.bound().audience.within(&b.bound().audience));
+            prop_assert!(folded.trust <= a.trust);
+            prop_assert!(folded.trust <= b.trust);
+            prop_assert!(folded.audience.within(&a.audience));
+            prop_assert!(folded.audience.within(&b.audience));
         }
 
         #[test]
