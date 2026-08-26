@@ -34,6 +34,9 @@ OpenAPPA to do differently.
   rule ordering, TOML fields, reader names, labels, or authority wiring unless
   the user explicitly asks for technical details. Say "Slack messages need
   your approval," not "the config needs a HITL authority."
+- Use ordinary descriptions, not invented category names. Never say "stale
+  root rules." If relevant, say: "These tools are in your config but were not
+  detected in this session: <names>. I'll leave them unchanged."
 - Show TOML only when the user asks for it.
 - Ask one focused question at a time. Do not make the user classify every tool
   when its name and description already make the answer clear.
@@ -57,10 +60,15 @@ The runtime address is
 ### Inspect
 
 1. Read the root config first. Record its tool rules and included batteries.
-2. Run `claude mcp list` for configured servers. Use the current session's
-   tool surface for the exact tool names and descriptions. A configured server
-   that is not visible is unprobed; report it and do not invent its tools.
-3. Compare the installed tools with the root rules. Existing root rules stay
+2. Run `claude mcp list` for configured servers.
+3. Add every MCP server visible in the current session, even when
+   `claude mcp list` omits it. MCP tools use `mcp__<server>__<tool>` names;
+   plugin-provided servers use `mcp__plugin_<plugin>_<server>__<tool>` names.
+   Keep each exact full tool name and description.
+4. Cross-check both sources. Record every configured MCP server whose tools
+   could not be detected. Keep it separate from Claude Code's built-in tools.
+   Do not invent its tool list.
+5. Compare the installed tools with the root rules. Existing root rules stay
    in control, including rules for tools a battery also covers.
 
 ### Find useful batteries
@@ -128,10 +136,19 @@ Group the proposal by server. Show:
 - batteries to add, each with its one-sentence explanation;
 - existing behavior that stays unchanged, but only when it affects the result;
 - how the remaining installed tools will behave;
-- installed tools that will remain blocked.
+- installed tools that will remain blocked;
+- every configured MCP server whose tools could not be detected.
 
-Do not mention unchanged or stale config entries unless they affect the user's
-requested outcome.
+Do not mention config entries that were not detected unless they affect the
+user's requested outcome.
+
+Name each configured MCP server that could not be inspected and say: "<server>
+is configured, but I could not inspect its tools in this session." Do not omit
+the server or fold it into a list of individual tools.
+
+When tools named in the config were not detected, use their exact names and
+say only that they were not detected in this session and will be left
+unchanged. Do not call them stale, removed, obsolete, or uninstalled.
 
 End with: **Approve, or tell me what to change.** Wait for the reply.
 
