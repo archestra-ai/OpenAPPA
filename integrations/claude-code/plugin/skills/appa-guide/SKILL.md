@@ -10,7 +10,7 @@ OpenAPPA configuration helper. Request: $ARGUMENTS
 Use one mode:
 
 - **`init`** — inspect the installed tools and build a useful starting config.
-- **`adjust`** — explain and change one part of the current config.
+- **`adjust`** — help the user make changes to an existing config.
 
 If the request already makes the mode clear, start there. Otherwise show these
 two choices in one short message and wait. Do not run both modes together.
@@ -137,7 +137,7 @@ After approval:
 Start from the user's requested outcome, not from a full tool rescan.
 
 1. Read the root config and only the included files relevant to the requested
-   change.
+   changes.
 2. For policy syntax or behavior that the current config does not demonstrate,
    consult the relevant section of
    `~/.claude/plugins/marketplaces/appa/website/content/docs/contracts.md`.
@@ -147,7 +147,7 @@ Start from the user's requested outcome, not from a full tool rescan.
 4. If a battery would help, propose it with the same one-sentence rule used in
    `init` mode. Existing root rules still take priority.
 5. End with: **Approve, or tell me what to change.** Wait for the reply.
-6. Apply only the approved change in the root config. To change battery
+6. Apply only the approved changes in the root config. To change battery
    behavior, add or edit a root rule; never modify the battery.
 7. Reload and report the result as described below.
 
