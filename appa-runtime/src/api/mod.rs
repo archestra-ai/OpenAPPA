@@ -285,8 +285,8 @@ impl Deployment {
         let policy = compile_policy(&config)?;
         validate_deployment(&policy, &config.externals)?;
         let dynamic_builtins = policy
-            .dynamic_resolver_builtins()
-            .map(|(name, builtin)| (name.as_str().to_string(), builtin))
+            .dynamic_resolvers()
+            .filter_map(|(name, builtin)| builtin.map(|builtin| (name.as_str().to_string(), builtin)))
             .collect();
         let externals = ExternalServices::new(config.externals.clone(), modules, dynamic_builtins, gates)
             .map_err(|error| OpenError::Modules(error.to_string()))?;
@@ -898,32 +898,28 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
     // A declared builtin is served by the runtime itself, so it is refused when it is also
     // bound, and when this deployment cannot serve it: a consult that can never answer is
     // a misconfiguration to refuse at open, not a no-answer to discover under an agent.
-    let declared_builtins: std::collections::BTreeSet<&str> = policy
-        .dynamic_resolver_builtins()
-        .map(|(name, builtin)| {
-            let name = name.as_str();
-            if externals.dynamic.contains_key(name) {
-                return Err(OpenError::BoundBuiltinResolver(name.to_string()));
+    // Every other resolver is bound exactly once.
+    let mut bound_by_deployment = Vec::new();
+    for (name, builtin) in policy.dynamic_resolvers() {
+        let name = name.as_str();
+        let Some(builtin) = builtin else {
+            bound_by_deployment.push(name);
+            continue;
+        };
+        if externals.dynamic.contains_key(name) {
+            return Err(OpenError::BoundBuiltinResolver(name.to_string()));
+        }
+        match builtin {
+            appa_policy::DynamicBuiltin::Llm if externals.llm.is_none() => {
+                return Err(OpenError::LlmNotConfigured(name.to_string()));
             }
-            match builtin {
-                appa_policy::DynamicBuiltin::Llm if externals.llm.is_none() => {
-                    Err(OpenError::LlmNotConfigured(name.to_string()))
-                }
-                appa_policy::DynamicBuiltin::ClaudeCode if !cfg!(unix) => {
-                    Err(OpenError::UnsupportedClaudeCodePlatform(name.to_string()))
-                }
-                appa_policy::DynamicBuiltin::Llm | appa_policy::DynamicBuiltin::ClaudeCode => Ok(name),
+            appa_policy::DynamicBuiltin::ClaudeCode if !cfg!(unix) => {
+                return Err(OpenError::UnsupportedClaudeCodePlatform(name.to_string()));
             }
-        })
-        .collect::<Result<_, _>>()?;
-    bound_exactly(
-        "dynamic resolver",
-        policy
-            .dynamic_resolver_names()
-            .map(|name| name.as_str())
-            .filter(|name| !declared_builtins.contains(name)),
-        &externals.dynamic,
-    )?;
+            appa_policy::DynamicBuiltin::Llm | appa_policy::DynamicBuiltin::ClaudeCode => {}
+        }
+    }
+    bound_exactly("dynamic resolver", bound_by_deployment.into_iter(), &externals.dynamic)?;
     bound_exactly(
         "membership resolver",
         rc.membership.iter().map(|resolver| resolver.as_str()),

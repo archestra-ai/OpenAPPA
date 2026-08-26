@@ -56,7 +56,7 @@ pub fn check_policy(policy: &str, enabled: &BTreeSet<System>) -> Result<CheckedP
 
     // A visitor's policy never selects an implementation on this host: a builtin resolver
     // would start a claude process under the demo service's own account.
-    if let Some((name, _)) = config.dynamic_resolver_builtins().next() {
+    if let Some((name, _)) = config.dynamic_resolvers().find(|(_, builtin)| builtin.is_some()) {
         return Err(PolicyError::BuiltinResolver {
             name: name.as_str().to_string(),
         });

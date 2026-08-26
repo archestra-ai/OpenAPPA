@@ -157,8 +157,8 @@ pub struct Config {
     engine: Engine,
     registry_config: RegistryConfig,
     boundary_label: Label,
-    dynamic_resolver_names: BTreeSet<DynamicResolverName>,
-    dynamic_resolver_builtins: BTreeMap<DynamicResolverName, DynamicBuiltin>,
+    /// Every registered `[[dynamic_resolver]]`, with the stock builtin it names, if any.
+    dynamic_resolvers: BTreeMap<DynamicResolverName, Option<DynamicBuiltin>>,
 }
 
 impl Config {
@@ -182,7 +182,7 @@ impl Config {
             None => default_boundary_label(&trust_chain),
         };
 
-        let mut dynamic_resolver_builtins = BTreeMap::new();
+        let mut dynamic_resolvers = BTreeMap::new();
         let mut declarations: BTreeMap<DynamicResolverName, ResolverDeclaration> = BTreeMap::new();
         for resolver in raw.dynamic_resolver {
             if resolver.name.is_empty() {
@@ -232,15 +232,19 @@ impl Config {
             {
                 return Err(ConfigError::DuplicateDynamicResolver(name.as_str().to_string()));
             }
-            if let Some(builtin) = resolver.builtin {
-                let Some(builtin) = DynamicBuiltin::parse(&builtin) else {
-                    return Err(ConfigError::UnknownDynamicBuiltin {
-                        name: name.as_str().to_string(),
-                        builtin,
-                    });
-                };
-                dynamic_resolver_builtins.insert(name, builtin);
-            }
+            let builtin = match resolver.builtin {
+                Some(builtin) => match DynamicBuiltin::parse(&builtin) {
+                    Some(builtin) => Some(builtin),
+                    None => {
+                        return Err(ConfigError::UnknownDynamicBuiltin {
+                            name: name.as_str().to_string(),
+                            builtin,
+                        });
+                    }
+                },
+                None => None,
+            };
+            dynamic_resolvers.insert(name, builtin);
         }
         let membership = match raw.membership {
             Some(membership) => {
@@ -337,8 +341,7 @@ impl Config {
             engine,
             registry_config,
             boundary_label,
-            dynamic_resolver_names: declarations.keys().cloned().collect(),
-            dynamic_resolver_builtins,
+            dynamic_resolvers,
         })
     }
 
@@ -363,16 +366,14 @@ impl Config {
     /// Every `[[dynamic_resolver]]` the policy registers — the validated superset of every
     /// resolver name a tool binding uses.
     pub fn dynamic_resolver_names(&self) -> impl Iterator<Item = &DynamicResolverName> {
-        self.dynamic_resolver_names.iter()
+        self.dynamic_resolvers.keys()
     }
 
-    /// The stock builtin each `[[dynamic_resolver]]` that carries one names on its declaration.
-    /// A resolver listed here takes no deployment binding; every other resolver is bound by name
-    /// under `[externals.dynamic]`.
-    pub fn dynamic_resolver_builtins(&self) -> impl Iterator<Item = (&DynamicResolverName, DynamicBuiltin)> {
-        self.dynamic_resolver_builtins
-            .iter()
-            .map(|(name, builtin)| (name, *builtin))
+    /// Every `[[dynamic_resolver]]` with the stock builtin it names on its declaration. A
+    /// resolver that names one takes no deployment binding; every other resolver is bound by
+    /// name under `[externals.dynamic]`.
+    pub fn dynamic_resolvers(&self) -> impl Iterator<Item = (&DynamicResolverName, Option<DynamicBuiltin>)> {
+        self.dynamic_resolvers.iter().map(|(name, builtin)| (name, *builtin))
     }
 }
 
@@ -1450,14 +1451,13 @@ confined_results = ["lookup"]
         };
         for expected in DynamicBuiltin::ALL {
             let config = Config::from_toml_str(&policy(expected.wire_name())).expect("the stock builtin loads");
-            let builtins: Vec<_> = config
-                .dynamic_resolver_builtins()
+            let resolvers: Vec<_> = config
+                .dynamic_resolvers()
                 .map(|(name, builtin)| (name.as_str(), builtin))
                 .collect();
-            assert_eq!(builtins, vec![("classify", expected)]);
             assert_eq!(
-                config.dynamic_resolver_names().count(),
-                2,
+                resolvers,
+                vec![("bound", None), ("classify", Some(expected))],
                 "a bound resolver still registers"
             );
         }
