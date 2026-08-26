@@ -1299,7 +1299,7 @@ samp {
   display: grid;
   /* The name column fits the longest arm label ("FIDES (Microsoft)", ~95px)
      without wrapping; the track takes whatever is left. */
-  grid-template-columns: 6.5rem minmax(0, 1fr) 3rem;
+  grid-template-columns: 7.25rem minmax(0, 1fr) 3rem;
   align-items: center;
   gap: 10px;
   padding: 3px 0;
