@@ -39,10 +39,10 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             },
             Err(error) => refuse(error.to_string()),
         },
-        HookEvent::Prompt { actor, text } => {
-            match on_actor(runtime, &actor, |session| {
-                let text = text.clone();
-                async move { session.on_prompt(text) }
+        HookEvent::Prompt { actor, .. } => {
+            match on_actor(runtime, &actor, |session| async move {
+                session.on_prompt();
+                Ok(())
             })
             .await
             {

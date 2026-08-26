@@ -188,9 +188,8 @@ impl Session {
     /// judgment — a stale offer declines at execution by live re-plan.
     /// The runtime keeps no transcript, so there is nothing
     /// left for this event to do.
-    pub fn on_prompt(&self, _text: String) -> Result<(), EventError> {
+    pub fn on_prompt(&self) {
         tracing::debug!(trajectory = %self.trajectory.0, "prompt acknowledged");
-        Ok(())
     }
 
     /// The actor finished a turn. A call still open here got no outcome
@@ -4403,9 +4402,7 @@ context_control = true
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_runtime(&dir);
         let session = runtime.create_session(root()).expect("a fresh id opens");
-        session
-            .on_prompt("read the report".to_string())
-            .expect("the prompt acks");
+        session.on_prompt();
         assert!(only_the_opening(&runtime));
     }
 
