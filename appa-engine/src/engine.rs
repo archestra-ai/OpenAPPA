@@ -14702,7 +14702,14 @@ mod tests {
         scoped.scope = crate::authority::Scope {
             tags: vec![crate::names::TagName::new("web")],
         };
-        let e = open_engine(returning_registry(vec![scoped], vec![classifier_cast()]));
+        let mut cfg = returning_registry(vec![scoped], vec![classifier_cast()]);
+        // A tool the sanitizer's scope reaches, so the sanitizer is one a result could
+        // meet. A child return originates from no tool, which is what leaves it unreached.
+        cfg.tools.push(ToolContract {
+            tags: vec![crate::names::TagName::new("web")],
+            ..open_tool("browse")
+        });
+        let e = open_engine(cfg);
         let child = TrajectoryId::new("child");
         let mut log = spawn_family(&e, None, &child);
         reads(&e, &mut log, &child, "read_suspicious_internal");

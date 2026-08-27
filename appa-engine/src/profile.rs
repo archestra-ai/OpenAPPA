@@ -548,15 +548,6 @@ pub(crate) fn validate_coverage(
         }
     }
 
-    if profile.confined_results.is_empty()
-        && !profile.confined_child_return
-        && let Some(sanitizer) = registry.sanitizers().find(|sanitizer| sanitizer.on.output)
-    {
-        return Err(LoadError::OutputSanitizerUncovered {
-            sanitizer: sanitizer.name.as_str().to_string(),
-        });
-    }
-
     if let ReturnPolicy::Sanitized(name) = child_return {
         if !profile.context_control {
             return Err(LoadError::ChildWithoutContextControl);
@@ -572,6 +563,24 @@ pub(crate) fn validate_coverage(
             None => {
                 return Err(LoadError::ChildReturnSanitizerUnknown(name.as_str().to_string()));
             }
+        }
+    }
+
+    // An output sanitizer runs on a confined result its scope reaches, or on a confined
+    // child return, which originates from no tool and so is reached only by an unscoped
+    // one. A sanitizer no confined source can reach never runs, and the deployment that
+    // declares it believes a derivation is available that is not.
+    for sanitizer in registry.sanitizers().filter(|sanitizer| sanitizer.on.output) {
+        let reaches_a_result = profile.confined_results.iter().any(|tool| {
+            registry
+                .variants(tool)
+                .any(|contract| sanitizer.scope.covers(&contract.tags))
+        });
+        let reaches_the_child_return = profile.confined_child_return && sanitizer.scope.is_unscoped();
+        if !reaches_a_result && !reaches_the_child_return {
+            return Err(LoadError::OutputSanitizerUncovered {
+                sanitizer: sanitizer.name.as_str().to_string(),
+            });
         }
     }
 
@@ -771,6 +780,44 @@ mod tests {
         let mut result_only = uncovered(&cfg);
         result_only.confined_results.insert(ToolName::new("fetch"));
         assert!(open(cfg, result_only, ReturnPolicy::Raw).is_ok());
+    }
+
+    /// Coverage is per sanitizer and per scope: some other tool being confined does not
+    /// give a scoped sanitizer an application point. A child return originates from no
+    /// tool, so only an unscoped sanitizer reaches it.
+    #[test]
+    fn a_scoped_output_sanitizer_needs_a_confined_result_its_scope_reaches() {
+        let mut cfg = config(vec![tool("fetch"), tool("post")]);
+        cfg.tools[1].tags = vec![TagName::new("outbound")];
+        let mut scoped = output_sanitizer("redactor");
+        scoped.scope = Scope {
+            tags: vec![TagName::new("outbound")],
+        };
+        cfg.sanitizers = vec![scoped];
+
+        let confining = |cfg: &RegistryConfig, tools: &[&str], child: bool| {
+            let mut declaration = covering_declaration(cfg);
+            declaration.confined_results = tools.iter().map(|name| ToolName::new(*name)).collect();
+            declaration.confined_child_return = child;
+            declaration
+        };
+
+        assert!(
+            matches!(
+                open(cfg.clone(), confining(&cfg, &["fetch"], false), ReturnPolicy::Raw),
+                Err(LoadError::OutputSanitizerUncovered { sanitizer }) if sanitizer == "redactor"
+            ),
+            "a confined tool outside the scope is not an application point"
+        );
+        assert!(
+            matches!(
+                open(cfg.clone(), confining(&cfg, &["fetch"], true), ReturnPolicy::Raw),
+                Err(LoadError::OutputSanitizerUncovered { sanitizer }) if sanitizer == "redactor"
+            ),
+            "a scoped sanitizer never reaches a child return"
+        );
+        let covered = confining(&cfg, &["post"], false);
+        assert!(open(cfg, covered, ReturnPolicy::Raw).is_ok());
     }
 
     #[test]

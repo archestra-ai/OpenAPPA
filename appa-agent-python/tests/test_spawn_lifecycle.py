@@ -122,8 +122,8 @@ def test_a_session_naming_no_spawn_tool_opens_no_children():
 
 
 def test_a_quarantine_exit_needs_a_host_that_opens_children():
-    """The host declares its coverage by naming a spawn tool. Without one this
-    policy's return sanitizer would have no application point, and the loader
-    says so rather than loading a sanitizer that could never run."""
-    with pytest.raises(AppaError, match="confines no application point"):
+    """A host that names no spawn tool controls no child context, so this policy's
+    return binding has nothing to bind to. The loader refuses rather than loading a
+    return sanitizer that could never run."""
+    with pytest.raises(AppaError, match="does not control child context"):
         Session(POLICY, json.dumps(TOOLS), "decide the ticket")
