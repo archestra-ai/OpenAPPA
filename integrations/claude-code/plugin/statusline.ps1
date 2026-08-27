@@ -6,8 +6,6 @@ $mascotBottom = "$fullBlock$fullBlock$lowerHalf$fullBlock$lowerHalf$fullBlock$fu
 try {
     [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
     if ($env:APPA_GATE -ne "1") {
-        Write-Output $mascotTop
-        Write-Output $mascotBottom
         exit 0
     }
     $statusInput = [Console]::In.ReadToEnd() | ConvertFrom-Json

@@ -18,8 +18,9 @@ Windows swaps in `hooks/hooks.windows.json`, which drives the
 `hooks/hook.ps1` adapter to block failed prompt, tool-call, and
 successful tool-result admission; WSL runs the POSIX hooks as-is.
 `statusline.sh` and `statusline.ps1` provide matching status displays
-without changing Claude's settings automatically; unprotected sessions show
-the mascot alone instead of runtime status.
+for protected sessions. `appa init` registers the platform script in Claude's
+global statusline setting, so each script exits without printing anything when
+`APPA_GATE=1` is absent. Plain `claude` therefore keeps its normal status area.
 
 Initialization and every protected session share one starter,
 `hooks/ensure-runtime.sh` (on Windows, `hook.ps1 -EnsureRuntime`): it

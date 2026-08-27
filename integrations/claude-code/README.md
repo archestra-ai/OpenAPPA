@@ -205,17 +205,19 @@ The policy and database stay at the locations in the table above; delete
 them only if you want the history gone. Remove a `clappa` shell alias
 separately if you added one instead of the command.
 
-## Statusline, manually
+## Statusline
 
-Claude Code reads `statusLine` only from your own settings — a plugin
-cannot set it. In a protected session the script shows the APPA pixel
+Claude Code reads `statusLine` only from your own global settings — a plugin
+cannot set it. `appa init` adds the platform script there unless you already
+have a custom statusline. In a protected session the script shows the APPA pixel
 mascot plus the session's current Trust and Audience, read from the
-process's `GET /status`. In an unprotected session it shows the mascot
-alone and never queries the runtime. Both platform scripts fail open: runtime down, unknown
+process's `GET /status`. In an unprotected session it prints nothing and never
+queries the runtime, so regular `claude` has no APPA statusline. Both platform
+scripts fail open inside a protected session: runtime down, unknown
 trajectory, or malformed input prints the mascot alone, never a blocked
 action. The POSIX script also needs `jq` and `curl`.
 
-To set it, merge this into `~/.claude/settings.json`, pointing at a
+To set it manually, merge this into `~/.claude/settings.json`, pointing at a
 checkout of this repository:
 
 ```json

@@ -24,6 +24,30 @@ fn shipped(file: &str) -> serde_json::Value {
         .unwrap_or_else(|_| panic!("the shipped {file} parses"))
 }
 
+fn plugin_file(file: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../integrations/claude-code/plugin")
+        .join(file)
+}
+
+#[test]
+fn an_ungated_session_has_no_appa_statusline() {
+    let output = Command::new("sh")
+        .arg(plugin_file("statusline.sh"))
+        .env_remove("APPA_GATE")
+        .stdin(Stdio::piped())
+        .output()
+        .expect("the POSIX statusline runs");
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"", "plain Claude must have no APPA statusline");
+
+    let windows = std::fs::read_to_string(plugin_file("statusline.ps1")).expect("the Windows statusline is readable");
+    assert!(
+        windows.contains("if ($env:APPA_GATE -ne \"1\") {\n        exit 0\n    }"),
+        "the Windows statusline must also be silent outside clappa",
+    );
+}
+
 /// The two shipped hook maps gate the same events. Nothing else compares
 /// them, so a hook added to one and not the other leaves that platform
 /// on the behaviour the other one fixed.
