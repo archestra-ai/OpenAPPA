@@ -282,7 +282,7 @@ impl LogStore {
             // second process would. It takes the position and records nothing, so this caller's
             // append conflicts on position and replays, and an assertion reads whose write landed
             // from the position rather than from records a later read would have to accept.
-            let foreign = encode(&foreign_batch());
+            let foreign = encode(&[]);
             let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let at = position(&transaction, &based_on.root)?;
             transaction.execute(
@@ -373,14 +373,6 @@ impl LogStore {
             .lock()
             .expect("the log store mutex is never poisoned: no panics under the lock")
     }
-}
-
-/// What a raced append's foreign writer records: nothing. A batch takes a log position whether or
-/// not it holds facts, so the race is won — the caller's append conflicts and replays — without
-/// minting a record every later read would then have to accept.
-#[cfg(feature = "fault-injection")]
-fn foreign_batch() -> Vec<Fact> {
-    Vec::new()
 }
 
 #[cfg(feature = "fault-injection")]
