@@ -16961,7 +16961,7 @@ mod tests {
             let identity = |cfg: &RegistryConfig| {
                 let profile = crate::profile::DeploymentProfile::declare(crate::profile::covering_declaration(cfg))
                     .expect("the covering declaration declares");
-                crate::profile::PolicyIdentityV1::of(cfg, &ReturnPolicy::Raw, &profile)
+                crate::profile::identity_of(cfg, &ReturnPolicy::Raw, &profile)
             };
             let forward = config(vec![capped_send(), team_delta("read")], vec![]);
             let backward = config(vec![team_delta("read"), capped_send()], vec![]);

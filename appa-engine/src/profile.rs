@@ -298,16 +298,6 @@ impl PolicyFileKey {
 pub struct PolicyIdentityV1(#[serde(with = "crate::hex32")] [u8; 32]);
 
 impl PolicyIdentityV1 {
-    pub fn of(registry: &RegistryConfig, child_return: &ReturnPolicy, profile: &DeploymentProfile) -> Self {
-        let document = identity_document(registry, child_return, profile);
-        let canonical = serde_json_canonicalizer::to_vec(&document).expect("an identity document canonicalizes");
-        let mut hasher = Sha256::new();
-        hasher.update(b"appa:policy-identity:v1");
-        hasher.update([0u8]);
-        hasher.update(&canonical);
-        PolicyIdentityV1(hasher.finalize().into())
-    }
-
     pub(crate) fn of_registry(registry: &Registry, child_return: &ReturnPolicy) -> Self {
         let document = identity_document_from_registry(registry, child_return);
         let canonical = serde_json_canonicalizer::to_vec(&document).expect("an identity document canonicalizes");
@@ -370,6 +360,24 @@ fn identity_document_from_registry(registry: &Registry, child_return: &ReturnPol
         .expect("identity document is an object")
         .insert("tools".into(), tools.into());
     document
+}
+
+/// The digest of a configuration as the engine that serves it would stamp it. Test-only:
+/// production reads [`crate::engine::Engine::identity`], which is this same digest taken
+/// from the registry the engine actually holds.
+#[cfg(test)]
+pub(crate) fn identity_of(
+    registry: &RegistryConfig,
+    child_return: &ReturnPolicy,
+    profile: &DeploymentProfile,
+) -> PolicyIdentityV1 {
+    let built = crate::registry::Registry::build(
+        registry.clone(),
+        crate::registry::PlannerCap::default(),
+        profile.clone(),
+    )
+    .expect("a fixture configuration builds");
+    PolicyIdentityV1::of_registry(&built, child_return)
 }
 
 fn canonical_value(value: &impl Serialize) -> serde_json::Value {
@@ -637,7 +645,7 @@ pub(crate) fn opening_at(trajectory: crate::value::TrajectoryId, starting_label:
     crate::fact::Fact::TrajectoryOpened {
         trajectory,
         dialect: PolicyDialectVersion::new(1),
-        policy_digest: PolicyIdentityV1::of(&config, &ReturnPolicy::Raw, &profile),
+        policy_digest: identity_of(&config, &ReturnPolicy::Raw, &profile),
         profile,
         policy_file_key: PolicyFileKey::of(b"fixture"),
         open_vectors: Vec::new(),
@@ -1261,7 +1269,7 @@ mod tests {
     }
 
     fn identity(cfg: &RegistryConfig, child: &ReturnPolicy, profile: &DeploymentProfile) -> PolicyIdentityV1 {
-        PolicyIdentityV1::of(cfg, child, profile)
+        super::identity_of(cfg, child, profile)
     }
 
     #[test]
@@ -1308,7 +1316,12 @@ mod tests {
 
     #[test]
     fn rescoping_a_cast_moves_the_identity() {
-        let mut cfg = config(vec![tool("fetch")]);
+        // The origin carries the tag the cast is rescoped to, so both configurations are
+        // ones the engine would load: the identity is only meaningful for those.
+        let mut origin = tool("fetch");
+        origin.tags = vec![TagName::new("inbound")];
+        origin.delta = None;
+        let mut cfg = config(vec![origin]);
         cfg.casts = vec![crate::authority::Cast {
             name: crate::names::CastName::new("vouch"),
             resolution: crate::authority::CastResolution::Constant(DeclaredLabel::literal(

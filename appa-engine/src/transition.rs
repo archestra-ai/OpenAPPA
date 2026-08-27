@@ -3878,7 +3878,7 @@ mod tests {
         let other_policy = ValidatedFactBatch::seal(
             vec![],
             1,
-            PolicyIdentityV1::of(
+            crate::profile::identity_of(
                 &crate::registry::RegistryConfig {
                     trust_chain: crate::registry::TrustChain::new(vec!["suspicious".into()]),
                     tools: vec![],
