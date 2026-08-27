@@ -7,7 +7,7 @@ while the process is down, every action in a protected session is
 blocked.
 
 The plugin protects only sessions launched with `APPA_GATE=1` (the
-`clappa` alias). The hooks read the variable from the Claude Code
+`clappa` command). The hooks read the variable from the Claude Code
 process environment, fixed at launch, so a session cannot turn the
 protection off. In every other session the plugin is inert: it checks
 nothing, starts nothing, and prints nothing. Installing the runtime is
@@ -37,6 +37,11 @@ install, and start the release binary, under the session's
 normal command approval — so the plugin alone completes the install. A
 runtime that dies mid-session still blocks the session until the next
 session start brings it back.
+
+Setup also installs an `appa` wrapper for the runtime's read-only
+`appa describe` command. It reports configuration and policy facts without
+starting the runtime or creating files; session tool and account facts remain
+the configuring session's responsibility.
 
 Concurrent starts need no lock: the runtime binds the loopback port, so
 the first process to bind serves and every later one exits at once. Each

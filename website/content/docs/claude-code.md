@@ -15,7 +15,7 @@ claude plugin marketplace add archestra-ai/OpenAPPA &&
   claude /appa-setup
 ```
 
-The setup installs the local runtime and adds `clappa`, a protected way to start Claude Code. It does not replace `claude` or change how your ordinary sessions start.
+The setup installs the local runtime, adds `appa` for read-only configuration discovery, and adds `clappa`, a protected way to start Claude Code. It does not replace `claude` or change how your ordinary sessions start.
 
 Setup asks once whether it may count the install. If you agree, it sends one event with the version, operating system and architecture. It sends nothing that identifies you or your machine, and it stores nothing to recognise you later. If you decline, or say nothing, it sends nothing. `APPA_TELEMETRY=0` refuses it without being asked. The runtime never reports anything at any point.
 
@@ -34,6 +34,12 @@ claude
 ```
 
 The skill inspects the MCP servers and tools available to Claude Code. It uses their declared purpose to identify what they read and which actions can send data outside the session. When a data boundary is unclear, it asks you one focused question.
+
+It begins with `appa describe`, which reports the current config,
+included batteries, policy tools, referenced groups, and membership wiring.
+The command does not guess at session-only tools or connector accounts; the
+skill merges those from the active Claude session and asks when an identity or
+boundary is unavailable.
 
 Before it writes anything, the skill shows the full proposal for approval. The result is deterministic policy config: exact tool contracts, audience rules, and any resolver definitions the setup needs. The model helps draft the file; the OpenAPPA runtime enforces the file.
 
@@ -126,7 +132,7 @@ To uninstall OpenAPPA from Claude Code, remove the plugin, stop the local runtim
 claude plugin uninstall appa-runtime
 claude plugin marketplace remove appa
 pkill -f appa-runtime
-rm ~/.local/bin/appa-runtime ~/.local/bin/clappa ~/.local/bin/appa-statusline.sh
+rm ~/.local/bin/appa-runtime ~/.local/bin/appa ~/.local/bin/clappa ~/.local/bin/appa-statusline.sh
 
 # drop the statusline entry the setup wrote, and keep one of your own:
 jq 'if (.statusLine.command? // "") | test("appa-statusline") then del(.statusLine) else . end' \

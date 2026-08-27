@@ -54,6 +54,7 @@ OpenAPPA to do differently.
 
 For OpenAPPA configuration, read only:
 
+- the output of `appa describe --config <live-path>`;
 - the live root config and included files relevant to the request;
 - a matched battery's `appa.toml` and README;
 - the relevant section of the installed guide at
@@ -82,17 +83,30 @@ The runtime address is
 
 ### Inspect
 
-1. Read the root config first. Record its tool rules and included batteries.
-2. Run `claude mcp list` for configured servers.
-3. Add every MCP server visible in the current session, even when
+1. Run `appa describe --config <live-path>` before reading or changing
+   the config. It is read-only and succeeds when the config is missing or
+   invalid. Record its config state, effective policy tools, included battery
+   names, referenced groups, and membership resolver/binding status. Treat its
+   session integrations, tools, and accounts as unavailable when it says so;
+   never turn an unavailable fact into an empty inventory.
+2. Read the root config. Record its tool rules and included batteries, and
+   preserve its comments. If `appa describe` and the file disagree, stop and
+   report the mismatch instead of guessing.
+3. Run `claude mcp list` for configured servers.
+4. Add every MCP server visible in the current session, even when
    `claude mcp list` omits it. MCP tools use `mcp__<server>__<tool>` names;
    plugin-provided servers use `mcp__plugin_<plugin>_<server>__<tool>` names.
    Keep each exact full tool name and description.
-4. Cross-check both sources. Record every configured MCP server whose tools
+5. Cross-check both sources. Record every configured MCP server whose tools
    could not be detected. Keep it separate from Claude Code's built-in tools.
    Do not invent its tool list.
-5. Compare the installed tools with the root rules. Existing root rules stay
+6. Compare the installed tools with the root rules. Existing root rules stay
    in control, including rules for tools a battery also covers.
+
+The command cannot see Claude's session tool catalogue or authenticated
+connector accounts. The session supplies tool facts; the user supplies an
+account identity when a connector does not expose one. Do not probe private
+mail, messages, or files merely to infer an identity.
 
 ### Find useful batteries
 
@@ -130,15 +144,21 @@ the user asks.
 
 Check what each matched battery expects the root config to provide. Record
 anything missing that the battery or complete config needs in order to work.
+A proposal may mention only groups listed under `referenced_groups` by
+`appa describe`, or a group the user explicitly establishes during this flow
+with a concrete resolver. A registered membership resolver does not prove
+that an arbitrary plausible group name exists.
 
 ### Cover the remaining tools
 
 Create root rules only for installed tools that neither the root config nor a
 matched battery covers.
 
-- A tool that reads user, company, local, or authenticated data returns
-  private data: `delta = { audience = ["private"] }`. Reuse the config's
-  existing private reader name when it has one.
+- A tool that reads personal or authenticated data may return data for a
+  configured `@self`. Organization-wide data may return data for a configured
+  `@internal`. If the suitable group was not reported by `appa describe`,
+  leave the tool blocked and explain the missing resolver. Never substitute
+  `"private"`, `@company`, `@employees`, or another plausible reader or group.
 - A tool that publishes, posts, sends, shares, or uploads requires data that
   may be public: `requires = { audience = { contains = ["public"] } }`.
 - A clearly public read or a tool whose result carries no data uses
@@ -154,6 +174,20 @@ do not ask about each tool separately.
 
 Wait for the answer before showing the proposal. This answer does not replace
 the approval required below. If nothing is unclear, do not ask.
+
+For Gmail, match only exact tools visible in this session whose names start
+with `mcp__claude_ai_Gmail__`; do not assume a fixed connector tool list. If
+the connected account is not exposed, include the account and intended data
+boundary in the one grouped ambiguity question. A non-consumer email domain
+is only a candidate boundary and still needs confirmation. Never suggest
+`gmail.com` or another consumer-mail domain as `@internal`.
+
+Confirmation alone does not create a working domain-backed group. The current
+membership resolver must expand a group to concrete reader IDs, so Gmail by
+itself cannot implement `@internal` from a domain. Require a real directory
+resolver that can enumerate those readers; otherwise leave internal-dependent
+tools blocked and say why. This boundary answer is separate from approval to
+write or install anything.
 
 ### Propose, then apply
 
@@ -189,17 +223,20 @@ End with: **Approve, or tell me what to change.** Wait for the reply.
 
 After approval:
 
-1. Copy each approved battery directory beside the root config under
+1. Run `appa describe --config <live-path>` again. If the config,
+   batteries, referenced groups, or membership wiring changed since the
+   proposal, revise the proposal and ask for approval again.
+2. Copy each approved battery directory beside the root config under
    `batteries/<name>/` and add its `appa.toml` to the root `include` list. Use
    the marketplace clone when present; otherwise fetch every file in that
    battery directory from GitHub so its supporting scripts are included. Leave
    an existing copied battery unchanged unless the user asked to refresh it.
-2. Add any root support the battery requires, such as its human-approval
+3. Add any root support the battery requires, such as its human-approval
    authority. This is part of making the approved behavior work; describe the
    behavior to the user, not this wiring.
-3. Add the approved uncovered-tool rules to the root config. Do not remove
+4. Add the approved uncovered-tool rules to the root config. Do not remove
    overlapping root rules; they intentionally override batteries.
-4. Reload and report the result as described below.
+5. Reload and report the result as described below.
 
 ## Adjust the current config
 

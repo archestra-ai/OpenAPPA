@@ -1,12 +1,12 @@
 ---
 name: appa-setup
-description: Install or upgrade the OpenAPPA runtime for this Claude Code plugin - download the appa-runtime release binary, verify its checksum and version, install the clappa command and the APPA statusline, start the runtime, and ask whether the install may be counted. Use when the user asks to set up APPA, install or upgrade appa-runtime, or when a session reports that the runtime binary is not installed.
+description: Install or upgrade the OpenAPPA runtime for this Claude Code plugin - download the appa-runtime release binary, verify its checksum and version, install the appa and clappa commands and the APPA statusline, start the runtime, and ask whether the install may be counted. Use when the user asks to set up APPA, install or upgrade appa-runtime, or when a session reports that the runtime binary is not installed.
 ---
 
 # appa-setup
 
 Install the `appa-runtime` binary that this plugin's hooks protect
-sessions with, plus the `clappa` command and the statusline, then start
+sessions with, plus the `appa` and `clappa` commands and the statusline, then start
 the runtime and prove it answers. Every command runs under the
 session's normal command approval.
 
@@ -35,14 +35,21 @@ Resolve both paths in a shell; do not guess.
 3. Verify before anything runs: the archive's SHA-256 must equal its line in `SHA256SUMS` (`shasum -a 256` or `sha256sum`). On a mismatch, stop and tell the user; do not install.
 4. Extract the archive and check the binary: `./appa-runtime --version` must print exactly `appa-runtime <contents of version.txt>`.
 5. Install the binary to the install target resolved above, mode 755, creating the directory when needed. That exact path is where the plugin's hooks look for it; do not choose a different location. Step 8 starts it.
-6. Create the `clappa` command as an executable, not an alias, so it works in every open terminal with no shell reload: write `clappa` into the same directory as the runtime binary, mode 755, containing:
+6. Create the `appa` and `clappa` commands as executables, not aliases, so they work in every open terminal with no shell reload. Write `appa` into the same directory as the runtime binary, mode 755, containing:
+
+   ```sh
+   #!/bin/sh
+   exec "$(dirname "$0")/appa-runtime" "$@"
+   ```
+
+   Then write `clappa` there, mode 755, containing:
 
    ```sh
    #!/bin/sh
    exec env APPA_GATE=1 claude "$@"
    ```
 
-   Only if that directory is not on the user's `PATH`, fall back to appending `alias clappa='APPA_GATE=1 claude'` to the file matching their shell and tell them to reload it. On Windows, add the matching `clappa` function to the PowerShell profile.
+   Only if that directory is not on the user's `PATH`, fall back to adding matching `appa` and `clappa` functions to the file matching their shell and tell them to reload it. On Windows, add the matching functions to the PowerShell profile; `appa` invokes the installed `appa-runtime.exe` with all arguments unchanged.
 
 7. Install the statusline, unless `~/.claude/settings.json` already has a `statusLine` entry that runs something other than `appa-statusline.sh` — never replace someone else's. Overwrite an APPA entry that names a different path: an earlier install into another directory leaves one behind. Copy `statusline.sh` (on Windows, `statusline.ps1`) from the plugin files directory resolved above into the runtime binary's directory as `appa-statusline.sh`, mode 755, and merge into `~/.claude/settings.json`:
 
@@ -89,6 +96,6 @@ Resolve both paths in a shell; do not guess.
    it, or mention it again — a failed count is not the user's problem, and an
    install that worked must not be reported as broken because a metric missed.
 
-10. Finish by telling the user that the runtime is running and that `clappa` starts a protected session. Add this tip on the next line: "🚀 Run `/appa-guide init` in the `clappa` session to build your initial security policy." Keep the command and `clappa` as inline code.
+10. Finish by telling the user that the runtime is running, `appa describe` shows the configuration facts available for setup, and `clappa` starts a protected session. Add this tip on the next line: "🚀 Run `/appa-guide init` in the `clappa` session to build your initial security policy." Keep the commands as inline code.
 
 If the `curl` download fails, ask the user to install the GitHub CLI, then try again with `gh release download`.

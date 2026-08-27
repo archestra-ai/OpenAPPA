@@ -68,6 +68,22 @@ suspicious. Pass its path directly to `--config`.
 
 ### 3. Start the process
 
+Before starting it, the installed `appa` wrapper can describe the facts a
+configuring human or agent may rely on:
+
+```sh
+appa describe --config appa.toml
+```
+
+`describe` is read-only. It works for a missing, malformed, or incomplete
+config and never creates the default config or database. It reports config
+state, includes and battery names, effective policy tools, referenced groups,
+and membership wiring. Claude's session tool inventory and authenticated
+connector identities are explicitly reported as unavailable because the
+adapter does not expose them to a standalone process.
+Without `--config`, the installed command reads the same platform config
+directory used by the Claude Code starter (`APPA_CONFIG_DIR` can override it).
+
 ```sh
 ./target/debug/appa-runtime --config appa.toml --db appa.db
 ```

@@ -12,7 +12,7 @@ use std::time::SystemTime;
 
 use axum::extract::State;
 use axum::routing::{get, post};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 use appa_runtime::api::{Reloaded, Runtime};
 use appa_runtime::config::Config;
@@ -41,8 +41,11 @@ fn ensure_default_config(path: &Path) -> io::Result<bool> {
     version = include_str!("../../version.txt").trim()
 )]
 struct Args {
-    #[arg(long, env = "APPA_CONFIG", default_value = "appa.toml")]
-    config: PathBuf,
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    #[arg(long, env = "APPA_CONFIG", global = true)]
+    config: Option<PathBuf>,
 
     #[arg(long, env = "APPA_DB", default_value = "appa.db")]
     db: PathBuf,
@@ -53,11 +56,17 @@ struct Args {
     #[arg(long, default_value = "127.0.0.1:8787")]
     listen: SocketAddr,
 
-    #[arg(long, value_enum, default_value_t = Adapter::ClaudeCode)]
+    #[arg(long, value_enum, default_value_t = Adapter::ClaudeCode, global = true)]
     adapter: Adapter,
 
     #[arg(short, action = clap::ArgAction::Count)]
     verbose: u8,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Describe the configuration facts available to a human or configuring agent.
+    Describe,
 }
 
 fn require_loopback(addr: &SocketAddr) -> Result<(), String> {
@@ -68,6 +77,32 @@ fn require_loopback(addr: &SocketAddr) -> Result<(), String> {
     }
 }
 
+fn installed_config_path() -> PathBuf {
+    if let Some(directory) = std::env::var_os("APPA_CONFIG_DIR") {
+        return PathBuf::from(directory).join("appa.toml");
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home)
+            .join("Library/Application Support/appa")
+            .join("appa.toml");
+    }
+    #[cfg(target_os = "windows")]
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        return PathBuf::from(appdata).join("appa").join("appa.toml");
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        if let Some(config_home) = std::env::var_os("XDG_CONFIG_HOME") {
+            return PathBuf::from(config_home).join("appa").join("appa.toml");
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join(".config/appa/appa.toml");
+        }
+    }
+    PathBuf::from("appa.toml")
+}
+
 /// The adapter surface this binary can serve. The one place harness
 /// names appear in this crate: each variant maps to one codec crate.
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -76,6 +111,12 @@ enum Adapter {
 }
 
 impl Adapter {
+    fn as_str(self) -> &'static str {
+        match self {
+            Adapter::ClaudeCode => "claude-code",
+        }
+    }
+
     fn codec(self) -> Codec {
         match self {
             Adapter::ClaudeCode => appa_adapter_claude_code::codec(),
@@ -231,6 +272,14 @@ async fn status(
 #[tokio::main]
 async fn main() -> ExitCode {
     let args = Args::parse();
+    if let Some(Command::Describe) = args.command {
+        let config_path = args.config.unwrap_or_else(installed_config_path);
+        print!(
+            "{}",
+            appa_runtime::describe::render(&config_path, args.adapter.as_str())
+        );
+        return ExitCode::SUCCESS;
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -238,19 +287,21 @@ async fn main() -> ExitCode {
         )
         .init();
 
+    let config_path = args.config.unwrap_or_else(|| PathBuf::from("appa.toml"));
+
     if let Err(refusal) = require_loopback(&args.listen) {
         eprintln!("appa-runtime: {refusal}");
         return ExitCode::FAILURE;
     }
-    match ensure_default_config(&args.config) {
-        Ok(true) => tracing::info!(path = %args.config.display(), "created default configuration"),
+    match ensure_default_config(&config_path) {
+        Ok(true) => tracing::info!(path = %config_path.display(), "created default configuration"),
         Ok(false) => {}
         Err(error) => {
-            eprintln!("appa-runtime: cannot create {}: {error}", args.config.display());
+            eprintln!("appa-runtime: cannot create {}: {error}", config_path.display());
             return ExitCode::FAILURE;
         }
     }
-    let config = match Config::load(&args.config) {
+    let config = match Config::load(&config_path) {
         Ok(config) => config,
         Err(error) => {
             eprintln!("appa-runtime: {error}");
@@ -272,7 +323,7 @@ async fn main() -> ExitCode {
     let state = AppState {
         runtime: Arc::clone(&runtime),
         codec: args.adapter.codec(),
-        config: args.config,
+        config: config_path,
         adapter: args.adapter,
         executable: ExecutableAtStart::of_this_process(),
     };
