@@ -245,10 +245,6 @@ impl Session {
     }
 
     pub async fn on_tool_call(&self, call: ProposedCall, spawn: bool) -> Result<ToolCallDecision, EventError> {
-        if is_control_tool(&call.tool) {
-            tracing::debug!(trajectory = %self.trajectory.0, "control tool passes unchecked");
-            return Ok(ToolCallDecision::Control);
-        }
         if let Some(open) = self.substituted_release(&call)? {
             return self.claim_or_abandon(call, open).await;
         }
@@ -368,10 +364,6 @@ impl Session {
     }
 
     pub async fn on_tool_result(&self, call: ProposedCall, o: ToolOutcome) -> Result<ToolResultDecision, EventError> {
-        if is_control_tool(&call.tool) {
-            tracing::debug!(trajectory = %self.trajectory.0, "control tool outcome absorbed");
-            return Ok(ToolResultDecision::Keep);
-        }
         let o = self.cap_outcome(o);
         outcome_decision(self.report_outcome(&call, &o).await?)
     }
@@ -4473,35 +4465,6 @@ context_control = true
             tool: name.to_string(),
             arguments: raw(serde_json::json!({"offer_id": "o1:cc:root:ff"})),
         }
-    }
-
-    #[tokio::test]
-    async fn the_control_tool_passes_unchecked_under_every_shipped_name() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_runtime(&dir);
-        let session = runtime.create_session(root()).expect("a fresh id opens");
-        for name in [
-            "execute_remedy_plan",
-            "mcp__appa__execute_remedy_plan",
-            "mcp__plugin_appa-runtime_appa__execute_remedy_plan",
-        ] {
-            assert_eq!(
-                session
-                    .on_tool_call(control_call(name), false)
-                    .await
-                    .expect("it passes"),
-                ToolCallDecision::Control,
-                "{name} is a control call",
-            );
-            assert_eq!(
-                session
-                    .on_tool_result(control_call(name), ToolOutcome::Indeterminate)
-                    .await
-                    .expect("its outcome is absorbed"),
-                ToolResultDecision::Keep,
-            );
-        }
-        assert!(only_the_opening(&runtime), "no control call reached the log");
     }
 
     #[tokio::test]

@@ -298,16 +298,6 @@ impl PolicyFileKey {
 pub struct PolicyIdentityV1(#[serde(with = "crate::hex32")] [u8; 32]);
 
 impl PolicyIdentityV1 {
-    pub fn of(registry: &RegistryConfig, child_return: &ReturnPolicy, profile: &DeploymentProfile) -> Self {
-        let document = identity_document(registry, child_return, profile);
-        let canonical = serde_json_canonicalizer::to_vec(&document).expect("an identity document canonicalizes");
-        let mut hasher = Sha256::new();
-        hasher.update(b"appa:policy-identity:v1");
-        hasher.update([0u8]);
-        hasher.update(&canonical);
-        PolicyIdentityV1(hasher.finalize().into())
-    }
-
     pub(crate) fn of_registry(registry: &Registry, child_return: &ReturnPolicy) -> Self {
         let document = identity_document_from_registry(registry, child_return);
         let canonical = serde_json_canonicalizer::to_vec(&document).expect("an identity document canonicalizes");
@@ -370,6 +360,24 @@ fn identity_document_from_registry(registry: &Registry, child_return: &ReturnPol
         .expect("identity document is an object")
         .insert("tools".into(), tools.into());
     document
+}
+
+/// The digest of a configuration as the engine that serves it would stamp it. Test-only:
+/// production reads [`crate::engine::Engine::identity`], which is this same digest taken
+/// from the registry the engine actually holds.
+#[cfg(test)]
+pub(crate) fn identity_of(
+    registry: &RegistryConfig,
+    child_return: &ReturnPolicy,
+    profile: &DeploymentProfile,
+) -> PolicyIdentityV1 {
+    let built = crate::registry::Registry::build(
+        registry.clone(),
+        crate::registry::PlannerCap::default(),
+        profile.clone(),
+    )
+    .expect("a fixture configuration builds");
+    PolicyIdentityV1::of_registry(&built, child_return)
 }
 
 fn canonical_value(value: &impl Serialize) -> serde_json::Value {
@@ -548,15 +556,6 @@ pub(crate) fn validate_coverage(
         }
     }
 
-    if profile.confined_results.is_empty()
-        && !profile.confined_child_return
-        && let Some(sanitizer) = registry.sanitizers().find(|sanitizer| sanitizer.on.output)
-    {
-        return Err(LoadError::OutputSanitizerUncovered {
-            sanitizer: sanitizer.name.as_str().to_string(),
-        });
-    }
-
     if let ReturnPolicy::Sanitized(name) = child_return {
         if !profile.context_control {
             return Err(LoadError::ChildWithoutContextControl);
@@ -572,6 +571,24 @@ pub(crate) fn validate_coverage(
             None => {
                 return Err(LoadError::ChildReturnSanitizerUnknown(name.as_str().to_string()));
             }
+        }
+    }
+
+    // An output sanitizer runs on a confined result its scope reaches, or on a confined
+    // child return, which originates from no tool and so is reached only by an unscoped
+    // one. A sanitizer no confined source can reach never runs, and the deployment that
+    // declares it believes a derivation is available that is not.
+    for sanitizer in registry.sanitizers().filter(|sanitizer| sanitizer.on.output) {
+        let reaches_a_result = profile.confined_results.iter().any(|tool| {
+            registry
+                .variants(tool)
+                .any(|contract| sanitizer.scope.covers(&contract.tags))
+        });
+        let reaches_the_child_return = profile.confined_child_return && sanitizer.scope.is_unscoped();
+        if !reaches_a_result && !reaches_the_child_return {
+            return Err(LoadError::OutputSanitizerUncovered {
+                sanitizer: sanitizer.name.as_str().to_string(),
+            });
         }
     }
 
@@ -628,7 +645,7 @@ pub(crate) fn opening_at(trajectory: crate::value::TrajectoryId, starting_label:
     crate::fact::Fact::TrajectoryOpened {
         trajectory,
         dialect: PolicyDialectVersion::new(1),
-        policy_digest: PolicyIdentityV1::of(&config, &ReturnPolicy::Raw, &profile),
+        policy_digest: identity_of(&config, &ReturnPolicy::Raw, &profile),
         profile,
         policy_file_key: PolicyFileKey::of(b"fixture"),
         open_vectors: Vec::new(),
@@ -771,6 +788,44 @@ mod tests {
         let mut result_only = uncovered(&cfg);
         result_only.confined_results.insert(ToolName::new("fetch"));
         assert!(open(cfg, result_only, ReturnPolicy::Raw).is_ok());
+    }
+
+    /// Coverage is per sanitizer and per scope: some other tool being confined does not
+    /// give a scoped sanitizer an application point. A child return originates from no
+    /// tool, so only an unscoped sanitizer reaches it.
+    #[test]
+    fn a_scoped_output_sanitizer_needs_a_confined_result_its_scope_reaches() {
+        let mut cfg = config(vec![tool("fetch"), tool("post")]);
+        cfg.tools[1].tags = vec![TagName::new("outbound")];
+        let mut scoped = output_sanitizer("redactor");
+        scoped.scope = Scope {
+            tags: vec![TagName::new("outbound")],
+        };
+        cfg.sanitizers = vec![scoped];
+
+        let confining = |cfg: &RegistryConfig, tools: &[&str], child: bool| {
+            let mut declaration = covering_declaration(cfg);
+            declaration.confined_results = tools.iter().map(|name| ToolName::new(*name)).collect();
+            declaration.confined_child_return = child;
+            declaration
+        };
+
+        assert!(
+            matches!(
+                open(cfg.clone(), confining(&cfg, &["fetch"], false), ReturnPolicy::Raw),
+                Err(LoadError::OutputSanitizerUncovered { sanitizer }) if sanitizer == "redactor"
+            ),
+            "a confined tool outside the scope is not an application point"
+        );
+        assert!(
+            matches!(
+                open(cfg.clone(), confining(&cfg, &["fetch"], true), ReturnPolicy::Raw),
+                Err(LoadError::OutputSanitizerUncovered { sanitizer }) if sanitizer == "redactor"
+            ),
+            "a scoped sanitizer never reaches a child return"
+        );
+        let covered = confining(&cfg, &["post"], false);
+        assert!(open(cfg, covered, ReturnPolicy::Raw).is_ok());
     }
 
     #[test]
@@ -1214,7 +1269,7 @@ mod tests {
     }
 
     fn identity(cfg: &RegistryConfig, child: &ReturnPolicy, profile: &DeploymentProfile) -> PolicyIdentityV1 {
-        PolicyIdentityV1::of(cfg, child, profile)
+        super::identity_of(cfg, child, profile)
     }
 
     #[test]
@@ -1261,7 +1316,12 @@ mod tests {
 
     #[test]
     fn rescoping_a_cast_moves_the_identity() {
-        let mut cfg = config(vec![tool("fetch")]);
+        // The origin carries the tag the cast is rescoped to, so both configurations are
+        // ones the engine would load: the identity is only meaningful for those.
+        let mut origin = tool("fetch");
+        origin.tags = vec![TagName::new("inbound")];
+        origin.delta = None;
+        let mut cfg = config(vec![origin]);
         cfg.casts = vec![crate::authority::Cast {
             name: crate::names::CastName::new("vouch"),
             resolution: crate::authority::CastResolution::Constant(DeclaredLabel::literal(

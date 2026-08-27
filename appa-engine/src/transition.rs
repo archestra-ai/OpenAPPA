@@ -487,6 +487,10 @@ pub enum TransitionError {
     UnknownDispatch,
     #[error("the report contradicts the observation this dispatch already checkpointed")]
     ObservationMismatch,
+    #[error(
+        "this dispatch closed as indeterminate and observed nothing, so a later report has no observation to check against"
+    )]
+    ClosedUnobserved,
     #[error("the dispatch recorded success: a failure or indeterminate outcome contradicts it")]
     ContradictedSuccess,
     #[error("the cast resolution is not admissible for this confined result")]
@@ -1604,10 +1608,13 @@ impl<'a> Sequence<'a> {
                 Ok(crate::plan::plan(
                     self.engine.registry(),
                     views,
-                    candidate,
-                    &block,
-                    &stage,
-                    role,
+                    crate::plan::BlockedCall {
+                        call: candidate,
+                        contract,
+                        raw: &block,
+                        stage: &stage,
+                        role,
+                    },
                     expansions,
                 )
                 .plans
@@ -3874,7 +3881,7 @@ mod tests {
         let other_policy = ValidatedFactBatch::seal(
             vec![],
             1,
-            PolicyIdentityV1::of(
+            crate::profile::identity_of(
                 &crate::registry::RegistryConfig {
                     trust_chain: crate::registry::TrustChain::new(vec!["suspicious".into()]),
                     tools: vec![],

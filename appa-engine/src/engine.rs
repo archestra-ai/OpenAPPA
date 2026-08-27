@@ -13,7 +13,7 @@ use crate::groups::{Expansions, GroupExpansion, GroupResolution};
 use crate::label::{EstablishedLabel, Label, PartialLabel};
 use crate::names::{AuthorityName, SanitizerName};
 use crate::params::{ArgumentError, CanonicalArguments};
-use crate::plan::{self, PlannedBlock};
+use crate::plan::{self, BlockedCall, PlannedBlock};
 use crate::profile::{self, DeploymentPolicy, DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyIdentityV1};
 use crate::projection::Projection;
 use crate::projection::Views;
@@ -77,13 +77,6 @@ struct Opening<'a> {
 
 /// A refused call and the block the check produced for it — what a remedy menu is planned over.
 #[derive(Clone, Copy)]
-struct BlockedCall<'a> {
-    call: &'a ResolvedCall,
-    raw: &'a crate::check::RawBlock,
-    stage: &'a CallStage,
-    role: plan::CallRole,
-}
-
 /// What a staged return's remedy menu is computed over: the crossing the child owes, at the
 /// label and body the stage stands on, and the sanitizer lineage that reached it.
 struct ReturnStageInput<'a> {
@@ -1294,6 +1287,9 @@ impl Engine {
         if !views.is_open(dispatch) {
             match (views.closed_successfully(dispatch), &observed) {
                 (true, None) => return Err(TransitionError::ContradictedSuccess),
+                (false, Some(_)) if views.closed_unobserved(dispatch) => {
+                    return Err(TransitionError::ClosedUnobserved);
+                }
                 (false, Some(_)) => return Err(TransitionError::ObservationMismatch),
                 _ => {}
             }
@@ -2051,7 +2047,7 @@ impl Engine {
         // moves nothing, so the two agree by construction.
         let advance = Sequence::advance_of(self, view, &facts);
         let final_views = working.view(&batch.trajectory);
-        let mut refused: Vec<(usize, &ResolvedCall, RawBlock, plan::CallRole)> = Vec::new();
+        let mut refused: Vec<(usize, &ResolvedCall, &ToolContract, RawBlock, plan::CallRole)> = Vec::new();
         for (position, call) in composed
             .iter()
             .enumerate()
@@ -2068,21 +2064,15 @@ impl Engine {
                 true => plan::CallRole::MarkedSpawn,
                 false => plan::CallRole::Ordinary,
             };
-            refused.push((position, call, raw, role));
+            refused.push((position, call, contract, raw, role));
         }
         let block_stage: Vec<crate::names::GroupName> = refused
             .iter()
-            .flat_map(|(_, call, raw, role)| {
-                let contract = self
-                    .registry
-                    .contract(call)
-                    .expect("a refused sibling names a checkable tool");
-                plan::block_groups(&self.registry, contract, raw, *role)
-            })
+            .flat_map(|(_, _, contract, raw, role)| plan::block_groups(&self.registry, contract, raw, *role))
             .collect();
         expansions.require(&block_stage)?;
         let mut blocked = Vec::new();
-        for (position, call, raw, role) in refused {
+        for (position, call, contract, raw, role) in refused {
             let subject = crate::basis::SubjectKey::Call {
                 trajectory: batch.trajectory.clone(),
                 batch: batch.id.clone(),
@@ -2098,6 +2088,7 @@ impl Engine {
                 },
                 BlockedCall {
                     call,
+                    contract,
                     raw: &raw,
                     stage: &CallStage::default(),
                     role,
@@ -2209,8 +2200,8 @@ impl Engine {
         blocked: BlockedCall<'_>,
         expansions: &Expansions,
     ) -> (Blocked, Vec<Fact>) {
-        let BlockedCall { call, raw, stage, role } = blocked;
-        let planned = plan::plan(&self.registry, views, call, raw, stage, role, expansions);
+        let call = blocked.call;
+        let planned = plan::plan(&self.registry, views, blocked, expansions);
         let (block_id, offers, opened) = self.open_offers(
             views,
             opening,
@@ -2378,7 +2369,18 @@ impl Engine {
                                 (block_id, Vec::new())
                             });
                             blocked.push(Blocked {
-                                block: plan::plan(&self.registry, views, &candidate, &raw, &stage, role, expansions),
+                                block: plan::plan(
+                                    &self.registry,
+                                    views,
+                                    BlockedCall {
+                                        call: &candidate,
+                                        contract,
+                                        raw: &raw,
+                                        stage: &stage,
+                                        role,
+                                    },
+                                    expansions,
+                                ),
                                 call: candidate,
                                 block_id,
                                 offers,
@@ -2448,12 +2450,23 @@ impl Engine {
             CheckOutcome::Block(raw) => {
                 expansions.require(&plan::block_groups(&self.registry, contract, &raw, role))?;
                 expansions.require(&plan::plan_groups(&self.registry, contract, &recorded.plan))?;
-                plan::plan(&self.registry, &views, &call, &raw, &stage, role, expansions)
-                    .plans
-                    .iter()
-                    .filter_map(plan::RemedyPlan::executable)
-                    .any(|offered| offered == &recorded.plan)
-                    .then_some(raw)
+                plan::plan(
+                    &self.registry,
+                    &views,
+                    BlockedCall {
+                        call: &call,
+                        contract,
+                        raw: &raw,
+                        stage: &stage,
+                        role,
+                    },
+                    expansions,
+                )
+                .plans
+                .iter()
+                .filter_map(plan::RemedyPlan::executable)
+                .any(|offered| offered == &recorded.plan)
+                .then_some(raw)
             }
             // The block is gone: whatever the agent would have remedied, nothing needs it now.
             CheckOutcome::Allow => None,
@@ -2469,7 +2482,7 @@ impl Engine {
                 view, &views, execution, &recorded, contract, &raw, &call, evidence, expansions,
             ),
             (OfferOutcome::Denied { authority }, None) => self.deny_offer(
-                view, &views, execution, &recorded, &call, &raw, &stage, authority, expansions,
+                view, &views, execution, &recorded, contract, &call, &raw, &stage, authority, expansions,
             ),
             _ => Err(TransitionError::PlanOutcomeMismatch),
         }
@@ -3109,6 +3122,7 @@ impl Engine {
                     },
                     BlockedCall {
                         call: &substituted,
+                        contract,
                         raw: &raw,
                         stage: &next,
                         role,
@@ -3356,7 +3370,18 @@ impl Engine {
             .pending_block(&recorded.subject)
             .unwrap_or((offer_block(recorded, execution, &call), Vec::new()));
         Ok(Some(Blocked {
-            block: plan::plan(&self.registry, views, &call, &raw, &stage, role, expansions),
+            block: plan::plan(
+                &self.registry,
+                views,
+                BlockedCall {
+                    call: &call,
+                    contract,
+                    raw: &raw,
+                    stage: &stage,
+                    role,
+                },
+                expansions,
+            ),
             call,
             block_id,
             offers,
@@ -3464,6 +3489,7 @@ impl Engine {
         views: &Views,
         execution: &OfferExecution,
         recorded: &crate::projection::RecordedOffer,
+        contract: &ToolContract,
         call: &ResolvedCall,
         raw: &crate::check::RawBlock,
         stage: &CallStage,
@@ -3507,7 +3533,13 @@ impl Engine {
                 nonce: &execution.offer_nonce,
                 subject: &recorded.subject,
             },
-            BlockedCall { call, raw, stage, role },
+            BlockedCall {
+                call,
+                contract,
+                raw,
+                stage,
+                role,
+            },
             expansions,
         );
         facts.extend(opened);
@@ -3570,14 +3602,17 @@ impl Engine {
     /// implemented remedy subset — see [`crate::plan`].
     #[cfg(test)]
     pub(crate) fn plan(&self, views: &Views, call: &ResolvedCall, raw: &RawBlock) -> Result<PlannedBlock, EngineError> {
-        self.validated_contract(call)?;
+        let contract = self.validated_contract(call)?;
         Ok(plan::plan(
             &self.registry,
             views,
-            call,
-            raw,
-            &CallStage::default(),
-            plan::CallRole::Ordinary,
+            BlockedCall {
+                call,
+                contract,
+                raw,
+                stage: &CallStage::default(),
+                role: plan::CallRole::Ordinary,
+            },
             &Expansions::default(),
         ))
     }
@@ -5217,6 +5252,72 @@ mod tests {
         assert_eq!(
             forge(crossing_at + 1, known(TRUSTED, Audience::Public)),
             Err(TransitionRefusal::ForgedLabel)
+        );
+    }
+
+    /// An indeterminate close records no observation and leaves the reservation
+    /// standing, because the call may have executed. A report that arrives afterwards is
+    /// refused on that ground, not on a contradiction with an observation there is none of.
+    #[test]
+    fn a_report_after_an_indeterminate_close_is_refused_on_its_own_ground() {
+        let internal = Audience::restricted([ReaderId::new("internal")]);
+        let e = engine_at(vec![crm_tool()], known(TRUSTED, internal));
+        let call = call("get_ticket", json!({}));
+        let records = vec![opened(&e)];
+        let view = e.view(&traj(), records.clone(), 1).unwrap();
+        let decision = e
+            .handle(
+                &view,
+                EngineEvent::Proposals(ProposalBatch {
+                    id: crate::transition::ProposalBatchId::new("b1"),
+                    trajectory: traj(),
+                    provider_results: Vec::new(),
+                    proposals: vec![raw(&call)],
+                    spawn: None,
+                    offer_nonce: nonce(),
+                    evidence: Vec::new(),
+                    expansions: vec![],
+                }),
+            )
+            .unwrap();
+        let FollowUp::Proposals { released, .. } = decision.follow_up else {
+            panic!("a proposal batch answers with proposals")
+        };
+        let dispatch = released[0].dispatch.clone();
+        let log = [records, decision.append.unwrap().facts().to_vec()].concat();
+        let released_view = e.view(&traj(), log.clone(), 2).unwrap();
+
+        let report = |outcome: ToolOutcome| ToolReport {
+            dispatch: dispatch.clone(),
+            outcome,
+            evidence: Vec::new(),
+            offer_nonce: nonce(),
+            expansions: vec![],
+        };
+        let closed = e
+            .handle(&released_view, EngineEvent::Outcome(report(ToolOutcome::Indeterminate)))
+            .expect("an indeterminate outcome closes the dispatch");
+        let facts = closed.append.expect("the close appends").facts().to_vec();
+        assert!(
+            matches!(
+                facts.as_slice(),
+                [Fact::DispatchClosed {
+                    outcome: crate::fact::CloseOutcome::Indeterminate,
+                    ..
+                }]
+            ),
+            "the close records the indeterminate outcome and no observation: {facts:?}"
+        );
+
+        let after = e.view(&traj(), [log, facts].concat(), 3).unwrap();
+        assert_eq!(
+            e.handle(
+                &after,
+                EngineEvent::Outcome(report(ToolOutcome::Success {
+                    body: OutcomeBody::Available(ValueBody::new("the ticket")),
+                }))
+            ),
+            Err(crate::transition::TransitionError::ClosedUnobserved)
         );
     }
 
@@ -14633,7 +14734,14 @@ mod tests {
         scoped.scope = crate::authority::Scope {
             tags: vec![crate::names::TagName::new("web")],
         };
-        let e = open_engine(returning_registry(vec![scoped], vec![classifier_cast()]));
+        let mut cfg = returning_registry(vec![scoped], vec![classifier_cast()]);
+        // A tool the sanitizer's scope reaches, so the sanitizer is one a result could
+        // meet. A child return originates from no tool, which is what leaves it unreached.
+        cfg.tools.push(ToolContract {
+            tags: vec![crate::names::TagName::new("web")],
+            ..open_tool("browse")
+        });
+        let e = open_engine(cfg);
         let child = TrajectoryId::new("child");
         let mut log = spawn_family(&e, None, &child);
         reads(&e, &mut log, &child, "read_suspicious_internal");
@@ -16885,7 +16993,7 @@ mod tests {
             let identity = |cfg: &RegistryConfig| {
                 let profile = crate::profile::DeploymentProfile::declare(crate::profile::covering_declaration(cfg))
                     .expect("the covering declaration declares");
-                crate::profile::PolicyIdentityV1::of(cfg, &ReturnPolicy::Raw, &profile)
+                crate::profile::identity_of(cfg, &ReturnPolicy::Raw, &profile)
             };
             let forward = config(vec![capped_send(), team_delta("read")], vec![]);
             let backward = config(vec![team_delta("read"), capped_send()], vec![]);

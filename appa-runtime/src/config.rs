@@ -240,6 +240,35 @@ pub const LLM_BUILTIN: &str = "llm";
 pub struct Endpoint {
     pub url: String,
     pub token: Option<Token>,
+    host: EndpointHost,
+}
+
+/// Where an endpoint's host is. A request to `Loopback` must not leave this
+/// machine, so it never goes through a proxy: cleartext is permitted only
+/// there, and the bearer token it carries stays on the host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndpointHost {
+    Loopback,
+    Remote,
+}
+
+impl Endpoint {
+    /// The endpoint at `url`. The host is derived here rather than taken from the
+    /// caller, so no endpoint can name a reach that disagrees with its own URL.
+    pub fn new(url: String, token: Option<Token>) -> Endpoint {
+        // An unparsable URL never reaches this far — `validated_url` refuses it — and a
+        // request to one fails anyway. Withholding the proxy is the safe reading of it.
+        let remote = reqwest::Url::parse(&url).is_ok_and(|parsed| !is_loopback(&parsed));
+        let host = match remote {
+            true => EndpointHost::Remote,
+            false => EndpointHost::Loopback,
+        };
+        Endpoint { url, token, host }
+    }
+
+    pub(crate) fn host(&self) -> EndpointHost {
+        self.host
+    }
 }
 
 /// A bearer token resolved from an `APPA_*` environment variable.
@@ -1069,7 +1098,7 @@ fn resolve_binding(
         (Some(url), None, None) => {
             let url = validated_url(section.name(), name, url)?;
             let token = resolve_token(section.name(), name, token_env, lookup)?;
-            Ok(Implementation::Resolver(Endpoint { url, token }))
+            Ok(Implementation::Resolver(Endpoint::new(url, token)))
         }
         (None, Some(builtin), None) if token_env.is_none() => {
             section.check_builtin(name, &builtin)?;

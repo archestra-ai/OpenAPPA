@@ -56,7 +56,6 @@ pub(crate) enum ToolCallDecision {
         feedback: String,
         unestablished: Vec<UnestablishedValue>,
     },
-    Control,
 }
 
 /// What the adapter gives the harness as the tool output. `Keep`: use
@@ -353,6 +352,10 @@ impl Inner {
         Ok(policy)
     }
 
+    /// The engine for a policy this deployment no longer serves, compiled once. The
+    /// compile stays outside the lock — it is the expensive step, and the mutex's
+    /// "no panic runs while it is held" reading must keep holding — so a race can
+    /// still compile twice, but only one result is ever cached and handed out.
     fn retired_engine(&self, key: &str, bytes: &[u8]) -> Result<Arc<RuntimeEngine>, EventError> {
         if let Some(engine) = self
             .retired
@@ -364,11 +367,13 @@ impl Inner {
         }
         let compiled = compile_stored_policy(bytes).map_err(EventError::PolicyUnavailable)?;
         let engine = Arc::new(RuntimeEngine::new(compiled.engine().clone()));
-        self.retired
-            .lock()
-            .expect("the retired-engine mutex is never poisoned: no panic runs while it is held")
-            .insert(key.to_string(), Arc::clone(&engine));
-        Ok(engine)
+        Ok(Arc::clone(
+            self.retired
+                .lock()
+                .expect("the retired-engine mutex is never poisoned: no panic runs while it is held")
+                .entry(key.to_string())
+                .or_insert(engine),
+        ))
     }
 
     pub(super) fn log(&self, root: &TrajectoryId) -> Result<Log, EventError> {
@@ -436,6 +441,18 @@ impl Runtime {
             self.inner.gates.serve_llm(deployment.config.externals.llm_bound());
             std::mem::replace(&mut *serving, Arc::clone(&deployment))
         };
+        // Every reload retires at most one more policy, so clearing here bounds the
+        // cache by the reloads since the last one instead of by the life of the
+        // process. A trajectory still replaying under a dropped entry recompiles it.
+        self.inner
+            .retired
+            .lock()
+            .expect("the retired-engine mutex is never poisoned: no panic runs while it is held")
+            .clear();
+        // Every reload retires at most one more policy, so clearing here bounds the
+        // cache by the reloads since the last one instead of by the life of the
+        // process. A trajectory still replaying under a dropped entry recompiles it.
+
         let key = crate::engine::policy_file_key(deployment.config.policy_file().bytes());
         let changed = crate::engine::policy_file_key(previous.config.policy_file().bytes()) != key;
         tracing::info!(
@@ -495,20 +512,10 @@ impl Runtime {
     /// carry the refusal: the session-start hook, and the start-after-lazy-open
     /// race. Every other path refuses inside the event it is already deciding.
     pub(crate) fn live(&self, root: &TrajectoryId, trajectory: &TrajectoryId) -> Result<(), EventError> {
-        let log = match self.inner.log(root) {
-            Ok(log) => log,
-            Err(EventError::UnknownTrajectory) => return Err(EventError::UnknownTrajectory),
-            Err(error) => return Err(EventError::Storage(error.to_string())),
-        };
+        let log = self.inner.log(root)?;
         let deployment = self.inner.deployment();
-        let policy = self
-            .inner
-            .resolve_policy(&deployment, &log)
-            .map_err(|error| EventError::Storage(error.to_string()))?;
-        let view = policy
-            .engine()
-            .rebuild_view(&log)
-            .map_err(|refusal| EventError::Storage(refusal.to_string()))?;
+        let policy = self.inner.resolve_policy(&deployment, &log)?;
+        let view = policy.engine().rebuild_view(&log).map_err(EventError::from)?;
         match policy.engine().liveness(&view, trajectory) {
             Liveness::Unopened => Err(EventError::UnknownTrajectory),
             Liveness::Ended => Err(EventError::TrajectoryEnded),
@@ -646,6 +653,19 @@ impl Runtime {
         let mut permits = self.inner.permits.lock().expect("the permit mutex is never poisoned");
         let mut holders = permits.remove(&quoted.0)?;
         (holders.len() == 1).then(|| holders.remove(0))
+    }
+
+    /// Drop every vouch this actor still holds. A vouch is recorded when the actor
+    /// quotes an offer at the control tool's hook and taken when the tool itself
+    /// runs, both inside one turn. One still standing at the turn's end was never
+    /// spent — the harness declined the call, or the tool never ran — and nothing
+    /// later can spend it.
+    pub(crate) fn release_vouches(&self, acting: &Actor) {
+        let mut permits = self.inner.permits.lock().expect("the permit mutex is never poisoned");
+        permits.retain(|_, holders| {
+            holders.retain(|holder| holder != acting);
+            !holders.is_empty()
+        });
     }
 
     fn spend_vouch(&self, quoted: &OfferId, acting: &Actor) {
@@ -966,8 +986,13 @@ fn compile_stored_policy(bytes: &[u8]) -> Result<appa_policy::Config, String> {
 #[cfg(test)]
 pub(crate) mod testing {
     fn engine_dispatch(label: &str) -> appa_engine::value::DispatchId {
-        let policy = appa_policy::Config::from_toml_str("version = 1\n[[tool]]\nname = \"Bash\"\n")
-            .expect("the fixture policy compiles");
+        let policy = appa_policy::Config::from_toml_str(
+            "version = 1
+[[tool]]
+name = \"Bash\"
+",
+        )
+        .expect("the fixture policy compiles");
         let engine = policy.engine().clone();
         let call = engine
             .resolve_call(appa_engine::value::ToolName::new("Bash"), br#"{"command":"ls"}"#)
@@ -1000,10 +1025,7 @@ mod deployment_tests {
     }
 
     fn endpoint() -> DynamicImplementation {
-        DynamicImplementation::Resolver(Endpoint {
-            url: "https://resolver.example".to_string(),
-            token: None,
-        })
+        DynamicImplementation::Resolver(Endpoint::new("https://resolver.example".to_string(), None))
     }
 
     fn load(config: Config) -> Result<Deployment, OpenError> {
@@ -1126,10 +1148,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         let mut extra = claude_config(policy);
         extra.externals.authorities.insert(
             "auditor".to_string(),
-            crate::config::Implementation::Resolver(Endpoint {
-                url: "https://auditor.example".to_string(),
-                token: None,
-            }),
+            crate::config::Implementation::Resolver(Endpoint::new("https://auditor.example".to_string(), None)),
         );
         assert!(matches!(
             load(extra),
@@ -1290,5 +1309,128 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             .externals
             .llm_bound();
         assert_eq!(runtime.inner.gates.llm_permits(), serving);
+    }
+
+    /// Two policies that differ only in a tool's description, so a root opened
+    /// under one replays against the other through the retired branch.
+    fn versioned_policy(description: &str) -> Config {
+        claude_config(&format!(
+            r#"
+            version = 1
+            [[tool]]
+            name = "fetch"
+            description = "{description}"
+            "#
+        ))
+    }
+
+    #[tokio::test]
+    async fn a_reload_drops_the_retired_engines_compiled_before_it() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = std::sync::Arc::new(
+            Runtime::open(versioned_policy("first"), dir.path().join("appa.db"), None).expect("the deployment opens"),
+        );
+        let root = TrajectoryId("retired-cache".to_string());
+        assert_eq!(
+            crate::hooks::handle(
+                &runtime,
+                appa_runtime_api::HookEvent::SessionStart { root: root.clone() }
+            )
+            .await,
+            appa_runtime_api::HookDecision::Ack
+        );
+
+        // The root's policy is no longer the serving one, so reading it compiles the
+        // retired engine and caches it.
+        runtime
+            .reload(versioned_policy("second"))
+            .expect("the second deployment loads");
+        assert!(
+            runtime.audit(&root).is_some(),
+            "the root still reads under its own policy"
+        );
+        assert_eq!(retired_len(&runtime), 1);
+
+        runtime
+            .reload(versioned_policy("third"))
+            .expect("the third deployment loads");
+        assert_eq!(
+            retired_len(&runtime),
+            0,
+            "the cache does not carry compiled engines across a reload"
+        );
+    }
+
+    fn retired_len(runtime: &Runtime) -> usize {
+        runtime
+            .inner
+            .retired
+            .lock()
+            .expect("the retired-engine mutex is never poisoned")
+            .len()
+    }
+
+    #[tokio::test]
+    async fn a_vouch_the_turn_never_spent_does_not_outlive_it() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = std::sync::Arc::new(
+            Runtime::open(versioned_policy("first"), dir.path().join("appa.db"), None).expect("the deployment opens"),
+        );
+        let root = TrajectoryId("vouch-release".to_string());
+        assert_eq!(
+            crate::hooks::handle(
+                &runtime,
+                appa_runtime_api::HookEvent::SessionStart { root: root.clone() }
+            )
+            .await,
+            appa_runtime_api::HookDecision::Ack
+        );
+        let actor = Actor {
+            root: root.clone(),
+            child: None,
+        };
+        let quoted = OfferId("offer-1".to_string());
+
+        runtime.vouch(&quoted, &actor);
+        assert_eq!(
+            runtime.take_vouched(&quoted),
+            Some(actor.clone()),
+            "a standing vouch is what the tool takes"
+        );
+
+        runtime.vouch(&quoted, &actor);
+        crate::hooks::handle(&runtime, appa_runtime_api::HookEvent::TurnEnd { actor: actor.clone() }).await;
+        assert_eq!(
+            runtime.take_vouched(&quoted),
+            None,
+            "the turn ended without spending it, so nothing later can"
+        );
+    }
+
+    /// The session-start check refuses on any fault, so the variant it refuses with is
+    /// what an operator reads. A missing policy file is not a storage failure, and
+    /// flattening it to one named the wrong incident.
+    #[tokio::test]
+    async fn a_liveness_check_refuses_with_the_fault_it_met() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = std::sync::Arc::new(
+            Runtime::open(versioned_policy("first"), dir.path().join("appa.db"), None).expect("the deployment opens"),
+        );
+        let root = TrajectoryId("liveness-fault".to_string());
+        assert_eq!(
+            crate::hooks::handle(
+                &runtime,
+                appa_runtime_api::HookEvent::SessionStart { root: root.clone() }
+            )
+            .await,
+            appa_runtime_api::HookDecision::Ack
+        );
+        assert!(runtime.live(&root, &root).is_ok());
+
+        runtime.inner.store.forget_policy_files();
+        assert!(
+            matches!(runtime.live(&root, &root), Err(EventError::PolicyUnavailable(_))),
+            "the root's policy file is gone, which is not a storage failure"
+        );
     }
 }

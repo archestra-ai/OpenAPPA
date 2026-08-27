@@ -432,7 +432,7 @@ fn compile_node(node: &Value, depth: usize, budget: &mut SchemaBudget) -> Result
             })
         }
         "number" => {
-            let constraint = compile_constraint(map, |v| v.is_number())?;
+            let constraint = compile_constraint(map, |v| matches!(v, Value::Number(n) if suppliable(n)))?;
             let bounds = compile_numeric_bounds(map)?;
             Ok(SchemaNode::Number {
                 description,
@@ -511,7 +511,7 @@ fn compile_numeric_bounds(map: &serde_json::Map<String, Value>) -> Result<Numeri
     let bound = |key: &str| -> Result<Option<serde_json::Number>, ParamsError> {
         match map.get(key) {
             None => Ok(None),
-            Some(Value::Number(n)) => Ok(Some(n.clone())),
+            Some(Value::Number(n)) if suppliable(n) => Ok(Some(n.clone())),
             Some(_) => Err(ParamsError::BadNumericBound),
         }
     };
@@ -536,6 +536,20 @@ fn compile_numeric_bounds(map: &serde_json::Map<String, Value>) -> Result<Numeri
         }
     }
     Ok(NumericBounds { lower, upper })
+}
+
+/// Could a legal argument carry this authored number? Argument scanning refuses an
+/// integer-formed token outside the safe-integer range, so a `const`, an `enum` member or a
+/// bound beyond it names a value no call can supply. Inside the range every value is exact
+/// in `f64`, which is what validation and scalar equality compare through; outside it, two
+/// distinct authored integers can compare equal. A number authored in a non-integer form
+/// carries no such bound, and the scanner applies none to it either.
+fn suppliable(number: &serde_json::Number) -> bool {
+    match (number.as_u64(), number.as_i64()) {
+        (Some(n), _) => n <= MAX_SAFE_INTEGER as u64,
+        (None, Some(n)) => n.unsigned_abs() <= MAX_SAFE_INTEGER as u64,
+        (None, None) => true,
+    }
 }
 
 fn is_schema_integer(value: &Value) -> bool {
@@ -1315,6 +1329,38 @@ mod tests {
             compile(json!({ "type": "object", "properties": { "x": { "type": "integer", "const": i64::MIN } } })),
             Err(ParamsError::BadConst)
         );
+    }
+
+    /// A `number` schema had no domain of its own, so it could name a constant no legal
+    /// argument can carry — argument scanning refuses an integer-formed token past the safe
+    /// range — and, compared through `f64`, that constant equals its supported neighbour.
+    #[test]
+    fn a_number_schema_names_only_values_an_argument_could_carry() {
+        let scalar = |keyword: &str, value: serde_json::Value| {
+            compile(json!({ "type": "object", "properties": {
+                "x": { "type": "number", keyword: value } } }))
+        };
+        assert_eq!(scalar("const", json!(9007199254740993u64)), Err(ParamsError::BadConst));
+        assert_eq!(scalar("const", json!(i64::MIN)), Err(ParamsError::BadConst));
+        assert_eq!(
+            scalar("enum", json!([1, 9007199254740993u64])),
+            Err(ParamsError::BadEnum)
+        );
+        assert_eq!(
+            scalar("minimum", json!(9007199254740993u64)),
+            Err(ParamsError::BadNumericBound)
+        );
+        assert_eq!(
+            scalar("exclusiveMaximum", json!(i64::MIN)),
+            Err(ParamsError::BadNumericBound)
+        );
+
+        // The edge of the range, and a non-integer form, both stay authorable: the scanner
+        // bounds an integer-formed token and nothing else.
+        assert!(scalar("const", json!(9007199254740991u64)).is_ok());
+        assert!(scalar("const", json!(-9007199254740991i64)).is_ok());
+        assert!(scalar("const", json!(1.5e300)).is_ok());
+        assert!(scalar("maximum", json!(1.5)).is_ok());
     }
 
     #[test]
