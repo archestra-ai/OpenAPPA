@@ -191,11 +191,16 @@ impl LogStore {
                      );",
                 )?;
                 transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-            } else if version != SCHEMA_VERSION || !has_schema(&transaction)? {
+            } else if version != SCHEMA_VERSION {
                 return Err(OpenError::ForeignSchema {
                     path,
                     found: version,
                     expected: SCHEMA_VERSION,
+                });
+            } else if !has_schema(&transaction)? {
+                return Err(OpenError::Damaged {
+                    path,
+                    detail: "stamped at this build's schema version, but its tables are missing".to_string(),
                 });
             }
             transaction.commit()?;
@@ -708,6 +713,21 @@ mod tests {
                 assert_eq!((found, expected), (SCHEMA_VERSION + 1, SCHEMA_VERSION));
             }
             other => panic!("expected a schema refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_stamped_database_without_its_tables_is_damaged() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let path = dir.path().join("appa.db");
+        Connection::open(&path)
+            .expect("the file opens")
+            .pragma_update(None, "user_version", SCHEMA_VERSION)
+            .expect("the stamp lands");
+
+        match LogStore::open(Backend::Sqlite { path }).err() {
+            Some(OpenError::Damaged { .. }) => {}
+            other => panic!("expected a damage refusal, got {other:?}"),
         }
     }
 
