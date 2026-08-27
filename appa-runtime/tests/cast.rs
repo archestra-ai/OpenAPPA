@@ -729,3 +729,32 @@ async fn a_silent_classifier_leaves_the_source_unresolved() {
         "the unanswered ask left nothing decided, so the retry resolves it"
     );
 }
+
+/// Two unresolved sources block one call, and their cascades are not the same length: the
+/// web ask has nothing behind its classifier, the files ask has a constant behind its own.
+/// The exhausted ask leaves the other's cascade alone.
+#[tokio::test]
+async fn a_source_with_nothing_left_to_ask_does_not_cancel_the_rest_of_its_batch() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, classifier) = serve_classifier().await;
+    // Silent, and no cast behind it: this ask ends here.
+    classifier.answering("web-classifier", Answer::Down);
+    // Over its ceiling, so the engine refuses it and the ask continues to the constant.
+    classifier.answering("files-classifier", labelled("trusted", serde_json::json!("public")));
+    let runtime = opened(&dir, &url).await;
+
+    for tool in ["read_page", "list_files"] {
+        assert_eq!(propose(&runtime, tool).await, HookDecision::AllowCall { spawn: None });
+        assert_eq!(returned(&runtime, tool, PAGE).await, HookDecision::Ack);
+    }
+
+    assert!(
+        matches!(propose(&runtime, "notify").await, HookDecision::DenyCall { .. }),
+        "the web source stays unresolved, so the sink stays blocked"
+    );
+    assert_eq!(
+        established(&runtime),
+        vec![("files-fallback".to_string(), "suspicious".to_string())],
+        "the files ask reached the constant behind it, though the web ask had nothing left"
+    );
+}

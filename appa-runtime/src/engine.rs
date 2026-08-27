@@ -1089,6 +1089,7 @@ impl RuntimeEngine {
                 let chain = self.engine.registry().trust_chain();
                 let acting = engine_id(trajectory);
                 let mut consults = Vec::new();
+                let mut settled = false;
                 for request in requests {
                     let EvidenceRequest::Cast { casts, value, body } = request else {
                         return Err(EngineRefusal::Invariant {
@@ -1101,12 +1102,16 @@ impl RuntimeEngine {
                             ask: self.cast_ask(value_source(view, &acting, value), casts, body),
                         }),
                         CastAnswerState::Unreadable(continued) => consults.push(*continued),
-                        CastAnswerState::NoAnswer | CastAnswerState::Resolved => {
-                            return Ok(deny_next(NO_CAST_ANSWERED.to_string()));
-                        }
+                        // This source will not be asked again: it answered, or it was
+                        // asked and answered nothing. The rest of the batch still goes
+                        // out, so one settled source does not cost the others a redrive.
+                        CastAnswerState::NoAnswer | CastAnswerState::Resolved => settled = true,
                     }
                 }
-                Ok(Next::ResolveExternal(consults))
+                match (settled, consults.is_empty()) {
+                    (true, true) => Ok(deny_next(NO_CAST_ANSWERED.to_string())),
+                    _ => Ok(Next::ResolveExternal(consults)),
+                }
             }
             FollowUp::Proposals {
                 released: releases,
