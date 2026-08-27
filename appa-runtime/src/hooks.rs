@@ -59,6 +59,7 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             if let Err(error) = on_actor(runtime, &actor, |session| async move { session.on_turn_end().await }).await {
                 tracing::warn!(root = %actor.root.0, %error, "the turn end closed no abandoned call");
             }
+            runtime.release_vouches(&actor);
             HookDecision::Ack
         }
         HookEvent::ToolCall { actor, call, spawn } => {
