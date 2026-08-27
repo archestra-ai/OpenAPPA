@@ -742,7 +742,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let path = dir.path().join("appa.db");
         std::fs::write(&path, b"not a sqlite database at all").expect("the file writes");
-        assert!(LogStore::open(Backend::Sqlite { path }).is_err());
+        match LogStore::open(Backend::Sqlite { path }).err() {
+            Some(OpenError::Damaged { .. }) => {}
+            other => panic!("expected a damage refusal, got {other:?}"),
+        }
     }
 
     #[test]
