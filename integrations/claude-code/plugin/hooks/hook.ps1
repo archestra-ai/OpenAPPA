@@ -53,7 +53,8 @@ function Test-RuntimeHealthy {
 # makes the install take effect, at the cost of the protected sessions
 # already open, whose hooks fail closed until the start answers. The pid
 # arrives in an HTTP body from whoever holds the port, so only a process
-# named appa is ever stopped. Returns $true once the port refuses
+# named appa is ever stopped. The retired appa-runtime name is accepted
+# so init can replace pre-0.5 installs. Returns $true once the port refuses
 # or another starter has already replaced the runtime, $false when the
 # stale runtime cannot be stopped.
 function Stop-StaleRuntime {
@@ -66,7 +67,7 @@ function Stop-StaleRuntime {
     # the wait below sees the port refuse or that starter's replacement.
     $process = Get-Process -Id $stalePid -ErrorAction SilentlyContinue
     if ($null -ne $process) {
-        if ($process.ProcessName -ne "appa") {
+        if ($process.ProcessName -notin @("appa", "appa-runtime")) {
             [Console]::Error.WriteLine("appa protection: pid $stalePid is not appa runtime; not stopping it")
             return $false
         }

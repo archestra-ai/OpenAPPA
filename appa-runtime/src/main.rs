@@ -161,14 +161,15 @@ impl ExecutableAtStart {
         std::env::current_exe().ok().and_then(Self::snapshot)
     }
 
-    /// Whether a different file now stands at the executable's path. A path that cannot be
-    /// read is not a replacement: there is nothing newer to run.
+    /// Whether the executable installed at this process's path no longer matches the one it
+    /// started from. A missing or unreadable path is stale too: Unix can keep an unlinked old
+    /// executable running after an install removes it.
     fn is_replaced(&self) -> bool {
         let Ok(metadata) = fs::metadata(&self.path) else {
-            return false;
+            return true;
         };
         let Ok(modified) = metadata.modified() else {
-            return false;
+            return true;
         };
         metadata.len() != self.len || modified != self.modified
     }
@@ -422,7 +423,7 @@ mod tests {
         assert_eq!(health_answer(Some(&started), 41), "stale 41");
 
         fs::remove_file(&path).expect("the executable is removed");
-        assert_eq!(health_answer(Some(&started), 41), "ok");
+        assert_eq!(health_answer(Some(&started), 41), "stale 41");
     }
 
     #[test]

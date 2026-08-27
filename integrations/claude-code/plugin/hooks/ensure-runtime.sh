@@ -43,7 +43,8 @@ healthy() {
 # here makes the install take effect, at the cost of the protected
 # sessions already open, whose hooks fail closed until the start below
 # answers. The pid arrives in an HTTP body from whoever holds the port,
-# so only this user's own appa process is ever signalled.
+# so only this user's own appa process is ever signalled. The retired
+# appa-runtime name is accepted so init can replace pre-0.5 installs.
 # Returns 0 once the port refuses, which is the start's normal starting
 # point; exits 0 itself when another starter has already replaced the
 # runtime, and 1 when the stale runtime cannot be stopped.
@@ -63,7 +64,7 @@ stop_stale_runtime() {
       return 1
     fi
     case $(ps -o comm= -p "$1" 2>/dev/null) in
-      appa | */appa) ;;
+      appa | */appa | appa-runtime | */appa-runtime) ;;
       *)
         printf 'appa protection: pid %s is not appa runtime; not stopping it\n' "$1" >&2
         return 1

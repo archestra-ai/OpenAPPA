@@ -31,6 +31,23 @@ fn plugin_file(file: &str) -> std::path::PathBuf {
 }
 
 #[test]
+fn runtime_starters_can_replace_the_retired_binary_name() {
+    let posix =
+        std::fs::read_to_string(plugin_file("hooks/ensure-runtime.sh")).expect("the POSIX runtime starter is readable");
+    assert!(
+        posix.contains("appa | */appa | appa-runtime | */appa-runtime"),
+        "the POSIX starter must recognize a stale pre-0.5 runtime",
+    );
+
+    let windows =
+        std::fs::read_to_string(plugin_file("hooks/hook.ps1")).expect("the Windows runtime starter is readable");
+    assert!(
+        windows.contains("@(\"appa\", \"appa-runtime\")"),
+        "the Windows starter must recognize a stale pre-0.5 runtime",
+    );
+}
+
+#[test]
 fn an_ungated_session_has_no_appa_statusline() {
     let output = Command::new("sh")
         .arg(plugin_file("statusline.sh"))

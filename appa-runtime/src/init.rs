@@ -356,6 +356,10 @@ fn remove_legacy_runtime(appa: &Path, paths: &DeploymentPaths) -> Result<(), Ini
         }
     }
     for target in targets {
+        // A Unix process can keep running after Cargo has unlinked its executable. Scan the
+        // two exact retired install paths even when no directory entry remains, then remove any
+        // file that is left. Windows keeps the file present while the process is running.
+        stop_legacy_runtime_at(&target)?;
         if !target.exists() {
             continue;
         }
@@ -364,7 +368,6 @@ fn remove_legacy_runtime(appa: &Path, paths: &DeploymentPaths) -> Result<(), Ini
             path: target.clone(),
             source,
         })?;
-        stop_legacy_runtime_at(&target)?;
         #[cfg(windows)]
         fs::remove_file(&target).map_err(|source| InitError::InstallRuntime { path: target, source })?;
     }
@@ -373,27 +376,13 @@ fn remove_legacy_runtime(appa: &Path, paths: &DeploymentPaths) -> Result<(), Ini
 
 #[cfg(unix)]
 fn stop_legacy_runtime_at(target: &Path) -> Result<(), InitError> {
-    let health = Command::new("curl")
-        .args(["--fail", "--silent", "--max-time", "1", "http://127.0.0.1:8787/health"])
-        .output();
-    let Ok(health) = health else {
+    let Ok(output) = Command::new("ps").args(["-axo", "pid=,command="]).output() else {
         return Ok(());
     };
-    if !health.status.success() || !String::from_utf8_lossy(&health.stdout).trim().starts_with("stale ") {
-        return Ok(());
-    }
-    let output = Command::new("ps")
-        .args(["-axo", "pid=,command="])
-        .output()
-        .map_err(|source| InitError::InstallRuntime {
-            path: target.to_path_buf(),
-            source,
-        })?;
     if !output.status.success() {
-        return Err(InitError::InstallRuntime {
-            path: target.to_path_buf(),
-            source: std::io::Error::other(String::from_utf8_lossy(&output.stderr).trim().to_owned()),
-        });
+        // Process discovery is a migration convenience. Restricted environments may deny ps;
+        // continue the install and let runtime identity verification reject a surviving daemon.
+        return Ok(());
     }
     let written = target.to_string_lossy();
     let mut stopped = Vec::new();
@@ -425,13 +414,8 @@ fn stop_legacy_runtime_at(target: &Path) -> Result<(), InitError> {
         stopped.push(pid);
     }
     if !stopped.is_empty() {
-        let address = "127.0.0.1:8787"
-            .parse()
-            .expect("the installed runtime address is valid");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while std::time::Instant::now() < deadline
-            && std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_millis(100)).is_ok()
-        {
+        while std::time::Instant::now() < deadline && stopped.iter().any(|pid| unsafe { libc::kill(*pid, 0) == 0 }) {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
     }
@@ -840,6 +824,31 @@ fn verify_runtime_binary(runtime: &Path) -> Result<(), InitError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_stops_an_unlinked_legacy_runtime() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let target = directory.path().join("appa-runtime");
+        fs::copy("/bin/sleep", &target).expect("the legacy executable is copied");
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).expect("the legacy executable is executable");
+        let mut child = Command::new(&target)
+            .arg("5")
+            .spawn()
+            .expect("the legacy process starts");
+        fs::remove_file(&target).expect("Cargo unlinks the installed legacy executable");
+        let reaper = std::thread::spawn(move || child.wait().expect("the legacy process is reaped"));
+
+        stop_legacy_runtime_at(&target).expect("legacy cleanup succeeds");
+
+        let status = reaper.join().expect("the reaper joins");
+        assert!(
+            !status.success(),
+            "cleanup must stop the unlinked process before sleep completes"
+        );
+    }
 
     #[test]
     fn marketplace_line_matches_only_the_named_marketplace() {
