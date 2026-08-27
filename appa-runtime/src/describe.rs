@@ -101,20 +101,19 @@ fn inspect(path: &Path) -> (ConfigDescription, PolicyDescription) {
                     config.state = ConfigState::Loadable;
                     config.diagnostic = None;
                     describe_policy_value(loaded.policy_file().value(), &root, &mut policy);
-                    if let Ok(source) = toml::to_string(loaded.policy_file().value()) {
-                        if let Ok(compiled) = appa_policy::Config::from_toml_str(&source) {
-                            policy.referenced_groups = compiled
-                                .registry()
-                                .groups()
-                                .iter()
-                                .map(|group| format!("@{}", group.as_str()))
-                                .collect();
-                            policy.membership =
-                                compiled.registry().membership().map(|resolver| MembershipDescription {
-                                    resolver: resolver.as_str().to_string(),
-                                    binding_configured: loaded.externals.membership.contains_key(resolver.as_str()),
-                                });
-                        }
+                    if let Ok(source) = toml::to_string(loaded.policy_file().value())
+                        && let Ok(compiled) = appa_policy::Config::from_toml_str(&source)
+                    {
+                        policy.referenced_groups = compiled
+                            .registry()
+                            .groups()
+                            .iter()
+                            .map(|group| format!("@{}", group.as_str()))
+                            .collect();
+                        policy.membership = compiled.registry().membership().map(|resolver| MembershipDescription {
+                            resolver: resolver.as_str().to_string(),
+                            binding_configured: loaded.externals.membership.contains_key(resolver.as_str()),
+                        });
                     }
                 }
             }
@@ -137,23 +136,23 @@ fn describe_policy_value(policy_value: &toml::Value, root: &toml::Value, out: &m
         .into_iter()
         .collect();
 
-    if let Ok(source) = toml::to_string(policy_value) {
-        if let Ok(compiled) = appa_policy::Config::from_toml_str(&source) {
-            out.referenced_groups = compiled
-                .registry()
-                .groups()
-                .iter()
-                .map(|group| format!("@{}", group.as_str()))
-                .collect();
-            out.membership = compiled.registry().membership().map(|resolver| MembershipDescription {
-                resolver: resolver.as_str().to_string(),
-                binding_configured: root
-                    .get("externals")
-                    .and_then(|externals| externals.get("membership"))
-                    .and_then(|membership| membership.get(resolver.as_str()))
-                    .is_some(),
-            });
-        }
+    if let Ok(source) = toml::to_string(policy_value)
+        && let Ok(compiled) = appa_policy::Config::from_toml_str(&source)
+    {
+        out.referenced_groups = compiled
+            .registry()
+            .groups()
+            .iter()
+            .map(|group| format!("@{}", group.as_str()))
+            .collect();
+        out.membership = compiled.registry().membership().map(|resolver| MembershipDescription {
+            resolver: resolver.as_str().to_string(),
+            binding_configured: root
+                .get("externals")
+                .and_then(|externals| externals.get("membership"))
+                .and_then(|membership| membership.get(resolver.as_str()))
+                .is_some(),
+        });
     }
 }
 

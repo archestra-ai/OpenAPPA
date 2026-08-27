@@ -127,14 +127,13 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
     let replacement =
         replace_plugin(&source, &marketplaces, &installations).and_then(|()| install_runtime(&appa, &deployed_appa));
     if let Err(operation) = replacement {
-        if let Some(recovery) = recovery.as_ref() {
-            if let Err(recovery_error) = restore_plugin(recovery).and_then(|()| install_clappa(launcher_dir).map(drop))
-            {
-                return Err(InitError::PluginRecovery {
-                    operation: Box::new(operation),
-                    recovery: Box::new(recovery_error),
-                });
-            }
+        if let Some(recovery) = recovery.as_ref()
+            && let Err(recovery_error) = restore_plugin(recovery).and_then(|()| install_clappa(launcher_dir).map(drop))
+        {
+            return Err(InitError::PluginRecovery {
+                operation: Box::new(operation),
+                recovery: Box::new(recovery_error),
+            });
         }
         return Err(operation);
     }
@@ -287,7 +286,7 @@ fn deployment_paths() -> Result<DeploymentPaths, InitError> {
 }
 
 fn user_home() -> Option<PathBuf> {
-    env::var_os("HOME").map(PathBuf::from).or_else(|| {
+    env::var_os("HOME").map(PathBuf::from).or({
         #[cfg(windows)]
         {
             env::var_os("USERPROFILE").map(PathBuf::from)
@@ -586,7 +585,7 @@ fn installed_plugin_installations(claude_dir: &Path) -> Result<Vec<PluginInstall
     else {
         return Ok(Vec::new());
     };
-    Ok(entries
+    entries
         .iter()
         .filter_map(|entry| {
             let scope = entry.get("scope")?.as_str()?.to_owned();
@@ -609,7 +608,7 @@ fn installed_plugin_installations(claude_dir: &Path) -> Result<Vec<PluginInstall
             }
             Ok(installation)
         })
-        .collect::<Result<Vec<_>, _>>()?)
+        .collect::<Result<Vec<_>, _>>()
 }
 
 fn installed_plugin_root(claude_dir: &Path) -> Result<PathBuf, InitError> {
