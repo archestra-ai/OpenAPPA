@@ -23,7 +23,7 @@ the mascot alone instead of runtime status.
 
 Initialization and every protected session share one starter,
 `hooks/ensure-runtime.sh` (on Windows, `hook.ps1 -EnsureRuntime`): it
-launches the installed `appa-runtime` when nothing healthy answers
+launches the installed `appa runtime` process when nothing healthy answers
 `/health` and returns only once one does. A running runtime answers
 `stale <pid>` once initialization replaced its binary on disk; the starter
 stops that process and starts the installed build in its place. The
@@ -57,7 +57,7 @@ process itself in the crate's
 APPA_GATE=1 claude --plugin-dir /path/to/OpenAPPA/integrations/claude-code/plugin
 
 # installed from this checkout
-cargo install --path appa-runtime --root ~/.local --force
-~/.local/bin/appa init claude-code
-~/.local/bin/clappa
+cargo install --path appa-runtime --force
+appa init claude-code
+clappa
 ```

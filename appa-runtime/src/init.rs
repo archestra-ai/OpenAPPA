@@ -3,7 +3,7 @@
 use std::env;
 use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -28,8 +28,6 @@ pub enum InitError {
     ClaudeCommand { command: String, message: String },
     #[error("the local Claude Code marketplace at {0} is incomplete")]
     InvalidMarketplace(PathBuf),
-    #[error("the appa-runtime binary is missing beside appa at {0}; install the whole package")]
-    MissingRuntime(PathBuf),
     #[error("cannot install the runtime at {path}: {source}")]
     InstallRuntime { path: PathBuf, source: std::io::Error },
     #[error("cannot initialize {path}: {source}")]
@@ -46,7 +44,7 @@ pub enum InitError {
     MissingPluginProject { scope: String, path: PathBuf },
     #[error("the installed Claude plugin is missing {0}")]
     MissingPluginFile(PathBuf),
-    #[error("the installed Claude plugin could not start appa-runtime: {0}")]
+    #[error("the installed Claude plugin could not start `appa runtime`: {0}")]
     Starter(String),
     #[error("the runtime at 127.0.0.1:8787 is not this installed build: {0}")]
     RuntimeIdentity(String),
@@ -68,7 +66,10 @@ impl MarketplaceSource {
 
     fn label(&self) -> String {
         match self {
-            Self::Local(path) => path.display().to_string(),
+            Self::Local(path) if env::current_dir().is_ok_and(|current| current.starts_with(path)) => {
+                "current checkout".to_owned()
+            }
+            Self::Local(path) => friendly_path(path),
             Self::Remote(source) => source.clone(),
         }
     }
@@ -91,19 +92,16 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
     let appa = env::current_exe().map_err(InitError::CurrentExecutable)?;
     let source = resolve_marketplace_source(explicit_source, &appa)?;
     let paths = deployment_paths()?;
-    let runtime_source = appa.parent().unwrap_or_else(|| Path::new(".")).join(runtime_filename());
-    if !runtime_source.is_file() {
-        return Err(InitError::MissingRuntime(runtime_source));
-    }
     let installations = installed_plugin_installations(&paths.claude_dir)?;
     let marketplaces = run_claude(["plugin", "marketplace", "list"])?;
 
+    remove_legacy_runtime(&appa, &paths)?;
     fs::create_dir_all(&paths.install_dir).map_err(|source| InitError::InstallRuntime {
         path: paths.install_dir.clone(),
         source,
     })?;
-    let runtime_target = paths.install_dir.join(runtime_filename());
-    install_runtime(&runtime_source, &runtime_target)?;
+    let deployed_appa = paths.install_dir.join(appa_filename());
+    install_runtime(&appa, &deployed_appa)?;
 
     fs::create_dir_all(&paths.config_dir).map_err(|source| InitError::WriteFile {
         path: paths.config_dir.clone(),
@@ -138,32 +136,54 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
     let plugin_root = installed_plugin_root(&paths.claude_dir)?;
     activate_platform_hooks(&plugin_root)?;
     let launcher_dir = appa.parent().unwrap_or(&paths.install_dir);
-    let launcher = install_clappa(launcher_dir)?;
-    let statusline = install_statusline(&plugin_root, &paths)?;
-    start_runtime(&plugin_root, &paths, &runtime_target)?;
+    install_clappa(launcher_dir)?;
+    install_statusline(&plugin_root, &paths)?;
+    start_runtime(&plugin_root, &paths, &deployed_appa)?;
 
-    let mut description = String::new();
-    description.push_str("OpenAPPA initialized for Claude Code\n");
-    description.push_str(&format!("Adapter source: {}\n", source.label()));
-    description.push_str(&format!("Plugin: {PLUGIN}\n"));
-    description.push_str(&format!("Runtime: {} (healthy)\n", runtime_target.display()));
-    description.push_str(&format!(
-        "Config: {} ({})\n",
-        config.display(),
-        if config_created { "created" } else { "kept" }
-    ));
-    description.push_str(&format!("Launcher: {}\n", launcher.display()));
-    match statusline {
-        Statusline::Installed(path) => {
-            description.push_str(&format!("Statusline: {}\n", path.display()));
+    Ok(render_receipt(
+        &source.label(),
+        &config,
+        config_created,
+        std::io::stdout().is_terminal() && env::var_os("NO_COLOR").is_none(),
+    ))
+}
+
+fn render_receipt(adapter: &str, config: &Path, config_created: bool, color: bool) -> String {
+    let title = if color {
+        "\u{1b}[1;32m✓ OpenAPPA initialized\u{1b}[0m \u{1b}[2mfor Claude Code\u{1b}[0m"
+    } else {
+        "OpenAPPA initialized for Claude Code"
+    };
+    let label = |name: &str| {
+        if color {
+            format!("\u{1b}[1;36m{name:<9}\u{1b}[0m")
+        } else {
+            format!("{name:<9}")
         }
-        Statusline::KeptExisting => description.push_str("Statusline: kept existing Claude setting\n"),
-    }
-    description.push_str(&format!(
-        "Next: run `{}`, then `/appa-guide init`.\n",
-        launcher.display()
-    ));
-    Ok(description)
+    };
+    format!(
+        "{title}\n\n  {} {adapter}\n  {} {PLUGIN}\n  {} healthy\n  {} {} ({})\n  {} clappa\n\nNext: run `clappa`, then `/appa-guide init`.\n",
+        label("Adapter"),
+        label("Plugin"),
+        label("Runtime"),
+        label("Config"),
+        friendly_path(config),
+        if config_created { "created" } else { "kept" },
+        label("Launcher"),
+    )
+}
+
+fn friendly_path(path: &Path) -> String {
+    user_home().and_then(|home| path.strip_prefix(home).ok()).map_or_else(
+        || path.display().to_string(),
+        |relative| {
+            if relative.as_os_str().is_empty() {
+                "~".to_owned()
+            } else {
+                format!("~/{}", relative.display())
+            }
+        },
+    )
 }
 
 fn resolve_marketplace_source(explicit: Option<&str>, appa: &Path) -> Result<MarketplaceSource, InitError> {
@@ -315,12 +335,112 @@ fn installed_data_dir() -> Option<PathBuf> {
         })
 }
 
-fn runtime_filename() -> &'static str {
+fn appa_filename() -> &'static str {
+    if cfg!(windows) { "appa.exe" } else { "appa" }
+}
+
+fn legacy_runtime_filename() -> &'static str {
     if cfg!(windows) {
         "appa-runtime.exe"
     } else {
         "appa-runtime"
     }
+}
+
+fn remove_legacy_runtime(appa: &Path, paths: &DeploymentPaths) -> Result<(), InitError> {
+    let mut targets = vec![paths.install_dir.join(legacy_runtime_filename())];
+    if let Some(parent) = appa.parent() {
+        let sibling = parent.join(legacy_runtime_filename());
+        if sibling != targets[0] {
+            targets.push(sibling);
+        }
+    }
+    for target in targets {
+        if !target.exists() {
+            continue;
+        }
+        #[cfg(unix)]
+        fs::remove_file(&target).map_err(|source| InitError::InstallRuntime {
+            path: target.clone(),
+            source,
+        })?;
+        stop_legacy_runtime_at(&target)?;
+        #[cfg(windows)]
+        fs::remove_file(&target).map_err(|source| InitError::InstallRuntime { path: target, source })?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn stop_legacy_runtime_at(target: &Path) -> Result<(), InitError> {
+    let health = Command::new("curl")
+        .args(["--fail", "--silent", "--max-time", "1", "http://127.0.0.1:8787/health"])
+        .output();
+    let Ok(health) = health else {
+        return Ok(());
+    };
+    if !health.status.success() || !String::from_utf8_lossy(&health.stdout).trim().starts_with("stale ") {
+        return Ok(());
+    }
+    let output = Command::new("ps")
+        .args(["-axo", "pid=,command="])
+        .output()
+        .map_err(|source| InitError::InstallRuntime {
+            path: target.to_path_buf(),
+            source,
+        })?;
+    if !output.status.success() {
+        return Err(InitError::InstallRuntime {
+            path: target.to_path_buf(),
+            source: std::io::Error::other(String::from_utf8_lossy(&output.stderr).trim().to_owned()),
+        });
+    }
+    let written = target.to_string_lossy();
+    let mut stopped = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let line = line.trim_start();
+        let Some((pid, command)) = line.split_once(char::is_whitespace) else {
+            continue;
+        };
+        let command = command.trim_start();
+        let is_target =
+            |path: &str| command == path || command.strip_prefix(path).is_some_and(|rest| rest.starts_with(' '));
+        if !is_target(&written) {
+            continue;
+        }
+        let Ok(pid) = pid.parse::<i32>() else {
+            continue;
+        };
+        // The exact executable path is one of APPA's two retired install locations.
+        // A process owned by another user cannot be signalled by this process.
+        if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(InitError::InstallRuntime {
+                    path: target.to_path_buf(),
+                    source: error,
+                });
+            }
+        }
+        stopped.push(pid);
+    }
+    if !stopped.is_empty() {
+        let address = "127.0.0.1:8787"
+            .parse()
+            .expect("the installed runtime address is valid");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline
+            && std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_millis(100)).is_ok()
+        {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn stop_legacy_runtime_at(target: &Path) -> Result<(), InitError> {
+    stop_windows_process_at(target, "appa-runtime")
 }
 
 fn install_runtime(source: &Path, target: &Path) -> Result<(), InitError> {
@@ -329,7 +449,7 @@ fn install_runtime(source: &Path, target: &Path) -> Result<(), InitError> {
     }
     #[cfg(windows)]
     if target.exists() {
-        stop_windows_runtime_at(target)?;
+        stop_windows_process_at(target, "appa")?;
         fs::remove_file(target).map_err(|source| InitError::InstallRuntime {
             path: target.to_path_buf(),
             source,
@@ -364,14 +484,15 @@ fn install_runtime(source: &Path, target: &Path) -> Result<(), InitError> {
 }
 
 #[cfg(windows)]
-fn stop_windows_runtime_at(target: &Path) -> Result<(), InitError> {
+fn stop_windows_process_at(target: &Path, process_name: &str) -> Result<(), InitError> {
     let output = Command::new("powershell.exe")
         .args([
             "-NoProfile",
             "-Command",
-            "$target = $env:APPA_RUNTIME_REPLACE_TARGET; Get-Process -Name appa-runtime -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $target } | Stop-Process -Force",
+            "$target = $env:APPA_RUNTIME_REPLACE_TARGET; $name = $env:APPA_RUNTIME_REPLACE_NAME; Get-Process -Name $name -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $target } | Stop-Process -Force",
         ])
         .env("APPA_RUNTIME_REPLACE_TARGET", target)
+        .env("APPA_RUNTIME_REPLACE_NAME", process_name)
         .output()
         .map_err(|source| InitError::InstallRuntime {
             path: target.to_path_buf(),
@@ -569,12 +690,7 @@ fn activate_platform_hooks(plugin_root: &Path) -> Result<(), InitError> {
     Ok(())
 }
 
-enum Statusline {
-    Installed(PathBuf),
-    KeptExisting,
-}
-
-fn install_statusline(plugin_root: &Path, paths: &DeploymentPaths) -> Result<Statusline, InitError> {
+fn install_statusline(plugin_root: &Path, paths: &DeploymentPaths) -> Result<(), InitError> {
     #[cfg(windows)]
     let (source, target) = (
         plugin_root.join("statusline.ps1"),
@@ -607,7 +723,7 @@ fn install_statusline(plugin_root: &Path, paths: &DeploymentPaths) -> Result<Sta
         .and_then(|line| line.get("command"))
         .and_then(Value::as_str);
     if existing.is_some_and(|command| !command.contains("appa-statusline")) {
-        return Ok(Statusline::KeptExisting);
+        return Ok(());
     }
 
     fs::copy(&source, &target).map_err(|source| InitError::WriteFile {
@@ -647,7 +763,7 @@ fn install_statusline(plugin_root: &Path, paths: &DeploymentPaths) -> Result<Sta
         path: settings_path,
         source,
     })?;
-    Ok(Statusline::Installed(target))
+    Ok(())
 }
 
 fn start_runtime(plugin_root: &Path, paths: &DeploymentPaths, runtime: &Path) -> Result<(), InitError> {
@@ -717,7 +833,7 @@ fn verify_runtime_binary(runtime: &Path) -> Result<(), InitError> {
         return Ok(());
     }
     Err(InitError::RuntimeIdentity(
-        "a different appa-runtime build is answering; stop it and rerun init".to_owned(),
+        "a different appa build is answering; stop it and rerun init".to_owned(),
     ))
 }
 
@@ -730,5 +846,25 @@ mod tests {
         assert!(is_appa_marketplace_line("  ❯ appa"));
         assert!(!is_appa_marketplace_line("  ❯ appa-other"));
         assert!(!is_appa_marketplace_line("Source: GitHub (appa)"));
+    }
+
+    #[test]
+    fn receipt_is_compact_and_hides_installation_details() {
+        let config = user_home()
+            .unwrap_or_else(|| PathBuf::from("/home/user"))
+            .join("config/appa.toml");
+        let receipt = render_receipt("current checkout", &config, false, false);
+
+        assert!(receipt.starts_with("OpenAPPA initialized for Claude Code\n\n"));
+        assert!(receipt.contains("Adapter   current checkout"));
+        assert!(receipt.contains("Runtime   healthy"));
+        assert!(receipt.contains("Launcher  clappa"));
+        assert!(receipt.contains("Next: run `clappa`, then `/appa-guide init`."));
+        assert!(!receipt.contains("Statusline"));
+        assert!(!receipt.contains("appa-runtime (healthy)"));
+        assert!(!receipt.contains("\u{1b}["));
+
+        let colored = render_receipt("current checkout", &config, false, true);
+        assert!(colored.starts_with("\u{1b}[1;32m✓ OpenAPPA initialized\u{1b}[0m"));
     }
 }

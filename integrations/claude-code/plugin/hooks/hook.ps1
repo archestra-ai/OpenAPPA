@@ -13,7 +13,7 @@ $protected = $env:APPA_GATE -eq "1"
 $dataDir = if ($env:APPA_DATA_DIR) { $env:APPA_DATA_DIR } else { Join-Path $env:LOCALAPPDATA "appa" }
 $configDir = if ($env:APPA_CONFIG_DIR) { $env:APPA_CONFIG_DIR } else { Join-Path $env:APPDATA "appa" }
 $installDir = if ($env:APPA_INSTALL_DIR) { $env:APPA_INSTALL_DIR } else { Join-Path $dataDir "bin" }
-$binary = Join-Path $installDir "appa-runtime.exe"
+$binary = Join-Path $installDir "appa.exe"
 
 if ($SessionContext) {
     if (-not $protected) {
@@ -53,7 +53,7 @@ function Test-RuntimeHealthy {
 # makes the install take effect, at the cost of the protected sessions
 # already open, whose hooks fail closed until the start answers. The pid
 # arrives in an HTTP body from whoever holds the port, so only a process
-# named appa-runtime is ever stopped. Returns $true once the port refuses
+# named appa is ever stopped. Returns $true once the port refuses
 # or another starter has already replaced the runtime, $false when the
 # stale runtime cannot be stopped.
 function Stop-StaleRuntime {
@@ -66,8 +66,8 @@ function Stop-StaleRuntime {
     # the wait below sees the port refuse or that starter's replacement.
     $process = Get-Process -Id $stalePid -ErrorAction SilentlyContinue
     if ($null -ne $process) {
-        if ($process.ProcessName -ne "appa-runtime") {
-            [Console]::Error.WriteLine("appa protection: pid $stalePid is not appa-runtime; not stopping it")
+        if ($process.ProcessName -ne "appa") {
+            [Console]::Error.WriteLine("appa protection: pid $stalePid is not appa runtime; not stopping it")
             return $false
         }
         Stop-Process -Id $stalePid -ErrorAction SilentlyContinue
@@ -116,6 +116,7 @@ function Start-RuntimeIfDown {
     $configPath = Join-Path $configDir "appa.toml"
     $databasePath = Join-Path $dataDir "appa.db"
     Start-Process -FilePath $binary -WindowStyle Hidden -ArgumentList @(
+        "runtime",
         "--config", "`"$configPath`"",
         "--db", "`"$databasePath`""
     ) | Out-Null
@@ -139,7 +140,7 @@ function Start-RuntimeIfDown {
 # install reports.
 if ($EnsureRuntime) {
     if (-not (Test-Path -LiteralPath $binary)) {
-        [Console]::Error.WriteLine("appa protection: appa-runtime is not installed; expected at $binary")
+        [Console]::Error.WriteLine("appa protection: appa is not installed; expected at $binary")
         exit 1
     }
     Start-RuntimeIfDown

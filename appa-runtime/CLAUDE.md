@@ -18,7 +18,7 @@ one at the repository root:
   `HookEvent`, `HookDecision` to hook wire JSON. It depends only on
   `appa-runtime-api`, so the boundary is compiler-enforced: an adapter
   cannot call the runtime, hold state, or see a dispatch id.
-- this crate (package `appa-runtime`, binaries `appa` and `appa-runtime`) —
+- this crate (package and binary `appa`) —
   the native lifecycle/description CLI and everything else: the runtime API and internal `Session` event model,
   the `hooks` dispatcher, the HTTP server, the MCP endpoint, the
   externals, the builtin modules (`builtins.rs` — stock implementations

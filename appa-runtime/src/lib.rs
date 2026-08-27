@@ -6,6 +6,8 @@ pub mod describe;
 pub mod hooks;
 pub mod init;
 pub mod mcp;
+#[path = "main.rs"]
+pub mod runtime_cli;
 pub mod tls;
 
 mod builtins;

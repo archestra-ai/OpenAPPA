@@ -12,12 +12,11 @@ OpenAPPA is designed for multiple agent surfaces. **Claude Code is simply the fi
 You need Cargo, Claude Code, and `curl`.
 
 ```sh
-cargo install --path appa-runtime --root ~/.local --force
-~/.local/bin/appa init claude-code
+cargo install --path appa-runtime --force
+appa init claude-code
 ```
 
-Initialization prints the absolute `clappa` path. Add `~/.local/bin` to your
-`PATH` to use the short command below.
+Initialization installs `clappa` beside `appa` so the short command works below.
 
 The native `appa` command installs the runtime, the matching Claude Code
 plugin, the statusline, and `clappa`, a protected way to start Claude Code.
@@ -138,9 +137,9 @@ To uninstall OpenAPPA from Claude Code, remove the plugin, stop the local runtim
 ```sh
 claude plugin uninstall appa-runtime
 claude plugin marketplace remove appa
-pkill -f appa-runtime
-rm ~/.local/bin/appa-runtime ~/.local/bin/clappa ~/.local/bin/appa-statusline.sh
-cargo uninstall --root ~/.local appa-runtime
+pkill -f 'appa runtime'
+rm ~/.local/bin/appa ~/.cargo/bin/clappa ~/.local/bin/appa-statusline.sh
+cargo uninstall appa
 
 # drop the statusline entry appa init wrote, and keep one of your own:
 jq 'if (.statusLine.command? // "") | test("appa-statusline") then del(.statusLine) else . end' \

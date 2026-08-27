@@ -1,10 +1,11 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::{env, ffi::OsString, iter};
 
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "appa", version = include_str!("../../../version.txt").trim())]
+#[command(name = "appa", version)]
 struct Args {
     #[command(subcommand)]
     command: Command,
@@ -52,6 +53,11 @@ enum Harness {
 }
 
 fn main() -> ExitCode {
+    if env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("runtime")) {
+        let args = iter::once(OsString::from("appa runtime")).chain(env::args_os().skip(2));
+        return appa_runtime::runtime_cli::run_from(args);
+    }
+
     match Args::parse().command {
         Command::Describe { config, adapter } => {
             let config = config.unwrap_or_else(appa_runtime::init::installed_config_path);

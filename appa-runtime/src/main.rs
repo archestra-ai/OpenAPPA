@@ -1,7 +1,8 @@
-//! Process entry: an HTTP listener for hooks. Policy decisions live behind the runtime API; this file
+//! Internal `appa runtime` command: an HTTP listener for hooks. Policy decisions live behind the runtime API; this file
 //! parses flags, initializes a missing deployment config, opens the
 //! runtime, picks the adapter codec, and serves.
 
+use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::net::SocketAddr;
@@ -12,12 +13,12 @@ use std::time::SystemTime;
 
 use axum::extract::State;
 use axum::routing::{get, post};
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use sha2::{Digest, Sha256};
 
-use appa_runtime::api::{Reloaded, Runtime};
-use appa_runtime::config::Config;
-use appa_runtime::{hooks, mcp};
+use crate::api::{Reloaded, Runtime};
+use crate::config::Config;
+use crate::{hooks, mcp};
 use appa_runtime_api::Codec;
 
 const DEFAULT_CONFIG: &str = include_str!("../../integrations/claude-code/examples/claude-code.appa.toml");
@@ -37,14 +38,8 @@ fn ensure_default_config(path: &Path) -> io::Result<bool> {
 }
 
 #[derive(Parser)]
-#[command(
-    name = "appa-runtime",
-    version = include_str!("../../version.txt").trim()
-)]
+#[command(name = "appa runtime", version)]
 struct Args {
-    #[command(subcommand)]
-    command: Option<Command>,
-
     #[arg(long, env = "APPA_CONFIG", global = true)]
     config: Option<PathBuf>,
 
@@ -64,12 +59,6 @@ struct Args {
     verbose: u8,
 }
 
-#[derive(Subcommand)]
-enum Command {
-    /// Describe the configuration facts available to a human or configuring agent.
-    Describe,
-}
-
 fn require_loopback(addr: &SocketAddr) -> Result<(), String> {
     if addr.ip().is_loopback() {
         Ok(())
@@ -86,12 +75,6 @@ enum Adapter {
 }
 
 impl Adapter {
-    fn as_str(self) -> &'static str {
-        match self {
-            Adapter::ClaudeCode => "claude-code",
-        }
-    }
-
     fn codec(self) -> Codec {
         match self {
             Adapter::ClaudeCode => appa_adapter_claude_code::codec(),
@@ -258,26 +241,33 @@ struct StatusQuery {
 async fn status(
     State(state): State<AppState>,
     query: Result<axum::extract::Query<StatusQuery>, axum::extract::rejection::QueryRejection>,
-) -> Result<axum::Json<appa_runtime::api::TrajectoryStatus>, axum::http::StatusCode> {
+) -> Result<axum::Json<crate::api::TrajectoryStatus>, axum::http::StatusCode> {
     let query = query.map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
-    let id = appa_runtime::api::TrajectoryId(query.0.trajectory);
+    let id = crate::api::TrajectoryId(query.0.trajectory);
     match state.runtime.status(&id) {
         Some(status) => Ok(axum::Json(status)),
         None => Err(axum::http::StatusCode::NOT_FOUND),
     }
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
-    let args = Args::parse();
-    if let Some(Command::Describe) = args.command {
-        let config_path = args.config.unwrap_or_else(appa_runtime::init::installed_config_path);
-        print!(
-            "{}",
-            appa_runtime::describe::render(&config_path, args.adapter.as_str())
-        );
-        return ExitCode::SUCCESS;
-    }
+/// Run the internal daemon command from arguments supplied by the public CLI.
+pub fn run_from<I, T>(args: I) -> ExitCode
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    let args = Args::parse_from(args);
+    let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("appa runtime: cannot create async runtime: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    runtime.block_on(serve(args))
+}
+
+async fn serve(args: Args) -> ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -288,32 +278,32 @@ async fn main() -> ExitCode {
     let config_path = args.config.unwrap_or_else(|| PathBuf::from("appa.toml"));
 
     if let Err(refusal) = require_loopback(&args.listen) {
-        eprintln!("appa-runtime: {refusal}");
+        eprintln!("appa runtime: {refusal}");
         return ExitCode::FAILURE;
     }
     match ensure_default_config(&config_path) {
         Ok(true) => tracing::info!(path = %config_path.display(), "created default configuration"),
         Ok(false) => {}
         Err(error) => {
-            eprintln!("appa-runtime: cannot create {}: {error}", config_path.display());
+            eprintln!("appa runtime: cannot create {}: {error}", config_path.display());
             return ExitCode::FAILURE;
         }
     }
     let config = match Config::load(&config_path) {
         Ok(config) => config,
         Err(error) => {
-            eprintln!("appa-runtime: {error}");
+            eprintln!("appa runtime: {error}");
             return ExitCode::FAILURE;
         }
     };
     if let Err(refusal) = refuse_unobservable_returns(args.adapter, config.policy_file().value()) {
-        eprintln!("appa-runtime: {refusal}");
+        eprintln!("appa runtime: {refusal}");
         return ExitCode::FAILURE;
     }
     let runtime = match Runtime::open(config, args.db, args.modules_dir) {
         Ok(runtime) => Arc::new(runtime),
         Err(error) => {
-            eprintln!("appa-runtime: {error}");
+            eprintln!("appa runtime: {error}");
             return ExitCode::FAILURE;
         }
     };
@@ -337,7 +327,7 @@ async fn main() -> ExitCode {
     let listener = match tokio::net::TcpListener::bind(args.listen).await {
         Ok(listener) => listener,
         Err(error) => {
-            eprintln!("appa-runtime: cannot bind {}: {error}", args.listen);
+            eprintln!("appa runtime: cannot bind {}: {error}", args.listen);
             return ExitCode::FAILURE;
         }
     };
@@ -345,7 +335,7 @@ async fn main() -> ExitCode {
     match axum::serve(listener, app).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("appa-runtime: server failed: {error}");
+            eprintln!("appa runtime: server failed: {error}");
             ExitCode::FAILURE
         }
     }
@@ -415,7 +405,7 @@ mod tests {
     #[test]
     fn health_reports_a_replaced_executable_by_the_pid_to_stop() {
         let directory = tempfile::tempdir().expect("temporary directory");
-        let path = directory.path().join("appa-runtime");
+        let path = directory.path().join("appa");
         fs::write(&path, "build one").expect("the executable is written");
         let started = ExecutableAtStart::snapshot(path.clone()).expect("the executable is readable");
 

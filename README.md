@@ -64,12 +64,11 @@ The Claude Code plugin is a playground for the model, not the product. It is the
 fastest way to watch a policy make a decision on real work:
 
 ```sh
-cargo install --path appa-runtime --root ~/.local --force
-~/.local/bin/appa init claude-code
+cargo install --path appa-runtime --force
+appa init claude-code
 ```
 
-Initialization prints the absolute `clappa` launcher path; add
-`~/.local/bin` to `PATH` to use the short command.
+Initialization installs the `clappa` launcher beside `appa`.
 
 The native `appa` command installs this checkout's Claude Code plugin, the
 runtime deployment, statusline, and `clappa` launcher. It replaces an existing

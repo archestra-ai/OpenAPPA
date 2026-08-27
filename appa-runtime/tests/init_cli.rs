@@ -16,9 +16,7 @@ fn executable(path: &Path) {
 fn install_test_binaries(bin: &Path) -> std::path::PathBuf {
     let appa = bin.join("appa");
     fs::copy(env!("CARGO_BIN_EXE_appa"), &appa).expect("appa is copied");
-    fs::copy(env!("CARGO_BIN_EXE_appa-runtime"), bin.join("appa-runtime")).expect("appa-runtime is copied");
     executable(&appa);
-    executable(&bin.join("appa-runtime"));
     appa
 }
 
@@ -33,7 +31,7 @@ fn install_fake_curl(bin: &Path) {
 }
 
 fn runtime_fingerprint(bin: &Path) -> String {
-    let digest = Sha256::digest(fs::read(bin.join("appa-runtime")).expect("runtime bytes"));
+    let digest = Sha256::digest(fs::read(bin.join("appa")).expect("runtime bytes"));
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
@@ -48,6 +46,8 @@ fn init_installs_one_local_adapter_and_is_safe_to_run_again() {
     fs::create_dir_all(&bin).expect("bin directory");
     fs::create_dir_all(plugin.join("hooks")).expect("plugin hooks");
     let appa = install_test_binaries(&bin);
+    fs::copy(&appa, bin.join("appa-runtime")).expect("legacy runtime fixture is copied");
+    executable(&bin.join("appa-runtime"));
     install_fake_curl(&bin);
     let fingerprint = runtime_fingerprint(&bin);
 
@@ -88,13 +88,10 @@ fn init_installs_one_local_adapter_and_is_safe_to_run_again() {
     assert!(first.status.success(), "{}", String::from_utf8_lossy(&first.stderr));
     let first_stdout = String::from_utf8(first.stdout).expect("UTF-8 output");
     assert!(first_stdout.starts_with("OpenAPPA initialized for Claude Code"));
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .canonicalize()
-        .expect("repository path");
-    assert!(first_stdout.contains(&format!("Adapter source: {}", repository.display())));
+    assert!(first_stdout.contains("Adapter   current checkout"));
     assert!(first_stdout.contains("(created)"));
-    assert!(bin.join("appa-runtime").is_file());
+    assert!(bin.join("appa").is_file());
+    assert!(!bin.join("appa-runtime").exists());
     assert!(bin.join("clappa").is_file());
     assert!(bin.join("appa-statusline.sh").is_file());
     assert!(config.join("appa.toml").is_file());
@@ -135,7 +132,7 @@ fn init_installs_one_local_adapter_and_is_safe_to_run_again() {
 
     let wrong_runtime = run("not-this-build");
     assert!(!wrong_runtime.status.success());
-    assert!(String::from_utf8_lossy(&wrong_runtime.stderr).contains("different appa-runtime build"));
+    assert!(String::from_utf8_lossy(&wrong_runtime.stderr).contains("different appa build"));
 }
 
 #[test]
@@ -189,7 +186,7 @@ fn init_keeps_a_custom_statusline() {
         .output()
         .expect("appa init runs");
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    assert!(String::from_utf8_lossy(&output.stdout).contains("kept existing Claude setting"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("Statusline"));
     let settings = fs::read_to_string(claude.join("settings.json")).expect("settings remain");
     assert!(settings.contains("my-status"));
     assert!(!bin.join("appa-statusline.sh").exists());

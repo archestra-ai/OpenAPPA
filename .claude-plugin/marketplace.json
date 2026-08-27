@@ -1,5 +1,6 @@
 {
   "name": "appa",
+  "description": "OpenAPPA protection and policy tooling for agent harnesses.",
   "owner": {
     "name": "Archestra"
   },

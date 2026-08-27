@@ -77,108 +77,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
-name = "appa-adapter-claude-code"
-version = "0.0.0"
-dependencies = [
- "appa-runtime-api",
- "serde",
- "serde_json",
- "tracing",
-]
-
-[[package]]
-name = "appa-agent-python"
-version = "0.1.0"
-dependencies = [
- "appa-runtime",
- "appa-runtime-api",
- "pyo3",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "toml",
-]
-
-[[package]]
-name = "appa-builtin"
-version = "0.0.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "appa-engine"
-version = "0.0.0"
-dependencies = [
- "proptest",
- "serde",
- "serde_json",
- "serde_json_canonicalizer",
- "sha2",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "appa-eventlog"
-version = "0.0.0"
-dependencies = [
- "appa-engine",
- "appa-policy",
- "rusqlite",
- "serde_json",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
-name = "appa-example-agent"
-version = "0.0.0"
-dependencies = [
- "appa-runtime",
- "appa-runtime-api",
- "axum",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "appa-module-fixture"
-version = "0.0.0"
-dependencies = [
- "appa-builtin",
- "serde_json",
-]
-
-[[package]]
-name = "appa-module-fixture-bad"
-version = "0.0.0"
-
-[[package]]
-name = "appa-policy"
-version = "0.0.0"
-dependencies = [
- "appa-engine",
- "serde",
- "serde_json",
- "thiserror",
- "toml",
-]
-
-[[package]]
-name = "appa-runtime"
-version = "0.0.0"
+name = "appa"
+version = "0.5.0"
 dependencies = [
  "appa-adapter-claude-code",
  "appa-builtin",
@@ -211,8 +111,108 @@ dependencies = [
 ]
 
 [[package]]
-name = "appa-runtime-api"
+name = "appa-adapter-claude-code"
+version = "0.5.0"
+dependencies = [
+ "appa-runtime-api",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "appa-agent-python"
+version = "0.5.0"
+dependencies = [
+ "appa",
+ "appa-runtime-api",
+ "pyo3",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml",
+]
+
+[[package]]
+name = "appa-builtin"
+version = "0.5.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "appa-engine"
+version = "0.5.0"
+dependencies = [
+ "proptest",
+ "serde",
+ "serde_json",
+ "serde_json_canonicalizer",
+ "sha2",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "appa-eventlog"
+version = "0.5.0"
+dependencies = [
+ "appa-engine",
+ "appa-policy",
+ "rusqlite",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "appa-example-agent"
+version = "0.5.0"
+dependencies = [
+ "appa",
+ "appa-runtime-api",
+ "axum",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "appa-module-fixture"
 version = "0.0.0"
+dependencies = [
+ "appa-builtin",
+ "serde_json",
+]
+
+[[package]]
+name = "appa-module-fixture-bad"
+version = "0.0.0"
+
+[[package]]
+name = "appa-policy"
+version = "0.5.0"
+dependencies = [
+ "appa-engine",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
+name = "appa-runtime-api"
+version = "0.5.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -515,10 +515,10 @@ name = "corporate-agent-demo"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "appa",
  "appa-engine",
  "appa-example-agent",
  "appa-policy",
- "appa-runtime",
  "axum",
  "clap",
  "corp-systems",
@@ -2859,10 +2859,10 @@ name = "website-chat-playground"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "appa",
  "appa-engine",
  "appa-example-agent",
  "appa-policy",
- "appa-runtime",
  "axum",
  "clap",
  "getrandom 0.3.4",

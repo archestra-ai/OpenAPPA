@@ -1,6 +1,6 @@
 [package]
 name = "appa-example-agent"
-version = "0.0.0"
+version.workspace = true
 edition.workspace = true
 publish = false
 description = "A protoagent on the runtime: it owns the loop, the transcript and the tool catalogue, and gates every flow through the hook dispatcher"

@@ -13,8 +13,8 @@ gate that was answering the whole time. The legal write is what keeps a dead
 runtime from passing as a refusal — with the hooks failing closed, a gate
 that is down blocks both sessions, not one.
 
-Needs the `claude` CLI on PATH and logged in, and an `appa-runtime`
-binary. It spends the machine's Claude usage, so it runs by hand:
+Needs the `claude` CLI on PATH and logged in, and the `appa` binary. It
+spends the machine's Claude usage, so it runs by hand:
 
     uv run integrations/claude-code/live-gate-check.py
 """
@@ -69,21 +69,21 @@ def repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def runtime_binary() -> Path:
+def appa_binary() -> Path:
     """The runtime this check gates with: an explicit one, a local build,
     or the installed one."""
-    override = os.environ.get("APPA_RUNTIME_BIN")
+    override = os.environ.get("APPA_BIN")
     if override:
         return Path(override)
-    candidates = [repo_root() / "target" / profile / "appa-runtime" for profile in ("release", "debug")]
-    installed = shutil.which("appa-runtime")
+    candidates = [repo_root() / "target" / profile / "appa" for profile in ("release", "debug")]
+    installed = shutil.which("appa")
     if installed:
         candidates.append(Path(installed))
     for candidate in candidates:
         if candidate.is_file():
             return candidate
     raise SystemExit(
-        "no appa-runtime binary found: build it with `cargo build -p appa-runtime`, install it, or set APPA_RUNTIME_BIN"
+        "no appa binary found: build it with `cargo build -p appa`, install it, or set APPA_BIN"
     )
 
 
@@ -130,7 +130,8 @@ class Session:
 def gate(config: Path, db: Path) -> Iterator[int]:
     process = subprocess.Popen(
         [
-            str(runtime_binary()),
+            str(appa_binary()),
+            "runtime",
             "--config",
             str(config),
             "--db",

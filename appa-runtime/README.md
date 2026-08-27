@@ -15,25 +15,24 @@ re-validates its persisted log before it is trusted.
 
 The Claude Code adapter requires the `claude` command and `curl`.
 
-From a source checkout, install both package binaries into the deployment's
-standard command directory, then initialize the harness adapter:
+From a source checkout, install `appa`, then initialize the harness adapter:
 
 ```sh
-cargo install --path appa-runtime --root ~/.local --force
-~/.local/bin/appa init claude-code
+cargo install --path appa-runtime --force
+appa init claude-code
 ```
 
 From an extracted release archive on POSIX:
 
 ```sh
-install -m 755 appa appa-runtime ~/.local/bin/
+install -m 755 appa ~/.local/bin/
 appa init claude-code --source ./claude-code
 ```
 
 From a checkout, `init` installs that checkout's marketplace. From an extracted
 release it uses the marketplace shipped beside the binaries. Otherwise it uses
 `archestra-ai/OpenAPPA`. It replaces an existing APPA plugin instead of stacking
-another copy, deploys the sibling `appa-runtime`, creates `clappa`, installs the
+another copy, deploys the same `appa` build for its internal `runtime` command, creates `clappa`, installs the
 statusline unless Claude already has a custom one, preserves an existing policy,
 and starts the runtime. The [Claude Code integration guide](../integrations/claude-code/README.md)
 covers the complete flow.
@@ -43,7 +42,7 @@ covers the complete flow.
 ### 1. Build
 
 ```sh
-cargo build -p appa-runtime
+cargo build -p appa
 ```
 
 ### 2. Prepare the configuration
@@ -105,7 +104,7 @@ Without `--config`, the installed command reads the same platform config
 directory used by the Claude Code starter (`APPA_CONFIG_DIR` can override it).
 
 ```sh
-./target/debug/appa-runtime --config appa.toml --db appa.db
+./target/debug/appa runtime --config appa.toml --db appa.db
 ```
 
 `curl localhost:8787/health` prints `ok` when it is up. The listener

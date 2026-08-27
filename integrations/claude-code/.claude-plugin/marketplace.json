@@ -1,5 +1,6 @@
 {
   "name": "appa",
+  "description": "OpenAPPA protection and policy tooling for Claude Code.",
   "owner": {
     "name": "Archestra"
   },

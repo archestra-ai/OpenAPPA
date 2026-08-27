@@ -41,12 +41,11 @@ This flow needs Cargo, the `claude` command, and `curl`. Install the native CLI
 and let it initialize Claude Code:
 
 ```sh
-cargo install --path appa-runtime --root ~/.local --force
-~/.local/bin/appa init claude-code
+cargo install --path appa-runtime --force
+appa init claude-code
 ```
 
-Init prints the absolute `clappa` path. Add `~/.local/bin` to `PATH` to use the
-short command in later examples.
+Init installs `clappa` beside `appa` so the short command works in later examples.
 
 From a checkout, `appa init` finds `integrations/claude-code` and registers that
 exact local marketplace. From an extracted release it uses the marketplace
@@ -54,7 +53,7 @@ shipped beside the binaries. Otherwise it uses `archestra-ai/OpenAPPA`. It
 uninstalls an existing user-scoped APPA plugin and replaces its marketplace
 before installing, so branch tests never stack two APPA hook sets.
 
-Initialization deploys the sibling `appa-runtime` binary, creates the starting
+Initialization deploys the same `appa` build for its internal `runtime` command, creates the starting
 policy only when it is missing, installs `clappa`, preserves a custom Claude
 statusline, registers the plugin, and starts the runtime through the same
 starter used at SessionStart. A successful command therefore proves that one
@@ -70,9 +69,9 @@ the PowerShell adapter on native Windows; WSL uses the POSIX hooks.
 
 | System | Runtime | Policy | Database |
 | --- | --- | --- | --- |
-| Linux | `~/.local/bin/appa-runtime` | `~/.config/appa/appa.toml` | `~/.local/share/appa/` |
-| macOS | `~/.local/bin/appa-runtime` | `~/Library/Application Support/appa/appa.toml` | `~/Library/Application Support/appa/` |
-| Windows | `%LOCALAPPDATA%\appa\bin\appa-runtime.exe` | `%APPDATA%\appa\appa.toml` | `%LOCALAPPDATA%\appa\` |
+| Linux | `~/.local/bin/appa runtime` | `~/.config/appa/appa.toml` | `~/.local/share/appa/` |
+| macOS | `~/.local/bin/appa runtime` | `~/Library/Application Support/appa/appa.toml` | `~/Library/Application Support/appa/` |
+| Windows | `%LOCALAPPDATA%\appa\bin\appa.exe runtime` | `%APPDATA%\appa\appa.toml` | `%LOCALAPPDATA%\appa\` |
 
 The runtime creates the starting policy only when the policy path does
 not exist. It never replaces the policy or database.
@@ -140,7 +139,7 @@ all follow it:
 
 ```sh
 cp integrations/claude-code/examples/claude-code.appa.toml appa.toml
-nohup cargo run --bin appa-runtime -- --config appa.toml --db appa.db --listen 127.0.0.1:8788 >appa-runtime.log 2>&1 &
+nohup cargo run --bin appa -- runtime --config appa.toml --db appa.db --listen 127.0.0.1:8788 >appa-runtime.log 2>&1 &
 APPA_GATE=1 APPA_RUNTIME_URL=http://127.0.0.1:8788 claude --plugin-dir integrations/claude-code/plugin
 ```
 
@@ -187,9 +186,9 @@ stale.
 ```sh
 claude plugin uninstall appa-runtime
 claude plugin marketplace remove appa
-pkill -f appa-runtime
-rm ~/.local/bin/appa-runtime ~/.local/bin/clappa ~/.local/bin/appa-statusline.sh
-cargo uninstall --root ~/.local appa-runtime
+pkill -f 'appa runtime'
+rm ~/.local/bin/appa ~/.cargo/bin/clappa ~/.local/bin/appa-statusline.sh
+cargo uninstall appa
 
 # drop the statusline entry appa init wrote, and keep one of your own:
 jq 'if (.statusLine.command? // "") | test("appa-statusline") then del(.statusLine) else . end' \

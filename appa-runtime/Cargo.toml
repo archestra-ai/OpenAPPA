@@ -1,15 +1,12 @@
 [package]
-name = "appa-runtime"
-version = "0.0.0"
+name = "appa"
+version.workspace = true
 edition.workspace = true
 publish = false
+autobins = false
 
 [lib]
 name = "appa_runtime"
-
-[[bin]]
-name = "appa-runtime"
-path = "src/main.rs"
 
 [[bin]]
 name = "appa"
