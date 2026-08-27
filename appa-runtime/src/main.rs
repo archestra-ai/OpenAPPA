@@ -1,6 +1,9 @@
-//! Process entry: an HTTP listener for hooks. Policy decisions live behind the runtime API; this file
+//! Process entry. Policy decisions live behind the runtime API; this file
 //! parses flags, initializes a missing deployment config, opens the
-//! runtime, picks the adapter codec, and serves.
+//! runtime, picks the adapter codec, and serves. Invoked as `appa-runtime hook`
+//! it is instead the client the harness runs once per hook (see `hook_client`).
+
+mod hook_client;
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -40,7 +43,12 @@ fn ensure_default_config(path: &Path) -> io::Result<bool> {
     name = "appa-runtime",
     version = include_str!("../../version.txt").trim()
 )]
+/// Gate a harness's flows. With no subcommand it serves the runtime; `hook` posts
+/// one hook event to a runtime already serving.
 struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     #[arg(long, env = "APPA_CONFIG", default_value = "appa.toml")]
     config: PathBuf,
 
@@ -58,6 +66,23 @@ struct Args {
 
     #[arg(short, action = clap::ArgAction::Count)]
     verbose: u8,
+}
+
+/// The one thing this binary does besides serve. The harness spawns it once per
+/// hook, so it runs before anything the server needs is built.
+#[derive(clap::Subcommand)]
+enum Command {
+    /// Post the hook event on stdin to the running runtime and print its answer.
+    Hook {
+        #[arg(long, env = "APPA_RUNTIME_URL", default_value = "http://127.0.0.1:8787")]
+        url: String,
+
+        /// Post a hook that reports a finished turn. It decides nothing, so it
+        /// discards the answer and never blocks, and waits on no evidence round
+        /// trip, so it takes the shorter deadline.
+        #[arg(long)]
+        turn_end: bool,
+    },
 }
 
 fn require_loopback(addr: &SocketAddr) -> Result<(), String> {
@@ -228,9 +253,21 @@ async fn status(
     }
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
     let args = Args::parse();
+    if let Some(Command::Hook { url, turn_end }) = &args.command {
+        return hook_client::run(url, hook_client::Decides::of_a_turn_end(*turn_end));
+    }
+    match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+        Ok(async_runtime) => async_runtime.block_on(serve(args)),
+        Err(error) => {
+            eprintln!("appa-runtime: cannot start the async runtime: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn serve(args: Args) -> ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
