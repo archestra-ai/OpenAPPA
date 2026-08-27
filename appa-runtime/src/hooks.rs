@@ -73,7 +73,6 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             .await
             {
                 Ok(ToolCallDecision::Allow { spawn }) => HookDecision::AllowCall { spawn },
-                Ok(ToolCallDecision::Control) => HookDecision::PassControl,
                 Ok(ToolCallDecision::Deny {
                     feedback,
                     unestablished,

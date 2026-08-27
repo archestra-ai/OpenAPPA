@@ -56,7 +56,6 @@ pub(crate) enum ToolCallDecision {
         feedback: String,
         unestablished: Vec<UnestablishedValue>,
     },
-    Control,
 }
 
 /// What the adapter gives the harness as the tool output. `Keep`: use
