@@ -508,6 +508,9 @@ fn worst_case_plan_alternatives(
         );
     }
     if tool.resolver_owns(crate::contract::ResolverReturn::Attention) {
+        // Only dynamic marks with an authority remedy multiply the plan menu. Marks declared
+        // solely by static requirements remain valid resolver outputs, but produce a terminal
+        // gap rather than alternative executable plans.
         let dynamic_marks: BTreeSet<_> = authorities
             .iter()
             .flat_map(|authority| authority.mandate.attends.iter())
@@ -895,10 +898,22 @@ impl Registry {
             }
         }
 
-        let attention_marks = config
-            .authorities
-            .iter()
-            .flat_map(|authority| authority.mandate.attends.iter().cloned())
+        // Attention names are a policy vocabulary, not an authority vocabulary. A policy may
+        // deliberately use a mark as an unremediable denial (for example `blocked`) while
+        // registering no authority at all. Dynamic resolvers must be able to return those marks,
+        // but still remain confined to names the policy declares somewhere.
+        let attention_marks = tools
+            .values()
+            .flatten()
+            .map(|(_, tool)| tool)
+            .chain(provider_run.values())
+            .flat_map(|tool| tool.requires.attention.iter().cloned())
+            .chain(
+                config
+                    .authorities
+                    .iter()
+                    .flat_map(|authority| authority.mandate.attends.iter().cloned()),
+            )
             .collect();
 
         Ok(Registry {
@@ -1019,14 +1034,14 @@ impl Registry {
         &self.authorities
     }
 
-    /// Every attention mark at least one registered authority attends, in stable name order.
-    /// Attention ignores scope, so this policy-wide set is also the complete set a dynamic
-    /// resolver may demand while retaining an in-place authority remedy.
+    /// Every attention mark declared by a static tool requirement or an authority permit, in
+    /// stable name order. This is the closed policy vocabulary a dynamic resolver may return;
+    /// a mark need not have an authority remedy and may deliberately make a call unexecutable.
     pub fn attention_marks(&self) -> impl Iterator<Item = &MarkName> {
         self.attention_marks.iter()
     }
 
-    pub(crate) fn attends(&self, mark: &MarkName) -> bool {
+    pub(crate) fn knows_attention_mark(&self, mark: &MarkName) -> bool {
         self.attention_marks.contains(mark)
     }
 
@@ -1296,6 +1311,21 @@ mod tests {
             scope: Scope::default(),
             hint: None,
         }
+    }
+
+    #[test]
+    fn static_requirements_declare_attention_vocabulary_without_an_authority() {
+        let mut blocked = tool("blocked");
+        blocked.requires.attention = vec![MarkName::new("blocked")];
+        let mut cfg = base();
+        cfg.tools = vec![blocked];
+
+        let registry = Registry::build_covered(cfg).expect("an unremediable attention mark is valid policy");
+
+        assert_eq!(
+            registry.attention_marks().map(MarkName::as_str).collect::<Vec<_>>(),
+            ["blocked"]
+        );
     }
 
     fn audience_sites(reader: &str) -> Vec<(&'static str, RegistryConfig)> {
