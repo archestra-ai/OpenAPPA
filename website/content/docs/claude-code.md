@@ -9,24 +9,31 @@ OpenAPPA is designed for multiple agent surfaces. **Claude Code is simply the fi
 
 ## Install the Claude Code demo
 
+You need Cargo, Claude Code, and `curl`.
+
 ```sh
-claude plugin marketplace add archestra-ai/OpenAPPA &&
-  claude plugin install appa-runtime@appa &&
-  claude /appa-setup
+cargo install --path appa-runtime --root ~/.local --force
+~/.local/bin/appa init claude-code
 ```
 
-The setup installs the local runtime, adds `appa` for read-only configuration discovery, and adds `clappa`, a protected way to start Claude Code. It does not replace `claude` or change how your ordinary sessions start.
+Initialization prints the absolute `clappa` path. Add `~/.local/bin` to your
+`PATH` to use the short command below.
 
-Setup asks once whether it may count the install. If you agree, it sends one event with the version, operating system and architecture. It sends nothing that identifies you or your machine, and it stores nothing to recognise you later. If you decline, or say nothing, it sends nothing. `APPA_TELEMETRY=0` refuses it without being asked. The runtime never reports anything at any point.
+The native `appa` command installs the runtime, the matching Claude Code
+plugin, the statusline, and `clappa`, a protected way to start Claude Code.
+From a checkout it uses that checkout's plugin, replacing an existing APPA
+installation instead of stacking another hook set. It preserves an existing
+policy and custom statusline. It does not replace `claude` or change how
+ordinary sessions start.
 
 ## 1. Teach OpenAPPA about your tools
 
 :::claude-policy-timing:::
 
-Start a normal, unprotected session, then run the policy setup skill:
+Start a protected session, then run the policy setup skill:
 
 ```sh
-claude
+clappa
 ```
 
 ```text
@@ -45,7 +52,7 @@ Before it writes anything, the skill shows the full proposal for approval. The r
 
 ## 2. Try a flow that should be blocked
 
-Leave the setup session and start Claude Code with OpenAPPA:
+Start a new protected Claude Code session with the updated policy:
 
 ```sh
 clappa
@@ -132,9 +139,10 @@ To uninstall OpenAPPA from Claude Code, remove the plugin, stop the local runtim
 claude plugin uninstall appa-runtime
 claude plugin marketplace remove appa
 pkill -f appa-runtime
-rm ~/.local/bin/appa-runtime ~/.local/bin/appa ~/.local/bin/clappa ~/.local/bin/appa-statusline.sh
+rm ~/.local/bin/appa-runtime ~/.local/bin/clappa ~/.local/bin/appa-statusline.sh
+cargo uninstall --root ~/.local appa-runtime
 
-# drop the statusline entry the setup wrote, and keep one of your own:
+# drop the statusline entry appa init wrote, and keep one of your own:
 jq 'if (.statusLine.command? // "") | test("appa-statusline") then del(.statusLine) else . end' \
   ~/.claude/settings.json > ~/.claude/settings.json.new &&
   mv ~/.claude/settings.json.new ~/.claude/settings.json

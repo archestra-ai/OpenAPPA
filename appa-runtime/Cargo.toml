@@ -11,6 +11,10 @@ name = "appa_runtime"
 name = "appa-runtime"
 path = "src/main.rs"
 
+[[bin]]
+name = "appa"
+path = "src/bin/appa.rs"
+
 [dependencies]
 appa-adapter-claude-code = { path = "../appa-adapter-claude-code" }
 # The builtin-module ABI: one source of truth for the descriptor,
@@ -36,6 +40,7 @@ rmcp = { version = "3", features = ["server", "macros", "transport-streamable-ht
 schemars = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
 tempfile = "3"
 tokio = { workspace = true }

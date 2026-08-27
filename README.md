@@ -64,21 +64,18 @@ The Claude Code plugin is a playground for the model, not the product. It is the
 fastest way to watch a policy make a decision on real work:
 
 ```sh
-claude plugin marketplace add archestra-ai/OpenAPPA &&
-  claude plugin install appa-runtime@appa &&
-  claude /appa-setup
+cargo install --path appa-runtime --root ~/.local --force
+~/.local/bin/appa init claude-code
 ```
 
-This installs an `appa` command for read-only setup discovery and a `clappa`
-command that runs Claude Code protected by OpenAPPA; plain `claude` sessions
-stay untouched. Run `/appa-guide init` in a plain
-`claude` session to bring your MCP servers into the policy, then start `clappa`
-to try the protected flow.
+Initialization prints the absolute `clappa` launcher path; add
+`~/.local/bin` to `PATH` to use the short command.
 
-Setup asks once whether it may count the install — version, OS and architecture,
-nothing that identifies you or your machine. Decline, or say nothing, and it
-sends nothing; `APPA_TELEMETRY=0` refuses it without being asked. The runtime
-never reports anything.
+The native `appa` command installs this checkout's Claude Code plugin, the
+runtime deployment, statusline, and `clappa` launcher. It replaces an existing
+APPA plugin instead of stacking a second copy and preserves an existing policy
+or custom statusline. Start `clappa`, then run `/appa-guide init` to bring the
+session's MCP servers into the policy. Plain `claude` sessions stay untouched.
 
 ![A protected Claude Code session refuses to post content from a private meeting recording to a public GitHub repo, and explains why](website/public/images/claude-code-blocked-flow.png)
 

@@ -105,6 +105,12 @@ jobs:
         run: |
           actual_version=$("./target/${TARGET}/release/${EXECUTABLE}" --version)
           test "$actual_version" = "appa-runtime ${EXPECTED_VERSION}"
+          case "$EXECUTABLE" in
+            *.exe) cli=appa.exe ;;
+            *) cli=appa ;;
+          esac
+          cli_version=$("./target/${TARGET}/release/${cli}" --version)
+          test "$cli_version" = "appa ${EXPECTED_VERSION}"
 
       - name: Verify Linux glibc baseline
         if: runner.os == 'Linux'
@@ -132,9 +138,18 @@ jobs:
         run: |
           mkdir -p "dist/${ASSET}"
           cp "target/${TARGET}/release/${EXECUTABLE}" "dist/${ASSET}/${EXECUTABLE}"
+          case "$EXECUTABLE" in
+            *.exe) cli=appa.exe ;;
+            *) cli=appa ;;
+          esac
+          cp "target/${TARGET}/release/${cli}" "dist/${ASSET}/${cli}"
           cp -R integrations/claude-code "dist/${ASSET}/claude-code"
+          cp -R batteries "dist/${ASSET}/claude-code/batteries"
+          mkdir -p "dist/${ASSET}/claude-code/website/content/docs"
+          cp website/content/docs/contracts.md "dist/${ASSET}/claude-code/website/content/docs/contracts.md"
           if [[ "$RUNNER_OS" != "Windows" ]]; then
             chmod 755 "dist/${ASSET}/${EXECUTABLE}"
+            chmod 755 "dist/${ASSET}/appa"
             chmod 755 "dist/${ASSET}/claude-code/plugin/statusline.sh"
           fi
 
@@ -162,6 +177,8 @@ jobs:
           mkdir verify
           tar -xzf "dist/${ARCHIVE}" -C verify
           cd verify
+          test -x appa
+          ./appa init claude-code --help >/dev/null
           "./${EXECUTABLE}" >runtime.stdout.log 2>runtime.stderr.log &
           runtime_pid=$!
           cleanup() {
@@ -179,7 +196,8 @@ jobs:
               test -f claude-code/plugin/hooks/hooks.json
               test -f claude-code/plugin/hooks/session-context.md
               test -f claude-code/plugin/skills/appa-guide/SKILL.md
-              test -f claude-code/plugin/skills/appa-setup/SKILL.md
+              test -d claude-code/batteries
+              test -f claude-code/website/content/docs/contracts.md
               test -x claude-code/plugin/statusline.sh
               exit 0
             fi
@@ -231,6 +249,14 @@ jobs:
             if (-not (Test-Path (Join-Path $package "appa.toml"))) {
               throw "Extracted runtime did not create appa.toml"
             }
+            $cli = Join-Path $package "appa.exe"
+            if (-not (Test-Path $cli)) {
+              throw "Extracted package does not contain appa.exe"
+            }
+            & $cli init claude-code --help | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+              throw "Extracted appa.exe does not expose init claude-code"
+            }
             if (-not (Test-Path (Join-Path $package "claude-code/.claude-plugin/marketplace.json"))) {
               throw "Extracted package does not contain the Claude Code marketplace"
             }
@@ -258,8 +284,11 @@ jobs:
             if (-not (Test-Path (Join-Path $package "claude-code/plugin/skills/appa-guide/SKILL.md"))) {
               throw "Extracted package does not contain the Claude Code appa-guide skill"
             }
-            if (-not (Test-Path (Join-Path $package "claude-code/plugin/skills/appa-setup/SKILL.md"))) {
-              throw "Extracted package does not contain the Claude Code appa-setup skill"
+            if (-not (Test-Path (Join-Path $package "claude-code/batteries"))) {
+              throw "Extracted package does not contain batteries for appa-guide"
+            }
+            if (-not (Test-Path (Join-Path $package "claude-code/website/content/docs/contracts.md"))) {
+              throw "Extracted package does not contain the contract guide for appa-guide"
             }
           } finally {
             $process.Refresh()

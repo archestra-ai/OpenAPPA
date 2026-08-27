@@ -11,12 +11,32 @@ policy the deployment cannot honor refuses to start. Every decision is
 persisted as engine facts in the SQLite log, and a reopened database
 re-validates its persisted log before it is trusted.
 
-## Install a release
+## Install
 
-The [Claude Code integration guide](../integrations/claude-code/README.md)
-covers the install: the plugin manager installs the gate, and a plain
-Claude Code session installs the verified runtime binary as a prompted
-task. An existing policy and database are always preserved.
+The Claude Code adapter requires the `claude` command and `curl`.
+
+From a source checkout, install both package binaries into the deployment's
+standard command directory, then initialize the harness adapter:
+
+```sh
+cargo install --path appa-runtime --root ~/.local --force
+~/.local/bin/appa init claude-code
+```
+
+From an extracted release archive on POSIX:
+
+```sh
+install -m 755 appa appa-runtime ~/.local/bin/
+appa init claude-code --source ./claude-code
+```
+
+From a checkout, `init` installs that checkout's marketplace. From an extracted
+release it uses the marketplace shipped beside the binaries. Otherwise it uses
+`archestra-ai/OpenAPPA`. It replaces an existing APPA plugin instead of stacking
+another copy, deploys the sibling `appa-runtime`, creates `clappa`, installs the
+statusline unless Claude already has a custom one, preserves an existing policy,
+and starts the runtime. The [Claude Code integration guide](../integrations/claude-code/README.md)
+covers the complete flow.
 
 ## Development quickstart
 
@@ -68,7 +88,7 @@ suspicious. Pass its path directly to `--config`.
 
 ### 3. Start the process
 
-Before starting it, the installed `appa` wrapper can describe the facts a
+Before starting it, the installed `appa` CLI can describe the facts a
 configuring human or agent may rely on:
 
 ```sh

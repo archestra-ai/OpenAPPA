@@ -13,6 +13,7 @@ use std::time::SystemTime;
 use axum::extract::State;
 use axum::routing::{get, post};
 use clap::{Parser, Subcommand};
+use sha2::{Digest, Sha256};
 
 use appa_runtime::api::{Reloaded, Runtime};
 use appa_runtime::config::Config;
@@ -75,32 +76,6 @@ fn require_loopback(addr: &SocketAddr) -> Result<(), String> {
     } else {
         Err(format!("refusing to listen on non-loopback address {addr}"))
     }
-}
-
-fn installed_config_path() -> PathBuf {
-    if let Some(directory) = std::env::var_os("APPA_CONFIG_DIR") {
-        return PathBuf::from(directory).join("appa.toml");
-    }
-    #[cfg(target_os = "macos")]
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home)
-            .join("Library/Application Support/appa")
-            .join("appa.toml");
-    }
-    #[cfg(target_os = "windows")]
-    if let Some(appdata) = std::env::var_os("APPDATA") {
-        return PathBuf::from(appdata).join("appa").join("appa.toml");
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        if let Some(config_home) = std::env::var_os("XDG_CONFIG_HOME") {
-            return PathBuf::from(config_home).join("appa").join("appa.toml");
-        }
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(".config/appa/appa.toml");
-        }
-    }
-    PathBuf::from("appa.toml")
 }
 
 /// The adapter surface this binary can serve. The one place harness
@@ -183,16 +158,19 @@ struct ExecutableAtStart {
     path: PathBuf,
     len: u64,
     modified: SystemTime,
+    digest: String,
 }
 
 impl ExecutableAtStart {
     fn snapshot(path: PathBuf) -> Option<Self> {
         let metadata = fs::metadata(&path).ok()?;
         let modified = metadata.modified().ok()?;
+        let digest = binary_digest(&path).ok()?;
         Some(Self {
             path,
             len: metadata.len(),
             modified,
+            digest,
         })
     }
 
@@ -203,8 +181,20 @@ impl ExecutableAtStart {
     /// Whether a different file now stands at the executable's path. A path that cannot be
     /// read is not a replacement: there is nothing newer to run.
     fn is_replaced(&self) -> bool {
-        Self::snapshot(self.path.clone()).is_some_and(|now| now != *self)
+        let Ok(metadata) = fs::metadata(&self.path) else {
+            return false;
+        };
+        let Ok(modified) = metadata.modified() else {
+            return false;
+        };
+        metadata.len() != self.len || modified != self.modified
     }
+}
+
+fn binary_digest(path: &Path) -> io::Result<String> {
+    let bytes = fs::read(path)?;
+    let digest = Sha256::digest(bytes);
+    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 #[derive(Clone)]
@@ -229,6 +219,14 @@ async fn hook(
 /// install replaced that file, naming the process to stop before starting the new build.
 async fn health(State(state): State<AppState>) -> String {
     health_answer(state.executable.as_ref(), std::process::id())
+}
+
+async fn binary_fingerprint(State(state): State<AppState>) -> Result<String, axum::http::StatusCode> {
+    state
+        .executable
+        .as_ref()
+        .map(|executable| executable.digest.clone())
+        .ok_or(axum::http::StatusCode::NOT_FOUND)
 }
 
 fn health_answer(executable: Option<&ExecutableAtStart>, pid: u32) -> String {
@@ -273,7 +271,7 @@ async fn status(
 async fn main() -> ExitCode {
     let args = Args::parse();
     if let Some(Command::Describe) = args.command {
-        let config_path = args.config.unwrap_or_else(installed_config_path);
+        let config_path = args.config.unwrap_or_else(appa_runtime::init::installed_config_path);
         print!(
             "{}",
             appa_runtime::describe::render(&config_path, args.adapter.as_str())
@@ -329,6 +327,7 @@ async fn main() -> ExitCode {
     };
     let app = axum::Router::new()
         .route("/health", get(health))
+        .route("/binary-fingerprint", get(binary_fingerprint))
         .route("/status", get(status))
         .route("/hook", post(hook))
         .route("/reload", post(reload))
@@ -342,7 +341,7 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    tracing::info!(listen = %args.listen, "appa-runtime serving /hook, /mcp, /status, /reload, and /health");
+    tracing::info!(listen = %args.listen, "appa-runtime serving /hook, /mcp, /status, /reload, /health, and /binary-fingerprint");
     match axum::serve(listener, app).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {

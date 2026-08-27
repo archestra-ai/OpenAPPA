@@ -7,8 +7,7 @@ param(
 # function). The guard reads the Claude Code process environment, fixed at
 # launch, so a session cannot turn the protection off. Without the variable
 # the protection hook exits 0 and -SessionContext prints nothing.
-# Installing the runtime is the appa-setup skill's job, invoked only
-# when the user asks.
+# Installing the runtime is `appa init claude-code`'s job.
 $protected = $env:APPA_GATE -eq "1"
 
 $dataDir = if ($env:APPA_DATA_DIR) { $env:APPA_DATA_DIR } else { Join-Path $env:LOCALAPPDATA "appa" }
@@ -93,8 +92,7 @@ function Stop-StaleRuntime {
 # so a protected session works without any service setup, and the last step
 # of the install starts it through -EnsureRuntime. A runtime whose binary
 # an install replaced is stopped first. Installing the binary is
-# not this script's job: the appa-setup skill does that when the user
-# asks.
+# not this script's job: `appa init claude-code` does that first.
 function Start-RuntimeIfDown {
     if (Test-RuntimeHealthy) {
         return
@@ -113,9 +111,13 @@ function Start-RuntimeIfDown {
     # different directories on Windows, so both must exist first.
     New-Item -ItemType Directory -Path $configDir -Force | Out-Null
     New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
+    # Start-Process joins ArgumentList into one Windows command line. Quote the
+    # path tokens explicitly so the standard user directories may contain spaces.
+    $configPath = Join-Path $configDir "appa.toml"
+    $databasePath = Join-Path $dataDir "appa.db"
     Start-Process -FilePath $binary -WindowStyle Hidden -ArgumentList @(
-        "--config", (Join-Path $configDir "appa.toml"),
-        "--db", (Join-Path $dataDir "appa.db")
+        "--config", "`"$configPath`"",
+        "--db", "`"$databasePath`""
     ) | Out-Null
     # A wall-clock budget, not a count of probes: one probe is instant
     # where the port refuses and costs the full deadline where it hangs.

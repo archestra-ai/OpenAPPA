@@ -1,14 +1,14 @@
 #!/bin/sh
 # Starts the installed appa-runtime when no healthy runtime answers.
-# Two callers share it: the last step of the install (the appa-setup skill)
-# and every protected SessionStart, which runs it before the hooks post
+# Two callers share it: `appa init claude-code` and every protected
+# SessionStart, which runs it before the hooks post
 # their first event. A protected session therefore needs no login service,
 # and an install that ends here leaves the runtime up, so the first
 # protected session pays nothing for the start. Exit 0 means a healthy
 # runtime answers; any other exit makes the chained protection hook block,
 # and tells the install that it has nothing to report as running.
-# Installing the binary is not this script's job: the appa-setup skill
-# does that (skills/appa-setup).
+# Installing the binary is not this script's job: `appa init claude-code`
+# installs it before registering this plugin.
 #
 # Concurrent starts need no lock. The runtime binds the loopback port, so
 # the first process to bind serves and every later one exits at once with
@@ -113,7 +113,7 @@ expected_binary=${APPA_INSTALL_DIR:-"$HOME/.local/bin"}/appa-runtime
 binary=$expected_binary
 if [ ! -x "$binary" ]; then
   binary=$(command -v appa-runtime 2>/dev/null) || {
-    printf 'appa protection: appa-runtime is not installed; expected at %s. Run in a plain terminal: claude /appa-setup\n' \
+    printf 'appa protection: appa-runtime is not installed; expected at %s. Run in a plain terminal: appa init claude-code\n' \
       "$expected_binary" >&2
     exit 1
   }

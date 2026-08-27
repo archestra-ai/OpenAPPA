@@ -4,14 +4,11 @@ use std::process::Command;
 fn describe_succeeds_for_a_missing_config_without_creating_files() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let config = directory.path().join("missing.toml");
-    let db = directory.path().join("must-not-exist.db");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_appa-runtime"))
+    let output = Command::new(env!("CARGO_BIN_EXE_appa"))
+        .arg("describe")
         .args(["--config"])
         .arg(&config)
-        .args(["--db"])
-        .arg(&db)
-        .arg("describe")
         .output()
         .expect("describe runs");
 
@@ -20,7 +17,6 @@ fn describe_succeeds_for_a_missing_config_without_creating_files() {
     assert!(description.starts_with("OpenAPPA world"));
     assert!(description.contains(&format!("Config: {} (missing)", config.display())));
     assert!(!config.exists(), "describe must not create a default config");
-    assert!(!db.exists(), "describe must not open the runtime database");
 }
 
 #[test]
@@ -30,10 +26,10 @@ fn describe_reports_malformed_config_without_echoing_it() {
     let secret = "do-not-print-this-value";
     std::fs::write(&config, format!("token = \\\"{secret}")).expect("malformed config");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_appa-runtime"))
+    let output = Command::new(env!("CARGO_BIN_EXE_appa"))
+        .arg("describe")
         .args(["--config"])
         .arg(&config)
-        .arg("describe")
         .output()
         .expect("describe runs");
 
@@ -48,7 +44,7 @@ fn bare_describe_uses_the_installed_config_directory() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let expected = directory.path().join("appa.toml");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_appa-runtime"))
+    let output = Command::new(env!("CARGO_BIN_EXE_appa"))
         .env("APPA_CONFIG_DIR", directory.path())
         .arg("describe")
         .output()
@@ -62,7 +58,7 @@ fn bare_describe_uses_the_installed_config_directory() {
 
 #[test]
 fn describe_has_one_text_interface_and_no_json_mode() {
-    let output = Command::new(env!("CARGO_BIN_EXE_appa-runtime"))
+    let output = Command::new(env!("CARGO_BIN_EXE_appa"))
         .args(["describe", "--json"])
         .output()
         .expect("describe runs");

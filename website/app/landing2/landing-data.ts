@@ -405,7 +405,7 @@ session = Session(policy="appa.toml")
     explain:
       "Coding agents expose a hook that fires before a tool runs. APPA answers it with a ruling: allow, or refuse with the requirement that failed and the sinks that would accept the value. Nothing about the agent changes.",
     code: `
-$ appa setup claude-code
+$ appa init claude-code
 ~✓ wrote .claude/settings.json  →  PreToolUse: appa hook
 ~
 ~# .claude/settings.json
