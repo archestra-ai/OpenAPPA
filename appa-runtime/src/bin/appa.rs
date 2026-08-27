@@ -27,6 +27,17 @@ enum Command {
         #[command(subcommand)]
         harness: Harness,
     },
+
+    /// Post one harness hook event to the running runtime.
+    #[command(hide = true)]
+    Hook {
+        #[arg(long, env = "APPA_RUNTIME_URL", default_value = "http://127.0.0.1:8787")]
+        url: String,
+
+        /// Report a finished turn, whose answer never blocks the harness.
+        #[arg(long)]
+        turn_end: bool,
+    },
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -59,6 +70,7 @@ fn main() -> ExitCode {
     }
 
     match Args::parse().command {
+        Command::Hook { url, turn_end } => appa_runtime::hook_client::run(&url, turn_end),
         Command::Describe { config, adapter } => {
             let config = config.unwrap_or_else(appa_runtime::init::installed_config_path);
             print!("{}", appa_runtime::describe::render(&config, adapter.as_str()));

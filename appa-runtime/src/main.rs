@@ -138,7 +138,6 @@ fn log_level(verbose: u8) -> &'static str {
 /// replacement so the plugin's starter replaces the process too.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ExecutableAtStart {
-    path: PathBuf,
     len: u64,
     modified: SystemTime,
     digest: String,
@@ -150,7 +149,6 @@ impl ExecutableAtStart {
         let modified = metadata.modified().ok()?;
         let digest = binary_digest(&path).ok()?;
         Some(Self {
-            path,
             len: metadata.len(),
             modified,
             digest,
@@ -165,14 +163,23 @@ impl ExecutableAtStart {
     /// started from. A missing or unreadable path is stale too: Unix can keep an unlinked old
     /// executable running after an install removes it.
     fn is_replaced(&self) -> bool {
-        let Ok(metadata) = fs::metadata(&self.path) else {
-            return true;
-        };
-        let Ok(modified) = metadata.modified() else {
-            return true;
-        };
-        metadata.len() != self.len || modified != self.modified
+        self.differs_from(current_executable_metadata())
     }
+
+    fn differs_from(&self, current: io::Result<(u64, SystemTime)>) -> bool {
+        current
+            .map(|(len, modified)| len != self.len || modified != self.modified)
+            .unwrap_or(true)
+    }
+}
+
+/// Read only the path the operating system says this process started from. Keeping this
+/// filesystem lookup outside Axum's extracted state makes the trust boundary explicit: an HTTP
+/// request supplies neither the executable path nor any part of it.
+fn current_executable_metadata() -> io::Result<(u64, SystemTime)> {
+    let path = std::env::current_exe()?;
+    let metadata = fs::metadata(path)?;
+    Ok((metadata.len(), metadata.modified()?))
 }
 
 fn binary_digest(path: &Path) -> io::Result<String> {
@@ -202,7 +209,8 @@ async fn hook(
 /// `ok` while this process serves the executable installed on disk; `stale <pid>` once an
 /// install replaced that file, naming the process to stop before starting the new build.
 async fn health(State(state): State<AppState>) -> String {
-    health_answer(state.executable.as_ref(), std::process::id())
+    let stale = state.executable.as_ref().is_some_and(ExecutableAtStart::is_replaced);
+    health_answer(stale, std::process::id())
 }
 
 async fn binary_fingerprint(State(state): State<AppState>) -> Result<String, axum::http::StatusCode> {
@@ -213,11 +221,8 @@ async fn binary_fingerprint(State(state): State<AppState>) -> Result<String, axu
         .ok_or(axum::http::StatusCode::NOT_FOUND)
 }
 
-fn health_answer(executable: Option<&ExecutableAtStart>, pid: u32) -> String {
-    match executable {
-        Some(executable) if executable.is_replaced() => format!("stale {pid}"),
-        _ => "ok".to_owned(),
-    }
+fn health_answer(stale: bool, pid: u32) -> String {
+    if stale { format!("stale {pid}") } else { "ok".to_owned() }
 }
 
 async fn reload(State(state): State<AppState>) -> Result<axum::Json<Reloaded>, (axum::http::StatusCode, String)> {
@@ -410,20 +415,25 @@ mod tests {
         fs::write(&path, "build one").expect("the executable is written");
         let started = ExecutableAtStart::snapshot(path.clone()).expect("the executable is readable");
 
-        assert_eq!(health_answer(Some(&started), 41), "ok");
-        assert_eq!(health_answer(None, 41), "ok");
+        let replaced = |path: &Path| {
+            started.differs_from(fs::metadata(path).and_then(|metadata| Ok((metadata.len(), metadata.modified()?))))
+        };
+
+        assert!(!replaced(&path));
+        assert_eq!(health_answer(false, 41), "ok");
 
         let later = started.modified + std::time::Duration::from_secs(2);
         fs::File::open(&path)
             .and_then(|file| file.set_modified(later))
             .expect("the executable's timestamp is moved");
-        assert_eq!(health_answer(Some(&started), 41), "stale 41");
+        assert!(replaced(&path));
+        assert_eq!(health_answer(true, 41), "stale 41");
 
         fs::write(&path, "build two, longer").expect("the executable is replaced");
-        assert_eq!(health_answer(Some(&started), 41), "stale 41");
+        assert!(replaced(&path));
 
         fs::remove_file(&path).expect("the executable is removed");
-        assert_eq!(health_answer(Some(&started), 41), "stale 41");
+        assert!(replaced(&path));
     }
 
     #[test]

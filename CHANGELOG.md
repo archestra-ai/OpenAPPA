@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.5.0...v0.5.1) (2026-08-27)
+
+
+### Performance Improvements
+
+* post hooks from the runtime binary, pin the replay crates, move to toml 1 ([#105](https://github.com/archestra-ai/OpenAPPA/issues/105)) ([5004ec8](https://github.com/archestra-ai/OpenAPPA/commit/5004ec8b5cd148cd16815026c2eb66ce70b891cc))
+
 ## [0.5.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.4.0...v0.5.0) (2026-08-27)
 
 

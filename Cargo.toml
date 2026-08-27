@@ -20,14 +20,15 @@ exclude = ["bench/corp-systems"]
 [workspace.package]
 edition = "2024"
 publish = false
-version = "0.5.0"
+version = "0.5.1"
 
 [workspace.lints.rust]
 dead_code = "deny"
 
 # Sized for a binary people install and ship, not for a numeric hot loop. Most of
-# this binary is monomorphized generic code, so `s` cuts build time and size
-# together; the gating path is bounded by inference and tool latency, not codegen.
+# this binary is monomorphized generic code waiting on a socket, so `s` cuts build
+# time and size together at no cost to it. The exception is the two crates pinned
+# below, which are the one stretch of the gating path that spends real CPU.
 # `panic` stays at the default unwind: a module crate built in this workspace
 # needs it to contain a panic at its `extern "C"` boundary (see appa-builtin).
 [profile.release]
@@ -36,23 +37,34 @@ lto = "thin"
 codegen-units = 16
 strip = "symbols"
 
+# The engine replays the whole trajectory before every decision, and sha2 digests
+# every value it admits, so these two run once per fact per hook while the rest of
+# the binary runs once per process. `3` here is free: it leaves build time where it
+# was and the binary very slightly smaller, and cuts the replay by about a fifth.
+[profile.release.package.appa-engine]
+opt-level = 3
+
+[profile.release.package.sha2]
+opt-level = 3
+
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_json_canonicalizer = "0.3"
 sha2 = "0.10"
 thiserror = "2"
-toml = "0.8"
+toml = "1"
 tracing = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time", "macros", "sync", "process"] }
 # 0.13 is the version rig-core speaks: one reqwest in the graph rather than two
 # whole HTTP stacks. `rustls-no-provider` leaves the crypto provider to `rustls`
 # below and keeps the platform verifier, so roots still come from the OS store.
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
-# The one crypto provider behind every rustls client here. Naming exactly one
-# provider feature is what lets rustls install it as the process default, so no
-# caller installs it by hand. aws-lc-rs is deliberately absent: it is a second C
-# and assembly toolchain on the install path for no capability ring lacks.
+# The one crypto provider behind every rustls client here. reqwest refuses to
+# build a client until a provider is installed, so an entry point installs this one
+# process-wide (appa-runtime/src/tls.rs) rather than each client naming it. aws-lc-rs
+# is deliberately absent: it is a second C and assembly toolchain on the install
+# path for no capability ring lacks.
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 axum = { version = "0.8", default-features = false, features = ["json", "tokio", "http1"] }
 tokio-util = { version = "0.7", default-features = false }

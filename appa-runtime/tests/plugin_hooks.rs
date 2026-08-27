@@ -12,8 +12,16 @@ use axum::routing::post;
 const TURN_ENDS: [&str; 3] = ["Stop", "StopFailure", "SubagentStop"];
 
 fn turn_end_command() -> &'static str {
-    "[ \"${APPA_GATE:-}\" = 1 ] || exit 0; curl -s -m 30 -X POST \"${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/hook\" \
-     -H 'content-type: application/json' --data-binary @- -o /dev/null; exit 0"
+    "[ \"${APPA_GATE:-}\" = 1 ] || exit 0; b=${APPA_INSTALL_DIR:-$HOME/.local/bin}/appa; \
+     [ -x \"$b\" ] || b=appa; \"$b\" hook --turn-end || exit 0"
+}
+
+/// Where the shipped commands look for the binary first. Without it they would
+/// find whatever appa this machine has installed, not the one built here.
+fn install_dir() -> &'static std::path::Path {
+    std::path::Path::new(env!("CARGO_BIN_EXE_appa"))
+        .parent()
+        .expect("the built binary sits in a directory")
 }
 
 fn shipped(file: &str) -> serde_json::Value {
@@ -131,8 +139,8 @@ fn shipped_command() -> String {
         Some(
             command
                 .replace(
-                    "; curl",
-                    "; sh \"${CLAUDE_PLUGIN_ROOT}/hooks/ensure-runtime.sh\" </dev/null && curl",
+                    "; \"$b\" hook",
+                    "; sh \"${CLAUDE_PLUGIN_ROOT}/hooks/ensure-runtime.sh\" </dev/null && \"$b\" hook",
                 )
                 .as_str()
         ),
@@ -150,6 +158,7 @@ fn run_gated(command: &str, url: &str, gated: bool) -> (i32, String) {
         .arg("-c")
         .arg(command)
         .env("APPA_RUNTIME_URL", url)
+        .env("APPA_INSTALL_DIR", install_dir())
         .env("APPA_GATE", if gated { "1" } else { "0" })
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -231,6 +240,22 @@ async fn an_ungated_session_posts_nothing_and_never_blocks() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unreachable_runtime_never_blocks_a_turn_end() {
     let url = refused_url().await;
+    let (code, stdout) = tokio::task::spawn_blocking(move || run_hook(turn_end_command(), &url))
+        .await
+        .expect("the blocking task joins");
+    assert_eq!(code, 0, "a turn end must never block the harness");
+    assert_eq!(stdout, "", "a turn end prints no decision");
+}
+
+/// The same guarantee where the runtime answers and refuses: the answer decides
+/// nothing, so it never reaches the harness and never becomes a blocking outcome.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_turn_end_still_prints_nothing_and_exits_0() {
+    let url = serve(Router::new().route(
+        "/hook",
+        post(|| async { (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom") }),
+    ))
+    .await;
     let (code, stdout) = tokio::task::spawn_blocking(move || run_hook(turn_end_command(), &url))
         .await
         .expect("the blocking task joins");

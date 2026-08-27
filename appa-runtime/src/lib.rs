@@ -3,6 +3,7 @@
 pub mod api;
 pub mod config;
 pub mod describe;
+pub mod hook_client;
 pub mod hooks;
 pub mod init;
 pub mod mcp;
