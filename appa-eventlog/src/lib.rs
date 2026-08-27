@@ -168,7 +168,6 @@ impl LogStore {
                 return Err(OpenError::Damaged { path, detail: check });
             }
         }
-        connection.pragma_update(None, "foreign_keys", "ON")?;
 
         let mut connection = connection;
         {
