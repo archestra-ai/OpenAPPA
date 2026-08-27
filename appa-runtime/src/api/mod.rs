@@ -513,20 +513,10 @@ impl Runtime {
     /// carry the refusal: the session-start hook, and the start-after-lazy-open
     /// race. Every other path refuses inside the event it is already deciding.
     pub(crate) fn live(&self, root: &TrajectoryId, trajectory: &TrajectoryId) -> Result<(), EventError> {
-        let log = match self.inner.log(root) {
-            Ok(log) => log,
-            Err(EventError::UnknownTrajectory) => return Err(EventError::UnknownTrajectory),
-            Err(error) => return Err(EventError::Storage(error.to_string())),
-        };
+        let log = self.inner.log(root)?;
         let deployment = self.inner.deployment();
-        let policy = self
-            .inner
-            .resolve_policy(&deployment, &log)
-            .map_err(|error| EventError::Storage(error.to_string()))?;
-        let view = policy
-            .engine()
-            .rebuild_view(&log)
-            .map_err(|refusal| EventError::Storage(refusal.to_string()))?;
+        let policy = self.inner.resolve_policy(&deployment, &log)?;
+        let view = policy.engine().rebuild_view(&log).map_err(EventError::from)?;
         match policy.engine().liveness(&view, trajectory) {
             Liveness::Unopened => Err(EventError::UnknownTrajectory),
             Liveness::Ended => Err(EventError::TrajectoryEnded),
@@ -997,8 +987,13 @@ fn compile_stored_policy(bytes: &[u8]) -> Result<appa_policy::Config, String> {
 #[cfg(test)]
 pub(crate) mod testing {
     fn engine_dispatch(label: &str) -> appa_engine::value::DispatchId {
-        let policy = appa_policy::Config::from_toml_str("version = 1\n[[tool]]\nname = \"Bash\"\n")
-            .expect("the fixture policy compiles");
+        let policy = appa_policy::Config::from_toml_str(
+            "version = 1
+[[tool]]
+name = \"Bash\"
+",
+        )
+        .expect("the fixture policy compiles");
         let engine = policy.engine().clone();
         let call = engine
             .resolve_call(appa_engine::value::ToolName::new("Bash"), br#"{"command":"ls"}"#)
@@ -1410,6 +1405,33 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             runtime.take_vouched(&quoted),
             None,
             "the turn ended without spending it, so nothing later can"
+        );
+    }
+
+    /// The session-start check refuses on any fault, so the variant it refuses with is
+    /// what an operator reads. A missing policy file is not a storage failure, and
+    /// flattening it to one named the wrong incident.
+    #[tokio::test]
+    async fn a_liveness_check_refuses_with_the_fault_it_met() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = std::sync::Arc::new(
+            Runtime::open(versioned_policy("first"), dir.path().join("appa.db"), None).expect("the deployment opens"),
+        );
+        let root = TrajectoryId("liveness-fault".to_string());
+        assert_eq!(
+            crate::hooks::handle(
+                &runtime,
+                appa_runtime_api::HookEvent::SessionStart { root: root.clone() }
+            )
+            .await,
+            appa_runtime_api::HookDecision::Ack
+        );
+        assert!(runtime.live(&root, &root).is_ok());
+
+        runtime.inner.store.forget_policy_files();
+        assert!(
+            matches!(runtime.live(&root, &root), Err(EventError::PolicyUnavailable(_))),
+            "the root's policy file is gone, which is not a storage failure"
         );
     }
 }
