@@ -149,7 +149,7 @@ impl LogStore {
     /// Open the log. A fresh database gets the schema and its version stamp; an existing one is
     /// checked for damage and for a version this build understands, and refused otherwise.
     pub fn open(backend: Backend) -> Result<LogStore, OpenError> {
-        let (connection, path) = match &backend {
+        let (mut connection, path) = match &backend {
             Backend::Sqlite { path } => (Connection::open(path)?, path.display().to_string()),
             Backend::Memory => (Connection::open_in_memory()?, ":memory:".to_string()),
         };
@@ -169,7 +169,6 @@ impl LogStore {
             }
         }
 
-        let mut connection = connection;
         {
             let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let version: i64 = transaction.query_row("PRAGMA user_version", [], |row| row.get(0))?;
