@@ -314,18 +314,6 @@ impl PartialLabel {
         self.bound = self.bound.combine(by);
     }
 
-    pub fn combine(&self, other: &PartialLabel) -> PartialLabel {
-        PartialLabel {
-            bound: self.bound.combine(&other.bound),
-            unresolved_trust: self.unresolved_trust.union(&other.unresolved_trust).copied().collect(),
-            unresolved_audience: self
-                .unresolved_audience
-                .union(&other.unresolved_audience)
-                .copied()
-                .collect(),
-        }
-    }
-
     /// The established bound: every known restriction, readable even while sources
     /// stay unresolved. The narrowing check and sanitizer residual comparisons read
     /// exactly this.
@@ -424,34 +412,38 @@ mod tests {
 
     proptest! {
         #[test]
-        fn combine_is_commutative(a in partial_strategy(), b in partial_strategy()) {
+        fn combine_is_commutative(a in established_strategy(), b in established_strategy()) {
             prop_assert_eq!(a.combine(&b), b.combine(&a));
         }
 
         #[test]
-        fn combine_is_associative(a in partial_strategy(), b in partial_strategy(), c in partial_strategy()) {
+        fn combine_is_associative(
+            a in established_strategy(),
+            b in established_strategy(),
+            c in established_strategy(),
+        ) {
             prop_assert_eq!(a.combine(&b).combine(&c), a.combine(&b.combine(&c)));
         }
 
         #[test]
-        fn combine_is_idempotent(a in partial_strategy()) {
+        fn combine_is_idempotent(a in established_strategy()) {
             prop_assert_eq!(a.combine(&a), a.clone());
         }
 
         #[test]
-        fn established_top_is_identity(a in partial_strategy()) {
-            let identity = PartialLabel::established(EstablishedLabel::top());
+        fn established_top_is_identity(a in established_strategy()) {
+            let identity = EstablishedLabel::top();
             prop_assert_eq!(identity.combine(&a), a.clone());
             prop_assert_eq!(a.combine(&identity), a.clone());
         }
 
         #[test]
-        fn combine_never_widens(a in partial_strategy(), b in partial_strategy()) {
+        fn combine_never_widens(a in established_strategy(), b in established_strategy()) {
             let folded = a.combine(&b);
-            prop_assert!(folded.bound().trust <= a.bound().trust);
-            prop_assert!(folded.bound().trust <= b.bound().trust);
-            prop_assert!(folded.bound().audience.within(&a.bound().audience));
-            prop_assert!(folded.bound().audience.within(&b.bound().audience));
+            prop_assert!(folded.trust <= a.trust);
+            prop_assert!(folded.trust <= b.trust);
+            prop_assert!(folded.audience.within(&a.audience));
+            prop_assert!(folded.audience.within(&b.audience));
         }
 
         #[test]
@@ -487,7 +479,20 @@ mod tests {
         fn fully_established_start_decides_every_test(start in established_strategy()) {
             let partial = PartialLabel::established(start.clone());
             prop_assert!(partial.is_fully_established());
+            // The rank above the start is out of reach; `Adequacy::Unresolved` is what a
+            // consumed dimension would answer, so both arms below prove the start decides.
             prop_assert_eq!(partial.meets_floor(start.trust), Adequacy::Holds);
+            prop_assert_eq!(partial.meets_floor(Trust::new(start.trust.rank() + 1)), Adequacy::Fails);
+            // A cap naming only a reader the alphabet never generates admits exactly the
+            // empty restricted audience, so the expectation is decided by the start alone.
+            let outside = Audience::restricted([ReaderId::new("z".to_string())]);
+            let admitted = match &start.audience {
+                Audience::Restricted(readers) if readers.is_empty() => Adequacy::Holds,
+                Audience::Public | Audience::Restricted(_) => Adequacy::Fails,
+            };
+            prop_assert_eq!(partial.within_cap(&outside), admitted);
+            // Every established audience is within a Public cap, the empty restricted one
+            // and Public itself included; only a generated bound reaches those two.
             prop_assert_eq!(partial.within_cap(&Audience::Public), Adequacy::Holds);
         }
     }

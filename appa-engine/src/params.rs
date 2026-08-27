@@ -21,7 +21,6 @@ pub const MAX_ARGUMENT_BYTES: usize = 256 * 1024;
 const MAX_ARGUMENT_DEPTH: usize = 32;
 const MAX_ARGUMENT_NODES: usize = 4096;
 const MAX_ARRAY_ELEMENTS: usize = 4096;
-const MAX_STRING_BYTES: usize = 256 * 1024;
 const MAX_NUMBER_TOKEN_BYTES: usize = 64;
 const MAX_SAFE_INTEGER: i64 = (1 << 53) - 1;
 
@@ -98,8 +97,6 @@ pub enum ArgumentError {
     TooManyNodes,
     #[error("array exceeds {MAX_ARRAY_ELEMENTS} elements")]
     TooManyArrayElements,
-    #[error("string exceeds {MAX_STRING_BYTES} decoded UTF-8 bytes")]
-    StringTooLong,
     #[error("number token exceeds {MAX_NUMBER_TOKEN_BYTES} source bytes")]
     NumberTokenTooLong,
     #[error("integer is outside the exact safe range")]
@@ -1089,9 +1086,6 @@ impl Scanner<'_> {
                 }
                 c if (c as u32) < 0x20 => return Err(self.syntax("unescaped control character")),
                 c => decoded.push(c),
-            }
-            if decoded.len() > MAX_STRING_BYTES {
-                return Err(ArgumentError::StringTooLong);
             }
         }
         Ok(decoded)

@@ -3181,18 +3181,26 @@ impl Engine {
         use crate::projection::OfferEnd;
         if let crate::basis::SubjectKey::ConfinedResult(dispatch) = &recorded.subject {
             return match (end, &execution.outcome, recorded.plan.hop()) {
-                (OfferEnd::Accepted, OfferOutcome::Derived(Evidence::Sanitizer { .. }), Some(_))
-                | (OfferEnd::Accepted, OfferOutcome::Approved(_), None) => Ok(EngineDecision {
-                    append: None,
-                    follow_up: FollowUp::Offer(self.confined_repeat(views, dispatch)),
-                }),
+                (OfferEnd::Accepted, OfferOutcome::Derived(Evidence::Sanitizer { .. }), Some(_)) => {
+                    Ok(EngineDecision {
+                        append: None,
+                        follow_up: FollowUp::Offer(self.confined_repeat(views, dispatch)),
+                    })
+                }
+                (OfferEnd::Accepted, OfferOutcome::Approved(evidence), None) if evidence.is_empty() => {
+                    Ok(EngineDecision {
+                        append: None,
+                        follow_up: FollowUp::Offer(self.confined_repeat(views, dispatch)),
+                    })
+                }
                 (OfferEnd::Invalidated, _, _) => Ok(EngineDecision {
                     append: None,
                     follow_up: FollowUp::Offer(OfferFollowUp::Invalidated),
                 }),
                 (OfferEnd::Accepted, OfferOutcome::Derived(_), Some(_))
                 | (_, OfferOutcome::Derived(_), None)
-                | (_, OfferOutcome::Approved(_), Some(_)) => Err(TransitionError::PlanOutcomeMismatch),
+                | (_, OfferOutcome::Approved(_), Some(_))
+                | (OfferEnd::Accepted, OfferOutcome::Approved(_), None) => Err(TransitionError::PlanOutcomeMismatch),
                 _ => Err(TransitionError::TerminalOffer),
             };
         }
@@ -3214,18 +3222,20 @@ impl Engine {
                         follow_up: FollowUp::Offer(self.return_repeat(views, id)),
                     })
                 }
-                (OfferEnd::Accepted, OfferOutcome::Approved(_), None) => Ok(EngineDecision {
-                    append: None,
-                    follow_up: FollowUp::Offer(self.return_repeat(views, id)),
-                }),
+                (OfferEnd::Accepted, OfferOutcome::Approved(evidence), None) if evidence.is_empty() => {
+                    Ok(EngineDecision {
+                        append: None,
+                        follow_up: FollowUp::Offer(self.return_repeat(views, id)),
+                    })
+                }
                 (OfferEnd::Invalidated, _, _) => Ok(EngineDecision {
                     append: None,
                     follow_up: FollowUp::Offer(OfferFollowUp::Invalidated),
                 }),
                 (OfferEnd::Accepted, OfferOutcome::Derived(_), Some(_)) => Err(TransitionError::PlanOutcomeMismatch),
-                (_, OfferOutcome::Derived(_), None) | (_, OfferOutcome::Approved(_), Some(_)) => {
-                    Err(TransitionError::PlanOutcomeMismatch)
-                }
+                (_, OfferOutcome::Derived(_), None)
+                | (_, OfferOutcome::Approved(_), Some(_))
+                | (OfferEnd::Accepted, OfferOutcome::Approved(_), None) => Err(TransitionError::PlanOutcomeMismatch),
                 _ => Err(TransitionError::TerminalOffer),
             };
         }
@@ -3584,14 +3594,6 @@ impl Engine {
         body: ValueBody,
     ) -> Result<branch::RawCrossing, BranchError> {
         branch::submit_child_return(&self.registry, parent, child, &body, &Expansions::default())
-    }
-
-    /// Record a child's void return: the child-attributed terminal that ends the branch and
-    /// crosses no value — no merge, no label contribution. A branch ends at most once.
-    /// See [`crate::branch`].
-    #[cfg(test)]
-    pub(crate) fn submit_void_return(&self, parent: &Views, child: &TrajectoryId) -> Result<Vec<Fact>, BranchError> {
-        branch::submit_void_return(parent, child)
     }
 
     fn dispatch_contract(&self, views: &Views, dispatch: &DispatchId) -> Result<&ToolContract, TransitionError> {
@@ -5972,6 +5974,17 @@ mod tests {
             )
             .map(|_| ()),
             Err(TransitionError::PlanOutcomeMismatch)
+        );
+        assert_eq!(
+            execute_offer(
+                &e,
+                &settled,
+                accept,
+                OfferOutcome::Approved(vec![stray_evidence(accept)])
+            )
+            .map(|_| ()),
+            Err(TransitionError::PlanOutcomeMismatch),
+            "an acceptance carrying evidence is refused after the offer ends, as it is before"
         );
     }
 
@@ -9144,8 +9157,7 @@ mod tests {
         let e = engine_at(vec![crm_tool()], known(TRUSTED, internal));
         let mut log = vec![opened(&e)];
         log.extend(forked_child(&e, &log.clone(), &child));
-        let ended = e
-            .submit_void_return(&Projection::build(&log, log.len() as u64).view(&traj()), &child)
+        let ended = branch::submit_void_return(&Projection::build(&log, log.len() as u64).view(&traj()), &child)
             .expect("the child ends with no value");
         log.extend(ended);
         let view = e.view(&traj(), log.clone(), log.len() as u64).unwrap();
@@ -14265,6 +14277,20 @@ mod tests {
             .expect("the fork opened")
     }
 
+    /// Authority evidence an `Approved` outcome may not carry: a plan that assigns no
+    /// authority is accepted only with an empty vector, so any entry is a mismatch.
+    fn stray_evidence(offer: crate::value::OfferId) -> crate::execute::AuthorityEvidence {
+        crate::execute::AuthorityEvidence {
+            offer,
+            authority: crate::names::AuthorityName::new("officer"),
+            covers: Vec::new(),
+            reviewed: crate::execute::AuthorityReview {
+                tool: ToolName::new("anything"),
+                trajectory_label: PartialLabel::established(established(Trust::new(0), Audience::Public)),
+            },
+        }
+    }
+
     fn return_offer(log: &[Fact], hop: bool) -> crate::value::OfferId {
         log.iter()
             .rev()
@@ -14438,6 +14464,17 @@ mod tests {
             offer_answer(&repeat),
             OfferFollowUp::Admitted { value } if value == &body
         ));
+        assert_eq!(
+            execute_offer(
+                &e,
+                &merged,
+                accept,
+                OfferOutcome::Approved(vec![stray_evidence(accept)])
+            )
+            .map(|_| ()),
+            Err(TransitionError::PlanOutcomeMismatch),
+            "an acceptance carrying evidence is refused after the offer ends, as it is before"
+        );
         let again = e
             .handle(
                 &viewing(&e, &merged),
