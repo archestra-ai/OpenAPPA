@@ -1691,8 +1691,8 @@ impl RuntimeEngine {
         let mut pins = Vec::new();
         let mut requests = Vec::new();
         for uses in &contract.uses {
-            let args = contract.resolver_args(uses, resolved.arguments());
-            let asked = contract.resolver_args_digest(uses, resolved.arguments());
+            let args = contract.resolver_args(uses, resolved.tool(), resolved.arguments());
+            let asked = contract.resolver_args_digest(uses, resolved.tool(), resolved.arguments());
             // A classification pinned to this call in an act the trajectory still has
             // prepared — an open offer, an unspent approval — stands: the re-proposal spells
             // the call the act was prepared for, and a resolver that may answer differently

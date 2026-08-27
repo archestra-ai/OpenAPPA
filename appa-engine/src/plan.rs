@@ -1506,7 +1506,7 @@ mod tests {
             let arguments = json!({ "to": "internal" });
             let pin = PinnedToolResolution::from_answer(
                 uses.clone(),
-                wire.resolver_args_digest(&uses, &arguments),
+                wire.resolver_args_digest(&uses, &wire.name, &arguments),
                 None,
                 None,
                 None,

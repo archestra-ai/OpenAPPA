@@ -657,7 +657,7 @@ mod tests {
         let resolved = base.clone().with_tool_resolutions(vec![
             PinnedToolResolution::from_answer(
                 uses.clone(),
-                contract.resolver_args_digest(&uses, base.canonical_arguments().value()),
+                contract.resolver_args_digest(&uses, base.tool(), base.canonical_arguments().value()),
                 Some(crate::label::Trust::new(0)),
                 None,
                 None,

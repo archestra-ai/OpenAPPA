@@ -507,7 +507,8 @@ pub(crate) fn validate_tool_resolutions(
         // one call's answer from standing in for an unrelated call's.
         if !declared.contains(uses)
             || seen.contains(&uses)
-            || pinned.args() != contract.resolver_args_digest(uses, answered_for.canonical_arguments().value())
+            || pinned.args()
+                != contract.resolver_args_digest(uses, answered_for.tool(), answered_for.canonical_arguments().value())
         {
             return Err(ToolResolutionRefusal::Foreign(uses.resolver.as_str().to_string()));
         }
@@ -807,7 +808,7 @@ mod tests {
         .expect("a policy mark does not require an authority");
         let contract = registry.tool(&ToolName::new("lookup")).expect("the tool is registered");
         let arguments = serde_json::json!({});
-        let args = contract.resolver_args_digest(&binding, &arguments);
+        let args = contract.resolver_args_digest(&binding, &ToolName::new("lookup"), &arguments);
         let call = |trust, required_trust, attention: &str| {
             ResolvedCall::new(
                 ToolName::new("lookup"),
@@ -901,7 +902,7 @@ mod tests {
         let answer_for = |file: &str| {
             PinnedToolResolution::from_answer(
                 uses.clone(),
-                contract.resolver_args_digest(&uses, &serde_json::json!({ "file": file })),
+                contract.resolver_args_digest(&uses, &ToolName::new("read"), &serde_json::json!({ "file": file })),
                 None,
                 Some(Audience::restricted([ReaderId::new("hr-lead")])),
                 None,

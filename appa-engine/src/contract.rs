@@ -651,11 +651,14 @@ impl ToolContract {
             .expect("load validation refuses a `uses` entry that reads a description the tool does not declare")
     }
 
-    /// The complete call a resolver reads: the tool name, its description when the policy declares
-    /// one, and the arguments. A tool without a description sends no `description` key.
-    fn complete_call(&self, arguments: &serde_json::Value) -> serde_json::Value {
+    /// The complete call a resolver reads: the proposed tool name, this contract's description
+    /// when the policy declares one, and the arguments. A tool without a description sends no
+    /// `description` key. The name is the one the actor proposed, not the contract's own: a
+    /// contract selected by pattern answers for many names, and a classifier that saw the pattern
+    /// would be judging a call it cannot identify.
+    fn complete_call(&self, called: &ToolName, arguments: &serde_json::Value) -> serde_json::Value {
         let mut call = serde_json::Map::new();
-        call.insert("name".into(), serde_json::Value::String(self.name.as_str().to_string()));
+        call.insert("name".into(), serde_json::Value::String(called.as_str().to_string()));
         if let Some(description) = &self.description {
             call.insert("description".into(), serde_json::Value::String(description.clone()));
         }
@@ -663,10 +666,15 @@ impl ToolContract {
         serde_json::Value::Object(call)
     }
 
-    fn source_value(&self, source: &ToolCallSource, arguments: &serde_json::Value) -> serde_json::Value {
+    fn source_value(
+        &self,
+        called: &ToolName,
+        source: &ToolCallSource,
+        arguments: &serde_json::Value,
+    ) -> serde_json::Value {
         match source {
-            ToolCallSource::Call => self.complete_call(arguments),
-            ToolCallSource::Name => serde_json::Value::String(self.name.as_str().to_string()),
+            ToolCallSource::Call => self.complete_call(called, arguments),
+            ToolCallSource::Name => serde_json::Value::String(called.as_str().to_string()),
             ToolCallSource::Description => serde_json::Value::String(self.described().to_string()),
             ToolCallSource::Arguments => arguments.clone(),
             ToolCallSource::Argument(argument) => arguments
@@ -680,26 +688,41 @@ impl ToolContract {
     /// otherwise one entry per declared input. The single definition — the runtime builds the
     /// request through it, and the check rebuilds the pinned value through it — so the tool name a
     /// no-input resolver sees is part of what its answer is pinned to.
-    pub fn resolver_args(&self, uses: &ToolResolverUse, arguments: &serde_json::Value) -> serde_json::Value {
+    pub fn resolver_args(
+        &self,
+        uses: &ToolResolverUse,
+        called: &ToolName,
+        arguments: &serde_json::Value,
+    ) -> serde_json::Value {
         match uses.inputs.is_empty() {
-            true => self.complete_call(arguments),
+            true => self.complete_call(called, arguments),
             false => serde_json::Value::Object(
                 uses.inputs
                     .iter()
-                    .map(|(input, source)| (input.clone(), self.source_value(source, arguments)))
+                    .map(|(input, source)| (input.clone(), self.source_value(called, source, arguments)))
                     .collect(),
             ),
         }
     }
 
     /// [`Self::resolver_args`] in its canonical spelling — the exact bytes a consult carries.
-    pub fn canonical_resolver_args(&self, uses: &ToolResolverUse, arguments: &serde_json::Value) -> Vec<u8> {
-        crate::params::canonical_bytes(&self.resolver_args(uses, arguments))
+    pub fn canonical_resolver_args(
+        &self,
+        uses: &ToolResolverUse,
+        called: &ToolName,
+        arguments: &serde_json::Value,
+    ) -> Vec<u8> {
+        crate::params::canonical_bytes(&self.resolver_args(uses, called, arguments))
     }
 
     /// What a pin stores, and what a re-derivation is compared against.
-    pub fn resolver_args_digest(&self, uses: &ToolResolverUse, arguments: &serde_json::Value) -> ResolverArgsDigest {
-        ResolverArgsDigest::of(&self.canonical_resolver_args(uses, arguments))
+    pub fn resolver_args_digest(
+        &self,
+        uses: &ToolResolverUse,
+        called: &ToolName,
+        arguments: &serde_json::Value,
+    ) -> ResolverArgsDigest {
+        ResolverArgsDigest::of(&self.canonical_resolver_args(uses, called, arguments))
     }
 
     /// The unresolved output shape before call-pinned answers are applied. Each dimension is
@@ -930,7 +953,7 @@ mod tests {
         };
         let contract = described(vec![mapped.clone()]);
         assert_eq!(
-            contract.resolver_args(&mapped, &arguments),
+            contract.resolver_args(&mapped, &ToolName::new("Bash"), &arguments),
             serde_json::json!({
                 "whole": complete,
                 "tool": "Bash",
@@ -949,7 +972,7 @@ mod tests {
         };
         assert!(!whole.requires_declared_description());
         assert_eq!(
-            described(vec![whole.clone()]).resolver_args(&whole, &arguments),
+            described(vec![whole.clone()]).resolver_args(&whole, &ToolName::new("Bash"), &arguments),
             complete
         );
 
@@ -963,14 +986,14 @@ mod tests {
             "name": "Bash",
             "arguments": { "command": "git push origin main", "timeout": 60_000 },
         });
-        assert_eq!(undescribed.resolver_args(&whole, &arguments), bare);
+        assert_eq!(undescribed.resolver_args(&whole, &ToolName::new("Bash"), &arguments), bare);
         let call_source = ToolResolverUse {
             inputs: BTreeMap::from([("whole".to_string(), ToolCallSource::Call)]),
             ..whole.clone()
         };
         assert!(!call_source.requires_declared_description());
         assert_eq!(
-            undescribed.resolver_args(&call_source, &arguments),
+            undescribed.resolver_args(&call_source, &ToolName::new("Bash"), &arguments),
             serde_json::json!({ "whole": bare })
         );
         let description_source = ToolResolverUse {
@@ -996,8 +1019,8 @@ mod tests {
             ..described(vec![uses.clone()])
         };
         assert_ne!(
-            read.resolver_args_digest(&uses, &arguments),
-            glob.resolver_args_digest(&uses, &arguments)
+            read.resolver_args_digest(&uses, &read.name, &arguments),
+            glob.resolver_args_digest(&uses, &glob.name, &arguments)
         );
     }
 
@@ -1011,7 +1034,7 @@ mod tests {
         let arguments = serde_json::json!({ "customer_id": "cust-7" });
         let pin = PinnedToolResolution::from_answer(
             uses.clone(),
-            contract.resolver_args_digest(&uses, &arguments),
+            contract.resolver_args_digest(&uses, &contract.name, &arguments),
             None,
             Some(Audience::restricted([ReaderId::new("support")])),
             None,

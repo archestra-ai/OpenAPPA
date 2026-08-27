@@ -6277,7 +6277,7 @@ mod tests {
         };
         crate::contract::PinnedToolResolution::from_answer(
             uses.clone(),
-            contract.resolver_args_digest(&uses, &json!({ "body": body })),
+            contract.resolver_args_digest(&uses, &contract.name, &json!({ "body": body })),
             None,
             None,
             None,
@@ -6300,7 +6300,7 @@ mod tests {
         };
         crate::contract::PinnedToolResolution::from_answer(
             uses.clone(),
-            contract.resolver_args_digest(&uses, &json!({ "who": who })),
+            contract.resolver_args_digest(&uses, &contract.name, &json!({ "who": who })),
             None,
             Some(Audience::restricted([ReaderId::new(reader)])),
             None,
@@ -11646,7 +11646,7 @@ mod tests {
             .expect("the public contract is first");
         crate::contract::PinnedToolResolution::from_answer(
             uses.clone(),
-            contract.resolver_args_digest(&uses, &json!({ "path": path })),
+            contract.resolver_args_digest(&uses, &contract.name, &json!({ "path": path })),
             None,
             None,
             None,
@@ -13563,7 +13563,7 @@ mod tests {
             .registry()
             .tool(&ToolName::new("notify"))
             .expect("notify is registered")
-            .resolver_args_digest(&binding, &arguments);
+            .resolver_args_digest(&binding, &ToolName::new("notify"), &arguments);
         let pinned = |audience: &Audience| {
             raw(&call("notify", arguments.clone()).with_tool_resolutions(vec![
                 crate::contract::PinnedToolResolution::from_answer(
