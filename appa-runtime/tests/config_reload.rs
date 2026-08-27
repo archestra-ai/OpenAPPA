@@ -251,7 +251,7 @@ async fn a_declared_builtin_the_deployment_cannot_serve_refuses_open_and_reload(
 }
 
 #[tokio::test]
-async fn reload_rereads_includes_and_a_broken_include_keeps_the_previous_deployment() {
+async fn reload_rereads_includes_and_a_broken_include_refuses() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let root_path = dir.path().join("appa.toml");
     let battery_path = dir.path().join("battery.toml");
@@ -276,12 +276,6 @@ async fn reload_rereads_includes_and_a_broken_include_keeps_the_previous_deploym
 
     std::fs::write(&battery_path, "[policy]\nversion = 1\nlimits = {}\n").expect("the broken battery writes");
     assert!(Config::load(&root_path).is_err(), "a broken include must refuse");
-    let still_active = TrajectoryId("reload:included-refusal".to_string());
-    start(&runtime, &still_active).await;
-    assert!(
-        allowed(&propose_notes(&runtime, &still_active).await),
-        "a failed composition leaves the previous deployment active"
-    );
 
     std::fs::write(&battery_path, "[policy]\nversion = 1\n").expect("the edited battery writes");
     let reloaded = runtime

@@ -149,18 +149,6 @@ pub enum OpenError {
     Storage(String),
 }
 
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum SessionError {
-    #[error("a trajectory with this id already exists")]
-    AlreadyExists,
-    #[error("no trajectory with this id exists")]
-    Unknown,
-    #[error("the trajectory has ended")]
-    Ended,
-    #[error("storage failure: {0}")]
-    Storage(String),
-}
-
 /// Every lifecycle misuse is one typed error; the adapter renders it
 /// as a deny.
 #[derive(Debug, thiserror::Error)]
@@ -238,17 +226,6 @@ impl EventError {
             | EventError::SpawnNotTaken
             | EventError::SpawnAmbiguous
             | EventError::BindingMismatch => false,
-        }
-    }
-}
-
-impl From<SessionError> for EventError {
-    fn from(error: SessionError) -> EventError {
-        match error {
-            SessionError::AlreadyExists => EventError::TrajectoryExists,
-            SessionError::Unknown => EventError::UnknownTrajectory,
-            SessionError::Ended => EventError::TrajectoryEnded,
-            SessionError::Storage(detail) => EventError::Storage(detail),
         }
     }
 }
@@ -479,7 +456,7 @@ impl Runtime {
     /// One transaction writes the opening
     /// record and stores the policy file it names, so the root is bound
     /// to that file durably or is not opened at all.
-    pub(crate) fn create_session(&self, id: TrajectoryId) -> Result<Session, SessionError> {
+    pub(crate) fn create_session(&self, id: TrajectoryId) -> Result<Session, EventError> {
         let deployment = self.inner.deployment();
         let opening = deployment.root_opening(&id);
         let root = self
@@ -487,8 +464,8 @@ impl Runtime {
             .store
             .create_root(opening, deployment.config.policy_file().bytes())
             .map_err(|error| match error {
-                appa_eventlog::CreateError::AlreadyExists { .. } => SessionError::AlreadyExists,
-                error => SessionError::Storage(error.to_string()),
+                appa_eventlog::CreateError::AlreadyExists { .. } => EventError::TrajectoryExists,
+                error => EventError::Storage(error.to_string()),
             })?;
         let root = TrajectoryId(root.as_str().to_string());
         Ok(Session::attach(Arc::clone(&self.inner), deployment, root.clone(), root))
@@ -496,14 +473,14 @@ impl Runtime {
 
     /// Reopens a persisted trajectory. There is no stored view: the next
     /// event rebuilds the engine's picture from the log.
-    pub(crate) fn session(&self, root: &TrajectoryId, trajectory: &TrajectoryId) -> Result<Session, SessionError> {
+    pub(crate) fn session(&self, root: &TrajectoryId, trajectory: &TrajectoryId) -> Result<Session, EventError> {
         let known = self
             .inner
             .store
             .has_root(&crate::engine::engine_id(root))
-            .map_err(|error| SessionError::Storage(error.to_string()))?;
+            .map_err(|error| EventError::Storage(error.to_string()))?;
         if !known {
-            return Err(SessionError::Unknown);
+            return Err(EventError::UnknownTrajectory);
         }
         Ok(Session::attach(
             Arc::clone(&self.inner),
@@ -517,24 +494,24 @@ impl Runtime {
     /// rebuild, for the two callers that have no following engine event to
     /// carry the refusal: the session-start hook, and the start-after-lazy-open
     /// race. Every other path refuses inside the event it is already deciding.
-    pub(crate) fn live(&self, root: &TrajectoryId, trajectory: &TrajectoryId) -> Result<(), SessionError> {
+    pub(crate) fn live(&self, root: &TrajectoryId, trajectory: &TrajectoryId) -> Result<(), EventError> {
         let log = match self.inner.log(root) {
             Ok(log) => log,
-            Err(EventError::UnknownTrajectory) => return Err(SessionError::Unknown),
-            Err(error) => return Err(SessionError::Storage(error.to_string())),
+            Err(EventError::UnknownTrajectory) => return Err(EventError::UnknownTrajectory),
+            Err(error) => return Err(EventError::Storage(error.to_string())),
         };
         let deployment = self.inner.deployment();
         let policy = self
             .inner
             .resolve_policy(&deployment, &log)
-            .map_err(|error| SessionError::Storage(error.to_string()))?;
+            .map_err(|error| EventError::Storage(error.to_string()))?;
         let view = policy
             .engine()
             .rebuild_view(&log)
-            .map_err(|refusal| SessionError::Storage(refusal.to_string()))?;
+            .map_err(|refusal| EventError::Storage(refusal.to_string()))?;
         match policy.engine().liveness(&view, trajectory) {
-            Liveness::Unopened => Err(SessionError::Unknown),
-            Liveness::Ended => Err(SessionError::Ended),
+            Liveness::Unopened => Err(EventError::UnknownTrajectory),
+            Liveness::Ended => Err(EventError::TrajectoryEnded),
             Liveness::Live => Ok(()),
         }
     }

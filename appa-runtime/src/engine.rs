@@ -2005,17 +2005,8 @@ impl RuntimeEngine {
         resolved: &ResolvedCall,
         evidence: &[ExternalEvidence],
     ) -> Result<Vec<PinnedMembership>, Resolution> {
-        // Same fast path as the dynamic pass: no placeholder, nothing to read.
-        if !contract.requires.label.audience.iter().any(|requirement| {
-            matches!(
-                requirement,
-                appa_engine::contract::AudienceRequirement::Includes(
-                    appa_engine::contract::RecipientSpec::Placeholder(_)
-                )
-            )
-        }) {
-            return Ok(Vec::new());
-        }
+        // No placeholder resolving to a group, nothing to read: `group_reads` already
+        // answers empty for that, and for strictly more.
         let reads = appa_engine::check::group_reads(contract, resolved);
         if reads.is_empty() {
             return Ok(Vec::new());
@@ -3247,9 +3238,9 @@ mod tests {
             "x\u{FFFD}rlo\u{FFFD}z\u{FFFD}"
         );
         assert_eq!(terminal_safe("tru\u{200B}sted"), "tru\u{FFFD}sted");
-        assert_ne!(
+        assert_eq!(
             terminal_safe("tru\u{206A}sted"),
-            "trusted",
+            "tru\u{FFFD}sted",
             "the full Cf range replaces"
         );
     }

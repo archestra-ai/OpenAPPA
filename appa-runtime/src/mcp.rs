@@ -83,7 +83,7 @@ impl ServerHandler for RemedyService {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
         info.server_info.name = "appa-runtime".to_string();
-        info.server_info.version = env!("CARGO_PKG_VERSION").to_string();
+        info.server_info.version = RUNTIME_VERSION.to_string();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.instructions = Some(
             "When blocking feedback names an offer id, call execute_remedy_plan \
@@ -93,6 +93,9 @@ impl ServerHandler for RemedyService {
         info
     }
 }
+
+/// The release version the CLI advertises, so an MCP client and `--version` agree.
+const RUNTIME_VERSION: &str = include_str!("../../version.txt").trim_ascii();
 
 const SESSION_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
 
@@ -115,6 +118,25 @@ mod tests {
     use crate::api::{ProposedCall, Runtime, ToolCallDecision};
     use crate::config::Config;
     use appa_runtime_api::HookDecision;
+
+    #[test]
+    fn the_mcp_server_advertises_the_release_version_the_cli_advertises() {
+        let service = RemedyService::new(std::sync::Arc::new(
+            Runtime::open(
+                config(),
+                tempfile::tempdir()
+                    .expect("a temp dir is creatable")
+                    .path()
+                    .join("appa.db"),
+                None,
+            )
+            .expect("the deployment opens"),
+        ));
+        assert_eq!(
+            service.get_info().server_info.version,
+            include_str!("../../version.txt").trim()
+        );
+    }
 
     fn config() -> Config {
         let text = r#"

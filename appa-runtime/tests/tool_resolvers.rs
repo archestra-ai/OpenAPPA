@@ -1,6 +1,9 @@
 //! Tool-level dynamic resolvers over real boundaries: a loopback HTTP classifier, a fake
 //! `claude` executable behind the command override, a real store, the real hook path.
 
+mod common;
+use common::{raw, serve};
+
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -65,18 +68,7 @@ async fn serve_classifier() -> (String, Classifier) {
             }),
         )
         .with_state(classifier.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("an ephemeral loopback port binds");
-    let addr = listener.local_addr().expect("the bound address is readable");
-    tokio::spawn(async move {
-        axum::serve(listener, router).await.expect("the stub serves");
-    });
-    (format!("http://{addr}/resolve"), classifier)
-}
-
-fn raw(value: serde_json::Value) -> Box<serde_json::value::RawValue> {
-    serde_json::value::to_raw_value(&value).expect("the fixture serializes")
+    (format!("{}/resolve", serve(router).await), classifier)
 }
 
 fn root() -> TrajectoryId {
@@ -773,14 +765,7 @@ async fn serve_ollama(content: &'static str) -> (String, Arc<Mutex<Vec<serde_jso
             }
         }),
     );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("an ephemeral loopback port binds");
-    let addr = listener.local_addr().expect("the bound address is readable");
-    tokio::spawn(async move {
-        axum::serve(listener, router).await.expect("the stub serves");
-    });
-    (format!("http://{addr}"), requests)
+    (serve(router).await, requests)
 }
 
 /// A resolver that names `builtin = "llm"` on its declaration is served by the

@@ -4,8 +4,8 @@
 use appa_runtime_api::{Actor, Codec, HookDecision, HookEvent, ParseRefusal, ProposedCall, TrajectoryId};
 
 use crate::api::{
-    ChildReturnDecision, EventError, LateOpen, OfferId, Runtime, Session, SessionError, SpawnResultDecision,
-    ToolCallDecision, ToolResultDecision, is_control_tool,
+    ChildReturnDecision, EventError, LateOpen, OfferId, Runtime, Session, SpawnResultDecision, ToolCallDecision,
+    ToolResultDecision, is_control_tool,
 };
 
 /// One hook call, wire to wire: parse through the codec, dispatch,
@@ -39,10 +39,10 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             },
             Err(error) => refuse(error.to_string()),
         },
-        HookEvent::Prompt { actor, text } => {
-            match on_actor(runtime, &actor, |session| {
-                let text = text.clone();
-                async move { session.on_prompt(text) }
+        HookEvent::Prompt { actor, .. } => {
+            match on_actor(runtime, &actor, |session| async move {
+                session.on_prompt();
+                Ok(())
             })
             .await
             {
@@ -159,12 +159,12 @@ fn return_decision(said: Option<String>, decision: ChildReturnDecision) -> HookD
     }
 }
 
-fn open_or_reopen(runtime: &Runtime, root: &appa_runtime_api::TrajectoryId) -> Result<Session, SessionError> {
+fn open_or_reopen(runtime: &Runtime, root: &appa_runtime_api::TrajectoryId) -> Result<Session, EventError> {
     match runtime.session(root, root) {
         Ok(session) => Ok(session),
-        Err(SessionError::Unknown) => match runtime.create_session(root.clone()) {
+        Err(EventError::UnknownTrajectory) => match runtime.create_session(root.clone()) {
             Ok(session) => Ok(session),
-            Err(SessionError::AlreadyExists) => runtime.session(root, root),
+            Err(EventError::TrajectoryExists) => runtime.session(root, root),
             Err(error) => Err(error),
         },
         Err(error) => Err(error),

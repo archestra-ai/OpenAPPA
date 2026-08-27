@@ -105,7 +105,10 @@ fn refuse_unobservable_returns(adapter: Adapter, policy: &toml::Value) -> Result
                 };
                 if (name == "Agent" || name == "Task") && !pins_foreground(tool) {
                     return Err(format!(
-                        "this deployment controls the subagent's context, and its `{name}` tool does not pin                          `run_in_background` to `false` (`parameters.properties.run_in_background.const = false`):                          a background subagent returns where no hook can check it. Pin the argument, as the                          shipped examples do."
+                        "this deployment controls the subagent's context, and its `{name}` tool does not pin \
+                        `run_in_background` to `false` (`parameters.properties.run_in_background.const = false`): a \
+                        background subagent returns where no hook can check it. Pin the argument, as the shipped \
+                        examples do."
                     ));
                 }
             }

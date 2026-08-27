@@ -2,7 +2,7 @@
 //! real boundaries: a loopback HTTP resolver and sanitizer, a real store, the real hook path.
 
 mod common;
-use common::{raw, serve};
+use common::{offers, raw, serve};
 
 use std::sync::{Arc, Mutex};
 
@@ -161,14 +161,9 @@ fn last_offer(decision: &HookDecision) -> OfferId {
     let HookDecision::DenyCall { feedback, .. } = decision else {
         panic!("expected a deny carrying feedback, got {decision:?}")
     };
-    feedback
-        .lines()
-        .filter_map(|line| {
-            let after = line.split("offer_id:").nth(1)?;
-            let rest = after.trim_start().strip_prefix('"')?;
-            Some(OfferId(rest[..rest.find('"')?].to_string()))
-        })
-        .next_back()
+    offers(feedback)
+        .last()
+        .cloned()
         .unwrap_or_else(|| panic!("no offer id in feedback: {feedback}"))
 }
 

@@ -1,5 +1,5 @@
 mod common;
-use common::{raw, serve};
+use common::{offers, raw, serve};
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -318,14 +318,9 @@ async fn returned(runtime: &Arc<Runtime>, tool: &str, body: &str) -> HookDecisio
 }
 
 fn last_offer(feedback: &str) -> OfferId {
-    feedback
-        .lines()
-        .filter_map(|line| {
-            let after = line.split("offer_id:").nth(1)?;
-            let rest = after.trim_start().strip_prefix('"')?;
-            Some(OfferId(rest[..rest.find('"')?].to_string()))
-        })
-        .next_back()
+    offers(feedback)
+        .last()
+        .cloned()
         .unwrap_or_else(|| panic!("no offer id in feedback: {feedback}"))
 }
 
