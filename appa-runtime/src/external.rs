@@ -15,8 +15,8 @@ use serde::Deserialize;
 
 use crate::builtins::{ClaudeCodeBackend, LoadedModule, MODULE_OUTPUT_CEILING, ModuleRegistry, ModulesError, Stock};
 use crate::config::{
-    CLAUDE_CODE_BUILTIN, DynamicImplementation, Endpoint, Externals, Implementation, LLM_BUILTIN, ResolverCommand,
-    Section,
+    CLAUDE_CODE_BUILTIN, DynamicImplementation, Endpoint, EndpointHost, Externals, Implementation, LLM_BUILTIN,
+    ResolverCommand, Section,
 };
 use crate::consult::{Consult, ConsultBody, ConsultKind, ModelPrompt, dynamic_answer_reads_readers_from};
 use crate::elicit::Elicitation;
@@ -110,6 +110,10 @@ fn kind_of(section: Section) -> ConsultKind {
 /// here.
 pub struct ExternalServices {
     http: reqwest::Client,
+    /// The client for every loopback endpoint. It refuses proxies, so a request
+    /// meant for this machine — and the bearer token cleartext is permitted to
+    /// carry there — is never relayed to whatever `HTTP_PROXY` names.
+    http_loopback: reqwest::Client,
     timeout: Duration,
     max_body_bytes: usize,
     backends: BTreeMap<ConsultKind, BTreeMap<String, Backend>>,
@@ -182,9 +186,16 @@ impl ExternalServices {
         gates: ConsultGates,
     ) -> Result<ExternalServices, ModulesError> {
         crate::tls::install_crypto_provider();
-        let http = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(config.timeout)
+        let client = || {
+            reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(config.timeout)
+        };
+        let http = client()
+            .build()
+            .expect("the reqwest client builds: the crypto provider is installed above");
+        let http_loopback = client()
+            .no_proxy()
             .build()
             .expect("the reqwest client builds: the crypto provider is installed above");
         let claude = ClaudeCodeBackend {
@@ -248,6 +259,7 @@ impl ExternalServices {
         backends.insert(ConsultKind::Dynamic, dynamic);
         Ok(ExternalServices {
             http,
+            http_loopback,
             timeout: config.timeout,
             max_body_bytes: config.max_body_bytes,
             backends,
@@ -398,7 +410,11 @@ impl ExternalServices {
     }
 
     async fn post(&self, endpoint: &Endpoint, consult: &Consult) -> Result<Vec<u8>, NoAnswerReason> {
-        let mut builder = self.http.post(&endpoint.url).json(consult);
+        let http = match endpoint.host() {
+            EndpointHost::Loopback => &self.http_loopback,
+            EndpointHost::Remote => &self.http,
+        };
+        let mut builder = http.post(&endpoint.url).json(consult);
         if let Some(token) = &endpoint.token {
             builder = builder.bearer_auth(token.reveal());
         }
@@ -813,10 +829,7 @@ mod tests {
     }
 
     fn endpoint(url: &str) -> Implementation {
-        Implementation::Resolver(Endpoint {
-            url: url.to_string(),
-            token: None,
-        })
+        Implementation::Resolver(Endpoint::new(url.to_string(), None))
     }
 
     /// Bindings with `classifier` and `review` dynamic resolvers and the `directory`
@@ -826,10 +839,7 @@ mod tests {
             .iter()
             .flat_map(|url| {
                 ["classifier", "review"].into_iter().map(move |name| {
-                    let endpoint = DynamicImplementation::Resolver(Endpoint {
-                        url: url.to_string(),
-                        token: None,
-                    });
+                    let endpoint = DynamicImplementation::Resolver(Endpoint::new(url.to_string(), None));
                     (name.to_string(), endpoint)
                 })
             })
@@ -1780,10 +1790,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         let mut config = externals(None, 2000, 65536);
         config.authorities.insert(
             "security".to_string(),
-            Implementation::Resolver(Endpoint {
-                url,
-                token: Some(Token::new("sekret".to_string())),
-            }),
+            Implementation::Resolver(Endpoint::new(url, Some(Token::new("sekret".to_string())))),
         );
         let services = services_over(config);
         let outcome = services

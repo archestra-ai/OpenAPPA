@@ -1000,10 +1000,7 @@ mod deployment_tests {
     }
 
     fn endpoint() -> DynamicImplementation {
-        DynamicImplementation::Resolver(Endpoint {
-            url: "https://resolver.example".to_string(),
-            token: None,
-        })
+        DynamicImplementation::Resolver(Endpoint::new("https://resolver.example".to_string(), None))
     }
 
     fn load(config: Config) -> Result<Deployment, OpenError> {
@@ -1126,10 +1123,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         let mut extra = claude_config(policy);
         extra.externals.authorities.insert(
             "auditor".to_string(),
-            crate::config::Implementation::Resolver(Endpoint {
-                url: "https://auditor.example".to_string(),
-                token: None,
-            }),
+            crate::config::Implementation::Resolver(Endpoint::new("https://auditor.example".to_string(), None)),
         );
         assert!(matches!(
             load(extra),

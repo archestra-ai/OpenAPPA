@@ -292,10 +292,7 @@ fn bind_hosted_externals(config: &mut Config, origin: &str) -> usize {
         if !shim::serves(path) {
             continue;
         }
-        *endpoint = Endpoint {
-            url: format!("{origin}{path}"),
-            token: endpoint.token.clone(),
-        };
+        *endpoint = Endpoint::new(format!("{origin}{path}"), endpoint.token.clone());
         bound += 1;
     }
     bound
