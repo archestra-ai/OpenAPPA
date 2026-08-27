@@ -675,7 +675,11 @@ pub(crate) async fn exchange_with_child(
         biased;
         bytes = &mut output => {
             let bytes = bytes?;
-            wait_for_child_exit(process_group).await?;
+            // The answer is already complete here, so an unobservable exit must not
+            // discard it: `waitid` reports `ECHILD` for a child something else reaped,
+            // and that says nothing about the answer. Whether the child exited well is
+            // still decided by the status `terminate_and_reap` returns to the caller.
+            let _ = wait_for_child_exit(process_group).await;
             Ok(bytes)
         }
         exited = wait_for_child_exit(process_group) => {
