@@ -426,7 +426,7 @@ fn worst_case_plan_alternatives(
     literal: &Expansions,
 ) -> u128 {
     use crate::check::Gap;
-    use crate::contract::{AudienceRequirement, HistoryRequirement, ResolverReturn};
+    use crate::contract::{AudienceRequirement, HistoryRequirement, RecipientSpec, ResolverReturn};
     use crate::fact::EffectKind;
     use crate::plan::covers_gap;
 
@@ -444,6 +444,32 @@ fn worst_case_plan_alternatives(
         authorities
             .iter()
             .filter(|authority| authority.scope.covers(&tool.tags) && authority.mandate.reader_ceiling.is_some())
+            .count()
+    };
+    // A static `includes` is decidable at load whenever neither side names a group, so the
+    // count is the authorities that can actually cover it rather than every one carrying a
+    // reader ceiling — planning admits only the former. A group on either side is a
+    // directory answer this lint cannot have, and ruling such an authority out would
+    // UNDERCOUNT: the cap is the only bound on how many plans one block surfaces, so an
+    // undecidable authority stays counted.
+    let includes_competent = |recipients: &crate::groups::DeclaredAudience| {
+        authorities
+            .iter()
+            .filter(|authority| {
+                let Some(ceiling) = &authority.mandate.reader_ceiling else {
+                    return false;
+                };
+                if !authority.scope.covers(&tool.tags) {
+                    return false;
+                }
+                if recipients.groups().next().is_some() || ceiling.groups().next().is_some() {
+                    return true;
+                }
+                let gap = Gap::Includes {
+                    recipients: recipients.resolve(literal),
+                };
+                covers_gap(authority, &gap, &tool.tags, literal)
+            })
             .count()
     };
 
@@ -470,9 +496,14 @@ fn worst_case_plan_alternatives(
     let mut seen_includes: Vec<&AudienceRequirement> = Vec::new();
     for requirement in &tool.requires.label.audience {
         match requirement {
-            AudienceRequirement::Includes(_) if !seen_includes.contains(&requirement) => {
+            AudienceRequirement::Includes(spec) if !seen_includes.contains(&requirement) => {
                 seen_includes.push(requirement);
-                multiply(reader_cap_competent());
+                match spec {
+                    RecipientSpec::Static(recipients) => multiply(includes_competent(recipients)),
+                    // A placeholder's recipients come from the call, so nothing about the
+                    // gap is known here.
+                    RecipientSpec::Placeholder(_) => multiply(reader_cap_competent()),
+                }
             }
             AudienceRequirement::Includes(_) | AudienceRequirement::Cap(_) => {}
         }
@@ -2569,6 +2600,69 @@ mod tests {
         assert!(matches!(
             Registry::build_covered_with_cap(cfg, cap),
             Err(LoadError::TooManyPlanAlternatives { count: 17, max: 16, .. })
+        ));
+    }
+
+    /// The cap bounds the plans a block can surface, so it must count the authorities
+    /// planning would admit. For a wholly literal `contains`, that is decidable here:
+    /// an authority capped at readers that exclude the recipient covers nothing.
+    #[test]
+    fn the_cap_counts_only_the_authorities_a_literal_contains_can_reach() {
+        let recipient = ReaderId::new("auditor");
+        let mut cfg = base();
+        let mut emit = tool("emit");
+        emit.requires.label.audience = vec![AudienceRequirement::Includes(RecipientSpec::Static(
+            DeclaredAudience::restricted([recipient.clone()]),
+        ))];
+        cfg.tools = vec![emit];
+        let capped_at = |name: &str, ceiling: DeclaredAudience| Authority {
+            name: AuthorityName::new(name),
+            mandate: Mandate {
+                reader_ceiling: Some(ceiling),
+                ..Mandate::default()
+            },
+            scope: Scope::default(),
+            hint: None,
+        };
+        // None of these reaches `auditor`, so none of them can cover the gap.
+        cfg.authorities = (0..80)
+            .map(|index| {
+                capped_at(
+                    &format!("a{index}"),
+                    DeclaredAudience::restricted([ReaderId::new(format!("other-{index}"))]),
+                )
+            })
+            .collect();
+        assert!(
+            Registry::build_covered(cfg.clone()).is_ok(),
+            "authorities that cannot cover the recipient are not alternatives"
+        );
+
+        // Authorities that do reach it are still counted, beside the ones that cannot.
+        let mut reaching = cfg.clone();
+        reaching.authorities.extend(
+            (0..65).map(|index| capped_at(&format!("r{index}"), DeclaredAudience::restricted([recipient.clone()]))),
+        );
+        assert!(matches!(
+            Registry::build_covered(reaching),
+            Err(LoadError::TooManyPlanAlternatives { count: 65, max: 64, .. })
+        ));
+
+        // A group on the authority's ceiling is a directory answer the lint cannot have,
+        // so those authorities stay counted rather than being ruled out.
+        let mut grouped = cfg.clone();
+        grouped.authorities = (0..80)
+            .map(|index| {
+                capped_at(
+                    &format!("g{index}"),
+                    DeclaredAudience::declared([], [GroupName::new("desk")]).expect("a group declaration"),
+                )
+            })
+            .collect();
+        grouped.membership = Some(crate::names::MembershipResolverName::new("directory"));
+        assert!(matches!(
+            Registry::build_covered(grouped),
+            Err(LoadError::TooManyPlanAlternatives { count: 80, max: 64, .. })
         ));
     }
 
