@@ -1608,10 +1608,13 @@ impl<'a> Sequence<'a> {
                 Ok(crate::plan::plan(
                     self.engine.registry(),
                     views,
-                    candidate,
-                    &block,
-                    &stage,
-                    role,
+                    crate::plan::BlockedCall {
+                        call: candidate,
+                        contract,
+                        raw: &block,
+                        stage: &stage,
+                        role,
+                    },
                     expansions,
                 )
                 .plans

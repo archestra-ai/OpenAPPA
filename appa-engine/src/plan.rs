@@ -220,15 +220,31 @@ pub(crate) enum CallRole {
 /// `unestablished` source lists nothing: no plan clears the missing fact, and the engine
 /// requests every applicable cast before it composes, so the block arises only where no cast
 /// applies. See the module docs for the direct-clearing model.
+/// One refused call as planning receives it: the call, the contract its check resolved,
+/// the block that check found, and the stage and role it was found at. The contract is
+/// carried rather than looked up again — an empty plan set is read as a proof that the
+/// block is unliftable, and a lookup that missed would have said the same thing.
+pub(crate) struct BlockedCall<'a> {
+    pub(crate) call: &'a ResolvedCall,
+    pub(crate) contract: &'a ToolContract,
+    pub(crate) raw: &'a RawBlock,
+    pub(crate) stage: &'a CallStage,
+    pub(crate) role: CallRole,
+}
+
 pub(crate) fn plan(
     registry: &Registry,
     views: &Views,
-    call: &ResolvedCall,
-    raw: &RawBlock,
-    stage: &CallStage,
-    role: CallRole,
+    blocked: BlockedCall<'_>,
     expansions: &Expansions,
 ) -> PlannedBlock {
+    let BlockedCall {
+        call,
+        contract,
+        raw,
+        stage,
+        role,
+    } = blocked;
     let current = views.current_label();
     let no_denials = BTreeSet::new();
     let denied = views.denied_authorities(&call.digest()).unwrap_or(&no_denials);
@@ -238,6 +254,7 @@ pub(crate) fn plan(
     let mut plans: Vec<RemedyPlan> = match raw.unestablished.is_empty() {
         true => enumerate_plans(
             registry,
+            contract,
             &current,
             &has_committed,
             &has_reserved,
@@ -285,6 +302,7 @@ pub(crate) fn plan(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn enumerate_plans(
     registry: &Registry,
+    contract: &ToolContract,
     current: &PartialLabel,
     has_committed: &impl Fn(&EffectKind) -> bool,
     has_reserved: &impl Fn(&EffectKind) -> bool,
@@ -293,9 +311,6 @@ pub(crate) fn enumerate_plans(
     role: CallRole,
     expansions: &Expansions,
 ) -> Vec<ExecutableRemedyPlan> {
-    let Some(contract) = registry.keyed_tool(call.tool(), call.contract_id()) else {
-        return Vec::new();
-    };
     let block = check::evaluate_state(
         contract,
         current,
@@ -1256,10 +1271,13 @@ mod tests {
         plan(
             registry,
             &views,
-            call,
-            &raw,
-            &CallStage::default(),
-            CallRole::Ordinary,
+            BlockedCall {
+                call,
+                contract,
+                raw: &raw,
+                stage: &CallStage::default(),
+                role: CallRole::Ordinary,
+            },
             &Expansions::default(),
         )
     }
@@ -3849,7 +3867,18 @@ mod tests {
             let projection = Projection::build(&log, log.len() as u64);
             let trajectory = traj();
             let views = projection.view(&trajectory);
-            let planned = plan(&registry, &views, &call, &raw, &CallStage::default(), CallRole::Ordinary, &Expansions::default());
+            let planned = plan(
+                &registry,
+                &views,
+                BlockedCall {
+                    call: &call,
+                    contract,
+                    raw: &raw,
+                    stage: &CallStage::default(),
+                    role: CallRole::Ordinary,
+                },
+                &Expansions::default(),
+            );
 
             let coverable = raw
                 .requirement_gaps
@@ -3938,7 +3967,18 @@ mod tests {
             let projection = Projection::build(&log, log.len() as u64);
             let trajectory = traj();
             let views = projection.view(&trajectory);
-            let planned = plan(&registry, &views, &call, &raw, &CallStage::default(), CallRole::Ordinary, &Expansions::default());
+            let planned = plan(
+                &registry,
+                &views,
+                BlockedCall {
+                    call: &call,
+                    contract,
+                    raw: &raw,
+                    stage: &CallStage::default(),
+                    role: CallRole::Ordinary,
+                },
+                &Expansions::default(),
+            );
 
             let authorities = registry.authorities();
             let mut bound: u128 = 1;
@@ -4079,7 +4119,18 @@ mod tests {
             let projection = Projection::build(&log, log.len() as u64);
             let trajectory = traj();
             let views = projection.view(&trajectory);
-            let planned = plan(&registry, &views, &call, &raw, &CallStage::default(), CallRole::Ordinary, &Expansions::default());
+            let planned = plan(
+                &registry,
+                &views,
+                BlockedCall {
+                    call: &call,
+                    contract,
+                    raw: &raw,
+                    stage: &CallStage::default(),
+                    role: CallRole::Ordinary,
+                },
+                &Expansions::default(),
+            );
 
             let competent = |authority: &Authority, gap: &Gap| -> bool {
                 let scoped = authority.scope.covers(&contract.tags);

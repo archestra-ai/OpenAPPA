@@ -498,6 +498,7 @@ impl Search<'_> {
         } else {
             for plan in plan::enumerate_plans(
                 self.registry,
+                context.contract,
                 &state.label,
                 &self.has_committed(state),
                 &self.has_reserved(),
@@ -1842,10 +1843,13 @@ mod tests {
             let planned = plan::plan(
                 &registry,
                 &views,
-                &proposal,
-                &raw_block(&registry, &views, &proposal),
-                &CallStage::default(),
-                CallRole::Ordinary,
+                plan::BlockedCall {
+                    call: &proposal,
+                    contract: registry.tool(proposal.tool()).expect("the fixture registers the tool"),
+                    raw: &raw_block(&registry, &views, &proposal),
+                    stage: &CallStage::default(),
+                    role: CallRole::Ordinary,
+                },
                 &Expansions::default(),
             );
             let expected: Vec<RecoveryRoute> = planned
