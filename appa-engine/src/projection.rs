@@ -1335,6 +1335,14 @@ impl Views<'_> {
         matches!(self.projection.closed.get(dispatch), Some(CloseKind::Failure))
     }
 
+    /// Did this dispatch close as indeterminate with nothing observed? The reservation
+    /// stands, because the call may have executed, and the log holds no observation that
+    /// a later report could agree or disagree with.
+    pub(crate) fn closed_unobserved(&self, dispatch: &DispatchId) -> bool {
+        matches!(self.projection.closed.get(dispatch), Some(CloseKind::Indeterminate))
+            && !self.projection.observations.contains_key(dispatch)
+    }
+
     /// Has this still-open dispatch's success checkpoint already committed its effects? Gates the
     /// close (success-family only, no duplicate effects) and the runtime's once-only checkpoint.
     /// Derived: a checkpoint is exactly a recorded observation on a dispatch that is still open.

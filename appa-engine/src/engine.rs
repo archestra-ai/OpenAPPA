@@ -1294,6 +1294,9 @@ impl Engine {
         if !views.is_open(dispatch) {
             match (views.closed_successfully(dispatch), &observed) {
                 (true, None) => return Err(TransitionError::ContradictedSuccess),
+                (false, Some(_)) if views.closed_unobserved(dispatch) => {
+                    return Err(TransitionError::ClosedUnobserved);
+                }
                 (false, Some(_)) => return Err(TransitionError::ObservationMismatch),
                 _ => {}
             }
@@ -5217,6 +5220,72 @@ mod tests {
         assert_eq!(
             forge(crossing_at + 1, known(TRUSTED, Audience::Public)),
             Err(TransitionRefusal::ForgedLabel)
+        );
+    }
+
+    /// An indeterminate close records no observation and leaves the reservation
+    /// standing, because the call may have executed. A report that arrives afterwards is
+    /// refused on that ground, not on a contradiction with an observation there is none of.
+    #[test]
+    fn a_report_after_an_indeterminate_close_is_refused_on_its_own_ground() {
+        let internal = Audience::restricted([ReaderId::new("internal")]);
+        let e = engine_at(vec![crm_tool()], known(TRUSTED, internal));
+        let call = call("get_ticket", json!({}));
+        let records = vec![opened(&e)];
+        let view = e.view(&traj(), records.clone(), 1).unwrap();
+        let decision = e
+            .handle(
+                &view,
+                EngineEvent::Proposals(ProposalBatch {
+                    id: crate::transition::ProposalBatchId::new("b1"),
+                    trajectory: traj(),
+                    provider_results: Vec::new(),
+                    proposals: vec![raw(&call)],
+                    spawn: None,
+                    offer_nonce: nonce(),
+                    evidence: Vec::new(),
+                    expansions: vec![],
+                }),
+            )
+            .unwrap();
+        let FollowUp::Proposals { released, .. } = decision.follow_up else {
+            panic!("a proposal batch answers with proposals")
+        };
+        let dispatch = released[0].dispatch.clone();
+        let log = [records, decision.append.unwrap().facts().to_vec()].concat();
+        let released_view = e.view(&traj(), log.clone(), 2).unwrap();
+
+        let report = |outcome: ToolOutcome| ToolReport {
+            dispatch: dispatch.clone(),
+            outcome,
+            evidence: Vec::new(),
+            offer_nonce: nonce(),
+            expansions: vec![],
+        };
+        let closed = e
+            .handle(&released_view, EngineEvent::Outcome(report(ToolOutcome::Indeterminate)))
+            .expect("an indeterminate outcome closes the dispatch");
+        let facts = closed.append.expect("the close appends").facts().to_vec();
+        assert!(
+            matches!(
+                facts.as_slice(),
+                [Fact::DispatchClosed {
+                    outcome: crate::fact::CloseOutcome::Indeterminate,
+                    ..
+                }]
+            ),
+            "the close records the indeterminate outcome and no observation: {facts:?}"
+        );
+
+        let after = e.view(&traj(), [log, facts].concat(), 3).unwrap();
+        assert_eq!(
+            e.handle(
+                &after,
+                EngineEvent::Outcome(report(ToolOutcome::Success {
+                    body: OutcomeBody::Available(ValueBody::new("the ticket")),
+                }))
+            ),
+            Err(crate::transition::TransitionError::ClosedUnobserved)
         );
     }
 

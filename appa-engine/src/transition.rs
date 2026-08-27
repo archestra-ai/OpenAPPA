@@ -487,6 +487,10 @@ pub enum TransitionError {
     UnknownDispatch,
     #[error("the report contradicts the observation this dispatch already checkpointed")]
     ObservationMismatch,
+    #[error(
+        "this dispatch closed as indeterminate and observed nothing, so a later report has no observation to check against"
+    )]
+    ClosedUnobserved,
     #[error("the dispatch recorded success: a failure or indeterminate outcome contradicts it")]
     ContradictedSuccess,
     #[error("the cast resolution is not admissible for this confined result")]
