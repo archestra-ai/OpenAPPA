@@ -14,6 +14,7 @@ use thiserror::Error;
 const MARKETPLACE: &str = "appa";
 const PLUGIN: &str = "appa-runtime@appa";
 const REMOTE_MARKETPLACE: &str = "archestra-ai/OpenAPPA";
+const RECOVERY_PREFIX: &str = ".appa-init-recovery-";
 const DEFAULT_CONFIG: &str = include_str!("../../integrations/claude-code/examples/claude-code.appa.toml");
 
 #[derive(Debug, Error)]
@@ -48,6 +49,11 @@ pub enum InitError {
     Starter(String),
     #[error("the runtime at 127.0.0.1:8787 is not this installed build: {0}")]
     RuntimeIdentity(String),
+    #[error("{operation}; restoring the previous Claude Code plugin also failed: {recovery}")]
+    PluginRecovery {
+        operation: Box<InitError>,
+        recovery: Box<InitError>,
+    },
 }
 
 #[derive(Clone)]
@@ -95,13 +101,11 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
     let installations = installed_plugin_installations(&paths.claude_dir)?;
     let marketplaces = run_claude(["plugin", "marketplace", "list"])?;
 
-    remove_legacy_runtime(&appa, &paths)?;
     fs::create_dir_all(&paths.install_dir).map_err(|source| InitError::InstallRuntime {
         path: paths.install_dir.clone(),
         source,
     })?;
     let deployed_appa = paths.install_dir.join(appa_filename());
-    install_runtime(&appa, &deployed_appa)?;
 
     fs::create_dir_all(&paths.config_dir).map_err(|source| InitError::WriteFile {
         path: paths.config_dir.clone(),
@@ -113,32 +117,36 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
     })?;
     let config = paths.config_dir.join("appa.toml");
     let config_created = create_default_config(&config)?;
+    let launcher_dir = appa.parent().unwrap_or(&paths.install_dir);
+    let recovery = prepare_plugin_recovery(&installations, &paths.data_dir)?;
 
-    for installation in installations {
-        run_claude_in(
-            ["plugin", "uninstall", PLUGIN, "--scope", &installation.scope, "--yes"],
-            installation.project_path.as_deref(),
-        )?;
+    if recovery.is_some() {
+        install_disabled_clappa(launcher_dir)?;
     }
 
-    if output_text(&marketplaces).lines().any(is_appa_marketplace_line) {
-        run_claude(["plugin", "marketplace", "remove", MARKETPLACE])?;
+    let replacement =
+        replace_plugin(&source, &marketplaces, &installations).and_then(|()| install_runtime(&appa, &deployed_appa));
+    if let Err(operation) = replacement {
+        if let Some(recovery) = recovery.as_ref() {
+            if let Err(recovery_error) = restore_plugin(recovery).and_then(|()| install_clappa(launcher_dir).map(drop))
+            {
+                return Err(InitError::PluginRecovery {
+                    operation: Box::new(operation),
+                    recovery: Box::new(recovery_error),
+                });
+            }
+        }
+        return Err(operation);
     }
 
-    run_claude_os([
-        OsStr::new("plugin"),
-        OsStr::new("marketplace"),
-        OsStr::new("add"),
-        source.command_argument(),
-    ])?;
-    run_claude(["plugin", "install", PLUGIN, "--scope", "user"])?;
+    remove_legacy_runtime(&appa, &paths)?;
 
     let plugin_root = installed_plugin_root(&paths.claude_dir)?;
     activate_platform_hooks(&plugin_root)?;
-    let launcher_dir = appa.parent().unwrap_or(&paths.install_dir);
     install_clappa(launcher_dir)?;
     install_statusline(&plugin_root, &paths)?;
     start_runtime(&plugin_root, &paths, &deployed_appa)?;
+    cleanup_plugin_recoveries(&paths.data_dir);
 
     Ok(render_receipt(
         &source.label(),
@@ -562,9 +570,11 @@ fn is_appa_marketplace_line(line: &str) -> bool {
         .is_some_and(|name| name.trim() == MARKETPLACE)
 }
 
+#[derive(Clone)]
 struct PluginInstallation {
     scope: String,
     project_path: Option<PathBuf>,
+    install_path: Option<PathBuf>,
 }
 
 fn installed_plugin_installations(claude_dir: &Path) -> Result<Vec<PluginInstallation>, InitError> {
@@ -581,7 +591,12 @@ fn installed_plugin_installations(claude_dir: &Path) -> Result<Vec<PluginInstall
         .filter_map(|entry| {
             let scope = entry.get("scope")?.as_str()?.to_owned();
             let project_path = entry.get("projectPath").and_then(Value::as_str).map(PathBuf::from);
-            Some(PluginInstallation { scope, project_path })
+            let install_path = entry.get("installPath").and_then(Value::as_str).map(PathBuf::from);
+            Some(PluginInstallation {
+                scope,
+                project_path,
+                install_path,
+            })
         })
         .collect::<Vec<_>>()
         .into_iter()
@@ -632,6 +647,138 @@ fn plugin_registry(claude_dir: &Path) -> Result<Value, InitError> {
     })
 }
 
+struct PluginRecovery {
+    marketplace: PathBuf,
+    installations: Vec<PluginInstallation>,
+}
+
+fn replace_plugin(
+    source: &MarketplaceSource,
+    marketplaces: &Output,
+    installations: &[PluginInstallation],
+) -> Result<(), InitError> {
+    for installation in installations {
+        run_claude_in(
+            ["plugin", "uninstall", PLUGIN, "--scope", &installation.scope, "--yes"],
+            installation.project_path.as_deref(),
+        )?;
+    }
+    if output_text(marketplaces).lines().any(is_appa_marketplace_line) {
+        run_claude(["plugin", "marketplace", "remove", MARKETPLACE])?;
+    }
+    run_claude_os([
+        OsStr::new("plugin"),
+        OsStr::new("marketplace"),
+        OsStr::new("add"),
+        source.command_argument(),
+    ])?;
+    run_claude(["plugin", "install", PLUGIN, "--scope", "user"])?;
+    Ok(())
+}
+
+fn prepare_plugin_recovery(
+    installations: &[PluginInstallation],
+    data_dir: &Path,
+) -> Result<Option<PluginRecovery>, InitError> {
+    if installations.is_empty() {
+        return Ok(None);
+    }
+    let source = installations
+        .iter()
+        .filter_map(|installation| installation.install_path.as_deref())
+        .find(|path| path.is_dir())
+        .ok_or(InitError::MissingPlugin)?;
+    let marketplace = data_dir.join(format!("{RECOVERY_PREFIX}{}", std::process::id()));
+    fs::create_dir_all(marketplace.join(".claude-plugin")).map_err(|source| InitError::WriteFile {
+        path: marketplace.clone(),
+        source,
+    })?;
+    copy_directory(source, &marketplace.join("plugin"))?;
+    let manifest = serde_json::to_vec_pretty(&serde_json::json!({
+        "name": MARKETPLACE,
+        "description": "Temporary rollback source created by appa init.",
+        "owner": { "name": "Archestra" },
+        "plugins": [{ "name": "appa-runtime", "source": "./plugin" }]
+    }))
+    .expect("the recovery marketplace is valid JSON");
+    let manifest_path = marketplace_manifest(&marketplace);
+    fs::write(&manifest_path, manifest).map_err(|source| InitError::WriteFile {
+        path: manifest_path,
+        source,
+    })?;
+    Ok(Some(PluginRecovery {
+        marketplace,
+        installations: installations.to_vec(),
+    }))
+}
+
+fn copy_directory(source_path: &Path, target: &Path) -> Result<(), InitError> {
+    fs::create_dir_all(target).map_err(|source| InitError::WriteFile {
+        path: target.to_path_buf(),
+        source,
+    })?;
+    for entry in fs::read_dir(source_path).map_err(|source| InitError::WriteFile {
+        path: source_path.to_path_buf(),
+        source,
+    })? {
+        let entry = entry.map_err(|source| InitError::WriteFile {
+            path: source_path.to_path_buf(),
+            source,
+        })?;
+        let destination = target.join(entry.file_name());
+        if entry
+            .file_type()
+            .map_err(|source| InitError::WriteFile {
+                path: entry.path(),
+                source,
+            })?
+            .is_dir()
+        {
+            copy_directory(&entry.path(), &destination)?;
+        } else {
+            fs::copy(entry.path(), &destination).map_err(|source| InitError::WriteFile {
+                path: destination,
+                source,
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn restore_plugin(recovery: &PluginRecovery) -> Result<(), InitError> {
+    for installation in &recovery.installations {
+        let _ = run_claude_in(
+            ["plugin", "uninstall", PLUGIN, "--scope", &installation.scope, "--yes"],
+            installation.project_path.as_deref(),
+        );
+    }
+    let _ = run_claude(["plugin", "marketplace", "remove", MARKETPLACE]);
+    run_claude_os([
+        OsStr::new("plugin"),
+        OsStr::new("marketplace"),
+        OsStr::new("add"),
+        recovery.marketplace.as_os_str(),
+    ])?;
+    for installation in &recovery.installations {
+        run_claude_in(
+            ["plugin", "install", PLUGIN, "--scope", &installation.scope],
+            installation.project_path.as_deref(),
+        )?;
+    }
+    Ok(())
+}
+
+fn cleanup_plugin_recoveries(data_dir: &Path) {
+    let Ok(entries) = fs::read_dir(data_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(RECOVERY_PREFIX) {
+            let _ = fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
 fn install_clappa(install_dir: &Path) -> Result<PathBuf, InitError> {
     #[cfg(windows)]
     let (path, contents) = (
@@ -656,6 +803,30 @@ fn install_clappa(install_dir: &Path) -> Result<PathBuf, InitError> {
         })?;
     }
     Ok(path)
+}
+
+fn install_disabled_clappa(install_dir: &Path) -> Result<(), InitError> {
+    #[cfg(windows)]
+    let (path, contents) = (
+        install_dir.join("clappa.cmd"),
+        "@echo off\r\necho appa init did not complete; rerun appa init claude-code 1>&2\r\nexit /b 1\r\n",
+    );
+    #[cfg(not(windows))]
+    let (path, contents) = (
+        install_dir.join("clappa"),
+        "#!/bin/sh\nprintf 'appa init did not complete; rerun appa init claude-code\\n' >&2\nexit 1\n",
+    );
+    fs::write(&path, contents).map_err(|source| InitError::WriteFile {
+        path: path.clone(),
+        source,
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+            .map_err(|source| InitError::WriteFile { path, source })?;
+    }
+    Ok(())
 }
 
 #[cfg(not(windows))]

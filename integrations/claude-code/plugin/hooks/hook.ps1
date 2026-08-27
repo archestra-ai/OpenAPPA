@@ -14,6 +14,7 @@ $dataDir = if ($env:APPA_DATA_DIR) { $env:APPA_DATA_DIR } else { Join-Path $env:
 $configDir = if ($env:APPA_CONFIG_DIR) { $env:APPA_CONFIG_DIR } else { Join-Path $env:APPDATA "appa" }
 $installDir = if ($env:APPA_INSTALL_DIR) { $env:APPA_INSTALL_DIR } else { Join-Path $dataDir "bin" }
 $binary = Join-Path $installDir "appa.exe"
+$legacyBinary = Join-Path $installDir "appa-runtime.exe"
 
 if ($SessionContext) {
     if (-not $protected) {
@@ -67,7 +68,18 @@ function Stop-StaleRuntime {
     # the wait below sees the port refuse or that starter's replacement.
     $process = Get-Process -Id $stalePid -ErrorAction SilentlyContinue
     if ($null -ne $process) {
-        if ($process.ProcessName -notin @("appa", "appa-runtime")) {
+        $expectedPath = if ($process.ProcessName -eq "appa") {
+            $binary
+        } elseif ($process.ProcessName -eq "appa-runtime") {
+            $legacyBinary
+        } else {
+            $null
+        }
+        if ($null -eq $expectedPath -or -not [String]::Equals(
+            $process.Path,
+            $expectedPath,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
             [Console]::Error.WriteLine("appa protection: pid $stalePid is not appa runtime; not stopping it")
             return $false
         }

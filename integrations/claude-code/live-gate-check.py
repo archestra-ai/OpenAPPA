@@ -259,7 +259,7 @@ def a_write_of_read_content_never_lands() -> list[str]:
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    logger.info("runtime: %s", runtime_binary())
+    logger.info("runtime: %s", appa_binary())
     failed = False
     for check in (a_write_of_the_models_own_words_lands, a_write_of_read_content_never_lands):
         failures = check()

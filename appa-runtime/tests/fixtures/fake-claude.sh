@@ -3,6 +3,22 @@ set -eu
 
 printf '%s\n' "$*" >>"$FAKE_CLAUDE_LOG"
 
+failure_marker="$FAKE_CLAUDE_HOME/failed-${FAKE_CLAUDE_FAIL_ONCE:-none}"
+case "${FAKE_CLAUDE_FAIL_ONCE:-}:$*" in
+  plugin-install-always:"plugin install appa-runtime@appa --scope user")
+    printf 'deliberate persistent fake Claude failure: %s\n' "$*" >&2
+    exit 71
+    ;;
+  marketplace-add:plugin\ marketplace\ add\ * | plugin-install:"plugin install appa-runtime@appa --scope user")
+    if [ ! -f "$failure_marker" ]; then
+      mkdir -p "$FAKE_CLAUDE_HOME"
+      : >"$failure_marker"
+      printf 'deliberate fake Claude failure: %s\n' "$*" >&2
+      exit 70
+    fi
+    ;;
+esac
+
 case "$*" in
   "plugin marketplace list")
     printf 'Configured marketplaces:\n'

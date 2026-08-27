@@ -66,8 +66,9 @@ fn init_installs_one_local_adapter_and_is_safe_to_run_again() {
 
     let log = directory.path().join("claude.log");
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
-    let run = |reported_fingerprint: &str| {
-        Command::new(&appa)
+    let run = |reported_fingerprint: &str, fail_once: Option<&str>| {
+        let mut command = Command::new(&appa);
+        command
             .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join(".."))
             .args(["init", "claude-code"])
             .env("PATH", &path)
@@ -79,12 +80,14 @@ fn init_installs_one_local_adapter_and_is_safe_to_run_again() {
             .env("FAKE_CLAUDE_HOME", &claude)
             .env("FAKE_CLAUDE_LOG", &log)
             .env("FAKE_PLUGIN_ROOT", &plugin)
-            .env("FAKE_RUNTIME_FINGERPRINT", reported_fingerprint)
-            .output()
-            .expect("appa init runs")
+            .env("FAKE_RUNTIME_FINGERPRINT", reported_fingerprint);
+        if let Some(failure) = fail_once {
+            command.env("FAKE_CLAUDE_FAIL_ONCE", failure);
+        }
+        command.output().expect("appa init runs")
     };
 
-    let first = run(&fingerprint);
+    let first = run(&fingerprint, None);
     assert!(first.status.success(), "{}", String::from_utf8_lossy(&first.stderr));
     let first_stdout = String::from_utf8(first.stdout).expect("UTF-8 output");
     assert!(first_stdout.starts_with("OpenAPPA initialized for Claude Code"));
@@ -105,7 +108,7 @@ fn init_installs_one_local_adapter_and_is_safe_to_run_again() {
             .is_some_and(|command| command.ends_with("appa-statusline.sh"))
     );
 
-    let second = run(&fingerprint);
+    let second = run(&fingerprint, None);
     assert!(second.status.success(), "{}", String::from_utf8_lossy(&second.stderr));
     assert!(String::from_utf8_lossy(&second.stdout).contains("(kept)"));
 
@@ -130,9 +133,56 @@ fn init_installs_one_local_adapter_and_is_safe_to_run_again() {
         Some(1)
     );
 
-    let wrong_runtime = run("not-this-build");
+    fs::copy(&appa, bin.join("appa-runtime")).expect("legacy runtime is restored for the failed-upgrade fixture");
+    executable(&bin.join("appa-runtime"));
+    for failure in ["marketplace-add", "plugin-install"] {
+        let failed = run(&fingerprint, Some(failure));
+        assert!(!failed.status.success(), "the injected {failure} failure must surface");
+        let registry: serde_json::Value = serde_json::from_slice(
+            &fs::read(claude.join("plugins/installed_plugins.json")).expect("restored plugin registry"),
+        )
+        .expect("restored registry JSON");
+        assert_eq!(
+            registry["plugins"]["appa-runtime@appa"].as_array().map(Vec::len),
+            Some(1),
+            "{failure} must restore the prior plugin",
+        );
+        assert!(
+            claude.join("marketplace-appa").is_file(),
+            "{failure} must restore the marketplace"
+        );
+        assert!(
+            bin.join("appa-runtime").is_file(),
+            "{failure} must leave the previous runtime available",
+        );
+        assert!(
+            !fs::read_to_string(bin.join("clappa"))
+                .expect("restored launcher")
+                .contains("init did not complete"),
+            "{failure} must restore the protected launcher",
+        );
+    }
+
+    let wrong_runtime = run("not-this-build", None);
     assert!(!wrong_runtime.status.success());
     assert!(String::from_utf8_lossy(&wrong_runtime.stderr).contains("different appa build"));
+
+    let unrecoverable = run(&fingerprint, Some("plugin-install-always"));
+    assert!(!unrecoverable.status.success());
+    assert!(String::from_utf8_lossy(&unrecoverable.stderr).contains("restoring the previous Claude Code plugin"));
+    assert!(
+        fs::read_to_string(bin.join("clappa"))
+            .expect("fail-closed launcher")
+            .contains("init did not complete"),
+        "a failed rollback must leave clappa refusing to launch an unprotected session",
+    );
+
+    let repaired = run(&fingerprint, None);
+    assert!(
+        repaired.status.success(),
+        "{}",
+        String::from_utf8_lossy(&repaired.stderr)
+    );
 }
 
 #[test]

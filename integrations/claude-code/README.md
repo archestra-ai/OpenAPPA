@@ -170,8 +170,8 @@ down from passing as a refusal: the hooks fail closed, so a gate that is
 not answering blocks both sessions rather than one.
 
 The check reads nothing of APPA's own log or database. It needs the
-`claude` CLI on PATH and logged in, and a runtime binary — a local
-build, an installed one, or `APPA_RUNTIME_BIN`. It spends the machine's
+`claude` CLI on PATH and logged in, and an appa binary — a local build,
+an installed one, or `APPA_BIN`. It spends the machine's
 Claude usage, so nothing runs it automatically.
 
 ## Upgrade

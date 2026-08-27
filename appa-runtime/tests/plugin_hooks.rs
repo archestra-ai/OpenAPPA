@@ -42,8 +42,12 @@ fn runtime_starters_can_replace_the_retired_binary_name() {
     let windows =
         std::fs::read_to_string(plugin_file("hooks/hook.ps1")).expect("the Windows runtime starter is readable");
     assert!(
-        windows.contains("@(\"appa\", \"appa-runtime\")"),
+        windows.contains("$process.ProcessName -eq \"appa-runtime\""),
         "the Windows starter must recognize a stale pre-0.5 runtime",
+    );
+    assert!(
+        windows.contains("[StringComparison]::OrdinalIgnoreCase"),
+        "the Windows starter must verify the stale process's installed path",
     );
 }
 
