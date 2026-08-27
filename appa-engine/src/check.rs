@@ -515,7 +515,10 @@ pub(crate) fn validate_tool_resolutions(
         if pinned
             .every_trust()
             .any(|trust| !registry.trust_chain().contains_rank(trust))
-            || pinned.every_mark().iter().any(|mark| !registry.attends(mark))
+            || pinned
+                .every_mark()
+                .iter()
+                .any(|mark| !registry.knows_attention_mark(mark))
         {
             return Err(ToolResolutionRefusal::OutsidePolicy(uses.resolver.as_str().to_string()));
         }
@@ -601,12 +604,11 @@ fn unresolved_recipient(key: &str) -> Audience {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authority::{Authority, Mandate, Scope};
     use crate::candidate::CallStage;
     use crate::contract::{PinnedToolResolution, RequiredAudience, ResolverReturn, ToolResolverUse};
     use crate::fact::EffectSet;
     use crate::label::{Dim, Label};
-    use crate::names::{AuthorityName, DynamicResolverName, MarkName};
+    use crate::names::{DynamicResolverName, MarkName};
     use crate::params::ToolParameters;
     use crate::registry::{Registry, RegistryConfig, TrustChain};
     use crate::value::ToolName;
@@ -781,22 +783,28 @@ mod tests {
         };
         let registry = Registry::build_covered(RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![contract],
-            authorities: vec![Authority {
-                name: AuthorityName::new("operator"),
-                mandate: Mandate {
-                    trust_ceiling: Some(Trust::new(1)),
-                    attends: vec![MarkName::new("operator-signoff")],
-                    ..Mandate::default()
+            tools: vec![
+                contract,
+                ToolContract {
+                    name: ToolName::new("blocked"),
+                    tags: vec![],
+                    parameters: ToolParameters::open(),
+                    description: Some("A statically blocked tool.".to_string()),
+                    uses: vec![],
+                    delta: Some(crate::contract::Delta::NONE),
+                    emits: EffectSet::default(),
+                    requires: crate::contract::Requires {
+                        attention: vec![MarkName::new("operator-signoff")],
+                        ..Default::default()
+                    },
                 },
-                scope: Scope::default(),
-                hint: None,
-            }],
+            ],
+            authorities: vec![],
             sanitizers: vec![],
             casts: vec![],
             membership: None,
         })
-        .expect("the policy loads");
+        .expect("a policy mark does not require an authority");
         let contract = registry.tool(&ToolName::new("lookup")).expect("the tool is registered");
         let arguments = serde_json::json!({});
         let args = contract.resolver_args_digest(&binding, &arguments);

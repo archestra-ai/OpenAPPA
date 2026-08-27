@@ -2913,6 +2913,39 @@ mod tests {
         engine.validated(opening, trajectory, 1).expect("the opening validates")
     }
 
+    #[test]
+    fn a_static_policy_mark_reaches_dynamic_consults_without_an_authority() {
+        let policy = appa_policy::Config::from_toml_str(
+            r#"
+                version = 1
+                [[dynamic_resolver]]
+                name = "classifier"
+                returns = ["requires.attention"]
+                [[tool]]
+                name = "classify"
+                description = "Classifies a proposed operation."
+                uses = [{ resolver = "classifier" }]
+                delta = {}
+                [[tool]]
+                name = "blocked"
+                description = "A statically blocked operation."
+                delta = {}
+                requires = { attention = ["blocked"] }
+            "#,
+        )
+        .expect("a closed attention vocabulary does not require an authority");
+        let engine = RuntimeEngine::new(policy.engine().clone());
+        let contract = policy
+            .registry()
+            .variants(&ToolName::new("classify"))
+            .next()
+            .expect("the classifier-backed tool is registered");
+
+        let declaration = engine.dynamic_declaration(&contract.uses[0]);
+
+        assert_eq!(declaration.attention_marks, ["blocked"]);
+    }
+
     fn classifier_policy() -> appa_policy::Config {
         classifier_policy_permitting("privacy-review")
     }
@@ -3098,10 +3131,10 @@ mod tests {
                             "arguments": {"nested": {"id": 7}, "deep": true},
                         })
                     );
-                    // The declaration carries the policy's vocabulary and nothing of the
-                    // trajectory: no current label, no static attention.
+                    // The declaration carries the policy's complete vocabulary and nothing of
+                    // the trajectory: no current label and no call-specific requirements.
                     assert_eq!(declaration.trust_ranks, ["suspicious", "trusted"]);
-                    assert_eq!(declaration.attention_marks, ["privacy-review"]);
+                    assert_eq!(declaration.attention_marks, ["privacy-review", "static-review"]);
                     assert_eq!(
                         declaration.returns,
                         ["delta.trust", "delta.audience", "requires.trust", "requires.audience"]
