@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.5.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.4.0...v0.5.0) (2026-08-27)
+
+
+### Features
+
+* **website:** consent-gated session replay ([#92](https://github.com/archestra-ai/OpenAPPA/issues/92)) ([58f7a5e](https://github.com/archestra-ai/OpenAPPA/commit/58f7a5eb5426fdd0847e8c4d1fa87706fe079c43))
+
+
+### Bug Fixes
+
+* **bench:** ship corporate benchmark corpora ([#93](https://github.com/archestra-ai/OpenAPPA/issues/93)) ([bfa61d2](https://github.com/archestra-ai/OpenAPPA/commit/bfa61d2dbae39f2f01b2d1510c9edab67885e6d1))
+* derive attention vocabulary from policy ([c7ead24](https://github.com/archestra-ai/OpenAPPA/commit/c7ead2446c0e1102a3d3d048ae418a6d5b11e596))
+* derive resolver attention vocabulary from policy ([#107](https://github.com/archestra-ai/OpenAPPA/issues/107)) ([c7ead24](https://github.com/archestra-ai/OpenAPPA/commit/c7ead2446c0e1102a3d3d048ae418a6d5b11e596))
+* **engine:** keep an offer standing across label-neutral admissions and reuse pinned resolver answers ([#97](https://github.com/archestra-ai/OpenAPPA/issues/97)) ([97ccace](https://github.com/archestra-ai/OpenAPPA/commit/97ccace3bb54f7f21877b818209c385045911b84))
+* **engine:** serialize every digest as hex, not a 32-integer array ([#96](https://github.com/archestra-ai/OpenAPPA/issues/96)) ([7f719d7](https://github.com/archestra-ai/OpenAPPA/commit/7f719d751f7d1d9402154273e1f5f9dda9d75087))
+* **plugin:** replace a running runtime whose binary an install replaced ([#101](https://github.com/archestra-ai/OpenAPPA/issues/101)) ([f324cd5](https://github.com/archestra-ai/OpenAPPA/commit/f324cd5145acff57b5a9274eab6649eaec0a36c5))
+* **runtime:** compile Claude backend on Windows ([#94](https://github.com/archestra-ai/OpenAPPA/issues/94)) ([4d443df](https://github.com/archestra-ai/OpenAPPA/commit/4d443dfa23e281d8da463dea7d525cb33d7f3736))
+* **website:** label FIDES baseline as FIDES (Microsoft) in benchmark banner ([#98](https://github.com/archestra-ai/OpenAPPA/issues/98)) ([f183ca8](https://github.com/archestra-ai/OpenAPPA/commit/f183ca8d8891b10479be1fb73498f8d50453ab9b))
+
+
+### Performance Improvements
+
+* **build:** drop the duplicate crypto provider and size the release profile ([#99](https://github.com/archestra-ai/OpenAPPA/issues/99)) ([ed8a351](https://github.com/archestra-ai/OpenAPPA/commit/ed8a351dd8d7afb751c87ef2a3ba38d67c2940f0))
+
+
+### Documentation
+
+* refresh public benchmark results ([#89](https://github.com/archestra-ai/OpenAPPA/issues/89)) ([a1ccf3f](https://github.com/archestra-ai/OpenAPPA/commit/a1ccf3fecc893c17afc494b0e4cf07c4c532e717))
+
+
+### Miscellaneous Chores
+
+* serve /paper from arXiv and drop superseded bench snapshots ([#104](https://github.com/archestra-ai/OpenAPPA/issues/104)) ([da89e0e](https://github.com/archestra-ai/OpenAPPA/commit/da89e0ea164a3eabdb87062619f1ad5ca6db86d0))
+
 ## [0.4.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.3.0...v0.4.0) (2026-08-26)
 
 
