@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.6.0...v0.6.1) (2026-08-28)
+
+
+### Bug Fixes
+
+* give tool classifiers an evidence-based neutral baseline ([#117](https://github.com/archestra-ai/OpenAPPA/issues/117)) ([816eb59](https://github.com/archestra-ai/OpenAPPA/commit/816eb59a5ad731f015ebba7d48553dd46e01874e))
+
 ## [0.6.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.5.1...v0.6.0) (2026-08-28)
 
 
