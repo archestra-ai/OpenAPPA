@@ -165,8 +165,25 @@ fn parse(answer: &[u8]) -> Result<Answer, String> {
 
 /// The blocking hook outcome. Claude Code reads stderr as the reason it blocked.
 fn block(failure: &str) -> ExitCode {
-    eprintln!("OpenAPPA runtime did not approve the hook: {failure}");
+    eprintln!("OpenAPPA hook blocked: {failure}");
     ExitCode::from(2)
+}
+
+/// Preserve the status while surfacing the runtime's own diagnostic. Claude Code displays
+/// stderr for a blocking hook, not the response body this client forwards on stdout.
+fn refusal(answer: &Answer) -> String {
+    let json_error = serde_json::from_slice::<serde_json::Value>(&answer.body)
+        .ok()
+        .and_then(|body| body.get("error").and_then(serde_json::Value::as_str).map(str::to_owned));
+    let plain_error = std::str::from_utf8(&answer.body)
+        .ok()
+        .map(str::trim)
+        .filter(|body| !body.is_empty())
+        .map(str::to_owned);
+    match json_error.or(plain_error) {
+        Some(detail) => format!("status={} {detail}", answer.status),
+        None => format!("status={}", answer.status),
+    }
 }
 
 pub(crate) fn run(url: &str, decides: Decides) -> ExitCode {
@@ -188,7 +205,7 @@ pub(crate) fn run(url: &str, decides: Decides) -> ExitCode {
             std::io::stdout().flush().ok();
             match answer.status {
                 200..=299 => ExitCode::SUCCESS,
-                status => block(&format!("it answered {status}")),
+                _ => block(&refusal(&answer)),
             }
         }
         Err(failure) => block(&failure),
@@ -236,6 +253,36 @@ mod tests {
 
         assert!(parse(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n").is_err());
         assert!(parse(b"garbage\r\n\r\n").is_err());
+    }
+
+    #[test]
+    fn a_refusal_surfaces_the_runtimes_exact_error() {
+        let answer = Answer {
+            status: 409,
+            body: serde_json::to_vec(&serde_json::json!({
+                "error": "resolver=claude-code error=malformed field=delta.audience value=\"secret\" allowed=declaration.audiences"
+            }))
+            .expect("the fixture serializes"),
+        };
+        assert_eq!(
+            refusal(&answer),
+            "status=409 resolver=claude-code error=malformed field=delta.audience value=\"secret\" allowed=declaration.audiences"
+        );
+
+        assert_eq!(
+            refusal(&Answer {
+                status: 503,
+                body: b"temporarily unavailable".to_vec(),
+            }),
+            "status=503 temporarily unavailable"
+        );
+        assert_eq!(
+            refusal(&Answer {
+                status: 500,
+                body: Vec::new(),
+            }),
+            "status=500"
+        );
     }
 
     #[test]

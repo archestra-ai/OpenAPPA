@@ -691,6 +691,7 @@ fn undeclared_contract() -> ToolContract {
 #[derive(Clone, Debug)]
 pub struct Registry {
     trust_chain: TrustChain,
+    audience_readers: BTreeSet<ReaderId>,
     tools: BTreeMap<ToolName, Vec<(ToolMatcher, ToolContract)>>,
     provider_run: BTreeMap<ToolName, ToolContract>,
     /// The one contract every undeclared name resolves to; in no listing, vector, or identity.
@@ -714,6 +715,7 @@ impl Registry {
         profile: crate::profile::DeploymentProfile,
     ) -> Result<Registry, LoadError> {
         config.trust_chain.validate()?;
+        let audience_readers = configured_audience_readers(&config, &profile);
 
         // Sanitizers index first: the child return-sanitizer binding validates against them.
         let mut sanitizers = BTreeMap::new();
@@ -1009,6 +1011,7 @@ impl Registry {
 
         Ok(Registry {
             trust_chain: config.trust_chain,
+            audience_readers,
             tools,
             unknown_tool,
             provider_run,
@@ -1087,6 +1090,12 @@ impl Registry {
 
     pub fn trust_chain(&self) -> &TrustChain {
         &self.trust_chain
+    }
+
+    /// The closed audience vocabulary written by this policy. `public` is the reserved
+    /// unrestricted state; the remaining entries are literal reader IDs, in stable order.
+    pub fn audiences(&self) -> impl Iterator<Item = &str> {
+        std::iter::once("public").chain(self.audience_readers.iter().map(ReaderId::as_str))
     }
 
     /// The one classification every name lookup derives from.
@@ -1451,6 +1460,64 @@ fn check_hint(hint: Option<&Hint>, context: impl Fn() -> String) -> Result<(), L
     }
 }
 
+/// Every literal reader the loaded policy writes, across every audience-bearing declaration.
+/// Dynamic classifiers choose from this vocabulary; call arguments are evidence, not a source
+/// of new policy labels. Groups and placeholders are deliberately absent because their members
+/// are resolved per operation rather than declared by the policy.
+fn configured_audience_readers(
+    config: &RegistryConfig,
+    profile: &crate::profile::DeploymentProfile,
+) -> BTreeSet<ReaderId> {
+    fn add_audience(readers: &mut BTreeSet<ReaderId>, audience: &Audience) {
+        if let Audience::Restricted(declared) = audience {
+            readers.extend(declared.iter().cloned());
+        }
+    }
+
+    fn add_declared(readers: &mut BTreeSet<ReaderId>, audience: &DeclaredAudience) {
+        if let DeclaredAudience::Restricted { readers: declared, .. } = audience {
+            readers.extend(declared.iter().cloned());
+        }
+    }
+
+    let mut readers = BTreeSet::new();
+    if let Dim::Known(audience) = &profile.starting_label().audience {
+        add_audience(&mut readers, audience);
+    }
+    for tool in &config.tools {
+        if let Some(AudienceDelta::Static(audience)) = &tool.delta.audience {
+            add_declared(&mut readers, audience);
+        }
+        if let Dim::Known(requirements) = &tool.requires.label.audience {
+            for requirement in requirements {
+                match requirement {
+                    AudienceRequirement::Includes(RecipientSpec::Static(audience))
+                    | AudienceRequirement::Cap(audience) => add_declared(&mut readers, audience),
+                    AudienceRequirement::Includes(RecipientSpec::Placeholder(_)) => {}
+                }
+            }
+        }
+    }
+    for authority in &config.authorities {
+        if let Some(audience) = &authority.mandate.reader_ceiling {
+            add_declared(&mut readers, audience);
+        }
+    }
+    for sanitizer in &config.sanitizers {
+        if let DeclaredTransition::Audience { from_includes, to } = &sanitizer.transition {
+            add_declared(&mut readers, from_includes);
+            add_declared(&mut readers, to);
+        }
+    }
+    for cast in &config.casts {
+        match &cast.resolution {
+            CastResolution::Resolver { may_cast } => add_declared(&mut readers, &may_cast.audience),
+            CastResolution::Constant(constant) => add_declared(&mut readers, &constant.audience),
+        }
+    }
+    readers
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1516,6 +1583,30 @@ mod tests {
         assert_eq!(
             registry.attention_marks().map(MarkName::as_str).collect::<Vec<_>>(),
             ["blocked"]
+        );
+    }
+
+    #[test]
+    fn declared_readers_form_a_closed_audience_vocabulary_with_public() {
+        let mut classified = tool("classified");
+        classified.delta = Delta {
+            trust: None,
+            audience: Some(AudienceDelta::Static(DeclaredAudience::restricted([ReaderId::new(
+                "private",
+            )]))),
+        };
+        classified.requires.label.audience =
+            Dim::Known(vec![AudienceRequirement::Cap(DeclaredAudience::restricted([
+                ReaderId::new("partner"),
+            ]))]);
+        let mut cfg = base();
+        cfg.tools = vec![classified];
+
+        let registry = Registry::build_covered(cfg).expect("literal policy audiences are valid");
+
+        assert_eq!(
+            registry.audiences().collect::<Vec<_>>(),
+            ["public", "partner", "private"]
         );
     }
 

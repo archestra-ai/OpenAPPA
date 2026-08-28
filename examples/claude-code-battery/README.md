@@ -66,7 +66,7 @@ Run the Read resolver directly:
 
 ```sh
 cd examples/claude-code-battery
-printf '%s\n' '{"version":1,"kind":"dynamic","name":"claude-code.read-sensitivity","declaration":{"returns":["delta.audience"],"trust_ranks":["suspicious","trusted"],"attention_marks":["hitl"]},"artifact":{"args":{"name":"Read","description":"Reads a file and returns its contents.","arguments":{"file_path":".env"}}}}' \
+printf '%s\n' '{"version":1,"kind":"dynamic","name":"claude-code.read-sensitivity","declaration":{"returns":["delta.audience"],"trust_ranks":["suspicious","trusted"],"audiences":["public","private"],"attention_marks":["hitl"]},"artifact":{"args":{"name":"Read","description":"Reads a file and returns its contents.","arguments":{"file_path":".env"}}}}' \
   | python3 ../../batteries/claude-code/read-sensitivity.py
 ```
 
@@ -76,7 +76,7 @@ The result restricts `.env` to `private`. Replace `.env` with
 Run the local replacement resolver directly:
 
 ```sh
-printf '%s\n' '{"version":1,"kind":"dynamic","name":"local.read-sensitivity","declaration":{"returns":["delta.audience"],"trust_ranks":["suspicious","trusted"],"attention_marks":["hitl"]},"artifact":{"args":{"name":"Read","description":"Reads a file and returns its contents.","arguments":{"file_path":"clients/acme.txt"}}}}' \
+printf '%s\n' '{"version":1,"kind":"dynamic","name":"local.read-sensitivity","declaration":{"returns":["delta.audience"],"trust_ranks":["suspicious","trusted"],"audiences":["public","private"],"attention_marks":["hitl"]},"artifact":{"args":{"name":"Read","description":"Reads a file and returns its contents.","arguments":{"file_path":"clients/acme.txt"}}}}' \
   | python3 ./local/read-sensitivity.py
 ```
 
