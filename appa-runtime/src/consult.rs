@@ -1308,7 +1308,11 @@ mod tests {
         );
         assert!(prompt.system.contains("Judge what the proposed tool call visibly does"));
         assert!(prompt.system.contains("For produced data, classify visible provenance"));
-        assert!(prompt.system.contains("For requirements, classify visible effects separately"));
+        assert!(
+            prompt
+                .system
+                .contains("For requirements, classify visible effects separately")
+        );
         assert!(prompt.system.contains("Uncertainty alone is not evidence"));
         assert!(!prompt.system.contains("Classify conservatively"));
         assert_eq!(
