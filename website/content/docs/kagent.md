@@ -175,35 +175,32 @@ After Actor recovery, the profile sends `TurnEnd` before a new call to close an 
 
 One trajectory runs one tool call at a time. Separate child trajectories can run concurrently.
 
-## Adopt side by side
+## Move an existing agent
 
-An existing `AgentInstance` cannot switch to another `Harness` or prepared revision. Existing clusters adopt OpenAPPA through a side-by-side replacement.
+An existing `AgentInstance` cannot change its `Harness`. Replace it with a new protected instance:
 
-| Phase | Operator action | Routing state |
-|---|---|---|
-| Prepare | Apply the policy `ConfigMap` and values with the `Harness` disabled | Existing instances continue serving |
-| Upgrade | Apply chart CRDs, upgrade the control plane, and wait for its service endpoint | Existing instances continue on current revisions |
-| Enable | Enable the chart-managed `Harness`, label the template, and wait for its ready revision | Existing instances continue serving |
-| Canary | Create a protected `AgentInstance` and run internal checks | Production traffic remains on the old instance |
-| Cut over | Route new root A2A tasks to protected instance | Pin old task and context IDs to old instance |
-| Drain | Wait for terminal work or apply the timeout and cancellation policy | No new work reaches the old instance |
-| Retain | Suspend old instance, export records, and verify `/data` snapshot | Keep both for at least 30 days |
+1. Run the Helm upgrade and readiness commands above.
+2. Create a protected instance from the existing `AgentTemplate`.
+3. Update the application to use the new `AgentInstance` ID.
+4. Let requests already assigned to the old instance finish there.
+5. Suspend the old instance.
 
-The protected instance starts a new OpenAPPA database and new root trajectories. The first release does not import an old unprotected transcript.
+```sh
+kagentctl agent-instance create customer-support-openappa \
+  --namespace kagent \
+  --template customer-support-agent \
+  --harness kagent-openappa
 
-When the application uses an external ADK session store, migration starts a new protected session ID.
+kagentctl agent-instance suspend <old-instance-id> --namespace kagent
+```
 
-Migration excludes the old model context.
+The protected instance starts a new OpenAPPA database and a new model session. It does not import the old transcript.
 
-External records re-enter through protected tools. Their tool contracts assign the required policy Labels.
+To revert, resume the old instance and point the application back to its ID:
 
-Rollback routes new root tasks to the unchanged old instance. Existing protected task and context IDs stay protected until terminal or canceled.
-
-After rollback drain, the operator suspends the protected instance and exports its task and event records.
-
-The operator verifies that the Substrate snapshot contains `/data`, then retains the export and snapshot for at least 30 days.
-
-Deletion requires a separate operator decision after the retention period. Rollback never merges or rewrites OpenAPPA trajectory logs.
+```sh
+kagentctl agent-instance resume <old-instance-id> --namespace kagent
+```
 
 ## Implementation plan
 
