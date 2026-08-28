@@ -232,6 +232,7 @@ The consult's declaration is the resolver's vocabulary; its artifact is `args`. 
   "declaration": {
     "returns": ["delta.trust", "delta.audience"],
     "trust_ranks": ["suspicious", "trusted"],
+    "audiences": ["public", "finance"],
     "attention_marks": ["privacy-review"]
   },
   "artifact": { "args": { "subject": "cust-7" } }
@@ -242,10 +243,11 @@ The consult's declaration is the resolver's vocabulary; its artifact is `args`. 
 |---|---|
 | `declaration.returns` | The results the resolver declared. The answer holds exactly these. |
 | `declaration.trust_ranks` | The policy's trust chain, least-trusted first. A trust result must name one of these. |
+| `declaration.audiences` | `public` plus every literal audience name written in the policy. An audience result must use these only. |
 | `declaration.attention_marks` | The attended marks. An attention result must name these only. |
 | `artifact.args` | The data the tool's input mapping selected, under the resolver's declared input names. Without a mapping, the complete call: `name`, `description` when declared, and `arguments`. |
 
-The consult carries nothing about the trajectory: no current label, no rank, no reader ids, no history. A resolver with mapped inputs that needs the tool name or its description reads it as an input.
+The consult carries no trajectory state: no current label, no current rank or audience, and no history. The audience names in the declaration are the policy vocabulary, not the trajectory's current readers. A resolver with mapped inputs that needs the tool name or its description reads it as an input.
 
 Response, from an endpoint or a command:
 
@@ -261,7 +263,7 @@ Response, from an endpoint or a command:
 
 `version` must match the consult. `answer` holds every result the resolver declared, keyed by the result's own name — including a result this tool does not read. A model builtin answers the same object without the envelope.
 
-OpenAPPA rejects a missing result, an extra result, and a `null` result. It rejects an extra key beside `version` and `answer`. Trust and attention values must come from the declaration, whether or not the tool reads them: a result no field reads establishes nothing, but the record keeps it, so it answers to the same vocabulary. `delta.audience` is `"public"` or a list of reader names, and never a group. `requires.audience` is an object with `contains`, `within`, or both: `{"contains": [...], "within": [...]}`. An empty reader list is a valid, maximally restrictive answer. An empty attention list is valid, and it is the only valid attention answer when `attention_marks` is empty. A model transport's dynamic answer may name only readers that appear in `args`: the artifact is the only input a model has, so any other reader is invented. Command and endpoint resolvers answer from directories of their own and are not held to this.
+OpenAPPA rejects a missing result, an extra result, and a `null` result. It rejects an extra key beside `version` and `answer`. Trust, audience, and attention values must come from the declaration, whether or not the tool reads them: a result no field reads establishes nothing, but the record keeps it, so it answers to the same vocabulary. `delta.audience` is `"public"` or a list of names from `declaration.audiences`, and never a group. `requires.audience` is an object with `contains`, `within`, or both: `{"contains": [...], "within": [...]}`. An empty audience list is a valid, maximally restrictive answer. An empty attention list is valid, and it is the only valid attention answer when `attention_marks` is empty. `artifact.args` is evidence for choosing among declared values; it is not a source of new policy labels. The same validation applies to model, command, and endpoint transports.
 
 ### Deployment coverage
 
@@ -589,16 +591,16 @@ Every transport receives one JSON object per consult:
 | `authority` | `hint`, `permits` | `tool`, `arguments`, `requirements` | `ruling` (`approve` or `deny`), optional `reason` |
 | `sanitizer` | `hint`, `on`, `permits`, `parameters` (for `tool_input`) | `tool` (when known), `body` | `body` |
 | `cast` | `hint`, `may_cast`, `tool` (when known) | `body` | `trust`, `audience` |
-| `dynamic` | `returns`, `trust_ranks`, `attention_marks` | `args` | one value per declared result |
+| `dynamic` | `returns`, `trust_ranks`, `audiences`, `attention_marks` | `args` | one value per declared result |
 | `membership` | empty | `group` | `readers` |
 
-The consult never carries the trajectory: no current label, no rank, no reader ids, no history, no user turn. A component judges the artifact against its own declaration and nothing else.
+The consult never carries trajectory state: no current label, no current rank or audience, no history, and no user turn. A component judges the artifact against the policy vocabulary in its declaration and nothing else.
 
 An endpoint or a command answers `{"version": 1, "answer": { … }}`. `version` must be `1`, `answer` must hold exactly the keys its kind defines, and no other key may appear. Anything else — an error status, a non-zero exit, a timeout, an oversized body, a malformed answer — is no answer: nothing is recorded, and the flow that asked stays where it was (a blocked call, a withheld result, the next cast in the cascade). A failed consult is never a denial.
 
 ### Model transports
 
-`claude-code` and `llm` render the same consult for a model: a fixed per-kind preamble and the `declaration` JSON as the system prompt, the `artifact` JSON as the only user turn, and an output schema built from the declaration — the `ruling` enum, the `may_cast` ranks, the declared results. The model answers the bare per-kind object; the artifact is treated as data, never as instructions. The prompt and the raw model output are never persisted; only the validated answer is.
+`claude-code` and `llm` render the same consult for a model: a fixed per-kind preamble and the `declaration` JSON as the system prompt, the `artifact` JSON as the only user turn, and an output schema built from the declaration — the `ruling` enum, the `may_cast` ranks, and the dynamic resolver's declared trust, audience, and attention vocabularies. The model answers the bare per-kind object; the artifact is treated as data, never as instructions. The prompt and the raw model output are never persisted; only the validated answer is.
 
 A model answer can do what the kind allows any implementation: an authority's ruling stays within `permits`, a cast's label within `may_cast`, and a sanitizer's derivation carries exactly the `permits` transition. A dynamic resolver has no ceiling, so a model bound there is trusted classifier evidence, exactly as an endpoint is. A model sanitizer deserves a second look: `permits` caps the label the derivation claims, not the bytes the model leaves in it, so keep its transition narrow and its `hint` exact.
 

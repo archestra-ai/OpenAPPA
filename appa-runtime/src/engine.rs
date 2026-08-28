@@ -1778,6 +1778,7 @@ impl RuntimeEngine {
         DynamicDeclaration::of(
             &uses.returns,
             registry.trust_chain(),
+            registry.audiences().map(str::to_string).collect(),
             registry
                 .attention_marks()
                 .map(|mark| mark.as_str().to_string())
@@ -2919,7 +2920,7 @@ mod tests {
     }
 
     #[test]
-    fn a_static_policy_mark_reaches_dynamic_consults_without_an_authority() {
+    fn static_policy_vocabularies_reach_dynamic_consults_without_an_authority() {
         let policy = appa_policy::Config::from_toml_str(
             r#"
                 version = 1
@@ -2936,6 +2937,10 @@ mod tests {
                 description = "A statically blocked operation."
                 delta = {}
                 requires = { attention = ["blocked"] }
+                [[tool]]
+                name = "private-data"
+                description = "Returns private data."
+                delta = { audience = ["private"] }
             "#,
         )
         .expect("a closed attention vocabulary does not require an authority");
@@ -2949,6 +2954,7 @@ mod tests {
         let declaration = engine.dynamic_declaration(&contract.uses[0]);
 
         assert_eq!(declaration.attention_marks, ["blocked"]);
+        assert_eq!(declaration.audiences, ["public", "private"]);
     }
 
     fn classifier_policy() -> appa_policy::Config {

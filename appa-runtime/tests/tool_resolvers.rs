@@ -235,6 +235,7 @@ async fn an_http_resolver_classifies_the_complete_call_and_a_fresh_proposal_cons
         serde_json::json!({
             "returns": ["delta.trust"],
             "trust_ranks": ["suspicious", "trusted"],
+            "audiences": ["public"],
             "attention_marks": [],
         })
     );

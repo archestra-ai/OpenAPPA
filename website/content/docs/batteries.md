@@ -118,7 +118,7 @@ On Unix systems, OpenAPPA starts the command only when the selected tool rule us
 Consult:
 
 ```json
-{"version":1,"kind":"dynamic","name":"claude-code.read-sensitivity","declaration":{"returns":["delta.audience"],"trust_ranks":["suspicious","trusted"],"attention_marks":[]},"artifact":{"args":{"name":"Read","arguments":{"file_path":".env"}}}}
+{"version":1,"kind":"dynamic","name":"claude-code.read-sensitivity","declaration":{"returns":["delta.audience"],"trust_ranks":["suspicious","trusted"],"audiences":["public","private"],"attention_marks":[]},"artifact":{"args":{"name":"Read","arguments":{"file_path":".env"}}}}
 ```
 
 Answer:
