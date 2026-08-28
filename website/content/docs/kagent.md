@@ -82,7 +82,7 @@ kubectl -n kagent wait endpoints/kagent-controller \
   --for='jsonpath={.subsets[0].addresses[0].ip}' --timeout=5m
 ```
 
-Enable the chart-managed `Harness`, label the selected `AgentTemplate`, and wait for preparation:
+Create the chart-managed `Harness`, label the `AgentTemplate` that may use it, and wait for preparation:
 
 ```sh
 helm upgrade kagent oci://ghcr.io/archestra-ai/charts/kagent-openappa \
@@ -106,6 +106,10 @@ kagentctl agent-instance create customer-support \
   --template customer-support-agent \
   --harness kagent-openappa
 ```
+
+`--harness kagent-openappa` sets the `harness` field in `CreateAgentInstance` to that Kubernetes resource name.
+
+kagent resolves the same-namespace `Harness` and `AgentTemplate`, then starts their latest ready revision.
 
 ## Run OpenAPPA inside the Actor
 
