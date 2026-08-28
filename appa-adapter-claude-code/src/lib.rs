@@ -169,6 +169,8 @@ struct WireEvent {
     prompt: Option<String>,
     #[serde(default)]
     tool_name: Option<String>,
+    /// The JSON spelling in Claude Code's `tool_input` hook field. This is
+    /// Claude Code's execution-boundary value, not Anthropic provider wire data.
     #[serde(default)]
     tool_input: Option<Box<serde_json::value::RawValue>>,
     #[serde(default)]
