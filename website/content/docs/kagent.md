@@ -46,11 +46,7 @@ The cluster operator installs those artifacts and supplies the policy `ConfigMap
 
 ## Select the OpenAPPA Harness
 
-A `Harness` is a kagent Kubernetes custom resource. It selects the runtime image, eligible workers, snapshot rules, and allowed `AgentTemplate` resources.
-
-An `AgentTemplate` defines one agent. An `AgentInstance` runs one prepared `AgentTemplate` and `Harness` pair as a Substrate `Actor`.
-
-Substrate is the kagent workload backend. kagent prepares an immutable revision, then Substrate uses its `ActorTemplate` to create the durable `Actor`.
+A kagent `Harness` is a Kubernetes resource that tells Substrate which workload image, workers, and snapshot rules to use when running an `AgentTemplate`.
 
 ```yaml
 # Proposed fields only. This excerpt omits existing required Harness fields.
@@ -67,7 +63,7 @@ spec:
     image: ghcr.io/archestra-ai/kagent-openappa@sha256:<digest>
 ```
 
-`policyRef` names a `ConfigMap` in the same Kubernetes namespace. A policy change creates a new prepared revision.
+`policyRef` names a `ConfigMap` in the same Kubernetes namespace.
 
 After kagent prepares the pair, an application team creates an `AgentInstance` with the OpenAPPA `Harness`.
 
