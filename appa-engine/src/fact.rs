@@ -226,6 +226,8 @@ pub enum Fact {
         #[serde(default)]
         memberships: Vec<crate::contract::PinnedMembership>,
         #[serde(default)]
+        requirement_cast: Option<crate::contract::PinnedRequirementCast>,
+        #[serde(default)]
         resolutions: Vec<crate::groups::GroupResolution>,
         subject: crate::basis::SubjectKey,
     },

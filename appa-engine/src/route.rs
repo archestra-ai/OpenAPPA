@@ -454,6 +454,7 @@ impl Search<'_> {
             requirement_gaps: eval.requirement_gaps.clone(),
             narrowing: eval.narrowing.clone(),
             unestablished: Vec::new(),
+            unknown_requirements: eval.unknown_requirements.clone(),
         };
         self.context
             .expansions
@@ -484,7 +485,7 @@ impl Search<'_> {
         );
         // Unresolved sources never move along a route, so what the block did not consume at
         // its check it does not consume here; the initial block is gated in `search`.
-        if !eval.consumed.is_empty() {
+        if !eval.consumed.is_empty() || !eval.unknown_requirements.is_empty() {
             return Ok(());
         }
         self.require_groups(context.contract, &eval, context.role)?;
@@ -596,6 +597,11 @@ impl Search<'_> {
             &self.has_reserved(),
             expansions,
         );
+        // An Unknown requirement is undecidable until a cast establishes it: no route runs
+        // through the call, so nothing it reads is required.
+        if !eval.unknown_requirements.is_empty() {
+            return Ok(Vec::new());
+        }
         self.require_groups(tool, &eval, CallRole::Ordinary)?;
         if !eval.consumed.is_empty() {
             let sources = check::unestablished_facts(&state.label, &eval.consumed);
@@ -925,7 +931,7 @@ mod tests {
             uses: vec![],
             name: ToolName::new(name),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires::default(),
@@ -955,8 +961,21 @@ mod tests {
     }
 
     fn requiring_trust(mut contract: ToolContract, floor: Trust) -> ToolContract {
-        contract.requires.label.trust_floor = Some(floor);
+        contract.requires.label.trust_floor = Some(Dim::Known(floor));
         contract
+    }
+
+    trait Written {
+        fn written(&mut self) -> &mut Vec<AudienceRequirement>;
+    }
+
+    impl Written for Dim<Vec<AudienceRequirement>> {
+        fn written(&mut self) -> &mut Vec<AudienceRequirement> {
+            let Dim::Known(requirements) = self else {
+                panic!("a test contract writes its requirements")
+            };
+            requirements
+        }
     }
 
     fn requiring_includes(mut contract: ToolContract, recipients: Audience) -> ToolContract {
@@ -964,6 +983,7 @@ mod tests {
             .requires
             .label
             .audience
+            .written()
             .push(AudienceRequirement::Includes(RecipientSpec::Static(
                 DeclaredAudience::literal(recipients),
             )));
@@ -975,15 +995,16 @@ mod tests {
             .requires
             .label
             .audience
+            .written()
             .push(AudienceRequirement::Cap(DeclaredAudience::literal(cap)));
         contract
     }
 
     fn narrowing_to(mut contract: ToolContract, trust: Option<Trust>, audience: Option<Audience>) -> ToolContract {
-        contract.delta = Some(Delta {
+        contract.delta = Delta {
             trust: trust.map(Dim::Known),
             audience: audience.map(|audience| Dim::Known(audience).into()),
-        });
+        };
         contract
     }
 
@@ -1118,6 +1139,7 @@ mod tests {
             proposed_effects: EffectSet::new(kinds.iter().map(|kind| effect(kind))).unwrap(),
             tool_resolutions: vec![],
             memberships: Vec::new(),
+            requirement_cast: None,
             subject: crate::basis::fixture_subject(&traj()),
             resolutions: vec![],
         }
@@ -1465,9 +1487,12 @@ mod tests {
             )]
         };
 
-        let mut unannotated = emitting("backup", &["backup"]);
-        unannotated.delta = None;
-        let registry = Deployment::of(vec![unannotated, requiring_prior(tool("wipe"), &["backup"])]).registry();
+        let mut unestablished = emitting("backup", &["backup"]);
+        unestablished.delta = Delta {
+            trust: Some(Dim::Unknown),
+            audience: None,
+        };
+        let registry = Deployment::of(vec![unestablished, requiring_prior(tool("wipe"), &["backup"])]).registry();
         assert_eq!(routes(&registry, &log, &wipe, depth(2)), prefix(Halt::Unestablished));
 
         let mut placeholder = emitting("backup", &["backup"]);
@@ -1476,6 +1501,7 @@ mod tests {
             .requires
             .label
             .audience
+            .written()
             .push(AudienceRequirement::Includes(RecipientSpec::Placeholder(
                 "to".to_string(),
             )));
@@ -1511,6 +1537,7 @@ mod tests {
                 resolution: CastResolution::Constant(DeclaredLabel {
                     trust: TRUSTED,
                     audience: DeclaredAudience::Public,
+                    attention: None,
                 }),
                 scope: Scope::default(),
             }])
@@ -1544,6 +1571,7 @@ mod tests {
             resolution: CastResolution::Constant(DeclaredLabel {
                 trust: TRUSTED,
                 audience: DeclaredAudience::declared([], [board.clone()]).unwrap(),
+                attention: None,
             }),
             scope: Scope::default(),
         }])

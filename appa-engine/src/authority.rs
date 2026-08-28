@@ -3,6 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::contract::{PinnedRequirementCast, RequirementAnswer, RequirementSlot};
 use crate::fact::EffectKind;
 use crate::groups::{DeclaredAudience, Expansions};
 use crate::label::{Adequacy, Audience, Dim, Dimension, EstablishedLabel, Label, ReaderId, Trust};
@@ -270,12 +271,16 @@ impl CastCeiling {
     }
 }
 
-/// A constant cast's declared complete label: a trust rank and a written audience whose
-/// groups resolve at the validation that reads it.
+/// A constant cast's declaration: a trust rank and a written audience whose groups resolve at
+/// the validation that reads them, and optionally the attention marks it answers a requirement
+/// with. Stamping a value reads the trust and audience; answering a contract's Unknown
+/// requirement slots reads the trust as the floor, the audience as `contains`, and the marks
+/// where declared — a constant that declares none cannot answer an Unknown attention slot.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeclaredLabel {
     pub trust: Trust,
     pub audience: DeclaredAudience,
+    pub attention: Option<Vec<MarkName>>,
 }
 
 impl DeclaredLabel {
@@ -283,6 +288,7 @@ impl DeclaredLabel {
         DeclaredLabel {
             trust: label.trust,
             audience: DeclaredAudience::literal(label.audience),
+            attention: None,
         }
     }
 
@@ -385,6 +391,80 @@ impl CastResolution {
         match self {
             CastResolution::Constant(constant) => constant.audience.groups(),
             CastResolution::Resolver { may_cast } => may_cast.audience.groups(),
+        }
+    }
+
+    /// Can this cast answer exactly `slots` for some call? A constant covers an attention slot
+    /// only when it declares marks; a resolver can answer a trust slot only under a non-empty
+    /// trust ceiling, since every pin outside the ceiling is refused. The one eligibility rule
+    /// the engine's listing and the load lint share.
+    pub(crate) fn can_answer_requirement(&self, slots: &[RequirementSlot]) -> bool {
+        match self {
+            CastResolution::Constant(constant) => {
+                !slots.contains(&RequirementSlot::Attention) || constant.attention.is_some()
+            }
+            CastResolution::Resolver { may_cast } => {
+                !slots.contains(&RequirementSlot::Trust) || !may_cast.trust.is_empty()
+            }
+        }
+    }
+
+    /// A constant's answer to exactly `slots`, or `None` where it cannot cover them — an
+    /// Unknown attention slot with no marks declared — and for a resolver, which is consulted.
+    /// Marks are answered in the pin's canonical form, so the answer equals its own pin.
+    pub(crate) fn requirement_answer(
+        &self,
+        slots: &[RequirementSlot],
+        expansions: &Expansions,
+    ) -> Option<RequirementAnswer> {
+        let CastResolution::Constant(constant) = self else {
+            return None;
+        };
+        let attention = match slots.contains(&RequirementSlot::Attention) {
+            true => {
+                let mut marks = constant.attention.clone()?;
+                marks.sort();
+                marks.dedup();
+                Some(marks)
+            }
+            false => None,
+        };
+        Some(RequirementAnswer {
+            trust: slots.contains(&RequirementSlot::Trust).then_some(constant.trust),
+            audience: slots
+                .contains(&RequirementSlot::Audience)
+                .then(|| constant.audience.resolve(expansions)),
+            attention,
+        })
+    }
+
+    /// Whether `pinned` is an answer this cast gives: a constant's own projection onto the slots
+    /// the pin covers, or a resolver answer within `may_cast` on every label dimension it
+    /// answers.
+    pub(crate) fn admits_requirement(&self, pinned: &PinnedRequirementCast, expansions: &Expansions) -> bool {
+        match self {
+            CastResolution::Constant(_) => {
+                let covered: Vec<RequirementSlot> = [
+                    RequirementSlot::Trust,
+                    RequirementSlot::Audience,
+                    RequirementSlot::Attention,
+                ]
+                .into_iter()
+                .filter(|slot| pinned.covers(*slot))
+                .collect();
+                self.requirement_answer(&covered, expansions)
+                    .is_some_and(|answer| answer == pinned.answer())
+            }
+            CastResolution::Resolver { may_cast } => {
+                let trust_admitted = pinned
+                    .required_trust()
+                    .is_none_or(|trust| may_cast.trust.contains(&trust));
+                let audience_admitted = pinned
+                    .answer()
+                    .audience
+                    .is_none_or(|audience| audience.within(&may_cast.audience.resolve(expansions)));
+                trust_admitted && audience_admitted
+            }
         }
     }
 

@@ -29,6 +29,8 @@ pub struct AuthorityReview {
 pub enum PlanError {
     #[error("the call has an unestablished dimension — a fact clears it, never a plan")]
     Unestablished(Vec<UnestablishedFact>),
+    #[error("the tool's requirement is unknown on {0:?} — a cast establishes it, never a plan")]
+    UnknownRequirement(Vec<crate::contract::RequirementSlot>),
     #[error("no authority registered as {0}")]
     UnknownAuthority(String),
     #[error("a ruling claims a gap the current block does not carry")]
@@ -85,6 +87,7 @@ mod tests {
     use crate::authority::{Authority, Mandate, Scope};
     use crate::contract::{Delta, LabelRequirements, Requires, ToolContract};
     use crate::fact::EffectSet;
+    use crate::label::Dim;
     use crate::label::Trust;
     use crate::names::MarkName;
     use crate::value::ToolName;
@@ -109,13 +112,13 @@ mod tests {
             uses: vec![],
             name: ToolName::new("wire"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![],
+                    trust_floor: Some(Dim::Known(TRUSTED)),
+                    audience: Dim::Known(vec![]),
                 },
                 ..Requires::default()
             },
@@ -157,6 +160,7 @@ mod tests {
             requirement_gaps: gaps,
             narrowing: None,
             unestablished: vec![],
+            unknown_requirements: Vec::new(),
         }
     }
 

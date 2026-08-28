@@ -1,8 +1,9 @@
-//! Load outcomes of the Unknown surface: an omitted `delta`, a pending-cast dimension, the
-//! reserved `"unknown"` token, and the shape of a `[[cast]]` — pinned at the TOML entry point.
+//! Load outcomes of the Unknown surface: what a declared tool's omitted `delta` means, a
+//! pending-cast dimension, the reserved `"unknown"` token, and the shape of a `[[cast]]` — pinned
+//! at the TOML entry point.
 
-use appa_engine::contract::{Delta, ToolContract};
-use appa_engine::label::Dimension;
+use appa_engine::contract::{Delta, RequirementSlot, ToolContract};
+use appa_engine::label::{Dim, Dimension};
 use appa_engine::registry::LoadError;
 use appa_policy::{Config, ConfigError};
 
@@ -20,8 +21,12 @@ fn contract<'a>(config: &'a Config, name: &str) -> &'a ToolContract {
         .unwrap_or_else(|| panic!("{name} registers"))
 }
 
+/// A declared tool with a label requirement and no `delta` used to be refused: its output was
+/// Unknown forever, so the requirement could never hold. Declaring the tool now says the
+/// deployment knows it, its unwritten dimensions restrict nothing, and the requirement is
+/// ordinary.
 #[test]
-fn an_unannotated_tool_with_a_label_requirement_is_refused() {
+fn a_declared_tool_with_a_label_requirement_and_no_delta_loads_neutral() {
     let cases = [
         ("trust floor", "requires = { trust = \"trusted\" }"),
         ("audience cap", "requires = { audience = { within = [\"public\"] } }"),
@@ -32,18 +37,18 @@ fn an_unannotated_tool_with_a_label_requirement_is_refused() {
     ];
     for (case, requires) in cases {
         let policy = tool_policy("send", requires);
-        assert!(
-            matches!(
-                Config::from_toml_str(&policy),
-                Err(ConfigError::Registry(LoadError::UnannotatedWithLabelRequirement(tool))) if tool == "send"
-            ),
-            "an unannotated tool with a {case} requirement must be refused"
+        let config = Config::from_toml_str(&policy)
+            .unwrap_or_else(|error| panic!("a declared tool with a {case} requirement loads: {error}"));
+        assert_eq!(
+            contract(&config, "send").delta,
+            Delta::NONE,
+            "{case}: an omitted delta is neutral"
         );
     }
 }
 
 #[test]
-fn an_unannotated_tool_with_history_or_attention_requirements_loads() {
+fn a_declared_tool_with_history_or_attention_requirements_loads() {
     let cases = [
         (
             "history",
@@ -54,14 +59,16 @@ fn an_unannotated_tool_with_history_or_attention_requirements_loads() {
     for (case, requires) in cases {
         let policy = tool_policy("send", requires);
         let config = Config::from_toml_str(&policy)
-            .unwrap_or_else(|error| panic!("an unannotated tool with a {case} requirement loads: {error}"));
+            .unwrap_or_else(|error| panic!("a declared tool with a {case} requirement loads: {error}"));
         let contract = contract(&config, "send");
-        assert_eq!(contract.delta, None, "{case}: the tool stays unannotated");
+        assert_eq!(contract.delta, Delta::NONE, "{case}: an omitted delta is neutral");
     }
 }
 
+/// One cast answers one dimension, so a confined result point cannot wait on two. Unconfined,
+/// nothing waits and both dimensions travel Unknown.
 #[test]
-fn a_delta_pending_in_both_dimensions_is_refused() {
+fn a_delta_unknown_in_both_dimensions_is_refused_only_at_a_confined_result_point() {
     let policy = format!(
         "{}\n[deployment]\nconfined_results = [\"scan\"]\n",
         tool_policy("scan", "delta = { trust = \"unknown\", audience = \"unknown\" }")
@@ -70,6 +77,10 @@ fn a_delta_pending_in_both_dimensions_is_refused() {
         Config::from_toml_str(&policy),
         Err(ConfigError::Registry(LoadError::DualPendingCast(tool))) if tool == "scan"
     ));
+
+    let unconfined = tool_policy("scan", "delta = { trust = \"unknown\", audience = \"unknown\" }");
+    let config = Config::from_toml_str(&unconfined).expect("an unconfined result point may leave both Unknown");
+    assert_eq!(contract(&config, "scan").pending_cast_dim(), Some(Dimension::Trust));
 }
 
 #[test]
@@ -88,30 +99,75 @@ fn a_pending_cast_dimension_with_a_requirement_on_it_is_refused() {
     ));
 }
 
+/// `"unknown"` in a requirement slot is the lazy form: the policy states no requirement, and a
+/// cast establishes it at the proposal. Each slot is its own monad — the others stay as written,
+/// and an omitted slot is still empty.
 #[test]
-fn a_pending_cast_tool_loads_only_when_its_result_is_confined() {
-    let unconfined = tool_policy("scan", "delta = { trust = \"unknown\" }");
+fn an_unknown_requirement_slot_loads_and_stays_unknown() {
+    let all = Config::from_toml_str(&tool_policy(
+        "send",
+        "requires = { trust = \"unknown\", audience = \"unknown\", attention = \"unknown\" }",
+    ))
+    .expect("every requirement slot may be unknown");
+    let requires = &contract(&all, "send").requires;
+    assert_eq!(requires.label.trust_floor, Some(Dim::Unknown));
+    assert_eq!(requires.label.audience, Dim::Unknown);
+    assert_eq!(requires.attention, Dim::Unknown);
+    assert_eq!(
+        requires.unknown_slots().collect::<Vec<_>>(),
+        [
+            RequirementSlot::Trust,
+            RequirementSlot::Audience,
+            RequirementSlot::Attention
+        ]
+    );
+
+    let one = Config::from_toml_str(&tool_policy("send", "requires = { trust = \"unknown\" }"))
+        .expect("one unknown slot loads");
+    let requires = &contract(&one, "send").requires;
+    assert_eq!(requires.label.trust_floor, Some(Dim::Unknown));
+    assert_eq!(requires.label.audience, Dim::Known(vec![]));
+    assert_eq!(requires.attention, Dim::Known(vec![]));
+    assert_eq!(requires.unknown_slots().collect::<Vec<_>>(), [RequirementSlot::Trust]);
+
     assert!(matches!(
-        Config::from_toml_str(&unconfined),
-        Err(ConfigError::Registry(LoadError::PendingCastUnconfined { tool })) if tool == "scan"
+        Config::from_toml_str(&tool_policy("send", "requires = { audience = \"nobody\" }")),
+        Err(ConfigError::BadAudience { .. })
     ));
+}
+
+/// `"unknown"` names the dimension the contract does not describe. Confining the result point
+/// is a separate deployment choice: it asks for a cast before the model reads the result, and
+/// without it the value carries its Unknown to whichever sink consumes it.
+#[test]
+fn an_unknown_dimension_loads_whether_or_not_its_result_point_is_confined() {
+    let unconfined = tool_policy("scan", "delta = { trust = \"unknown\" }");
+    let config = Config::from_toml_str(&unconfined).expect("an unconfined Unknown dimension loads");
+    assert_eq!(contract(&config, "scan").pending_cast_dim(), Some(Dimension::Trust));
+    assert!(
+        !config
+            .registry()
+            .profile()
+            .confines_result(&contract(&config, "scan").name)
+    );
 
     let confined = format!("{unconfined}\n[deployment]\nconfined_results = [\"scan\"]\n");
     let config = Config::from_toml_str(&confined).expect("a confined pending-cast tool loads");
     let contract = contract(&config, "scan");
     assert_eq!(contract.pending_cast_dim(), Some(Dimension::Trust));
+    assert!(config.registry().profile().confines_result(&contract.name));
 }
 
+/// `delta = {}` writes out what an omitted `delta` already says. The two spellings are one
+/// contract, and Unknown is reached only by asking for it: `"unknown"` on a dimension, or a
+/// resolver that owns one.
 #[test]
-fn an_empty_delta_and_an_omitted_delta_load_as_different_contracts() {
-    let omitted = Config::from_toml_str(&tool_policy("read", "")).expect("an unannotated tool loads");
+fn an_empty_delta_and_an_omitted_delta_load_as_the_same_contract() {
+    let omitted = Config::from_toml_str(&tool_policy("read", "")).expect("a tool with no delta loads");
     let neutral = Config::from_toml_str(&tool_policy("read", "delta = {}")).expect("a neutral tool loads");
 
-    let omitted = contract(&omitted, "read");
-    let neutral = contract(&neutral, "read");
-    assert_eq!(omitted.delta, None);
-    assert_eq!(neutral.delta, Some(Delta::NONE));
-    assert_ne!(omitted.delta, neutral.delta);
+    assert_eq!(contract(&omitted, "read").delta, Delta::NONE);
+    assert_eq!(contract(&neutral, "read").delta, contract(&omitted, "read").delta);
 }
 
 #[test]

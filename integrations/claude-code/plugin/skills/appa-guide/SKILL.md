@@ -162,7 +162,8 @@ Group the proposal by server. Show:
 - batteries to add, each with its one-sentence explanation;
 - existing behavior that stays unchanged, but only when it affects the result;
 - how the remaining installed tools will behave;
-- installed tools that will remain blocked;
+- installed tools the proposal leaves undeclared: decided call by call by a
+  cast covering undeclared tools when the config has one, blocked otherwise;
 - every configured MCP server whose tools could not be detected.
 
 Add one short **OpenAPPA pieces** line that names every primitive the proposal

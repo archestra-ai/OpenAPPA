@@ -1,11 +1,10 @@
 # The open (contrast) policy for the bench's `appa-open` arm
 # (`appa-corp-agent`): the same eighteen tools
-# with the neutral `delta = {}` annotation, no requirements, no authorities,
-# no sanitizer — every flow passes. Neutral rather than unannotated on
-# purpose: an unannotated tool's results fold Unknown, which would leave a
-# child's value return undecidable on this loop; the open arm must lose to
-# the guarded policy on security, never on plumbing. Same binary, same loop,
-# same tool schemas — only the policy differs.
+# with the neutral `delta = {}` annotation (an omitted `delta` says the
+# same), no requirements, no authorities, no sanitizer — every flow passes.
+# The open arm must lose to the guarded policy on security, never on
+# plumbing. Same binary, same loop, same tool schemas — only the policy
+# differs.
 
 [policy]
 version = 1

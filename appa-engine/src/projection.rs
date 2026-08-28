@@ -506,6 +506,7 @@ impl Projection {
                     proposed_effects,
                     tool_resolutions,
                     memberships,
+                    requirement_cast,
                     subject,
                     resolutions,
                     proposed_label: _,
@@ -514,7 +515,8 @@ impl Projection {
                         dispatch.clone(),
                         ResolvedCall::new_keyed(tool.clone(), *contract, arguments.clone())
                             .with_tool_resolutions(tool_resolutions.clone())
-                            .with_memberships(memberships.clone()),
+                            .with_memberships(memberships.clone())
+                            .with_requirement_cast(requirement_cast.clone()),
                     );
                     receiving_bounds.insert(dispatch.clone(), receiving.clone());
                     dispatch_resolutions.insert(dispatch.clone(), resolutions.clone());
@@ -1838,6 +1840,7 @@ mod tests {
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
                 tool_resolutions: Vec::new(),
                 memberships: Vec::new(),
+                requirement_cast: None,
                 subject: crate::basis::fixture_subject(&traj("a")),
                 resolutions: vec![],
             },
@@ -1869,6 +1872,7 @@ mod tests {
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
                 tool_resolutions: Vec::new(),
                 memberships: Vec::new(),
+                requirement_cast: None,
                 subject: crate::basis::fixture_subject(&traj("a")),
                 resolutions: vec![],
             },
@@ -1899,6 +1903,7 @@ mod tests {
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
                 tool_resolutions: Vec::new(),
                 memberships: Vec::new(),
+                requirement_cast: None,
                 subject: crate::basis::fixture_subject(&traj("a")),
                 resolutions: vec![],
             },
@@ -2289,6 +2294,7 @@ mod tests {
                 proposed_effects: EffectSet::new([]).unwrap(),
                 tool_resolutions: Vec::new(),
                 memberships: Vec::new(),
+                requirement_cast: None,
                 subject: crate::basis::fixture_subject(&traj("a")),
                 resolutions: vec![],
             },

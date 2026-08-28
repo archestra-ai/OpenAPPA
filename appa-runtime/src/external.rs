@@ -63,7 +63,9 @@ struct ConsultResponse {
 /// the one input it has, so any other reader is invented and the consult has no answer.
 fn grounded_model_answer(consult: &Consult, answer: serde_json::Value) -> Result<serde_json::Value, NoAnswerReason> {
     match &consult.body {
-        ConsultBody::Dynamic { artifact, .. } if !dynamic_answer_reads_readers_from(&answer, &artifact.args) => {
+        ConsultBody::Dynamic { artifact, .. } | ConsultBody::RequirementCast { artifact, .. }
+            if !dynamic_answer_reads_readers_from(&answer, &artifact.args) =>
+        {
             tracing::debug!(
                 name = consult.name,
                 "a model named a reader its artifact does not carry"
@@ -274,7 +276,7 @@ impl ExternalServices {
     pub async fn consult(&self, consult: &Consult, elicitation: Option<&Elicitation>) -> ConsultOutcome {
         let kind = consult.kind();
         let name = consult.name.as_str();
-        let Some(backend) = self.backends.get(&kind).and_then(|table| table.get(name)) else {
+        let Some(backend) = self.backends.get(&kind.binding()).and_then(|table| table.get(name)) else {
             tracing::debug!(kind = kind.wire_name(), name, "consult of an unregistered external");
             return ConsultOutcome::NoAnswer(NoAnswerReason::Unregistered);
         };

@@ -16,13 +16,14 @@ use crate::value::ToolName;
 /// result's actual state is established by a registered cast at admission, so the raw result
 /// is confined until then.
 ///
-/// A contract may carry no delta and no resolver-owned label field: the tool is **unannotated** —
-/// the deployment never described its output, which is not the same as declaring it neutral. An
-/// unannotated tool's result is admitted at `Unknown` in both dimensions
-/// (fail-closed: the fold absorbs Unknown, and any later check whose requirement consumes the
-/// dimension names the values a cast must resolve). The deliberate "this result carries nothing"
-/// annotation is the empty declared delta ([`Delta::NONE`], `delta = {}` on the config surface).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// An omitted dimension is neutral, not unknown: declaring the tool is what says the deployment
+/// knows it, and a dimension it does not describe restricts nothing ([`Delta::NONE`], `delta = {}`
+/// on the config surface, is the same statement written out). Unknown enters a declared contract
+/// only where the policy asks for it — `"unknown"` for a pending cast, or a resolver owning the
+/// dimension until its answer pins. A tool the policy never declares is checked as the reserved
+/// undeclared contract: its output and every requirement slot Unknown, so only a cast covering
+/// undeclared tools can decide a call to it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Delta {
     pub trust: Option<Dim<Trust>>,
     pub audience: Option<AudienceDelta>,
@@ -384,6 +385,153 @@ impl<'de> Deserialize<'de> for PinnedToolResolution {
     }
 }
 
+/// One cast's answer to the requirement slots a contract leaves Unknown: the floor the call's
+/// inputs must meet, the readers they must be disclosable to (read as `contains`), and the marks
+/// the call carries. A slot is answered only where the contract leaves it Unknown; a slot the
+/// contract writes is not a cast's to change.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequirementAnswer {
+    pub trust: Option<Trust>,
+    pub audience: Option<Audience>,
+    pub attention: Option<Vec<MarkName>>,
+}
+
+/// A cast's requirement answer pinned to the call it judged. The pin carries the digest of the
+/// canonical call it was answered for, which binds it to that call alone;
+/// [`crate::check::validate_requirement_cast`] re-derives the digest and holds the answer to the
+/// contract's Unknown slots and the cast's declaration, at the check and again on replay.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PinnedRequirementCast {
+    cast: crate::names::CastName,
+    call: crate::value::CanonicalDigest,
+    required_trust: Option<Trust>,
+    required_audience: Option<RequiredAudience>,
+    attention: Option<Vec<MarkName>>,
+}
+
+impl PinnedRequirementCast {
+    /// An answer covering at least one slot, with literal readers only; the marks are
+    /// canonicalized.
+    pub fn from_answer(
+        cast: crate::names::CastName,
+        call: crate::value::CanonicalDigest,
+        answer: RequirementAnswer,
+    ) -> Option<Self> {
+        let RequirementAnswer {
+            trust,
+            audience,
+            attention,
+        } = answer;
+        if trust.is_none() && audience.is_none() && attention.is_none() {
+            return None;
+        }
+        if matches!(&audience, Some(Audience::Restricted(readers)) if !readers.iter().all(ReaderId::is_literal)) {
+            return None;
+        }
+        let attention = attention.map(|mut marks| {
+            marks.sort();
+            marks.dedup();
+            marks
+        });
+        Some(PinnedRequirementCast {
+            cast,
+            call,
+            required_trust: trust,
+            required_audience: audience.map(|includes| RequiredAudience {
+                includes: Some(includes),
+                cap: None,
+            }),
+            attention,
+        })
+    }
+
+    pub fn cast(&self) -> &crate::names::CastName {
+        &self.cast
+    }
+
+    /// The digest of the canonical call this answer was given for.
+    pub fn answered_for(&self) -> &crate::value::CanonicalDigest {
+        &self.call
+    }
+
+    pub fn required_trust(&self) -> Option<Trust> {
+        self.required_trust
+    }
+
+    pub fn required_audience(&self) -> Option<&RequiredAudience> {
+        self.required_audience.as_ref()
+    }
+
+    pub fn attention(&self) -> Option<&[MarkName]> {
+        self.attention.as_deref()
+    }
+
+    pub fn covers(&self, slot: RequirementSlot) -> bool {
+        match slot {
+            RequirementSlot::Trust => self.required_trust.is_some(),
+            RequirementSlot::Audience => self.required_audience.is_some(),
+            RequirementSlot::Attention => self.attention.is_some(),
+        }
+    }
+
+    pub(crate) fn answer(&self) -> RequirementAnswer {
+        RequirementAnswer {
+            trust: self.required_trust,
+            audience: self
+                .required_audience
+                .as_ref()
+                .and_then(|required| required.includes.clone()),
+            attention: self.attention.clone(),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PinnedRequirementCast {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            cast: crate::names::CastName,
+            call: crate::value::CanonicalDigest,
+            required_trust: Option<Trust>,
+            required_audience: Option<RequiredAudience>,
+            attention: Option<Vec<MarkName>>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let audience = match wire.required_audience {
+            None => None,
+            Some(RequiredAudience {
+                includes: Some(includes),
+                cap: None,
+            }) => Some(includes),
+            Some(_) => {
+                return Err(serde::de::Error::custom(
+                    "a pinned requirement cast answers the audience as a `contains` floor only",
+                ));
+            }
+        };
+        let answer = PinnedRequirementCast::from_answer(
+            wire.cast,
+            wire.call,
+            RequirementAnswer {
+                trust: wire.required_trust,
+                audience,
+                attention: wire.attention.clone(),
+            },
+        )
+        .ok_or_else(|| serde::de::Error::custom("a pinned requirement cast must answer a slot with literal readers"))?;
+        if answer.attention != wire.attention {
+            return Err(serde::de::Error::custom(
+                "pinned requirement-cast attention is not in canonical order",
+            ));
+        }
+        Ok(answer)
+    }
+}
+
 /// The declared audience contribution: a written reader set — literal readers and groups an
 /// operation resolves when it reads them — or a pending cast.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -541,7 +689,7 @@ pub(crate) enum NotStatic {
 
 impl<'a> StaticContract<'a> {
     pub(crate) fn of(contract: &'a ToolContract, expansions: &Expansions) -> Result<StaticContract<'a>, NotStatic> {
-        let placeholder = contract.requires.label.audience.iter().any(|requirement| {
+        let placeholder = contract.requires.audience_requirements().iter().any(|requirement| {
             matches!(
                 requirement,
                 AudienceRequirement::Includes(RecipientSpec::Placeholder(_))
@@ -550,9 +698,8 @@ impl<'a> StaticContract<'a> {
         if !contract.uses.is_empty() || placeholder {
             return Err(NotStatic::Arguments);
         }
-        match &contract.delta {
-            Some(delta) if delta.pending_cast_dim().is_none() => {}
-            Some(_) | None => return Err(NotStatic::Unestablished),
+        if contract.delta.pending_cast_dim().is_some() {
+            return Err(NotStatic::Unestablished);
         }
         expansions
             .require(contract.groups())
@@ -599,17 +746,97 @@ pub enum HistoryRequirement {
     NoPrior(EffectKind),
 }
 
+/// The label side of a requirement. Each slot is `(T | empty) | unknown`, like a delta
+/// dimension: an omitted floor is no floor, an empty audience list demands nothing, and
+/// [`Dim::Unknown`] is a requirement the policy did not state — the engine cannot check a
+/// flow against it and asks a cast at the proposal, the point of need.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LabelRequirements {
-    pub trust_floor: Option<Trust>,
-    pub audience: Vec<AudienceRequirement>,
+    pub trust_floor: Option<Dim<Trust>>,
+    pub audience: Dim<Vec<AudienceRequirement>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Requires {
     pub label: LabelRequirements,
     pub history: Vec<HistoryRequirement>,
-    pub attention: Vec<MarkName>,
+    /// Marks the call must carry: the same monad as the label slots.
+    pub attention: Dim<Vec<MarkName>>,
+}
+
+/// One requirement slot a cast can establish when the policy left it Unknown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum RequirementSlot {
+    Trust,
+    Audience,
+    Attention,
+}
+
+impl RequirementSlot {
+    /// The slot as a policy author writes it.
+    pub fn wire_name(self) -> &'static str {
+        self.resolver_return().wire_name()
+    }
+
+    /// The resolver destination that answers this slot: what a requirement cast is asked for,
+    /// and what a written slot forbids a dynamic resolver from also owning.
+    pub fn resolver_return(self) -> ResolverReturn {
+        match self {
+            RequirementSlot::Trust => ResolverReturn::RequiredTrust,
+            RequirementSlot::Audience => ResolverReturn::RequiredAudience,
+            RequirementSlot::Attention => ResolverReturn::Attention,
+        }
+    }
+}
+
+impl Requires {
+    /// The static trust floor, when the policy stated one.
+    pub fn trust_floor(&self) -> Option<Trust> {
+        match self.label.trust_floor {
+            Some(Dim::Known(floor)) => Some(floor),
+            Some(Dim::Unknown) | None => None,
+        }
+    }
+
+    /// The static audience requirements; an Unknown slot contributes none, it is asked instead.
+    pub fn audience_requirements(&self) -> &[AudienceRequirement] {
+        match &self.label.audience {
+            Dim::Known(requirements) => requirements,
+            Dim::Unknown => &[],
+        }
+    }
+
+    /// The static marks; an Unknown slot contributes none, it is asked instead.
+    pub fn attention_marks(&self) -> &[MarkName] {
+        match &self.attention {
+            Dim::Known(marks) => marks,
+            Dim::Unknown => &[],
+        }
+    }
+
+    /// Whether the policy wrote anything into the slot — a value or `"unknown"`. A written slot
+    /// has an owner, so a resolver may not own the same destination.
+    pub(crate) fn declares(&self, slot: RequirementSlot) -> bool {
+        match slot {
+            RequirementSlot::Trust => self.label.trust_floor.is_some(),
+            RequirementSlot::Audience => !matches!(&self.label.audience, Dim::Known(list) if list.is_empty()),
+            RequirementSlot::Attention => !matches!(&self.attention, Dim::Known(marks) if marks.is_empty()),
+        }
+    }
+
+    /// The slots the policy left Unknown, in slot order.
+    pub fn unknown_slots(&self) -> impl Iterator<Item = RequirementSlot> + '_ {
+        [
+            (
+                RequirementSlot::Trust,
+                matches!(self.label.trust_floor, Some(Dim::Unknown)),
+            ),
+            (RequirementSlot::Audience, matches!(self.label.audience, Dim::Unknown)),
+            (RequirementSlot::Attention, matches!(self.attention, Dim::Unknown)),
+        ]
+        .into_iter()
+        .filter_map(|(slot, unknown)| unknown.then_some(slot))
+    }
 }
 
 /// A tool contract: name, routing tags, the compiled input schema, and the three
@@ -629,10 +856,11 @@ pub struct ToolContract {
     /// The resolvers this tool uses, each classifying a proposed call before the call is checked.
     #[serde(default)]
     pub uses: Vec<ToolResolverUse>,
-    /// The static output contribution. `None` is unannotated only when no tool-level resolver owns
-    /// trust or audience. `Some(Delta::NONE)` is the deliberate neutral annotation.
+    /// The static output contribution. An omitted `delta` is [`Delta::NONE`]: the tool is declared,
+    /// so its unwritten dimensions restrict nothing. A resolver owning a dimension still holds it
+    /// Unknown until its answer pins.
     #[serde(default)]
-    pub delta: Option<Delta>,
+    pub delta: Delta,
     pub emits: EffectSet,
     pub requires: Requires,
 }
@@ -651,11 +879,15 @@ impl ToolContract {
             .expect("load validation refuses a `uses` entry that reads a description the tool does not declare")
     }
 
-    /// The complete call a resolver reads: the tool name, its description when the policy declares
-    /// one, and the arguments. A tool without a description sends no `description` key.
-    fn complete_call(&self, arguments: &serde_json::Value) -> serde_json::Value {
+    /// The complete call as a consult artifact — what a resolver without an input mapping and a
+    /// requirement cast both read: the proposed tool name, this contract's description when the
+    /// policy declares one, and the canonical arguments. A tool without a description sends no
+    /// `description` key. The name is the one the actor proposed, not the contract's own: a
+    /// contract selected by pattern answers for many names, and a classifier that saw the pattern
+    /// would be judging a call it cannot identify.
+    pub fn complete_call(&self, called: &ToolName, arguments: &serde_json::Value) -> serde_json::Value {
         let mut call = serde_json::Map::new();
-        call.insert("name".into(), serde_json::Value::String(self.name.as_str().to_string()));
+        call.insert("name".into(), serde_json::Value::String(called.as_str().to_string()));
         if let Some(description) = &self.description {
             call.insert("description".into(), serde_json::Value::String(description.clone()));
         }
@@ -663,10 +895,15 @@ impl ToolContract {
         serde_json::Value::Object(call)
     }
 
-    fn source_value(&self, source: &ToolCallSource, arguments: &serde_json::Value) -> serde_json::Value {
+    fn source_value(
+        &self,
+        called: &ToolName,
+        source: &ToolCallSource,
+        arguments: &serde_json::Value,
+    ) -> serde_json::Value {
         match source {
-            ToolCallSource::Call => self.complete_call(arguments),
-            ToolCallSource::Name => serde_json::Value::String(self.name.as_str().to_string()),
+            ToolCallSource::Call => self.complete_call(called, arguments),
+            ToolCallSource::Name => serde_json::Value::String(called.as_str().to_string()),
             ToolCallSource::Description => serde_json::Value::String(self.described().to_string()),
             ToolCallSource::Arguments => arguments.clone(),
             ToolCallSource::Argument(argument) => arguments
@@ -680,38 +917,49 @@ impl ToolContract {
     /// otherwise one entry per declared input. The single definition — the runtime builds the
     /// request through it, and the check rebuilds the pinned value through it — so the tool name a
     /// no-input resolver sees is part of what its answer is pinned to.
-    pub fn resolver_args(&self, uses: &ToolResolverUse, arguments: &serde_json::Value) -> serde_json::Value {
+    pub fn resolver_args(
+        &self,
+        uses: &ToolResolverUse,
+        called: &ToolName,
+        arguments: &serde_json::Value,
+    ) -> serde_json::Value {
         match uses.inputs.is_empty() {
-            true => self.complete_call(arguments),
+            true => self.complete_call(called, arguments),
             false => serde_json::Value::Object(
                 uses.inputs
                     .iter()
-                    .map(|(input, source)| (input.clone(), self.source_value(source, arguments)))
+                    .map(|(input, source)| (input.clone(), self.source_value(called, source, arguments)))
                     .collect(),
             ),
         }
     }
 
     /// [`Self::resolver_args`] in its canonical spelling — the exact bytes a consult carries.
-    pub fn canonical_resolver_args(&self, uses: &ToolResolverUse, arguments: &serde_json::Value) -> Vec<u8> {
-        crate::params::canonical_bytes(&self.resolver_args(uses, arguments))
+    pub fn canonical_resolver_args(
+        &self,
+        uses: &ToolResolverUse,
+        called: &ToolName,
+        arguments: &serde_json::Value,
+    ) -> Vec<u8> {
+        crate::params::canonical_bytes(&self.resolver_args(uses, called, arguments))
     }
 
     /// What a pin stores, and what a re-derivation is compared against.
-    pub fn resolver_args_digest(&self, uses: &ToolResolverUse, arguments: &serde_json::Value) -> ResolverArgsDigest {
-        ResolverArgsDigest::of(&self.canonical_resolver_args(uses, arguments))
+    pub fn resolver_args_digest(
+        &self,
+        uses: &ToolResolverUse,
+        called: &ToolName,
+        arguments: &serde_json::Value,
+    ) -> ResolverArgsDigest {
+        ResolverArgsDigest::of(&self.canonical_resolver_args(uses, called, arguments))
     }
 
     /// The unresolved output shape before call-pinned answers are applied. Each dimension is
     /// derived independently: resolver-owned fields are `Unknown` until their pin applies, and
-    /// every other dimension is exactly what the static contract describes — its declared delta
-    /// value, or `Unknown` on an unannotated tool. Resolver ownership of one dimension never
-    /// establishes the other.
+    /// every other dimension is exactly what the static contract describes. Resolver ownership of
+    /// one dimension never establishes the other.
     pub fn output_label(&self, expansions: &Expansions) -> Label {
-        let mut label = match &self.delta {
-            Some(delta) => delta.output_label(expansions),
-            None => Label::new(Dim::Unknown, Dim::Unknown),
-        };
+        let mut label = self.delta.output_label(expansions);
         if self.resolver_owns(ResolverReturn::Trust) {
             label.trust = Dim::Unknown;
         }
@@ -724,10 +972,9 @@ impl ToolContract {
     /// The groups this contract's check reads: its delta's, its static recipients' and
     /// its cap's. Required before the check runs; a placeholder's group rides the call instead.
     pub fn groups(&self) -> impl Iterator<Item = &crate::names::GroupName> {
-        self.delta.iter().flat_map(Delta::groups).chain(
+        self.delta.groups().chain(
             self.requires
-                .label
-                .audience
+                .audience_requirements()
                 .iter()
                 .flat_map(AudienceRequirement::groups),
         )
@@ -753,7 +1000,7 @@ impl ToolContract {
     /// The single dimension this contract declares pending-cast, if any. An unannotated tool
     /// declares none: its Unknown output is admitted as-is, not confined awaiting a cast.
     pub fn pending_cast_dim(&self) -> Option<Dimension> {
-        self.delta.as_ref().and_then(Delta::pending_cast_dim)
+        self.delta.pending_cast_dim()
     }
 }
 
@@ -786,7 +1033,7 @@ mod tests {
     }
 
     #[test]
-    fn resolver_ownership_leaves_the_other_dimension_fail_closed() {
+    fn a_resolver_owns_its_dimension_and_leaves_the_rest_of_the_delta_alone() {
         use crate::groups::Expansions;
 
         let owner = |field: ResolverReturn| ToolContract {
@@ -799,20 +1046,29 @@ mod tests {
                 inputs: std::collections::BTreeMap::new(),
                 returns: BTreeSet::from([field]),
             }],
-            delta: None,
+            delta: crate::contract::Delta::NONE,
             emits: crate::fact::EffectSet::default(),
             requires: Requires::default(),
         };
 
-        // An unannotated dimension stays Unknown whatever the resolver owns: ownership of
-        // the audience never promotes trust off the fail-closed floor, and vice versa.
+        // A resolver holds the dimension it owns Unknown until its answer pins it. The
+        // dimension the contract describes neither statically nor through a resolver is the
+        // neutral one the declaration asked for.
         let label = owner(ResolverReturn::Audience).output_label(&Expansions::default());
-        assert_eq!(label.trust, Dim::Unknown, "trust was never described");
+        assert_eq!(
+            label.trust,
+            Dim::Known(Trust::new(u8::MAX)),
+            "trust is described by neither"
+        );
         assert_eq!(label.audience, Dim::Unknown, "the pin has not applied yet");
 
         let label = owner(ResolverReturn::Trust).output_label(&Expansions::default());
         assert_eq!(label.trust, Dim::Unknown, "the pin has not applied yet");
-        assert_eq!(label.audience, Dim::Unknown, "audience was never described");
+        assert_eq!(
+            label.audience,
+            Dim::Known(crate::label::Audience::Public),
+            "audience is described by neither"
+        );
 
         // With the pin applied, exactly the owned dimension resolves.
         let binding = ToolResolverUse {
@@ -836,7 +1092,11 @@ mod tests {
             label.audience,
             Dim::Known(Audience::restricted([ReaderId::new("alice")]))
         );
-        assert_eq!(label.trust, Dim::Unknown, "the undescribed dimension stays fail-closed");
+        assert_eq!(
+            label.trust,
+            Dim::Known(Trust::new(u8::MAX)),
+            "pinning the owned dimension leaves the undescribed one alone"
+        );
     }
 
     #[test]
@@ -879,7 +1139,7 @@ mod tests {
             description: Some("Runs one shell command and returns its output.".to_string()),
             parameters: crate::params::ToolParameters::open(),
             uses,
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires::default(),
         }
@@ -930,7 +1190,7 @@ mod tests {
         };
         let contract = described(vec![mapped.clone()]);
         assert_eq!(
-            contract.resolver_args(&mapped, &arguments),
+            contract.resolver_args(&mapped, &ToolName::new("Bash"), &arguments),
             serde_json::json!({
                 "whole": complete,
                 "tool": "Bash",
@@ -949,7 +1209,7 @@ mod tests {
         };
         assert!(!whole.requires_declared_description());
         assert_eq!(
-            described(vec![whole.clone()]).resolver_args(&whole, &arguments),
+            described(vec![whole.clone()]).resolver_args(&whole, &ToolName::new("Bash"), &arguments),
             complete
         );
 
@@ -963,14 +1223,17 @@ mod tests {
             "name": "Bash",
             "arguments": { "command": "git push origin main", "timeout": 60_000 },
         });
-        assert_eq!(undescribed.resolver_args(&whole, &arguments), bare);
+        assert_eq!(
+            undescribed.resolver_args(&whole, &ToolName::new("Bash"), &arguments),
+            bare
+        );
         let call_source = ToolResolverUse {
             inputs: BTreeMap::from([("whole".to_string(), ToolCallSource::Call)]),
             ..whole.clone()
         };
         assert!(!call_source.requires_declared_description());
         assert_eq!(
-            undescribed.resolver_args(&call_source, &arguments),
+            undescribed.resolver_args(&call_source, &ToolName::new("Bash"), &arguments),
             serde_json::json!({ "whole": bare })
         );
         let description_source = ToolResolverUse {
@@ -996,8 +1259,8 @@ mod tests {
             ..described(vec![uses.clone()])
         };
         assert_ne!(
-            read.resolver_args_digest(&uses, &arguments),
-            glob.resolver_args_digest(&uses, &arguments)
+            read.resolver_args_digest(&uses, &read.name, &arguments),
+            glob.resolver_args_digest(&uses, &glob.name, &arguments)
         );
     }
 
@@ -1011,7 +1274,7 @@ mod tests {
         let arguments = serde_json::json!({ "customer_id": "cust-7" });
         let pin = PinnedToolResolution::from_answer(
             uses.clone(),
-            contract.resolver_args_digest(&uses, &arguments),
+            contract.resolver_args_digest(&uses, &contract.name, &arguments),
             None,
             Some(Audience::restricted([ReaderId::new("support")])),
             None,

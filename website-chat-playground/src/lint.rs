@@ -102,7 +102,7 @@ mod tests {
             .next()
             .expect("the finance system provides list_invoices");
         assert!(matches!(
-            invoices.delta.as_ref().and_then(|delta| delta.audience.as_ref()),
+            invoices.delta.audience.as_ref(),
             Some(AudienceDelta::Static(audience))
                 if *audience == DeclaredAudience::restricted([
                     ReaderId::new("cfo@corp.example"),

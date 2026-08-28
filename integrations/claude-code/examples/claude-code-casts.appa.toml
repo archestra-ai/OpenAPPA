@@ -1,11 +1,11 @@
 # Example deployment for protecting a Claude Code session, with casts
-# resolving what the policy leaves unannotated. Read
+# resolving what the policy leaves Unknown. Read
 # `claude-code.appa.toml` first: this file is that policy plus the
 # cast wiring.
 #
-# A tool with no `delta` key is unannotated: its results enter Unknown
-# in both dimensions and never satisfy a sink's `requires` on their
-# own. A `[[cast]]` resolves such a value whole — every dimension at
+# A tool declaring `delta = { trust = "unknown" }` leaves its results
+# Unknown in that dimension: they never satisfy a sink's `requires` on
+# their own. A `[[cast]]` resolves such a value whole — every dimension at
 # once — either from a constant written here or from a classifier the
 # deployment binds under `[externals.casts]`. Applicable casts run in
 # registration order until one answers; a resolver that cannot answer
@@ -23,8 +23,10 @@
 # issue undeclared: the block names the value, and its remedy plans
 # name what would clear it.
 #
-# GitHub tools this file does not name are blocked, which is the
-# fail-closed default: name the ones your session needs.
+# GitHub tools this file does not name have every requirement unknown.
+# Only a cast with no `tags` reaches them, answering the trust, audience,
+# and review marks each call requires; this file registers none, so
+# such a call is blocked: name the ones your session needs.
 
 [policy]
 version = 1
@@ -230,12 +232,14 @@ delta = { trust = "unknown" }
 name = "mcp__github__get_me"
 delta = {}
 
-# Reading an issue is unannotated on purpose: no `delta` key, so the
-# text enters Unknown in both dimensions. The `github-content` constant
-# below resolves it the first time a sink asks.
+# Reading an issue declares its output Unknown on purpose, so the text
+# enters unclassified. The result point is not confined, so the model
+# reads the issue right away and the `github-content` constant resolves
+# the Unknown the first time a sink asks for it.
 [[policy.tool]]
 name = "mcp__github__issue_read"
 tags = ["github"]
+delta = { trust = "unknown" }
 
 # The sink. Only `trusted` content may become an issue; a value still
 # Unknown here is listed as unestablished, and a value cast to

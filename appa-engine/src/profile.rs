@@ -73,7 +73,6 @@ impl std::fmt::Display for CoverageSlot {
 pub enum ProviderRunConstruct {
     Requires,
     DynamicDelta,
-    PendingCastDelta,
 }
 
 impl std::fmt::Display for ProviderRunConstruct {
@@ -81,7 +80,6 @@ impl std::fmt::Display for ProviderRunConstruct {
         f.write_str(match self {
             ProviderRunConstruct::Requires => "a `requires`",
             ProviderRunConstruct::DynamicDelta => "a dynamic delta",
-            ProviderRunConstruct::PendingCastDelta => "a pending-cast delta",
         })
     }
 }
@@ -327,10 +325,10 @@ fn identity_document_from_registry(registry: &Registry, child_return: &ReturnPol
             "delta": tool.delta,
             "emits": tool.emits,
             "requires": {
-                "trust_floor": tool.requires.label.trust_floor,
-                "audience": sorted_set(&tool.requires.label.audience),
+                "trust_floor": trust_slot(tool.requires.label.trust_floor.as_ref()),
+                "audience": list_slot(&tool.requires.label.audience),
                 "history": sorted_set(&tool.requires.history),
-                "attention": sorted_set(&tool.requires.attention),
+                "attention": list_slot(&tool.requires.attention),
             },
         })
     };
@@ -384,6 +382,23 @@ fn canonical_value(value: &impl Serialize) -> serde_json::Value {
     serde_json::to_value(value).expect("an engine declaration serializes")
 }
 
+/// A requirement list slot in identity: its sorted members, or `"unknown"`.
+fn list_slot<T: Serialize>(slot: &Dim<Vec<T>>) -> serde_json::Value {
+    match slot {
+        Dim::Known(values) => serde_json::Value::Array(sorted_set(values)),
+        Dim::Unknown => serde_json::json!("unknown"),
+    }
+}
+
+/// The trust-floor slot in identity: the rank, `null` for no floor, or `"unknown"`.
+fn trust_slot(slot: Option<&Dim<Trust>>) -> serde_json::Value {
+    match slot {
+        None => serde_json::Value::Null,
+        Some(Dim::Known(floor)) => canonical_value(floor),
+        Some(Dim::Unknown) => serde_json::json!("unknown"),
+    }
+}
+
 fn sorted_set(values: &[impl Serialize]) -> Vec<serde_json::Value> {
     let mut rendered: Vec<serde_json::Value> = values.iter().map(canonical_value).collect();
     rendered.sort_by_cached_key(|value| {
@@ -412,10 +427,10 @@ fn identity_document(
                 "delta": tool.delta,
                 "emits": tool.emits,
                 "requires": {
-                    "trust_floor": tool.requires.label.trust_floor,
-                    "audience": sorted_set(&tool.requires.label.audience),
+                    "trust_floor": trust_slot(tool.requires.label.trust_floor.as_ref()),
+                    "audience": list_slot(&tool.requires.label.audience),
                     "history": sorted_set(&tool.requires.history),
-                    "attention": sorted_set(&tool.requires.attention),
+                    "attention": list_slot(&tool.requires.attention),
                 },
             })
         })
@@ -522,7 +537,9 @@ pub(crate) fn validate_coverage(
         check_readers(audience, || "deployment starting label".to_string())?;
     }
 
-    let registered = |tool: &ToolName| registry.tool(tool).is_some() || registry.provider_run_contract(tool).is_some();
+    // Coverage names declared tools only: an undeclared name resolves to the engine-built
+    // Unknown contract at a proposal, but a deployment declaration naming one is a typo.
+    let registered = |tool: &ToolName| registry.declared(tool) || registry.provider_run_contract(tool).is_some();
     for tool in declaration.executor_exceptions.keys() {
         if !registered(tool) {
             return Err(LoadError::UnknownDeploymentTool {
@@ -547,12 +564,15 @@ pub(crate) fn validate_coverage(
         }
     }
 
-    // Pending-cast admission needs a raw result the model has not seen.
+    // A confined result point admits its value only through a cast, and one cast answers one
+    // dimension. An unconfined Unknown dimension needs no such answer: it leaves admission
+    // unresolved and a sink resolves it, so both dimensions may be Unknown at once.
     for tool in registry.tools() {
-        if tool.pending_cast_dim().is_some() && !profile.confines_result(&tool.name) {
-            return Err(LoadError::PendingCastUnconfined {
-                tool: tool.name.as_str().to_string(),
-            });
+        if profile.confines_result(&tool.name)
+            && matches!(tool.delta.trust, Some(Dim::Unknown))
+            && matches!(tool.delta.audience, Some(crate::contract::AudienceDelta::PendingCast))
+        {
+            return Err(LoadError::DualPendingCast(tool.name.as_str().to_string()));
         }
     }
 
@@ -595,8 +615,6 @@ pub(crate) fn validate_coverage(
     for contract in registry.provider_run_contracts() {
         let construct = if contract.requires != crate::contract::Requires::default() {
             Some(ProviderRunConstruct::Requires)
-        } else if contract.pending_cast_dim().is_some() {
-            Some(ProviderRunConstruct::PendingCastDelta)
         } else if !contract.uses.is_empty() {
             Some(ProviderRunConstruct::DynamicDelta)
         } else {
@@ -662,6 +680,12 @@ pub(crate) fn covering_declaration(config: &RegistryConfig) -> ProfileDeclaratio
         confined_results: config
             .tools
             .iter()
+            // A result point whose label is Unknown in both dimensions cannot be confined: one
+            // cast answers one dimension, so the maximal profile leaves it to resolve at a sink.
+            .filter(|tool| {
+                !(matches!(tool.delta.trust, Some(Dim::Unknown))
+                    && matches!(tool.delta.audience, Some(crate::contract::AudienceDelta::PendingCast)))
+            })
             .map(|tool| crate::registry::base_tool_name(&tool.name).expect("test contracts have valid names"))
             .collect(),
         confined_child_return: true,
@@ -695,7 +719,7 @@ mod tests {
             uses: vec![],
             name: ToolName::new(name),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires::default(),
@@ -750,20 +774,38 @@ mod tests {
         declaration.confined_results.remove(&ToolName::new(name));
     }
 
+    /// An Unknown output dimension loads with or without a confined result point: confining it
+    /// asks for a cast before the model reads the result, and leaving it unconfined lets the
+    /// value carry the Unknown to whichever sink consumes it.
     #[test]
-    fn a_pending_cast_delta_needs_a_confined_result_point() {
+    fn an_unknown_output_dimension_loads_confined_or_not() {
         let mut scan = tool("scan");
-        scan.delta = Some(Delta {
+        scan.delta = Delta {
             trust: Some(Dim::Unknown),
             audience: None,
-        });
+        };
         let cfg = config(vec![scan]);
-        let mut declaration = covering_declaration(&cfg);
-        declaration.confined_results.clear();
-        declaration.confined_child_return = true; // the child crossing alone does not cover a result point
+        let mut unconfined = covering_declaration(&cfg);
+        unconfined.confined_results.clear();
+        assert!(open(cfg.clone(), unconfined, ReturnPolicy::Raw).is_ok());
+        assert!(open(cfg.clone(), covering_declaration(&cfg), ReturnPolicy::Raw).is_ok());
+    }
+
+    /// One cast answers one dimension, so a confined result point cannot wait on two. Unconfined,
+    /// nothing waits: both dimensions travel Unknown and resolve at a sink.
+    #[test]
+    fn both_dimensions_unknown_is_refused_only_at_a_confined_result_point() {
+        let mut scan = tool("scan");
+        scan.delta = Delta {
+            trust: Some(Dim::Unknown),
+            audience: Some(Dim::Unknown.into()),
+        };
+        let cfg = config(vec![scan]);
+        let mut confined = covering_declaration(&cfg);
+        confined.confined_results.insert(ToolName::new("scan"));
         assert!(matches!(
-            open(cfg.clone(), declaration, ReturnPolicy::Raw),
-            Err(LoadError::PendingCastUnconfined { tool }) if tool == "scan"
+            open(cfg.clone(), confined, ReturnPolicy::Raw),
+            Err(LoadError::DualPendingCast(name)) if name == "scan"
         ));
         assert!(open(cfg.clone(), covering_declaration(&cfg), ReturnPolicy::Raw).is_ok());
     }
@@ -852,19 +894,11 @@ mod tests {
                 let mut t = tool("search");
                 t.requires = Requires {
                     label: LabelRequirements {
-                        trust_floor: Some(Trust::new(1)),
-                        audience: vec![],
+                        trust_floor: Some(Dim::Known(Trust::new(1))),
+                        audience: Dim::Known(vec![]),
                     },
                     ..Requires::default()
                 };
-                t
-            }),
-            (ProviderRunConstruct::PendingCastDelta, {
-                let mut t = tool("search");
-                t.delta = Some(Delta {
-                    trust: Some(Dim::Unknown),
-                    audience: None,
-                });
                 t
             }),
             (ProviderRunConstruct::DynamicDelta, {
@@ -887,16 +921,23 @@ mod tests {
                     if tool == "search" && construct == expected
             ));
         }
-        for contract in [tool("search"), {
-            let mut t = tool("search");
-            t.delta = None;
-            t
-        }] {
-            let cfg = config(vec![contract]);
-            let mut declaration = covering_declaration(&cfg);
-            provider_run(&mut declaration, "search");
-            assert!(open(cfg, declaration, ReturnPolicy::Raw).is_ok());
-        }
+
+        // An Unknown output dimension is not one of them: a provider-run result reaches the
+        // model inside the inference call, so it is never confined, and its Unknown travels to
+        // whichever sink consumes it.
+        let mut search = tool("search");
+        search.delta = Delta {
+            trust: Some(Dim::Unknown),
+            audience: None,
+        };
+        let cfg = config(vec![search]);
+        let mut declaration = covering_declaration(&cfg);
+        provider_run(&mut declaration, "search");
+        assert!(open(cfg, declaration, ReturnPolicy::Raw).is_ok());
+        let cfg = config(vec![tool("search")]);
+        let mut declaration = covering_declaration(&cfg);
+        provider_run(&mut declaration, "search");
+        assert!(open(cfg, declaration, ReturnPolicy::Raw).is_ok());
 
         let cfg = config(vec![tool("search(query:*)")]);
         let mut declaration = covering_declaration(&cfg);
@@ -1063,12 +1104,12 @@ mod tests {
 
     fn narrowing_catalogue() -> RegistryConfig {
         let mut leak = tool("leak");
-        leak.delta = Some(Delta {
+        leak.delta = Delta {
             trust: None,
             audience: Some(AudienceDelta::Static(DeclaredAudience::literal(Audience::restricted(
                 [ReaderId::new("internal")],
             )))),
-        });
+        };
         let mut cfg = config(vec![leak]);
         cfg.sanitizers = vec![Sanitizer {
             name: SanitizerName::new("scrub"),
@@ -1320,7 +1361,10 @@ mod tests {
         // ones the engine would load: the identity is only meaningful for those.
         let mut origin = tool("fetch");
         origin.tags = vec![TagName::new("inbound")];
-        origin.delta = None;
+        origin.delta = Delta {
+            trust: Some(Dim::Unknown),
+            audience: None,
+        };
         let mut cfg = config(vec![origin]);
         cfg.casts = vec![crate::authority::Cast {
             name: crate::names::CastName::new("vouch"),
@@ -1409,10 +1453,10 @@ mod tests {
         let base = identity(&cfg, &ReturnPolicy::Raw, &profile);
 
         let mut delta_edit = cfg.clone();
-        delta_edit.tools[0].delta = Some(Delta {
+        delta_edit.tools[0].delta = Delta {
             trust: Some(Dim::Known(Trust::new(0))),
             audience: None,
-        });
+        };
         assert_ne!(identity(&delta_edit, &ReturnPolicy::Raw, &profile), base);
 
         let mut resolver_edit = cfg.clone();
