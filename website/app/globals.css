@@ -837,6 +837,397 @@ samp {
   height: auto;
 }
 
+/* Static integration diagrams use the documentation palette. */
+.kagent-deployment-figure,
+.kagent-profile-figure {
+  margin: 1.5rem 0 2rem;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-weak);
+  font-family: var(--font-mono);
+}
+
+.kagent-deployment-flow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 0.8fr) auto minmax(0, 1fr);
+  align-items: stretch;
+  gap: 0.4rem;
+  padding-top: 1rem;
+}
+
+.kagent-deployment-phase {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+}
+
+.kagent-deployment-phase-kagent {
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+}
+
+.kagent-deployment-phase > span {
+  color: var(--text);
+  font-size: 11px;
+}
+
+.kagent-deployment-phase > strong {
+  color: var(--text-strong);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.kagent-deployment-phase > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-top: auto;
+}
+
+.kagent-deployment-phase small {
+  padding: 0.15rem 0.3rem;
+  border: 1px solid var(--border-weak);
+  border-radius: 3px;
+  color: var(--text);
+  font-size: 10px;
+  line-height: 1.3;
+}
+
+.kagent-deployment-arrow {
+  align-self: center;
+  color: var(--icon);
+}
+
+.kagent-profile-actor {
+  margin-top: 1rem;
+  padding: 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+}
+
+.kagent-profile-actor-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-bottom: 0.65rem;
+  border-bottom: 1px solid var(--border-weak);
+}
+
+.kagent-profile-actor-title span {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.kagent-profile-actor-title strong {
+  color: var(--text-strong);
+  font-size: 12px;
+}
+
+.kagent-profile-process-flow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: stretch;
+  gap: 0.75rem;
+  padding: 1rem 0;
+}
+
+.kagent-profile-supervisor {
+  display: flex;
+  align-items: baseline;
+  gap: 0.65rem;
+  margin-top: 0.75rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--border-weak);
+  border-radius: 4px;
+  background: var(--bg-weak);
+}
+
+.kagent-profile-supervisor span,
+.kagent-profile-supervisor small {
+  color: var(--text);
+  font-size: 11px;
+}
+
+.kagent-profile-supervisor strong {
+  color: var(--text-strong);
+  font-size: 12px;
+}
+
+.kagent-profile-supervisor small {
+  margin-left: auto;
+}
+
+.kagent-profile-process {
+  display: flex;
+  min-height: 7rem;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.4rem;
+  padding: 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-weak);
+}
+
+.kagent-profile-process-appa {
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+}
+
+.kagent-profile-process span,
+.kagent-profile-process small {
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.kagent-profile-process strong {
+  color: var(--text-strong);
+  font-size: 14px;
+}
+
+.kagent-profile-exchange {
+  display: grid;
+  align-content: center;
+  gap: 0.5rem;
+  color: var(--accent);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.kagent-profile-request::after {
+  content: " →";
+}
+
+.kagent-profile-response::before {
+  content: "← ";
+}
+
+.kagent-profile-runtime-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-top: 0.65rem;
+  border-top: 1px solid var(--border-weak);
+  color: var(--text);
+  font-size: 11px;
+}
+
+.kagent-figure {
+  margin: 1.5rem 0 2rem;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-weak);
+  font-family: var(--font-mono);
+}
+
+.kagent-figure-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid var(--border-weak);
+  color: var(--text-strong);
+  font-size: 12px;
+}
+
+.kagent-figure-title span:last-child {
+  color: var(--text);
+}
+
+.kagent-figure-title span:first-child {
+  flex-shrink: 0;
+}
+
+.kagent-gates {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: stretch;
+  gap: 0.8rem;
+  padding: 1rem 0;
+}
+
+.kagent-gate {
+  display: flex;
+  min-height: 8rem;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.45rem;
+  padding: 0.8rem;
+  border: 1px solid var(--accent-border);
+  border-radius: 5px;
+  background: var(--accent-bg);
+}
+
+.kagent-gate > span,
+.kagent-gate > small {
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.kagent-gate > strong {
+  color: var(--text-strong);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.kagent-execution {
+  display: flex;
+  align-items: center;
+  align-self: center;
+  gap: 0.35rem;
+  color: var(--text);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.kagent-execution strong {
+  color: var(--text-strong);
+  font-size: 13px;
+}
+
+.kagent-execution span:first-child::after {
+  content: " →";
+}
+
+.kagent-execution span:last-child::before {
+  content: "→ ";
+}
+
+.kagent-runtime-band {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  padding: 0.8rem 1rem;
+  border: 1px solid var(--accent-border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.kagent-runtime-band strong {
+  color: var(--accent);
+}
+
+.kagent-decision-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border-weak);
+  color: var(--text);
+  font-size: 11px;
+  text-align: center;
+}
+
+.kagent-decision-strip strong {
+  color: var(--text-strong);
+}
+
+@media (max-width: 767px) {
+  .kagent-figure-title {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 0.2rem;
+  }
+
+  .kagent-gates {
+    grid-template-columns: 1fr;
+    gap: 0.6rem;
+  }
+
+  .kagent-gate {
+    min-height: 0;
+  }
+
+  .kagent-execution {
+    flex-direction: column;
+    gap: 0.2rem;
+  }
+
+  .kagent-execution span:first-child::after {
+    content: " ↓";
+  }
+
+  .kagent-execution span:last-child::before {
+    content: "↓ ";
+  }
+
+  .kagent-decision-strip {
+    grid-template-columns: 1fr;
+    gap: 0.35rem;
+    text-align: left;
+  }
+
+  .kagent-runtime-band {
+    align-items: stretch;
+    flex-direction: column;
+    text-align: center;
+  }
+
+  .kagent-runtime-band > span[aria-hidden="true"] {
+    transform: rotate(90deg);
+  }
+
+  .kagent-profile-actor-title,
+  .kagent-profile-runtime-meta,
+  .kagent-profile-supervisor {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+
+  .kagent-profile-supervisor small {
+    margin-left: 0;
+  }
+
+  .kagent-deployment-flow {
+    grid-template-columns: 1fr;
+    gap: 0.6rem;
+  }
+
+  .kagent-deployment-arrow {
+    justify-self: center;
+    transform: rotate(90deg);
+  }
+
+  .kagent-profile-process-flow {
+    grid-template-columns: 1fr;
+    gap: 0.75rem;
+  }
+
+  .kagent-profile-process {
+    min-height: 0;
+  }
+
+  .kagent-profile-exchange {
+    justify-items: center;
+  }
+
+  .kagent-profile-request::after {
+    content: " ↓";
+  }
+
+  .kagent-profile-response::before {
+    content: "↑ ";
+  }
+
+}
+
 .prose blockquote {
   border-left: 2px solid var(--border);
   padding-left: 1rem;
