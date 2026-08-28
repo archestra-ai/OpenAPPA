@@ -27,15 +27,29 @@ kagent uses Google ADK to run model, tool, and child-agent steps. An ordinary AD
 1. `BeforeToolCallbacks` send `HookEvent::ToolCall` before tool dispatch.
 2. `AfterToolCallbacks` send one terminal `HookEvent::ToolResult` after execution or error handling.
 
-:::kagent-enforcement:::
+```text
+Model              Google ADK         Go extension        appa-runtime       Tool
+  | FunctionCall       |                   |                    |              |
+  |------------------->| BeforeTool       |                    |              |
+  |                    |------------------>| ToolCall           |              |
+  |                    |                   |------------------->|              |
+  |                    |                   |<-------------------| Allow / deny |
+  |                    |-----------------------------------------------> Run   |
+  |                    |<----------------------------------------------- result |
+  |                    | AfterTool        |                    |              |
+  |                    |------------------>| ToolResult         |              |
+  |                    |                   |------------------->|              |
+  |                    |                   |<-------------------| result rule  |
+  |<-------------------| admitted result  |                    |              |
+```
 
-The Go extension sends both events to the local `appa-runtime` process. It applies the returned decision before kagent continues.
-
-OpenAPPA can block dispatch, keep the returned result, replace it, or withhold it.
+OpenAPPA can block dispatch, keep the result, replace it, or withhold it before model delivery.
 
 ## Install with Helm
 
-The integration release publishes one OCI Helm chart. It pins both images and includes an OpenAPPA `Harness` template that is disabled by default.
+The integration release publishes one OCI Helm chart. It pins both images and includes an OpenAPPA `Harness` template.
+
+The chart disables that template by default.
 
 Create the policy `ConfigMap`:
 
@@ -111,21 +125,36 @@ kagentctl agent-instance create customer-support \
 
 kagent resolves the same-namespace `Harness` and `AgentTemplate`, then starts their latest ready revision.
 
-## Run OpenAPPA inside the Actor
+## Architecture
 
-The Actor image runs `kagent-go-adk` and `appa-runtime` as separate processes in one container.
+```text
++---------------------------- Kubernetes cluster -----------------------------+
+|                                                                              |
+|  kubectl / Helm -> Kubernetes API -> patched kagent controller               |
+|                    Harness + AgentTemplate + policy ConfigMap                 |
+|                                      |                                       |
+|                                      | prepared Revision + ActorTemplate      |
+|                                      v                                       |
+|  Application -- A2A --> +------------- Substrate Actor -------------------+  |
+|                          |                                                  |  |
+|  Model provider <------> |  kagent-go-adk                                  |  |
+|  Tools / MCP / A2A <-->  |  Google ADK + OpenAPPA Go extension             |  |
+|                          |           | ToolCall / ToolResult                |  |
+|                          |           v /hook        ^ HookDecision          |  |
+|                          |  appa-runtime -> appa-adapter-kagent -> Engine   |  |
+|                          |                                  |               |  |
+|                          |                                  v               |  |
+|                          |                        /data/openappa/appa.db      |  |
+|                          +--------------------------------------------------+  |
+|                                                                              |
++------------------------------------------------------------------------------+
+```
 
-The Actor becomes ready only after `appa-runtime` passes its health check.
+The Actor image runs `kagent-go-adk` and `appa-runtime` as separate processes. The Actor becomes ready after `appa-runtime` passes its health check.
 
-:::kagent-profile:::
+The Go extension implements existing ADK callbacks inside `kagent-go-adk`. It sends kagent `JSON` to the local `/hook` endpoint.
 
-The Go extension implements existing ADK callback and plugin interfaces inside `kagent-go-adk`.
-
-Each callback sends kagent `JSON` to `http://127.0.0.1:8787/hook`. `appa-adapter-kagent` translates the request into `HookEvent` and `HookDecision` values.
-
-kagent declares `/data` as durable storage in the `ActorTemplate`. Substrate mounts it when it creates the `Actor`.
-
-OpenAPPA stores its database at `/data/openappa/appa.db`.
+Substrate mounts the `ActorTemplate` `/data` directory. OpenAPPA stores its database at `/data/openappa/appa.db`.
 
 ## Map every execution path
 
@@ -141,6 +170,19 @@ Most paths use existing Google ADK callbacks. The table marks proposed kagent ca
 | Automatic `preload_memory` | Context-bound `memory.Service` decorator before `Search` | The same decorator before model delivery |
 | MCP App internal tool or resource | Proposed owning-Actor gate → `ToolCall` | The same proposed gate → `ToolResult` |
 | Registered long-running work | Proposed `BeforeBackgroundStart` → `ToolCall` and `ChildStart` | Proposed `OnBackgroundResult` → `SpawnResult` |
+
+For `single_turn`, `task`, remote A2A, and registered long-running work, the child return follows this sequence:
+
+```text
+Parent ADK -> Go extension: path-specific dispatch callback
+Go extension -> appa-runtime: ToolCall(spawn = true)
+appa-runtime -> Go extension: AllowCall + prepared child binding
+Go extension -> appa-runtime: ChildStart(actual child ID)
+Child, remote agent, or worker -> Go extension: terminal result
+Go extension -> appa-runtime: SpawnResult
+appa-runtime -> Go extension: Ack | ChildReturn | Block
+Go extension -> Parent ADK: admitted child result
+```
 
 `BeforeModelCallbacks` confirm that each model-bound result already passed admission. `plugin.OnUserMessageCallback` rejects forged task responses.
 
