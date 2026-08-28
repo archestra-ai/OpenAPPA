@@ -37,14 +37,17 @@
 
 use appa_engine::candidate::DerivedVia;
 use appa_engine::check::UnestablishedFact;
-use appa_engine::contract::{PinnedMembership, PinnedToolResolution, RequiredAudience, ToolResolverUse};
+use appa_engine::contract::{
+    PinnedMembership, PinnedRequirementCast, PinnedToolResolution, RequiredAudience, RequirementSlot, ResolverReturn,
+    ToolResolverUse,
+};
 pub(crate) use appa_engine::engine::ForkStatus;
 use appa_engine::engine::{Engine, EngineError};
 use appa_engine::execute::{AuthorityEvidence, AuthorityReview};
 use appa_engine::fact::{BoundaryKind, CloseOutcome, EffectSet, Fact, ReturnDerivation};
 use appa_engine::groups::GroupExpansion;
 use appa_engine::label::{Audience, Dimension, EstablishedLabel, Label, PartialLabel, ReaderId, Trust};
-use appa_engine::names::{GroupName, MarkName};
+use appa_engine::names::{CastName, GroupName, MarkName};
 use appa_engine::plan::{ExecutableRemedyPlan, PlanId, PlannedBlock, RemedyPlan, RequiredRuling};
 use appa_engine::profile::PolicyFileKey as EnginePolicyFileKey;
 use appa_engine::projection::Views;
@@ -55,10 +58,11 @@ use appa_engine::transition::Blocked as CoreBlocked;
 /// the event or passed with the read.
 pub(crate) use appa_engine::transition::EngineView;
 use appa_engine::transition::{
-    ApplicableCast, ChildFollowUp, ChildReport, ChildSubmission, EngineEvent as CoreEvent, Evidence, EvidenceRequest,
-    FollowUp, ForkBinding, OfferConsult, OfferExecution, OfferFollowUp, OfferOutcome, OutcomeBody as CoreOutcomeBody,
-    OutcomeFollowUp, ProposalBatch, ProposalBatchId, ProposedCall as CoreProposedCall, Released, SpawnMark,
-    ToolOutcome as CoreToolOutcome, ToolReport, TransitionError, TransitionRefusal, ValidatedFactBatch,
+    ApplicableCast, ApplicableRequirementCast, ChildFollowUp, ChildReport, ChildSubmission, EngineEvent as CoreEvent,
+    Evidence, EvidenceRequest, FollowUp, ForkBinding, OfferConsult, OfferExecution, OfferFollowUp, OfferOutcome,
+    OutcomeBody as CoreOutcomeBody, OutcomeFollowUp, ProposalBatch, ProposalBatchId, ProposedCall as CoreProposedCall,
+    Released, SpawnMark, ToolOutcome as CoreToolOutcome, ToolReport, TransitionError, TransitionRefusal,
+    ValidatedFactBatch,
 };
 use appa_engine::value::{
     ChildReturnId, DispatchId as EngineDispatchId, ForkId, OfferId as EngineOfferId, OfferNonce as EngineOfferNonce,
@@ -140,6 +144,53 @@ pub enum ExternalRequest {
         value: ValueId,
         ask: CastAsk,
     },
+    /// Answer the requirement slots a proposed call's contract leaves Unknown, before the call
+    /// is proposed. The casts travel in registration order; a constant among them arrives
+    /// already answered.
+    RequirementCast {
+        call: appa_engine::value::CanonicalDigest,
+        ask: RequirementAsk,
+    },
+}
+
+/// One requirement ask as the session answers it: the casts still to try, and the complete
+/// call every resolver consult carries under the declaration naming the slots to answer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RequirementAsk {
+    pub casts: Vec<ApplicableRequirementCast>,
+    pub declaration: DynamicDeclaration,
+    pub args: serde_json::Value,
+}
+
+impl RequirementAsk {
+    /// The same ask continued past `cast`: only the casts registered after it are left.
+    fn after(&self, cast: &CastName) -> RequirementAsk {
+        RequirementAsk {
+            casts: self
+                .casts
+                .iter()
+                .skip_while(|candidate| candidate.name != *cast)
+                .skip(1)
+                .cloned()
+                .collect(),
+            declaration: self.declaration.clone(),
+            args: self.args.clone(),
+        }
+    }
+}
+
+/// One cast's requirement answer as the session obtained it: a declared constant echoed
+/// back, or a resolver's wire answer still to be read against the policy.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RequirementVerdict {
+    pub cast: CastName,
+    pub answer: RequirementLabel,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RequirementLabel {
+    Declared(appa_engine::contract::RequirementAnswer),
+    Classified(DynamicAnswer),
 }
 
 /// One cast ask as the session answers it: the casts still to try, in registration order,
@@ -235,6 +286,12 @@ pub enum ExternalEvidence {
         verdict: Option<CastVerdict>,
         ask: CastAsk,
     },
+    /// `None` means every cast the ask still carried was asked and none answered usably.
+    RequirementCast {
+        call: appa_engine::value::CanonicalDigest,
+        verdict: Option<RequirementVerdict>,
+        ask: RequirementAsk,
+    },
 }
 
 impl ExternalEvidence {
@@ -248,6 +305,10 @@ impl ExternalEvidence {
             (
                 ExternalEvidence::PendingCast { source: mine, .. },
                 ExternalEvidence::PendingCast { source: theirs, .. },
+            ) => mine == theirs,
+            (
+                ExternalEvidence::RequirementCast { call: mine, .. },
+                ExternalEvidence::RequirementCast { call: theirs, .. },
             ) => mine == theirs,
             _ => false,
         }
@@ -272,6 +333,14 @@ impl ExternalEvidence {
                 ask,
             } => Some(ExternalRequest::PendingCast {
                 source: *source,
+                ask: ask.after(&verdict.cast),
+            }),
+            ExternalEvidence::RequirementCast {
+                call,
+                verdict: Some(verdict),
+                ask,
+            } => Some(ExternalRequest::RequirementCast {
+                call: *call,
                 ask: ask.after(&verdict.cast),
             }),
             _ => None,
@@ -1011,7 +1080,11 @@ impl RuntimeEngine {
                 detail: "deciding a proposal for a trajectory the log has not opened".to_string(),
             });
         };
-        let (tool_pins, memberships) = match self.answers_for(&views, &resolved, evidence) {
+        let CallAnswers {
+            tool_resolutions,
+            memberships,
+            requirement_cast,
+        } = match self.answers_for(&views, &resolved, evidence) {
             Ok(answers) => answers,
             Err(Resolution::Feedback(text)) => return Ok(deny(text)),
             Err(Resolution::Consult(requests)) => return Ok(EngineDecision::deliver(Next::ResolveExternal(requests))),
@@ -1019,8 +1092,9 @@ impl RuntimeEngine {
         let proposed = CoreProposedCall {
             tool: ToolName::new(call.tool.clone()),
             arguments: call.arguments.get().as_bytes().to_vec(),
-            tool_resolutions: tool_pins,
+            tool_resolutions,
             memberships,
+            requirement_cast,
         };
         let expansions = self.membership_evidence(evidence);
         // A deployment that does not control context releases the marked call
@@ -1316,13 +1390,16 @@ impl RuntimeEngine {
                 // rewritten arguments before the engine judges it. A rewrite that stays in its
                 // contract carries the call's own answers, and a derivation the engine cannot
                 // mint a call from is the engine's to refuse.
+                // A requirement cast judged the call as proposed, never a rewrite of it, so the
+                // input stage carries no requirement answer: the engine refuses a rewrite into
+                // a contract that leaves a slot Unknown.
                 let (tool_resolutions, memberships) = match self
                     .engine
                     .resolve_call(call.tool().clone(), derived.as_str().as_bytes())
                 {
                     Ok(rewritten) if rewritten.contract_id() != call.contract_id() => {
                         match self.answers_for(&views, &rewritten, evidence) {
-                            Ok(answers) => answers,
+                            Ok(answers) => (answers.tool_resolutions, answers.memberships),
                             Err(Resolution::Consult(requests)) => {
                                 return Ok(EngineDecision::deliver(Next::ResolveExternal(requests)));
                             }
@@ -1646,32 +1723,170 @@ impl RuntimeEngine {
 
     /// Every answer a call's contract declares, from the evidence gathered so far, or the
     /// consults still owed: the resolvers it uses and the placeholder groups its arguments name.
+    /// Every answer the call must carry before it is proposed: its tool-level resolver pins,
+    /// its membership pins, and the cast answer for the requirement slots its contract leaves
+    /// Unknown. Every consult still owed goes out in one round; feedback ends the proposal.
     fn answers_for(
         &self,
         views: &Views,
         resolved: &ResolvedCall,
         evidence: &[ExternalEvidence],
-    ) -> Result<(Vec<PinnedToolResolution>, Vec<PinnedMembership>), Resolution> {
+    ) -> Result<CallAnswers, Resolution> {
         let contract = self
             .engine
             .registry()
             .contract(resolved)
             .expect("a resolved call names its registered contract");
-        let tools = self.tool_resolutions_for(views, contract, resolved, evidence);
-        let memberships = self.memberships_for(contract, resolved, evidence);
-        match (tools, memberships) {
-            (Ok(tool_pins), Ok(memberships)) => Ok((tool_pins, memberships)),
-            (Err(Resolution::Feedback(text)), _) | (_, Err(Resolution::Feedback(text))) => {
-                Err(Resolution::Feedback(text))
-            }
-            (Err(Resolution::Consult(mut tools)), Err(Resolution::Consult(memberships))) => {
-                tools.extend(memberships);
-                Err(Resolution::Consult(tools))
-            }
-            (Err(Resolution::Consult(requests)), Ok(_)) | (Ok(_), Err(Resolution::Consult(requests))) => {
-                Err(Resolution::Consult(requests))
+        let mut requests = Vec::new();
+        let tools = gather(
+            &mut requests,
+            self.tool_resolutions_for(views, contract, resolved, evidence),
+        )?;
+        let memberships = gather(&mut requests, self.memberships_for(contract, resolved, evidence))?;
+        let requirement = gather(&mut requests, self.requirement_cast_for(contract, resolved, evidence))?;
+        match (tools, memberships, requirement) {
+            (Some(tool_resolutions), Some(memberships), Some(requirement_cast)) => Ok(CallAnswers {
+                tool_resolutions,
+                memberships,
+                requirement_cast,
+            }),
+            _ => {
+                // A group both an argument and a cast's ceiling name is asked for once.
+                let mut distinct: Vec<ExternalRequest> = Vec::with_capacity(requests.len());
+                for request in requests {
+                    if !distinct.contains(&request) {
+                        distinct.push(request);
+                    }
+                }
+                Err(Resolution::Consult(distinct))
             }
         }
+    }
+
+    /// The cast answer for the requirement slots `contract` leaves Unknown: none where it
+    /// leaves nothing Unknown; the engine's own listing tried in order otherwise, a declared
+    /// constant answering without a consult. No cast reaching the tool is a denial the model
+    /// hears — for an undeclared tool, that it is undeclared. An answer the engine would refuse
+    /// continues the cascade past its cast, and a cascade that runs dry is a denial.
+    fn requirement_cast_for(
+        &self,
+        contract: &appa_engine::contract::ToolContract,
+        resolved: &ResolvedCall,
+        evidence: &[ExternalEvidence],
+    ) -> Result<Option<PinnedRequirementCast>, Resolution> {
+        let slots: Vec<RequirementSlot> = contract.requires.unknown_slots().collect();
+        if slots.is_empty() {
+            return Ok(None);
+        }
+        let tool = resolved.tool().as_str();
+        let gathered = self.membership_evidence(evidence);
+        let expansions = gathered.expansions();
+        let listed = match self.engine.requirement_casts(resolved, &expansions) {
+            Ok(listed) => listed,
+            Err(TransitionError::MembershipNeeded { needed }) => {
+                return match self.membership_consult(&gathered, needed) {
+                    Ok(MembershipConsult::Requests(requests)) => Err(Resolution::Consult(requests)),
+                    Ok(MembershipConsult::Unresolved(group)) => {
+                        Err(Resolution::Feedback(unresolved_group(tool, &group)))
+                    }
+                    Err(refusal) => Err(Resolution::Feedback(format!("[appa] {tool}: {refusal}"))),
+                };
+            }
+            Err(error) => return Err(Resolution::Feedback(format!("[appa] {tool}: {error}"))),
+        };
+        if listed.is_empty() {
+            return Err(Resolution::Feedback(uncovered_requirements(
+                self.engine.registry().classify(resolved.tool()),
+                tool,
+                &slots,
+            )));
+        }
+        let digest = resolved.digest();
+        let reported = evidence.iter().find_map(|entry| match entry {
+            ExternalEvidence::RequirementCast { call, verdict, .. } if *call == digest => Some((verdict, entry)),
+            _ => None,
+        });
+        let Some((verdict, entry)) = reported else {
+            // A constant listed first answers here, with no evidence round: the engine projected
+            // it onto the slots, so its pin is admitted by construction.
+            if let Some(first) = listed.first()
+                && let Some(answer) = first.constant.clone()
+            {
+                let pinned = PinnedRequirementCast::from_answer(first.name.clone(), digest, answer);
+                let admitted = pinned.filter(|pinned| {
+                    let judged = resolved.clone().with_requirement_cast(Some(pinned.clone()));
+                    self.engine.requirement_cast_admits(&judged, &expansions)
+                });
+                return match admitted {
+                    Some(pinned) => Ok(Some(pinned)),
+                    None => Err(Resolution::Feedback(no_requirement_cast_answered(tool))),
+                };
+            }
+            let declaration = self.requirement_declaration(&slots);
+            let ask = RequirementAsk {
+                casts: listed,
+                declaration,
+                args: contract.complete_call(resolved.tool(), resolved.arguments()),
+            };
+            return Err(Resolution::Consult(vec![ExternalRequest::RequirementCast {
+                call: digest,
+                ask,
+            }]));
+        };
+        let Some(verdict) = verdict else {
+            return Err(Resolution::Feedback(no_requirement_cast_answered(tool)));
+        };
+        let continued = || match entry.continued() {
+            Some(continued) => Err(Resolution::Consult(vec![continued])),
+            None => Err(Resolution::Feedback(no_requirement_cast_answered(tool))),
+        };
+        let Some(pinned) = self.requirement_pin(verdict, digest) else {
+            return continued();
+        };
+        let judged = resolved.clone().with_requirement_cast(Some(pinned.clone()));
+        match self.engine.requirement_cast_admits(&judged, &expansions) {
+            true => Ok(Some(pinned)),
+            false => continued(),
+        }
+    }
+
+    /// What a resolver cast is told to answer: the Unknown slots as declared returns.
+    fn requirement_declaration(&self, slots: &[RequirementSlot]) -> DynamicDeclaration {
+        let returns = slots.iter().map(|slot| slot.resolver_return()).collect();
+        self.dynamic_declaration(&returns)
+    }
+
+    /// The pin a verdict yields, or `None` where the answer cannot be read against the policy:
+    /// an unknown rank, an audience ceiling where a floor was asked, or nothing answered.
+    fn requirement_pin(
+        &self,
+        verdict: &RequirementVerdict,
+        call: appa_engine::value::CanonicalDigest,
+    ) -> Option<PinnedRequirementCast> {
+        let answer = match &verdict.answer {
+            RequirementLabel::Declared(answer) => answer.clone(),
+            RequirementLabel::Classified(classified) => {
+                let chain = self.engine.registry().trust_chain();
+                let trust = match classified.required_trust.as_deref() {
+                    Some(name) => Some(chain.rank_of(name)?),
+                    None => None,
+                };
+                let audience = match &classified.required_audience {
+                    Some(required) if required.cap.is_none() => Some(resolved_audience(required.includes.as_ref()?)),
+                    Some(_) => return None,
+                    None => None,
+                };
+                appa_engine::contract::RequirementAnswer {
+                    trust,
+                    audience,
+                    attention: classified
+                        .attention
+                        .clone()
+                        .map(|marks| marks.into_iter().map(MarkName::new).collect()),
+                }
+            }
+        };
+        PinnedRequirementCast::from_answer(verdict.cast.clone(), call, answer)
     }
 
     fn tool_resolutions_for(
@@ -1691,8 +1906,8 @@ impl RuntimeEngine {
         let mut pins = Vec::new();
         let mut requests = Vec::new();
         for uses in &contract.uses {
-            let args = contract.resolver_args(uses, resolved.arguments());
-            let asked = contract.resolver_args_digest(uses, resolved.arguments());
+            let args = contract.resolver_args(uses, resolved.tool(), resolved.arguments());
+            let asked = contract.resolver_args_digest(uses, resolved.tool(), resolved.arguments());
             // A classification pinned to this call in an act the trajectory still has
             // prepared — an open offer, an unspent approval — stands: the re-proposal spells
             // the call the act was prepared for, and a resolver that may answer differently
@@ -1714,7 +1929,7 @@ impl RuntimeEngine {
                 None => requests.push(ExternalRequest::ToolResolution {
                     uses: uses.clone(),
                     args,
-                    declaration: self.dynamic_declaration(uses),
+                    declaration: self.dynamic_declaration(&uses.returns),
                 }),
                 Some(answer) => {
                     let rank = |name: &str, what: &str| {
@@ -1771,12 +1986,12 @@ impl RuntimeEngine {
         Ok(pins)
     }
 
-    /// What one dynamic resolver binding declares: the results it owns and the policy's
-    /// vocabulary its answer may use.
-    fn dynamic_declaration(&self, uses: &ToolResolverUse) -> DynamicDeclaration {
+    /// What one dynamic consult declares: the results to answer and the policy's vocabulary the
+    /// answer may use — a resolver binding's own returns, or a requirement cast's asked slots.
+    fn dynamic_declaration(&self, returns: &std::collections::BTreeSet<ResolverReturn>) -> DynamicDeclaration {
         let registry = self.engine.registry();
         DynamicDeclaration::of(
-            &uses.returns,
+            returns,
             registry.trust_chain(),
             registry.audiences().map(str::to_string).collect(),
             registry
@@ -1963,16 +2178,19 @@ impl RuntimeEngine {
                 continue;
             };
             let group = GroupName::new(group.clone());
-            if named != resolver.as_str()
-                || !registry.groups().contains(&group)
-                || gathered.answers.contains_key(&group)
-            {
+            if named != resolver.as_str() || !registry.groups().contains(&group) {
                 continue;
             }
             let expansion = readers
                 .as_ref()
                 .and_then(|readers| GroupExpansion::new(group.clone(), readers.iter().map(ReaderId::new)).ok());
-            gathered.answers.insert(group, expansion);
+            // An expansion outranks a no-answer for the same group, whichever was reported first.
+            match (gathered.answers.get(&group), expansion) {
+                (Some(Some(_)), _) => {}
+                (_, expansion) => {
+                    gathered.answers.insert(group, expansion);
+                }
+            }
         }
         gathered
     }
@@ -2072,6 +2290,47 @@ impl RuntimeEngine {
         }
         Ok(pins)
     }
+}
+
+/// Everything a proposal carries beyond its tool and arguments, gathered before it is judged.
+struct CallAnswers {
+    tool_resolutions: Vec<PinnedToolResolution>,
+    memberships: Vec<PinnedMembership>,
+    requirement_cast: Option<PinnedRequirementCast>,
+}
+
+/// One answer's contribution to a proposal's round of consults: the answer, or the consults it
+/// still owes gathered beside the others'. Feedback ends the round.
+fn gather<T>(requests: &mut Vec<ExternalRequest>, answer: Result<T, Resolution>) -> Result<Option<T>, Resolution> {
+    match answer {
+        Ok(answer) => Ok(Some(answer)),
+        Err(Resolution::Consult(consults)) => {
+            requests.extend(consults);
+            Ok(None)
+        }
+        Err(Resolution::Feedback(text)) => Err(Resolution::Feedback(text)),
+    }
+}
+
+/// The denial for a call whose contract leaves requirement slots Unknown that no cast reaches:
+/// an undeclared tool with no cast covering undeclared tools, or a declared tool whose lazy
+/// slots no cast's scope reaches.
+fn uncovered_requirements(kind: appa_engine::registry::ToolKind, tool: &str, slots: &[RequirementSlot]) -> String {
+    match kind {
+        appa_engine::registry::ToolKind::Undeclared => {
+            format!("[appa] tool {tool} is not declared in this policy and no cast covers undeclared tools")
+        }
+        _ => format!(
+            "[appa] {tool}: its policy leaves {} unknown and no cast reaches it; the call was not checked",
+            slots.iter().map(|slot| slot.wire_name()).collect::<Vec<_>>().join(", ")
+        ),
+    }
+}
+
+fn no_requirement_cast_answered(tool: &str) -> String {
+    format!(
+        "[appa] no registered cast answered what {tool} requires; the call is not decided yet and may be proposed again"
+    )
 }
 
 fn unresolved_group(tool: &str, group: &GroupName) -> String {
@@ -2951,7 +3210,7 @@ mod tests {
             .next()
             .expect("the classifier-backed tool is registered");
 
-        let declaration = engine.dynamic_declaration(&contract.uses[0]);
+        let declaration = engine.dynamic_declaration(&contract.uses[0].returns);
 
         assert_eq!(declaration.attention_marks, ["blocked"]);
         assert_eq!(declaration.audiences, ["public", "private"]);
@@ -3235,6 +3494,7 @@ mod tests {
                 requirement_gaps: vec![],
                 narrowing: None,
                 unestablished: vec![],
+                unknown_requirements: vec![],
             },
             plans: vec![
                 RemedyPlan::Executable(plan(3)),

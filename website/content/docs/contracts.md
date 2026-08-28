@@ -269,7 +269,7 @@ The `[deployment]` table declares the capabilities of your hosting environment�
 
 During policy load, OpenAPPA validates that all declared constructs are supported by the deployment. If a policy requires a capability the deployment lacks, loading fails with an explicit error:
 - A `tool_output` sanitizer requires a deployment that can withhold raw tool results.
-- A pending cast (`delta = { trust = "unknown" }`) requires raw results to be withheld until classified.
+- A tool listed in `confined_results` requires a deployment that can withhold raw results; a pending cast (`delta = { trust = "unknown" }`) on an unlisted tool crosses unresolved and is cast where a check needs it.
 - A `[child]` section requires child context isolation.
 - Provider-run tools (tools executed directly inside a provider inference call) cannot declare `requires`, dynamic resolvers, or pending casts.
 
@@ -282,7 +282,7 @@ A tool contract is short: a name, a `delta`, and often `effects` and a `[tool.re
 | Review Area | Red Flag / Misconfiguration | Safe / Correct Pattern | Spec Invariant & Risk |
 |---|---|---|---|
 | **`delta` Accuracy** | Tool reads sensitive customer data but declares `delta = {}` or omits `delta`. | Declare explicit restriction, e.g. `delta = { audience = ["support"] }`. | Undermines downstream checks; over-restricting is safe (costs reach, doesn't leak). |
-| **Unannotated Tools** | Omitting `delta` while declaring `requires`. | Use `delta = {}` if output carries no labels, or separate unannotated tools. | Loader refuses `requires` on unannotated tools; unannotated output enters as `Unknown`. |
+| **Unknown slots** | Omitting `delta` in the belief that the result enters as `Unknown`. | Omit `delta`, or write `delta = {}`, for a result that carries no restriction; write `delta = { trust = "unknown" }` for one a cast must classify. | An omitted slot is empty and restricts nothing; only `"unknown"` and a resolver-owned field enter as `Unknown`. |
 | **`effects` Completeness** | Mutation or deployment tool omits `effects`. | Declare all side effects, e.g., `effects = ["migration.applied", "mutation"]`. | Under-declared effects pass `excludes` checks silently without triggering history constraints. |
 | **Dynamic Recipients** | Static readers when an ACL depends on an argument. | Use a placeholder for a recipient the call names — a literal reader, `public`, or an `@group` — or a dynamic resolver for an argument-derived reader set. | Static readers can ignore the proposed argument; placeholder groups and dynamic resolution pin their answer to the call. |
 | **Overlapping resolvers** | Two `uses` entries whose `returns` include the same destination. | Give each destination one owner. | It does not load because a contract field cannot have two values. |
@@ -323,7 +323,8 @@ excludes = ["migration.applied"]                       # Neither recorded nor re
 ### Key contract rules
 
 - **`delta` is strictly restrictive**: A tool's delta can only narrow the audience or lower trust. Within an annotated `delta`, an omitted dimension defaults to identity (unchanged).
-- **Pending-cast deltas (`delta = { trust = "unknown" }` or `delta = { audience = "unknown" }`)**: Holds one label dimension pending resolution by a registered `[[cast]]` at admission. At most one dimension may be pending-cast. Declaring both `requires` and `unknown` delta on the same dimension is a load error. `"unknown"` is reserved: it can name neither a trust rank nor a reader.
+- **Pending-cast deltas (`delta = { trust = "unknown" }` or `delta = { audience = "unknown" }`)**: Holds a label dimension pending resolution by a registered `[[cast]]`. Both dimensions may be pending unless the tool is listed in `confined_results`, where one cast must answer the withheld result whole. Declaring both `requires` and `unknown` delta on the same dimension is a load error. `"unknown"` is reserved: it can name neither a trust rank nor a reader.
+- **Unknown requirements (`requires = { trust = "unknown" }`, `audience = "unknown"`, or `attention = "unknown"`)**: Leaves the slot to a cast whose scope covers the tool. The cast reads the proposed call and answers the slot; the answer is pinned to that call and holds on replay. A resolver and `"unknown"` cannot own the same slot. A tool the policy never declares has every slot Unknown, and only a cast without `tags` reaches it.
 - **Dynamic argument placeholders (`$arg`)**: `requires.audience = { contains = ["$recipient"] }` evaluates `$recipient` against the actual call argument at runtime. The argument value can be a literal reader ID, the reserved word `public`, or an `@group` expanded by the membership resolver. Placeholders are supported only inside `contains`. The argument must be declared as a required top-level string in the tool's `parameters` schema.
 - **Dynamic resolvers (`uses`)**: Attaches registered resolvers to classify proposed calls. Each entry maps required inputs from `$tool_call`. Mapped arguments must be required top-level properties in the tool schema. Without an explicit input mapping, a resolver receives the complete tool call: `name`, `description` when declared, and `arguments`.
 - **Single field ownership**: Each contract field has one source: a static policy value or an attached resolver whose `returns` includes that destination. Static and resolver ownership cannot overlap. Two attached resolvers cannot own the same destination.
@@ -455,9 +456,11 @@ Registering `name = "attest-schema"` is sufficient; OpenAPPA applies it natively
 
 ## Casts
 
-Unannotated tools return data in an `Unknown` label state. A `[[cast]]` resolves the whole value at once, using static rules or external classifiers: its answer is one complete label that preserves every dimension already established and makes every unresolved dimension concrete, admitted atomically or not at all.
+Pending-cast tools return data in an `Unknown` label state. A `[[cast]]` resolves the whole value at once, using static rules or external classifiers: its answer is one complete label that preserves every dimension already established and makes every unresolved dimension concrete, admitted atomically or not at all.
 
 A block lists each Unknown source by value under `unestablished`, together with the dimensions no applicable cast reaches. No remedy plan clears that slot; only an admitted cast does. While any source in a block is unestablished, the block offers no executable plan.
+
+A cast also answers the other Unknown: a `requires` slot written as `"unknown"`, and every slot of a tool the policy never declares (an omitted `requires` slot is empty and asks nothing). The runtime consults the cast with the proposed call — kind `requirement-cast`, the same `args` a dynamic resolver without an input mapping reads — and the cast answers `requires.trust`, `requires.audience` (its `contains` readers), and `requires.attention` in the dynamic-answer vocabulary. A constant answers from its declared label, and covers the attention slot only when it declares `attention` (`[]` for no marks). A cast with `tags` reaches the declared tools its tags cover; only a cast without `tags` reaches an undeclared tool. Casts are consulted in registration order until one answers; an answer outside the cast's `may_cast` ceiling continues to the next cast, and when none answers the call is blocked.
 
 ```toml
 [[cast]]
@@ -519,7 +522,7 @@ The runtime consults a resolver-backed cast with the common envelope. The commen
 
 The response is `{"version": 1, "answer": {"trust": "suspicious", "audience": "public"}}`, where `audience` is `"public"` or an array of literal reader ids; a model builtin answers the inner object alone. Anything else — an error status, a timeout, a malformed body, or an empty answer — is no answer: nothing is recorded, the next applicable cast is consulted, and when none answers the call stays undecided and can be proposed again.
 
-A tool contract can also declare a pending dimension with `delta = { trust = "unknown" }`. When configured in `confined_results`, the runtime withholds raw results from the model until the cast evaluates the value. If the resolved label restricts the trajectory, OpenAPPA presents a narrowing prompt to the agent before delivering the data.
+A tool contract can also declare a pending dimension with `delta = { trust = "unknown" }`. When the tool is listed in `confined_results`, the runtime withholds raw results from the model until the cast evaluates the value; if the resolved label restricts the trajectory, OpenAPPA presents a narrowing prompt to the agent before delivering the data. Not listed, the result crosses unresolved and the cast runs where a check needs it.
 
 ## Externals
 

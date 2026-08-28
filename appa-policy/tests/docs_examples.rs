@@ -88,10 +88,11 @@ fn the_cast_example_in_the_policy_reference_loads() {
         .expect("the casts section declares a cast");
 
     // A scoped cast is unreachable — a load error — until a tool in its scope can use it, and
-    // the guide shows the declarations without their tools. One unannotated tool tagged for
-    // the classifier's scope is the origin the declarations assume.
+    // the guide shows the declarations without their tools. One tool tagged for the
+    // classifier's scope, declaring the Unknown a cast resolves, is the origin the
+    // declarations assume.
     let policy = as_policy(&format!(
-        "[[tool]]\nname = \"read_ticket\"\ntags = [\"support\"]\n\n{declarations}"
+        "[[tool]]\nname = \"read_ticket\"\ntags = [\"support\"]\ndelta = {{ trust = \"unknown\" }}\n\n{declarations}"
     ));
     let config = match Config::from_toml_str(&policy) {
         Ok(config) => config,

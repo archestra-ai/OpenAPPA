@@ -96,8 +96,11 @@ Rebuild the label state at the moment of the block by folding the
 admitted values in order, then compare against the blocked tool's
 declarations in the policy. Distinguish at least:
 
-- **Undeclared tool** — no policy entry for the name; not a label
-  problem.
+- **Undeclared tool** — no policy entry for the name and no cast
+  covering undeclared tools (a `[[policy.cast]]` with no `tags`), so
+  the call was not judged at all; not a label problem. With such a
+  cast, the cast's answer is the tool's `requires` and a block is a
+  requirement gap like any other.
 - **Unestablished dimension** — a consumed value was never labeled;
   name the tool that produced it.
 - **Requirement gap** — the session's accumulated label cannot satisfy

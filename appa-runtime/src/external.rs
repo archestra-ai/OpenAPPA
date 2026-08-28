@@ -85,10 +85,12 @@ struct ConsultResponse {
 /// diagnostic short and body-free: it may reach a blocking hook's stderr.
 fn validate_model_answer(consult: &Consult, answer: serde_json::Value) -> Result<serde_json::Value, NoAnswerReason> {
     match &consult.body {
-        ConsultBody::Dynamic { declaration, .. } => match model_dynamic_answer_error(&answer, declaration) {
-            Some(detail) => Err(NoAnswerReason::MalformedAnswer(detail)),
-            None => Ok(answer),
-        },
+        ConsultBody::Dynamic { declaration, .. } | ConsultBody::RequirementCast { declaration, .. } => {
+            match model_dynamic_answer_error(&answer, declaration) {
+                Some(detail) => Err(NoAnswerReason::MalformedAnswer(detail)),
+                None => Ok(answer),
+            }
+        }
         _ => Ok(answer),
     }
 }
@@ -293,7 +295,7 @@ impl ExternalServices {
     pub async fn consult(&self, consult: &Consult, elicitation: Option<&Elicitation>) -> ConsultOutcome {
         let kind = consult.kind();
         let name = consult.name.as_str();
-        let Some(backend) = self.backends.get(&kind).and_then(|table| table.get(name)) else {
+        let Some(backend) = self.backends.get(&kind.binding()).and_then(|table| table.get(name)) else {
             tracing::debug!(kind = kind.wire_name(), name, "consult of an unregistered external");
             return ConsultOutcome::NoAnswer(NoAnswerReason::Unregistered);
         };
@@ -969,6 +971,16 @@ mod tests {
     #[test]
     fn a_model_dynamic_answer_names_the_undeclared_audience_field() {
         let consult = dynamic_consult("judge", serde_json::json!({"command": "pwd"}));
+        let requirement_cast = match &consult.body {
+            ConsultBody::Dynamic { declaration, artifact } => Consult {
+                name: consult.name.clone(),
+                body: ConsultBody::RequirementCast {
+                    declaration: declaration.clone(),
+                    artifact: artifact.clone(),
+                },
+            },
+            _ => unreachable!("the fixture is dynamic"),
+        };
         let answer = |reader: &str| {
             serde_json::json!({
                 "delta.trust": "trusted",
@@ -978,13 +990,15 @@ mod tests {
                 "requires.attention": [],
             })
         };
-        assert!(validate_model_answer(&consult, answer("bob@example.com")).is_ok());
-        assert_eq!(
-            validate_model_answer(&consult, answer("secret")),
-            Err(NoAnswerReason::MalformedAnswer(
-                "field=delta.audience value=\"secret\" allowed=declaration.audiences".to_string()
-            ))
-        );
+        for consult in [&consult, &requirement_cast] {
+            assert!(validate_model_answer(consult, answer("bob@example.com")).is_ok());
+            assert_eq!(
+                validate_model_answer(consult, answer("secret")),
+                Err(NoAnswerReason::MalformedAnswer(
+                    "field=delta.audience value=\"secret\" allowed=declaration.audiences".to_string()
+                ))
+            );
+        }
     }
 
     fn membership_consult(name: &str, group: &str) -> Consult {

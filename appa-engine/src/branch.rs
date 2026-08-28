@@ -203,7 +203,7 @@ mod tests {
             uses: vec![],
             name: ToolName::new("read"),
             tags: vec![],
-            delta: Some(crate::contract::Delta::NONE),
+            delta: crate::contract::Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: crate::contract::Requires::default(),
@@ -233,6 +233,7 @@ mod tests {
             proposed_effects: EffectSet::default(),
             tool_resolutions: Vec::new(),
             memberships: Vec::new(),
+            requirement_cast: None,
             subject: crate::basis::fixture_subject(&trajectory),
             resolutions: vec![],
         });
@@ -743,6 +744,7 @@ mod tests {
             proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
             tool_resolutions: Vec::new(),
             memberships: Vec::new(),
+            requirement_cast: None,
             subject: crate::basis::fixture_subject(&child()),
             resolutions: vec![],
         });
@@ -951,6 +953,7 @@ mod tests {
             proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
             tool_resolutions: Vec::new(),
             memberships: Vec::new(),
+            requirement_cast: None,
             subject: crate::basis::fixture_subject(&child()),
             resolutions: vec![],
         });

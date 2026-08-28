@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::candidate::CallStage;
 use crate::contract::{
-    AudienceRequirement, HistoryRequirement, PinnedToolResolution, RecipientSpec, StaticContract, ToolContract,
-    ToolResolverUse,
+    AudienceRequirement, HistoryRequirement, PinnedRequirementCast, PinnedToolResolution, RecipientSpec,
+    RequirementSlot, StaticContract, ToolContract, ToolResolverUse,
 };
 use crate::fact::EffectKind;
 use crate::groups::Expansions;
@@ -52,6 +52,9 @@ pub struct RawBlock {
     pub requirement_gaps: Vec<Gap>,
     pub narrowing: Option<Narrowing>,
     pub unestablished: Vec<UnestablishedFact>,
+    /// Requirement slots the policy left Unknown. Like `unestablished`, no plan clears them: a
+    /// cast establishes the requirement, or the call stays undecidable.
+    pub unknown_requirements: Vec<crate::contract::RequirementSlot>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -69,6 +72,10 @@ pub(crate) struct StateEval {
     pub(crate) requirement_gaps: Vec<Gap>,
     pub(crate) narrowing: Option<Narrowing>,
     pub(crate) consumed: Vec<Dimension>,
+    /// Requirement slots the policy left Unknown and no pinned requirement cast answered: the
+    /// check cannot judge the flow against them, so the call is not decidable until a cast
+    /// establishes each one.
+    pub(crate) unknown_requirements: Vec<crate::contract::RequirementSlot>,
 }
 
 /// The partial label the trajectory would hold after this call commits, on the check's clock:
@@ -81,9 +88,7 @@ pub(crate) fn committed_label(
     expansions: &Expansions,
 ) -> PartialLabel {
     let mut committed = current.clone();
-    if let Some(delta) = &contract.delta {
-        committed.narrow_bound(&delta.established_narrowing(expansions));
-    }
+    committed.narrow_bound(&contract.delta.established_narrowing(expansions));
     committed
 }
 
@@ -101,6 +106,13 @@ impl<'a> CallReads<'a> {
         match self {
             CallReads::Resolved(call) => call.tool_resolutions(),
             CallReads::Static => &[],
+        }
+    }
+
+    fn requirement_cast(self) -> Option<&'a PinnedRequirementCast> {
+        match self {
+            CallReads::Resolved(call) => call.requirement_cast(),
+            CallReads::Static => None,
         }
     }
 }
@@ -162,7 +174,11 @@ pub(crate) fn evaluate(
         stage,
         expansions,
     );
-    if eval.requirement_gaps.is_empty() && eval.narrowing.is_none() && eval.consumed.is_empty() {
+    if eval.requirement_gaps.is_empty()
+        && eval.narrowing.is_none()
+        && eval.consumed.is_empty()
+        && eval.unknown_requirements.is_empty()
+    {
         return CheckOutcome::Allow;
     }
     let unestablished = unestablished_facts(&current, &eval.consumed);
@@ -170,6 +186,7 @@ pub(crate) fn evaluate(
         requirement_gaps: eval.requirement_gaps,
         narrowing: eval.narrowing,
         unestablished,
+        unknown_requirements: eval.unknown_requirements,
     })
 }
 
@@ -201,12 +218,24 @@ pub(crate) fn evaluate_state(
     let mut gaps = Vec::new();
     label_gaps(contract, &committed, reads, stage, expansions, &mut gaps);
     history_gaps(contract, has_committed, has_reserved, &mut gaps);
-    for mark in contract.requires.attention.iter().chain(
-        reads
-            .tool_resolutions()
-            .iter()
-            .flat_map(|resolution| resolution.attention()),
-    ) {
+    for mark in contract
+        .requires
+        .attention_marks()
+        .iter()
+        .chain(
+            reads
+                .tool_resolutions()
+                .iter()
+                .flat_map(|resolution| resolution.attention()),
+        )
+        .chain(
+            reads
+                .requirement_cast()
+                .and_then(PinnedRequirementCast::attention)
+                .into_iter()
+                .flatten(),
+        )
+    {
         gaps.push(Gap::Attention(mark.clone()));
     }
     let mut seen = Vec::with_capacity(gaps.len());
@@ -220,6 +249,11 @@ pub(crate) fn evaluate_state(
         requirement_gaps: seen,
         narrowing,
         consumed,
+        unknown_requirements: contract
+            .requires
+            .unknown_slots()
+            .filter(|slot| !reads.requirement_cast().is_some_and(|pinned| pinned.covers(*slot)))
+            .collect(),
     }
 }
 
@@ -236,8 +270,7 @@ fn consumed_unknown(
     }
     let audience_unresolved = contract
         .requires
-        .label
-        .audience
+        .audience_requirements()
         .iter()
         .any(|requirement| match requirement {
             AudienceRequirement::Includes(spec) => match resolve_recipients(spec, reads, expansions) {
@@ -262,19 +295,25 @@ fn consumed_unknown(
     dims
 }
 
-/// Every trust floor this call must meet: the contract's static floor, then each floor a
-/// tool-level resolver pinned to the call — one stream, so the static and dynamic halves
-/// cannot drift on how a floor is judged.
+/// Every trust floor this call must meet: the contract's static floor, each floor a tool-level
+/// resolver pinned to the call, and the floor a requirement cast answered for an Unknown slot —
+/// one stream, so the static and dynamic halves cannot drift on how a floor is judged.
 fn effective_trust_floors<'a>(contract: &'a ToolContract, reads: CallReads<'a>) -> impl Iterator<Item = Trust> + 'a {
-    contract.requires.label.trust_floor.into_iter().chain(
-        reads
-            .tool_resolutions()
-            .iter()
-            .filter_map(|resolution| resolution.required_trust()),
-    )
+    contract
+        .requires
+        .trust_floor()
+        .into_iter()
+        .chain(
+            reads
+                .tool_resolutions()
+                .iter()
+                .filter_map(|resolution| resolution.required_trust()),
+        )
+        .chain(reads.requirement_cast().and_then(PinnedRequirementCast::required_trust))
 }
 
-/// Every audience requirement pinned to the call by a tool-level resolver.
+/// Every audience requirement pinned to the call: by a tool-level resolver, or by a requirement
+/// cast answering an Unknown slot.
 fn pinned_audience_requirements<'a>(
     reads: CallReads<'a>,
 ) -> impl Iterator<Item = &'a crate::contract::RequiredAudience> {
@@ -282,6 +321,11 @@ fn pinned_audience_requirements<'a>(
         .tool_resolutions()
         .iter()
         .filter_map(|resolution| resolution.required_audience())
+        .chain(
+            reads
+                .requirement_cast()
+                .and_then(PinnedRequirementCast::required_audience),
+        )
 }
 
 /// The block's `unestablished` slot: every source unresolved on a consumed dimension,
@@ -331,7 +375,7 @@ fn label_gaps(
             });
         }
     }
-    for requirement in &contract.requires.label.audience {
+    for requirement in contract.requires.audience_requirements() {
         match requirement {
             AudienceRequirement::Includes(spec) => match resolve_recipients(spec, reads, expansions) {
                 Some(recipients) => {
@@ -434,8 +478,7 @@ pub struct GroupRead {
 pub fn group_reads(contract: &ToolContract, call: &ResolvedCall) -> Vec<GroupRead> {
     contract
         .requires
-        .label
-        .audience
+        .audience_requirements()
         .iter()
         .filter_map(|requirement| match requirement {
             AudienceRequirement::Includes(RecipientSpec::Placeholder(key)) => match placeholder_argument(key, call) {
@@ -507,7 +550,8 @@ pub(crate) fn validate_tool_resolutions(
         // one call's answer from standing in for an unrelated call's.
         if !declared.contains(uses)
             || seen.contains(&uses)
-            || pinned.args() != contract.resolver_args_digest(uses, answered_for.canonical_arguments().value())
+            || pinned.args()
+                != contract.resolver_args_digest(uses, answered_for.tool(), answered_for.canonical_arguments().value())
         {
             return Err(ToolResolutionRefusal::Foreign(uses.resolver.as_str().to_string()));
         }
@@ -537,6 +581,91 @@ pub(crate) enum MembershipRefusal {
     Needed(Vec<GroupRead>),
     #[error("the pinned membership answer for argument {0} is not bound to this call")]
     Foreign(String),
+}
+
+/// Why a call's requirement-cast pin is not admissible, or what it still owes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RequirementCastRefusal {
+    /// The contract leaves these slots Unknown and the call carries no answer.
+    Needed(Vec<RequirementSlot>),
+    /// The pin is not about this call: no such cast, a cast whose scope does not reach the
+    /// contract, an answer for other arguments or other slots, or a constant's groups the
+    /// record does not expand.
+    Foreign(String),
+    /// The answer is not one the cast gives: a value outside the policy vocabulary, off the
+    /// constant, or over `may_cast`.
+    OutsidePolicy(String),
+}
+
+/// Hold a call's requirement-cast pin to the contract's Unknown slots and the cast's
+/// declaration: exactly the Unknown slots are answered, for exactly this canonical call, by a
+/// registered cast reaching the contract, with a constant's own values or within a resolver's
+/// ceiling. The one validator the check, composition, and replay consume.
+pub(crate) fn validate_requirement_cast(
+    registry: &crate::registry::Registry,
+    contract: &ToolContract,
+    call: &ResolvedCall,
+    expansions: &Expansions,
+) -> Result<(), RequirementCastRefusal> {
+    let slots: Vec<RequirementSlot> = contract.requires.unknown_slots().collect();
+    let Some(pinned) = call.requirement_cast() else {
+        return match slots.is_empty() {
+            true => Ok(()),
+            false => Err(RequirementCastRefusal::Needed(slots)),
+        };
+    };
+    let name = pinned.cast().as_str().to_string();
+    let foreign = || RequirementCastRefusal::Foreign(name.clone());
+    if slots.is_empty() || pinned.answered_for() != &call.digest() {
+        return Err(foreign());
+    }
+    // The pin names a cast the engine consults for this contract: covering it, able to answer
+    // the slots, and before or at the first constant in registration order.
+    let cast = registry
+        .requirement_cast_order(&contract.tags, &slots)
+        .find(|cast| cast.name == *pinned.cast())
+        .ok_or_else(foreign)?;
+    if [
+        RequirementSlot::Trust,
+        RequirementSlot::Audience,
+        RequirementSlot::Attention,
+    ]
+    .into_iter()
+    .any(|slot| pinned.covers(slot) != slots.contains(&slot))
+    {
+        return Err(foreign());
+    }
+    if expansions.require(cast.resolution.groups()).is_err() {
+        return Err(foreign());
+    }
+    let outside = || RequirementCastRefusal::OutsidePolicy(name.clone());
+    if pinned
+        .required_trust()
+        .is_some_and(|trust| !registry.trust_chain().contains_rank(trust))
+        || pinned
+            .attention()
+            .into_iter()
+            .flatten()
+            .any(|mark| !registry.knows_attention_mark(mark))
+    {
+        return Err(outside());
+    }
+    match cast.resolution.admits_requirement(pinned, expansions) {
+        true => Ok(()),
+        false => Err(outside()),
+    }
+}
+
+/// The groups a call's pinned requirement cast reads: a constant's declared audience, a
+/// resolver's ceiling. Composition requires them beside the contract's own.
+pub(crate) fn requirement_cast_groups<'a>(
+    registry: &'a crate::registry::Registry,
+    call: &ResolvedCall,
+) -> impl Iterator<Item = &'a crate::names::GroupName> {
+    call.requirement_cast()
+        .and_then(|pinned| registry.cast(pinned.cast()))
+        .into_iter()
+        .flat_map(|cast| cast.resolution.groups())
 }
 
 /// The pinned answers a checked call may carry are exactly the ones its placeholders spell:
@@ -632,10 +761,10 @@ mod tests {
             parameters: ToolParameters::open(),
             description: Some("A test tool.".to_string()),
             uses: vec![binding.clone()],
-            delta: None,
+            delta: crate::contract::Delta::NONE,
             emits: EffectSet::default(),
             requires: crate::contract::Requires {
-                attention: vec![MarkName::new("static-review")],
+                attention: Dim::Known(vec![MarkName::new("static-review")]),
                 ..Default::default()
             },
         };
@@ -708,7 +837,7 @@ mod tests {
             parameters: ToolParameters::open(),
             description: Some("A test tool.".to_string()),
             uses: vec![binding.clone()],
-            delta: None,
+            delta: crate::contract::Delta::NONE,
             emits: EffectSet::default(),
             requires: Default::default(),
         };
@@ -777,7 +906,7 @@ mod tests {
             parameters: ToolParameters::open(),
             description: Some("A test tool.".to_string()),
             uses: vec![binding.clone()],
-            delta: None,
+            delta: crate::contract::Delta::NONE,
             emits: EffectSet::default(),
             requires: Default::default(),
         };
@@ -791,10 +920,10 @@ mod tests {
                     parameters: ToolParameters::open(),
                     description: Some("A statically blocked tool.".to_string()),
                     uses: vec![],
-                    delta: Some(crate::contract::Delta::NONE),
+                    delta: crate::contract::Delta::NONE,
                     emits: EffectSet::default(),
                     requires: crate::contract::Requires {
-                        attention: vec![MarkName::new("operator-signoff")],
+                        attention: Dim::Known(vec![MarkName::new("operator-signoff")]),
                         ..Default::default()
                     },
                 },
@@ -807,7 +936,7 @@ mod tests {
         .expect("a policy mark does not require an authority");
         let contract = registry.tool(&ToolName::new("lookup")).expect("the tool is registered");
         let arguments = serde_json::json!({});
-        let args = contract.resolver_args_digest(&binding, &arguments);
+        let args = contract.resolver_args_digest(&binding, &ToolName::new("lookup"), &arguments);
         let call = |trust, required_trust, attention: &str| {
             ResolvedCall::new(
                 ToolName::new("lookup"),
@@ -876,7 +1005,7 @@ mod tests {
                 }))
                 .expect("the schema compiles"),
                 uses: vec![uses.clone()],
-                delta: Some(crate::contract::Delta::NONE),
+                delta: crate::contract::Delta::NONE,
                 emits: EffectSet::default(),
                 requires: Default::default(),
             }],
@@ -901,7 +1030,7 @@ mod tests {
         let answer_for = |file: &str| {
             PinnedToolResolution::from_answer(
                 uses.clone(),
-                contract.resolver_args_digest(&uses, &serde_json::json!({ "file": file })),
+                contract.resolver_args_digest(&uses, &ToolName::new("read"), &serde_json::json!({ "file": file })),
                 None,
                 Some(Audience::restricted([ReaderId::new("hr-lead")])),
                 None,

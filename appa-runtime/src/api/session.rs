@@ -13,7 +13,7 @@ use crate::consult::{
 use crate::engine::{
     AuthorityVerdict, CandidateResolution, CastAsk, CastLabel, CastVerdict, EngineDecision, EngineEvent, EngineView,
     ExternalEvidence, ExternalRequest, Feedback, ForkStatus, Liveness, Next, OfferNonce, OpenDispatch, Presentation,
-    engine_id,
+    RequirementAsk, RequirementLabel, RequirementVerdict, engine_id,
 };
 use crate::external::ConsultOutcome;
 
@@ -863,6 +863,11 @@ impl Session {
                 verdict: self.cascade(ask).await,
                 ask: ask.clone(),
             },
+            ExternalRequest::RequirementCast { call, ask } => ExternalEvidence::RequirementCast {
+                call: *call,
+                verdict: self.cascade_requirement(ask).await,
+                ask: ask.clone(),
+            },
             ExternalRequest::Membership { resolver, group } => {
                 let consult = Consult {
                     name: resolver.clone(),
@@ -902,6 +907,39 @@ impl Session {
             return Some(CastVerdict {
                 cast: cast.name.clone(),
                 label,
+            });
+        }
+        None
+    }
+
+    /// The requirement cascade: the same order and the same first-answer rule as [`Self::cascade`],
+    /// with a resolver consulted about the proposed call under the slots it must answer.
+    async fn cascade_requirement(&self, ask: &RequirementAsk) -> Option<RequirementVerdict> {
+        // One consult body for the cascade: the proposed call is the same at every cast.
+        let mut consult = Consult {
+            name: String::new(),
+            body: ConsultBody::RequirementCast {
+                declaration: ask.declaration.clone(),
+                artifact: DynamicArtifact { args: ask.args.clone() },
+            },
+        };
+        for cast in &ask.casts {
+            let answer = match &cast.constant {
+                Some(constant) => RequirementLabel::Declared(constant.clone()),
+                None => {
+                    consult.name = cast.name.as_str().to_string();
+                    match self.deployment.externals.consult(&consult, None).await {
+                        ConsultOutcome::Answer(answer) => match DynamicAnswer::from_wire(&answer, &ask.declaration) {
+                            Some(answer) => RequirementLabel::Classified(answer),
+                            None => continue,
+                        },
+                        ConsultOutcome::NoAnswer(_) => continue,
+                    }
+                }
+            };
+            return Some(RequirementVerdict {
+                cast: cast.name.clone(),
+                answer,
             });
         }
         None
@@ -1032,9 +1070,12 @@ mod real_engine_tests {
     const FETCH_AND_SEND: &str = r#"
 version = 1
 
+# Unclassified in both dimensions and not a confined result point, so a fetched value carries
+# its Unknown to the sink that consumes it.
 [[policy.tool]]
 name = "fetch"
 parameters = { type = "object", properties = { b = { type = "integer" }, a = { type = "integer" } } }
+delta = { trust = "unknown", audience = "unknown" }
 
 [[policy.tool]]
 name = "send"
@@ -3324,9 +3365,12 @@ confined_child_return = true
     const MARKED: &str = r#"
 version = 1
 
+# Unclassified in both dimensions, and no confined result point, so the value carries its
+# Unknown out of admission and names itself as the unresolved source.
 [[policy.tool]]
 name = "fetch"
 parameters = { type = "object", properties = { b = { type = "integer" }, a = { type = "integer" } } }
+delta = { trust = "unknown", audience = "unknown" }
 
 [[policy.tool]]
 name = "mark"

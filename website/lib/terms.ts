@@ -150,9 +150,9 @@ const TERMS = {
   unestablished:
     "Returned on a refusal: each source, by value, whose needed dimension no registered cast reaches, with its unresolved dimensions. A registered cast that gives no answer decides nothing and lists nothing here.",
   Unknown:
-    "Unestablished label state on an unannotated or pending-cast value. Not a rank: it is ordered against no rank. Fails closed at every consumer of the dimension — label requirements, sanitizer applicability and permits checks, pending-cast admission — until a cast resolves the value.",
+    "Unestablished state of a slot the policy left to a cast: a pending-cast value's dimension, a requires slot written as \"unknown\", and every slot of a tool the policy never declares. Not a rank: it is ordered against no rank. Fails closed at every consumer of the slot — label requirements, sanitizer applicability and permits checks, confined admission — until a cast resolves the value or answers the requirement for the proposed call.",
   confined_results:
-    "The deployment's list of result points the host withholds from the model. A pending-cast delta and output sanitization at a tool result both need the tool listed here.",
+    "The deployment's list of result points the host withholds from the model. Output sanitization at a tool result needs the tool listed here; a pending-cast delta on an unlisted tool crosses unresolved and is cast where a check needs it.",
   trajectory: "One agent run: its security label plus its append-only event log.",
 } as const satisfies Record<string, string>;
 

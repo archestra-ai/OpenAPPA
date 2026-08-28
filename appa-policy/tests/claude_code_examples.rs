@@ -60,11 +60,15 @@ fn the_casts_example_registers_what_it_describes() {
     // Each example tool has one contract, so the name alone finds it.
     let tool = |name: &str| registry.tools().find(|tool| tool.name.as_str() == name);
 
-    let unannotated = tool("mcp__github__issue_read").expect("the unannotated tool registers");
-    assert_eq!(unannotated.delta, None);
+    // Both declare an Unknown trust; only WebFetch is a confined result point, so only its
+    // raw page waits for the cast.
+    let lazy = tool("mcp__github__issue_read").expect("the unclassified read registers");
+    assert_eq!(lazy.pending_cast_dim(), Some(Dimension::Trust));
+    assert!(!config.registry().profile().confines_result(&lazy.name));
 
     let pending = tool("WebFetch").expect("the pending-cast tool registers");
     assert_eq!(pending.pending_cast_dim(), Some(Dimension::Trust));
+    assert!(config.registry().profile().confines_result(&pending.name));
 
     let sink = tool("mcp__github__issue_write").expect("the sink registers");
     assert!(sink.requires.label.trust_floor.is_some());

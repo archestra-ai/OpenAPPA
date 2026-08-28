@@ -15,11 +15,12 @@ const POLICY: &str = r#"
 [policy]
 version = 1
 
-# Unannotated: the result crosses to the model with both dimensions unresolved. Only a
-# call that needs the fact drives the cast.
+# Unclassified and unconfined: the result crosses to the model with both dimensions
+# unresolved. Only a call that needs the fact drives the cast.
 [[policy.tool]]
 name = "read_page"
 tags = ["web"]
+delta = { trust = "unknown", audience = "unknown" }
 
 # Pending cast: the runtime holds the output until a cast establishes the whole label.
 [[policy.tool]]
@@ -32,11 +33,12 @@ name = "scan_files"
 tags = ["files"]
 delta = { trust = "unknown" }
 
-# Unannotated and inside the files scope: the lazy path meets the same cast cascade,
-# constant fallback included.
+# Unclassified, unconfined, and inside the files scope: the lazy path meets the same cast
+# cascade, constant fallback included.
 [[policy.tool]]
 name = "list_files"
 tags = ["files"]
+delta = { trust = "unknown", audience = "unknown" }
 
 [[policy.tool]]
 name = "notify"
