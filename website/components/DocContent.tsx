@@ -20,7 +20,7 @@ import { ConnectedAgentFigure } from "@/components/figures/ConnectedAgentFigure"
 import { ExfiltrationFigure } from "@/components/figures/ExfiltrationFigure";
 import { GuardrailFigure } from "@/components/figures/GuardrailFigure";
 import { LabelFoldFigure } from "@/components/figures/LabelFoldFigure";
-import { KagentDeploymentFigure, KagentEnforcementFigure, KagentProfileFigure } from "@/components/figures/KagentEnforcementFigure";
+import { KagentEnforcementFigure, KagentProfileFigure } from "@/components/figures/KagentEnforcementFigure";
 import { NegotiationFigure } from "@/components/figures/NegotiationFigure";
 import { PolicyStackFigure } from "@/components/figures/PolicyStackFigure";
 import { RemedyPlanFigure } from "@/components/figures/RemedyPlanFigure";
@@ -46,7 +46,6 @@ const DIRECTIVES: Record<string, () => ReactNode> = {
   "fig-guardrail": () => <GuardrailFigure />,
   "fig-label-fold": () => <LabelFoldFigure />,
   "kagent-enforcement": () => <KagentEnforcementFigure />,
-  "kagent-deployment": () => <KagentDeploymentFigure />,
   "kagent-profile": () => <KagentProfileFigure />,
   "fig-negotiation": () => <NegotiationFigure />,
   "fig-policy-stack": () => <PolicyStackFigure />,

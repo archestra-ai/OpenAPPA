@@ -39,19 +39,67 @@ The integration release publishes these artifacts:
 
 | Artifact | Producer | Consumer |
 |---|---|---|
-| Generated CRD and Helm bundle | Integration release CI from the kagent fork | Cluster operator upgrade |
+| OCI Helm chart with generated CRDs and Harness template | Integration release CI from the kagent fork | Cluster operator install or upgrade |
 | Patched kagent control-plane image | Integration release CI from the kagent fork | Cluster operator deployment |
 | OpenAPPA Actor runtime image | Integration release CI | OpenAPPA `Harness` workload |
-| OpenAPPA `Harness` manifest | Integration release | Kubernetes API |
+| Patched `kagentctl` binary | Integration release CI from the kagent fork | Application-team AgentInstance creation |
 | Example policy `ConfigMap` | OpenAPPA repository | Policy author and cluster operator |
 
 The Actor image contains the patched kagent Go runtime and the `appa-runtime` binary from the same reviewed release.
 
-The `Harness` manifest MUST pin the Actor image by SHA-256 digest.
+The Helm chart MUST pin the control-plane and Actor images by SHA-256 digest.
 
-Release notes MUST record the CRD bundle version, both image digests, and source commits.
+Release notes MUST record the chart version, both image digests, and source commits.
 
-The cluster operator installs the patched control plane before applying the `Harness`. Existing unpatched control planes reject the new `openappa` field.
+The chart contains generated CRDs, the patched control plane, and the OpenAPPA `Harness` template.
+
+`openappa.harness.enabled` defaults to false so an unpatched controller never observes the new `openappa` field.
+
+## Helm installation contract
+
+Publish the chart at `oci://ghcr.io/archestra-ai/charts/kagent-openappa`.
+
+The chart exposes these required values:
+
+```yaml
+openappa:
+  policyRef: customer-support-policy
+  harness:
+    enabled: false
+  allowedAgentTemplates:
+    matchLabels:
+      openappa: enabled
+substrate:
+  workerPoolRef: default
+  snapshotLocation: s3://kagent-snapshots/openappa
+```
+
+When enabled, the chart maps these values to `spec.kagent.openappa.policyRef`, `spec.allowedAgentTemplates.selector`, `spec.substrate.workerPoolRef`, and `spec.substrate.snapshotPolicy.location`.
+
+The chart pins `spec.workload.image` to the reviewed Actor image digest. Operators do not supply a mutable tag.
+
+`helm show crds` MUST produce the complete generated CRD bundle for existing-cluster upgrades.
+
+The first `helm upgrade --install --atomic --wait` MUST keep `openappa.harness.enabled=false` and leave chart-managed Deployments and Services ready.
+
+Operators MUST verify the controller Deployment and at least one ready `kagent-controller` service endpoint before labeling templates or creating instances. That endpoint serves the CRD conversion path.
+
+Only then can a second atomic Helm upgrade set `openappa.harness.enabled=true` and create the Harness.
+
+Harness preparation is a separate controller operation. Operators label each selected `AgentTemplate` and wait for its `status.harnesses[harness=kagent-openappa].conditions[Ready]` value.
+
+A failed pair preparation leaves the chart installed for diagnosis. The operator fixes the policy or template, or runs `helm rollback` explicitly.
+
+Add this CLI mapping:
+
+```text
+kagentctl agent-instance create <name> \
+  --namespace <namespace> \
+  --template <AgentTemplate> \
+  --harness kagent-openappa
+```
+
+The command calls `AgentInstanceService.CreateAgentInstance` with namespace, Harness, AgentTemplate, idempotency request ID, and display name.
 
 ## Harness profile
 
@@ -492,10 +540,11 @@ The OpenAPPA Harness profile, policy compiler, Go ADK extension, and Rust adapte
 
 ### Control-plane upgrade
 
-1. Apply the generated CRD or Helm bundle with optional `KagentHarness.OpenAPPA` and collaboration-mode fields.
-2. Deploy the patched kagent control-plane image.
-3. Wait for every controller and conversion webhook to report ready.
-4. Apply no OpenAPPA `Harness` until the patched control plane is ready.
+1. Apply the policy `ConfigMap` and values with `openappa.harness.enabled=false`.
+2. Apply the generated CRD bundle with optional `KagentHarness.OpenAPPA` and collaboration-mode fields.
+3. Run the first atomic Helm upgrade with the Harness disabled.
+4. Wait for every controller and the `kagent-controller` service endpoint to report ready.
+5. Run the second atomic Helm upgrade with `openappa.harness.enabled=true`.
 
 Existing Harnesses omit the new field. Their compilation, builders, callbacks, and Actor images remain unchanged.
 
@@ -503,10 +552,10 @@ Existing Harnesses omit the new field. Their compilation, builders, callbacks, a
 
 For each existing `AgentTemplate` selected for adoption:
 
-1. Apply the policy `ConfigMap` and OpenAPPA `Harness`.
+1. Label the `AgentTemplate` so the chart-managed Harness admits it.
 2. Let the compiler inventory tools, providers, child modes, MCP Apps, memory, and background paths.
 3. Refuse preparation when any enabled path lacks required coverage.
-4. Wait for a ready revision and Substrate `ActorTemplate` before creating an instance.
+4. Wait for the Harness-specific ready condition and Substrate `ActorTemplate` before creating an instance.
 
 The same `AgentTemplate` can serve both the old and OpenAPPA Harnesses during rollout.
 

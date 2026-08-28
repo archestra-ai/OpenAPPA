@@ -33,57 +33,85 @@ The Go extension sends both events to the local `appa-runtime` process. It appli
 
 OpenAPPA can block dispatch, keep the returned result, replace it, or withhold it.
 
-## Install the integration
+## Install with Helm
 
-The OpenAPPA integration maintainers build and publish these artifacts from pinned source commits:
+The integration release publishes one OCI Helm chart. It pins both images and includes an OpenAPPA `Harness` template that is disabled by default.
 
-- A generated kagent resource-definition bundle.
-- A patched kagent control-plane image.
-- A digest-pinned Actor image that contains kagent and OpenAPPA.
-- An OpenAPPA `Harness` manifest.
+Create the policy `ConfigMap`:
 
-The cluster operator installs those artifacts and supplies the policy `ConfigMap`.
-
-## Select the OpenAPPA Harness
-
-A kagent `Harness` is a Kubernetes resource that tells Substrate which workload image, workers, and snapshot rules to use when running an `AgentTemplate`.
-
-```yaml
-# Proposed fields only. This excerpt omits existing required Harness fields.
-apiVersion: kagent.dev/v1alpha3
-kind: Harness
-metadata:
-  name: kagent-openappa
-spec:
-  kagent:
-    openappa:
-      policyRef:
-        name: customer-support-policy
-  workload:
-    image: ghcr.io/archestra-ai/kagent-openappa@sha256:<digest>
+```sh
+kubectl create namespace kagent --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n kagent create configmap customer-support-policy \
+  --from-file=appa.toml=./appa.toml \
+  --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-`policyRef` names a `ConfigMap` in the same Kubernetes namespace.
+Apply the generated CRDs, then install or upgrade kagent:
 
-After kagent prepares the pair, an application team creates an `AgentInstance` with the OpenAPPA `Harness`.
+```yaml
+# openappa-values.yaml
+openappa:
+  policyRef: customer-support-policy
+  harness:
+    enabled: false
+  allowedAgentTemplates:
+    matchLabels:
+      openappa: enabled
+substrate:
+  workerPoolRef: default
+  snapshotLocation: s3://kagent-snapshots/openappa
+```
 
-:::kagent-deployment:::
+```sh
+helm show crds oci://ghcr.io/archestra-ai/charts/kagent-openappa \
+  --version <release-version> | kubectl apply -f -
+
+helm upgrade --install kagent \
+  oci://ghcr.io/archestra-ai/charts/kagent-openappa \
+  --version <release-version> \
+  --namespace kagent \
+  --values openappa-values.yaml \
+  --atomic --wait --timeout 5m
+```
+
+Wait for the patched controller and its service endpoint:
+
+```sh
+kubectl -n kagent rollout status deployment/kagent-controller --timeout=5m
+kubectl -n kagent wait endpoints/kagent-controller \
+  --for='jsonpath={.subsets[0].addresses[0].ip}' --timeout=5m
+```
+
+Enable the chart-managed `Harness`, label the selected `AgentTemplate`, and wait for preparation:
+
+```sh
+helm upgrade kagent oci://ghcr.io/archestra-ai/charts/kagent-openappa \
+  --version <release-version> \
+  --namespace kagent \
+  --values openappa-values.yaml \
+  --set openappa.harness.enabled=true \
+  --atomic --wait --timeout 5m
+
+kubectl -n kagent label agenttemplate customer-support-agent openappa=enabled
+kubectl -n kagent wait agenttemplate/customer-support-agent \
+  --for='jsonpath={.status.harnesses[?(@.harness=="kagent-openappa")].conditions[?(@.type=="Ready")].status}=True' \
+  --timeout=5m
+```
+
+The integration adds a `kagentctl` command for creating the protected instance:
+
+```sh
+kagentctl agent-instance create customer-support \
+  --namespace kagent \
+  --template customer-support-agent \
+  --harness kagent-openappa
+```
 
 ## Run OpenAPPA inside the Actor
 
-The Actor image contains three binaries:
+The Actor image runs `kagent-go-adk` and `appa-runtime` as separate processes in one container.
 
-```text
-/usr/local/bin/kagent-openappa-supervisor
-  |-- /usr/local/bin/appa-runtime --adapter kagent
-  `-- /usr/local/bin/kagent-go-adk
-```
-
-The supervisor runs as PID 1. It starts `appa-runtime`, waits for `/health`, then starts `kagent-go-adk`.
-
-The supervisor forwards termination signals and stops the other child when either child exits.
-
-It then exits with failure so Substrate applies the configured `Actor` lifecycle policy.
+The Actor becomes ready only after `appa-runtime` passes its health check.
 
 :::kagent-profile:::
 
@@ -153,8 +181,9 @@ An existing `AgentInstance` cannot switch to another `Harness` or prepared revis
 
 | Phase | Operator action | Routing state |
 |---|---|---|
-| Upgrade | Install the resource definitions and patched control plane. Wait for controllers and webhooks | Existing instances continue on current revisions |
-| Prepare | Apply the policy `ConfigMap` and OpenAPPA `Harness`. Wait for a ready revision | Existing instances continue serving |
+| Prepare | Apply the policy `ConfigMap` and values with the `Harness` disabled | Existing instances continue serving |
+| Upgrade | Apply chart CRDs, upgrade the control plane, and wait for its service endpoint | Existing instances continue on current revisions |
+| Enable | Enable the chart-managed `Harness`, label the template, and wait for its ready revision | Existing instances continue serving |
 | Canary | Create a protected `AgentInstance` and run internal checks | Production traffic remains on the old instance |
 | Cut over | Route new root A2A tasks to protected instance | Pin old task and context IDs to old instance |
 | Drain | Wait for terminal work or apply the timeout and cancellation policy | No new work reaches the old instance |
