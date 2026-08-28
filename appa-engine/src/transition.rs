@@ -81,6 +81,9 @@ pub struct ProposedCall {
     /// The membership expansions the runtime resolved for this call's `@group` placeholder
     /// arguments. Payload on the same terms as the dynamic answers.
     pub memberships: Vec<crate::contract::PinnedMembership>,
+    /// The cast answer the runtime obtained for the requirement slots this call's contract leaves
+    /// Unknown, when it has any. Payload on the same terms.
+    pub requirement_cast: Option<crate::contract::PinnedRequirementCast>,
 }
 
 /// One provider-run result the response exposed: the tool the provider ran inside the
@@ -175,7 +178,7 @@ pub enum OfferOutcome {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OfferFollowUp {
-    Approved { call: ResolvedCall },
+    Approved { call: Box<ResolvedCall> },
     Denied { block: Box<Blocked> },
     Invalidated,
     Staged(Box<Confined>),
@@ -358,6 +361,15 @@ pub struct ApplicableCast {
     pub constant: Option<crate::label::EstablishedLabel>,
 }
 
+/// One cast that can answer a proposed call's Unknown requirement slots, in registration order.
+/// A constant arrives already projected onto the slots; a resolver carries `None` and the runtime
+/// consults it with the call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApplicableRequirementCast {
+    pub name: crate::names::CastName,
+    pub constant: Option<crate::contract::RequirementAnswer>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OutcomeFollowUp {
     Closed { admitted: Option<ValueBody> },
@@ -453,6 +465,15 @@ pub enum TransitionError {
     ForeignToolResolution { resolver: String },
     #[error("tool-level resolver answer from {resolver} contains a value outside policy")]
     InvalidToolResolution { resolver: String },
+    #[error("{tool} leaves requirement slots Unknown that no cast has answered: {slots:?}")]
+    RequirementCastNeeded {
+        tool: String,
+        slots: Vec<crate::contract::RequirementSlot>,
+    },
+    #[error("requirement-cast answer from {cast} is not one this call reads")]
+    ForeignRequirementCast { cast: String },
+    #[error("requirement-cast answer from {cast} is not one that cast gives")]
+    InvalidRequirementCast { cast: String },
     #[error("the act's membership expansions are not evidence for it: {0}")]
     ForeignExpansion(#[from] crate::groups::ExpansionRefusal),
     #[error(transparent)]
@@ -1181,12 +1202,14 @@ impl<'a> Sequence<'a> {
                 proposed_effects,
                 tool_resolutions,
                 memberships,
+                requirement_cast,
                 subject,
                 resolutions,
             } => {
                 let call = ResolvedCall::new_keyed(tool.clone(), *contract, arguments.clone())
                     .with_tool_resolutions(tool_resolutions.clone())
-                    .with_memberships(memberships.clone());
+                    .with_memberships(memberships.clone())
+                    .with_requirement_cast(requirement_cast.clone());
                 if call.tool_resolutions() != tool_resolutions.as_slice() {
                     return Err(TransitionRefusal::ForgedLabel);
                 }
@@ -1221,6 +1244,11 @@ impl<'a> Sequence<'a> {
                     crate::check::AnsweredFor::Consulted(consulted),
                 )
                 .is_err()
+                {
+                    return Err(TransitionRefusal::ForgedResolution);
+                }
+                if crate::check::validate_requirement_cast(self.engine.registry(), contract, &call, &expansions)
+                    .is_err()
                 {
                     return Err(TransitionRefusal::ForgedResolution);
                 }
@@ -1824,7 +1852,7 @@ impl<'a> Sequence<'a> {
         let live = views.current_label();
         if rulings
             .iter()
-            .any(|evidence| evidence.reviewed.tool != contract.name || evidence.reviewed.trajectory_label != live)
+            .any(|evidence| evidence.reviewed.tool != *call.tool() || evidence.reviewed.trajectory_label != live)
         {
             return Err(TransitionRefusal::UnbackedApproval);
         }
@@ -2078,8 +2106,10 @@ impl<'a> Sequence<'a> {
     }
 
     /// Can this release's result restrict the trajectory, leave it unresolved, or arrive through a
-    /// bound sanitizer? An unannotated contract admits at `Unknown`, so it can;
-    /// the deliberate neutral `delta = {}` cannot.
+    /// bound sanitizer? An unannotated contract admits at `Unknown`, so it can, and so can one
+    /// whose output dimension a resolver pins per call — its delta is absent by construction
+    /// while the pinned answer restricts; the deliberate neutral `delta = {}` with no
+    /// resolver-owned output cannot.
     fn result_can_restrict(
         &self,
         tool: &crate::value::ToolName,
@@ -2095,7 +2125,11 @@ impl<'a> Sequence<'a> {
             return true;
         }
         match self.engine.registry().keyed_tool(tool, contract_id) {
-            Some(contract) => contract.delta.as_ref().is_none_or(|delta| !delta.is_none()),
+            Some(contract) => {
+                !contract.delta.is_none()
+                    || contract.resolver_owns(crate::contract::ResolverReturn::Trust)
+                    || contract.resolver_owns(crate::contract::ResolverReturn::Audience)
+            }
             None => true,
         }
     }
@@ -2159,6 +2193,7 @@ impl<'a> Sequence<'a> {
                     arguments,
                     tool_resolutions,
                     memberships,
+                    requirement_cast,
                     subject,
                     resolutions,
                     ..
@@ -2166,7 +2201,8 @@ impl<'a> Sequence<'a> {
             ) if dispatch == &next.dispatch => {
                 let opened = ResolvedCall::new_keyed(tool.clone(), *contract, arguments.clone())
                     .with_tool_resolutions(tool_resolutions.clone())
-                    .with_memberships(memberships.clone());
+                    .with_memberships(memberships.clone())
+                    .with_requirement_cast(requirement_cast.clone());
                 if opened != next.call || subject != &next.subject {
                     return Err(TransitionRefusal::UnbackedDecision);
                 }
@@ -2301,6 +2337,7 @@ impl<'a> Sequence<'a> {
         {
             return Err(TransitionRefusal::ForeignAdmission);
         }
+        let expansions = self.recorded_expansions(resolutions)?;
         for call in proposals {
             if !self.engine.registry().contains_tool(call.tool()) {
                 return Err(TransitionRefusal::UnknownTool(call.tool().as_str().to_string()));
@@ -2328,8 +2365,10 @@ impl<'a> Sequence<'a> {
             {
                 return Err(TransitionRefusal::ForgedResolution);
             }
+            if crate::check::validate_requirement_cast(self.engine.registry(), contract, call, &expansions).is_err() {
+                return Err(TransitionRefusal::ForgedResolution);
+            }
         }
-        let expansions = self.recorded_expansions(resolutions)?;
         let mut working = std::borrow::Cow::Borrowed(&self.projection);
         let composed = crate::engine::compose_batch(
             self.engine.registry(),
@@ -2595,7 +2634,9 @@ impl<'a> Sequence<'a> {
                             return Err(TransitionRefusal::ForgedLabel);
                         }
                         None => {
-                            if contract.pending_cast_dim().is_some() || views.bound_sanitizer(dispatch).is_some() {
+                            if self.engine.registry().confined_pending_cast(contract).is_some()
+                                || views.bound_sanitizer(dispatch).is_some()
+                            {
                                 return Err(TransitionRefusal::ForgedLabel);
                             }
                             self.observed_as(
@@ -3459,6 +3500,11 @@ impl<'a> Sequence<'a> {
                 return Err(TransitionRefusal::ForgedMembership);
             }
         }
+        // A requirement cast judged one exact call, so a rewrite carries none; a contract that
+        // leaves a slot Unknown is not rewritten into.
+        if crate::check::validate_requirement_cast(registry, contract, call, expansions).is_err() {
+            return Err(TransitionRefusal::SanitizerUnapplicable);
+        }
 
         let stage = views.call_stage(subject);
         let derived = registered
@@ -3752,7 +3798,7 @@ mod tests {
             uses: vec![],
             name: ToolName::new("note"),
             tags: vec![],
-            delta: Some(crate::contract::Delta::NONE),
+            delta: crate::contract::Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: crate::contract::Requires::default(),
@@ -3816,6 +3862,7 @@ mod tests {
                         arguments: call.canonical_arguments().canonical_bytes().to_vec(),
                         tool_resolutions: Vec::new(),
                         memberships: Vec::new(),
+                        requirement_cast: None,
                     }],
                     spawn: None,
                     offer_nonce: nonce(),

@@ -226,7 +226,7 @@ pub(crate) fn validate_pending_cast(
     resolved: &EstablishedLabel,
     expansions: &Expansions,
 ) -> Result<(), AdmitError> {
-    if contract.pending_cast_dim().is_none() {
+    if registry.confined_pending_cast(contract).is_none() {
         return Err(AdmitError::NotPendingCast);
     }
     let registered = registry
@@ -352,7 +352,11 @@ pub(crate) fn admit_result(
         }],
         ResultAdmission::SuccessNoValue => vec![close_success()],
         ResultAdmission::SuccessRaw { body } => {
-            if contract.pending_cast_dim().is_some() {
+            // An Unknown dimension is a missing fact, not a withheld one: the value admits
+            // raw and stays unresolved until a sink asks. Confining the result point is what
+            // turns that into "resolve before the model sees it", and the deployment declares
+            // it per tool.
+            if registry.confined_pending_cast(contract).is_some() {
                 return Err(AdmitError::OutputPendingCast);
             }
             vec![close_success(), admit_value(output_label(), body)]
@@ -575,10 +579,10 @@ mod tests {
             uses: vec![],
             name: ToolName::new("get_ticket"),
             tags: vec![],
-            delta: Some(Delta {
+            delta: Delta {
                 trust: Some(Dim::Known(SUSPICIOUS)),
                 audience: Some(Dim::Known(internal()).into()),
-            }),
+            },
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
             requires: Default::default(),
@@ -634,10 +638,10 @@ mod tests {
             uses: vec![],
             name: ToolName::new("scan_inbox"),
             tags: vec![],
-            delta: Some(Delta {
+            delta: Delta {
                 trust: Some(Dim::Unknown),
                 audience: Some(Dim::Known(internal()).into()),
-            }),
+            },
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
             requires: Default::default(),
@@ -647,10 +651,10 @@ mod tests {
             uses: vec![],
             name: ToolName::new("poll_room"),
             tags: vec![],
-            delta: Some(Delta {
+            delta: Delta {
                 trust: Some(Dim::Known(SUSPICIOUS)),
                 audience: Some(Dim::Unknown.into()),
-            }),
+            },
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
             requires: Default::default(),
@@ -660,10 +664,10 @@ mod tests {
             uses: vec![dynamic_binding()],
             name: ToolName::new("dynamic_scan"),
             tags: vec![],
-            delta: Some(Delta {
+            delta: Delta {
                 trust: Some(Dim::Unknown),
                 audience: None,
-            }),
+            },
             parameters: crate::params::test_string_argument_schema("room"),
             emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
             requires: Default::default(),
@@ -700,6 +704,7 @@ mod tests {
             proposed_effects: EffectSet::new([EffectKind::new("read")]).unwrap(),
             tool_resolutions: Vec::new(),
             memberships: Vec::new(),
+            requirement_cast: None,
             subject: crate::basis::fixture_subject(&traj()),
             resolutions: vec![],
         };
@@ -914,10 +919,10 @@ mod tests {
             uses: vec![],
             name: ToolName::new("fetch"),
             tags: vec![crate::names::TagName::new("web")],
-            delta: Some(Delta {
+            delta: Delta {
                 trust: Some(Dim::Unknown),
                 audience: Some(Dim::Known(Audience::Public).into()),
-            }),
+            },
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Default::default(),
@@ -927,10 +932,10 @@ mod tests {
             uses: vec![],
             name: ToolName::new("note"),
             tags: vec![],
-            delta: Some(Delta {
+            delta: Delta {
                 trust: Some(Dim::Unknown),
                 audience: Some(Dim::Known(Audience::Public).into()),
-            }),
+            },
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Default::default(),
@@ -1243,10 +1248,10 @@ mod tests {
             uses: vec![],
             name: ToolName::new("fetch_page"),
             tags: vec![],
-            delta: Some(Delta {
+            delta: Delta {
                 trust: None,
                 audience: Some(Dim::Unknown.into()),
-            }),
+            },
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Default::default(),
@@ -1346,6 +1351,7 @@ mod tests {
             proposed_effects: EffectSet::new([EffectKind::new("read")]).unwrap(),
             tool_resolutions: vec![audience_pin(internal())],
             memberships: Vec::new(),
+            requirement_cast: None,
             subject: crate::basis::fixture_subject(&traj()),
             resolutions: vec![],
         }];

@@ -1,10 +1,11 @@
 # Example deployment for protecting a Claude Code session.
 #
 # Every built-in tool of the harness is named: a tool the policy does
-# not name is blocked, and a named tool without a `delta` key has its
-# results admitted as fully unknown (fail-closed). `delta = {}` is the
-# deliberate neutral annotation: the result's label is the combination
-# of its sources, unchanged.
+# not name has every requirement unknown, so only a cast covering
+# undeclared tools can decide it — this file registers none, and such
+# a call is blocked. A named tool without a `delta` key restricts
+# nothing, the same statement as `delta = {}`: the result's label is the
+# combination of its sources, unchanged.
 #
 # Tools that bring outside content into the session — the web tools —
 # carry `delta = { trust = "suspicious" }` instead: their results

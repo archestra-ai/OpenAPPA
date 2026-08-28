@@ -603,10 +603,14 @@ impl RawTool {
         declarations: &BTreeMap<DynamicResolverName, ResolverDeclaration>,
     ) -> Result<ToolContract, ConfigError> {
         let ctx = || format!("tool {}", self.name);
-        // No `delta` key and no resolver-owned label field = unannotated (Unknown/Unknown);
-        // `delta = {}` = the deliberate neutral annotation. The distinction is the whole point —
-        // never collapse an omitted delta into the neutral one.
-        let delta = self.delta.map(|d| d.convert(chain, &ctx())).transpose()?;
+        // Declaring the tool is the deployment saying it knows it, so an omitted `delta` and
+        // `delta = {}` say the same thing: the dimensions this contract does not describe restrict
+        // nothing. Unknown is asked for by name (`"unknown"`) or held by a resolver that owns the
+        // dimension; a tool with no contract at all is the only whole-contract unknown.
+        let delta = match self.delta {
+            Some(d) => d.convert(chain, &ctx())?,
+            None => Delta::default(),
+        };
         let requires = match self.requires {
             Some(r) => r.convert(chain, &ctx())?,
             None => Requires::default(),
@@ -755,12 +759,16 @@ enum RawAttention {
 impl RawRequires {
     fn convert(self, chain: &TrustChain, ctx: &str) -> Result<Requires, ConfigError> {
         let mut audience = Vec::new();
+        let mut audience_unknown = false;
         match self.audience {
+            Some(RawRequiresAudienceField::Reference(value)) if value == UNKNOWN_TOKEN => audience_unknown = true,
             Some(RawRequiresAudienceField::Reference(value)) => {
                 let context = format!("{ctx} requires audience");
                 return Err(ConfigError::BadAudience {
                     context,
-                    reason: format!("expected {{ contains = [...] }} or {{ within = [...] }}, found {value:?}"),
+                    reason: format!(
+                        "expected {{ contains = [...] }}, {{ within = [...] }} or \"{UNKNOWN_TOKEN}\", found {value:?}"
+                    ),
                 });
             }
             Some(RawRequiresAudienceField::Operators(a)) => {
@@ -793,18 +801,25 @@ impl RawRequires {
             );
         }
         let trust_floor = match self.trust.as_deref() {
-            Some(value) => Some(parse_trust(value, chain, ctx)?),
+            Some(UNKNOWN_TOKEN) => Some(Dim::Unknown),
+            Some(value) => Some(Dim::Known(parse_trust(value, chain, ctx)?)),
             None => None,
         };
         let attention = match self.attention {
+            Some(RawAttention::Reference(value)) if value == UNKNOWN_TOKEN => Dim::Unknown,
             Some(RawAttention::Reference(value)) => {
                 return Err(ConfigError::BadAttention {
                     context: format!("{ctx} requires attention"),
                     found: value,
                 });
             }
-            Some(RawAttention::Marks(marks)) => marks.into_iter().map(MarkName::new).collect(),
-            None => Vec::new(),
+            Some(RawAttention::Marks(marks)) => Dim::Known(marks.into_iter().map(MarkName::new).collect()),
+            None => Dim::Known(Vec::new()),
+        };
+        let audience = if audience_unknown {
+            Dim::Unknown
+        } else {
+            Dim::Known(audience)
         };
         Ok(Requires {
             label: LabelRequirements { trust_floor, audience },
@@ -1064,6 +1079,7 @@ struct RawMayCast {
 struct RawConstantLabel {
     trust: String,
     audience: Vec<String>,
+    attention: Option<Vec<String>>,
 }
 
 impl RawConstantLabel {
@@ -1071,6 +1087,14 @@ impl RawConstantLabel {
         Ok(DeclaredLabel {
             trust: parse_trust(&self.trust, chain, ctx)?,
             audience: parse_declared_audience(&self.audience, ctx)?,
+            // One spelling per mark set: the identity and the pin both read the canonical form.
+            attention: self.attention.map(|marks| {
+                let mut marks: Vec<appa_engine::names::MarkName> =
+                    marks.into_iter().map(appa_engine::names::MarkName::new).collect();
+                marks.sort();
+                marks.dedup();
+                marks
+            }),
         })
     }
 }
@@ -1304,7 +1328,7 @@ confined_results = ["lookup"]
     #[test]
     fn a_resolver_cast_registers_the_ceiling_the_policy_declares() {
         let policy = "version = 1\n\
-             [[tool]]\nname = \"fetch\"\ntags = [\"web\"]\n\
+             [[tool]]\nname = \"fetch\"\ntags = [\"web\"]\ndelta = { trust = \"unknown\" }\n\
              [[cast]]\nname = \"content-classifier\"\n\
              resolver = { may_cast = { trust = [\"suspicious\"], audience = [\"public\"] } }\n\
              tags = [\"web\"]\n";
@@ -1327,7 +1351,7 @@ confined_results = ["lookup"]
         let with_hint = |hint: &str| {
             format!(
                 "version = 1\n\
-                 [[tool]]\nname = \"fetch\"\ntags = [\"web\"]\n\
+                 [[tool]]\nname = \"fetch\"\ntags = [\"web\"]\ndelta = {{ trust = \"unknown\" }}\n\
                  [[cast]]\nname = \"content-classifier\"\nhint = \"{hint}\"\n\
                  resolver = {{ may_cast = {{ trust = [\"suspicious\"], audience = [\"public\"] }} }}\n\
                  tags = [\"web\"]\n"
@@ -1918,7 +1942,7 @@ confined_results = ["read", "send"]
             .next()
             .expect("read registers");
         assert_eq!(
-            read.delta.as_ref().and_then(|delta| delta.audience.as_ref()),
+            read.delta.audience.as_ref(),
             Some(&AudienceDelta::Static(
                 DeclaredAudience::declared([ReaderId::new("auditor")], [GroupName::new("team")]).unwrap()
             ))
@@ -1997,10 +2021,7 @@ confined_results = ["read", "send"]
             .tools()
             .find(|tool| tool.name.as_str() == "t")
             .expect("t registers");
-        assert!(matches!(
-            tool.delta.as_ref().and_then(|d| d.audience.as_ref()),
-            Some(AudienceDelta::PendingCast)
-        ));
+        assert!(matches!(tool.delta.audience.as_ref(), Some(AudienceDelta::PendingCast)));
         assert!(matches!(delta("[\"unknown\"]"), Err(ConfigError::BadAudience { .. })));
         assert!(matches!(delta("[]"), Err(ConfigError::BadAudience { .. })));
     }

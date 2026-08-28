@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::authority::{Authority, Cast, CastResolution, DeclaredTransition, Hint, Sanitizer};
-use crate::contract::{AudienceDelta, AudienceRequirement, Delta, RecipientSpec, ToolContract};
+use crate::authority::{Authority, Cast, CastResolution, DeclaredLabel, DeclaredTransition, Hint, Sanitizer};
+use crate::contract::{AudienceDelta, AudienceRequirement, RecipientSpec, RequirementSlot, ToolContract};
 use crate::groups::{DeclaredAudience, ExpansionRefusal, Expansions, GroupExpansion, GroupResolution};
 use crate::label::{Audience, Dim, Dimension, ReaderId, Trust};
 use crate::names::{AuthorityName, CastName, GroupName, MarkName, MembershipResolverName, SanitizerName, TagName};
@@ -265,6 +265,8 @@ pub enum LoadError {
     DuplicateRank(String),
     #[error("trust rank name \"unknown\" is reserved: it spells the unestablished state, not a rank")]
     ReservedRankName,
+    #[error("tool name \"*\" is reserved: it names the engine-built contract of an undeclared tool")]
+    ReservedToolName,
     #[error("duplicate tool contract: {0}")]
     DuplicateTool(String),
     #[error("malformed tool selector {0:?}")]
@@ -300,10 +302,6 @@ pub enum LoadError {
     #[error("tool {tool} declares a pending-cast {dimension:?} output and a `requires` on that dimension")]
     PendingCastWithRequirement { tool: String, dimension: Dimension },
     #[error(
-        "tool {0} is unannotated (no delta) but declares label requirements: declare its delta (`delta = {{}}` for a deliberately neutral output) so the committed label the requirements check is established"
-    )]
-    UnannotatedWithLabelRequirement(String),
-    #[error(
         "tool {tool}: {count} worst-case alternative remedy plans exceed the planner cap of {max} — reduce the requirement entries, the competent authorities, or the clearing tools, or raise `[limits] planner_cap`"
     )]
     TooManyPlanAlternatives { tool: String, count: u128, max: u128 },
@@ -332,10 +330,6 @@ pub enum LoadError {
         "tool {tool} is provider-run and cannot be a confined result point: its result reaches the model inside the inference call, before any host could withhold it"
     )]
     ConfinedProviderRun { tool: String },
-    #[error(
-        "tool {tool} declares a pending-cast delta but the deployment does not confine its result point — the offer needs a raw result the model has not seen"
-    )]
-    PendingCastUnconfined { tool: String },
     #[error(
         "sanitizer {sanitizer} registers on tool_output but the deployment confines no application point — neither a result point nor the child-return crossing"
     )]
@@ -473,7 +467,7 @@ fn worst_case_plan_alternatives(
             .count()
     };
 
-    if let Some(floor) = tool.requires.label.trust_floor {
+    if let Some(floor) = tool.requires.trust_floor() {
         let gap = Gap::TrustFloor {
             required: floor,
             actual: floor,
@@ -494,7 +488,7 @@ fn worst_case_plan_alternatives(
         }
     }
     let mut seen_includes: Vec<&AudienceRequirement> = Vec::new();
-    for requirement in &tool.requires.label.audience {
+    for requirement in tool.requires.audience_requirements() {
         match requirement {
             AudienceRequirement::Includes(spec) if !seen_includes.contains(&requirement) => {
                 seen_includes.push(requirement);
@@ -525,7 +519,7 @@ fn worst_case_plan_alternatives(
         }
     }
     let mut seen_marks: Vec<&crate::names::MarkName> = Vec::new();
-    for mark in &tool.requires.attention {
+    for mark in tool.requires.attention_marks() {
         if seen_marks.contains(&mark) {
             continue;
         }
@@ -564,7 +558,7 @@ fn worst_case_plan_alternatives(
         Some(_) => 0,
         None if tool.resolver_owns(crate::contract::ResolverReturn::Trust)
             || tool.resolver_owns(crate::contract::ResolverReturn::Audience)
-            || tool.delta.iter().flat_map(Delta::groups).next().is_some() =>
+            || tool.delta.groups().next().is_some() =>
         {
             sanitizers
                 .iter()
@@ -591,7 +585,7 @@ fn worst_case_plan_alternatives(
             HistoryRequirement::NoPrior(_) => None,
         })
         .collect();
-    let has_cap = tool.requires.label.audience.iter().any(|requirement| {
+    let has_cap = tool.requires.audience_requirements().iter().any(|requirement| {
         matches!(
             requirement,
             AudienceRequirement::Cap(DeclaredAudience::Restricted { .. })
@@ -603,7 +597,7 @@ fn worst_case_plan_alternatives(
             candidate.emits.iter().any(|kind| priors.contains(&kind))
                 || (has_cap
                     && matches!(
-                        candidate.delta.as_ref().and_then(|delta| delta.audience.as_ref()),
+                        candidate.delta.audience.as_ref(),
                         Some(AudienceDelta::Static(DeclaredAudience::Restricted { .. }))
                     ))
         })
@@ -654,11 +648,53 @@ fn worst_case_return_stage(sanitizers: &[Sanitizer], confined: bool) -> u128 {
 /// redispatch offers, and the planner-cap bound exclude them by construction — no call site
 /// filters. The profile itself rides along, so plan and branch enumeration read confinement and
 /// context control from the one capability object they already hold.
+/// The name of the engine-built contract every undeclared tool resolves to. Reserved: a policy
+/// cannot declare it.
+pub const UNDECLARED_TOOL_NAME: &str = "*";
+
+/// How the registry classifies a proposed tool name: declared and checkable, declared as
+/// provider-run (never checked), or undeclared — the engine-built all-Unknown contract.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolKind {
+    Declared,
+    ProviderRun,
+    Undeclared,
+}
+
+/// The contract of a tool the policy never declared: every slot Unknown. Nothing about it is
+/// known until a cast establishes each slot at its point of need, so the call is undecidable
+/// until then and its result travels Unknown.
+fn undeclared_contract() -> ToolContract {
+    use crate::contract::{Delta, LabelRequirements, Requires};
+    ToolContract {
+        name: ToolName::new(UNDECLARED_TOOL_NAME),
+        tags: Vec::new(),
+        description: None,
+        parameters: crate::params::ToolParameters::open(),
+        uses: Vec::new(),
+        delta: Delta {
+            trust: Some(Dim::Unknown),
+            audience: Some(Dim::Unknown.into()),
+        },
+        emits: crate::fact::EffectSet::default(),
+        requires: Requires {
+            label: LabelRequirements {
+                trust_floor: Some(Dim::Unknown),
+                audience: Dim::Unknown,
+            },
+            history: Vec::new(),
+            attention: Dim::Unknown,
+        },
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Registry {
     trust_chain: TrustChain,
     tools: BTreeMap<ToolName, Vec<(ToolMatcher, ToolContract)>>,
     provider_run: BTreeMap<ToolName, ToolContract>,
+    /// The one contract every undeclared name resolves to; in no listing, vector, or identity.
+    unknown_tool: ToolContract,
     authorities: Vec<Authority>,
     attention_marks: BTreeSet<MarkName>,
     sanitizers: BTreeMap<SanitizerName, Sanitizer>,
@@ -717,21 +753,24 @@ impl Registry {
         let mut provider_run = BTreeMap::new();
         for mut tool in config.tools {
             let (base_name, matcher) = parse_contract_name(tool.name.as_str())?;
+            if base_name.as_str() == UNDECLARED_TOOL_NAME {
+                return Err(LoadError::ReservedToolName);
+            }
             tool.name = base_name;
-            let declared_trust = match tool.delta.as_ref().and_then(|d| d.trust.as_ref()) {
+            let declared_trust = match tool.delta.trust.as_ref() {
                 Some(Dim::Known(t)) => Some(*t),
                 Some(Dim::Unknown) | None => None,
             };
             check_rank(&config.trust_chain, declared_trust, || {
                 format!("tool {} delta", tool.name.as_str())
             })?;
-            check_rank(&config.trust_chain, tool.requires.label.trust_floor, || {
+            check_rank(&config.trust_chain, tool.requires.trust_floor(), || {
                 format!("tool {} trust floor", tool.name.as_str())
             })?;
-            if let Some(AudienceDelta::Static(audience)) = tool.delta.as_ref().and_then(|d| d.audience.as_ref()) {
+            if let Some(AudienceDelta::Static(audience)) = tool.delta.audience.as_ref() {
                 check_declared_readers(audience, || format!("tool {} delta", tool.name.as_str()))?;
             }
-            for requirement in &tool.requires.label.audience {
+            for requirement in tool.requires.audience_requirements() {
                 match requirement {
                     AudienceRequirement::Includes(RecipientSpec::Static(recipients)) => {
                         check_declared_readers(recipients, || format!("tool {} contains", tool.name.as_str()))?;
@@ -865,25 +904,25 @@ impl Registry {
         }
 
         let writes_group = |tool: &ToolContract, cast: &Cast| {
-            tool.delta.iter().flat_map(Delta::groups).next().is_some() || cast.resolution.groups().next().is_some()
+            tool.delta.groups().next().is_some() || cast.resolution.groups().next().is_some()
         };
+        let unknown_tool = undeclared_contract();
+        let unknown_slots = |tool: &ToolContract| -> Vec<RequirementSlot> { tool.requires.unknown_slots().collect() };
         for (i, cast) in casts.iter().enumerate() {
-            let castable: Vec<&ToolContract> = tools
+            let covered: Vec<&ToolContract> = tools
                 .values()
                 .flatten()
                 .map(|(_, tool)| tool)
                 .filter(|tool| cast.scope.covers(&tool.tags))
+                .collect();
+            let castable: Vec<&ToolContract> = covered
+                .iter()
+                .copied()
                 .filter(|tool| crate::label::EstablishedLabel::from_label(&tool.output_label(&literal)).is_none())
                 .collect();
             if !cast.scope.is_unscoped() {
-                let usable = castable.iter().any(|tool| match &cast.resolution {
-                    CastResolution::Constant(constant) => {
-                        writes_group(tool, cast)
-                            || cast
-                                .resolution
-                                .validate(&tool.output_label(&literal), &constant.resolve(&literal), &literal)
-                                .is_ok()
-                    }
+                let meets_a_value = castable.iter().any(|tool| match &cast.resolution {
+                    CastResolution::Constant(constant) => constant_can_meet(tool, constant, &literal),
                     CastResolution::Resolver { may_cast } => {
                         // A resolver-owned trust dimension arrives established by its pin, so
                         // an audience-only cast is as usable here as beside a static trust.
@@ -892,28 +931,45 @@ impl Registry {
                             || !may_cast.trust.is_empty()
                     }
                 });
-                if !usable {
+                // A cast is also reached as the requirement cast of a covered tool whose policy
+                // leaves a slot Unknown, whatever that tool's output label.
+                let answers_a_requirement = covered.iter().any(|tool| {
+                    let slots = unknown_slots(tool);
+                    !slots.is_empty() && cast.resolution.can_answer_requirement(&slots)
+                });
+                if !meets_a_value && !answers_a_requirement {
                     return Err(LoadError::UnreachableCast(cast.name.as_str().to_string()));
                 }
             }
-            if castable.is_empty() {
+            // The tools whose Unknown requirement slots this cast may be asked for: an unscoped
+            // cast is also asked for every undeclared tool.
+            let requirers: Vec<&ToolContract> = covered
+                .iter()
+                .copied()
+                .chain(cast.scope.is_unscoped().then_some(&unknown_tool))
+                .filter(|tool| !unknown_slots(tool).is_empty())
+                .collect();
+            if castable.is_empty() && requirers.is_empty() {
                 continue;
             }
+            // An earlier constant shadows this cast when it answers first at every value and every
+            // requirement this cast could be asked for: the engine stops at the first covering
+            // constant, so what it cannot answer reaches the casts after it.
             let shadowing = casts[..i].iter().find(|earlier| {
                 let CastResolution::Constant(constant) = &earlier.resolution else {
                     return false;
                 };
                 earlier.scope.covers_scope(&cast.scope)
+                    && requirers
+                        .iter()
+                        .all(|tool| earlier.resolution.can_answer_requirement(&unknown_slots(tool)))
                     && castable.iter().all(|tool| {
-                        // A tool whose audience a resolver pins per call cannot prove an
+                        // A tool whose output dimension a resolver pins per call cannot prove an
                         // earlier constant dominates: the load-time output label is not the
                         // label the cast would meet.
-                        let audience_pinned_per_call = matches!(
-                            tool.delta.as_ref().and_then(|delta| delta.trust.as_ref()),
-                            Some(Dim::Unknown)
-                        ) && tool
-                            .resolver_owns(crate::contract::ResolverReturn::Audience);
-                        !audience_pinned_per_call
+                        let pinned_per_call = tool.resolver_owns(crate::contract::ResolverReturn::Trust)
+                            || tool.resolver_owns(crate::contract::ResolverReturn::Audience);
+                        !pinned_per_call
                             && !writes_group(tool, earlier)
                             && earlier
                                 .resolution
@@ -938,18 +994,23 @@ impl Registry {
             .flatten()
             .map(|(_, tool)| tool)
             .chain(provider_run.values())
-            .flat_map(|tool| tool.requires.attention.iter().cloned())
+            .flat_map(|tool| tool.requires.attention_marks().iter().cloned())
             .chain(
                 config
                     .authorities
                     .iter()
                     .flat_map(|authority| authority.mandate.attends.iter().cloned()),
             )
+            .chain(casts.iter().flat_map(|cast| match &cast.resolution {
+                CastResolution::Constant(constant) => constant.attention.iter().flatten().cloned().collect(),
+                CastResolution::Resolver { .. } => Vec::new(),
+            }))
             .collect();
 
         Ok(Registry {
             trust_chain: config.trust_chain,
             tools,
+            unknown_tool,
             provider_run,
             authorities: config.authorities,
             attention_marks,
@@ -973,6 +1034,28 @@ impl Registry {
 
     /// An event's answers as one operation's expansions: each names a group this
     /// policy writes, once.
+    /// The casts consulted, in order, for a contract with `tags` leaving `slots` Unknown: every
+    /// covering cast that can answer the slots, up to and including the first constant — a
+    /// constant always answers, so nothing after it is reached. The engine lists from this and
+    /// the check holds a pin to it.
+    pub(crate) fn requirement_cast_order<'a>(
+        &'a self,
+        tags: &'a [TagName],
+        slots: &'a [RequirementSlot],
+    ) -> impl Iterator<Item = &'a Cast> + 'a {
+        let mut answered = false;
+        self.casts
+            .iter()
+            .filter(move |cast| cast.scope.covers(tags) && cast.resolution.can_answer_requirement(slots))
+            .take_while(move |cast| {
+                if answered {
+                    return false;
+                }
+                answered = matches!(cast.resolution, CastResolution::Constant(_));
+                true
+            })
+    }
+
     pub(crate) fn expansions_from_event(&self, answers: &[GroupExpansion]) -> Result<Expansions, ExpansionRefusal> {
         Expansions::from_event(&self.groups, answers)
     }
@@ -992,16 +1075,56 @@ impl Registry {
         &self.profile
     }
 
+    /// The dimension a cast must resolve before the result is admitted: a contract's Unknown
+    /// dimension at a result point the deployment confines. An Unknown dimension at an
+    /// unconfined result point is a missing fact the value carries out of admission and a sink
+    /// resolves later, so it names no admission-time cast.
+    pub(crate) fn confined_pending_cast(&self, contract: &ToolContract) -> Option<Dimension> {
+        contract
+            .pending_cast_dim()
+            .filter(|_| self.profile.confines_result(&contract.name))
+    }
+
     pub fn trust_chain(&self) -> &TrustChain {
         &self.trust_chain
     }
 
-    pub(crate) fn tool(&self, name: &ToolName) -> Option<&ToolContract> {
-        self.tools.get(name)?.first().map(|(_, tool)| tool)
+    /// The one classification every name lookup derives from.
+    pub fn classify(&self, name: &ToolName) -> ToolKind {
+        if self.tools.contains_key(name) {
+            ToolKind::Declared
+        } else if self.provider_run.contains_key(name) {
+            ToolKind::ProviderRun
+        } else {
+            ToolKind::Undeclared
+        }
     }
 
+    /// Whether the policy declares this checkable tool. Deployment coverage and provider-result
+    /// admission read this: an undeclared name resolves to a contract at a proposal, but a
+    /// declaration naming one is a typo.
+    pub(crate) fn declared(&self, name: &ToolName) -> bool {
+        self.classify(name) == ToolKind::Declared
+    }
+
+    /// The first contract of a name, for tests that register one contract per tool.
+    #[cfg(test)]
+    pub(crate) fn tool(&self, name: &ToolName) -> Option<&ToolContract> {
+        match self.classify(name) {
+            ToolKind::Declared => self.tools.get(name)?.first().map(|(_, tool)| tool),
+            ToolKind::ProviderRun => None,
+            ToolKind::Undeclared => Some(&self.unknown_tool),
+        }
+    }
+
+    /// The contract a persisted call names. An undeclared tool has exactly one contract, at
+    /// ordinal zero; a record naming another ordinal for it is forged.
     pub(crate) fn keyed_tool(&self, name: &ToolName, id: ToolContractId) -> Option<&ToolContract> {
-        self.tools.get(name)?.get(id.ordinal()).map(|(_, tool)| tool)
+        match self.classify(name) {
+            ToolKind::Declared => self.tools.get(name)?.get(id.ordinal()).map(|(_, tool)| tool),
+            ToolKind::ProviderRun => None,
+            ToolKind::Undeclared => (id.ordinal() == 0).then_some(&self.unknown_tool),
+        }
     }
 
     pub fn contract(&self, call: &crate::value::ResolvedCall) -> Option<&ToolContract> {
@@ -1013,17 +1136,22 @@ impl Registry {
         name: &ToolName,
         arguments: &serde_json::Value,
     ) -> Option<(ToolContractId, &ToolContract)> {
-        self.tools
-            .get(name)?
-            .iter()
-            .enumerate()
-            .find_map(|(ordinal, (matcher, tool))| {
-                if matcher.matches(arguments) {
-                    ToolContractId::new(ordinal).map(|id| (id, tool))
-                } else {
-                    None
-                }
-            })
+        match self.classify(name) {
+            ToolKind::Declared => self
+                .tools
+                .get(name)?
+                .iter()
+                .enumerate()
+                .find_map(|(ordinal, (matcher, tool))| {
+                    if matcher.matches(arguments) {
+                        ToolContractId::new(ordinal).map(|id| (id, tool))
+                    } else {
+                        None
+                    }
+                }),
+            ToolKind::ProviderRun => None,
+            ToolKind::Undeclared => Some((ToolContractId::default(), &self.unknown_tool)),
+        }
     }
 
     pub(crate) fn selection_matches(&self, call: &crate::value::ResolvedCall) -> bool {
@@ -1031,8 +1159,10 @@ impl Registry {
             .is_some_and(|(selected, _)| selected == call.contract_id())
     }
 
+    /// Whether a proposal naming this tool has a checkable contract: declared or undeclared. A
+    /// provider-run tool is the one name with no checkable contract.
     pub(crate) fn contains_tool(&self, name: &ToolName) -> bool {
-        self.tools.contains_key(name)
+        self.classify(name) != ToolKind::ProviderRun
     }
 
     pub fn variants(&self, name: &ToolName) -> impl Iterator<Item = &ToolContract> {
@@ -1113,39 +1243,67 @@ impl Registry {
 }
 
 fn validate_pending_cast(tool: &ToolContract) -> Result<(), LoadError> {
-    let requires_trust =
-        tool.requires.label.trust_floor.is_some() || tool.resolver_owns(crate::contract::ResolverReturn::RequiredTrust);
-    let requires_audience = !tool.requires.label.audience.is_empty()
+    use crate::contract::RequirementSlot;
+    let requires_trust = tool.requires.declares(RequirementSlot::Trust)
+        || tool.resolver_owns(crate::contract::ResolverReturn::RequiredTrust);
+    let requires_audience = tool.requires.declares(RequirementSlot::Audience)
         || tool.resolver_owns(crate::contract::ResolverReturn::RequiredAudience);
-    let Some(delta) = &tool.delta else {
-        // Each dimension answers for itself: a resolver owning one dimension establishes
-        // nothing about the other. An unannotated dimension is fail-closed Unknown forever,
-        // so a requirement consuming it could never hold and is refused here.
-        let trust_described = tool.resolver_owns(crate::contract::ResolverReturn::Trust);
-        let audience_described = tool.resolver_owns(crate::contract::ResolverReturn::Audience);
-        return if (requires_trust && !trust_described) || (requires_audience && !audience_described) {
-            Err(LoadError::UnannotatedWithLabelRequirement(
-                tool.name.as_str().to_string(),
-            ))
-        } else {
-            Ok(())
-        };
+    let refused = |dimension| LoadError::PendingCastWithRequirement {
+        tool: tool.name.as_str().to_string(),
+        dimension,
     };
-    if matches!(delta.trust, Some(Dim::Unknown))
-        && matches!(delta.audience, Some(crate::contract::AudienceDelta::PendingCast))
-    {
-        return Err(LoadError::DualPendingCast(tool.name.as_str().to_string()));
+    let delta = &tool.delta;
+    if matches!(delta.trust, Some(Dim::Unknown)) && requires_trust {
+        return Err(refused(Dimension::Trust));
     }
-    match delta.pending_cast_dim() {
-        Some(Dimension::Trust) if requires_trust => Err(LoadError::PendingCastWithRequirement {
-            tool: tool.name.as_str().to_string(),
-            dimension: Dimension::Trust,
-        }),
-        Some(Dimension::Audience) if requires_audience => Err(LoadError::PendingCastWithRequirement {
-            tool: tool.name.as_str().to_string(),
-            dimension: Dimension::Audience,
-        }),
-        _ => Ok(()),
+    if matches!(delta.audience, Some(crate::contract::AudienceDelta::PendingCast)) && requires_audience {
+        return Err(refused(Dimension::Audience));
+    }
+    Ok(())
+}
+
+/// Can a scoped constant ever answer for this origin? Every established output dimension of
+/// the origin must be able to equal the constant's under some membership answers: trust by
+/// equality, audience by the declared shapes. An Unknown origin dimension — pending-cast or
+/// resolver-owned — compares nothing.
+fn constant_can_meet(tool: &ToolContract, constant: &DeclaredLabel, literal: &Expansions) -> bool {
+    use crate::contract::ResolverReturn;
+    let trust_meets = match tool.output_label(literal).trust {
+        Dim::Known(trust) => trust == constant.trust,
+        Dim::Unknown => true,
+    };
+    let origin_audience = match &tool.delta.audience {
+        _ if tool.resolver_owns(ResolverReturn::Audience) => None,
+        Some(AudienceDelta::Static(audience)) => Some(audience.clone()),
+        Some(AudienceDelta::PendingCast) => None,
+        None => Some(DeclaredAudience::Public),
+    };
+    trust_meets && origin_audience.is_none_or(|origin| audience_equalizable(&origin, &constant.audience))
+}
+
+/// Can two declared audiences resolve to the same reader set under some membership answers?
+/// A group answers with any literal reader set, the empty one included, and one answer serves
+/// every mention of its name; `public` never crosses to a reader list.
+fn audience_equalizable(origin: &DeclaredAudience, constant: &DeclaredAudience) -> bool {
+    match (origin, constant) {
+        (DeclaredAudience::Public, DeclaredAudience::Public) => true,
+        (DeclaredAudience::Public, DeclaredAudience::Restricted { .. })
+        | (DeclaredAudience::Restricted { .. }, DeclaredAudience::Public) => false,
+        (
+            DeclaredAudience::Restricted {
+                readers: origin_readers,
+                groups: origin_groups,
+            },
+            DeclaredAudience::Restricted {
+                readers: constant_readers,
+                groups: constant_groups,
+            },
+        ) => match (origin_groups.is_empty(), constant_groups.is_empty()) {
+            (false, false) => true,
+            (true, false) => constant_readers.is_subset(origin_readers),
+            (false, true) => origin_readers.is_subset(constant_readers),
+            (true, true) => origin_readers == constant_readers,
+        },
     }
 }
 
@@ -1162,20 +1320,22 @@ fn validate_tool_resolvers(tool: &ToolContract) -> Result<(), LoadError> {
     };
     // A destination holds one value: a static one the policy wrote, or one resolver result.
     let mut owned: BTreeSet<ResolverReturn> = BTreeSet::new();
-    if tool.delta.as_ref().is_some_and(|delta| delta.trust.is_some()) {
+    if tool.delta.trust.is_some() {
         owned.insert(ResolverReturn::Trust);
     }
-    if tool.delta.as_ref().is_some_and(|delta| delta.audience.is_some()) {
+    if tool.delta.audience.is_some() {
         owned.insert(ResolverReturn::Audience);
     }
-    if tool.requires.label.trust_floor.is_some() {
-        owned.insert(ResolverReturn::RequiredTrust);
-    }
-    if !tool.requires.label.audience.is_empty() {
-        owned.insert(ResolverReturn::RequiredAudience);
-    }
-    if !tool.requires.attention.is_empty() {
-        owned.insert(ResolverReturn::Attention);
+    // A slot the policy wrote — a value or `"unknown"` — is owned statically: an Unknown
+    // requirement is cast lazily, so no resolver may also answer it eagerly.
+    for slot in [
+        RequirementSlot::Trust,
+        RequirementSlot::Audience,
+        RequirementSlot::Attention,
+    ] {
+        if tool.requires.declares(slot) {
+            owned.insert(slot.resolver_return());
+        }
     }
 
     for uses in &tool.uses {
@@ -1228,7 +1388,7 @@ fn check_audience_bindings(tool: &ToolContract) -> Result<(), LoadError> {
                 fault,
             })
     };
-    for requirement in &tool.requires.label.audience {
+    for requirement in tool.requires.audience_requirements() {
         match requirement {
             AudienceRequirement::Includes(RecipientSpec::Placeholder(argument)) => check(argument, "contains")?,
             AudienceRequirement::Includes(RecipientSpec::Static(_)) | AudienceRequirement::Cap(_) => {}
@@ -1325,7 +1485,7 @@ mod tests {
             uses: vec![],
             name: ToolName::new(name),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires::default(),
@@ -1347,7 +1507,7 @@ mod tests {
     #[test]
     fn static_requirements_declare_attention_vocabulary_without_an_authority() {
         let mut blocked = tool("blocked");
-        blocked.requires.attention = vec![MarkName::new("blocked")];
+        blocked.requires.attention = Dim::Known(vec![MarkName::new("blocked")]);
         let mut cfg = base();
         cfg.tools = vec![blocked];
 
@@ -1365,22 +1525,23 @@ mod tests {
 
         let mut delta = base();
         let mut delta_tool = tool("emit");
-        delta_tool.delta = Some(Delta {
+        delta_tool.delta = Delta {
             trust: None,
             audience: Some(AudienceDelta::Static(DeclaredAudience::literal(named.clone()))),
-        });
+        };
         delta.tools = vec![delta_tool];
 
         let mut includes = base();
         let mut includes_tool = tool("emit");
-        includes_tool.requires.label.audience = vec![AudienceRequirement::Includes(RecipientSpec::Static(
+        includes_tool.requires.label.audience = Dim::Known(vec![AudienceRequirement::Includes(RecipientSpec::Static(
             DeclaredAudience::literal(named.clone()),
-        ))];
+        ))]);
         includes.tools = vec![includes_tool];
 
         let mut cap = base();
         let mut cap_tool = tool("emit");
-        cap_tool.requires.label.audience = vec![AudienceRequirement::Cap(DeclaredAudience::literal(named.clone()))];
+        cap_tool.requires.label.audience =
+            Dim::Known(vec![AudienceRequirement::Cap(DeclaredAudience::literal(named.clone()))]);
         cap.tools = vec![cap_tool];
 
         let mut ceiling = base();
@@ -1471,13 +1632,13 @@ mod tests {
     fn one_reserved_member_spoils_an_otherwise_literal_set() {
         let mut cfg = base();
         let mut spoiled = tool("emit");
-        spoiled.requires.label.audience = vec![AudienceRequirement::Cap(DeclaredAudience::literal(
+        spoiled.requires.label.audience = Dim::Known(vec![AudienceRequirement::Cap(DeclaredAudience::literal(
             Audience::restricted([
                 ReaderId::new("ap@corp.example"),
                 ReaderId::new("finance"),
                 ReaderId::new("public"),
             ]),
-        ))];
+        ))]);
         cfg.tools = vec![spoiled];
         assert!(matches!(
             Registry::build_covered(cfg),
@@ -1511,9 +1672,9 @@ mod tests {
 
         let mut empty_cap = base();
         let mut cap_tool = tool("emit");
-        cap_tool.requires.label.audience = vec![AudienceRequirement::Cap(DeclaredAudience::literal(
+        cap_tool.requires.label.audience = Dim::Known(vec![AudienceRequirement::Cap(DeclaredAudience::literal(
             Audience::restricted([]),
-        ))];
+        ))]);
         empty_cap.tools = vec![cap_tool];
         assert!(Registry::build_covered(empty_cap).is_ok());
     }
@@ -1743,10 +1904,10 @@ mod tests {
     fn refuses_rank_out_of_chain() {
         let mut cfg = base();
         cfg.tools = vec![ToolContract {
-            delta: Some(Delta {
+            delta: Delta {
                 trust: Some(Dim::Known(Trust::new(9))),
                 audience: None,
-            }),
+            },
             ..tool("over")
         }];
         assert!(matches!(
@@ -1765,7 +1926,7 @@ mod tests {
             uses: vec![],
             name: ToolName::new(name),
             tags: tags.iter().copied().map(crate::names::TagName::new).collect(),
-            delta: Some(delta),
+            delta,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires::default(),
@@ -1849,20 +2010,111 @@ mod tests {
 
     #[test]
     fn an_earlier_constant_valid_at_every_origin_shadows_a_later_cast() {
+        let fallback = |attention: Option<Vec<MarkName>>| Cast {
+            name: CastName::new("fallback"),
+            resolution: CastResolution::Constant(DeclaredLabel {
+                trust: Trust::new(0),
+                audience: DeclaredAudience::literal(internal()),
+                attention,
+            }),
+            scope: Scope::default(),
+            hint: None,
+        };
         let mut cfg = base();
         cfg.tools = vec![origin("inbox", &[], pending_trust(internal()))];
         cfg.casts = vec![
-            constant_cast(
-                "fallback",
-                EstablishedLabel::new(Trust::new(0), internal()),
-                Scope::default(),
-            ),
+            fallback(Some(vec![])),
             resolver_cast("classifier", vec![Trust::new(0)], Audience::Public, Scope::default()),
         ];
         assert!(matches!(
             Registry::build_covered(cfg),
             Err(LoadError::ShadowedCast { cast, by }) if cast == "classifier" && by == "fallback"
         ));
+
+        // Without attention marks the constant answers no undeclared tool, whose attention slot
+        // is Unknown, so an unscoped cast after it is still reached.
+        let mut cfg = base();
+        cfg.tools = vec![origin("inbox", &[], pending_trust(internal()))];
+        cfg.casts = vec![
+            fallback(None),
+            resolver_cast("classifier", vec![Trust::new(0)], Audience::Public, Scope::default()),
+        ];
+        assert!(Registry::build_covered(cfg).is_ok());
+    }
+
+    #[test]
+    fn a_resolver_without_a_trust_ceiling_reaches_no_trust_slot() {
+        let asking = |trust_floor: Option<Dim<Trust>>, audience: Dim<Vec<AudienceRequirement>>| {
+            let mut tool = origin("send", &["mail"], Delta::NONE);
+            tool.requires = Requires {
+                label: LabelRequirements { trust_floor, audience },
+                ..Requires::default()
+            };
+            tool
+        };
+        let mut cfg = base();
+        cfg.tools = vec![asking(Some(Dim::Unknown), Dim::Known(vec![]))];
+        cfg.casts = vec![resolver_cast("classifier", vec![], Audience::Public, scoped(&["mail"]))];
+        assert!(matches!(
+            Registry::build_covered(cfg),
+            Err(LoadError::UnreachableCast(name)) if name == "classifier"
+        ));
+
+        let mut cfg = base();
+        cfg.tools = vec![asking(None, Dim::Unknown)];
+        cfg.casts = vec![resolver_cast("classifier", vec![], Audience::Public, scoped(&["mail"]))];
+        assert!(
+            Registry::build_covered(cfg).is_ok(),
+            "an audience slot is answered under an empty trust ceiling"
+        );
+    }
+
+    #[test]
+    fn shadowing_follows_the_requirement_slots_a_constant_can_answer() {
+        let constant = |name: &str, attention: Option<Vec<MarkName>>, scope: Scope| Cast {
+            name: CastName::new(name),
+            resolution: CastResolution::Constant(DeclaredLabel {
+                trust: Trust::new(0),
+                audience: DeclaredAudience::Public,
+                attention,
+            }),
+            scope,
+            hint: None,
+        };
+        // Two constants both answering a lone Unknown floor: the engine stops at the first.
+        let mut floor = origin("send", &["mail"], Delta::NONE);
+        floor.requires = Requires {
+            label: LabelRequirements {
+                trust_floor: Some(Dim::Unknown),
+                audience: Dim::Known(vec![]),
+            },
+            ..Requires::default()
+        };
+        let mut cfg = base();
+        cfg.tools = vec![floor];
+        cfg.casts = vec![
+            constant("first", None, scoped(&["mail"])),
+            constant("second", None, scoped(&["mail"])),
+        ];
+        assert!(matches!(
+            Registry::build_covered(cfg),
+            Err(LoadError::ShadowedCast { cast, by }) if cast == "second" && by == "first"
+        ));
+
+        // A constant without marks establishes the value but cannot answer the attention slot,
+        // so the resolver after it is consulted for that slot.
+        let mut reviewed = origin("inbox", &["mail"], pending_trust(Audience::Public));
+        reviewed.requires = Requires {
+            attention: Dim::Unknown,
+            ..Requires::default()
+        };
+        let mut cfg = base();
+        cfg.tools = vec![reviewed];
+        cfg.casts = vec![
+            constant("first", None, scoped(&["mail"])),
+            resolver_cast("classifier", vec![Trust::new(0)], Audience::Public, scoped(&["mail"])),
+        ];
+        assert!(Registry::build_covered(cfg).is_ok());
     }
 
     #[test]
@@ -1871,6 +2123,7 @@ mod tests {
             CastResolution::Constant(crate::authority::DeclaredLabel {
                 trust,
                 audience: DeclaredAudience::declared([], [GroupName::new("team")]).unwrap(),
+                attention: None,
             })
         };
         let mut cfg = base();
@@ -1995,6 +2248,145 @@ mod tests {
     }
 
     #[test]
+    fn a_scoped_constant_no_covered_origin_can_equal_is_unreachable() {
+        let mut cfg = base();
+        cfg.membership = Some(MembershipResolverName::new("directory"));
+        cfg.tools = vec![origin("board", &["mail"], pending_audience(Trust::new(1)))];
+        cfg.casts = vec![Cast {
+            name: CastName::new("fallback"),
+            resolution: CastResolution::Constant(crate::authority::DeclaredLabel {
+                trust: Trust::new(0),
+                audience: DeclaredAudience::declared([], [GroupName::new("team")]).unwrap(),
+                attention: None,
+            }),
+            scope: scoped(&["mail"]),
+            hint: None,
+        }];
+        assert!(
+            matches!(
+                Registry::build_covered(cfg),
+                Err(LoadError::UnreachableCast(name)) if name == "fallback"
+            ),
+            "the origin's established trust never equals the constant's"
+        );
+
+        let mut cfg = base();
+        cfg.membership = Some(MembershipResolverName::new("directory"));
+        cfg.tools = vec![origin(
+            "inbox",
+            &["mail"],
+            Delta {
+                trust: Some(Dim::Unknown),
+                audience: Some(AudienceDelta::Static(
+                    DeclaredAudience::declared([ReaderId::new("alice")], [GroupName::new("team")]).unwrap(),
+                )),
+            },
+        )];
+        cfg.casts = vec![constant_cast(
+            "fallback",
+            EstablishedLabel::new(Trust::new(0), Audience::Public),
+            scoped(&["mail"]),
+        )];
+        assert!(
+            matches!(
+                Registry::build_covered(cfg),
+                Err(LoadError::UnreachableCast(name)) if name == "fallback"
+            ),
+            "a reader list never resolves to public"
+        );
+    }
+
+    #[test]
+    fn a_scoped_constant_some_membership_answer_equalizes_loads() {
+        let mut cfg = base();
+        cfg.membership = Some(MembershipResolverName::new("directory"));
+        cfg.tools = vec![origin(
+            "inbox",
+            &["mail"],
+            Delta {
+                trust: Some(Dim::Unknown),
+                audience: Some(AudienceDelta::Static(
+                    DeclaredAudience::declared([ReaderId::new("alice")], [GroupName::new("team")]).unwrap(),
+                )),
+            },
+        )];
+        cfg.casts = vec![constant_cast(
+            "fallback",
+            EstablishedLabel::new(Trust::new(0), Audience::restricted([ReaderId::new("alice")])),
+            scoped(&["mail"]),
+        )];
+        assert!(Registry::build_covered(cfg).is_ok(), "an empty team answer equalizes");
+    }
+
+    #[test]
+    fn a_resolver_owned_output_dimension_defeats_constant_shadowing() {
+        let mut cfg = base();
+        let mut shell = origin("shell", &[], Delta::NONE);
+        shell.uses = vec![ToolResolverUse {
+            resolver: crate::names::DynamicResolverName::new("classify"),
+            inputs: std::collections::BTreeMap::new(),
+            returns: [ResolverReturn::Trust].into_iter().collect(),
+        }];
+        cfg.tools = vec![shell];
+        cfg.casts = vec![
+            constant_cast(
+                "fallback",
+                EstablishedLabel::new(Trust::new(0), Audience::Public),
+                Scope::default(),
+            ),
+            resolver_cast("classifier", vec![Trust::new(0)], Audience::Public, Scope::default()),
+        ];
+        assert!(
+            Registry::build_covered(cfg).is_ok(),
+            "the load-time label is not the label the cast meets once the resolver pins trust"
+        );
+    }
+
+    #[test]
+    fn a_scoped_cast_reaching_only_an_unknown_requirement_slot_loads() {
+        let asks_a_floor = || {
+            let mut tool = origin("send", &["mail"], Delta::NONE);
+            tool.requires = Requires {
+                label: LabelRequirements {
+                    trust_floor: Some(Dim::Unknown),
+                    audience: Dim::Known(vec![]),
+                },
+                ..Requires::default()
+            };
+            tool
+        };
+        let mut cfg = base();
+        cfg.tools = vec![asks_a_floor()];
+        cfg.casts = vec![resolver_cast(
+            "classifier",
+            vec![Trust::new(0)],
+            Audience::Public,
+            scoped(&["mail"]),
+        )];
+        assert!(
+            Registry::build_covered(cfg).is_ok(),
+            "a resolver answers the floor per call"
+        );
+
+        let mut cfg = base();
+        cfg.tools = vec![asks_a_floor()];
+        cfg.casts = vec![Cast {
+            name: CastName::new("fallback"),
+            resolution: CastResolution::Constant(DeclaredLabel {
+                trust: Trust::new(0),
+                audience: DeclaredAudience::Public,
+                attention: None,
+            }),
+            scope: scoped(&["mail"]),
+            hint: None,
+        }];
+        assert!(
+            Registry::build_covered(cfg).is_ok(),
+            "a constant answers the floor inline"
+        );
+    }
+
+    #[test]
     fn a_scoped_cast_covering_no_registered_origin_is_unreachable() {
         let mut cfg = base();
         cfg.tools = vec![origin("inbox", &["mail"], pending_trust(internal()))];
@@ -2060,6 +2452,54 @@ mod tests {
     }
 
     #[test]
+    fn refuses_the_reserved_tool_name() {
+        let mut cfg = base();
+        cfg.tools = vec![tool(UNDECLARED_TOOL_NAME)];
+        assert!(matches!(Registry::build_covered(cfg), Err(LoadError::ReservedToolName)));
+    }
+
+    /// Every undeclared name resolves to the one engine-built contract: all slots Unknown, at
+    /// ordinal zero only, distinct from a declared tool's first contract, and in no listing.
+    #[test]
+    fn an_undeclared_name_resolves_to_the_reserved_all_unknown_contract() {
+        let mut cfg = base();
+        cfg.tools = vec![tool("read")];
+        let registry = Registry::build_covered(cfg).unwrap();
+        let read = ToolName::new("read");
+        let ghost = ToolName::new("ghost");
+        assert_eq!(registry.classify(&read), ToolKind::Declared);
+        assert_eq!(registry.classify(&ghost), ToolKind::Undeclared);
+        assert!(registry.declared(&read));
+        assert!(!registry.declared(&ghost));
+        assert!(registry.contains_tool(&ghost));
+
+        let (id, unknown) = registry.select_tool(&ghost, &serde_json::json!({})).unwrap();
+        assert_eq!(id, ToolContractId::default());
+        assert_eq!(unknown.name.as_str(), UNDECLARED_TOOL_NAME);
+        assert_eq!(unknown.delta.trust, Some(Dim::Unknown));
+        assert_eq!(unknown.delta.audience, Some(Dim::Unknown.into()));
+        assert_eq!(
+            unknown.requires.unknown_slots().collect::<Vec<_>>(),
+            [
+                crate::contract::RequirementSlot::Trust,
+                crate::contract::RequirementSlot::Audience,
+                crate::contract::RequirementSlot::Attention
+            ]
+        );
+        assert!(unknown.uses.is_empty());
+
+        let declared = registry.keyed_tool(&read, ToolContractId::default()).unwrap();
+        assert_ne!(declared.name, unknown.name);
+        assert_eq!(
+            registry.keyed_tool(&ghost, ToolContractId::default()).map(|c| &c.name),
+            Some(&unknown.name)
+        );
+        assert!(registry.keyed_tool(&ghost, ToolContractId::new(1).unwrap()).is_none());
+        assert!(registry.tools().all(|tool| tool.name.as_str() != UNDECLARED_TOOL_NAME));
+        assert!(registry.tool_names().all(|name| name.as_str() != UNDECLARED_TOOL_NAME));
+    }
+
+    #[test]
     fn refuses_the_reserved_rank_name() {
         let mut cfg = base();
         cfg.trust_chain = TrustChain::new(vec!["suspicious".into(), "unknown".into()]);
@@ -2070,11 +2510,11 @@ mod tests {
     fn an_unannotated_tool_composes_with_history_and_attention_requirements() {
         let mut cfg = base();
         let mut guard = tool("guard");
-        guard.delta = None;
+        guard.delta = Delta::NONE;
         guard.requires = Requires {
             label: LabelRequirements::default(),
             history: vec![HistoryRequirement::NoPrior(EffectKind::new("email.sent"))],
-            attention: vec![MarkName::new("signoff")],
+            attention: Dim::Known(vec![MarkName::new("signoff")]),
         };
         cfg.tools = vec![guard];
         cfg.authorities = vec![attends_authority("steward")];
@@ -2093,36 +2533,20 @@ mod tests {
     }
 
     #[test]
-    fn refuses_dual_pending_cast_output() {
-        let mut cfg = base();
-        cfg.tools = vec![ToolContract {
-            delta: Some(Delta {
-                trust: Some(Dim::Unknown),
-                audience: Some(Dim::Unknown.into()),
-            }),
-            ..tool("scan")
-        }];
-        assert!(matches!(
-            Registry::build_covered(cfg),
-            Err(LoadError::DualPendingCast(name)) if name == "scan"
-        ));
-    }
-
-    #[test]
     fn refuses_a_requirement_on_a_pending_cast_dimension() {
         use crate::contract::{AudienceRequirement, LabelRequirements, Requires};
         use crate::label::Audience;
 
         let mut cfg = base();
         cfg.tools = vec![ToolContract {
-            delta: Some(Delta {
+            delta: Delta {
                 trust: Some(Dim::Unknown),
                 audience: None,
-            }),
+            },
             requires: Requires {
                 label: LabelRequirements {
-                    trust_floor: Some(Trust::new(1)),
-                    audience: vec![],
+                    trust_floor: Some(Dim::Known(Trust::new(1))),
+                    audience: Dim::Known(vec![]),
                 },
                 ..Requires::default()
             },
@@ -2138,14 +2562,16 @@ mod tests {
 
         let mut cfg = base();
         cfg.tools = vec![ToolContract {
-            delta: Some(Delta {
+            delta: Delta {
                 trust: None,
                 audience: Some(Dim::Unknown.into()),
-            }),
+            },
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: None,
-                    audience: vec![AudienceRequirement::Cap(DeclaredAudience::literal(Audience::Public))],
+                    audience: Dim::Known(vec![AudienceRequirement::Cap(DeclaredAudience::literal(
+                        Audience::Public,
+                    ))]),
                 },
                 ..Requires::default()
             },
@@ -2161,14 +2587,44 @@ mod tests {
 
         let mut cfg = base();
         cfg.tools = vec![ToolContract {
-            delta: Some(Delta {
+            delta: Delta {
                 trust: Some(Dim::Unknown),
-                audience: None,
-            }),
+                audience: Some(Dim::Unknown.into()),
+            },
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: None,
-                    audience: vec![AudienceRequirement::Cap(DeclaredAudience::literal(Audience::Public))],
+                    audience: Dim::Known(vec![AudienceRequirement::Cap(DeclaredAudience::literal(
+                        Audience::Public,
+                    ))]),
+                },
+                ..Requires::default()
+            },
+            ..tool("scan")
+        }];
+        assert!(
+            matches!(
+                Registry::build_covered(cfg),
+                Err(LoadError::PendingCastWithRequirement {
+                    dimension: Dimension::Audience,
+                    ..
+                })
+            ),
+            "each pending dimension is held to the rule, not only the first"
+        );
+
+        let mut cfg = base();
+        cfg.tools = vec![ToolContract {
+            delta: Delta {
+                trust: Some(Dim::Unknown),
+                audience: None,
+            },
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: None,
+                    audience: Dim::Known(vec![AudienceRequirement::Cap(DeclaredAudience::literal(
+                        Audience::Public,
+                    ))]),
                 },
                 ..Requires::default()
             },
@@ -2190,8 +2646,9 @@ mod tests {
     fn binding_sites(parameters: &crate::params::ToolParameters) -> Vec<(&'static str, RegistryConfig)> {
         let mut placeholder = tool("emit");
         placeholder.parameters = parameters.clone();
-        placeholder.requires.label.audience =
-            vec![AudienceRequirement::Includes(RecipientSpec::Placeholder("to".into()))];
+        placeholder.requires.label.audience = Dim::Known(vec![AudienceRequirement::Includes(
+            RecipientSpec::Placeholder("to".into()),
+        )]);
         let mut cfg = base();
         cfg.tools = vec![placeholder];
         vec![("tool emit contains", cfg)]
@@ -2296,12 +2753,12 @@ mod tests {
 
         let mut cfg = base();
         let mut emitter = tool("emit");
-        emitter.requires.label.audience = vec![
+        emitter.requires.label.audience = Dim::Known(vec![
             AudienceRequirement::Includes(RecipientSpec::Static(DeclaredAudience::literal(Audience::restricted(
                 [ReaderId::new("finance")],
             )))),
             AudienceRequirement::Cap(DeclaredAudience::literal(Audience::Public)),
-        ];
+        ]);
         cfg.tools = vec![emitter];
         assert!(Registry::build_covered(cfg).is_ok());
     }
@@ -2392,56 +2849,50 @@ mod tests {
         };
         let trust_floor = Requires {
             label: LabelRequirements {
-                trust_floor: Some(Trust::new(1)),
-                audience: vec![],
+                trust_floor: Some(Dim::Known(Trust::new(1))),
+                audience: Dim::Known(vec![]),
             },
             ..Requires::default()
         };
         let includes = Requires {
             label: LabelRequirements {
                 trust_floor: None,
-                audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                audience: Dim::Known(vec![AudienceRequirement::Includes(RecipientSpec::Static(
                     DeclaredAudience::literal(internal()),
-                ))],
+                ))]),
             },
             ..Requires::default()
         };
 
-        // A resolver owning the audience says nothing about trust: the trust dimension is
-        // still unannotated, and a trust requirement on it is refused — the pre-resolver
-        // refusal must not be bypassed by ownership of the other dimension.
+        // A resolver owning the audience says nothing about trust: the delta describes trust
+        // neither statically nor through the resolver, so trust is the neutral one the
+        // declaration asked for and a requirement on it reads an established dimension.
         let mut cfg = base();
         cfg.tools = vec![ToolContract {
-            delta: None,
+            delta: crate::contract::Delta::NONE,
             description: Some("A test tool.".to_string()),
             uses: owner(ResolverReturn::Audience),
             requires: trust_floor.clone(),
             ..tool("send")
         }];
-        assert!(matches!(
-            Registry::build_covered(cfg),
-            Err(LoadError::UnannotatedWithLabelRequirement(name)) if name == "send"
-        ));
+        assert!(Registry::build_covered(cfg).is_ok());
 
         // Symmetric: trust ownership does not describe the audience.
         let mut cfg = base();
         cfg.tools = vec![ToolContract {
-            delta: None,
+            delta: crate::contract::Delta::NONE,
             description: Some("A test tool.".to_string()),
             uses: owner(ResolverReturn::Trust),
             requires: includes.clone(),
             ..tool("send")
         }];
-        assert!(matches!(
-            Registry::build_covered(cfg),
-            Err(LoadError::UnannotatedWithLabelRequirement(name)) if name == "send"
-        ));
+        assert!(Registry::build_covered(cfg).is_ok());
 
         // A requirement on the dimension the resolver itself establishes is sound: the pin
         // is present by the time the check runs.
         let mut cfg = base();
         cfg.tools = vec![ToolContract {
-            delta: None,
+            delta: crate::contract::Delta::NONE,
             description: Some("A test tool.".to_string()),
             uses: owner(ResolverReturn::Trust),
             requires: trust_floor,
@@ -2451,7 +2902,7 @@ mod tests {
 
         let mut cfg = base();
         cfg.tools = vec![ToolContract {
-            delta: None,
+            delta: crate::contract::Delta::NONE,
             description: Some("A test tool.".to_string()),
             uses: owner(ResolverReturn::Audience),
             requires: includes,
@@ -2468,10 +2919,10 @@ mod tests {
         // dimension — this is the shape the shadowing guard and admission tests exercise.
         let mut cfg = base();
         cfg.tools = vec![ToolContract {
-            delta: Some(Delta {
+            delta: Delta {
                 trust: Some(Dim::Unknown),
                 audience: None,
-            }),
+            },
             description: Some("A test tool.".to_string()),
             uses: vec![ToolResolverUse {
                 resolver: crate::names::DynamicResolverName::new("classifier"),
@@ -2491,10 +2942,10 @@ mod tests {
         // But a resolver claiming a dimension the delta already describes is a dual owner.
         let mut cfg = base();
         cfg.tools = vec![ToolContract {
-            delta: Some(Delta {
+            delta: Delta {
                 trust: Some(Dim::Unknown),
                 audience: None,
-            }),
+            },
             description: Some("A test tool.".to_string()),
             uses: vec![ToolResolverUse {
                 resolver: crate::names::DynamicResolverName::new("classifier"),
@@ -2508,55 +2959,24 @@ mod tests {
             Err(LoadError::DuplicateResolverDestination { destination, .. })
                 if destination == "delta.trust"
         ));
-    }
 
-    #[test]
-    fn refuses_label_requirements_on_an_unannotated_tool() {
-        use crate::contract::{LabelRequirements, Requires};
-
+        // A requirement the policy left Unknown is owned lazily — a cast establishes it at the
+        // proposal — so a resolver may not also answer it eagerly.
         let mut cfg = base();
-        cfg.tools = vec![ToolContract {
-            delta: None,
-            requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: Some(Trust::new(1)),
-                    audience: vec![],
-                },
-                ..Requires::default()
-            },
-            ..tool("send")
+        let mut lazy = tool("send");
+        lazy.description = Some("A test tool.".to_string());
+        lazy.requires.label.trust_floor = Some(Dim::Unknown);
+        lazy.uses = vec![ToolResolverUse {
+            resolver: crate::names::DynamicResolverName::new("classifier"),
+            inputs: std::collections::BTreeMap::new(),
+            returns: [ResolverReturn::RequiredTrust].into_iter().collect(),
         }];
+        cfg.tools = vec![lazy];
         assert!(matches!(
             Registry::build_covered(cfg),
-            Err(LoadError::UnannotatedWithLabelRequirement(name)) if name == "send"
+            Err(LoadError::DuplicateResolverDestination { destination, .. })
+                if destination == "requires.trust"
         ));
-
-        let mut cfg = base();
-        cfg.tools = vec![ToolContract {
-            delta: None,
-            requires: Requires {
-                history: vec![crate::contract::HistoryRequirement::Prior(
-                    crate::fact::EffectKind::new("backup"),
-                )],
-                ..Requires::default()
-            },
-            ..tool("send")
-        }];
-        assert!(Registry::build_covered(cfg).is_ok());
-
-        let mut cfg = base();
-        cfg.tools = vec![ToolContract {
-            delta: Some(Delta::NONE),
-            requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: Some(Trust::new(1)),
-                    audience: vec![],
-                },
-                ..Requires::default()
-            },
-            ..tool("send")
-        }];
-        assert!(Registry::build_covered(cfg).is_ok());
     }
 
     #[test]
@@ -2577,7 +2997,7 @@ mod tests {
     fn n_squared_config(n: usize) -> RegistryConfig {
         let mut two_marks = tool("wire");
         two_marks.requires = Requires {
-            attention: vec![MarkName::new("m1"), MarkName::new("m2")],
+            attention: Dim::Known(vec![MarkName::new("m1"), MarkName::new("m2")]),
             ..Requires::default()
         };
         let attester = |name: String| Authority {
@@ -2608,7 +3028,7 @@ mod tests {
     fn the_alternative_bound_counts_every_sanitizer_for_a_dynamic_output() {
         let mut dynamic = tool("lookup");
         dynamic.parameters = crate::params::test_string_argument_schema("customer");
-        dynamic.delta.as_mut().unwrap().audience = None;
+        dynamic.delta.audience = None;
         dynamic.uses = vec![audience_resolver("customer")];
         let sanitizer = |index| Sanitizer {
             name: SanitizerName::new(format!("sanitizer-{index}")),
@@ -2641,9 +3061,9 @@ mod tests {
         let recipient = ReaderId::new("auditor");
         let mut cfg = base();
         let mut emit = tool("emit");
-        emit.requires.label.audience = vec![AudienceRequirement::Includes(RecipientSpec::Static(
+        emit.requires.label.audience = Dim::Known(vec![AudienceRequirement::Includes(RecipientSpec::Static(
             DeclaredAudience::restricted([recipient.clone()]),
-        ))];
+        ))]);
         cfg.tools = vec![emit];
         let capped_at = |name: &str, ceiling: DeclaredAudience| Authority {
             name: AuthorityName::new(name),
@@ -2739,10 +3159,10 @@ mod tests {
         };
         let mut narrowing = tool("wire");
         narrowing.tags = vec![TagName::new("t")];
-        narrowing.delta = Some(Delta {
+        narrowing.delta = Delta {
             trust: Some(Dim::Known(Trust::new(0))),
             audience: None,
-        });
+        };
         let mut cfg = base();
         cfg.tools = vec![narrowing];
         cfg.sanitizers = vec![lifting("attest-schema", Scope::default()), scoped("s1"), scoped("s2")];
@@ -2809,32 +3229,31 @@ mod tests {
         target.requires = Requires {
             label: LabelRequirements {
                 trust_floor: None,
-                audience: vec![AudienceRequirement::Cap(DeclaredAudience::literal(
+                audience: Dim::Known(vec![AudienceRequirement::Cap(DeclaredAudience::literal(
                     Audience::restricted([ReaderId::new("a")]),
-                ))],
+                ))]),
             },
             ..Requires::default()
         };
         let mut tools = vec![target];
         for i in 0..narrowers {
             let mut narrower = tool(&format!("narrow{i}"));
-            narrower.delta.as_mut().unwrap().audience = Some(AudienceDelta::Static(DeclaredAudience::literal(
-                Audience::restricted([ReaderId::new("a"), ReaderId::new("c")]),
-            )));
+            narrower.delta.audience = Some(AudienceDelta::Static(DeclaredAudience::literal(Audience::restricted(
+                [ReaderId::new("a"), ReaderId::new("c")],
+            ))));
             tools.push(narrower);
         }
         let mut public = tool("public-delta");
-        public.delta.as_mut().unwrap().audience =
-            Some(AudienceDelta::Static(DeclaredAudience::literal(Audience::Public)));
+        public.delta.audience = Some(AudienceDelta::Static(DeclaredAudience::literal(Audience::Public)));
         let mut dynamic = tool("dynamic-delta");
         dynamic.parameters = crate::params::test_string_argument_schema("to");
-        dynamic.delta.as_mut().unwrap().audience = None;
+        dynamic.delta.audience = None;
         dynamic.uses = vec![audience_resolver("to")];
         let mut pending = tool("pending-delta");
-        pending.delta.as_mut().unwrap().audience = Some(AudienceDelta::PendingCast);
+        pending.delta.audience = Some(AudienceDelta::PendingCast);
         let neutral = tool("neutral");
         let mut unannotated = tool("unannotated");
-        unannotated.delta = None;
+        unannotated.delta = Delta::NONE;
         tools.extend([public, dynamic, pending, neutral, unannotated]);
         let mut cfg = base();
         cfg.tools = tools;
@@ -2859,8 +3278,9 @@ mod tests {
             Registry::build_covered_with_cap(cfg.clone(), cap),
             Err(LoadError::TooManyPlanAlternatives { count: 5, max: 4, .. })
         ));
-        cfg.tools[0].requires.label.audience =
-            vec![AudienceRequirement::Cap(DeclaredAudience::literal(Audience::Public))];
+        cfg.tools[0].requires.label.audience = Dim::Known(vec![AudienceRequirement::Cap(DeclaredAudience::literal(
+            Audience::Public,
+        ))]);
         assert!(Registry::build_covered_with_cap(cfg, cap).is_ok());
     }
 
@@ -2870,18 +3290,18 @@ mod tests {
         target.requires = Requires {
             label: LabelRequirements {
                 trust_floor: None,
-                audience: vec![AudienceRequirement::Cap(DeclaredAudience::literal(
+                audience: Dim::Known(vec![AudienceRequirement::Cap(DeclaredAudience::literal(
                     Audience::restricted([ReaderId::new("a")]),
-                ))],
+                ))]),
             },
             history: vec![HistoryRequirement::Prior(EffectKind::new("k"))],
             ..Requires::default()
         };
         let mut fixer = tool("fixer");
         fixer.emits = EffectSet::new([EffectKind::new("k")]).unwrap();
-        fixer.delta.as_mut().unwrap().audience = Some(AudienceDelta::Static(DeclaredAudience::literal(
-            Audience::restricted([ReaderId::new("a")]),
-        )));
+        fixer.delta.audience = Some(AudienceDelta::Static(DeclaredAudience::literal(Audience::restricted(
+            [ReaderId::new("a")],
+        ))));
         let mut cfg = base();
         cfg.tools = vec![target, fixer];
         assert!(Registry::build_covered_with_cap(cfg, PlannerCap::new(2).expect("nonzero")).is_ok());
@@ -2890,7 +3310,7 @@ mod tests {
     #[test]
     fn families_that_fit_alone_still_refuse_when_their_sum_exceeds_the_cap() {
         let mut cfg = prior_target_config(3);
-        cfg.tools[0].requires.label.trust_floor = Some(Trust::new(1));
+        cfg.tools[0].requires.label.trust_floor = Some(Dim::Known(Trust::new(1)));
         let officer = |name: String| Authority {
             name: AuthorityName::new(name),
             mandate: Mandate {
@@ -2936,7 +3356,7 @@ mod tests {
         assert!(Registry::build_covered_with_cap(cfg, PlannerCap::new(1).expect("nonzero")).is_ok());
 
         let mut untagged = tool("read");
-        untagged.delta = Some(crate::contract::Delta::NONE);
+        untagged.delta = crate::contract::Delta::NONE;
         let mut cfg = base();
         cfg.tools = vec![untagged];
         cfg.sanitizers = (0..9)
@@ -3072,9 +3492,9 @@ mod tests {
         };
         let mut target = tool("post");
         target.tags = vec![TagName::new("outbound")];
-        target.requires.label.audience = vec![AudienceRequirement::Includes(RecipientSpec::Static(
+        target.requires.label.audience = Dim::Known(vec![AudienceRequirement::Includes(RecipientSpec::Static(
             DeclaredAudience::literal(Audience::restricted([ReaderId::new("partner")])),
-        ))];
+        ))]);
         let with = |sanitizers: Vec<Sanitizer>| {
             let mut cfg = base();
             cfg.tools = vec![target.clone()];
@@ -3101,9 +3521,9 @@ mod tests {
     #[test]
     fn sanitizer_chains_do_not_multiply_either_stage_bound() {
         let mut narrowing = tool("fetch");
-        narrowing.delta.as_mut().unwrap().audience = Some(AudienceDelta::Static(DeclaredAudience::literal(
-            Audience::restricted([ReaderId::new("a")]),
-        )));
+        narrowing.delta.audience = Some(AudienceDelta::Static(DeclaredAudience::literal(Audience::restricted(
+            [ReaderId::new("a")],
+        ))));
         let mut cfg = base();
         cfg.tools = vec![narrowing];
         cfg.sanitizers = (0..5).map(output_sanitizer).collect();

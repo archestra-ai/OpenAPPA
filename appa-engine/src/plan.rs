@@ -251,7 +251,10 @@ pub(crate) fn plan(
 
     let has_committed = |kind: &EffectKind| views.has_effect(kind);
     let has_reserved = |kind: &EffectKind| views.has_reservation(kind);
-    let mut plans: Vec<RemedyPlan> = match raw.unestablished.is_empty() {
+    // Neither a missing value fact nor an Unknown requirement is planned around: a cast
+    // establishes them, or the call stays undecidable.
+    let plannable = raw.unestablished.is_empty() && raw.unknown_requirements.is_empty();
+    let mut plans: Vec<RemedyPlan> = match plannable {
         true => enumerate_plans(
             registry,
             contract,
@@ -271,7 +274,7 @@ pub(crate) fn plan(
     };
 
     let terminal = |plan: &RemedyPlan| plan.executable().is_some_and(|plan| plan.hop().is_none());
-    if raw.unestablished.is_empty() && !plans.iter().any(terminal) && !raw.requirement_gaps.is_empty() {
+    if plannable && !plans.iter().any(terminal) && !raw.requirement_gaps.is_empty() {
         plans.extend(
             direct_redispatches(registry, &current, raw, expansions)
                 .into_iter()
@@ -687,6 +690,12 @@ pub(crate) fn input_hops(
     if !gaps.iter().any(|gap| matches!(gap, Gap::Includes { .. })) {
         return Vec::new();
     }
+    // An input rewrite is judged as a new call without the requirement-cast pin the blocked
+    // call carried, and the rewrite path consults no cast: a hop under a contract leaving a
+    // slot Unknown could never execute, so none is offered.
+    if contract.requires.unknown_slots().next().is_some() {
+        return Vec::new();
+    }
     let released = stage.released(current);
     registry
         .sanitizers()
@@ -727,7 +736,7 @@ fn applicable_output_sanitizers<'r>(
     output: &Label,
     expansions: &Expansions,
 ) -> Vec<&'r Sanitizer> {
-    if contract.pending_cast_dim().is_some() {
+    if registry.confined_pending_cast(contract).is_some() {
         return Vec::new();
     }
     registry
@@ -790,7 +799,7 @@ pub(crate) fn confined_stage(
     expansions: &Expansions,
 ) -> Vec<ExecutableRemedyPlan> {
     let mut plans: Vec<ExecutableRemedyPlan> = Vec::new();
-    if contract.pending_cast_dim().is_none() {
+    if registry.confined_pending_cast(contract).is_none() {
         let hops = registry
             .sanitizers()
             .filter(|sanitizer| !lineage.contains(&sanitizer.name))
@@ -1042,8 +1051,8 @@ pub(crate) fn block_groups(
         }
     }
     if raw.narrowing.is_some()
+        && registry.confined_pending_cast(contract).is_none()
         && registry.profile().confines_result(&contract.name)
-        && contract.pending_cast_dim().is_none()
     {
         for sanitizer in registry.sanitizers() {
             if sanitizer.on.output && !sanitizer.name.is_attest_schema() && sanitizer.applies_to(&contract.tags) {
@@ -1053,7 +1062,7 @@ pub(crate) fn block_groups(
     }
     if has(|gap| matches!(gap, Gap::Cap { .. })) {
         for tool in registry.tools() {
-            groups.extend(tool.delta.iter().flat_map(crate::contract::Delta::groups).cloned());
+            groups.extend(tool.delta.groups().cloned());
         }
     }
     groups
@@ -1089,7 +1098,7 @@ pub(crate) fn confined_stage_groups(
     contract: &ToolContract,
     lineage: &SanitizerLineage,
 ) -> Vec<GroupName> {
-    if contract.pending_cast_dim().is_some() {
+    if registry.confined_pending_cast(contract).is_some() {
         return Vec::new();
     }
     registry
@@ -1293,20 +1302,20 @@ mod tests {
             uses: vec![],
             name: ToolName::new("gate"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![],
+                    trust_floor: Some(Dim::Known(TRUSTED)),
+                    audience: Dim::Known(vec![]),
                 },
                 ..Requires::default()
             },
         };
         let mut vault = gate.clone();
         vault.name = ToolName::new("vault");
-        vault.requires.attention = vec![MarkName::new("signoff")];
+        vault.requires.attention = Dim::Known(vec![MarkName::new("signoff")]);
         let steward = Authority {
             name: AuthorityName::new("steward"),
             mandate: Mandate {
@@ -1370,7 +1379,7 @@ mod tests {
             uses: vec![],
             name: ToolName::new("backup"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("backup")]).unwrap(),
             requires: Requires::default(),
@@ -1381,15 +1390,15 @@ mod tests {
             uses: vec![],
             name: ToolName::new("wipe"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: None,
-                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                    audience: Dim::Known(vec![AudienceRequirement::Includes(RecipientSpec::Static(
                         DeclaredAudience::literal(partner.clone()),
-                    ))],
+                    ))]),
                 },
                 history: vec![HistoryRequirement::Prior(EffectKind::new("backup"))],
                 ..Requires::default()
@@ -1447,15 +1456,15 @@ mod tests {
             description: Some("A test tool.".to_string()),
             name: ToolName::new("wire"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::test_string_argument_schema("to"),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: None,
-                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                    audience: Dim::Known(vec![AudienceRequirement::Includes(RecipientSpec::Static(
                         DeclaredAudience::literal(partner.clone()),
-                    ))],
+                    ))]),
                 },
                 ..Requires::default()
             },
@@ -1548,7 +1557,7 @@ mod tests {
             uses: vec![],
             name: ToolName::new(name),
             tags: vec![],
-            delta: Some(delta),
+            delta,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires::default(),
@@ -1761,7 +1770,7 @@ mod tests {
                 audience: Some(Dim::Known(internal()).into()),
             },
         );
-        publish.requires.attention = vec![MarkName::new("signoff")];
+        publish.requires.attention = Dim::Known(vec![MarkName::new("signoff")]);
         let steward = Authority {
             name: AuthorityName::new("steward"),
             mandate: Mandate {
@@ -1827,10 +1836,10 @@ mod tests {
             uses: vec![],
             name: ToolName::new("backup"),
             tags: vec![],
-            delta: Some(Delta {
+            delta: Delta {
                 trust: Some(Dim::Known(SUSPICIOUS)),
                 audience: None,
-            }),
+            },
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("backup.done")]).unwrap(),
             requires: Requires::default(),
@@ -1840,13 +1849,13 @@ mod tests {
             uses: vec![],
             name: ToolName::new("wipe"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![],
+                    trust_floor: Some(Dim::Known(TRUSTED)),
+                    audience: Dim::Known(vec![]),
                 },
                 history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
                 ..Requires::default()
@@ -1899,7 +1908,7 @@ mod tests {
             uses: vec![],
             name: ToolName::new("backup"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("backup")]).unwrap(),
             requires: Requires::default(),
@@ -1909,13 +1918,13 @@ mod tests {
             uses: vec![],
             name: ToolName::new("wipe"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![],
+                    trust_floor: Some(Dim::Known(TRUSTED)),
+                    audience: Dim::Known(vec![]),
                 },
                 history: vec![HistoryRequirement::Prior(EffectKind::new("backup"))],
                 ..Requires::default()
@@ -1927,10 +1936,10 @@ mod tests {
             uses: vec![],
             name: ToolName::new("narrow"),
             tags: vec![],
-            delta: Some(Delta {
+            delta: Delta {
                 trust: None,
                 audience: Some(Dim::Known(a.clone()).into()),
-            }),
+            },
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires::default(),
@@ -1940,13 +1949,13 @@ mod tests {
             uses: vec![],
             name: ToolName::new("send"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![AudienceRequirement::Cap(DeclaredAudience::literal(a))],
+                    trust_floor: Some(Dim::Known(TRUSTED)),
+                    audience: Dim::Known(vec![AudienceRequirement::Cap(DeclaredAudience::literal(a))]),
                 },
                 ..Requires::default()
             },
@@ -2000,13 +2009,15 @@ mod tests {
             uses: vec![],
             name: ToolName::new("send"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::test_string_argument_schema("to"),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: None,
-                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Placeholder("to".into()))],
+                    audience: Dim::Known(vec![AudienceRequirement::Includes(RecipientSpec::Placeholder(
+                        "to".into(),
+                    ))]),
                 },
                 ..Requires::default()
             },
@@ -2048,10 +2059,10 @@ mod tests {
             uses: vec![],
             name: ToolName::new(name),
             tags: vec![],
-            delta: Some(Delta {
+            delta: Delta {
                 trust: None,
                 audience: Some(Dim::Known(to).into()),
-            }),
+            },
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires::default(),
@@ -2061,13 +2072,13 @@ mod tests {
             uses: vec![],
             name: ToolName::new("send"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: None,
-                    audience: vec![AudienceRequirement::Cap(DeclaredAudience::literal(a()))],
+                    audience: Dim::Known(vec![AudienceRequirement::Cap(DeclaredAudience::literal(a()))]),
                 },
                 ..Requires::default()
             },
@@ -2101,18 +2112,18 @@ mod tests {
             uses: vec![],
             name: ToolName::new("send"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: None,
-                    audience: vec![AudienceRequirement::Cap(DeclaredAudience::literal(a))],
+                    audience: Dim::Known(vec![AudienceRequirement::Cap(DeclaredAudience::literal(a))]),
                 },
                 ..Requires::default()
             },
         };
-        let contract = |name: &str, delta: Option<Delta>| ToolContract {
+        let contract = |name: &str, delta: Delta| ToolContract {
             description: Some("A test tool.".to_string()),
             uses: vec![],
             name: ToolName::new(name),
@@ -2129,10 +2140,10 @@ mod tests {
                 {
                     let mut dynamic = contract(
                         "dynamic",
-                        Some(Delta {
+                        Delta {
                             trust: None,
                             audience: None,
-                        }),
+                        },
                     );
                     dynamic.uses = vec![ToolResolverUse {
                         resolver: crate::names::DynamicResolverName::new("acl"),
@@ -2147,13 +2158,12 @@ mod tests {
                 },
                 contract(
                     "pending",
-                    Some(Delta {
+                    Delta {
                         trust: None,
                         audience: Some(AudienceDelta::PendingCast),
-                    }),
+                    },
                 ),
-                contract("neutral", Some(Delta::NONE)),
-                contract("unannotated", None),
+                contract("neutral", Delta::NONE),
             ],
             authorities: vec![],
             sanitizers: vec![],
@@ -2174,13 +2184,13 @@ mod tests {
             uses: vec![],
             name: ToolName::new("send"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: None,
-                    audience: vec![AudienceRequirement::Cap(DeclaredAudience::literal(a.clone()))],
+                    audience: Dim::Known(vec![AudienceRequirement::Cap(DeclaredAudience::literal(a.clone()))]),
                 },
                 history: vec![
                     HistoryRequirement::Prior(EffectKind::new("backup.done")),
@@ -2194,10 +2204,10 @@ mod tests {
             uses: vec![],
             name: ToolName::new("fixer"),
             tags: vec![],
-            delta: Some(Delta {
+            delta: Delta {
                 trust: None,
                 audience: Some(AudienceDelta::Static(DeclaredAudience::literal(a.clone()))),
-            }),
+            },
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("backup.done"), EffectKind::new("receipt")]).unwrap(),
             requires: Requires::default(),
@@ -2232,13 +2242,13 @@ mod tests {
             uses: vec![],
             name: ToolName::new("wire"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![],
+                    trust_floor: Some(Dim::Known(TRUSTED)),
+                    audience: Dim::Known(vec![]),
                 },
                 ..Requires::default()
             },
@@ -2276,15 +2286,15 @@ mod tests {
             uses: vec![],
             name: ToolName::new("wire"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![],
+                    trust_floor: Some(Dim::Known(TRUSTED)),
+                    audience: Dim::Known(vec![]),
                 },
-                attention: vec![MarkName::new("signoff")],
+                attention: Dim::Known(vec![MarkName::new("signoff")]),
                 ..Requires::default()
             },
         };
@@ -2368,13 +2378,13 @@ mod tests {
             uses: vec![],
             name: ToolName::new("wire"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![],
+                    trust_floor: Some(Dim::Known(TRUSTED)),
+                    audience: Dim::Known(vec![]),
                 },
                 ..Requires::default()
             },
@@ -2410,15 +2420,15 @@ mod tests {
             uses: vec![],
             name: ToolName::new("send"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: None,
-                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                    audience: Dim::Known(vec![AudienceRequirement::Includes(RecipientSpec::Static(
                         DeclaredAudience::literal(Audience::restricted([ReaderId::new("hr")])),
-                    ))],
+                    ))]),
                 },
                 ..Requires::default()
             },
@@ -2459,13 +2469,13 @@ mod tests {
             uses: vec![],
             name: ToolName::new("send"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![],
+                    trust_floor: Some(Dim::Known(TRUSTED)),
+                    audience: Dim::Known(vec![]),
                 },
                 ..Requires::default()
             },
@@ -2504,7 +2514,7 @@ mod tests {
             uses: vec![],
             name: ToolName::new("wire"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
@@ -2554,6 +2564,7 @@ mod tests {
                 .expect("distinct generated effect kinds"),
             tool_resolutions: vec![],
             memberships: Vec::new(),
+            requirement_cast: None,
             subject: crate::basis::fixture_subject(&traj()),
             resolutions: vec![],
         }
@@ -2566,7 +2577,7 @@ mod tests {
             uses: vec![],
             name: ToolName::new("guard"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
@@ -2607,7 +2618,7 @@ mod tests {
             uses: vec![],
             name: ToolName::new("delete_db"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
@@ -2620,7 +2631,7 @@ mod tests {
             uses: vec![],
             name: ToolName::new("backup"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("backup.done")]).unwrap(),
             requires: Requires {
@@ -2660,15 +2671,15 @@ mod tests {
             uses: vec![],
             name: ToolName::new("send"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: None,
-                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                    audience: Dim::Known(vec![AudienceRequirement::Includes(RecipientSpec::Static(
                         DeclaredAudience::literal(Audience::restricted([ReaderId::new("hr")])),
-                    ))],
+                    ))]),
                 },
                 ..Requires::default()
             },
@@ -2711,15 +2722,15 @@ mod tests {
             uses: vec![],
             name: ToolName::new("send"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                    trust_floor: Some(Dim::Known(TRUSTED)),
+                    audience: Dim::Known(vec![AudienceRequirement::Includes(RecipientSpec::Static(
                         DeclaredAudience::literal(Audience::restricted([ReaderId::new("hr")])),
-                    ))],
+                    ))]),
                 },
                 ..Requires::default()
             },
@@ -2768,13 +2779,13 @@ mod tests {
             uses: vec![],
             name: ToolName::new("wire"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![],
+                    trust_floor: Some(Dim::Known(TRUSTED)),
+                    audience: Dim::Known(vec![]),
                 },
                 ..Requires::default()
             },
@@ -2829,13 +2840,13 @@ mod tests {
             uses: vec![],
             name: ToolName::new("wire"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![],
+                    trust_floor: Some(Dim::Known(TRUSTED)),
+                    audience: Dim::Known(vec![]),
                 },
                 ..Requires::default()
             },
@@ -2900,13 +2911,13 @@ mod tests {
             uses: vec![],
             name: ToolName::new("wire"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![],
+                    trust_floor: Some(Dim::Known(TRUSTED)),
+                    audience: Dim::Known(vec![]),
                 },
                 ..Requires::default()
             },
@@ -2942,13 +2953,13 @@ mod tests {
             uses: vec![],
             name: ToolName::new("send"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![],
+                    trust_floor: Some(Dim::Known(TRUSTED)),
+                    audience: Dim::Known(vec![]),
                 },
                 history: vec![HistoryRequirement::Prior(EffectKind::new("receipt"))],
                 ..Requires::default()
@@ -2959,7 +2970,7 @@ mod tests {
             uses: vec![],
             name: ToolName::new("emitter"),
             tags: vec![],
-            delta: None,
+            delta: crate::contract::Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("receipt")]).unwrap(),
             requires: Requires::default(),
@@ -2997,7 +3008,7 @@ mod tests {
             uses: vec![],
             name: ToolName::new("send"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
@@ -3010,13 +3021,13 @@ mod tests {
             uses: vec![],
             name: ToolName::new("emitter"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("receipt")]).unwrap(),
             requires: Requires {
                 label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![],
+                    trust_floor: Some(Dim::Known(TRUSTED)),
+                    audience: Dim::Known(vec![]),
                 },
                 ..Requires::default()
             },
@@ -3058,11 +3069,11 @@ mod tests {
             uses: vec![],
             name: ToolName::new("wire"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
-                attention: vec![MarkName::new("signoff"), MarkName::new("signoff")],
+                attention: Dim::Known(vec![MarkName::new("signoff"), MarkName::new("signoff")]),
                 ..Requires::default()
             },
         };
@@ -3102,15 +3113,15 @@ mod tests {
             uses: vec![],
             name: ToolName::new("wire"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![],
+                    trust_floor: Some(Dim::Known(TRUSTED)),
+                    audience: Dim::Known(vec![]),
                 },
-                attention: vec![MarkName::new("signoff")],
+                attention: Dim::Known(vec![MarkName::new("signoff")]),
                 ..Requires::default()
             },
         };
@@ -3150,13 +3161,13 @@ mod tests {
             uses: vec![],
             name: ToolName::new("wire"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![],
+                    trust_floor: Some(Dim::Known(TRUSTED)),
+                    audience: Dim::Known(vec![]),
                 },
                 ..Requires::default()
             },
@@ -3183,10 +3194,10 @@ mod tests {
             uses: vec![],
             name: ToolName::new("get"),
             tags: vec![],
-            delta: Some(Delta {
+            delta: Delta {
                 trust: None,
                 audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")])).into()),
-            }),
+            },
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires::default(),
@@ -3218,7 +3229,7 @@ mod tests {
             uses: vec![],
             name: ToolName::new("delete_db"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("db.deleted")]).unwrap(),
             requires: Requires {
@@ -3231,7 +3242,7 @@ mod tests {
             uses: vec![],
             name: ToolName::new("backup"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("backup.done")]).unwrap(),
             requires: Requires::default(),
@@ -3260,7 +3271,7 @@ mod tests {
             uses: vec![],
             name: ToolName::new("delete_db"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
@@ -3273,7 +3284,7 @@ mod tests {
             uses: vec![],
             name: ToolName::new(name),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("backup.done")]).unwrap(),
             requires: Requires::default(),
@@ -3310,7 +3321,7 @@ mod tests {
             uses: vec![],
             name: ToolName::new("delete_db"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
@@ -3323,15 +3334,15 @@ mod tests {
             uses: vec![],
             name: ToolName::new("backup"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("backup.done")]).unwrap(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: None,
-                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                    audience: Dim::Known(vec![AudienceRequirement::Includes(RecipientSpec::Static(
                         DeclaredAudience::literal(Audience::restricted([ReaderId::new("auditor")])),
-                    ))],
+                    ))]),
                 },
                 ..Requires::default()
             },
@@ -3362,7 +3373,7 @@ mod tests {
             uses: vec![],
             name: ToolName::new("archive"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
@@ -3375,13 +3386,15 @@ mod tests {
             uses: vec![],
             name: ToolName::new("send"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::test_string_argument_schema("to"),
             emits: EffectSet::new([EffectKind::new("email.sent")]).unwrap(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: None,
-                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Placeholder("to".into()))],
+                    audience: Dim::Known(vec![AudienceRequirement::Includes(RecipientSpec::Placeholder(
+                        "to".into(),
+                    ))]),
                 },
                 ..Requires::default()
             },
@@ -3410,7 +3423,7 @@ mod tests {
             uses: vec![],
             name: ToolName::new("delete_db"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
@@ -3438,11 +3451,11 @@ mod tests {
             uses: vec![],
             name: ToolName::new("wire"),
             tags: vec![TagName::new("payments")],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
-                attention: vec![MarkName::new("signoff")],
+                attention: Dim::Known(vec![MarkName::new("signoff")]),
                 ..Requires::default()
             },
         };
@@ -3480,11 +3493,11 @@ mod tests {
             uses: vec![],
             name: ToolName::new("wire"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
-                attention: vec![MarkName::new("signoff")],
+                attention: Dim::Known(vec![MarkName::new("signoff")]),
                 ..Requires::default()
             },
         };
@@ -3517,7 +3530,7 @@ mod tests {
             uses: vec![],
             name: ToolName::new("a"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("ka")]).unwrap(),
             requires: Requires {
@@ -3530,7 +3543,7 @@ mod tests {
             uses: vec![],
             name: ToolName::new("b"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("kb")]).unwrap(),
             requires: Requires {
@@ -3599,10 +3612,10 @@ mod tests {
             let mut expected = Vec::new();
             for tool in registry.tools() {
                 let narrowed = match &tool.delta {
-                    Some(Delta {
+                    Delta {
                         audience: Some(AudienceDelta::Static(delta)),
                         ..
-                    }) => Some(intersect(
+                    } => Some(intersect(
                         &current.bound().audience,
                         &delta.resolve(&Expansions::default()),
                     )),
@@ -3660,18 +3673,15 @@ mod tests {
         ]
     }
 
-    fn a_delta() -> impl Strategy<Value = Option<Delta>> {
-        prop_oneof![
-            Just(None),
-            (
-                prop::option::of((0u8..2).prop_map(|t| Dim::Known(Trust::new(t)))),
-                prop::option::of(small_audience().prop_map(Dim::Known)),
-            )
-                .prop_map(|(trust, audience)| Some(Delta {
-                    trust,
-                    audience: audience.map(Into::into)
-                })),
-        ]
+    fn a_delta() -> impl Strategy<Value = Delta> {
+        (
+            prop::option::of((0u8..2).prop_map(|t| Dim::Known(Trust::new(t)))),
+            prop::option::of(small_audience().prop_map(Dim::Known)),
+        )
+            .prop_map(|(trust, audience)| Delta {
+                trust,
+                audience: audience.map(Into::into),
+            })
     }
 
     fn an_includes() -> impl Strategy<Value = Option<AudienceRequirement>> {
@@ -3707,11 +3717,11 @@ mod tests {
                 }
                 Requires {
                     label: LabelRequirements {
-                        trust_floor: floor,
-                        audience,
+                        trust_floor: floor.map(Dim::Known),
+                        audience: Dim::Known(audience),
                     },
                     history,
-                    attention: if attend { vec![MarkName::new("m0")] } else { vec![] },
+                    attention: Dim::Known(if attend { vec![MarkName::new("m0")] } else { vec![] }),
                 }
             })
     }
@@ -3723,20 +3733,15 @@ mod tests {
             prop::collection::btree_set(small_effect(), 0..2),
             a_requires(),
         )
-            .prop_map(move |(delta, emits, mut requires)| {
-                if delta.is_none() {
-                    requires.label = LabelRequirements::default();
-                }
-                ToolContract {
-                    description: Some("A test tool.".to_string()),
-                    uses: vec![],
-                    name: name.clone(),
-                    tags: vec![],
-                    delta,
-                    parameters: crate::params::test_string_argument_schema("to"),
-                    emits: EffectSet::new(emits).expect("a btree_set draw is distinct"),
-                    requires,
-                }
+            .prop_map(move |(delta, emits, requires)| ToolContract {
+                description: Some("A test tool.".to_string()),
+                uses: vec![],
+                name: name.clone(),
+                tags: vec![],
+                delta,
+                parameters: crate::params::test_string_argument_schema("to"),
+                emits: EffectSet::new(emits).expect("a btree_set draw is distinct"),
+                requires,
             })
     }
 
@@ -3851,13 +3856,17 @@ mod tests {
                 &CallStage::default(),
                 &Expansions::default(),
             );
-            if !eval.consumed.is_empty() || (eval.requirement_gaps.is_empty() && eval.narrowing.is_none()) {
+            if !eval.consumed.is_empty()
+                || !eval.unknown_requirements.is_empty()
+                || (eval.requirement_gaps.is_empty() && eval.narrowing.is_none())
+            {
                 return Ok(());
             }
             let raw = RawBlock {
                 requirement_gaps: eval.requirement_gaps,
                 narrowing: eval.narrowing,
                 unestablished: Vec::new(),
+                unknown_requirements: eval.unknown_requirements.clone(),
             };
 
             let mut log = vec![opened(state.label.clone().into_label())];
@@ -3952,13 +3961,17 @@ mod tests {
                 &CallStage::default(),
                 &Expansions::default(),
             );
-            if !eval.consumed.is_empty() || (eval.requirement_gaps.is_empty() && eval.narrowing.is_none()) {
+            if !eval.consumed.is_empty()
+                || !eval.unknown_requirements.is_empty()
+                || (eval.requirement_gaps.is_empty() && eval.narrowing.is_none())
+            {
                 return Ok(());
             }
             let raw = RawBlock {
                 requirement_gaps: eval.requirement_gaps,
                 narrowing: eval.narrowing,
                 unestablished: Vec::new(),
+                unknown_requirements: eval.unknown_requirements.clone(),
             };
             let mut log = vec![opened(state.label.clone().into_label())];
             for kind in &state.effects {
@@ -3983,7 +3996,7 @@ mod tests {
             let authorities = registry.authorities();
             let mut bound: u128 = 1;
             let mut multiply = |competent: usize| bound = bound.saturating_mul(competent.max(1) as u128);
-            if let Some(floor) = contract.requires.label.trust_floor {
+            if let Some(floor) = contract.requires.trust_floor() {
                 multiply(
                     authorities
                         .iter()
@@ -3992,7 +4005,7 @@ mod tests {
                 );
             }
             let mut seen_includes: Vec<&AudienceRequirement> = Vec::new();
-            for requirement in &contract.requires.label.audience {
+            for requirement in contract.requires.audience_requirements() {
                 if matches!(requirement, AudienceRequirement::Includes(_)) && !seen_includes.contains(&requirement) {
                     seen_includes.push(requirement);
                 }
@@ -4018,7 +4031,7 @@ mod tests {
             for kind in &no_priors {
                 multiply(authorities.iter().filter(|a| a.mandate.waivers.contains(kind)).count());
             }
-            let marks: BTreeSet<_> = contract.requires.attention.iter().collect();
+            let marks: BTreeSet<_> = contract.requires.attention_marks().iter().collect();
             for mark in &marks {
                 multiply(authorities.iter().filter(|a| a.mandate.attends.contains(mark)).count());
             }
@@ -4034,10 +4047,7 @@ mod tests {
                 })
                 .collect();
             let has_cap = contract
-                .requires
-                .label
-                .audience
-                .iter()
+                .requires.audience_requirements().iter()
                 .any(|requirement| matches!(requirement, AudienceRequirement::Cap(DeclaredAudience::Restricted { .. })));
             let redispatches = registry
                 .tools()
@@ -4045,7 +4055,7 @@ mod tests {
                     candidate.emits.iter().any(|kind| priors.contains(kind))
                         || (has_cap
                             && matches!(
-                                candidate.delta.as_ref().and_then(|delta| delta.audience.as_ref()),
+                                candidate.delta.audience.as_ref(),
                                 Some(AudienceDelta::Static(DeclaredAudience::Restricted { .. }))
                             ))
                 })
@@ -4103,13 +4113,17 @@ mod tests {
                 &CallStage::default(),
                 &Expansions::default(),
             );
-            if !eval.consumed.is_empty() || (eval.requirement_gaps.is_empty() && eval.narrowing.is_none()) {
+            if !eval.consumed.is_empty()
+                || !eval.unknown_requirements.is_empty()
+                || (eval.requirement_gaps.is_empty() && eval.narrowing.is_none())
+            {
                 return Ok(());
             }
             let raw = RawBlock {
                 requirement_gaps: eval.requirement_gaps,
                 narrowing: eval.narrowing,
                 unestablished: Vec::new(),
+                unknown_requirements: eval.unknown_requirements.clone(),
             };
 
             let mut log = vec![opened(state.label.clone().into_label())];

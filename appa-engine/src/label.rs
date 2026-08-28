@@ -19,6 +19,13 @@ pub enum Dim<T> {
     Unknown,
 }
 
+/// The empty slot: a known nothing, never Unknown.
+impl<T: Default> Default for Dim<T> {
+    fn default() -> Self {
+        Dim::Known(T::default())
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Dimension {
     Trust,

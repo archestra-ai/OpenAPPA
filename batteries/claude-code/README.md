@@ -3,7 +3,7 @@
 Use this battery for Claude Code sessions that need policy-aware shell commands
 and automatic privacy labels for local file reads.
 
-It covers two built-in tools:
+It covers two built-in tools and every tool the policy does not name:
 
 - **Bash** — Before a command runs, the Claude Code model decides what trust,
   audience, and fresh attention the command requires. It also labels the
@@ -13,6 +13,18 @@ It covers two built-in tools:
   Hidden paths, credential files, private keys, system-secret locations, and
   sensitive symlink targets produce private content. Other paths produce public
   content. The resolver does not block the read or lower its trust.
+- **Undeclared tools** — A tool with no policy entry, such as an MCP server's
+  tool, is not blocked for being unnamed. Before it runs, the Claude Code model
+  reads the call and answers the trust, audience, and fresh attention it
+  requires; the session's label then decides the call exactly as it decides a
+  declared tool's. A floor is checked against what the session already holds,
+  so a fresh session meets any floor and the answer gains force as the session
+  absorbs suspicious or private content. Attention marks come from the root
+  policy's authorities: a root that registers `hitl` lets the model demand a
+  person's sign-off for a call. Its results enter with an unknown label and are
+  classified by the same cast when a later check needs them. Deployments that
+  want undeclared tools blocked outright omit this battery's cast with a root
+  rule of their own.
 
 ## Add it to a deployment
 
