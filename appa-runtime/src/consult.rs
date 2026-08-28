@@ -555,7 +555,9 @@ struct RequiredAudienceWire {
 
 impl DynamicAnswer {
     /// Read one dynamic answer: one property per declared result, keyed by the result's own
-    /// name, no more and no fewer, every rank, audience, and mark inside the declared vocabulary.
+    /// name, no more and no fewer, every rank and mark inside the declared vocabulary, and every
+    /// audience in its literal wire shape. Model transports apply their closed audience
+    /// vocabulary separately; endpoint and command resolvers may answer from a directory.
     pub fn from_wire(answer: &serde_json::Value, declaration: &DynamicDeclaration) -> Option<DynamicAnswer> {
         let mut results = answer.as_object()?.clone();
         // An explicit null is not field absence: `{"delta.trust": null}` spells a result the
@@ -597,16 +599,7 @@ impl DynamicAnswer {
         let wire_audience = |value: Option<serde_json::Value>| -> Option<Option<WireAudience>> {
             match value {
                 None => Some(None),
-                Some(value) => {
-                    let audience = WireAudience::from_wire(&value)?;
-                    let declared = match &audience {
-                        WireAudience::Public => declaration.audiences.iter().any(|name| name == "public"),
-                        WireAudience::Readers(readers) => {
-                            readers.iter().all(|reader| declaration.audiences.contains(reader))
-                        }
-                    };
-                    declared.then_some(Some(audience))
-                }
+                Some(value) => WireAudience::from_wire(&value).map(Some),
             }
         };
         let attention = match attention {
@@ -643,6 +636,34 @@ impl DynamicAnswer {
             attention,
         })
     }
+}
+
+/// A short, body-free reason a model's dynamic answer is unusable. Endpoint and command
+/// resolvers may return directory-derived readers; model classifiers are confined to the
+/// policy vocabulary in their declaration.
+pub fn model_dynamic_answer_error(answer: &serde_json::Value, declaration: &DynamicDeclaration) -> Option<String> {
+    let check = |field: &str, audience: Option<&serde_json::Value>| {
+        audience?
+            .as_array()?
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .find(|reader| !declaration.audiences.iter().any(|allowed| allowed == reader))
+            .map(|reader| format!("{field} contains {reader:?}, which is not in declaration.audiences"))
+    };
+    let required = answer.get("requires.audience").and_then(serde_json::Value::as_object);
+    check("delta.audience", answer.get("delta.audience"))
+        .or_else(|| {
+            check(
+                "requires.audience.contains",
+                required.and_then(|required| required.get("contains")),
+            )
+        })
+        .or_else(|| {
+            check(
+                "requires.audience.within",
+                required.and_then(|required| required.get("within")),
+            )
+        })
 }
 
 // ---------------------------------------------------------------- membership
@@ -1048,7 +1069,6 @@ mod tests {
             serde_json::json!({"requires.audience": {}}),
             serde_json::json!({"requires.audience": {"contains": ["@eng"]}}),
             serde_json::json!({"requires.audience": {"contains": ["a"], "other": 1}}),
-            serde_json::json!({"requires.audience": {"contains": ["invented"]}}),
         ] {
             assert_eq!(DynamicAnswer::from_wire(&malformed, &required), None, "{malformed}");
         }
@@ -1058,6 +1078,22 @@ mod tests {
                 &required
             )
             .is_some()
+        );
+        let directory_answer = serde_json::json!({"requires.audience": {"contains": ["customer-7"]}});
+        assert!(
+            DynamicAnswer::from_wire(&directory_answer, &required).is_some(),
+            "an endpoint or command resolver may return a directory-derived reader"
+        );
+        assert_eq!(
+            model_dynamic_answer_error(&directory_answer, &required).as_deref(),
+            Some("requires.audience.contains contains \"customer-7\", which is not in declaration.audiences")
+        );
+        assert_eq!(
+            model_dynamic_answer_error(
+                &serde_json::json!({"requires.audience": {"contains": ["support"]}}),
+                &required
+            ),
+            None
         );
     }
 

@@ -18,7 +18,7 @@ use crate::config::{
     CLAUDE_CODE_BUILTIN, DynamicImplementation, Endpoint, EndpointHost, Externals, Implementation, LLM_BUILTIN,
     ResolverCommand, Section,
 };
-use crate::consult::{Consult, ConsultBody, ConsultKind, ModelPrompt};
+use crate::consult::{Consult, ConsultBody, ConsultKind, ModelPrompt, model_dynamic_answer_error};
 use crate::elicit::Elicitation;
 use crate::llm::{LlmBackend, LlmGate};
 use appa_policy::DynamicBuiltin;
@@ -36,10 +36,22 @@ pub enum NoAnswerReason {
     Timeout,
     Transport,
     Malformed,
+    MalformedAnswer(String),
     Oversized,
     UnsupportedVersion,
     ModuleError,
     ModulePanicked,
+}
+
+impl NoAnswerReason {
+    /// The short reason safe to return through an operational hook failure. Never includes
+    /// the model's answer body.
+    pub fn diagnostic(&self) -> String {
+        match self {
+            NoAnswerReason::MalformedAnswer(detail) => format!("Malformed: {detail}"),
+            other => format!("{other:?}"),
+        }
+    }
 }
 
 /// The outcome of one consult: the answer object for the kind's parser to
@@ -57,6 +69,18 @@ pub enum ConsultOutcome {
 struct ConsultResponse {
     version: u32,
     answer: serde_json::Value,
+}
+
+/// Model classifiers use the policy vocabulary carried in their declaration. Keep the
+/// diagnostic short and body-free: it may reach a blocking hook's stderr.
+fn validate_model_answer(consult: &Consult, answer: serde_json::Value) -> Result<serde_json::Value, NoAnswerReason> {
+    match &consult.body {
+        ConsultBody::Dynamic { declaration, .. } => match model_dynamic_answer_error(&answer, declaration) {
+            Some(detail) => Err(NoAnswerReason::MalformedAnswer(detail)),
+            None => Ok(answer),
+        },
+        _ => Ok(answer),
+    }
 }
 
 fn read_answer(body: &[u8]) -> Result<serde_json::Value, NoAnswerReason> {
@@ -280,9 +304,15 @@ impl ExternalServices {
                     Err(NoAnswerReason::Unreachable)
                 }
             },
-            Backend::ClaudeCode(claude) => self.consult_claude(claude, consult).await,
+            Backend::ClaudeCode(claude) => self
+                .consult_claude(claude, consult)
+                .await
+                .and_then(|answer| validate_model_answer(consult, answer)),
             Backend::Llm(llm) => match ModelPrompt::new(consult) {
-                Some(prompt) => llm.consult(&prompt).await,
+                Some(prompt) => llm
+                    .consult(&prompt)
+                    .await
+                    .and_then(|answer| validate_model_answer(consult, answer)),
                 None => Err(NoAnswerReason::Unregistered),
             },
         };
@@ -924,6 +954,27 @@ mod tests {
                 artifact: DynamicArtifact { args },
             },
         }
+    }
+
+    #[test]
+    fn a_model_dynamic_answer_names_the_undeclared_audience_field() {
+        let consult = dynamic_consult("judge", serde_json::json!({"command": "pwd"}));
+        let answer = |reader: &str| {
+            serde_json::json!({
+                "delta.trust": "trusted",
+                "delta.audience": [reader],
+                "requires.trust": "trusted",
+                "requires.audience": {"within": "public"},
+                "requires.attention": [],
+            })
+        };
+        assert!(validate_model_answer(&consult, answer("bob@example.com")).is_ok());
+        assert_eq!(
+            validate_model_answer(&consult, answer("secret")),
+            Err(NoAnswerReason::MalformedAnswer(
+                "delta.audience contains \"secret\", which is not in declaration.audiences".to_string()
+            ))
+        );
     }
 
     fn membership_consult(name: &str, group: &str) -> Consult {

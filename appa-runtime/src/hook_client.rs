@@ -260,13 +260,13 @@ mod tests {
         let answer = Answer {
             status: 409,
             body: serde_json::to_vec(&serde_json::json!({
-                "error": "dynamic resolver claude-code gave no usable answer (Malformed); the call was not checked"
+                "error": "dynamic resolver claude-code gave no usable answer (Malformed: delta.audience contains \"secret\", which is not in declaration.audiences); the call was not checked"
             }))
             .expect("the fixture serializes"),
         };
         assert_eq!(
             refusal(&answer),
-            "it answered 409: dynamic resolver claude-code gave no usable answer (Malformed); the call was not checked"
+            "it answered 409: dynamic resolver claude-code gave no usable answer (Malformed: delta.audience contains \"secret\", which is not in declaration.audiences); the call was not checked"
         );
 
         assert_eq!(
