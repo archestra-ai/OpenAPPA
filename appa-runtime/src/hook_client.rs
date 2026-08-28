@@ -165,7 +165,7 @@ fn parse(answer: &[u8]) -> Result<Answer, String> {
 
 /// The blocking hook outcome. Claude Code reads stderr as the reason it blocked.
 fn block(failure: &str) -> ExitCode {
-    eprintln!("OpenAPPA runtime did not approve the hook: {failure}");
+    eprintln!("OpenAPPA hook blocked: {failure}");
     ExitCode::from(2)
 }
 
@@ -181,8 +181,8 @@ fn refusal(answer: &Answer) -> String {
         .filter(|body| !body.is_empty())
         .map(str::to_owned);
     match json_error.or(plain_error) {
-        Some(detail) => format!("it answered {}: {detail}", answer.status),
-        None => format!("it answered {}", answer.status),
+        Some(detail) => format!("status={} {detail}", answer.status),
+        None => format!("status={}", answer.status),
     }
 }
 
@@ -260,13 +260,13 @@ mod tests {
         let answer = Answer {
             status: 409,
             body: serde_json::to_vec(&serde_json::json!({
-                "error": "dynamic resolver claude-code gave no usable answer (Malformed: delta.audience contains \"secret\", which is not in declaration.audiences); the call was not checked"
+                "error": "resolver=claude-code error=malformed field=delta.audience value=\"secret\" allowed=declaration.audiences"
             }))
             .expect("the fixture serializes"),
         };
         assert_eq!(
             refusal(&answer),
-            "it answered 409: dynamic resolver claude-code gave no usable answer (Malformed: delta.audience contains \"secret\", which is not in declaration.audiences); the call was not checked"
+            "status=409 resolver=claude-code error=malformed field=delta.audience value=\"secret\" allowed=declaration.audiences"
         );
 
         assert_eq!(
@@ -274,14 +274,14 @@ mod tests {
                 status: 503,
                 body: b"temporarily unavailable".to_vec(),
             }),
-            "it answered 503: temporarily unavailable"
+            "status=503 temporarily unavailable"
         );
         assert_eq!(
             refusal(&Answer {
                 status: 500,
                 body: Vec::new(),
             }),
-            "it answered 500"
+            "status=500"
         );
     }
 

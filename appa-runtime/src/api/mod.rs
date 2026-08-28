@@ -190,7 +190,7 @@ pub(crate) enum EventError {
     PolicyUnavailable(String),
     #[error("engine invariant breach: {0}")]
     EngineInvariant(String),
-    #[error("dynamic resolver {resolver} gave no usable answer ({reason}); the call was not checked")]
+    #[error("resolver={resolver} error={reason}")]
     ResolverUnavailable { resolver: String, reason: String },
     #[error("storage failure: {0}")]
     Storage(String),

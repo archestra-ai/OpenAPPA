@@ -825,7 +825,7 @@ impl Session {
                 let answer = match self.deployment.externals.consult(&consult, None).await {
                     ConsultOutcome::Answer(answer) => DynamicAnswer::from_wire(&answer, declaration).ok_or_else(|| {
                         crate::external::NoAnswerReason::MalformedAnswer(
-                            "answer does not match the declared fields or value types".to_string(),
+                            "detail=invalid_fields_or_value_types".to_string(),
                         )
                     }),
                     ConsultOutcome::NoAnswer(reason) => Err(reason),

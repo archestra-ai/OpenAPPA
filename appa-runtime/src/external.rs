@@ -48,8 +48,18 @@ impl NoAnswerReason {
     /// the model's answer body.
     pub fn diagnostic(&self) -> String {
         match self {
-            NoAnswerReason::MalformedAnswer(detail) => format!("Malformed: {detail}"),
-            other => format!("{other:?}"),
+            NoAnswerReason::MalformedAnswer(detail) => format!("malformed {detail}"),
+            NoAnswerReason::Unregistered => "unregistered".to_string(),
+            NoAnswerReason::Unreachable => "unreachable".to_string(),
+            NoAnswerReason::Dismissed => "dismissed".to_string(),
+            NoAnswerReason::NonSuccess { status } => format!("non_success status={status}"),
+            NoAnswerReason::Timeout => "timeout".to_string(),
+            NoAnswerReason::Transport => "transport".to_string(),
+            NoAnswerReason::Malformed => "malformed".to_string(),
+            NoAnswerReason::Oversized => "oversized".to_string(),
+            NoAnswerReason::UnsupportedVersion => "unsupported_version".to_string(),
+            NoAnswerReason::ModuleError => "module_error".to_string(),
+            NoAnswerReason::ModulePanicked => "module_panicked".to_string(),
         }
     }
 }
@@ -972,7 +982,7 @@ mod tests {
         assert_eq!(
             validate_model_answer(&consult, answer("secret")),
             Err(NoAnswerReason::MalformedAnswer(
-                "delta.audience contains \"secret\", which is not in declaration.audiences".to_string()
+                "field=delta.audience value=\"secret\" allowed=declaration.audiences".to_string()
             ))
         );
     }

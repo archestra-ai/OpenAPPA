@@ -648,7 +648,7 @@ pub fn model_dynamic_answer_error(answer: &serde_json::Value, declaration: &Dyna
             .iter()
             .filter_map(serde_json::Value::as_str)
             .find(|reader| !declaration.audiences.iter().any(|allowed| allowed == reader))
-            .map(|reader| format!("{field} contains {reader:?}, which is not in declaration.audiences"))
+            .map(|reader| format!("field={field} value={reader:?} allowed=declaration.audiences"))
     };
     let required = answer.get("requires.audience").and_then(serde_json::Value::as_object);
     check("delta.audience", answer.get("delta.audience"))
@@ -1086,7 +1086,7 @@ mod tests {
         );
         assert_eq!(
             model_dynamic_answer_error(&directory_answer, &required).as_deref(),
-            Some("requires.audience.contains contains \"customer-7\", which is not in declaration.audiences")
+            Some("field=requires.audience.contains value=\"customer-7\" allowed=declaration.audiences")
         );
         assert_eq!(
             model_dynamic_answer_error(
