@@ -67,7 +67,8 @@ pub struct ProposalBatch {
     pub expansions: Vec<crate::groups::GroupExpansion>,
 }
 
-/// One call the model proposed, as it wrote it: a tool name and untrusted argument bytes.
+/// One model-directed call as the harness presents it for dispatch: a tool name and
+/// untrusted argument bytes representing the value the harness would execute.
 /// Only the engine turns this into a [`ResolvedCall`], so no caller can present a
 /// payload under a schema the registry does not hold.
 #[derive(Clone, Debug, PartialEq, Eq)]

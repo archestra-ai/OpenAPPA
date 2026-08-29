@@ -7,8 +7,9 @@
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TrajectoryId(pub String);
 
-/// A tool call as the model proposed it. The engine canonicalizes;
-/// the runtime and the adapter pass it through unchanged.
+/// A model-directed tool call at the harness's execution boundary. The
+/// arguments are the JSON spelling the harness would execute. The engine
+/// canonicalizes them; the runtime and adapter do not parse or rewrite them.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ProposedCall {
     pub tool: String,
