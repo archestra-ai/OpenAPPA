@@ -1,9 +1,8 @@
 "use client";
 
-// The /landing2 chat playground: the landing demo card's chrome around a real
-// chat UI (AI Elements), driven by the appa-demo service — the visitor's own
-// OpenRouter key, the policy shown beside the chat actually enforced, any
-// prompt.
+// The /playground chat: demo-card chrome around a real chat UI (AI Elements),
+// driven by the appa-demo service — the visitor's own OpenRouter key, the
+// policy shown beside the chat actually enforced, any prompt.
 //
 // Everything shown is a live run. There is no canned transcript: when the
 // service is unreachable the card says so and the composer is disabled, rather
