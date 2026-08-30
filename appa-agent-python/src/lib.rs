@@ -156,7 +156,7 @@ struct ExternalsConfig {
     #[serde(default)]
     max_body_bytes: Option<usize>,
     #[serde(default)]
-    dynamic: BTreeMap<String, EndpointConfig>,
+    annotators: BTreeMap<String, EndpointConfig>,
     /// The directory endpoint of the policy's membership resolver, by resolver name.
     #[serde(default)]
     membership: BTreeMap<String, EndpointConfig>,
@@ -214,7 +214,7 @@ impl SessionInner {
                     .collect()
             };
             bindings.casts = bound(parsed.casts);
-            bindings.dynamic = bound(parsed.dynamic);
+            bindings.annotators = bound(parsed.annotators);
             bindings.membership = bound(parsed.membership);
             bindings
         } else {

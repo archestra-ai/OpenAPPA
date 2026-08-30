@@ -1,5 +1,6 @@
-//! A `tool_input` rewrite is judged by the ordered contract its rewritten arguments select, over
-//! real boundaries: a loopback HTTP resolver and sanitizer, a real store, the real hook path.
+//! A `tool_input` rewrite is judged by the ordered declaration its rewritten arguments select,
+//! over real boundaries: a loopback HTTP annotator and sanitizer, a real store, the real hook
+//! path.
 
 mod common;
 use common::{offers, raw, serve};
@@ -13,19 +14,19 @@ use axum::Router;
 use axum::extract::State;
 use axum::routing::post;
 
-/// The public contract at 0 uses a resolver that owns the recipients the call requires; the
-/// private contract at 1 requires the partner desk and records a classified read. `read_hr`
-/// narrows the audience to `hr` first, so a call that needs the partner desk blocks and the
-/// `redirect` sanitizer — `hr` to `partner` — is offered.
+/// The public contract at 0 routes through an annotator that owns the recipients the call
+/// requires; the private contract at 1 requires the partner desk and records a classified
+/// read. `read_hr` narrows the audience to `hr` first, so a call that needs the partner desk
+/// blocks and the `redirect` sanitizer — `hr` to `partner` — is offered.
 fn policy(base: &str) -> String {
     format!(
         r#"
 [policy]
 version = 1
 
-[[policy.dynamic_resolver]]
+[[policy.annotator]]
 name = "classify"
-returns = ["requires.audience"]
+audiences = ["partner"]
 
 [[policy.tool]]
 name = "read_hr"
@@ -34,8 +35,7 @@ delta = {{ audience = ["hr"] }}
 [[policy.tool]]
 name = "read_file(path:public/*)"
 parameters = {{ type = "object", properties = {{ path = {{ type = "string" }} }}, required = ["path"] }}
-uses = [{{ resolver = "classify" }}]
-delta = {{}}
+annotator = "classify"
 
 [[policy.tool]]
 name = "read_file(path:private/*)"
@@ -53,7 +53,7 @@ permits = {{ audience = {{ from = ["hr"], to = ["partner"] }} }}
 timeout_ms = 2000
 max_body_bytes = 65536
 
-[externals.dynamic.classify]
+[externals.annotators.classify]
 url = "{base}/resolve"
 
 [externals.sanitizers.redirect]
@@ -64,7 +64,7 @@ url = "{base}/sanitize"
 
 #[derive(Clone)]
 struct Stubs {
-    /// Every request the resolver received.
+    /// Every request the annotator received.
     consults: Arc<Mutex<Vec<serde_json::Value>>>,
     /// Every request the sanitizer received.
     sanitizations: Arc<Mutex<Vec<serde_json::Value>>>,
@@ -86,7 +86,15 @@ async fn serve_stubs(rewrite: serde_json::Value) -> (String, Stubs) {
                 stubs.consults.lock().unwrap().push(request);
                 axum::Json(serde_json::json!({
                     "version": 1,
-                    "answer": { "requires.audience": { "contains": ["partner"] } },
+                    "answer": {
+                        "delta": {},
+                        "requires": {
+                            "audience": { "contains": ["partner"] },
+                            "history": [],
+                            "attention": [],
+                        },
+                        "emits": [],
+                    },
                 }))
             }),
         )
@@ -215,14 +223,14 @@ fn released_effects(runtime: &Runtime) -> Vec<Vec<String>> {
 }
 
 #[tokio::test]
-async fn a_rewrite_into_the_public_contract_consults_its_resolver_about_the_rewritten_call() {
+async fn a_rewrite_into_the_public_contract_consults_its_annotator_about_the_rewritten_call() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let (runtime, stubs) = narrowed(&dir, serde_json::json!({ "path": "public/q3.md" })).await;
 
     let blocked = propose(&runtime, read_file("private/q3.md")).await;
     assert!(
         stubs.consults.lock().unwrap().is_empty(),
-        "the private contract uses no resolver"
+        "the private contract is static and owes no annotation"
     );
     let hop = last_offer(&blocked);
 
@@ -234,7 +242,7 @@ async fn a_rewrite_into_the_public_contract_consults_its_resolver_about_the_rewr
     assert_eq!(
         consults.len(),
         1,
-        "the public contract's resolver is consulted once, about the rewrite"
+        "the public declaration's annotator is consulted once, about the rewrite"
     );
     assert_eq!(
         consults[0]["artifact"]["args"],
@@ -269,7 +277,7 @@ async fn a_rewrite_into_the_private_contract_records_the_classified_read_and_con
     assert_eq!(
         stubs.consults.lock().unwrap().len(),
         1,
-        "the private contract uses no resolver, and the proposal's answer is not carried"
+        "the private contract is static, and the proposal's annotation is not carried"
     );
 
     assert_eq!(
@@ -281,7 +289,7 @@ async fn a_rewrite_into_the_private_contract_records_the_classified_read_and_con
 }
 
 #[tokio::test]
-async fn a_rewrite_within_the_public_contract_keeps_the_proposals_answer() {
+async fn a_rewrite_within_the_public_contract_is_annotated_afresh() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let (runtime, stubs) = narrowed(&dir, serde_json::json!({ "path": "public/q4.md" })).await;
 
@@ -304,10 +312,15 @@ async fn a_rewrite_within_the_public_contract_keeps_the_proposals_answer() {
         sanitizations[0]["artifact"]["body"],
         serde_json::json!({ "path": "public/q3.md" }).to_string()
     );
+    let consults = stubs.consults.lock().unwrap().clone();
     assert_eq!(
-        stubs.consults.lock().unwrap().len(),
-        1,
-        "the answer about the proposal rides through a rewrite that stays in its contract"
+        consults.len(),
+        2,
+        "a rewrite is a new call: the annotator is consulted about the rewritten arguments"
+    );
+    assert_eq!(
+        consults[1]["artifact"]["args"],
+        serde_json::json!({ "name": "read_file", "arguments": { "path": "public/q4.md" } })
     );
     assert_eq!(
         propose(&runtime, read_file("public/q4.md")).await,

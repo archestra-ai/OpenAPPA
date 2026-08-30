@@ -1,4 +1,4 @@
-//! The policy reference's resolver and cast examples are held to the loader.
+//! The policy reference's cast examples are held to the loader.
 //!
 //! `website/content/docs/contracts.md` is a golden file: what it shows a reader typing has to
 //! be what this crate accepts. Nothing else in the test suite reads it, so a syntax change that
@@ -51,28 +51,6 @@ fn as_policy(example: &str) -> String {
     match example.starts_with("version") {
         true => example.to_string(),
         false => format!("version = 1\n\n{example}"),
-    }
-}
-
-#[test]
-fn every_resolver_example_in_the_policy_reference_loads() {
-    let reference = policy_reference();
-    let examples = section_examples(&reference, "### Dynamic resolvers");
-    assert!(
-        examples.len() >= 3,
-        "expected the three worked policy examples, found {}",
-        examples.len()
-    );
-
-    for (index, example) in examples.iter().enumerate() {
-        let policy = as_policy(example);
-        assert!(
-            !policy.contains("resolvers = ["),
-            "example {index} still shows the retired binding syntax:\n{example}"
-        );
-        if let Err(error) = Config::from_toml_str(&policy) {
-            panic!("example {index} does not load: {error}\n{policy}");
-        }
     }
 }
 

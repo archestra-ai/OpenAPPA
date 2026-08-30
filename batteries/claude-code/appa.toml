@@ -3,29 +3,30 @@
 [policy]
 version = 1
 
-# Classify each command before dispatch: both the labels on its output and the
-# trust and audience the command may receive.
-[[policy.dynamic_resolver]]
+# The stock model annotator produces Bash's complete contract before dispatch:
+# the labels on its output and the trust, audience, and review marks the
+# command requires. `audiences` closes the mandate: "private" is the one
+# literal reader a produced annotation may name.
+[[policy.annotator]]
 name = "claude-code.bash-requirements"
 builtin = "claude-code"
-returns = ["delta.trust", "delta.audience", "requires.trust", "requires.audience", "requires.attention"]
+audiences = ["private"]
 
 [[policy.tool]]
 name = "Bash"
 description = "Runs one shell command and returns its output."
-uses = [{ resolver = "claude-code.bash-requirements" }]
+annotator = "claude-code.bash-requirements"
 
-# Classify only who may receive the returned file content. Read adds no trust
-# restriction and the resolver does not block the read itself.
-[[policy.dynamic_resolver]]
+# This annotator only decides who may receive the returned file content: its
+# answers leave trust alone and never block the read itself.
+[[policy.annotator]]
 name = "claude-code.read-sensitivity"
-returns = ["delta.audience"]
+audiences = ["private"]
 
 [[policy.tool]]
 name = "Read"
 description = "Reads a file and returns its contents."
-uses = [{ resolver = "claude-code.read-sensitivity" }]
-delta = {}
+annotator = "claude-code.read-sensitivity"
 
 # Every tool this policy does not name — an MCP server's tools, for one — is
 # not refused for being unnamed: the model reads the call as written and
@@ -39,7 +40,7 @@ delta = {}
 name = "claude-code.undeclared-tool"
 resolver = { may_cast = { trust = ["suspicious", "trusted"], audience = ["public"] } }
 
-[externals.dynamic."claude-code.read-sensitivity"]
+[externals.annotators."claude-code.read-sensitivity"]
 command = ["python3", "./read-sensitivity.py"]
 
 [externals.casts."claude-code.undeclared-tool"]

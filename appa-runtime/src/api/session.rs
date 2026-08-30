@@ -7,8 +7,8 @@ use crate::elicit::Elicitation;
 use appa_engine::value::ValueBody;
 
 use crate::consult::{
-    CastAnswer, CastArtifact, CastDeclaration, Consult, ConsultBody, DynamicAnswer, DynamicArtifact,
-    MembershipArtifact, ReadersAnswer, SanitizerAnswer,
+    AnnotationAnswer, AnnotationArtifact, CastAnswer, CastArtifact, CastDeclaration, Consult, ConsultBody,
+    DynamicAnswer, DynamicArtifact, MembershipArtifact, ReadersAnswer, SanitizerAnswer,
 };
 use crate::engine::{
     AuthorityVerdict, CandidateResolution, CastAsk, CastLabel, CastVerdict, EngineDecision, EngineEvent, EngineView,
@@ -809,47 +809,51 @@ impl Session {
                     derived,
                 }
             }
-            ExternalRequest::ToolResolution {
-                uses,
-                args,
+            ExternalRequest::Annotation {
+                annotator,
+                call,
                 declaration,
+                args,
             } => {
-                let resolver = uses.resolver.as_str();
                 let consult = Consult {
-                    name: resolver.to_string(),
-                    body: ConsultBody::Dynamic {
+                    name: annotator.clone(),
+                    body: ConsultBody::Annotation {
                         declaration: declaration.clone(),
-                        artifact: DynamicArtifact { args: args.clone() },
+                        artifact: AnnotationArtifact { args: args.clone() },
                     },
                 };
                 let answer = match self.deployment.externals.consult(&consult, None).await {
-                    ConsultOutcome::Answer(answer) => DynamicAnswer::from_wire(&answer, declaration).ok_or_else(|| {
-                        crate::external::NoAnswerReason::MalformedAnswer(
-                            "detail=invalid_fields_or_value_types".to_string(),
-                        )
-                    }),
+                    ConsultOutcome::Answer(answer) => {
+                        AnnotationAnswer::from_wire(&answer, declaration).ok_or_else(|| {
+                            crate::external::NoAnswerReason::MalformedAnswer(
+                                "detail=invalid_fields_or_value_types".to_string(),
+                            )
+                        })
+                    }
                     ConsultOutcome::NoAnswer(reason) => Err(reason),
                 };
+                // Annotation failure is an operational refusal, never model feedback: the
+                // call is not judged, nothing is appended, and the harness fails closed.
                 let answer = match answer {
                     Ok(answer) => answer,
                     Err(reason) => {
                         match reason {
                             crate::external::NoAnswerReason::Unreachable | crate::external::NoAnswerReason::Timeout => {
-                                tracing::warn!(resolver, ?reason, "a tool-resolution consult produced no answer")
+                                tracing::warn!(annotator, ?reason, "an annotation consult produced no answer")
                             }
-                            _ => tracing::debug!(resolver, ?reason, "a tool-resolution consult produced no answer"),
+                            _ => tracing::debug!(annotator, ?reason, "an annotation consult produced no answer"),
                         }
-                        return Err(EventError::ResolverUnavailable {
-                            resolver: resolver.to_string(),
+                        return Err(EventError::AnnotationRefused {
+                            annotator: annotator.clone(),
                             reason: reason.diagnostic(),
                         });
                     }
                 };
-                ExternalEvidence::ToolResolution {
-                    resolver: resolver.to_string(),
-                    // The evidence names the exact value it answered for, so a sibling call with
-                    // other arguments cannot consume it.
-                    args: appa_engine::contract::ResolverArgsDigest::of(&appa_engine::params::canonical_bytes(args)),
+                ExternalEvidence::Annotation {
+                    annotator: annotator.clone(),
+                    // The evidence names the exact call it answered for: a rewritten call
+                    // never consumes a stale annotation.
+                    call: *call,
                     answer,
                 }
             }
@@ -1158,9 +1162,8 @@ builtin = "approve"
 "#;
         assert!(matches!(
             Runtime::open(config_with(policy, None), dir.path().join("appa.db"), None),
-            Err(OpenError::Policy(
-                appa_policy::ConfigError::ForbiddenInlineBinding { .. }
-            )),
+            Err(OpenError::Policy(error))
+                if matches!(*error, appa_policy::ConfigError::ForbiddenInlineBinding { .. }),
         ));
     }
 

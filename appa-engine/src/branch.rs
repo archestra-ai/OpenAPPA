@@ -197,10 +197,9 @@ mod tests {
         crate::profile::opening_at(trajectory, label)
     }
 
-    fn read_tool() -> crate::contract::ToolContract {
-        crate::contract::ToolContract {
+    fn read_tool() -> crate::contract::ToolAnnotation {
+        crate::contract::ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("read"),
             tags: vec![],
             delta: crate::contract::Delta::NONE,
@@ -208,6 +207,21 @@ mod tests {
             emits: EffectSet::default(),
             requires: crate::contract::Requires::default(),
         }
+    }
+
+    fn pinned(call: &ResolvedCall) -> crate::contract::PinnedAnnotation {
+        crate::contract::PinnedAnnotation::new(
+            crate::contract::ToolAnnotation {
+                name: call.tool().clone(),
+                tags: vec![],
+                description: None,
+                parameters: crate::params::ToolParameters::open(),
+                delta: crate::contract::Delta::NONE,
+                emits: EffectSet::default(),
+                requires: crate::contract::Requires::default(),
+            },
+            crate::contract::AnnotationMandate::Declared,
+        )
     }
 
     fn admit(log: &mut Vec<Fact>, trajectory: TrajectoryId, label: Label) {
@@ -226,12 +240,12 @@ mod tests {
             trajectory: trajectory.clone(),
             dispatch: dispatch.clone(),
             tool: call.tool().clone(),
-            contract: call.contract_id(),
+            declaration: call.declaration_id(),
             arguments: call.canonical_arguments().clone(),
             proposed_label: EstablishedLabel::top(),
             receiving: EstablishedLabel::top(),
             proposed_effects: EffectSet::default(),
-            tool_resolutions: Vec::new(),
+            annotation: pinned(&call),
             memberships: Vec::new(),
             requirement_cast: None,
             subject: crate::basis::fixture_subject(&trajectory),
@@ -268,6 +282,7 @@ mod tests {
         Registry::build_covered(RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
             tools: vec![],
+            annotators: vec![],
             authorities: vec![],
             sanitizers: vec![declassify],
             casts: vec![],
@@ -737,12 +752,12 @@ mod tests {
             trajectory: child(),
             dispatch: dispatch.clone(),
             tool: call.tool().clone(),
-            contract: call.contract_id(),
+            declaration: call.declaration_id(),
             arguments: call.canonical_arguments().clone(),
             proposed_label: EstablishedLabel::top(),
             receiving: EstablishedLabel::top(),
             proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
-            tool_resolutions: Vec::new(),
+            annotation: pinned(&call),
             memberships: Vec::new(),
             requirement_cast: None,
             subject: crate::basis::fixture_subject(&child()),
@@ -762,7 +777,8 @@ mod tests {
     fn cast_registry() -> Registry {
         Registry::build_covered(RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![read_tool()],
+            tools: vec![crate::contract::ToolDeclaration::Declared(read_tool())],
+            annotators: vec![],
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![Cast {
@@ -946,12 +962,12 @@ mod tests {
             trajectory: child(),
             dispatch: dispatch.clone(),
             tool: call.tool().clone(),
-            contract: call.contract_id(),
+            declaration: call.declaration_id(),
             arguments: call.canonical_arguments().clone(),
             proposed_label: EstablishedLabel::top(),
             receiving: EstablishedLabel::top(),
             proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
-            tool_resolutions: Vec::new(),
+            annotation: pinned(&call),
             memberships: Vec::new(),
             requirement_cast: None,
             subject: crate::basis::fixture_subject(&child()),

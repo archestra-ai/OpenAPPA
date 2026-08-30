@@ -6,7 +6,7 @@ use crate::admit::{self, AdmitError, CastAnswer, ResultAdmission};
 use crate::branch::{self, BranchError};
 use crate::candidate::{CallStage, ConfinedFrom, DerivedCandidate, DerivedVia, SanitizerLineage};
 use crate::check::{self, CheckOutcome, Narrowing, RawBlock};
-use crate::contract::ToolContract;
+use crate::contract::ToolAnnotation;
 use crate::execute::{self, PlanError};
 use crate::fact::{Fact, ObservedResult, ReturnDerivation, ReturnPolicy, ReturnRejection};
 use crate::groups::{Expansions, GroupExpansion, GroupResolution};
@@ -135,7 +135,7 @@ impl Engine {
         let tools = self
             .registry
             .tool_names()
-            .chain(self.registry.provider_run_contracts().map(|tool| &tool.name));
+            .chain(self.registry.provider_run_annotations().map(|tool| &tool.name));
         profile::derive_open_vectors(self.profile(), tools)
     }
 
@@ -1438,7 +1438,7 @@ impl Engine {
         views: &Views,
         dispatch: &DispatchId,
         call: &ResolvedCall,
-        contract: &crate::contract::ToolContract,
+        contract: &crate::contract::ToolAnnotation,
         raw: &ValueBody,
         raw_digest: RawResultDigest,
         report: &ToolReport,
@@ -1491,8 +1491,7 @@ impl Engine {
             });
         };
         if let Some(registered) = self.registry.cast(&cast) {
-            let prior =
-                contract.output_label_for_resolutions(views.tool_resolutions(dispatch).unwrap_or_default(), expansions);
+            let prior = contract.output_label(expansions);
             expansions.require(registered.resolution.reads(&prior))?;
         }
         let candidate = crate::admit::cast_candidate(
@@ -1593,7 +1592,7 @@ impl Engine {
     /// the menu reads anything.
     fn confined_menu(
         &self,
-        contract: &ToolContract,
+        contract: &ToolAnnotation,
         receiving: &EstablishedLabel,
         label: &Label,
         residual: &Narrowing,
@@ -1840,7 +1839,7 @@ impl Engine {
             return Err(TransitionError::BatchIdentityConflict);
         }
         for result in &batch.provider_results {
-            if self.registry.provider_run_contract(&result.tool).is_none() {
+            if self.registry.provider_run_annotation(&result.tool).is_none() {
                 return Err(TransitionError::Call(match self.registry.declared(&result.tool) {
                     true => EngineError::NotProviderRun(result.tool.as_str().to_string()),
                     false => EngineError::UnknownTool(result.tool.as_str().to_string()),
@@ -1852,8 +1851,8 @@ impl Engine {
                 batch
                     .provider_results
                     .iter()
-                    .filter_map(|result| self.registry.provider_run_contract(&result.tool))
-                    .flat_map(ToolContract::groups),
+                    .filter_map(|result| self.registry.provider_run_annotation(&result.tool))
+                    .flat_map(ToolAnnotation::groups),
             )?;
         }
         Ok(admitted)
@@ -1896,16 +1895,16 @@ impl Engine {
         let mut needed = Vec::new();
         let mut unresolved = Vec::new();
         for call in proposals {
-            let contract = self
+            let declaration = self
                 .registry
-                .contract(call)
+                .declaration(call)
                 .expect("a resolved call names a checkable tool");
-            let (groups, resolvers) = unanswered(&self.registry, contract, call, expansions)?;
+            let (groups, annotator) = unanswered(&self.registry, declaration, call, expansions)?;
             needed.extend(groups);
-            for resolver in resolvers {
-                if !unresolved.contains(&resolver) {
-                    unresolved.push(resolver);
-                }
+            if let Some(annotator) = annotator
+                && !unresolved.contains(&annotator)
+            {
+                unresolved.push(annotator);
             }
         }
         if !needed.is_empty() {
@@ -1914,7 +1913,7 @@ impl Engine {
             return Err(TransitionError::MembershipNeeded { needed });
         }
         if !unresolved.is_empty() {
-            return Err(TransitionError::ToolResolutionNeeded { resolvers: unresolved });
+            return Err(TransitionError::AnnotationNeeded { annotators: unresolved });
         }
         Ok(())
     }
@@ -1943,7 +1942,7 @@ impl Engine {
                 .map(|(position, result)| {
                     let contract = self
                         .registry
-                        .provider_run_contract(&result.tool)
+                        .provider_run_annotation(&result.tool)
                         .expect("every exposed result was classified above");
                     Fact::ValueAdmitted {
                         trajectory: batch.trajectory.clone(),
@@ -2047,7 +2046,7 @@ impl Engine {
         // moves nothing, so the two agree by construction.
         let advance = Sequence::advance_of(self, view, &facts);
         let final_views = working.view(&batch.trajectory);
-        let mut refused: Vec<(usize, &ResolvedCall, &ToolContract, RawBlock, plan::CallRole)> = Vec::new();
+        let mut refused: Vec<(usize, &ResolvedCall, &ToolAnnotation, RawBlock, plan::CallRole)> = Vec::new();
         for (position, call) in composed
             .iter()
             .enumerate()
@@ -2119,7 +2118,7 @@ impl Engine {
             .map(|(position, proposed)| {
                 self.resolve_call(proposed.tool.clone(), &proposed.arguments)
                     .map(|call| {
-                        call.with_tool_resolutions(proposed.tool_resolutions.clone())
+                        call.with_annotation(proposed.annotation.clone())
                             .with_memberships(proposed.memberships.clone())
                             .with_requirement_cast(proposed.requirement_cast.clone())
                     })
@@ -2154,7 +2153,7 @@ impl Engine {
         for call in proposals {
             let contract = self
                 .registry
-                .contract(call)
+                .annotation_of(call)
                 .expect("a resolved call names a checkable tool");
             let check::CheckOutcome::Block(raw) =
                 check::evaluate(contract, &views, call, &CallStage::default(), expansions)
@@ -2194,7 +2193,7 @@ impl Engine {
         expansions: &[crate::groups::GroupExpansion],
     ) -> Result<Vec<crate::transition::ApplicableRequirementCast>, TransitionError> {
         let expansions = self.registry.expansions_from_event(expansions)?;
-        let Some(contract) = self.registry.contract(call) else {
+        let Some(contract) = self.registry.annotation_of(call) else {
             return Ok(Vec::new());
         };
         let slots: Vec<crate::contract::RequirementSlot> = contract.requires.unknown_slots().collect();
@@ -2223,7 +2222,7 @@ impl Engine {
         let Ok(expansions) = self.registry.expansions_from_event(expansions) else {
             return false;
         };
-        self.registry.contract(call).is_some_and(|contract| {
+        self.registry.annotation_of(call).is_some_and(|contract| {
             check::validate_requirement_cast(&self.registry, contract, call, &expansions).is_ok()
         })
     }
@@ -2371,7 +2370,12 @@ impl Engine {
             })
             .collect();
         for (call, expansions) in &standing {
-            expansions.require(self.registry.contract(call).into_iter().flat_map(ToolContract::groups))?;
+            expansions.require(
+                self.registry
+                    .annotation_of(call)
+                    .into_iter()
+                    .flat_map(ToolAnnotation::groups),
+            )?;
         }
         let mut released = Vec::new();
         let mut blocked = Vec::new();
@@ -3054,7 +3058,7 @@ impl Engine {
         views: &Views,
         execution: &OfferExecution,
         recorded: &crate::projection::RecordedOffer,
-        contract: &ToolContract,
+        contract: &ToolAnnotation,
         raw: &crate::check::RawBlock,
         call: &ResolvedCall,
         stage: &CallStage,
@@ -3072,7 +3076,7 @@ impl Engine {
             sanitizer: named,
             source,
             derived: body,
-            tool_resolutions,
+            annotation,
             memberships,
         } = evidence
         else {
@@ -3092,16 +3096,11 @@ impl Engine {
             .lineage()
             .extend(sanitizer.clone())
             .ok_or(TransitionError::SanitizerUnapplicable)?;
-        let (substituted, contract) = substituted_call(
-            &self.registry,
-            views,
-            &recorded.subject,
-            call,
-            body,
-            tool_resolutions,
-            memberships,
-            expansions,
-        )?;
+        let substituted = substituted_call(&self.registry, call, body, annotation.as_ref(), memberships, expansions)?;
+        let contract = self
+            .registry
+            .annotation_of(&substituted)
+            .expect("a validated call resolves its annotation");
         // The sanitizer's jurisdiction reaches the contract the rewrite selects as well as the
         // one the offer was planned on: a rewrite is no way past a tag that keeps sanitizers off
         // a contract.
@@ -3450,7 +3449,7 @@ impl Engine {
         views: &Views,
         execution: &OfferExecution,
         recorded: &crate::projection::RecordedOffer,
-        contract: &ToolContract,
+        contract: &ToolAnnotation,
         raw: &crate::check::RawBlock,
         call: &ResolvedCall,
         evidence: &[execute::AuthorityEvidence],
@@ -3549,7 +3548,7 @@ impl Engine {
         views: &Views,
         execution: &OfferExecution,
         recorded: &crate::projection::RecordedOffer,
-        contract: &ToolContract,
+        contract: &ToolAnnotation,
         call: &ResolvedCall,
         raw: &crate::check::RawBlock,
         stage: &CallStage,
@@ -3691,18 +3690,22 @@ impl Engine {
         branch::submit_child_return(&self.registry, parent, child, &body, &Expansions::default())
     }
 
-    fn dispatch_contract(&self, views: &Views, dispatch: &DispatchId) -> Result<&ToolContract, TransitionError> {
+    fn dispatch_contract<'c>(
+        &'c self,
+        views: &'c Views<'c>,
+        dispatch: &DispatchId,
+    ) -> Result<&'c ToolAnnotation, TransitionError> {
         let call = views.dispatch_call(dispatch).ok_or(TransitionError::UnknownDispatch)?;
         self.validated_contract(call).map_err(TransitionError::Call)
     }
 
-    fn validated_contract(&self, call: &ResolvedCall) -> Result<&ToolContract, EngineError> {
-        if self.registry.provider_run_contract(call.tool()).is_some() {
+    fn validated_contract<'c>(&'c self, call: &'c ResolvedCall) -> Result<&'c ToolAnnotation, EngineError> {
+        if self.registry.provider_run_annotation(call.tool()).is_some() {
             return Err(EngineError::ProviderRunTool(call.tool().as_str().to_string()));
         }
         let contract = self
             .registry
-            .keyed_tool(call.tool(), call.contract_id())
+            .annotation_of(call)
             .ok_or_else(|| EngineError::UnknownTool(call.tool().as_str().to_string()))?;
         contract
             .parameters
@@ -3729,87 +3732,109 @@ fn select_call<'a>(
     registry: &'a Registry,
     tool: ToolName,
     raw_arguments: &[u8],
-) -> Result<(ResolvedCall, &'a ToolContract), EngineError> {
+) -> Result<(ResolvedCall, &'a crate::contract::ToolDeclaration), EngineError> {
     let parsed = CanonicalArguments::parse(raw_arguments).map_err(EngineError::InvalidCall)?;
-    let (id, contract) = registry
+    let (id, declaration) = registry
         .select_tool(&tool, parsed.value())
         .ok_or(EngineError::InvalidCall(ArgumentError::NoMatchingContract))?;
-    contract
-        .parameters
+    declaration
+        .parameters()
         .validate(parsed.value())
         .map_err(EngineError::InvalidCall)?;
-    Ok((ResolvedCall::new_keyed(tool, id, parsed), contract))
+    Ok((ResolvedCall::new_keyed(tool, id, parsed), declaration))
 }
 
-/// The call a sanitizer's replacement renders, under the ordered contract its arguments select.
+/// The call a sanitizer's replacement renders, under the ordered declaration its arguments select.
 ///
-/// A rewrite that stays in its contract carries the answers the call it replaces carries, given
-/// about the call last consulted on the record; the runtime consulted nothing and hands nothing
-/// in. A rewrite that selects another contract is a new call under it: nothing rides along, and
-/// the answers the runtime consulted about the rewritten arguments are judged as a proposal's are.
-#[allow(clippy::too_many_arguments)]
-fn substituted_call<'a>(
-    registry: &'a Registry,
-    views: &Views,
-    subject: &crate::basis::SubjectKey,
+/// Annotation evidence binds the exact canonical call, so a rewrite of an Annotator-declared
+/// tool carries the fresh annotation the runtime obtained for the rewritten call, whatever
+/// declaration it selects. Membership answers survive a same-declaration rewrite only where the
+/// arguments they read are unchanged; a rewrite that selects another declaration is a new call
+/// under it, its membership answers judged as a proposal's are.
+fn substituted_call(
+    registry: &Registry,
     call: &ResolvedCall,
     body: &ValueBody,
-    tool_resolutions: &[crate::contract::PinnedToolResolution],
+    annotation: Option<&crate::contract::PinnedAnnotation>,
     memberships: &[crate::contract::PinnedMembership],
     expansions: &Expansions,
-) -> Result<(ResolvedCall, &'a ToolContract), TransitionError> {
-    let (rewritten, contract) =
+) -> Result<ResolvedCall, TransitionError> {
+    let (rewritten, declaration) =
         select_call(registry, call.tool().clone(), body.as_str().as_bytes()).map_err(TransitionError::Call)?;
-    if rewritten.contract_id() == call.contract_id() {
-        if !tool_resolutions.is_empty() || !memberships.is_empty() {
-            return Err(TransitionError::EvidenceMismatch);
+    let same = rewritten.declaration_id() == call.declaration_id();
+    if same && !memberships.is_empty() {
+        return Err(TransitionError::EvidenceMismatch);
+    }
+    let substituted = if same {
+        call.substituting(rewritten.into_canonical_arguments())
+            .with_annotation(annotation.cloned())
+    } else {
+        rewritten
+            .with_annotation(annotation.cloned())
+            .with_memberships(memberships.to_vec())
+    };
+    match check::validate_annotation(registry, declaration, &substituted) {
+        Ok(()) => {}
+        Err(check::AnnotationRefusal::Needed(annotator)) => {
+            return Err(TransitionError::AnnotationNeeded {
+                annotators: vec![annotator],
+            });
         }
-        let substituted = call.substituting(rewritten.into_canonical_arguments());
-        let consulted = views
-            .consulted_call(subject)
-            .ok_or(TransitionError::SanitizerUnapplicable)?;
-        if check::validate_tool_resolutions(
-            registry,
-            contract,
-            &substituted,
-            check::AnsweredFor::Consulted(consulted),
-        )
-        .is_err()
-            || check::validate_requirement_cast(registry, contract, &substituted, expansions).is_err()
-        {
+        Err(_) => return Err(TransitionError::SanitizerUnapplicable),
+    }
+    {
+        let checked = registry
+            .annotation_of(&substituted)
+            .expect("a validated call resolves its annotation");
+        // A rewrite consults no cast: a hop into a declaration leaving a requirement slot
+        // Unknown could never execute, so none is offered.
+        if check::validate_requirement_cast(registry, checked, &substituted, expansions).is_err() {
             return Err(TransitionError::SanitizerUnapplicable);
         }
-        return Ok((substituted, contract));
+        if !same {
+            let mut needed = match check::validate_memberships(checked, &substituted) {
+                Ok(()) => Vec::new(),
+                Err(check::MembershipRefusal::Needed(reads)) => {
+                    reads.into_iter().map(|read| read.group).collect::<Vec<_>>()
+                }
+                Err(check::MembershipRefusal::Foreign(argument)) => {
+                    return Err(TransitionError::ForeignMembership { argument });
+                }
+            };
+            if !needed.is_empty() {
+                needed.sort();
+                needed.dedup();
+                return Err(TransitionError::MembershipNeeded { needed });
+            }
+        }
     }
-    let substituted = rewritten
-        .with_tool_resolutions(tool_resolutions.to_vec())
-        .with_memberships(memberships.to_vec());
-    // A rewrite selecting a contract that leaves a requirement slot Unknown carries no answer
-    // for it, and the input stage consults no cast.
-    if check::validate_requirement_cast(registry, contract, &substituted, expansions).is_err() {
-        return Err(TransitionError::SanitizerUnapplicable);
-    }
-    let (mut needed, resolvers) = unanswered(registry, contract, &substituted, expansions)?;
-    if !needed.is_empty() {
-        needed.sort();
-        needed.dedup();
-        return Err(TransitionError::MembershipNeeded { needed });
-    }
-    if !resolvers.is_empty() {
-        return Err(TransitionError::ToolResolutionNeeded { resolvers });
-    }
-    Ok((substituted, contract))
+    Ok(substituted)
 }
 
-/// What a call's contract declares that the call does not yet carry: the groups its placeholders
-/// name and the resolvers it uses, each once. A foreign or out-of-policy answer is a refusal.
+/// What a call's declaration requires that the call does not yet carry: the groups its
+/// placeholders name, and the Annotator whose annotation it still owes. A foreign or
+/// out-of-policy answer is a refusal. A call still owing its annotation has no requirements to
+/// read yet, so the annotation ask comes back alone and the rest is judged once it lands.
 fn unanswered(
     registry: &Registry,
-    contract: &ToolContract,
+    declaration: &crate::contract::ToolDeclaration,
     call: &ResolvedCall,
     expansions: &Expansions,
-) -> Result<(Vec<crate::names::GroupName>, Vec<String>), TransitionError> {
-    match check::validate_requirement_cast(registry, contract, call, expansions) {
+) -> Result<(Vec<crate::names::GroupName>, Option<crate::names::AnnotatorName>), TransitionError> {
+    match check::validate_annotation(registry, declaration, call) {
+        Ok(()) => {}
+        Err(check::AnnotationRefusal::Needed(annotator)) => return Ok((Vec::new(), Some(annotator))),
+        Err(check::AnnotationRefusal::Foreign(reason)) => {
+            return Err(TransitionError::ForeignAnnotation { reason });
+        }
+        Err(check::AnnotationRefusal::OutsidePolicy(reason)) => {
+            return Err(TransitionError::InvalidAnnotation { reason });
+        }
+    }
+    let checked = registry
+        .annotation_of(call)
+        .expect("a validated call resolves its annotation");
+    match check::validate_requirement_cast(registry, checked, call, expansions) {
         Ok(()) => {}
         Err(check::RequirementCastRefusal::Needed(slots)) => {
             return Err(TransitionError::RequirementCastNeeded {
@@ -3824,33 +3849,14 @@ fn unanswered(
             return Err(TransitionError::InvalidRequirementCast { cast });
         }
     }
-    let groups = match check::validate_memberships(contract, call) {
+    let groups = match check::validate_memberships(checked, call) {
         Ok(()) => Vec::new(),
         Err(check::MembershipRefusal::Needed(reads)) => reads.into_iter().map(|read| read.group).collect(),
         Err(check::MembershipRefusal::Foreign(argument)) => {
             return Err(TransitionError::ForeignMembership { argument });
         }
     };
-    let resolvers = match check::validate_tool_resolutions(registry, contract, call, check::AnsweredFor::ThisCall) {
-        Ok(()) => Vec::new(),
-        Err(check::ToolResolutionRefusal::Needed(bindings)) => {
-            let mut resolvers: Vec<String> = Vec::new();
-            for binding in bindings {
-                let resolver = binding.resolver.as_str().to_string();
-                if !resolvers.contains(&resolver) {
-                    resolvers.push(resolver);
-                }
-            }
-            resolvers
-        }
-        Err(check::ToolResolutionRefusal::Foreign(resolver)) => {
-            return Err(TransitionError::ForeignToolResolution { resolver });
-        }
-        Err(check::ToolResolutionRefusal::OutsidePolicy(resolver)) => {
-            return Err(TransitionError::InvalidToolResolution { resolver });
-        }
-    };
-    Ok((groups, resolvers))
+    Ok((groups, None))
 }
 
 fn invalidated_siblings(
@@ -3884,8 +3890,7 @@ fn settled_outcome(views: &Views, dispatch: &DispatchId) -> SettledOutcome {
 
 fn approved_release(
     registry: &Registry,
-    contract: &ToolContract,
-    call: &ResolvedCall,
+    contract: &ToolAnnotation,
     trajectory: &TrajectoryId,
     dispatch: &DispatchId,
     approval: &crate::projection::PreparedApproval,
@@ -3915,7 +3920,7 @@ fn approved_release(
             dispatch: dispatch.clone(),
             plan: approval.plan,
             sanitizer: sanitizer.clone(),
-            contribution: crate::plan::bound_contribution(registry, contract, call, sanitizer, expansions)
+            contribution: crate::plan::bound_contribution(registry, contract, sanitizer, expansions)
                 .expect("a prepared approval binds an output sanitizer enumeration found applicable"),
             resolutions: registry.resolutions(expansions),
         });
@@ -3935,7 +3940,7 @@ fn replay_outcome(recorded: &crate::projection::RecordedOffer, end: &crate::proj
                     sanitizer: sanitizer.clone(),
                     source: RawResultDigest::of(&[]),
                     derived: ValueBody::new(""),
-                    tool_resolutions: Vec::new(),
+                    annotation: None,
                     memberships: Vec::new(),
                 })
             }
@@ -4014,7 +4019,7 @@ fn branch_refusal(error: BranchError) -> TransitionError {
 /// whose decision released it.
 pub(crate) fn opened_dispatch(
     registry: &Registry,
-    contract: &ToolContract,
+    contract: &ToolAnnotation,
     views: &Views,
     call: &ResolvedCall,
     subject: crate::basis::SubjectKey,
@@ -4024,23 +4029,20 @@ pub(crate) fn opened_dispatch(
     let occurrence = views.dispatch_count(&digest);
     let dispatch = DispatchId::new(views.trajectory().clone(), digest, occurrence);
     let current = views.current_label();
+    let annotation = match call.annotation() {
+        Some(pinned) => pinned.clone(),
+        None => crate::contract::PinnedAnnotation::new(contract.clone(), crate::contract::AnnotationMandate::Declared),
+    };
     let fact = Fact::DispatchOpened {
         trajectory: views.trajectory().clone(),
         dispatch: dispatch.clone(),
         tool: call.tool().clone(),
-        contract: call.contract_id(),
+        declaration: call.declaration_id(),
         arguments: call.canonical_arguments().clone(),
-        proposed_label: check::committed_label_for_call(
-            contract,
-            &current,
-            check::CallReads::Resolved(call),
-            expansions,
-        )
-        .bound()
-        .clone(),
+        proposed_label: check::committed_label(contract, &current, expansions).bound().clone(),
         receiving: current.bound().clone(),
         proposed_effects: contract.emits.clone(),
-        tool_resolutions: call.tool_resolutions().to_vec(),
+        annotation,
         memberships: call.memberships().to_vec(),
         requirement_cast: call.requirement_cast().cloned(),
         resolutions: registry.resolutions(expansions),
@@ -4195,7 +4197,7 @@ pub(crate) fn compose_batch<'a>(
                     dispatch: dispatch.clone(),
                 });
                 facts.extend(approved_release(
-                    registry, contract, call, trajectory, &dispatch, &prepared, under,
+                    registry, contract, trajectory, &dispatch, &prepared, under,
                 ));
             }
             facts.push(opening);
@@ -4231,9 +4233,9 @@ pub(crate) fn compose_batch<'a>(
     Ok(composed)
 }
 
-fn contract_for_call<'a>(registry: &'a Registry, call: &ResolvedCall) -> Result<&'a ToolContract, EngineError> {
-    registry.contract(call).ok_or_else(|| {
-        if registry.provider_run_contract(call.tool()).is_some() {
+fn contract_for_call<'a>(registry: &'a Registry, call: &'a ResolvedCall) -> Result<&'a ToolAnnotation, EngineError> {
+    registry.annotation_of(call).ok_or_else(|| {
+        if registry.provider_run_annotation(call.tool()).is_some() {
             EngineError::ProviderRunTool(call.tool().as_str().to_string())
         } else {
             EngineError::UnknownTool(call.tool().as_str().to_string())
@@ -4251,7 +4253,7 @@ mod tests {
     use crate::check::Gap;
     use crate::contract::{
         AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, RecipientSpec, RequirementSlot, Requires,
-        ToolContract,
+        ToolAnnotation,
     };
     use crate::fact::{EffectKind, EffectSet, Fact};
     use crate::label::PartialLabel;
@@ -4273,18 +4275,70 @@ mod tests {
         TrajectoryId::new("t")
     }
 
-    fn engine(tools: Vec<ToolContract>) -> Engine {
+    fn engine(tools: Vec<ToolAnnotation>) -> Engine {
         open_engine(test_config(tools))
     }
 
-    fn engine_at(tools: Vec<ToolContract>, starting: Label) -> Engine {
+    fn engine_at(tools: Vec<ToolAnnotation>, starting: Label) -> Engine {
         open_engine_at(test_config(tools), starting)
     }
 
-    fn test_config(tools: Vec<ToolContract>) -> RegistryConfig {
+    fn declared(tools: Vec<ToolAnnotation>) -> Vec<crate::contract::ToolDeclaration> {
+        tools
+            .into_iter()
+            .map(crate::contract::ToolDeclaration::Declared)
+            .collect()
+    }
+
+    /// The pin a statically declared call's dispatch record carries: the declaration is its own
+    /// annotation.
+    fn pinned_static(tool: &ToolAnnotation) -> crate::contract::PinnedAnnotation {
+        crate::contract::PinnedAnnotation::new(tool.clone(), crate::contract::AnnotationMandate::Declared)
+    }
+
+    /// A complete annotation as `annotator` produced it for one call.
+    fn pinned_for(produced: ToolAnnotation, annotator: &str) -> crate::contract::PinnedAnnotation {
+        crate::contract::PinnedAnnotation::new(
+            produced,
+            crate::contract::AnnotationMandate::Annotator(crate::names::AnnotatorName::new(annotator)),
+        )
+    }
+
+    /// An Annotated declaration carrying `tool`'s operational metadata, routed through `annotator`.
+    fn annotated(tool: ToolAnnotation, annotator: &str) -> crate::contract::ToolDeclaration {
+        crate::contract::ToolDeclaration::Annotated {
+            name: tool.name,
+            tags: tool.tags,
+            description: tool.description,
+            parameters: tool.parameters,
+            annotator: crate::names::AnnotatorName::new(annotator),
+        }
+    }
+
+    /// An Annotator registration with no bounds: every omitted bound resolves to the whole policy
+    /// vocabulary at load.
+    fn annotator(name: &str) -> crate::registry::AnnotatorDeclaration {
+        crate::registry::AnnotatorDeclaration {
+            name: crate::names::AnnotatorName::new(name),
+            trust: None,
+            audiences: None,
+            marks: None,
+            effects: None,
+        }
+    }
+
+    fn annotator_with_readers(name: &str, readers: &[&str]) -> crate::registry::AnnotatorDeclaration {
+        crate::registry::AnnotatorDeclaration {
+            audiences: Some(readers.iter().map(|reader| ReaderId::new(*reader)).collect()),
+            ..annotator(name)
+        }
+    }
+
+    fn test_config(tools: Vec<ToolAnnotation>) -> RegistryConfig {
         RegistryConfig {
+            annotators: vec![],
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools,
+            tools: declared(tools),
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![],
@@ -4303,10 +4357,9 @@ mod tests {
             .remove(0)
     }
 
-    fn read_tool(name: &str, delta: Delta) -> ToolContract {
-        ToolContract {
+    fn read_tool(name: &str, delta: Delta) -> ToolAnnotation {
+        ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new(name),
             tags: vec![],
             delta,
@@ -4316,7 +4369,7 @@ mod tests {
         }
     }
 
-    fn suspicious_read() -> ToolContract {
+    fn suspicious_read() -> ToolAnnotation {
         read_tool(
             "read_suspicious",
             Delta {
@@ -4326,7 +4379,7 @@ mod tests {
         )
     }
 
-    fn internal_read() -> ToolContract {
+    fn internal_read() -> ToolAnnotation {
         read_tool(
             "read_internal",
             Delta {
@@ -4346,7 +4399,7 @@ mod tests {
         }
     }
 
-    fn suspicious_internal_read() -> ToolContract {
+    fn suspicious_internal_read() -> ToolAnnotation {
         read_tool(
             "read_suspicious_internal",
             Delta {
@@ -4356,7 +4409,7 @@ mod tests {
         )
     }
 
-    fn unknown_read() -> ToolContract {
+    fn unknown_read() -> ToolAnnotation {
         read_tool(
             "read_unknown",
             Delta {
@@ -4539,8 +4592,9 @@ mod tests {
     }
 
     fn open_engine_returning_at(mut cfg: RegistryConfig, child_return: ReturnPolicy, starting: Label) -> Engine {
-        if !cfg.tools.iter().any(|tool| tool.name.as_str() == "spawn") {
-            cfg.tools.push(plain_tool("spawn"));
+        if !cfg.tools.iter().any(|tool| tool.name().as_str() == "spawn") {
+            cfg.tools
+                .push(crate::contract::ToolDeclaration::Declared(plain_tool("spawn")));
         }
         let profile = crate::profile::ProfileDeclaration {
             starting_label: starting,
@@ -4576,7 +4630,7 @@ mod tests {
         crate::transition::ProposedCall {
             tool: call.tool().clone(),
             arguments: call.canonical_arguments().canonical_bytes().to_vec(),
-            tool_resolutions: call.tool_resolutions().to_vec(),
+            annotation: call.annotation().cloned(),
             memberships: call.memberships().to_vec(),
             requirement_cast: call.requirement_cast().cloned(),
         }
@@ -4588,10 +4642,9 @@ mod tests {
         engine.check(&p.view(&t), call).unwrap()
     }
 
-    fn crm_tool() -> ToolContract {
-        ToolContract {
+    fn crm_tool() -> ToolAnnotation {
+        ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("get_ticket"),
             tags: vec![],
             delta: Delta {
@@ -4612,9 +4665,8 @@ mod tests {
 
     #[test]
     fn permuted_effect_declarations_produce_byte_identical_dispatch_facts() {
-        let pay = |emits: [&str; 2]| ToolContract {
+        let pay = |emits: [&str; 2]| ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("pay"),
             tags: vec![],
             delta: Delta::NONE,
@@ -4622,7 +4674,7 @@ mod tests {
             emits: EffectSet::new(emits.map(EffectKind::new)).unwrap(),
             requires: Requires::default(),
         };
-        let release = |contract: ToolContract| {
+        let release = |contract: ToolAnnotation| {
             let e = engine(vec![contract]);
             let mut log = vec![opened(&e)];
             let decision = e
@@ -4863,12 +4915,12 @@ mod tests {
                 trajectory: traj(),
                 dispatch,
                 tool: call.tool().clone(),
-                contract: call.contract_id(),
+                declaration: call.declaration_id(),
                 arguments: call.canonical_arguments().clone(),
                 proposed_label: EstablishedLabel::new(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
                 receiving: EstablishedLabel::new(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
                 proposed_effects: crate::fact::EffectSet::default(),
-                tool_resolutions: Vec::new(),
+                annotation: pinned_static(&crm_tool()),
                 memberships: Vec::new(),
                 requirement_cast: None,
                 subject: crate::basis::fixture_subject(&traj()),
@@ -4979,9 +5031,8 @@ mod tests {
 
     #[test]
     fn pending_cast_output_dispatches_before_resolution() {
-        let scan = ToolContract {
+        let scan = ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("scan_inbox"),
             tags: vec![],
             delta: Delta {
@@ -5013,9 +5064,8 @@ mod tests {
 
     #[test]
     fn includes_placeholder_resolves_from_arguments() {
-        let send = ToolContract {
+        let send = ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("send_email"),
             tags: vec![],
             delta: Delta::NONE,
@@ -5049,9 +5099,8 @@ mod tests {
 
     #[test]
     fn history_prior_and_no_prior() {
-        let del = ToolContract {
+        let del = ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("delete_db"),
             tags: vec![],
             delta: Delta::NONE,
@@ -5078,9 +5127,8 @@ mod tests {
     #[test]
     fn an_includes_requirement_reads_the_committed_label() {
         let b_reader = Audience::restricted([ReaderId::new("b")]);
-        let share = ToolContract {
+        let share = ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("share"),
             tags: vec![],
             delta: Delta {
@@ -5120,9 +5168,8 @@ mod tests {
 
     #[test]
     fn a_trust_floor_reads_the_committed_label() {
-        let risky = ToolContract {
+        let risky = ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("risky"),
             tags: vec![],
             delta: Delta {
@@ -5159,9 +5206,8 @@ mod tests {
     #[test]
     fn a_read_that_narrows_into_the_cap_passes_the_cap() {
         let a_reader = Audience::restricted([ReaderId::new("a")]);
-        let scoped = ToolContract {
+        let scoped = ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("scoped"),
             tags: vec![],
             delta: Delta {
@@ -5190,10 +5236,9 @@ mod tests {
         }
     }
 
-    fn emitting(name: &str, kind: &str) -> ToolContract {
-        ToolContract {
+    fn emitting(name: &str, kind: &str) -> ToolAnnotation {
+        ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new(name),
             tags: vec![],
             delta: Delta::NONE,
@@ -5203,10 +5248,9 @@ mod tests {
         }
     }
 
-    fn history_guarded(name: &str, requirement: HistoryRequirement) -> ToolContract {
-        ToolContract {
+    fn history_guarded(name: &str, requirement: HistoryRequirement) -> ToolAnnotation {
+        ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new(name),
             tags: vec![],
             delta: Delta::NONE,
@@ -5530,9 +5574,8 @@ mod tests {
             scope: crate::authority::Scope::default(),
             hint: None,
         };
-        let fetch = ToolContract {
+        let fetch = ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("fetch"),
             tags: vec![],
             delta: Delta {
@@ -5544,8 +5587,9 @@ mod tests {
             requires: Requires::default(),
         };
         let e = open_engine(RegistryConfig {
+            annotators: vec![],
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![fetch],
+            tools: declared(vec![fetch]),
             authorities: vec![],
             sanitizers: vec![redactor],
             casts: vec![],
@@ -5727,11 +5771,11 @@ mod tests {
             hint: None,
         };
         open_engine(RegistryConfig {
+            annotators: vec![],
             trust_chain: TrustChain::new(vec!["secret".into(), "suspicious".into(), "trusted".into()]),
-            tools: vec![
-                ToolContract {
+            tools: declared(vec![
+                ToolAnnotation {
                     description: Some("A test tool.".to_string()),
-                    uses: vec![],
                     name: ToolName::new("fetch"),
                     tags: vec![],
                     delta: Delta {
@@ -5743,7 +5787,7 @@ mod tests {
                     requires: Requires::default(),
                 },
                 unestablished_tool("ping"),
-            ],
+            ]),
             authorities: vec![],
             sanitizers: vec![
                 sanitizer("redactor", Trust::new(0), Trust::new(1)),
@@ -6000,7 +6044,7 @@ mod tests {
                 sanitizer: crate::names::SanitizerName::new("redact"),
                 source: crate::value::RawResultDigest::of(&[]),
                 derived: ValueBody::new(""),
-                tool_resolutions: vec![],
+                annotation: None,
                 memberships: vec![],
             }))),
         );
@@ -6228,49 +6272,9 @@ mod tests {
 
     fn substituting_engine(trust: Trust) -> Engine {
         let partner = Audience::restricted([ReaderId::new("partner")]);
-        let post = |name: &str, tags: Vec<crate::names::TagName>| ToolContract {
-            description: Some("A test tool.".to_string()),
-            uses: vec![],
-            name: ToolName::new(name),
-            tags,
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::compile(&json!({
-                "type": "object",
-                "properties": { "body": { "type": "string" } },
-                "required": ["body"],
-            }))
-            .unwrap(),
-            emits: EffectSet::new([EffectKind::new("outbound.post")]).unwrap(),
-            requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: Some(Dim::Known(TRUSTED)),
-                    audience: Dim::Known(vec![AudienceRequirement::Includes(RecipientSpec::Static(
-                        DeclaredAudience::literal(partner.clone()),
-                    ))]),
-                },
-                ..Requires::default()
-            },
-        };
-        let post_to = ToolContract {
-            name: ToolName::new("post_to"),
-            parameters: crate::params::ToolParameters::compile(&json!({
-                "type": "object",
-                "properties": { "body": { "type": "string" }, "who": { "type": "string" } },
-                "required": ["body", "who"],
-            }))
-            .unwrap(),
-            delta: Delta {
-                trust: None,
-                audience: None,
-            },
-            description: Some("A test tool.".to_string()),
-            uses: vec![dynamic_who()],
-            ..post("post_to", vec![crate::names::TagName::new("outbound")])
-        };
-        // Its resolver declares no inputs, so it reads the complete call: every rewrite changes
-        // what it was shown. The recipients it requires are the answer's, not the policy's.
+        let post = post_tool;
         // Its recipients are a cast's per-call answer: the policy leaves the audience slot Unknown.
-        let post_lazy = ToolContract {
+        let post_lazy = ToolAnnotation {
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: Some(Dim::Known(TRUSTED)),
@@ -6286,28 +6290,23 @@ mod tests {
                 ],
             )
         };
-        let post_call = ToolContract {
-            uses: vec![dynamic_call()],
-            requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: Some(Dim::Known(TRUSTED)),
-                    audience: Dim::Known(vec![]),
-                },
-                ..Requires::default()
-            },
-            ..post("post_call", vec![crate::names::TagName::new("outbound")])
-        };
         open_engine_at(
             RegistryConfig {
+                annotators: vec![annotator("acl")],
                 trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-                tools: vec![
-                    post("post", vec![crate::names::TagName::new("outbound")]),
-                    post("post_untagged", vec![]),
-                    post_to,
-                    post_call,
-                    post_lazy,
-                    unestablished_tool("ping"),
-                ],
+                tools: {
+                    let mut tools = declared(vec![
+                        post("post", vec![crate::names::TagName::new("outbound")]),
+                        post("post_untagged", vec![]),
+                        post_lazy,
+                        unestablished_tool("ping"),
+                    ]);
+                    tools.push(annotated(
+                        post("post_dyn", vec![crate::names::TagName::new("outbound")]),
+                        "acl",
+                    ));
+                    tools
+                },
                 authorities: vec![crate::authority::Authority {
                     name: AuthorityName::new("officer"),
                     mandate: crate::authority::Mandate {
@@ -6358,72 +6357,41 @@ mod tests {
         vec![opened(e)]
     }
 
-    fn dynamic_who() -> crate::contract::ToolResolverUse {
-        crate::contract::ToolResolverUse {
-            resolver: crate::names::DynamicResolverName::new("acl"),
-            inputs: std::collections::BTreeMap::from([(
-                "who".to_string(),
-                crate::contract::ToolCallSource::argument("who").expect("a plain name is a source"),
-            )]),
-            returns: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
+    fn post_tool(name: &str, tags: Vec<crate::names::TagName>) -> ToolAnnotation {
+        ToolAnnotation {
+            description: Some("A test tool.".to_string()),
+            name: ToolName::new(name),
+            tags,
+            delta: Delta::NONE,
+            parameters: crate::params::ToolParameters::compile(&json!({
+                "type": "object",
+                "properties": { "body": { "type": "string" } },
+                "required": ["body"],
+            }))
+            .unwrap(),
+            emits: EffectSet::new([EffectKind::new("outbound.post")]).unwrap(),
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: Some(Dim::Known(TRUSTED)),
+                    audience: Dim::Known(vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                        DeclaredAudience::literal(Audience::restricted([ReaderId::new("partner")])),
+                    ))]),
+                },
+                ..Requires::default()
+            },
         }
     }
 
-    fn dynamic_call() -> crate::contract::ToolResolverUse {
-        crate::contract::ToolResolverUse {
-            resolver: crate::names::DynamicResolverName::new("classify"),
-            inputs: std::collections::BTreeMap::new(),
-            returns: [crate::contract::ResolverReturn::RequiredAudience]
-                .into_iter()
-                .collect(),
-        }
-    }
-
-    /// A pin for the call on `post_call` whose `body` argument holds `body`. Its args are all the
-    /// tool arguments, so any rewrite of `body` changes them.
-    fn call_pin_for(body: &str) -> crate::contract::PinnedToolResolution {
-        call_pin_for_reader(body, "partner")
-    }
-
-    fn call_pin_for_reader(body: &str, reader: &str) -> crate::contract::PinnedToolResolution {
-        let uses = dynamic_call();
-        let contract = crate::contract::ToolContract {
-            uses: vec![uses.clone()],
-            ..plain_tool("post_call")
-        };
-        crate::contract::PinnedToolResolution::from_answer(
-            uses.clone(),
-            contract.resolver_args_digest(&uses, &contract.name, &json!({ "body": body })),
-            None,
-            None,
-            None,
-            Some(crate::contract::RequiredAudience {
-                includes: Some(Audience::restricted([ReaderId::new(reader)])),
-                cap: None,
-            }),
-            None,
-        )
-        .expect("a literal required audience pins")
-    }
-
-    /// A pin for a call on `post` whose `who` argument holds `who`. The args it stores are the
-    /// ones that tool would have sent, so the pin binds to that call and no other.
-    fn who_pin_for(who: &str, reader: &str) -> crate::contract::PinnedToolResolution {
-        let uses = dynamic_who();
-        let contract = crate::contract::ToolContract {
-            uses: vec![uses.clone()],
-            ..plain_tool("post_to")
-        };
-        crate::contract::PinnedToolResolution::from_answer(
-            uses.clone(),
-            contract.resolver_args_digest(&uses, &contract.name, &json!({ "who": who })),
-            None,
-            Some(Audience::restricted([ReaderId::new(reader)])),
-            None,
-            None,
-            None,
-        )
-        .expect("a literal reader set pins")
+    /// The complete annotation `acl` produces for a `post_dyn` call: the declaration's
+    /// operational metadata with the recipients the answer requires.
+    fn post_dyn_annotation(readers: &[&str]) -> ToolAnnotation {
+        let mut produced = post_tool("post_dyn", vec![crate::names::TagName::new("outbound")]);
+        produced.requires.label.audience = Dim::Known(vec![AudienceRequirement::Includes(RecipientSpec::Static(
+            DeclaredAudience::literal(Audience::restricted(
+                readers.iter().map(|reader| ReaderId::new(*reader)),
+            )),
+        ))]);
+        produced
     }
 
     fn substitution(call: &ResolvedCall, replacement: &str) -> OfferOutcome {
@@ -6431,7 +6399,7 @@ mod tests {
             sanitizer: crate::names::SanitizerName::new("redact"),
             source: crate::value::RawResultDigest::of(call.canonical_arguments().canonical_bytes()),
             derived: ValueBody::new(replacement),
-            tool_resolutions: Vec::new(),
+            annotation: None,
             memberships: Vec::new(),
         })
     }
@@ -6626,25 +6594,7 @@ mod tests {
         let log = [log, facts].concat();
         assert_eq!(e.validate_replay(&log), Ok(()));
 
-        let answer = || {
-            crate::contract::PinnedToolResolution::from_answer(
-                crate::contract::ToolResolverUse {
-                    resolver: crate::names::DynamicResolverName::new("acl"),
-                    inputs: std::collections::BTreeMap::from([(
-                        "body".to_string(),
-                        crate::contract::ToolCallSource::argument("body").expect("a plain name is a source"),
-                    )]),
-                    returns: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
-                },
-                crate::contract::ResolverArgsDigest::of(b""),
-                None,
-                Some(Audience::restricted([ReaderId::new("partner")])),
-                None,
-                None,
-                None,
-            )
-            .expect("a literal reader set pins")
-        };
+        let answer = || pinned_static(&plain_tool("post"));
 
         let mut forged = log.clone();
         let candidate = forged.len() - 2;
@@ -6655,25 +6605,24 @@ mod tests {
         else {
             panic!("the hop's batch records its candidate before the opening")
         };
-        *call = call.clone().with_tool_resolutions(vec![answer()]);
+        *call = call.clone().with_annotation(Some(answer()));
         assert_eq!(
             e.validate_replay(&forged),
-            Err(crate::transition::TransitionRefusal::ForgedLabel),
-            "the candidate is the call the predecessor's own substitution renders, answers included"
+            Err(crate::transition::TransitionRefusal::ForgedResolution),
+            "a static declaration is its own annotation: a candidate restating another is forged"
         );
 
         let mut forged = log.clone();
-        let Fact::DispatchOpened { tool_resolutions, .. } =
+        let Fact::DispatchOpened { annotation, .. } =
             forged.last_mut().expect("the opening is the batch's last record")
         else {
             panic!("the hop's batch ends with its opening")
         };
-        *tool_resolutions = vec![answer()];
+        *annotation = answer();
         assert_eq!(
             e.validate_replay(&forged),
-            Err(crate::transition::TransitionRefusal::UnbackedDecision),
-            "the release a candidate earned is that exact call; an opening of any other claims a \
-             subject this decision never released"
+            Err(crate::transition::TransitionRefusal::ForgedResolution),
+            "the record restates another annotation than the compiled declaration's"
         );
     }
 
@@ -6885,169 +6834,43 @@ mod tests {
     }
 
     #[test]
-    fn a_proposal_missing_a_dynamic_answer_refuses_the_event_and_appends_nothing() {
+    fn a_proposal_missing_its_annotation_refuses_the_event_and_appends_nothing() {
         let e = substituting_engine(TRUSTED);
         let log = internal_log(&e);
-        let unpinned = call("post_to", json!({ "body": "ssn 123", "who": "desk" }));
+        let unpinned = call("post_dyn", json!({ "body": "ssn 123" }));
         assert_eq!(
             e.handle(
                 &viewing(&e, &log),
                 batch_on(&traj(), "b1", Vec::new(), vec![raw(&unpinned), raw(&unpinned)], None)
             ),
-            Err(TransitionError::ToolResolutionNeeded {
-                resolvers: vec!["acl".to_string()]
+            Err(TransitionError::AnnotationNeeded {
+                annotators: vec![crate::names::AnnotatorName::new("acl")]
             })
         );
-        let foreign =
-            call("post", json!({ "body": "ssn 123" })).with_tool_resolutions(vec![who_pin_for("desk", "partner")]);
-        assert_eq!(
-            e.handle(
-                &viewing(&e, &log),
-                batch_on(&traj(), "b2", Vec::new(), vec![raw(&foreign)], None)
-            ),
-            Err(TransitionError::ForeignToolResolution {
-                resolver: "acl".to_string()
-            })
-        );
-        let conflicting = call("post_to", json!({ "body": "ssn 123", "who": "desk" }))
-            .with_tool_resolutions(vec![who_pin_for("desk", "partner"), who_pin_for("desk", "internal")]);
-        assert_eq!(
-            e.handle(
-                &viewing(&e, &log),
-                batch_on(&traj(), "b3", Vec::new(), vec![raw(&conflicting)], None)
-            ),
-            Err(TransitionError::ForeignToolResolution {
-                resolver: "acl".to_string()
-            })
-        );
-    }
-
-    #[test]
-    fn a_substitution_that_rewrites_a_dynamically_read_argument_keeps_its_answer() {
-        let e = substituting_engine(TRUSTED);
-        let proposal = call("post_to", json!({ "body": "ssn 123", "who": "desk" }))
-            .with_tool_resolutions(vec![who_pin_for("desk", "partner")]);
-        let log = internal_log(&e);
-        let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
-        let hop = opened_offers(&facts)[0].0;
-        let log = [log, facts].concat();
-
-        // `who` is exactly what the resolver read, and the rewrite replaces it. The answer was
-        // given about the proposal this rewrite lands on, so it still stands.
-        let hopped = execute_offer(
-            &e,
-            &log,
-            hop,
-            substitution(&proposal, r#"{"body":"[redacted]","who":"someone else"}"#),
-        )
-        .expect("the hop runs over the argument its resolver read");
-        match offer_answer(&hopped) {
-            OfferFollowUp::Substituted { block } => {
-                assert_eq!(
-                    block.call.canonical_arguments().canonical_text(),
-                    r#"{"body":"[redacted]","who":"someone else"}"#
-                );
-                assert_eq!(
-                    block.call.tool_resolutions(),
-                    proposal.tool_resolutions(),
-                    "the answer rides through the rewrite; the resolver is not asked again"
-                );
-                assert!(
-                    block.block.raw.requirement_gaps.is_empty(),
-                    "the rewrite cleared the includes gap; only the answer's own narrowing remains"
-                );
-            }
-            other => panic!("the substitution re-plans over the derived call, got {other:?}"),
-        }
-        let log = [log, appended_facts(hopped)].concat();
-        assert_eq!(e.validate_replay(&log), Ok(()));
-    }
-
-    #[test]
-    fn an_all_arguments_answer_keeps_its_hop_and_rides_through_the_substitution() {
-        let e = substituting_engine(TRUSTED);
-        let proposal =
-            call("post_call", json!({ "body": "ssn 123" })).with_tool_resolutions(vec![call_pin_for("ssn 123")]);
-        let log = internal_log(&e);
-        let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
-        let offers = opened_offers(&facts);
-        assert_eq!(
-            offers[0].1.hop(),
-            Some(&crate::names::SanitizerName::new("redact")),
-            "a resolver that reads the complete call is offered the input hop"
-        );
-        let log = [log, facts].concat();
-
-        let hopped = execute_offer(&e, &log, offers[0].0, substitution(&proposal, REDACTED)).expect("the hop runs");
-        let released = match offer_answer(&hopped) {
-            OfferFollowUp::Released(released) => (**released).clone(),
-            other => panic!("the substitution clears the last gap and dispatches, got {other:?}"),
-        };
-        assert_eq!(released.call.canonical_arguments().canonical_text(), REDACTED);
-        assert_eq!(
-            released.call.tool_resolutions(),
-            proposal.tool_resolutions(),
-            "the answer rides through the rewrite; the resolver is not asked again"
-        );
-        let facts = appended_facts(hopped);
+        let foreign = call("post", json!({ "body": "ssn 123" }))
+            .with_annotation(Some(pinned_for(post_dyn_annotation(&["partner"]), "acl")));
         assert!(
             matches!(
-                facts.as_slice(),
-                [
-                    Fact::BasisAdvanced { .. },
-                    Fact::OfferAccepted { .. },
-                    Fact::OfferInvalidated { .. },
-                    Fact::CandidateDerived {
-                        derived: DerivedCandidate::Call { call, .. },
-                        ..
-                    },
-                    Fact::DispatchOpened { tool_resolutions, .. },
-                ] if call == &released.call && tool_resolutions == proposal.tool_resolutions()
+                e.handle(
+                    &viewing(&e, &log),
+                    batch_on(&traj(), "b2", Vec::new(), vec![raw(&foreign)], None)
+                ),
+                Err(TransitionError::ForeignAnnotation { .. })
             ),
-            "the derived candidate and the opening both carry the answers: {facts:?}"
+            "a static declaration is its own annotation; an annotator's pin on it is foreign"
         );
-        let log = [log, facts].concat();
-        assert_eq!(e.validate_replay(&log), Ok(()));
-    }
-
-    #[test]
-    fn a_carried_answer_may_not_be_restated_on_the_record() {
-        let e = substituting_engine(TRUSTED);
-        let proposal =
-            call("post_call", json!({ "body": "ssn 123" })).with_tool_resolutions(vec![call_pin_for("ssn 123")]);
-        let log = internal_log(&e);
-        let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
-        let offer = opened_offers(&facts)[0].0;
-        let log = [log, facts].concat();
-        let hopped =
-            appended_facts(execute_offer(&e, &log, offer, substitution(&proposal, REDACTED)).expect("the hop runs"));
-        assert_eq!(e.validate_replay(&[log.clone(), hopped.clone()].concat()), Ok(()));
-
-        // The rewrite carries the proposal's answer. Restating it with a wider audience keeps the
-        // resolver, the declared use and the `args` digest the proposal's — only what the answer
-        // says moves. The record refuses it: the digest binds what an answer is about, and the
-        // complete-call comparison binds what it says.
-        for (position, refusal) in [
-            (3usize, TransitionRefusal::ForgedLabel),
-            (4, TransitionRefusal::UnbackedDecision),
-        ] {
-            let mut forged = hopped.clone();
-            match &mut forged[position] {
-                Fact::CandidateDerived {
-                    derived: DerivedCandidate::Call { call, .. },
-                    ..
-                } => {
-                    *call = call
-                        .clone()
-                        .with_tool_resolutions(vec![call_pin_for_reader("ssn 123", "public-desk")])
-                }
-                Fact::DispatchOpened { tool_resolutions, .. } => {
-                    *tool_resolutions = vec![call_pin_for_reader("ssn 123", "public-desk")]
-                }
-                other => panic!("the hop's batch derives then opens, got {other:?}"),
-            }
-            assert_eq!(e.validate_replay(&[log.clone(), forged].concat()), Err(refusal));
-        }
+        let restated = call("post_dyn", json!({ "body": "ssn 123" }))
+            .with_annotation(Some(pinned_static(&post_dyn_annotation(&["partner"]))));
+        assert!(
+            matches!(
+                e.handle(
+                    &viewing(&e, &log),
+                    batch_on(&traj(), "b3", Vec::new(), vec![raw(&restated)], None)
+                ),
+                Err(TransitionError::ForeignAnnotation { .. })
+            ),
+            "an Annotated declaration's pin must carry its annotator's mandate"
+        );
     }
 
     #[test]
@@ -7400,8 +7223,9 @@ mod tests {
     #[test]
     fn a_spawn_mark_takes_declared_context_control() {
         let config = RegistryConfig {
+            annotators: vec![],
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![plain_tool("spawn")],
+            tools: declared(vec![plain_tool("spawn")]),
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![],
@@ -7697,10 +7521,9 @@ mod tests {
         );
     }
 
-    fn neutral_tool() -> ToolContract {
-        ToolContract {
+    fn neutral_tool() -> ToolAnnotation {
+        ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("read_note"),
             tags: vec![],
             delta: Delta::NONE,
@@ -7710,10 +7533,9 @@ mod tests {
         }
     }
 
-    fn emitting_tool() -> ToolContract {
-        ToolContract {
+    fn emitting_tool() -> ToolAnnotation {
+        ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("send_note"),
             emits: EffectSet::new([EffectKind::new("email.sent")]).unwrap(),
             ..neutral_tool()
@@ -7911,10 +7733,10 @@ mod tests {
             hint: None,
         };
         let cfg = RegistryConfig {
+            annotators: vec![],
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![ToolContract {
+            tools: declared(vec![ToolAnnotation {
                 description: Some("A test tool.".to_string()),
-                uses: vec![],
                 name: ToolName::new("wire"),
                 tags: vec![],
                 delta: Delta::NONE,
@@ -7927,7 +7749,7 @@ mod tests {
                     },
                     ..Requires::default()
                 },
-            }],
+            }]),
             authorities: vec![officer("officer-a"), officer("officer-b")],
             sanitizers: vec![],
             casts: vec![],
@@ -7996,8 +7818,8 @@ mod tests {
 
     /// An open tool that describes neither output dimension: both travel Unknown, so a release
     /// can restrict the trajectory and no cast is owed before the model reads the result.
-    fn unestablished_tool(name: &str) -> ToolContract {
-        ToolContract {
+    fn unestablished_tool(name: &str) -> ToolAnnotation {
+        ToolAnnotation {
             delta: Delta {
                 trust: Some(Dim::Unknown),
                 audience: Some(Dim::Unknown.into()),
@@ -8006,10 +7828,9 @@ mod tests {
         }
     }
 
-    fn open_tool(name: &str) -> ToolContract {
-        ToolContract {
+    fn open_tool(name: &str) -> ToolAnnotation {
+        ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new(name),
             tags: vec![],
             delta: crate::contract::Delta::NONE,
@@ -8109,8 +7930,9 @@ mod tests {
             hint: None,
         };
         let e = open_engine(RegistryConfig {
+            annotators: vec![],
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![crm_tool()],
+            tools: declared(vec![crm_tool()]),
             authorities: vec![],
             sanitizers: vec![declassify],
             casts: vec![],
@@ -8593,32 +8415,30 @@ mod tests {
         );
     }
 
-    /// A neutral delta with a resolver owning an output dimension is not neutral: the pinned
-    /// answer restricts, so the release moves the basis an approval was taken on.
+    /// A neutral delta under an Annotator is not neutral: the produced annotation owns the
+    /// output, so the release moves the basis an approval was taken on.
     #[test]
-    fn a_resolver_owned_release_stales_an_approval() {
-        let uses = crate::contract::ToolResolverUse {
-            resolver: crate::names::DynamicResolverName::new("classify"),
-            inputs: std::collections::BTreeMap::new(),
-            returns: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
-        };
-        let classified = ToolContract {
+    fn an_annotated_release_stales_an_approval() {
+        let classified = ToolAnnotation {
             name: ToolName::new("read_note"),
-            uses: vec![uses.clone()],
             ..neutral_tool()
         };
-        let pin = crate::contract::PinnedToolResolution::from_answer(
-            uses.clone(),
-            classified.resolver_args_digest(&uses, &classified.name, &json!({})),
-            None,
-            Some(Audience::Public),
-            None,
-            None,
-            None,
-        )
-        .expect("a literal reader set pins");
+        let pin = pinned_for(
+            {
+                let mut produced = classified.clone();
+                produced.delta = Delta {
+                    trust: None,
+                    audience: Some(Dim::Known(Audience::Public).into()),
+                };
+                produced
+            },
+            "classify",
+        );
 
-        let e = engine(vec![crm_tool(), classified]);
+        let mut cfg = test_config(vec![crm_tool()]);
+        cfg.tools.push(annotated(classified, "classify"));
+        cfg.annotators.push(annotator("classify"));
+        let e = open_engine(cfg);
         let log = vec![opened(&e)];
         let blocked = appended_facts(blocked_batch(&e, &log, "b1", nonce()));
         let offer = opened_offers(&blocked)[0].0;
@@ -8632,7 +8452,7 @@ mod tests {
             &log,
             "b2",
             nonce(),
-            call("read_note", json!({})).with_tool_resolutions(vec![pin]),
+            call("read_note", json!({})).with_annotation(Some(pin)),
         )
         .expect("the classified note decides");
         assert!(
@@ -9345,11 +9165,11 @@ mod tests {
         };
         assert_eq!(
             tampered(&|fact| {
-                if let Fact::DispatchOpened { tool_resolutions, .. } = fact {
-                    tool_resolutions.push(who_pin_for("desk", "anyone"));
+                if let Fact::DispatchOpened { annotation, .. } = fact {
+                    *annotation = pinned_static(&plain_tool("forged"));
                 }
             }),
-            Err(TransitionRefusal::UnbackedDecision)
+            Err(TransitionRefusal::ForgedResolution)
         );
         assert_eq!(
             tampered(&|fact| {
@@ -9414,6 +9234,8 @@ mod tests {
                 e.registry()
                     .tool(call.tool())
                     .unwrap()
+                    .declared()
+                    .expect("a static declaration")
                     .output_label(&Expansions::default()),
             ),
             provenance: Provenance::ToolResult {
@@ -9486,12 +9308,12 @@ mod tests {
                 trajectory: child.clone(),
                 dispatch: DispatchId::new(child.clone(), call.digest(), 0),
                 tool: call.tool().clone(),
-                contract: call.contract_id(),
+                declaration: call.declaration_id(),
                 arguments: call.canonical_arguments().clone(),
                 proposed_label: EstablishedLabel::new(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
                 receiving: EstablishedLabel::new(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
                 proposed_effects: EffectSet::default(),
-                tool_resolutions: Vec::new(),
+                annotation: pinned_static(&crm_tool()),
                 memberships: Vec::new(),
                 requirement_cast: None,
                 subject: crate::basis::fixture_subject(&child),
@@ -9565,8 +9387,9 @@ mod tests {
             hint: None,
         };
         let config = RegistryConfig {
+            annotators: vec![],
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![crm_tool()],
+            tools: declared(vec![crm_tool()]),
             authorities: vec![],
             sanitizers: vec![declassify],
             casts: vec![],
@@ -9595,10 +9418,9 @@ mod tests {
         );
     }
 
-    fn pending_cast_tool(name: &str, tag: &str) -> ToolContract {
-        ToolContract {
+    fn pending_cast_tool(name: &str, tag: &str) -> ToolAnnotation {
+        ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new(name),
             tags: vec![crate::names::TagName::new(tag)],
             delta: Delta {
@@ -9627,13 +9449,14 @@ mod tests {
 
     fn cast_engine() -> Engine {
         open_engine(RegistryConfig {
+            annotators: vec![],
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![
+            tools: declared(vec![
                 pending_cast_tool("scan_inbox", "mail"),
                 pending_cast_tool("browse", "web"),
                 unestablished_tool("ping"),
                 suspicious_read(),
-            ],
+            ]),
             authorities: vec![],
             sanitizers: vec![crate::authority::Sanitizer {
                 name: crate::names::SanitizerName::new("launder"),
@@ -9768,11 +9591,12 @@ mod tests {
         assert_eq!(again.follow_up, asked.follow_up);
 
         let alone = open_engine(RegistryConfig {
+            annotators: vec![],
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![
+            tools: declared(vec![
                 pending_cast_tool("scan_inbox", "mail"),
                 pending_cast_tool("browse", "web"),
-            ],
+            ]),
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![resolver_cast(
@@ -10249,8 +10073,8 @@ mod tests {
 
     /// A pending-cast tool whose delta also narrows the audience statically: the narrowing is
     /// accepted at the check, and the cast resolves trust at admission.
-    fn narrowing_pending_cast_tool(name: &str, tag: &str) -> ToolContract {
-        ToolContract {
+    fn narrowing_pending_cast_tool(name: &str, tag: &str) -> ToolAnnotation {
+        ToolAnnotation {
             delta: Delta {
                 trust: Some(Dim::Unknown),
                 audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")])).into()),
@@ -10261,11 +10085,12 @@ mod tests {
 
     fn narrowing_cast_engine() -> Engine {
         open_engine(RegistryConfig {
+            annotators: vec![],
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![
+            tools: declared(vec![
                 narrowing_pending_cast_tool("scan_internal", "mail"),
                 pending_cast_tool("scan_inbox", "mail"),
-            ],
+            ]),
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![resolver_cast("paranoid", vec![SUSPICIOUS, TRUSTED], vec![])],
@@ -10475,17 +10300,18 @@ mod tests {
             hint: None,
         };
         let e = open_engine(RegistryConfig {
+            annotators: vec![],
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![
+            tools: declared(vec![
                 narrowing_pending_cast_tool("scan_internal", "mail"),
-                ToolContract {
+                ToolAnnotation {
                     delta: Delta {
                         trust: Some(Dim::Known(TRUSTED)),
                         audience: Some(Dim::Known(internal()).into()),
                     },
                     ..pending_cast_tool("scan_static", "mail")
                 },
-            ],
+            ]),
             authorities: vec![],
             sanitizers: vec![scrub],
             casts: vec![resolver_cast("paranoid", vec![SUSPICIOUS, TRUSTED], vec![])],
@@ -10513,7 +10339,7 @@ mod tests {
         assert!(pending_plans[0].required.is_empty());
     }
 
-    fn reservation_tools() -> Vec<ToolContract> {
+    fn reservation_tools() -> Vec<ToolAnnotation> {
         vec![
             emitting("send", "email.sent"),
             history_guarded("guard", HistoryRequirement::NoPrior(EffectKind::new("email.sent"))),
@@ -10624,9 +10450,8 @@ mod tests {
 
     #[test]
     fn a_calls_own_emits_never_fail_its_own_check() {
-        let selfguard = ToolContract {
+        let selfguard = ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("selfguard"),
             tags: vec![],
             delta: Delta::NONE,
@@ -10652,9 +10477,8 @@ mod tests {
 
     #[test]
     fn a_success_checkpoint_settles_while_the_dispatch_stays_open() {
-        let scan = ToolContract {
+        let scan = ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("scan"),
             tags: vec![],
             delta: Delta {
@@ -10703,9 +10527,8 @@ mod tests {
 
     #[test]
     fn attention_is_always_a_gap() {
-        let tool = ToolContract {
+        let tool = ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Delta::NONE,
@@ -10726,10 +10549,9 @@ mod tests {
         }
     }
 
-    fn trusted_sink() -> ToolContract {
-        ToolContract {
+    fn trusted_sink() -> ToolAnnotation {
+        ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("send"),
             tags: vec![],
             delta: Delta::NONE,
@@ -10929,9 +10751,8 @@ mod tests {
 
     #[test]
     fn all_three_block_slots_coexist() {
-        let vault = ToolContract {
+        let vault = ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("vault"),
             tags: vec![],
             delta: Delta {
@@ -11007,9 +10828,8 @@ mod tests {
 
     #[test]
     fn a_gap_and_an_unestablished_source_split_by_dimension() {
-        let vault = ToolContract {
+        let vault = ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("vault"),
             tags: vec![],
             delta: Delta {
@@ -11061,8 +10881,9 @@ mod tests {
             hint: None,
         };
         let cfg = RegistryConfig {
+            annotators: vec![],
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![unknown_read(), plain_tool("note")],
+            tools: declared(vec![unknown_read(), plain_tool("note")]),
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![classifier],
@@ -11165,8 +10986,9 @@ mod tests {
             hint: None,
         };
         let e = open_engine(RegistryConfig {
+            annotators: vec![],
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![plain_tool("spawn"), unknown_read()],
+            tools: declared(vec![plain_tool("spawn"), unknown_read()]),
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![classifier],
@@ -11285,9 +11107,8 @@ mod tests {
 
     #[test]
     fn replay_refuses_an_out_of_scope_resolution() {
-        let fetch = crate::contract::ToolContract {
+        let fetch = crate::contract::ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("fetch"),
             tags: vec![crate::names::TagName::new("web")],
             delta: crate::contract::Delta {
@@ -11310,8 +11131,9 @@ mod tests {
             hint: None,
         };
         let cfg = RegistryConfig {
+            annotators: vec![],
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![fetch, unknown_read()],
+            tools: declared(vec![fetch, unknown_read()]),
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![webby],
@@ -11380,10 +11202,9 @@ mod tests {
 
     /// A declared tool whose output label is Unknown in both dimensions: it dispatches, its
     /// result admits raw, and the Unknown resolves only when a sink consumes it.
-    fn unknown_output_tool(name: &str) -> ToolContract {
-        ToolContract {
+    fn unknown_output_tool(name: &str) -> ToolAnnotation {
+        ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new(name),
             tags: vec![],
             delta: crate::contract::Delta {
@@ -11473,9 +11294,8 @@ mod tests {
 
     #[test]
     fn includes_missing_placeholder_is_an_invalid_call_and_still_fails_closed_underneath() {
-        let send = ToolContract {
+        let send = ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("send_email"),
             tags: vec![],
             delta: Delta::NONE,
@@ -11500,7 +11320,12 @@ mod tests {
             Err(EngineError::InvalidCall(_))
         ));
 
-        let contract = e.registry.tool(&ToolName::new("send_email")).unwrap();
+        let contract = e
+            .registry
+            .tool(&ToolName::new("send_email"))
+            .unwrap()
+            .declared()
+            .expect("a static declaration");
         let evaluate = |log: &[Fact]| {
             let p = Projection::build(log, log.len() as u64);
             crate::check::evaluate(
@@ -11532,9 +11357,8 @@ mod tests {
         use crate::authority::{Authority, Mandate};
         use crate::names::AuthorityName;
 
-        let wire = ToolContract {
+        let wire = ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Delta::NONE,
@@ -11558,8 +11382,9 @@ mod tests {
             hint: None,
         };
         let cfg = RegistryConfig {
+            annotators: vec![],
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![wire],
+            tools: declared(vec![wire]),
             authorities: vec![officer],
             sanitizers: vec![],
             casts: vec![],
@@ -11588,10 +11413,9 @@ mod tests {
         );
     }
 
-    fn strict_tool(name: &str) -> ToolContract {
-        ToolContract {
+    fn strict_tool(name: &str) -> ToolAnnotation {
+        ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new(name),
             tags: vec![],
             parameters: crate::params::ToolParameters::compile(&json!({
@@ -11649,9 +11473,9 @@ mod tests {
         let ghost = e
             .resolve_call(ToolName::new("ghost"), br#"{}"#)
             .expect("an undeclared tool resolves");
-        assert_eq!(ghost.contract_id(), crate::value::ToolContractId::default());
+        assert_eq!(ghost.declaration_id(), crate::value::ToolDeclarationId::default());
         assert_eq!(
-            e.registry.contract(&ghost).map(|contract| contract.name.as_str()),
+            e.registry.annotation_of(&ghost).map(|contract| contract.name.as_str()),
             Some(crate::registry::UNDECLARED_TOOL_NAME)
         );
     }
@@ -11673,7 +11497,10 @@ mod tests {
         let selected = e
             .resolve_call(ToolName::new("read"), br#"{"path":"secret.txt","token":"ok"}"#)
             .unwrap();
-        assert_eq!(selected.contract_id(), crate::value::ToolContractId::new(0).unwrap());
+        assert_eq!(
+            selected.declaration_id(),
+            crate::value::ToolDeclarationId::new(0).unwrap()
+        );
         assert!(
             matches!(
                 e.resolve_call(ToolName::new("read"), br#"{"path":"secret.txt"}"#),
@@ -11682,9 +11509,15 @@ mod tests {
             "the first match's schema failure must not fall through"
         );
         let overlap = e.resolve_call(ToolName::new("read"), br#"{"path":"public"}"#).unwrap();
-        assert_eq!(overlap.contract_id(), crate::value::ToolContractId::new(1).unwrap());
+        assert_eq!(
+            overlap.declaration_id(),
+            crate::value::ToolDeclarationId::new(1).unwrap()
+        );
         let fallback = e.resolve_call(ToolName::new("read"), br#"{}"#).unwrap();
-        assert_eq!(fallback.contract_id(), crate::value::ToolContractId::new(2).unwrap());
+        assert_eq!(
+            fallback.declaration_id(),
+            crate::value::ToolDeclarationId::new(2).unwrap()
+        );
         let no_fallback = engine(vec![plain_tool("read(path:secret*)")]);
         assert!(matches!(
             no_fallback.resolve_call(ToolName::new("read"), br#"{}"#),
@@ -11725,53 +11558,41 @@ mod tests {
         let selected = e
             .resolve_call(ToolName::new("read"), br#"{"path":"private.txt"}"#)
             .unwrap();
-        assert_eq!(selected.contract_id(), crate::value::ToolContractId::new(1).unwrap());
-        let opening = vec![opened(&e)];
-        let facts = appended_facts(proposed(&e, &opening, "b1", nonce(), selected.clone()).expect("the call releases"));
-        let log = [opening, facts].concat();
-        let projection = crate::projection::Projection::build(&log, log.len() as u64);
-        let trajectory = traj();
-        let views = projection.view(&trajectory);
-        let subject = crate::basis::SubjectKey::Call {
-            trajectory: traj(),
-            batch: crate::transition::ProposalBatchId::new("b1"),
-            position: 0,
-        };
-        let rewrite = |body: &str, pins: &[crate::contract::PinnedToolResolution]| {
+        assert_eq!(
+            selected.declaration_id(),
+            crate::value::ToolDeclarationId::new(1).unwrap()
+        );
+        let rewrite = |body: &str, memberships: &[crate::contract::PinnedMembership]| {
             substituted_call(
                 &e.registry,
-                &views,
-                &subject,
                 &selected,
                 &ValueBody::new(body),
-                pins,
-                &[],
+                None,
+                memberships,
                 &Expansions::default(),
             )
         };
 
-        // Arguments that select another contract render a new call under it: the selected
+        // Arguments that select another declaration render a new call under it: the selected
         // ordinal, nothing carried.
-        let (fresh, contract) = rewrite(r#"{"path":"safe.txt"}"#, &[]).expect("a new call under contract 0");
-        assert_eq!(fresh.contract_id(), crate::value::ToolContractId::new(0).unwrap());
-        assert!(std::ptr::eq(contract, e.registry.contract(&fresh).unwrap()));
-        assert!(fresh.tool_resolutions().is_empty());
+        let fresh = rewrite(r#"{"path":"safe.txt"}"#, &[]).expect("a new call under declaration 0");
+        assert_eq!(fresh.declaration_id(), crate::value::ToolDeclarationId::new(0).unwrap());
+        assert!(fresh.annotation().is_none());
         assert!(
             !e.registry
                 .selection_matches(&selected.substituting(fresh.canonical_arguments().clone()))
         );
 
-        // Arguments that stay in the contract render the substitution: the call's own answers
-        // ride along, and nothing may be handed in beside them.
-        let (kept, contract) = rewrite(r#"{"path":"other-private.txt"}"#, &[]).expect("the substitution");
+        // Arguments that stay in the declaration render the substitution, and membership
+        // evidence may not be handed in beside it.
+        let kept = rewrite(r#"{"path":"other-private.txt"}"#, &[]).expect("the substitution");
         assert_eq!(kept, selected.substituting(kept.canonical_arguments().clone()));
-        assert!(std::ptr::eq(contract, e.registry.contract(&selected).unwrap()));
         assert!(matches!(
-            rewrite(r#"{"path":"other-private.txt"}"#, &[call_pin_for("ssn 123")]),
+            rewrite(r#"{"path":"other-private.txt"}"#, &[expansion("to", &["partner"])]),
             Err(TransitionError::EvidenceMismatch)
         ));
 
-        // Arguments no contract selects, or that fail the selected schema, mint nothing.
+        // Arguments no declaration selects, or that fail the selected schema, mint nothing.
         assert!(matches!(
             rewrite(r#"{"path":7}"#, &[]),
             Err(TransitionError::Call(EngineError::InvalidCall(
@@ -11792,38 +11613,14 @@ mod tests {
     /// [`ordered_read_engine`] with the private contract carrying `private_tag` instead of
     /// `outbound`.
     fn ordered_read_engine_tagged(desks: &[&str], private_tag: &str) -> Engine {
-        let read = |name: &str| ToolContract {
-            description: Some("A test tool.".to_string()),
-            uses: vec![],
-            name: ToolName::new(name),
-            tags: vec![crate::names::TagName::new("outbound")],
-            delta: Delta::NONE,
-            parameters: crate::params::ToolParameters::compile(&json!({
-                "type": "object",
-                "properties": { "path": { "type": "string" } },
-                "required": ["path"],
-                "additionalProperties": false,
-            }))
-            .unwrap(),
-            emits: EffectSet::default(),
-            requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: Some(Dim::Known(TRUSTED)),
-                    audience: Dim::Known(vec![]),
-                },
-                ..Requires::default()
-            },
-        };
+        let read = ordered_read;
         let includes = |reader: &str| {
             AudienceRequirement::Includes(RecipientSpec::Static(DeclaredAudience::literal(Audience::restricted(
                 [ReaderId::new(reader)],
             ))))
         };
-        let public = ToolContract {
-            uses: vec![read_call()],
-            ..read("read(path:public/*)")
-        };
-        let private = ToolContract {
+        let public = annotated(read("read(path:public/*)"), "classify");
+        let private = ToolAnnotation {
             emits: classified_read(),
             tags: vec![crate::names::TagName::new(private_tag)],
             requires: Requires {
@@ -11842,8 +11639,16 @@ mod tests {
         };
         open_engine_at(
             RegistryConfig {
+                annotators: vec![annotator_with_readers(
+                    "classify",
+                    &["internal", "partner", "auditor", "legal", "press"],
+                )],
                 trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-                tools: vec![public, private, plain_tool("note")],
+                tools: {
+                    let mut tools = vec![public];
+                    tools.extend(declared(vec![private, plain_tool("note")]));
+                    tools
+                },
                 authorities: vec![],
                 sanitizers: vec![
                     input_sanitizer("redact", &["internal"], &["internal", "partner"]),
@@ -11883,39 +11688,46 @@ mod tests {
         }
     }
 
-    fn read_call() -> crate::contract::ToolResolverUse {
-        crate::contract::ToolResolverUse {
-            resolver: crate::names::DynamicResolverName::new("classify"),
-            inputs: std::collections::BTreeMap::new(),
-            returns: [crate::contract::ResolverReturn::RequiredAudience]
-                .into_iter()
-                .collect(),
+    fn ordered_read(name: &str) -> ToolAnnotation {
+        ToolAnnotation {
+            description: Some("A test tool.".to_string()),
+            name: ToolName::new(name),
+            tags: vec![crate::names::TagName::new("outbound")],
+            delta: Delta::NONE,
+            parameters: crate::params::ToolParameters::compile(&json!({
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "required": ["path"],
+                "additionalProperties": false,
+            }))
+            .unwrap(),
+            emits: EffectSet::default(),
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: Some(Dim::Known(TRUSTED)),
+                    audience: Dim::Known(vec![]),
+                },
+                ..Requires::default()
+            },
         }
     }
 
-    /// The `classify` answer about `read` of `path` under the public contract: the readers the
-    /// call then requires. Its args are the complete call, so any rewrite of `path` changes them.
-    fn read_pin_for(e: &Engine, path: &str, readers: &[&str]) -> crate::contract::PinnedToolResolution {
-        let uses = read_call();
-        let contract = e
-            .registry
-            .keyed_tool(&ToolName::new("read"), crate::value::ToolContractId::new(0).unwrap())
-            .expect("the public contract is first");
-        crate::contract::PinnedToolResolution::from_answer(
-            uses.clone(),
-            contract.resolver_args_digest(&uses, &contract.name, &json!({ "path": path })),
-            None,
-            None,
-            None,
-            Some(crate::contract::RequiredAudience {
-                includes: Some(Audience::restricted(
-                    readers.iter().map(|reader| ReaderId::new(*reader)),
-                )),
-                cap: None,
-            }),
-            None,
-        )
-        .expect("a literal required audience pins")
+    /// The complete annotation `classify` produces for a `read` call under the public
+    /// declaration: the declaration's operational metadata with the readers the call requires.
+    /// It is evidence for exactly one canonical call: a rewrite is annotated afresh or not at all.
+    fn read_pin(readers: &[&str]) -> crate::contract::PinnedAnnotation {
+        let mut produced = ordered_read("read");
+        produced.requires.label.audience = Dim::Known(
+            readers
+                .iter()
+                .map(|reader| {
+                    AudienceRequirement::Includes(RecipientSpec::Static(DeclaredAudience::literal(
+                        Audience::restricted([ReaderId::new(*reader)]),
+                    )))
+                })
+                .collect(),
+        );
+        pinned_for(produced, "classify")
     }
 
     fn read_of(e: &Engine, path: &str) -> ResolvedCall {
@@ -11927,14 +11739,14 @@ mod tests {
         call: &ResolvedCall,
         sanitizer: &str,
         replacement: &str,
-        tool_resolutions: Vec<crate::contract::PinnedToolResolution>,
+        annotation: Option<crate::contract::PinnedAnnotation>,
         memberships: Vec<crate::contract::PinnedMembership>,
     ) -> OfferOutcome {
         OfferOutcome::Derived(crate::transition::Evidence::Rewrite {
             sanitizer: crate::names::SanitizerName::new(sanitizer),
             source: crate::value::RawResultDigest::of(call.canonical_arguments().canonical_bytes()),
             derived: ValueBody::new(replacement),
-            tool_resolutions,
+            annotation,
             memberships,
         })
     }
@@ -11957,19 +11769,26 @@ mod tests {
     fn opened_contract_of(
         facts: &[Fact],
     ) -> (
-        crate::value::ToolContractId,
+        crate::value::ToolDeclarationId,
         EffectSet,
-        Vec<crate::contract::PinnedToolResolution>,
+        Option<crate::contract::PinnedAnnotation>,
     ) {
         facts
             .iter()
             .find_map(|fact| match fact {
                 Fact::DispatchOpened {
-                    contract,
+                    declaration,
                     proposed_effects,
-                    tool_resolutions,
+                    annotation,
                     ..
-                } => Some((*contract, proposed_effects.clone(), tool_resolutions.clone())),
+                } => Some((
+                    *declaration,
+                    proposed_effects.clone(),
+                    match annotation.mandate() {
+                        crate::contract::AnnotationMandate::Declared => None,
+                        crate::contract::AnnotationMandate::Annotator(_) => Some(annotation.clone()),
+                    },
+                )),
                 _ => None,
             })
             .expect("the rewrite dispatches")
@@ -11985,70 +11804,54 @@ mod tests {
     fn a_rewrite_that_selects_another_contract_is_judged_under_it_with_the_answers_consulted_for_it() {
         let e = ordered_read_engine(&["auditor", "legal"]);
         let proposal = read_of(&e, "private/q3.md");
-        assert_eq!(proposal.contract_id(), crate::value::ToolContractId::new(1).unwrap());
+        assert_eq!(
+            proposal.declaration_id(),
+            crate::value::ToolDeclarationId::new(1).unwrap()
+        );
         let log = vec![opened(&e)];
         let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
         let hop = hop_named(&facts, "redact");
         let log = [log, facts].concat();
         let public = r#"{"path":"public/q3.md"}"#;
 
-        // The rewritten arguments select the public contract, whose resolver was never asked:
-        // the rewrite is a new call under it, and that contract's answers are owed first.
+        // The rewritten arguments select the public declaration, whose annotator was never
+        // asked: the rewrite is a new call under it, and its annotation is owed first.
         assert_eq!(
-            execute_offer(&e, &log, hop, rewrite(&proposal, "redact", public, vec![], vec![])).err(),
-            Some(TransitionError::ToolResolutionNeeded {
-                resolvers: vec!["classify".to_string()]
+            execute_offer(&e, &log, hop, rewrite(&proposal, "redact", public, None, vec![])).err(),
+            Some(TransitionError::AnnotationNeeded {
+                annotators: vec![crate::names::AnnotatorName::new("classify")]
             })
         );
-        // An answer about the proposal is not evidence for the rewrite.
-        assert_eq!(
-            execute_offer(
-                &e,
-                &log,
-                hop,
-                rewrite(
-                    &proposal,
-                    "redact",
-                    public,
-                    vec![read_pin_for(&e, "private/q3.md", &["partner"])],
-                    vec![]
-                ),
-            )
-            .err(),
-            Some(TransitionError::ForeignToolResolution {
-                resolver: "classify".to_string()
-            })
-        );
-        let answer = read_pin_for(&e, "public/q3.md", &["partner"]);
+        let answer = read_pin(&["partner"]);
         let hopped = execute_offer(
             &e,
             &log,
             hop,
-            rewrite(&proposal, "redact", public, vec![answer.clone()], vec![]),
+            rewrite(&proposal, "redact", public, Some(answer.clone()), vec![]),
         )
         .expect("the hop runs");
         let released = released_by(&hopped);
         assert_eq!(
-            released.call.contract_id(),
-            crate::value::ToolContractId::new(0).unwrap()
+            released.call.declaration_id(),
+            crate::value::ToolDeclarationId::new(0).unwrap()
         );
-        assert_eq!(released.call.tool_resolutions(), &[answer]);
+        assert_eq!(released.call.annotation(), Some(&answer));
         let facts = appended_facts(hopped);
         assert_eq!(
             opened_contract_of(&facts),
             (
-                crate::value::ToolContractId::new(0).unwrap(),
+                crate::value::ToolDeclarationId::new(0).unwrap(),
                 EffectSet::default(),
-                released.call.tool_resolutions().to_vec()
+                released.call.annotation().cloned()
             ),
-            "the opening records the public contract: its effects, not the classified read's, and its answers"
+            "the opening records the public declaration: its effects, not the classified read's, and its annotation"
         );
         let log = [log, facts].concat();
         assert_eq!(e.validate_replay(&log), Ok(()));
 
-        // Replay holds the record to the same rule: the pinned answer is about the rewritten call
-        // and nothing else, the persisted contract is the one the arguments select, and the tool
-        // is the one the sanitizer rewrote — another tool's open contract is no place to land.
+        // Replay holds the record to the same rule: the persisted declaration is the one the
+        // arguments select, and the tool is the one the sanitizer rewrote — another tool's open
+        // declaration is no place to land.
         let derived_at = log
             .iter()
             .position(|fact| matches!(fact, Fact::CandidateDerived { .. }))
@@ -12057,22 +11860,15 @@ mod tests {
             (
                 ResolvedCall::new_keyed(
                     ToolName::new("note"),
-                    crate::value::ToolContractId::new(0).unwrap(),
+                    crate::value::ToolDeclarationId::new(0).unwrap(),
                     released.call.canonical_arguments().clone(),
                 ),
                 TransitionRefusal::ForgedLabel,
             ),
             (
-                released
-                    .call
-                    .clone()
-                    .with_tool_resolutions(vec![read_pin_for(&e, "private/q3.md", &["partner"])]),
-                TransitionRefusal::ForgedResolution,
-            ),
-            (
                 ResolvedCall::new_keyed(
                     ToolName::new("read"),
-                    crate::value::ToolContractId::new(1).unwrap(),
+                    crate::value::ToolDeclarationId::new(1).unwrap(),
                     released.call.canonical_arguments().clone(),
                 ),
                 TransitionRefusal::SanitizerUnapplicable,
@@ -12092,11 +11888,13 @@ mod tests {
     }
 
     #[test]
-    fn a_rewrite_into_the_classified_contract_records_its_effect_and_carries_no_answer() {
+    fn a_rewrite_into_the_classified_declaration_records_its_effect_and_carries_no_annotation() {
         let e = ordered_read_engine(&[]);
-        let proposal =
-            read_of(&e, "public/q3.md").with_tool_resolutions(vec![read_pin_for(&e, "public/q3.md", &["partner"])]);
-        assert_eq!(proposal.contract_id(), crate::value::ToolContractId::new(0).unwrap());
+        let proposal = read_of(&e, "public/q3.md").with_annotation(Some(read_pin(&["partner"])));
+        assert_eq!(
+            proposal.declaration_id(),
+            crate::value::ToolDeclarationId::new(0).unwrap()
+        );
         let log = vec![opened(&e)];
         let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
         let hop = hop_named(&facts, "redact");
@@ -12106,57 +11904,60 @@ mod tests {
             &e,
             &log,
             hop,
-            rewrite(&proposal, "redact", r#"{"path":"private/q3.md"}"#, vec![], vec![]),
+            rewrite(&proposal, "redact", r#"{"path":"private/q3.md"}"#, None, vec![]),
         )
         .expect("the hop runs");
         let released = released_by(&hopped);
         assert_eq!(
-            released.call.contract_id(),
-            crate::value::ToolContractId::new(1).unwrap()
+            released.call.declaration_id(),
+            crate::value::ToolDeclarationId::new(1).unwrap()
         );
         assert!(
-            released.call.tool_resolutions().is_empty(),
-            "the classified contract uses no resolver; the public contract's answer does not ride along"
+            released.call.annotation().is_none(),
+            "the classified declaration is statically declared; the public annotation does not ride along"
         );
         let facts = appended_facts(hopped);
         assert_eq!(
             opened_contract_of(&facts),
-            (crate::value::ToolContractId::new(1).unwrap(), classified_read(), vec![]),
-            "the opening records the classified read the selected contract emits"
+            (
+                crate::value::ToolDeclarationId::new(1).unwrap(),
+                classified_read(),
+                None
+            ),
+            "the opening records the classified read the selected declaration emits"
         );
         assert_eq!(e.validate_replay(&[log.clone(), facts].concat()), Ok(()));
 
-        // A rewrite that stays in the public contract keeps the proposal's answer and takes none
-        // beside it.
+        // A rewrite that stays in the annotated declaration is annotated afresh or not at all:
+        // the proposal's annotation never rides through, and none means the rewrite still owes one.
         let public = r#"{"path":"public/q4.md"}"#;
         assert_eq!(
-            execute_offer(
+            execute_offer(&e, &log, hop, rewrite(&proposal, "redact", public, None, vec![])).err(),
+            Some(TransitionError::AnnotationNeeded {
+                annotators: vec![crate::names::AnnotatorName::new("classify")]
+            })
+        );
+        let fresh = read_pin(&["partner"]);
+        let kept = released_by(
+            &execute_offer(
                 &e,
                 &log,
                 hop,
-                rewrite(
-                    &proposal,
-                    "redact",
-                    public,
-                    vec![read_pin_for(&e, "public/q4.md", &["partner"])],
-                    vec![]
-                ),
+                rewrite(&proposal, "redact", public, Some(fresh.clone()), vec![]),
             )
-            .err(),
-            Some(TransitionError::EvidenceMismatch)
+            .expect("the hop runs"),
         );
-        let kept = released_by(
-            &execute_offer(&e, &log, hop, rewrite(&proposal, "redact", public, vec![], vec![])).expect("the hop runs"),
+        assert_eq!(
+            kept.call.declaration_id(),
+            crate::value::ToolDeclarationId::new(0).unwrap()
         );
-        assert_eq!(kept.call.contract_id(), crate::value::ToolContractId::new(0).unwrap());
-        assert_eq!(kept.call.tool_resolutions(), proposal.tool_resolutions());
+        assert_eq!(kept.call.annotation(), Some(&fresh));
     }
 
     #[test]
     fn a_rewrite_into_a_contract_the_sanitizer_does_not_reach_is_refused() {
         let e = ordered_read_engine_tagged(&[], "classified");
-        let proposal =
-            read_of(&e, "public/q3.md").with_tool_resolutions(vec![read_pin_for(&e, "public/q3.md", &["partner"])]);
+        let proposal = read_of(&e, "public/q3.md").with_annotation(Some(read_pin(&["partner"])));
         let log = vec![opened(&e)];
         let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
         let hop = hop_named(&facts, "redact");
@@ -12170,7 +11971,7 @@ mod tests {
                 &e,
                 &log,
                 hop,
-                rewrite(&proposal, "redact", r#"{"path":"private/q3.md"}"#, vec![], vec![]),
+                rewrite(&proposal, "redact", r#"{"path":"private/q3.md"}"#, None, vec![]),
             )
             .err(),
             Some(TransitionError::SanitizerUnapplicable)
@@ -12179,7 +11980,7 @@ mod tests {
     }
 
     #[test]
-    fn a_rewrite_within_the_contract_carries_the_answers_of_the_call_last_consulted() {
+    fn a_rewrite_within_the_declaration_is_annotated_afresh() {
         let e = ordered_read_engine(&["auditor", "legal"]);
         let proposal = read_of(&e, "private/q3.md");
         let log = vec![opened(&e)];
@@ -12187,10 +11988,10 @@ mod tests {
         let redact = hop_named(&facts, "redact");
         let log = [log, facts].concat();
 
-        // The first hop selects the public contract; its answer requires the auditor, which the
-        // redaction does not reach, so the rewritten call blocks on that one gap — the public
-        // contract's, not the classified read's partner, auditor and legal desks.
-        let answer = read_pin_for(&e, "public/q3.md", &["auditor"]);
+        // The first hop selects the public declaration; its annotation requires the auditor,
+        // which the redaction does not reach, so the rewritten call blocks on that one gap — the
+        // public declaration's, not the classified read's partner, auditor and legal desks.
+        let answer = read_pin(&["auditor"]);
         let hopped = execute_offer(
             &e,
             &log,
@@ -12199,7 +12000,7 @@ mod tests {
                 &proposal,
                 "redact",
                 r#"{"path":"public/q3.md"}"#,
-                vec![answer.clone()],
+                Some(answer.clone()),
                 vec![],
             ),
         )
@@ -12208,8 +12009,11 @@ mod tests {
             OfferFollowUp::Substituted { block } => (**block).clone(),
             other => panic!("the substitution re-plans over the derived call, got {other:?}"),
         };
-        assert_eq!(block.call.contract_id(), crate::value::ToolContractId::new(0).unwrap());
-        assert_eq!(block.call.tool_resolutions(), std::slice::from_ref(&answer));
+        assert_eq!(
+            block.call.declaration_id(),
+            crate::value::ToolDeclarationId::new(0).unwrap()
+        );
+        assert_eq!(block.call.annotation(), Some(&answer));
         assert_eq!(block.block.raw.requirement_gaps, vec![includes_gap("auditor")]);
         let facts = appended_facts(hopped);
         let widen = hop_named(&facts, "widen");
@@ -12227,21 +12031,27 @@ mod tests {
             other => panic!("a repeated batch answers as proposals, got {other:?}"),
         }
 
-        // The second hop stays in the public contract: it carries the answer the first hop was
-        // consulted for — about that hop's arguments, not the proposal's — and consults nothing.
+        // The second hop stays in the public declaration: annotation evidence binds the exact
+        // canonical call, so the rewrite carries the fresh annotation obtained for it.
         let hopped = execute_offer(
             &e,
             &log,
             widen,
-            rewrite(&block.call, "widen", r#"{"path":"public/q3-v2.md"}"#, vec![], vec![]),
+            rewrite(
+                &block.call,
+                "widen",
+                r#"{"path":"public/q3-v2.md"}"#,
+                Some(read_pin(&["auditor"])),
+                vec![],
+            ),
         )
         .expect("the hop runs");
         let released = released_by(&hopped);
         assert_eq!(
-            released.call.contract_id(),
-            crate::value::ToolContractId::new(0).unwrap()
+            released.call.declaration_id(),
+            crate::value::ToolDeclarationId::new(0).unwrap()
         );
-        assert_eq!(released.call.tool_resolutions(), &[answer]);
+        assert_eq!(released.call.annotation(), Some(&answer));
         let log = [log, appended_facts(hopped)].concat();
         assert_eq!(e.validate_replay(&log), Ok(()));
     }
@@ -12260,13 +12070,13 @@ mod tests {
         // auditor and legal desks together, is blocked on something this block never was: the hop
         // improves nothing, lands no record, and the offer stands.
         for readers in [&["press"][..], &["auditor", "legal"][..]] {
-            let answer = read_pin_for(&e, "public/q3.md", readers);
+            let answer = read_pin(readers);
             assert_eq!(
                 execute_offer(
                     &e,
                     &log,
                     hop,
-                    rewrite(&proposal, "redact", public, vec![answer], vec![])
+                    rewrite(&proposal, "redact", public, Some(answer), vec![])
                 )
                 .err(),
                 Some(TransitionError::SanitizerUnapplicable)
@@ -12282,7 +12092,7 @@ mod tests {
                     &proposal,
                     "redact",
                     r#"{"path":"public/q3.md","extra":1}"#,
-                    vec![],
+                    None,
                     vec![]
                 ),
             ),
@@ -12293,7 +12103,7 @@ mod tests {
 
     #[test]
     fn a_rewrite_into_a_contract_reading_a_group_pins_that_group_afresh() {
-        let send = |name: &str, audience: AudienceRequirement| ToolContract {
+        let send = |name: &str, audience: AudienceRequirement| ToolAnnotation {
             parameters: crate::params::test_string_argument_schema("to"),
             tags: vec![crate::names::TagName::new("outbound")],
             requires: Requires {
@@ -12307,8 +12117,9 @@ mod tests {
         };
         let e = open_engine_at(
             RegistryConfig {
+                annotators: vec![],
                 trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-                tools: vec![
+                tools: declared(vec![
                     send(
                         "send(to:@*)",
                         AudienceRequirement::Includes(RecipientSpec::Placeholder("to".into())),
@@ -12319,7 +12130,7 @@ mod tests {
                             Audience::restricted([ReaderId::new("partner")]),
                         ))),
                     ),
-                ],
+                ]),
                 authorities: vec![],
                 sanitizers: vec![input_sanitizer("redact", &["internal"], &["internal", "partner"])],
                 casts: vec![],
@@ -12330,7 +12141,10 @@ mod tests {
         let proposal = e
             .resolve_call(ToolName::new("send"), br#"{"to":"partner-desk"}"#)
             .expect("the call resolves");
-        assert_eq!(proposal.contract_id(), crate::value::ToolContractId::new(1).unwrap());
+        assert_eq!(
+            proposal.declaration_id(),
+            crate::value::ToolDeclarationId::new(1).unwrap()
+        );
         let log = vec![opened(&e)];
         let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
         let hop = hop_named(&facts, "redact");
@@ -12340,7 +12154,7 @@ mod tests {
         // The rewritten argument names a group under the first contract: its membership is owed,
         // and a membership pinned for another argument is not it.
         assert_eq!(
-            execute_offer(&e, &log, hop, rewrite(&proposal, "redact", group, vec![], vec![])).err(),
+            execute_offer(&e, &log, hop, rewrite(&proposal, "redact", group, None, vec![])).err(),
             Some(TransitionError::MembershipNeeded {
                 needed: vec![crate::names::GroupName::new("team")]
             })
@@ -12350,7 +12164,7 @@ mod tests {
                 &e,
                 &log,
                 hop,
-                rewrite(&proposal, "redact", group, vec![], vec![expansion("cc", &["partner"])]),
+                rewrite(&proposal, "redact", group, None, vec![expansion("cc", &["partner"])]),
             )
             .err(),
             Some(TransitionError::ForeignMembership {
@@ -12361,13 +12175,13 @@ mod tests {
             &e,
             &log,
             hop,
-            rewrite(&proposal, "redact", group, vec![], vec![expansion("to", &["partner"])]),
+            rewrite(&proposal, "redact", group, None, vec![expansion("to", &["partner"])]),
         )
         .expect("the hop runs");
         let released = released_by(&hopped);
         assert_eq!(
-            released.call.contract_id(),
-            crate::value::ToolContractId::new(0).unwrap()
+            released.call.declaration_id(),
+            crate::value::ToolDeclarationId::new(0).unwrap()
         );
         assert_eq!(released.call.memberships(), &[expansion("to", &["partner"])]);
         let facts = appended_facts(hopped);
@@ -12388,17 +12202,16 @@ mod tests {
         let mut facts = appended_facts(proposed(&e, &opening, "b1", nonce(), call).expect("the call releases"));
         assert_eq!(e.validate_replay(&[opening.clone(), facts.clone()].concat()), Ok(()));
 
-        let later = crate::value::ToolContractId::new(1).unwrap();
+        let later = crate::value::ToolDeclarationId::new(1).unwrap();
         for fact in &mut facts {
             match fact {
                 Fact::ProposalBatchDecided { proposals, .. } => {
                     let original = &proposals[0];
                     proposals[0] =
                         ResolvedCall::new_keyed(original.tool().clone(), later, original.canonical_arguments().clone())
-                            .with_tool_resolutions(original.tool_resolutions().to_vec())
                             .with_memberships(original.memberships().to_vec());
                 }
-                Fact::DispatchOpened { contract, .. } => *contract = later,
+                Fact::DispatchOpened { declaration, .. } => *declaration = later,
                 _ => {}
             }
         }
@@ -12423,12 +12236,12 @@ mod tests {
                     trajectory: traj(),
                     dispatch: DispatchId::new(traj(), minted_from.digest(), 0),
                     tool: ToolName::new(tool),
-                    contract: Default::default(),
+                    declaration: Default::default(),
                     arguments: crate::params::test_arguments(&payload),
                     proposed_label: established(TRUSTED, Audience::Public),
                     receiving: established(TRUSTED, Audience::Public),
                     proposed_effects: EffectSet::default(),
-                    tool_resolutions: vec![],
+                    annotation: pinned_static(&plain_tool(tool)),
                     memberships: Vec::new(),
                     requirement_cast: None,
                     subject: crate::basis::fixture_subject(&traj()),
@@ -12451,10 +12264,10 @@ mod tests {
             Err(TransitionRefusal::DigestMismatch)
         ));
         let mut forged_contract = dispatched("send", json!({ "to": "hr" }), &good);
-        let Fact::DispatchOpened { contract, .. } = &mut forged_contract[1] else {
+        let Fact::DispatchOpened { declaration, .. } = &mut forged_contract[1] else {
             unreachable!("the fixture opens one dispatch")
         };
-        *contract = crate::value::ToolContractId::new(99).unwrap();
+        *declaration = crate::value::ToolDeclarationId::new(99).unwrap();
         assert!(matches!(
             e.validate_replay(&forged_contract),
             Err(TransitionRefusal::UnknownTool(name)) if name == "send"
@@ -12477,8 +12290,9 @@ mod tests {
             hint: None,
         };
         let cfg = RegistryConfig {
+            annotators: vec![],
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![wire],
+            tools: declared(vec![wire]),
             authorities: vec![officer],
             sanitizers: vec![],
             casts: vec![],
@@ -12538,10 +12352,9 @@ mod tests {
         }
     }
 
-    fn plain_tool(name: &str) -> ToolContract {
-        ToolContract {
+    fn plain_tool(name: &str) -> ToolAnnotation {
+        ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new(name),
             tags: vec![],
             delta: Delta::NONE,
@@ -12551,11 +12364,12 @@ mod tests {
         }
     }
 
-    fn engine_with_provider_run(tools: Vec<ToolContract>, provider_run: &[&str]) -> Engine {
+    fn engine_with_provider_run(tools: Vec<ToolAnnotation>, provider_run: &[&str]) -> Engine {
         provider_run_engine(
             RegistryConfig {
+                annotators: vec![],
                 trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-                tools,
+                tools: declared(tools),
                 authorities: vec![],
                 sanitizers: vec![],
                 casts: vec![],
@@ -12651,12 +12465,12 @@ mod tests {
                     trajectory: traj(),
                     dispatch,
                     tool: proposal.tool().clone(),
-                    contract: proposal.contract_id(),
+                    declaration: proposal.declaration_id(),
                     arguments: proposal.canonical_arguments().clone(),
                     proposed_label: established(TRUSTED, Audience::Public),
                     receiving: established(TRUSTED, Audience::Public),
                     proposed_effects: EffectSet::default(),
-                    tool_resolutions: vec![],
+                    annotation: pinned_static(&plain_tool("ghost")),
                     memberships: Vec::new(),
                     requirement_cast: None,
                     subject: crate::basis::fixture_subject(&traj()),
@@ -12671,7 +12485,7 @@ mod tests {
         );
         let second = ResolvedCall::new_keyed(
             ghost.tool().clone(),
-            crate::value::ToolContractId::new(1).unwrap(),
+            crate::value::ToolDeclarationId::new(1).unwrap(),
             ghost.canonical_arguments().clone(),
         );
         assert_eq!(
@@ -13230,8 +13044,9 @@ mod tests {
     #[test]
     fn a_fork_carries_the_deployments_child_return_binding() {
         let cfg = RegistryConfig {
+            annotators: vec![],
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![plain_tool("spawn")],
+            tools: declared(vec![plain_tool("spawn")]),
             authorities: vec![],
             sanitizers: vec![crate::authority::Sanitizer {
                 name: crate::names::SanitizerName::new("redactor"),
@@ -13372,7 +13187,7 @@ mod tests {
         crate::transition::ProposedCall {
             tool: ToolName::new(tool),
             arguments: arguments.to_vec(),
-            tool_resolutions: Vec::new(),
+            annotation: None,
             memberships: Vec::new(),
             requirement_cast: None,
         }
@@ -13926,7 +13741,7 @@ mod tests {
         /// projection's own unit test.
         const TOOLS: [&str; 3] = ["identity", "suspicious", "internal"];
 
-        fn labeled_tool(name: &str) -> ToolContract {
+        fn labeled_tool(name: &str) -> ToolAnnotation {
             let mut tool = plain_tool(name);
             tool.delta = match name {
                 "identity" => Delta::NONE,
@@ -14288,45 +14103,23 @@ mod tests {
     }
 
     #[test]
-    fn a_repeat_matches_each_sibling_to_the_dispatch_its_own_answers_opened() {
-        let binding = crate::contract::ToolResolverUse {
-            resolver: crate::names::DynamicResolverName::new("acl"),
-            inputs: std::collections::BTreeMap::from([(
-                "room".to_string(),
-                crate::contract::ToolCallSource::argument("room").expect("a plain name is a source"),
-            )]),
-            returns: [crate::contract::ResolverReturn::RequiredAudience]
-                .into_iter()
-                .collect(),
-        };
+    fn a_repeat_matches_each_sibling_to_the_dispatch_its_own_annotation_opened() {
         let mut notify = plain_tool("notify");
         notify.parameters = crate::params::test_string_argument_schema("room");
-        notify.uses = vec![binding.clone()];
         let internal = Audience::restricted([ReaderId::new("internal")]);
-        let e = engine_at(vec![notify], known(TRUSTED, internal.clone()));
+        let mut cfg = test_config(vec![]);
+        cfg.tools.push(annotated(notify.clone(), "acl"));
+        cfg.annotators
+            .push(annotator_with_readers("acl", &["internal", "outsider"]));
+        let e = open_engine_at(cfg, known(TRUSTED, internal.clone()));
         let log = vec![opened(&e)];
         let arguments = json!({ "room": "lobby" });
-        let args = e
-            .registry()
-            .tool(&ToolName::new("notify"))
-            .expect("notify is registered")
-            .resolver_args_digest(&binding, &ToolName::new("notify"), &arguments);
         let pinned = |audience: &Audience| {
-            raw(&call("notify", arguments.clone()).with_tool_resolutions(vec![
-                crate::contract::PinnedToolResolution::from_answer(
-                    binding.clone(),
-                    args,
-                    None,
-                    None,
-                    None,
-                    Some(crate::contract::RequiredAudience {
-                        includes: Some(audience.clone()),
-                        cap: None,
-                    }),
-                    None,
-                )
-                .expect("a literal reader set pins"),
-            ]))
+            let mut produced = notify.clone();
+            produced.requires.label.audience = Dim::Known(vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                DeclaredAudience::literal(audience.clone()),
+            ))]);
+            raw(&call("notify", arguments.clone()).with_annotation(Some(pinned_for(produced, "acl"))))
         };
         let outsider = Audience::restricted([ReaderId::new("outsider")]);
         let proposals = || vec![pinned(&outsider), pinned(&internal)];
@@ -14338,12 +14131,23 @@ mod tests {
         assert_eq!(released.len(), 1);
         assert_eq!(blocked.len(), 1);
         let ran = released[0].dispatch.clone();
-        let required_includes = |call: &ResolvedCall| {
-            call.tool_resolutions()[0]
-                .required_audience()
-                .and_then(|required| required.includes.clone())
+        let required_includes = |call: &ResolvedCall| match &call
+            .annotation()
+            .expect("an annotated proposal carries its pin")
+            .annotation()
+            .requires
+            .label
+            .audience
+        {
+            Dim::Known(requirements) => match requirements.as_slice() {
+                [AudienceRequirement::Includes(RecipientSpec::Static(recipients))] => {
+                    recipients.resolve(&Expansions::default())
+                }
+                other => panic!("one produced includes requirement, got {other:?}"),
+            },
+            Dim::Unknown => panic!("a produced annotation leaves no slot Unknown"),
         };
-        assert_eq!(required_includes(&released[0].call), Some(internal.clone()));
+        assert_eq!(required_includes(&released[0].call), internal.clone());
         let log = [log, appended_facts(first)].concat();
 
         let repeat = e
@@ -14355,11 +14159,11 @@ mod tests {
         assert_eq!(released[0].dispatch, ran);
         assert_eq!(
             required_includes(&released[0].call),
-            Some(internal.clone()),
+            internal.clone(),
             "the repeat names the sibling that actually ran"
         );
         assert_eq!(blocked.len(), 1);
-        assert_eq!(required_includes(&blocked[0].call), Some(outsider.clone()));
+        assert_eq!(required_includes(&blocked[0].call), outsider.clone());
     }
 
     fn membership_engine(authorities: Vec<crate::authority::Authority>, starting: Label) -> Engine {
@@ -14376,8 +14180,9 @@ mod tests {
         };
         open_engine_at(
             RegistryConfig {
+                annotators: vec![],
                 trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-                tools: vec![send],
+                tools: declared(vec![send]),
                 authorities,
                 sanitizers: vec![],
                 casts: vec![],
@@ -15023,14 +14828,15 @@ mod tests {
         casts: Vec<crate::authority::Cast>,
     ) -> RegistryConfig {
         RegistryConfig {
+            annotators: vec![],
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![
+            tools: declared(vec![
                 plain_tool("spawn"),
                 unestablished_tool("fetch"),
                 suspicious_read(),
                 internal_read(),
                 suspicious_internal_read(),
-            ],
+            ]),
             authorities: vec![],
             sanitizers,
             casts,
@@ -15488,10 +15294,11 @@ mod tests {
         let mut cfg = returning_registry(vec![scoped], vec![classifier_cast()]);
         // A tool the sanitizer's scope reaches, so the sanitizer is one a result could
         // meet. A child return originates from no tool, which is what leaves it unreached.
-        cfg.tools.push(ToolContract {
-            tags: vec![crate::names::TagName::new("web")],
-            ..open_tool("browse")
-        });
+        cfg.tools
+            .push(crate::contract::ToolDeclaration::Declared(ToolAnnotation {
+                tags: vec![crate::names::TagName::new("web")],
+                ..open_tool("browse")
+            }));
         let e = open_engine(cfg);
         let child = TrajectoryId::new("child");
         let mut log = spawn_family(&e, None, &child);
@@ -16532,10 +16339,10 @@ mod tests {
     #[test]
     fn a_tool_output_block_never_offers_the_reserved_attest_schema() {
         let e = open_engine(RegistryConfig {
+            annotators: vec![],
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![ToolContract {
+            tools: declared(vec![ToolAnnotation {
                 description: Some("A test tool.".to_string()),
-                uses: vec![],
                 name: ToolName::new("fetch"),
                 tags: vec![],
                 delta: Delta {
@@ -16545,7 +16352,7 @@ mod tests {
                 parameters: crate::params::ToolParameters::open(),
                 emits: EffectSet::new([EffectKind::new("web.read")]).unwrap(),
                 requires: Requires::default(),
-            }],
+            }]),
             authorities: vec![],
             sanitizers: vec![lifting_sanitizer("redactor"), lifting_sanitizer("attest-schema")],
             casts: vec![],
@@ -16578,8 +16385,9 @@ mod tests {
         };
         let e = open_engine_at(
             RegistryConfig {
+                annotators: vec![],
                 trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into(), "gold".into()]),
-                tools: vec![plain_tool("spawn"), suspicious_read()],
+                tools: declared(vec![plain_tool("spawn"), suspicious_read()]),
                 authorities: vec![],
                 sanitizers: vec![attest],
                 casts: vec![],
@@ -16894,7 +16702,7 @@ mod tests {
 
         #[test]
         fn a_route_reads_the_ordered_contract_the_standing_call_selected() {
-            let private = ToolContract {
+            let private = ToolAnnotation {
                 requires: Requires {
                     label: LabelRequirements {
                         trust_floor: None,
@@ -16955,7 +16763,7 @@ mod tests {
             Audience::restricted(names.iter().map(|name| ReaderId::new(*name)))
         }
 
-        fn team_delta(name: &str) -> ToolContract {
+        fn team_delta(name: &str) -> ToolAnnotation {
             let mut tool = plain_tool(name);
             tool.delta = Delta {
                 trust: None,
@@ -16964,7 +16772,7 @@ mod tests {
             tool
         }
 
-        fn capped_send() -> ToolContract {
+        fn capped_send() -> ToolAnnotation {
             let mut send = plain_tool("send");
             send.requires = Requires {
                 label: LabelRequirements {
@@ -16976,10 +16784,11 @@ mod tests {
             send
         }
 
-        fn config(tools: Vec<ToolContract>, authorities: Vec<crate::authority::Authority>) -> RegistryConfig {
+        fn config(tools: Vec<ToolAnnotation>, authorities: Vec<crate::authority::Authority>) -> RegistryConfig {
             RegistryConfig {
+                annotators: vec![],
                 trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-                tools,
+                tools: declared(tools),
                 authorities,
                 sanitizers: vec![],
                 casts: vec![],
@@ -17759,7 +17568,10 @@ mod tests {
             let forward = config(vec![capped_send(), team_delta("read")], vec![]);
             let backward = config(vec![team_delta("read"), capped_send()], vec![]);
             let mut renamed = config(vec![capped_send(), team_delta("read")], vec![]);
-            renamed.tools[1].delta = Delta {
+            let crate::contract::ToolDeclaration::Declared(renamed_read) = &mut renamed.tools[1] else {
+                panic!("the fixture declares its tools")
+            };
+            renamed_read.delta = Delta {
                 trust: None,
                 audience: Some(AudienceDelta::Static(grouped(&[], &["board"]))),
             };
@@ -17798,6 +17610,7 @@ mod tests {
             casts: Vec<crate::authority::Cast>,
         ) -> RegistryConfig {
             RegistryConfig {
+                annotators: vec![],
                 membership: Some(crate::names::MembershipResolverName::new("directory")),
                 ..returning_registry(sanitizers, casts)
             }
@@ -17953,8 +17766,11 @@ mod tests {
             let fetch = cfg
                 .tools
                 .iter_mut()
-                .find(|tool| tool.name.as_str() == "fetch")
+                .find(|tool| tool.name().as_str() == "fetch")
                 .expect("the returning registry fetches");
+            let crate::contract::ToolDeclaration::Declared(fetch) = fetch else {
+                panic!("the returning registry declares fetch")
+            };
             fetch.delta = Delta {
                 trust: Some(Dim::Unknown),
                 audience: Some(Dim::Known(readers(&["internal"])).into()),

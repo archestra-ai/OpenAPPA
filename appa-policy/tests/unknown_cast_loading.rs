@@ -2,23 +2,26 @@
 //! pending-cast dimension, the reserved `"unknown"` token, and the shape of a `[[cast]]` — pinned
 //! at the TOML entry point.
 
-use appa_engine::contract::{Delta, RequirementSlot, ToolContract};
+use appa_engine::contract::{Delta, RequirementSlot, ToolAnnotation};
 use appa_engine::label::{Dim, Dimension};
 use appa_engine::registry::LoadError;
 use appa_policy::{Config, ConfigError};
 
-/// A tool contract under the default trust chain, with the given TOML lines after its name.
+/// A tool declaration under the default trust chain, with the given TOML lines after its name.
 fn tool_policy(name: &str, body: &str) -> String {
     format!("version = 1\n\n[[tool]]\nname = \"{name}\"\n{body}\n")
 }
 
-/// The one contract a policy here registers under `name`; these policies never order several.
-fn contract<'a>(config: &'a Config, name: &str) -> &'a ToolContract {
+/// The one annotation a policy here registers under `name`; these policies never order several,
+/// and every tool here is statically declared.
+fn contract<'a>(config: &'a Config, name: &str) -> &'a ToolAnnotation {
     config
         .registry()
         .tools()
-        .find(|tool| tool.name.as_str() == name)
+        .find(|tool| tool.name().as_str() == name)
         .unwrap_or_else(|| panic!("{name} registers"))
+        .declared()
+        .unwrap_or_else(|| panic!("{name} is declared"))
 }
 
 /// A declared tool with a label requirement and no `delta` used to be refused: its output was

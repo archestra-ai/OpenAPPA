@@ -183,11 +183,11 @@ async fn a_refused_edit_changes_nothing_and_the_gate_keeps_deciding() {
     }
 }
 
-/// The `notes` tool beside one dynamic resolver that names `builtin` on its declaration,
+/// The `notes` tool beside one annotator that names `builtin` on its declaration,
 /// over the given `[externals]` entries.
 fn declaring(builtin: &str, externals: &str) -> String {
     policy_with(&format!(
-        "[[policy.tool]]\nname = \"notes\"\n[[policy.dynamic_resolver]]\nname = \"classify\"\nbuiltin = \"{builtin}\"\nreturns = [\"delta.trust\"]\n"
+        "[[policy.tool]]\nname = \"notes\"\n[[policy.annotator]]\nname = \"classify\"\nbuiltin = \"{builtin}\"\n"
     )) + externals
 }
 
@@ -196,29 +196,29 @@ fn declaring(builtin: &str, externals: &str) -> String {
 #[tokio::test]
 async fn a_declared_builtin_the_deployment_cannot_serve_refuses_open_and_reload() {
     let bound: fn(&OpenError) -> bool =
-        |error| matches!(error, OpenError::BoundBuiltinResolver(name) if name == "classify");
+        |error| matches!(error, OpenError::BoundBuiltinAnnotator(name) if name == "classify");
     let no_profile: fn(&OpenError) -> bool =
         |error| matches!(error, OpenError::LlmNotConfigured(name) if name == "classify");
     let no_platform: fn(&OpenError) -> bool =
         |error| matches!(error, OpenError::UnsupportedClaudeCodePlatform(name) if name == "classify");
     let mut cases = vec![
         (
-            "a builtin resolver that is also bound",
+            "a builtin annotator that is also bound",
             declaring(
                 "claude-code",
-                "[externals.dynamic.classify]\nurl = \"https://classify.internal\"\n",
+                "[externals.annotators.classify]\nurl = \"https://classify.internal\"\n",
             ),
             bound,
         ),
         (
-            "an llm resolver with no [externals.llm]",
+            "an llm annotator with no [externals.llm]",
             declaring("llm", ""),
             no_profile,
         ),
     ];
     if !cfg!(unix) {
         cases.push((
-            "a claude-code resolver off Unix",
+            "a claude-code annotator off Unix",
             declaring("claude-code", ""),
             no_platform,
         ));

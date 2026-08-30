@@ -1,5 +1,5 @@
-//! Tool-level dynamic resolvers over real boundaries: a loopback HTTP classifier, a fake
-//! `claude` executable behind the command override, a real store, the real hook path.
+//! Tool annotators over real boundaries: a loopback HTTP annotator, a fake `claude`
+//! executable behind the command override, a real store, the real hook path.
 
 mod common;
 use common::{raw, serve};
@@ -7,7 +7,7 @@ use common::{raw, serve};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use appa_runtime::api::Runtime;
+use appa_runtime::api::{AuditEvent, Runtime};
 use appa_runtime::{config::Config, hooks};
 use appa_runtime_api::{Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, ToolOutcome, TrajectoryId};
 use axum::Router;
@@ -22,19 +22,14 @@ enum Answer {
 }
 
 #[derive(Clone)]
-struct Classifier {
+struct Annotator {
     answers: Arc<Mutex<std::collections::BTreeMap<String, Answer>>>,
     requests: Arc<Mutex<Vec<serde_json::Value>>>,
-    delays: Arc<Mutex<std::collections::BTreeMap<String, Duration>>>,
 }
 
-impl Classifier {
-    fn set(&self, resolver: &str, answer: Answer) {
-        self.answers.lock().unwrap().insert(resolver.to_string(), answer);
-    }
-
-    fn delay(&self, resolver: &str, delay: Duration) {
-        self.delays.lock().unwrap().insert(resolver.to_string(), delay);
+impl Annotator {
+    fn set(&self, annotator: &str, answer: Answer) {
+        self.answers.lock().unwrap().insert(annotator.to_string(), answer);
     }
 
     fn requests(&self) -> Vec<serde_json::Value> {
@@ -42,24 +37,19 @@ impl Classifier {
     }
 }
 
-async fn serve_classifier() -> (String, Classifier) {
-    let classifier = Classifier {
+async fn serve_annotator() -> (String, Annotator) {
+    let annotator = Annotator {
         answers: Arc::new(Mutex::new(Default::default())),
         requests: Arc::new(Mutex::new(Vec::new())),
-        delays: Arc::new(Mutex::new(Default::default())),
     };
     let router = Router::new()
         .route(
-            "/resolve",
-            post(|State(classifier): State<Classifier>, body: String| async move {
+            "/annotate",
+            post(|State(annotator): State<Annotator>, body: String| async move {
                 let request: serde_json::Value = serde_json::from_str(&body).expect("the request is JSON");
-                let resolver = request["name"].as_str().unwrap_or_default().to_string();
-                classifier.requests.lock().unwrap().push(request);
-                let delay = classifier.delays.lock().unwrap().get(&resolver).copied();
-                if let Some(delay) = delay {
-                    tokio::time::sleep(delay).await;
-                }
-                let answer = classifier.answers.lock().unwrap().get(&resolver).cloned();
+                let name = request["name"].as_str().unwrap_or_default().to_string();
+                annotator.requests.lock().unwrap().push(request);
+                let answer = annotator.answers.lock().unwrap().get(&name).cloned();
                 match answer {
                     Some(Answer::Wire(value)) => (axum::http::StatusCode::OK, value.to_string()),
                     Some(Answer::Malformed) => (axum::http::StatusCode::OK, "not json".to_string()),
@@ -67,12 +57,24 @@ async fn serve_classifier() -> (String, Classifier) {
                 }
             }),
         )
-        .with_state(classifier.clone());
-    (format!("{}/resolve", serve(router).await), classifier)
+        .with_state(annotator.clone());
+    (format!("{}/annotate", serve(router).await), annotator)
+}
+
+/// A produced annotation whose only semantics is the given output-trust delta.
+fn produced(delta_trust: &str) -> serde_json::Value {
+    serde_json::json!({
+        "version": 1,
+        "answer": {
+            "delta": { "trust": delta_trust },
+            "requires": { "history": [], "attention": [] },
+            "emits": [],
+        }
+    })
 }
 
 fn root() -> TrajectoryId {
-    TrajectoryId("tool-resolvers-test".to_string())
+    TrajectoryId("annotators-test".to_string())
 }
 
 fn actor() -> Actor {
@@ -140,29 +142,29 @@ fn http_policy(url: &str) -> String {
 [policy]
 version = 1
 
-[[policy.dynamic_resolver]]
+[[policy.annotator]]
 name = "classifier"
-returns = ["delta.trust"]
+audiences = ["internal"]
 
 [[policy.tool]]
 name = "fetch"
 description = "Fetches one URL and returns its body."
 parameters = {{ type = "object", properties = {{ url = {{ type = "string" }} }}, required = ["url"] }}
-uses = [{{ resolver = "classifier" }}]
+annotator = "classifier"
 
 [externals]
 timeout_ms = 2000
 max_body_bytes = 65536
 
-[externals.dynamic.classifier]
+[externals.annotators.classifier]
 url = "{url}"
 "#
     )
 }
 
 #[cfg(unix)]
-fn command_policy(script: &str, matched_without_resolver: bool) -> String {
-    let direct = if matched_without_resolver {
+fn command_policy(script: &str, matched_without_annotator: bool) -> String {
+    let direct = if matched_without_annotator {
         r#"
 [[policy.tool]]
 name = "fetch(url:https://public*)"
@@ -176,35 +178,31 @@ delta = {}
 [policy]
 version = 1
 
-[[policy.dynamic_resolver]]
+[[policy.annotator]]
 name = "classifier"
-returns = ["delta.trust"]
 
 {direct}
 [[policy.tool]]
 name = "fetch"
 description = "Fetches one URL and returns its body."
 parameters = {{ type = "object", properties = {{ url = {{ type = "string" }} }}, required = ["url"] }}
-uses = [{{ resolver = "classifier" }}]
+annotator = "classifier"
 
 [externals]
 timeout_ms = 5000
 max_body_bytes = 65536
 
-[externals.dynamic.classifier]
+[externals.annotators.classifier]
 command = ["/bin/sh", "{script}"]
 "#
     )
 }
 
 #[tokio::test]
-async fn an_http_resolver_classifies_the_complete_call_and_a_fresh_proposal_consults_again() {
+async fn an_http_annotator_annotates_the_complete_call_and_a_fresh_proposal_consults_again() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
-    let (url, classifier) = serve_classifier().await;
-    classifier.set(
-        "classifier",
-        Answer::Wire(serde_json::json!({ "version": 1, "answer": { "delta.trust": "trusted" } })),
-    );
+    let (url, annotator) = serve_annotator().await;
+    annotator.set("classifier", Answer::Wire(produced("trusted")));
     let runtime = open_runtime(&dir, &http_policy(&url)).await;
 
     assert_eq!(
@@ -213,13 +211,13 @@ async fn an_http_resolver_classifies_the_complete_call_and_a_fresh_proposal_cons
     );
     ran(&runtime, fetch("https://a.example")).await;
 
-    let requests = classifier.requests();
+    let requests = annotator.requests();
     assert_eq!(requests.len(), 1);
     let request = &requests[0];
     assert_eq!(request["version"], 1);
-    assert_eq!(request["kind"], "dynamic");
+    assert_eq!(request["kind"], "annotation");
     assert_eq!(request["name"], "classifier");
-    // The resolver declares no inputs, so `args` is the complete call.
+    // The annotator declares no inputs, so `args` is the complete call.
     assert_eq!(
         request["artifact"],
         serde_json::json!({
@@ -230,13 +228,16 @@ async fn an_http_resolver_classifies_the_complete_call_and_a_fresh_proposal_cons
             }
         })
     );
+    // The declaration restates the resolved mandate: the closed vocabulary a produced
+    // annotation may use.
     assert_eq!(
         request["declaration"],
         serde_json::json!({
-            "returns": ["delta.trust"],
+            "inputs": [],
             "trust_ranks": ["suspicious", "trusted"],
-            "audiences": ["public"],
+            "audiences": ["internal"],
             "attention_marks": [],
+            "effects": [],
         })
     );
     let keys: Vec<&str> = request
@@ -251,43 +252,39 @@ async fn an_http_resolver_classifies_the_complete_call_and_a_fresh_proposal_cons
         "nothing about the trajectory rides along"
     );
 
-    // Different canonical arguments are a different classification subject.
+    // Different canonical arguments are a different annotation subject.
     assert_eq!(
         propose(&runtime, fetch("https://b.example")).await,
         HookDecision::AllowCall { spawn: None }
     );
     ran(&runtime, fetch("https://b.example")).await;
-    assert_eq!(classifier.requests().len(), 2);
+    assert_eq!(annotator.requests().len(), 2);
 
     // And a fresh proposal of the first call is a new act: nothing durable answers for
-    // it, so the resolver is consulted again.
+    // it, so the annotator is consulted again.
     assert_eq!(
         propose(&runtime, fetch("https://a.example")).await,
         HookDecision::AllowCall { spawn: None }
     );
-    assert_eq!(classifier.requests().len(), 3);
+    assert_eq!(annotator.requests().len(), 3);
 }
 
 #[tokio::test]
-async fn only_the_first_matching_contract_runs_its_resolver() {
+async fn only_the_selected_declaration_consults_its_annotator() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
-    let (url, classifier) = serve_classifier().await;
-    classifier.set(
-        "classifier",
-        Answer::Wire(serde_json::json!({ "version": 1, "answer": { "delta.trust": "trusted" } })),
-    );
+    let (url, annotator) = serve_annotator().await;
+    annotator.set("classifier", Answer::Wire(produced("trusted")));
     let config = format!(
         r#"
 [policy]
 version = 1
 
-[[policy.dynamic_resolver]]
+[[policy.annotator]]
 name = "classifier"
-returns = ["delta.trust"]
 
 [[policy.tool]]
 name = "fetch(url:https://private*)"
-uses = [{{ resolver = "classifier" }}]
+annotator = "classifier"
 
 [[policy.tool]]
 name = "fetch"
@@ -297,7 +294,7 @@ delta = {{}}
 timeout_ms = 2000
 max_body_bytes = 65536
 
-[externals.dynamic.classifier]
+[externals.annotators.classifier]
 url = "{url}"
 "#
     );
@@ -309,8 +306,8 @@ url = "{url}"
         HookDecision::AllowCall { spawn: None }
     );
     assert!(
-        classifier.requests().is_empty(),
-        "the fallback contract has no resolver"
+        annotator.requests().is_empty(),
+        "the fallback contract is static and owes no annotation"
     );
     ran(&runtime, public).await;
 
@@ -318,9 +315,9 @@ url = "{url}"
         propose(&runtime, fetch("https://private.example")).await,
         HookDecision::AllowCall { spawn: None }
     );
-    let requests = classifier.requests();
+    let requests = annotator.requests();
     assert_eq!(requests.len(), 1);
-    // The matched contract declares no description, so the complete call carries none.
+    // The matched declaration writes no description, so the complete call carries none.
     assert_eq!(
         requests[0]["artifact"]["args"],
         serde_json::json!({ "name": "fetch", "arguments": { "url": "https://private.example" } })
@@ -329,23 +326,23 @@ url = "{url}"
 
 #[cfg(unix)]
 #[tokio::test]
-async fn command_resolvers_run_only_for_the_selected_contract_and_pick_up_script_edits() {
+async fn command_annotators_run_only_for_the_selected_declaration_and_pick_up_script_edits() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
-    let script = dir.path().join("resolver.sh");
+    let script = dir.path().join("annotator.sh");
     let calls = dir.path().join("calls.txt");
     std::fs::write(
         &script,
-        "cat >> calls.txt\nprintf '%s' '{\"version\":1,\"answer\":{\"delta.trust\":\"trusted\"}}'",
+        "cat >> calls.txt\nprintf '%s' '{\"version\":1,\"answer\":{\"delta\":{\"trust\":\"trusted\"},\"requires\":{\"history\":[],\"attention\":[]},\"emits\":[]}}'",
     )
-    .expect("the resolver script writes");
-    let runtime = open_runtime(&dir, &command_policy("resolver.sh", true)).await;
+    .expect("the annotator script writes");
+    let runtime = open_runtime(&dir, &command_policy("annotator.sh", true)).await;
 
     let public = fetch("https://public.example");
     assert_eq!(
         propose(&runtime, public.clone()).await,
         HookDecision::AllowCall { spawn: None }
     );
-    assert!(!calls.exists(), "the earlier direct contract starts no resolver");
+    assert!(!calls.exists(), "the earlier direct contract starts no annotator");
     ran(&runtime, public).await;
 
     let private = fetch("https://private.example");
@@ -353,10 +350,10 @@ async fn command_resolvers_run_only_for_the_selected_contract_and_pick_up_script
         propose(&runtime, private.clone()).await,
         HookDecision::AllowCall { spawn: None }
     );
-    assert!(calls.exists(), "the fallback contract runs its command resolver");
+    assert!(calls.exists(), "the fallback declaration runs its command annotator");
     ran(&runtime, private).await;
 
-    std::fs::write(&script, "cat > /dev/null\nprintf 'not-json'").expect("the resolver edit writes");
+    std::fs::write(&script, "cat > /dev/null\nprintf 'not-json'").expect("the annotator edit writes");
     let baseline = audit_len(&runtime);
     assert!(matches!(
         propose(&runtime, fetch("https://another.example")).await,
@@ -389,10 +386,10 @@ async fn a_command_consult_keeps_its_deployment_during_reload() {
     let gate = dir.path().join("gate");
     std::fs::write(
         dir.path().join("old.sh"),
-        "cat > /dev/null\ntouch started\nwhile [ ! -f gate ]; do sleep 0.01; done\nprintf '%s' '{\"version\":1,\"answer\":{\"delta.trust\":\"trusted\"}}'",
+        "cat > /dev/null\ntouch started\nwhile [ ! -f gate ]; do sleep 0.01; done\nprintf '%s' '{\"version\":1,\"answer\":{\"delta\":{\"trust\":\"trusted\"},\"requires\":{\"history\":[],\"attention\":[]},\"emits\":[]}}'",
     )
-    .expect("the old resolver writes");
-    std::fs::write(dir.path().join("new.sh"), "cat > /dev/null\nexit 7").expect("the new resolver writes");
+    .expect("the old annotator writes");
+    std::fs::write(dir.path().join("new.sh"), "cat > /dev/null\nexit 7").expect("the new annotator writes");
     let runtime = open_runtime(&dir, &command_policy("old.sh", false)).await;
 
     let in_flight = {
@@ -406,7 +403,7 @@ async fn a_command_consult_keeps_its_deployment_during_reload() {
         .reload(Config::load(&config_path).expect("the replacement config loads"))
         .expect("the replacement deployment opens");
     assert!(reloaded.changed);
-    std::fs::write(&gate, "go").expect("the old resolver is released");
+    std::fs::write(&gate, "go").expect("the old annotator is released");
 
     assert_eq!(
         in_flight.await.expect("the proposal task completes"),
@@ -416,32 +413,24 @@ async fn a_command_consult_keeps_its_deployment_during_reload() {
 }
 
 #[tokio::test]
-async fn a_mapped_input_shows_the_resolver_one_argument() {
+async fn a_mapped_input_shows_the_annotator_one_argument() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
-    let (url, classifier) = serve_classifier().await;
-    classifier.set(
-        "classifier",
-        Answer::Wire(serde_json::json!({ "version": 1, "answer": { "delta.trust": "trusted" } })),
+    let (url, annotator) = serve_annotator().await;
+    annotator.set("classifier", Answer::Wire(produced("trusted")));
+    let config = http_policy(&url).replace(
+        r#"name = "classifier"
+audiences = ["internal"]"#,
+        r#"name = "classifier"
+inputs = { subject = "$tool_call.arguments.url" }
+audiences = ["internal"]"#,
     );
-    let config = http_policy(&url)
-        .replace(
-            r#"name = "classifier"
-returns = ["delta.trust"]"#,
-            r#"name = "classifier"
-inputs = ["subject"]
-returns = ["delta.trust"]"#,
-        )
-        .replace(
-            r#"uses = [{ resolver = "classifier" }]"#,
-            r#"uses = [{ resolver = "classifier", inputs = { subject = "$tool_call.arguments.url" } }]"#,
-        );
     let runtime = open_runtime(&dir, &config).await;
 
     assert_eq!(
         propose(&runtime, fetch("https://a.example")).await,
         HookDecision::AllowCall { spawn: None }
     );
-    let requests = classifier.requests();
+    let requests = annotator.requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(
         requests[0]["artifact"]["args"],
@@ -450,33 +439,48 @@ returns = ["delta.trust"]"#,
 }
 
 #[tokio::test]
-async fn every_resolver_failure_refuses_the_hook_and_appends_nothing() {
+async fn every_annotation_failure_refuses_the_hook_and_appends_nothing() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
-    let (url, classifier) = serve_classifier().await;
+    let (url, annotator) = serve_annotator().await;
     let runtime = open_runtime(&dir, &http_policy(&url)).await;
     let baseline = audit_len(&runtime);
 
     for failure in [
         Answer::Down,
         Answer::Malformed,
-        // A missing answer, a foreign version, an undeclared rank, an undeclared result, and
-        // an extra envelope key are exactly as unusable as transport failures.
+        // A missing answer, a foreign version, an undeclared rank, a missing mandatory
+        // array, an unknown key, and a null leaf are exactly as unusable as transport
+        // failures: the mandate is closed and the decode is strict.
         Answer::Wire(serde_json::json!({ "version": 1 })),
-        Answer::Wire(serde_json::json!({ "version": 7, "answer": { "delta.trust": "trusted" } })),
-        Answer::Wire(serde_json::json!({ "version": 1, "answer": { "delta.trust": "invented" } })),
-        Answer::Wire(
-            serde_json::json!({ "version": 1, "answer": { "delta.trust": "trusted", "delta.audience": "public" } }),
-        ),
-        Answer::Wire(serde_json::json!({ "version": 1, "answer": { "delta.trust": "trusted" }, "context": {} })),
+        Answer::Wire(serde_json::json!({
+            "version": 7,
+            "answer": { "delta": {}, "requires": { "history": [], "attention": [] }, "emits": [] },
+        })),
+        Answer::Wire(serde_json::json!({
+            "version": 1,
+            "answer": { "delta": { "trust": "invented" }, "requires": { "history": [], "attention": [] }, "emits": [] },
+        })),
+        Answer::Wire(serde_json::json!({
+            "version": 1,
+            "answer": { "delta": {}, "requires": { "attention": [] }, "emits": [] },
+        })),
+        Answer::Wire(serde_json::json!({
+            "version": 1,
+            "answer": { "delta": {}, "requires": { "history": [], "attention": [] }, "emits": [], "context": {} },
+        })),
+        Answer::Wire(serde_json::json!({
+            "version": 1,
+            "answer": { "delta": { "trust": null }, "requires": { "history": [], "attention": [] }, "emits": [] },
+        })),
     ] {
-        classifier.set("classifier", failure);
+        annotator.set("classifier", failure);
         let decision = propose(&runtime, fetch("https://a.example")).await;
         let HookDecision::Refuse { detail } = decision else {
-            panic!("a resolver failure is an operational refusal, got {decision:?}");
+            panic!("an annotation failure is an operational refusal, got {decision:?}");
         };
         assert!(
             detail.contains("classifier"),
-            "the refusal names the resolver: {detail}"
+            "the refusal names the annotator: {detail}"
         );
         assert_eq!(
             audit_len(&runtime),
@@ -487,10 +491,7 @@ async fn every_resolver_failure_refuses_the_hook_and_appends_nothing() {
 
     // The deployment recovering makes the same proposal succeed: nothing durable recorded
     // the failures, and the fresh invocation consults again.
-    classifier.set(
-        "classifier",
-        Answer::Wire(serde_json::json!({ "version": 1, "answer": { "delta.trust": "trusted" } })),
-    );
+    annotator.set("classifier", Answer::Wire(produced("trusted")));
     assert_eq!(
         propose(&runtime, fetch("https://a.example")).await,
         HookDecision::AllowCall { spawn: None }
@@ -498,82 +499,7 @@ async fn every_resolver_failure_refuses_the_hook_and_appends_nothing() {
     assert!(audit_len(&runtime) > baseline);
 }
 
-fn two_resolver_policy(url: &str) -> String {
-    format!(
-        r#"
-[policy]
-version = 1
-
-[[policy.dynamic_resolver]]
-name = "alpha"
-returns = ["delta.trust"]
-[[policy.dynamic_resolver]]
-name = "beta"
-inputs = ["subject"]
-returns = ["requires.trust"]
-
-[[policy.tool]]
-name = "fetch"
-description = "Fetches one URL and returns its body."
-parameters = {{ type = "object", properties = {{ url = {{ type = "string" }} }}, required = ["url"] }}
-uses = [
-  {{ resolver = "alpha" }},
-  {{ resolver = "beta", inputs = {{ subject = "$tool_call.arguments.url" }} }},
-]
-
-[externals]
-timeout_ms = 5000
-max_body_bytes = 65536
-
-[externals.dynamic.alpha]
-url = "{url}"
-
-[externals.dynamic.beta]
-url = "{url}"
-"#
-    )
-}
-
-#[tokio::test]
-async fn independent_consults_overlap_and_completion_order_never_moves_the_record() {
-    let run = |slow: &'static str| async move {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let (url, classifier) = serve_classifier().await;
-        classifier.set(
-            "alpha",
-            Answer::Wire(serde_json::json!({ "version": 1, "answer": { "delta.trust": "trusted" } })),
-        );
-        classifier.set(
-            "beta",
-            Answer::Wire(serde_json::json!({ "version": 1, "answer": { "requires.trust": "suspicious" } })),
-        );
-        // Both consults sleep: sequential execution would cost ~600ms, concurrent ~300ms.
-        classifier.delay("alpha", Duration::from_millis(300));
-        classifier.delay("beta", Duration::from_millis(300));
-        classifier.delay(slow, Duration::from_millis(320));
-        let runtime = open_runtime(&dir, &two_resolver_policy(&url)).await;
-        let started = Instant::now();
-        assert_eq!(
-            propose(&runtime, fetch("https://a.example")).await,
-            HookDecision::AllowCall { spawn: None }
-        );
-        let elapsed = started.elapsed();
-        // Concurrent: the batch costs its slowest member, not the sum of both.
-        assert!(
-            elapsed < Duration::from_millis(550),
-            "the two consults did not overlap: {elapsed:?}"
-        );
-        ran(&runtime, fetch("https://a.example")).await;
-        format!("{:?}", runtime.audit(&root()).expect("the audit reads"))
-    };
-    let alpha_slow = run("alpha").await;
-    let beta_slow = run("beta").await;
-    assert_eq!(
-        alpha_slow, beta_slow,
-        "which consult finished first must not move the recorded trajectory"
-    );
-}
-
+#[cfg(unix)]
 fn fake_claude(dir: &std::path::Path, script: &str) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let path = dir.join("fake-claude");
@@ -582,22 +508,22 @@ fn fake_claude(dir: &std::path::Path, script: &str) -> std::path::PathBuf {
     path
 }
 
+#[cfg(unix)]
 fn builtin_policy(command: &std::path::Path, extra: &str) -> String {
     format!(
         r#"
 [policy]
 version = 1
 
-[[policy.dynamic_resolver]]
+[[policy.annotator]]
 name = "classifier"
 builtin = "claude-code"
-returns = ["delta.trust"]
 
 [[policy.tool]]
 name = "fetch"
 description = "Fetches one URL and returns its body."
 parameters = {{ type = "object", properties = {{ url = {{ type = "string" }} }}, required = ["url"] }}
-uses = [{{ resolver = "classifier" }}]
+annotator = "classifier"
 
 [externals]
 timeout_ms = 5000
@@ -611,6 +537,10 @@ command = "{command}"
     )
 }
 
+#[cfg(unix)]
+const NEUTRAL_STRUCTURED: &str = r#"printf '%s' '{"structured_output":{"delta":{"trust":"trusted"},"requires":{"history":[],"attention":[]},"emits":[]}}'"#;
+
+#[cfg(unix)]
 #[tokio::test]
 async fn the_claude_builtin_runs_the_configured_command_and_model() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
@@ -618,7 +548,7 @@ async fn the_claude_builtin_runs_the_configured_command_and_model() {
     let command = fake_claude(
         dir.path(),
         &format!(
-            "printf '%s\\n' \"$@\" > {args}\ncat > /dev/null\nprintf '%s' '{{\"structured_output\":{{\"delta.trust\":\"trusted\"}}}}'",
+            "printf '%s\\n' \"$@\" > {args}\ncat > /dev/null\n{NEUTRAL_STRUCTURED}",
             args = args_path.display(),
         ),
     );
@@ -650,6 +580,7 @@ async fn the_claude_builtin_runs_the_configured_command_and_model() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn the_builtin_timeout_is_its_own_budget_and_a_slow_consult_refuses_fast() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
@@ -665,77 +596,43 @@ async fn the_builtin_timeout_is_its_own_budget_and_a_slow_consult_refuses_fast()
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn concurrent_claude_consults_are_gated_by_the_runtime_permit_pool() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
-    // One destination has one owner, so a tool takes at most five resolvers, one per result.
-    // Five 300ms consults through a four-permit gate are still two waves. Each resolver
-    // declares a different result, so the fake answers by the declaration it finds on the
-    // last line of its system prompt.
-    let command = fake_claude(
-        dir.path(),
-        r#"while [ $# -gt 0 ]; do
-  if [ "$1" = "--system-prompt" ]; then shift; declaration=$(printf '%s\n' "$1" | tail -n 1); fi
-  shift
-done
-cat > /dev/null
-sleep 0.3
-case "$declaration" in
-  *'"delta.trust"'*) printf '%s' '{"structured_output":{"delta.trust":"trusted"}}' ;;
-  *'"delta.audience"'*) printf '%s' '{"structured_output":{"delta.audience":"public"}}' ;;
-  *'"requires.trust"'*) printf '%s' '{"structured_output":{"requires.trust":"suspicious"}}' ;;
-  *'"requires.audience"'*) printf '%s' '{"structured_output":{"requires.audience":{"within":"public"}}}' ;;
-  *) printf '%s' '{"structured_output":{"requires.attention":[]}}' ;;
-esac
-"#,
-    );
-    let results = [
-        "delta.trust",
-        "delta.audience",
-        "requires.trust",
-        "requires.audience",
-        "requires.attention",
-    ];
-    let resolvers: String = results
-        .iter()
-        .enumerate()
-        .map(|(index, result)| {
-            format!(
-                "[[policy.dynamic_resolver]]\nname = \"classifier-{index}\"\nbuiltin = \"claude-code\"\nreturns = [\"{result}\"]\n"
-            )
-        })
-        .collect();
-    let bindings: Vec<String> = (0..results.len())
-        .map(|index| format!("{{ resolver = \"classifier-{index}\" }}"))
-        .collect();
-    let config = format!(
-        r#"
-[policy]
-version = 1
+    // A call owes one annotation, so concurrency comes from trajectories: five roots each
+    // propose one annotated call at once. Five 300ms consults through a four-permit gate
+    // are still two waves.
+    let command = fake_claude(dir.path(), &format!("cat > /dev/null\nsleep 0.3\n{NEUTRAL_STRUCTURED}"));
+    let runtime = open_runtime(&dir, &builtin_policy(&command, "")).await;
 
-{resolvers}
-[[policy.tool]]
-name = "fetch"
-description = "Fetches one URL and returns its body."
-parameters = {{ type = "object", properties = {{ url = {{ type = "string" }} }}, required = ["url"] }}
-uses = [{bindings}]
-
-[externals]
-timeout_ms = 10000
-max_body_bytes = 65536
-
-[externals.claude_code]
-command = "{command}"
-"#,
-        bindings = bindings.join(", "),
-        command = command.display(),
-    );
-    let runtime = open_runtime(&dir, &config).await;
     let started = Instant::now();
-    assert_eq!(
-        propose(&runtime, fetch("https://a.example")).await,
-        HookDecision::AllowCall { spawn: None }
-    );
+    let mut proposals = Vec::new();
+    for index in 0..5 {
+        let root = TrajectoryId(format!("annotators-permit-{index}"));
+        assert_eq!(
+            hooks::handle(&runtime, HookEvent::SessionStart { root: root.clone() }).await,
+            HookDecision::Ack
+        );
+        let runtime = Arc::clone(&runtime);
+        proposals.push(tokio::spawn(async move {
+            hooks::handle(
+                &runtime,
+                HookEvent::ToolCall {
+                    actor: Actor { root, child: None },
+                    call: fetch("https://a.example"),
+                    spawn: false,
+                },
+            )
+            .await
+        }));
+    }
+    for proposal in proposals {
+        assert_eq!(
+            proposal.await.expect("the proposal task completes"),
+            HookDecision::AllowCall { spawn: None }
+        );
+    }
     assert!(
         started.elapsed() >= Duration::from_millis(450),
         "five subprocess consults must not all run at once: {:?}",
@@ -769,39 +666,38 @@ async fn serve_ollama(content: &'static str) -> (String, Arc<Mutex<Vec<serde_jso
     (serve(router).await, requests)
 }
 
-/// A resolver that names `builtin = "llm"` on its declaration is served by the
-/// deployment's `[externals.llm]` profile and by nothing under `[externals.dynamic]`: the
-/// endpoint bound for another resolver sees no request.
+/// An annotator that names `builtin = "llm"` on its declaration is served by the
+/// deployment's `[externals.llm]` profile and by nothing under `[externals.annotators]`:
+/// the endpoint bound for another annotator sees no request.
 #[tokio::test]
-async fn a_declared_llm_resolver_consults_the_llm_profile_and_no_binding() {
+async fn a_declared_llm_annotator_consults_the_llm_profile_and_no_binding() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
-    let (endpoint_url, classifier) = serve_classifier().await;
-    let (llm_url, llm_requests) = serve_ollama("{\"delta.trust\":\"trusted\"}").await;
+    let (endpoint_url, annotator) = serve_annotator().await;
+    let (llm_url, llm_requests) =
+        serve_ollama(r#"{"delta":{"trust":"trusted"},"requires":{"history":[],"attention":[]},"emits":[]}"#).await;
     let config = format!(
         r#"
 [policy]
 version = 1
 
-[[policy.dynamic_resolver]]
+[[policy.annotator]]
 name = "classifier"
 builtin = "llm"
-returns = ["delta.trust"]
 
-[[policy.dynamic_resolver]]
+[[policy.annotator]]
 name = "other"
-returns = ["delta.audience"]
 
 [[policy.tool]]
 name = "fetch"
 description = "Fetches one URL and returns its body."
 parameters = {{ type = "object", properties = {{ url = {{ type = "string" }} }}, required = ["url"] }}
-uses = [{{ resolver = "classifier" }}]
+annotator = "classifier"
 
 [externals]
 timeout_ms = 5000
 max_body_bytes = 65536
 
-[externals.dynamic.other]
+[externals.annotators.other]
 url = "{endpoint_url}"
 
 [externals.llm]
@@ -819,27 +715,25 @@ url = "{llm_url}"
     assert_eq!(consults.len(), 1, "the profile answered the one consult");
     assert_eq!(consults[0]["model"], "m", "the profile's model is the one consulted");
     assert!(
-        classifier.requests().is_empty(),
-        "the declared resolver never reached a dynamic binding"
+        annotator.requests().is_empty(),
+        "the declared annotator never reached an annotator binding"
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
-async fn a_builtin_resolver_never_touches_an_http_endpoint() {
+async fn a_builtin_annotator_never_touches_an_http_endpoint() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
-    let (url, classifier) = serve_classifier().await;
-    let command = fake_claude(
-        dir.path(),
-        "cat > /dev/null\nprintf '%s' '{\"structured_output\":{\"delta.trust\":\"trusted\"}}'",
-    );
+    let (url, annotator) = serve_annotator().await;
+    let command = fake_claude(dir.path(), &format!("cat > /dev/null\n{NEUTRAL_STRUCTURED}"));
     let config = builtin_policy(&command, "")
         .replace(
             "[[policy.tool]]",
-            "[[policy.dynamic_resolver]]\nname = \"other\"\nreturns = [\"delta.audience\"]\n\n[[policy.tool]]",
+            "[[policy.annotator]]\nname = \"other\"\n\n[[policy.tool]]",
         )
         .replace(
             "[externals.claude_code]",
-            &format!("[externals.dynamic.other]\nurl = \"{url}\"\n\n[externals.claude_code]"),
+            &format!("[externals.annotators.other]\nurl = \"{url}\"\n\n[externals.claude_code]"),
         );
     let runtime = open_runtime(&dir, &config).await;
     assert_eq!(
@@ -847,7 +741,92 @@ async fn a_builtin_resolver_never_touches_an_http_endpoint() {
         HookDecision::AllowCall { spawn: None }
     );
     assert!(
-        classifier.requests().is_empty(),
-        "the builtin resolver answered; the endpoint saw no request"
+        annotator.requests().is_empty(),
+        "the builtin annotator answered; the endpoint saw no request"
+    );
+}
+
+/// The neutral annotation: no label change, no requirements, no effects.
+fn neutral() -> serde_json::Value {
+    serde_json::json!({
+        "version": 1,
+        "answer": { "delta": {}, "requires": { "history": [], "attention": [] }, "emits": [] }
+    })
+}
+
+fn released_effects(runtime: &Runtime) -> Vec<Vec<String>> {
+    runtime
+        .audit(&root())
+        .expect("the audit reads")
+        .iter()
+        .filter_map(|entry| match &entry.event {
+            AuditEvent::Released { tool, effects, .. } if tool == "fetch" => Some(effects.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_neutral_annotation_admits_the_call_and_records_no_effects() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, annotator) = serve_annotator().await;
+    annotator.set("classifier", Answer::Wire(neutral()));
+    let runtime = open_runtime(&dir, &http_policy(&url)).await;
+
+    assert_eq!(
+        propose(&runtime, fetch("https://a.example")).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    ran(&runtime, fetch("https://a.example")).await;
+    assert_eq!(
+        released_effects(&runtime),
+        vec![Vec::<String>::new()],
+        "an annotation that answers the identity admits the call and commits nothing"
+    );
+}
+
+#[tokio::test]
+async fn a_produced_history_requirement_gates_on_the_effects_a_prior_release_committed() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, annotator) = serve_annotator().await;
+    // Every produced annotation emits `egress` and requires that no prior `egress` was
+    // committed: the first release succeeds and records the effect, and that record is
+    // exactly what refuses the second call.
+    annotator.set(
+        "classifier",
+        Answer::Wire(serde_json::json!({
+            "version": 1,
+            "answer": {
+                "delta": {},
+                "requires": { "history": [{ "excludes": "egress" }], "attention": [] },
+                "emits": ["egress"],
+            }
+        })),
+    );
+    let config = http_policy(&url).replace(
+        r#"name = "classifier"
+audiences = ["internal"]"#,
+        r#"name = "classifier"
+audiences = ["internal"]
+effects = ["egress"]"#,
+    );
+    let runtime = open_runtime(&dir, &config).await;
+
+    assert_eq!(
+        propose(&runtime, fetch("https://a.example")).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    ran(&runtime, fetch("https://a.example")).await;
+    assert_eq!(released_effects(&runtime), vec![vec!["egress".to_string()]]);
+
+    let decision = propose(&runtime, fetch("https://b.example")).await;
+    assert!(
+        matches!(decision, HookDecision::DenyCall { .. }),
+        "the committed egress violates the produced no-prior requirement: {decision:?}"
+    );
+    assert_eq!(
+        released_effects(&runtime),
+        vec![vec!["egress".to_string()]],
+        "the refused call released nothing"
     );
 }

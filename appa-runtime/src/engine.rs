@@ -38,15 +38,16 @@
 use appa_engine::candidate::DerivedVia;
 use appa_engine::check::UnestablishedFact;
 use appa_engine::contract::{
-    PinnedMembership, PinnedRequirementCast, PinnedToolResolution, RequiredAudience, RequirementSlot, ResolverReturn,
-    ToolResolverUse,
+    AnnotationMandate, AudienceDelta, AudienceRequirement, Delta, HistoryRequirement, LabelRequirements,
+    PinnedAnnotation, PinnedMembership, PinnedRequirementCast, RecipientSpec, RequirementSlot, Requires,
+    ToolAnnotation, ToolDeclaration,
 };
 pub(crate) use appa_engine::engine::ForkStatus;
 use appa_engine::engine::{Engine, EngineError};
 use appa_engine::execute::{AuthorityEvidence, AuthorityReview};
-use appa_engine::fact::{BoundaryKind, CloseOutcome, EffectSet, Fact, ReturnDerivation};
-use appa_engine::groups::GroupExpansion;
-use appa_engine::label::{Audience, Dimension, EstablishedLabel, Label, PartialLabel, ReaderId, Trust};
+use appa_engine::fact::{BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ReturnDerivation};
+use appa_engine::groups::{DeclaredAudience, GroupExpansion};
+use appa_engine::label::{Audience, Dim, Dimension, EstablishedLabel, Label, PartialLabel, ReaderId, Trust};
 use appa_engine::names::{CastName, GroupName, MarkName};
 use appa_engine::plan::{ExecutableRemedyPlan, PlanId, PlannedBlock, RemedyPlan, RequiredRuling};
 use appa_engine::profile::PolicyFileKey as EnginePolicyFileKey;
@@ -75,8 +76,9 @@ use std::collections::BTreeMap;
 use crate::api::OutcomeBody;
 pub(crate) use crate::api::{OfferId, ProposedCall, SpawnBinding, ToolOutcome, TrajectoryId};
 use crate::consult::{
-    AuthorityAnswer, AuthorityArtifact, AuthorityDeclaration, CastAnswer, CastDeclaration, CastTool, DynamicAnswer,
-    DynamicDeclaration, Requirement, Ruling, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint, WireAudience,
+    AnnotationAnswer, AnnotationDeclaration, AuthorityAnswer, AuthorityArtifact, AuthorityDeclaration, CastAnswer,
+    CastDeclaration, CastTool, DynamicAnswer, DynamicDeclaration, HistoryEntry, Requirement, Ruling, SanitizerArtifact,
+    SanitizerDeclaration, SanitizerPoint, WireAudience,
 };
 
 /// One fresh 256-bit random number per act that can surface offers; the
@@ -121,11 +123,14 @@ pub enum ExternalRequest {
         declaration: SanitizerDeclaration,
         artifact: SanitizerArtifact,
     },
-    ToolResolution {
-        uses: ToolResolverUse,
-        /// Exactly what this use selected: the value the request carries as `args`.
+    /// Produce the complete annotation for one proposed call of an Annotated tool. The
+    /// request is keyed on the call's canonical digest: any rewrite is a new question.
+    Annotation {
+        annotator: String,
+        call: appa_engine::value::CanonicalDigest,
+        declaration: AnnotationDeclaration,
+        /// The consult artifact: the complete call, or one value per declared input.
         args: serde_json::Value,
-        declaration: DynamicDeclaration,
     },
     Membership {
         resolver: String,
@@ -263,12 +268,12 @@ pub enum ExternalEvidence {
         source: RawResultDigest,
         derived: Option<String>,
     },
-    ToolResolution {
-        resolver: String,
-        /// The `args` the classifier answered for, by digest. Evidence matches that value only,
-        /// so two calls sharing a resolver never take each other's answer.
-        args: appa_engine::contract::ResolverArgsDigest,
-        answer: DynamicAnswer,
+    /// The annotation produced for one exact call, by canonical digest: evidence for a
+    /// rewritten call never matches, so every rewrite is annotated afresh.
+    Annotation {
+        annotator: String,
+        call: appa_engine::value::CanonicalDigest,
+        answer: AnnotationAnswer,
     },
     Membership {
         resolver: String,
@@ -310,6 +315,9 @@ impl ExternalEvidence {
                 ExternalEvidence::RequirementCast { call: mine, .. },
                 ExternalEvidence::RequirementCast { call: theirs, .. },
             ) => mine == theirs,
+            (ExternalEvidence::Annotation { call: mine, .. }, ExternalEvidence::Annotation { call: theirs, .. }) => {
+                mine == theirs
+            }
             _ => false,
         }
     }
@@ -645,11 +653,20 @@ pub(crate) fn opened_under(log: &Log) -> Option<Opened> {
 /// [`PolicyEngine`], which a configuration reload does not change.
 pub struct RuntimeEngine {
     engine: Engine,
+    /// The consult input mapping per registered `[[annotator]]`, policy-compiled and
+    /// runtime-owned: the engine never sees it, the runtime builds every artifact from it.
+    annotator_inputs: BTreeMap<String, BTreeMap<String, appa_policy::ToolCallSource>>,
 }
 
 impl RuntimeEngine {
-    pub fn new(engine: Engine) -> RuntimeEngine {
-        RuntimeEngine { engine }
+    pub fn new(
+        engine: Engine,
+        annotator_inputs: BTreeMap<String, BTreeMap<String, appa_policy::ToolCallSource>>,
+    ) -> RuntimeEngine {
+        RuntimeEngine {
+            engine,
+            annotator_inputs,
+        }
     }
 
     /// The opening of a fresh root: this engine's opening batch bound to the
@@ -1081,7 +1098,7 @@ impl RuntimeEngine {
             });
         };
         let CallAnswers {
-            tool_resolutions,
+            annotation,
             memberships,
             requirement_cast,
         } = match self.answers_for(&views, &resolved, evidence) {
@@ -1092,7 +1109,7 @@ impl RuntimeEngine {
         let proposed = CoreProposedCall {
             tool: ToolName::new(call.tool.clone()),
             arguments: call.arguments.get().as_bytes().to_vec(),
-            tool_resolutions,
+            annotation,
             memberships,
             requirement_cast,
         };
@@ -1385,34 +1402,48 @@ impl RuntimeEngine {
                     Ok(derived) => derived,
                     Err(next) => return Ok(next),
                 };
-                // A rewrite whose arguments select another ordered contract is a new call under
-                // it: that contract's resolvers and placeholder groups are consulted about the
-                // rewritten arguments before the engine judges it. A rewrite that stays in its
-                // contract carries the call's own answers, and a derivation the engine cannot
-                // mint a call from is the engine's to refuse.
-                // A requirement cast judged the call as proposed, never a rewrite of it, so the
-                // input stage carries no requirement answer: the engine refuses a rewrite into
-                // a contract that leaves a slot Unknown.
-                let (tool_resolutions, memberships) = match self
+                // A rewrite whose arguments select another ordered declaration is a new call
+                // under it: that declaration's annotation and placeholder groups are gathered
+                // about the rewritten arguments before the engine judges it. A rewrite that
+                // stays in its declaration carries no membership pins (the engine's
+                // unchanged-argument rule), but an Annotated declaration is still annotated
+                // afresh — the digest is the annotation's key, so a sanitizer rewrite always
+                // re-annotates. A derivation the engine cannot mint a call from is the
+                // engine's to refuse. A requirement cast judged the call as proposed, never a
+                // rewrite of it, so the input stage carries no requirement answer: the engine
+                // refuses a rewrite into a contract that leaves a slot Unknown.
+                let (annotation, memberships) = match self
                     .engine
                     .resolve_call(call.tool().clone(), derived.as_str().as_bytes())
                 {
-                    Ok(rewritten) if rewritten.contract_id() != call.contract_id() => {
+                    Ok(rewritten) if rewritten.declaration_id() != call.declaration_id() => {
                         match self.answers_for(&views, &rewritten, evidence) {
-                            Ok(answers) => (answers.tool_resolutions, answers.memberships),
+                            Ok(answers) => (answers.annotation, answers.memberships),
                             Err(Resolution::Consult(requests)) => {
                                 return Ok(EngineDecision::deliver(Next::ResolveExternal(requests)));
                             }
                             Err(Resolution::Feedback(text)) => return Ok(no_answer(text)),
                         }
                     }
-                    Ok(_) | Err(_) => (Vec::new(), Vec::new()),
+                    Ok(rewritten) => match self.engine.registry().declaration(&rewritten) {
+                        Some(declaration @ ToolDeclaration::Annotated { .. }) => {
+                            match self.annotation_for(&views, declaration, &rewritten, evidence) {
+                                Ok(annotation) => (Some(annotation), Vec::new()),
+                                Err(Resolution::Consult(requests)) => {
+                                    return Ok(EngineDecision::deliver(Next::ResolveExternal(requests)));
+                                }
+                                Err(Resolution::Feedback(text)) => return Ok(no_answer(text)),
+                            }
+                        }
+                        _ => (None, Vec::new()),
+                    },
+                    Err(_) => (None, Vec::new()),
                 };
                 OfferOutcome::Derived(Evidence::Rewrite {
                     sanitizer,
                     source,
                     derived,
-                    tool_resolutions,
+                    annotation,
                     memberships,
                 })
             }
@@ -1721,32 +1752,43 @@ impl RuntimeEngine {
         Ok(EngineDecision { append, then })
     }
 
-    /// Every answer a call's contract declares, from the evidence gathered so far, or the
-    /// consults still owed: the resolvers it uses and the placeholder groups its arguments name.
-    /// Every answer the call must carry before it is proposed: its tool-level resolver pins,
-    /// its membership pins, and the cast answer for the requirement slots its contract leaves
-    /// Unknown. Every consult still owed goes out in one round; feedback ends the proposal.
+    /// Every answer a call must carry before it is proposed, from the evidence gathered so
+    /// far, or the consults still owed: the produced annotation for an Annotated declaration,
+    /// the membership pins for the placeholder groups a declared contract's arguments name,
+    /// and the cast answer for the requirement slots it leaves Unknown. Every consult still
+    /// owed goes out in one round; feedback ends the proposal.
     fn answers_for(
         &self,
         views: &Views,
         resolved: &ResolvedCall,
         evidence: &[ExternalEvidence],
     ) -> Result<CallAnswers, Resolution> {
-        let contract = self
+        let declaration = self
             .engine
             .registry()
-            .contract(resolved)
-            .expect("a resolved call names its registered contract");
+            .declaration(resolved)
+            .expect("a resolved call names its registered declaration");
         let mut requests = Vec::new();
-        let tools = gather(
-            &mut requests,
-            self.tool_resolutions_for(views, contract, resolved, evidence),
-        )?;
-        let memberships = gather(&mut requests, self.memberships_for(contract, resolved, evidence))?;
-        let requirement = gather(&mut requests, self.requirement_cast_for(contract, resolved, evidence))?;
-        match (tools, memberships, requirement) {
-            (Some(tool_resolutions), Some(memberships), Some(requirement_cast)) => Ok(CallAnswers {
-                tool_resolutions,
+        // An Annotated declaration owes exactly one thing: its produced annotation, which is
+        // complete, concrete, and literal — so it carries no membership pins and leaves no
+        // requirement slot for a cast to answer.
+        let (annotation, memberships, requirement) = match declaration {
+            ToolDeclaration::Declared(contract) => {
+                let memberships = gather(&mut requests, self.memberships_for(contract, resolved, evidence))?;
+                let requirement = gather(&mut requests, self.requirement_cast_for(contract, resolved, evidence))?;
+                (Some(None), memberships, requirement)
+            }
+            ToolDeclaration::Annotated { .. } => {
+                let annotation = gather(
+                    &mut requests,
+                    self.annotation_for(views, declaration, resolved, evidence),
+                )?;
+                (annotation.map(Some), Some(Vec::new()), Some(None))
+            }
+        };
+        match (annotation, memberships, requirement) {
+            (Some(annotation), Some(memberships), Some(requirement_cast)) => Ok(CallAnswers {
+                annotation,
                 memberships,
                 requirement_cast,
             }),
@@ -1770,7 +1812,7 @@ impl RuntimeEngine {
     /// continues the cascade past its cast, and a cascade that runs dry is a denial.
     fn requirement_cast_for(
         &self,
-        contract: &appa_engine::contract::ToolContract,
+        contract: &ToolAnnotation,
         resolved: &ResolvedCall,
         evidence: &[ExternalEvidence],
     ) -> Result<Option<PinnedRequirementCast>, Resolution> {
@@ -1850,10 +1892,10 @@ impl RuntimeEngine {
         }
     }
 
-    /// What a resolver cast is told to answer: the Unknown slots as declared returns.
+    /// What a requirement cast is told to answer: the Unknown slots as declared returns.
     fn requirement_declaration(&self, slots: &[RequirementSlot]) -> DynamicDeclaration {
-        let returns = slots.iter().map(|slot| slot.resolver_return()).collect();
-        self.dynamic_declaration(&returns)
+        let returns = slots.iter().map(|slot| slot.wire_name().to_string()).collect();
+        self.dynamic_declaration(returns)
     }
 
     /// The pin a verdict yields, or `None` where the answer cannot be read against the policy:
@@ -1889,106 +1931,147 @@ impl RuntimeEngine {
         PinnedRequirementCast::from_answer(verdict.cast.clone(), call, answer)
     }
 
-    fn tool_resolutions_for(
+    /// The pinned annotation an Annotated declaration owes: a pin standing on an open offer
+    /// or unspent approval for this exact digest, the evidence the Annotator gave for it, or
+    /// the one consult still owed. The digest is the key: any rewrite is annotated afresh.
+    fn annotation_for(
         &self,
         views: &Views,
-        contract: &appa_engine::contract::ToolContract,
+        declaration: &ToolDeclaration,
         resolved: &ResolvedCall,
         evidence: &[ExternalEvidence],
-    ) -> Result<Vec<PinnedToolResolution>, Resolution> {
-        if contract.uses.is_empty() {
-            return Ok(Vec::new());
+    ) -> Result<PinnedAnnotation, Resolution> {
+        let annotator = declaration
+            .annotator()
+            .expect("only an Annotated declaration owes an annotation");
+        // A produced annotation pinned to this call in an act the trajectory still has
+        // prepared — an open offer, an unspent approval — stands: the re-proposal spells the
+        // call the act was prepared for, and an Annotator that may answer differently twice
+        // is not asked twice.
+        if let Some(pin) = views.pinned_annotation(resolved) {
+            return Ok(pin.clone());
         }
-        let chain = self.engine.registry().trust_chain();
-        // The arguments the consult carries are also the key resolver evidence is matched
-        // against: an answer given for other arguments is not evidence for this call, and
-        // the use consults again.
-        let mut pins = Vec::new();
-        let mut requests = Vec::new();
-        for uses in &contract.uses {
-            let args = contract.resolver_args(uses, resolved.tool(), resolved.arguments());
-            let asked = contract.resolver_args_digest(uses, resolved.tool(), resolved.arguments());
-            // A classification pinned to this call in an act the trajectory still has
-            // prepared — an open offer, an unspent approval — stands: the re-proposal spells
-            // the call the act was prepared for, and a resolver that may answer differently
-            // twice is not asked twice. The record outranks evidence for the same arguments,
-            // so one standing act never carries two answers for one subject.
-            if let Some(pin) = views.pinned_tool_resolution(resolved, uses, asked) {
-                pins.push(pin.clone());
-                continue;
-            }
-            let answer = evidence.iter().find_map(|entry| match entry {
-                ExternalEvidence::ToolResolution {
-                    resolver,
-                    args: answered_for,
-                    answer,
-                } if resolver == uses.resolver.as_str() && *answered_for == asked => Some(answer.clone()),
-                _ => None,
-            });
-            match answer {
-                None => requests.push(ExternalRequest::ToolResolution {
-                    uses: uses.clone(),
-                    args,
-                    declaration: self.dynamic_declaration(&uses.returns),
-                }),
-                Some(answer) => {
-                    let rank = |name: &str, what: &str| {
-                        chain.rank_of(name).ok_or_else(|| {
-                            Resolution::Feedback(format!(
-                                "[appa] {}: dynamic resolver {} returned an unknown {what}",
-                                resolved.tool().as_str(),
-                                uses.resolver.as_str()
-                            ))
-                        })
-                    };
-                    let trust = answer
-                        .trust
-                        .as_deref()
-                        .map(|name| rank(name, "trust rank"))
-                        .transpose()?;
-                    let audience = answer.audience.as_ref().map(resolved_audience);
-                    let required_trust = answer
-                        .required_trust
-                        .as_deref()
-                        .map(|name| rank(name, "required trust rank"))
-                        .transpose()?;
-                    let required_audience = answer.required_audience.as_ref().map(|required| RequiredAudience {
-                        includes: required.includes.as_ref().map(resolved_audience),
-                        cap: required.cap.as_ref().map(resolved_audience),
-                    });
-                    let attention = answer
-                        .attention
-                        .map(|marks| marks.into_iter().map(MarkName::new).collect());
-                    match PinnedToolResolution::from_answer(
-                        uses.clone(),
-                        asked,
-                        trust,
-                        audience,
-                        required_trust,
-                        required_audience,
-                        attention,
-                    ) {
-                        Some(pin) => pins.push(pin),
-                        None => {
-                            return Err(Resolution::Feedback(format!(
-                                "[appa] {}: dynamic resolver {} returned malformed fields",
-                                resolved.tool().as_str(),
-                                uses.resolver.as_str()
-                            )));
-                        }
-                    }
-                }
-            }
-        }
-        if !requests.is_empty() {
-            return Err(Resolution::Consult(requests));
-        }
-        Ok(pins)
+        let digest = resolved.digest();
+        let answer = evidence.iter().find_map(|entry| match entry {
+            ExternalEvidence::Annotation {
+                annotator: answered_by,
+                call,
+                answer,
+            } if answered_by == annotator.as_str() && *call == digest => Some(answer),
+            _ => None,
+        });
+        let Some(answer) = answer else {
+            let inputs = self
+                .annotator_inputs
+                .get(annotator.as_str())
+                .expect("the deployment registers every annotator the policy declares");
+            return Err(Resolution::Consult(vec![ExternalRequest::Annotation {
+                annotator: annotator.as_str().to_string(),
+                call: digest,
+                declaration: self.annotation_declaration(annotator, inputs),
+                args: annotation_args(inputs, declaration, resolved),
+            }]));
+        };
+        Ok(PinnedAnnotation::new(
+            self.produced_annotation(declaration, resolved, answer),
+            AnnotationMandate::Annotator(annotator.clone()),
+        ))
     }
 
-    /// What one dynamic consult declares: the results to answer and the policy's vocabulary the
-    /// answer may use — a resolver binding's own returns, or a requirement cast's asked slots.
-    fn dynamic_declaration(&self, returns: &std::collections::BTreeSet<ResolverReturn>) -> DynamicDeclaration {
+    /// What one annotation consult declares: the Annotator's resolved mandate vocabulary and
+    /// the input names its artifact carries.
+    fn annotation_declaration(
+        &self,
+        annotator: &appa_engine::names::AnnotatorName,
+        inputs: &BTreeMap<String, appa_policy::ToolCallSource>,
+    ) -> AnnotationDeclaration {
+        let registry = self.engine.registry();
+        let chain = registry.trust_chain();
+        let mandate = registry
+            .annotator_mandate(annotator)
+            .expect("declarations name only registered annotators");
+        AnnotationDeclaration {
+            inputs: inputs.keys().cloned().collect(),
+            trust_ranks: mandate
+                .trust_ranks()
+                .filter_map(|trust| chain.name_of(trust).map(str::to_string))
+                .collect(),
+            audiences: mandate.audiences().map(|reader| reader.as_str().to_string()).collect(),
+            attention_marks: mandate.marks().map(|mark| mark.as_str().to_string()).collect(),
+            effects: mandate.effects().map(|kind| kind.as_str().to_string()).collect(),
+        }
+    }
+
+    /// The complete concrete annotation a decoded answer produces for one call: the
+    /// declaration's own metadata, the answer's semantics. `from_wire` confined every leaf
+    /// to the declared mandate vocabulary, so reading it back against the policy cannot
+    /// fail.
+    fn produced_annotation(
+        &self,
+        declaration: &ToolDeclaration,
+        resolved: &ResolvedCall,
+        answer: &AnnotationAnswer,
+    ) -> ToolAnnotation {
+        let chain = self.engine.registry().trust_chain();
+        let rank = |name: &str| {
+            chain
+                .rank_of(name)
+                .expect("a decoded annotation answer names declared ranks")
+        };
+        let declared = |audience: &WireAudience| match audience {
+            WireAudience::Public => DeclaredAudience::Public,
+            WireAudience::Readers(readers) => DeclaredAudience::restricted(readers.iter().map(ReaderId::new)),
+        };
+        let mut requirements = Vec::new();
+        if let Some(required) = &answer.required_audience {
+            if let Some(includes) = &required.includes {
+                requirements.push(AudienceRequirement::Includes(RecipientSpec::Static(declared(includes))));
+            }
+            if let Some(cap) = &required.cap {
+                requirements.push(AudienceRequirement::Cap(declared(cap)));
+            }
+        }
+        ToolAnnotation {
+            name: resolved.tool().clone(),
+            tags: declaration.tags().to_vec(),
+            description: declaration.description().map(str::to_string),
+            parameters: declaration.parameters().clone(),
+            delta: Delta {
+                trust: answer.delta_trust.as_deref().map(|name| Dim::Known(rank(name))),
+                audience: answer
+                    .delta_audience
+                    .as_ref()
+                    .map(|audience| AudienceDelta::Static(declared(audience))),
+            },
+            emits: EffectSet::new(answer.emits.iter().map(|kind| EffectKind::new(kind.as_str())))
+                .expect("a decoded annotation answer holds no duplicate effect"),
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: answer.required_trust.as_deref().map(|name| Dim::Known(rank(name))),
+                    audience: Dim::Known(requirements),
+                },
+                history: answer
+                    .history
+                    .iter()
+                    .map(|entry| match entry {
+                        HistoryEntry::Contains(kind) => HistoryRequirement::Prior(EffectKind::new(kind.as_str())),
+                        HistoryEntry::Excludes(kind) => HistoryRequirement::NoPrior(EffectKind::new(kind.as_str())),
+                    })
+                    .collect(),
+                attention: Dim::Known(
+                    answer
+                        .attention
+                        .iter()
+                        .map(|mark| MarkName::new(mark.as_str()))
+                        .collect(),
+                ),
+            },
+        }
+    }
+
+    /// What one requirement-cast consult declares: the slots to answer and the policy's
+    /// vocabulary the answer may use.
+    fn dynamic_declaration(&self, returns: Vec<String>) -> DynamicDeclaration {
         let registry = self.engine.registry();
         DynamicDeclaration::of(
             returns,
@@ -2016,11 +2099,11 @@ impl RuntimeEngine {
             .expect("plans reference only registered sanitizers");
         let (on, tool, parameters) = match subject {
             SanitizerSubject::Input { call } => {
-                let contract = registry
-                    .contract(call)
-                    .expect("a resolved call names its registered contract");
+                let declaration = registry
+                    .declaration(call)
+                    .expect("a resolved call names its registered declaration");
                 let parameters =
-                    serde_json::to_value(&contract.parameters).expect("a compiled parameter schema serializes");
+                    serde_json::to_value(declaration.parameters()).expect("a compiled parameter schema serializes");
                 (SanitizerPoint::ToolInput, Some(call.tool().clone()), Some(parameters))
             }
             SanitizerSubject::Output { tool } => (SanitizerPoint::ToolOutput, tool, None),
@@ -2065,8 +2148,8 @@ impl RuntimeEngine {
     fn cast_ask(&self, source: CastSource, casts: Vec<ApplicableCast>, body: ValueBody) -> CastAsk {
         let registry = self.engine.registry();
         let CastSource { tool, call } = source;
-        let tool = match call.as_ref().and_then(|call| registry.contract(call)) {
-            Some(contract) => Some(CastTool::of(contract)),
+        let tool = match call.as_ref().and_then(|call| registry.declaration(call)) {
+            Some(declaration) => Some(CastTool::of(declaration)),
             None => tool.map(|tool| CastTool {
                 name: tool.as_str().to_string(),
                 description: None,
@@ -2225,7 +2308,7 @@ impl RuntimeEngine {
 
     fn memberships_for(
         &self,
-        contract: &appa_engine::contract::ToolContract,
+        contract: &ToolAnnotation,
         resolved: &ResolvedCall,
         evidence: &[ExternalEvidence],
     ) -> Result<Vec<PinnedMembership>, Resolution> {
@@ -2294,9 +2377,51 @@ impl RuntimeEngine {
 
 /// Everything a proposal carries beyond its tool and arguments, gathered before it is judged.
 struct CallAnswers {
-    tool_resolutions: Vec<PinnedToolResolution>,
+    annotation: Option<PinnedAnnotation>,
     memberships: Vec<PinnedMembership>,
     requirement_cast: Option<PinnedRequirementCast>,
+}
+
+/// The consult artifact an annotation request carries: the complete call — its proposed
+/// name, the declaration's description when the policy wrote one, and the canonical
+/// arguments — or one value per declared input.
+fn annotation_args(
+    inputs: &BTreeMap<String, appa_policy::ToolCallSource>,
+    declaration: &ToolDeclaration,
+    resolved: &ResolvedCall,
+) -> serde_json::Value {
+    let complete = || {
+        let mut call = serde_json::Map::new();
+        call.insert("name".to_string(), serde_json::json!(resolved.tool().as_str()));
+        if let Some(description) = declaration.description() {
+            call.insert("description".to_string(), serde_json::json!(description));
+        }
+        call.insert("arguments".to_string(), resolved.arguments().clone());
+        serde_json::Value::Object(call)
+    };
+    if inputs.is_empty() {
+        return complete();
+    }
+    let mut args = serde_json::Map::new();
+    for (input, source) in inputs {
+        let value = match source {
+            appa_policy::ToolCallSource::Call => complete(),
+            appa_policy::ToolCallSource::Name => serde_json::json!(resolved.tool().as_str()),
+            appa_policy::ToolCallSource::Description => serde_json::json!(
+                declaration
+                    .description()
+                    .expect("the loader requires a description a mapped input reads")
+            ),
+            appa_policy::ToolCallSource::Arguments => resolved.arguments().clone(),
+            appa_policy::ToolCallSource::Argument(name) => resolved
+                .arguments()
+                .get(name)
+                .cloned()
+                .expect("the loader requires a mapped argument in the schema"),
+        };
+        args.insert(input.clone(), value);
+    }
+    serde_json::Value::Object(args)
 }
 
 /// One answer's contribution to a proposal's round of consults: the answer, or the consults it
@@ -3111,12 +3236,17 @@ mod tests {
         Resolution, RuntimeEngine, SanitizerSubject, TrajectoryId, audience_wire, engine_id, remedy_instruction,
         remedy_lines, terminal_safe,
     };
-    use crate::consult::{DynamicAnswer, RequiredAudienceAnswer, SanitizerPoint, WireAudience};
-    use appa_engine::contract::RequiredAudience;
-    use appa_engine::label::{Audience, ReaderId};
+    use crate::consult::{AnnotationAnswer, HistoryEntry, RequiredAudienceAnswer, SanitizerPoint, WireAudience};
+    use appa_engine::contract::{
+        AnnotationMandate, AudienceDelta, AudienceRequirement, HistoryRequirement, RecipientSpec,
+    };
+    use appa_engine::fact::{EffectKind, EffectSet};
+    use appa_engine::groups::DeclaredAudience;
+    use appa_engine::label::{Audience, Dim, ReaderId, Trust};
+    use appa_engine::names::{AnnotatorName, MarkName};
     use appa_engine::plan::{ExecutableRemedyPlan, PlanId, PlannedBlock, RemedyPlan, RemedyStep};
     use appa_engine::value::{RawResultDigest, ToolName, ValueBody};
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     #[test]
     fn a_sanitizer_consult_names_its_point_and_the_tool_the_value_belongs_to() {
@@ -3136,7 +3266,7 @@ mod tests {
             "#,
         )
         .expect("the sanitizer policy compiles");
-        let engine = RuntimeEngine::new(policy.engine().clone());
+        let engine = RuntimeEngine::new(policy.engine().clone(), BTreeMap::new());
         let scrub = appa_engine::names::SanitizerName::new("scrub");
         let request = |subject: SanitizerSubject<'_>| match engine.sanitizer_request(
             &scrub,
@@ -3179,18 +3309,10 @@ mod tests {
     }
 
     #[test]
-    fn static_policy_vocabularies_reach_dynamic_consults_without_an_authority() {
+    fn static_policy_vocabularies_reach_requirement_cast_consults_without_an_authority() {
         let policy = appa_policy::Config::from_toml_str(
             r#"
                 version = 1
-                [[dynamic_resolver]]
-                name = "classifier"
-                returns = ["requires.attention"]
-                [[tool]]
-                name = "classify"
-                description = "Classifies a proposed operation."
-                uses = [{ resolver = "classifier" }]
-                delta = {}
                 [[tool]]
                 name = "blocked"
                 description = "A statically blocked operation."
@@ -3203,52 +3325,50 @@ mod tests {
             "#,
         )
         .expect("a closed attention vocabulary does not require an authority");
-        let engine = RuntimeEngine::new(policy.engine().clone());
-        let contract = policy
-            .registry()
-            .variants(&ToolName::new("classify"))
-            .next()
-            .expect("the classifier-backed tool is registered");
+        let engine = RuntimeEngine::new(policy.engine().clone(), BTreeMap::new());
 
-        let declaration = engine.dynamic_declaration(&contract.uses[0].returns);
+        let declaration = engine.dynamic_declaration(vec!["requires.attention".to_string()]);
 
+        assert_eq!(declaration.returns, ["requires.attention"]);
         assert_eq!(declaration.attention_marks, ["blocked"]);
         assert_eq!(declaration.audiences, ["public", "private"]);
     }
 
-    fn classifier_policy() -> appa_policy::Config {
-        classifier_policy_permitting("privacy-review")
-    }
-
-    /// The tool-level resolver policy with one authority permitting `mark`.
-    fn classifier_policy_permitting(mark: &str) -> appa_policy::Config {
-        appa_policy::Config::from_toml_str(&format!(
+    /// The annotated-tool policy: one Annotator producing `lookup`'s semantics per call, and
+    /// one authority able to clear the mark a produced annotation may require.
+    fn annotator_policy() -> appa_policy::Config {
+        appa_policy::Config::from_toml_str(
             r#"
                 version = 1
-                [[dynamic_resolver]]
+                [[annotator]]
                 name = "classifier"
-                returns = ["delta.trust", "delta.audience", "requires.trust", "requires.audience"]
                 [[tool]]
                 name = "lookup"
                 description = "Looks one record up."
-                uses = [{{ resolver = "classifier" }}]
-                # The tool keeps its own attention mark: `requires.attention` has one owner, and
-                # here it is the policy, so the classifier never sees the mark.
-                requires = {{ attention = ["static-review"] }}
+                annotator = "classifier"
                 [[authority]]
                 name = "reviewer"
                 [authority.permits]
-                attention = ["{mark}"]
-            "#
-        ))
-        .expect("the tool-level resolver policy compiles")
+                attention = ["privacy-review"]
+            "#,
+        )
+        .expect("the annotated-tool policy compiles")
+    }
+
+    fn annotator_engine(policy: &appa_policy::Config) -> RuntimeEngine {
+        let inputs = policy
+            .annotators()
+            .map(|(name, binding)| (name.as_str().to_string(), binding.inputs.clone()))
+            .collect();
+        RuntimeEngine::new(policy.engine().clone(), inputs)
     }
 
     #[test]
-    fn a_recorded_classification_answers_the_re_proposal_without_a_consult() {
-        // The reviewer can clear the tool's own mark, so the classified call blocks with an
-        // offer that stands for the re-proposal.
-        let engine = RuntimeEngine::new(classifier_policy_permitting("static-review").engine().clone());
+    fn a_recorded_annotation_answers_the_re_proposal_without_a_consult() {
+        // The reviewer can clear the mark the produced annotation requires, so the annotated
+        // call blocks with an offer that stands for the re-proposal.
+        let policy = annotator_policy();
+        let engine = annotator_engine(&policy);
         let trajectory = TrajectoryId("t".to_string());
         let opening = engine.root_opening(&trajectory, b"policy");
         let view = engine
@@ -3276,33 +3396,33 @@ mod tests {
         let first = propose(&view, Vec::new());
         let asked = match &first.then {
             Next::ResolveExternal(requests) => match requests.as_slice() {
-                [ExternalRequest::ToolResolution { args, .. }] => {
-                    appa_engine::contract::ResolverArgsDigest::of(&appa_engine::params::canonical_bytes(args))
+                [ExternalRequest::Annotation { annotator, call, .. }] => {
+                    assert_eq!(annotator, "classifier");
+                    *call
                 }
-                other => panic!("the first proposal consults the classifier once, not {other:?}"),
+                other => panic!("the first proposal consults the annotator once, not {other:?}"),
             },
-            other => panic!("an unanswered resolver consults, not {other:?}"),
+            other => panic!("an unannotated call must consult, not {other:?}"),
         };
         assert!(
             first.append.is_none(),
-            "nothing is decided before the classifier answers"
+            "nothing is decided before the annotator answers"
         );
 
-        let answer = DynamicAnswer {
-            trust: Some("trusted".to_string()),
-            audience: Some(WireAudience::Readers(vec!["support".to_string()])),
-            required_trust: Some("trusted".to_string()),
-            required_audience: Some(RequiredAudienceAnswer {
-                includes: None,
-                cap: Some(WireAudience::Public),
-            }),
-            attention: None,
+        let answer = AnnotationAnswer {
+            delta_trust: Some("trusted".to_string()),
+            delta_audience: Some(WireAudience::Public),
+            required_trust: None,
+            required_audience: None,
+            history: Vec::new(),
+            attention: vec!["privacy-review".to_string()],
+            emits: Vec::new(),
         };
         let decided = propose(
             &view,
-            vec![ExternalEvidence::ToolResolution {
-                resolver: "classifier".to_string(),
-                args: asked,
+            vec![ExternalEvidence::Annotation {
+                annotator: "classifier".to_string(),
+                call: asked,
                 answer,
             }],
         );
@@ -3315,7 +3435,7 @@ mod tests {
         let again = propose(&view, Vec::new());
         assert!(
             !matches!(again.then, Next::ResolveExternal(_)),
-            "the offer the classified call was blocked with stands, so its pin answers the re-proposal"
+            "the offer the annotated call was blocked with stands, so its pin answers the re-proposal"
         );
         let owner = engine_id(&trajectory);
         let views = view.views(&owner).expect("the root is opened");
@@ -3323,47 +3443,44 @@ mod tests {
             .engine
             .resolve_call(ToolName::new("lookup"), br#"{"id": 7}"#)
             .expect("the call resolves");
-        let contract = engine
+        let declaration = engine
             .engine
             .registry()
-            .contract(&resolved)
-            .expect("the call names its contract");
-        let pins = engine
-            .tool_resolutions_for(&views, contract, &resolved, &[])
-            .expect("the recorded answer pins without evidence");
-        assert_eq!(pins.len(), 1);
+            .declaration(&resolved)
+            .expect("the call names its declaration");
+        let pin = engine
+            .annotation_for(&views, declaration, &resolved, &[])
+            .expect("the recorded annotation pins without evidence");
         assert_eq!(
-            pins[0].audience(),
-            Some(&Audience::restricted([ReaderId::new("support")]))
+            pin.annotation().requires.attention,
+            Dim::Known(vec![MarkName::new("privacy-review")])
         );
-        assert_eq!(pins[0].required_trust(), Some(appa_engine::label::Trust::new(1)));
 
-        // Evidence for arguments the trajectory already classified is not a second answer:
-        // the record outranks it, so the trajectory never pins two answers for one subject.
-        let contradicting = ExternalEvidence::ToolResolution {
-            resolver: "classifier".to_string(),
-            args: asked,
-            answer: DynamicAnswer {
-                trust: Some("suspicious".to_string()),
-                audience: Some(WireAudience::Public),
-                required_trust: Some("suspicious".to_string()),
-                required_audience: Some(RequiredAudienceAnswer {
-                    includes: None,
-                    cap: Some(WireAudience::Public),
-                }),
-                attention: None,
+        // Evidence for a call the trajectory already annotated is not a second answer: the
+        // record outranks it, so the trajectory never pins two answers for one subject.
+        let contradicting = ExternalEvidence::Annotation {
+            annotator: "classifier".to_string(),
+            call: asked,
+            answer: AnnotationAnswer {
+                delta_trust: Some("suspicious".to_string()),
+                delta_audience: None,
+                required_trust: None,
+                required_audience: None,
+                history: Vec::new(),
+                attention: Vec::new(),
+                emits: Vec::new(),
             },
         };
         let pinned = engine
-            .tool_resolutions_for(&views, contract, &resolved, &[contradicting])
-            .expect("the recorded answer pins over contradicting evidence");
-        assert_eq!(pinned, pins);
+            .annotation_for(&views, declaration, &resolved, &[contradicting])
+            .expect("the recorded annotation pins over contradicting evidence");
+        assert_eq!(pinned, pin);
     }
 
     #[test]
-    fn one_tool_resolver_can_pin_delta_and_requirements_from_all_arguments() {
-        let policy = classifier_policy();
-        let engine = RuntimeEngine::new(policy.engine().clone());
+    fn one_annotator_produces_the_complete_annotation_from_the_exact_call() {
+        let policy = annotator_policy();
+        let engine = annotator_engine(&policy);
         let call = engine
             .engine
             .resolve_call(
@@ -3373,26 +3490,27 @@ mod tests {
                     .as_bytes(),
             )
             .expect("the call resolves");
-        let contract = engine
+        let declaration = engine
             .engine
             .registry()
-            .contract(&call)
-            .expect("the call names its contract");
+            .declaration(&call)
+            .expect("the call names its declaration");
         let trajectory = TrajectoryId("t".to_string());
         let view = opened_view(&engine, &trajectory);
         let owner = engine_id(&trajectory);
         let views = view.views(&owner).expect("the root is opened");
-        let consulted_args = match engine.tool_resolutions_for(&views, contract, &call, &[]) {
+        let asked = match engine.annotation_for(&views, declaration, &call, &[]) {
             Err(Resolution::Consult(requests)) => match requests.as_slice() {
                 [
-                    ExternalRequest::ToolResolution {
-                        uses,
-                        args,
+                    ExternalRequest::Annotation {
+                        annotator,
+                        call: digest,
                         declaration,
+                        args,
                     },
                 ] => {
-                    assert_eq!(uses.resolver.as_str(), "classifier");
-                    // The resolver declares no inputs, so `args` is the complete call.
+                    assert_eq!(annotator, "classifier");
+                    // The annotator maps no inputs, so `args` is the complete call.
                     assert_eq!(
                         args,
                         &serde_json::json!({
@@ -3401,61 +3519,82 @@ mod tests {
                             "arguments": {"nested": {"id": 7}, "deep": true},
                         })
                     );
-                    // The declaration carries the policy's complete vocabulary and nothing of
+                    // The declaration carries the mandate's complete vocabulary and nothing of
                     // the trajectory: no current label and no call-specific requirements.
+                    assert!(declaration.inputs.is_empty());
                     assert_eq!(declaration.trust_ranks, ["suspicious", "trusted"]);
-                    assert_eq!(declaration.attention_marks, ["privacy-review", "static-review"]);
-                    assert_eq!(
-                        declaration.returns,
-                        ["delta.trust", "delta.audience", "requires.trust", "requires.audience"]
-                    );
-                    appa_engine::contract::ResolverArgsDigest::of(&appa_engine::params::canonical_bytes(args))
+                    assert_eq!(declaration.attention_marks, ["privacy-review"]);
+                    assert!(declaration.effects.is_empty());
+                    *digest
                 }
-                other => panic!("expected one tool-resolution consult, got {other:?}"),
+                other => panic!("expected one annotation consult, got {other:?}"),
             },
-            other => panic!("an unanswered tool resolver must consult, got {other:?}"),
+            other => panic!("an unannotated call must consult, got {other:?}"),
         };
+        assert_eq!(
+            asked,
+            call.digest(),
+            "the consult is keyed on the call's canonical digest"
+        );
 
-        let answer = || DynamicAnswer {
-            trust: Some("suspicious".to_string()),
-            audience: Some(WireAudience::Public),
+        let answer = || AnnotationAnswer {
+            delta_trust: Some("suspicious".to_string()),
+            delta_audience: Some(WireAudience::Public),
             required_trust: Some("trusted".to_string()),
             required_audience: Some(RequiredAudienceAnswer {
                 includes: Some(WireAudience::Readers(vec!["support".to_string()])),
                 cap: Some(WireAudience::Public),
             }),
-            attention: None,
+            history: vec![HistoryEntry::Excludes("send".to_string())],
+            attention: Vec::new(),
+            emits: vec!["read".to_string()],
         };
-        let pins = engine
-            .tool_resolutions_for(
+        let pin = engine
+            .annotation_for(
                 &views,
-                contract,
+                declaration,
                 &call,
-                &[ExternalEvidence::ToolResolution {
-                    resolver: "classifier".to_string(),
-                    args: consulted_args,
+                &[ExternalEvidence::Annotation {
+                    annotator: "classifier".to_string(),
+                    call: asked,
                     answer: answer(),
                 }],
             )
             .expect("a complete answer pins");
-        assert_eq!(pins.len(), 1);
-        assert_eq!(pins[0].trust(), Some(appa_engine::label::Trust::new(0)));
-        assert_eq!(pins[0].audience(), Some(&Audience::Public));
-        assert_eq!(pins[0].required_trust(), Some(appa_engine::label::Trust::new(1)));
         assert_eq!(
-            pins[0].required_audience(),
-            Some(&RequiredAudience {
-                includes: Some(Audience::restricted([ReaderId::new("support")])),
-                cap: Some(Audience::Public),
-            })
+            pin.mandate(),
+            &AnnotationMandate::Annotator(AnnotatorName::new("classifier"))
         );
-        assert!(
-            pins[0].attention().is_empty(),
-            "this resolver returns no attention result: `requires.attention` is the policy's"
+        let produced = pin.annotation();
+        assert_eq!(produced.name, ToolName::new("lookup"));
+        assert_eq!(produced.description.as_deref(), Some("Looks one record up."));
+        assert_eq!(produced.delta.trust, Some(Dim::Known(Trust::new(0))));
+        assert_eq!(
+            produced.delta.audience,
+            Some(AudienceDelta::Static(DeclaredAudience::Public))
+        );
+        assert_eq!(produced.requires.label.trust_floor, Some(Dim::Known(Trust::new(1))));
+        assert_eq!(
+            produced.requires.label.audience,
+            Dim::Known(vec![
+                AudienceRequirement::Includes(RecipientSpec::Static(DeclaredAudience::restricted([ReaderId::new(
+                    "support"
+                )]))),
+                AudienceRequirement::Cap(DeclaredAudience::Public),
+            ])
+        );
+        assert_eq!(
+            produced.requires.history,
+            vec![HistoryRequirement::NoPrior(EffectKind::new("send"))]
+        );
+        assert_eq!(produced.requires.attention, Dim::Known(Vec::new()));
+        assert_eq!(
+            produced.emits,
+            EffectSet::new([EffectKind::new("read")]).expect("one kind is no duplicate")
         );
 
-        // An answer given for other arguments is not evidence for this call either: the
-        // resolver is consulted again rather than handed a sibling's classification.
+        // An answer given for another call is not evidence for this one either: the annotator
+        // is consulted again rather than handed a sibling's annotation.
         let other_call = engine
             .engine
             .resolve_call(
@@ -3466,13 +3605,13 @@ mod tests {
             )
             .expect("the call resolves");
         assert!(matches!(
-            engine.tool_resolutions_for(
+            engine.annotation_for(
                 &views,
-                contract,
+                declaration,
                 &other_call,
-                &[ExternalEvidence::ToolResolution {
-                    resolver: "classifier".to_string(),
-                    args: consulted_args,
+                &[ExternalEvidence::Annotation {
+                    annotator: "classifier".to_string(),
+                    call: asked,
                     answer: answer(),
                 }],
             ),

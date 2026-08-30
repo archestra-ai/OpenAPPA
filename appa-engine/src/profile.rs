@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::contract::ToolContract;
+use crate::contract::{ToolAnnotation, ToolDeclaration};
 use crate::fact::ReturnPolicy;
 use crate::label::{Dim, Dimension, Label, Trust};
 use crate::names::SurfaceName;
@@ -72,14 +72,12 @@ impl std::fmt::Display for CoverageSlot {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProviderRunConstruct {
     Requires,
-    DynamicDelta,
 }
 
 impl std::fmt::Display for ProviderRunConstruct {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             ProviderRunConstruct::Requires => "a `requires`",
-            ProviderRunConstruct::DynamicDelta => "a dynamic delta",
         })
     }
 }
@@ -314,14 +312,13 @@ impl PolicyIdentityV1 {
 }
 
 fn identity_document_from_registry(registry: &Registry, child_return: &ReturnPolicy) -> serde_json::Value {
-    let render = |matcher: &crate::registry::ToolMatcher, tool: &ToolContract| {
+    fn render_annotation(matcher: &crate::registry::ToolMatcher, tool: &ToolAnnotation) -> serde_json::Value {
         serde_json::json!({
             "name": tool.name,
             "matcher": matcher,
             "tags": sorted_set(&tool.tags),
             "parameters": tool.parameters.normalized(),
             "description": tool.description,
-            "uses": sorted_set(&tool.uses),
             "delta": tool.delta,
             "emits": tool.emits,
             "requires": {
@@ -331,20 +328,50 @@ fn identity_document_from_registry(registry: &Registry, child_return: &ReturnPol
                 "attention": list_slot(&tool.requires.attention),
             },
         })
+    }
+    let render = |matcher: &crate::registry::ToolMatcher, declaration: &ToolDeclaration| match declaration {
+        ToolDeclaration::Declared(tool) => render_annotation(matcher, tool),
+        ToolDeclaration::Annotated {
+            name,
+            tags,
+            description,
+            parameters,
+            annotator,
+        } => serde_json::json!({
+            "name": name,
+            "matcher": matcher,
+            "tags": sorted_set(tags),
+            "parameters": parameters.normalized(),
+            "description": description,
+            "annotator": annotator,
+        }),
     };
     let mut tools: Vec<_> = registry
         .semantic_tools()
-        .map(|(matcher, tool)| render(matcher, tool))
+        .map(|(matcher, declaration)| render(matcher, declaration))
         .collect();
     tools.extend(
         registry
-            .provider_run_contracts()
-            .map(|tool| render(&crate::registry::ToolMatcher::Bare, tool)),
+            .provider_run_annotations()
+            .map(|tool| render_annotation(&crate::registry::ToolMatcher::Bare, tool)),
     );
+    let annotators: Vec<serde_json::Value> = registry
+        .annotators()
+        .map(|(name, mandate)| {
+            serde_json::json!({
+                "name": name,
+                "trust": mandate.trust_ranks().collect::<Vec<_>>(),
+                "audiences": mandate.audiences().collect::<Vec<_>>(),
+                "marks": mandate.marks().collect::<Vec<_>>(),
+                "effects": mandate.effects().collect::<Vec<_>>(),
+            })
+        })
+        .collect();
     let mut document = identity_document(
         &RegistryConfig {
             trust_chain: registry.trust_chain().clone(),
             tools: Vec::new(),
+            annotators: Vec::new(),
             authorities: registry.authorities().to_vec(),
             sanitizers: registry.sanitizers().cloned().collect(),
             casts: registry.casts().to_vec(),
@@ -353,10 +380,9 @@ fn identity_document_from_registry(registry: &Registry, child_return: &ReturnPol
         child_return,
         registry.profile(),
     );
-    document
-        .as_object_mut()
-        .expect("identity document is an object")
-        .insert("tools".into(), tools.into());
+    let document_map = document.as_object_mut().expect("identity document is an object");
+    document_map.insert("tools".into(), tools.into());
+    document_map.insert("annotators".into(), annotators.into());
     document
 }
 
@@ -413,29 +439,6 @@ fn identity_document(
     child_return: &ReturnPolicy,
     profile: &DeploymentProfile,
 ) -> serde_json::Value {
-    let mut tools: Vec<_> = registry.tools.iter().collect();
-    tools.sort_by(|a, b| a.name.cmp(&b.name));
-    let tools: Vec<serde_json::Value> = tools
-        .into_iter()
-        .map(|tool| {
-            serde_json::json!({
-                "name": tool.name,
-                "tags": sorted_set(&tool.tags),
-                "parameters": tool.parameters.normalized(),
-                "description": tool.description,
-                "uses": sorted_set(&tool.uses),
-                "delta": tool.delta,
-                "emits": tool.emits,
-                "requires": {
-                    "trust_floor": trust_slot(tool.requires.label.trust_floor.as_ref()),
-                    "audience": list_slot(&tool.requires.label.audience),
-                    "history": sorted_set(&tool.requires.history),
-                    "attention": list_slot(&tool.requires.attention),
-                },
-            })
-        })
-        .collect();
-
     let authorities: Vec<serde_json::Value> = registry
         .authorities
         .iter()
@@ -482,7 +485,6 @@ fn identity_document(
 
     serde_json::json!({
         "trust_chain": registry.trust_chain,
-        "tools": tools,
         "authorities": authorities,
         "sanitizers": sanitizers,
         "casts": casts,
@@ -539,7 +541,7 @@ pub(crate) fn validate_coverage(
 
     // Coverage names declared tools only: an undeclared name resolves to the engine-built
     // Unknown contract at a proposal, but a deployment declaration naming one is a typo.
-    let registered = |tool: &ToolName| registry.declared(tool) || registry.provider_run_contract(tool).is_some();
+    let registered = |tool: &ToolName| registry.declared(tool) || registry.provider_run_annotation(tool).is_some();
     for tool in declaration.executor_exceptions.keys() {
         if !registered(tool) {
             return Err(LoadError::UnknownDeploymentTool {
@@ -567,7 +569,7 @@ pub(crate) fn validate_coverage(
     // A confined result point admits its value only through a cast, and one cast answers one
     // dimension. An unconfined Unknown dimension needs no such answer: it leaves admission
     // unresolved and a sink resolves it, so both dimensions may be Unknown at once.
-    for tool in registry.tools() {
+    for tool in registry.tools().filter_map(ToolDeclaration::declared) {
         if profile.confines_result(&tool.name)
             && matches!(tool.delta.trust, Some(Dim::Unknown))
             && matches!(tool.delta.audience, Some(crate::contract::AudienceDelta::PendingCast))
@@ -602,7 +604,7 @@ pub(crate) fn validate_coverage(
         let reaches_a_result = profile.confined_results.iter().any(|tool| {
             registry
                 .variants(tool)
-                .any(|contract| sanitizer.scope.covers(&contract.tags))
+                .any(|declaration| sanitizer.scope.covers(declaration.tags()))
         });
         let reaches_the_child_return = profile.confined_child_return && sanitizer.scope.is_unscoped();
         if !reaches_a_result && !reaches_the_child_return {
@@ -612,18 +614,11 @@ pub(crate) fn validate_coverage(
         }
     }
 
-    for contract in registry.provider_run_contracts() {
-        let construct = if contract.requires != crate::contract::Requires::default() {
-            Some(ProviderRunConstruct::Requires)
-        } else if !contract.uses.is_empty() {
-            Some(ProviderRunConstruct::DynamicDelta)
-        } else {
-            None
-        };
-        if let Some(construct) = construct {
+    for annotation in registry.provider_run_annotations() {
+        if annotation.requires != crate::contract::Requires::default() {
             return Err(LoadError::ProviderRunConstruct {
-                tool: contract.name.as_str().to_string(),
-                construct,
+                tool: annotation.name.as_str().to_string(),
+                construct: ProviderRunConstruct::Requires,
             });
         }
     }
@@ -650,6 +645,7 @@ pub(crate) fn opening_at(trajectory: crate::value::TrajectoryId, starting_label:
     let config = RegistryConfig {
         trust_chain: chain.clone(),
         tools: Vec::new(),
+        annotators: Vec::new(),
         authorities: Vec::new(),
         sanitizers: Vec::new(),
         casts: Vec::new(),
@@ -682,11 +678,15 @@ pub(crate) fn covering_declaration(config: &RegistryConfig) -> ProfileDeclaratio
             .iter()
             // A result point whose label is Unknown in both dimensions cannot be confined: one
             // cast answers one dimension, so the maximal profile leaves it to resolve at a sink.
-            .filter(|tool| {
-                !(matches!(tool.delta.trust, Some(Dim::Unknown))
-                    && matches!(tool.delta.audience, Some(crate::contract::AudienceDelta::PendingCast)))
+            .filter(|declaration| {
+                declaration.declared().is_none_or(|tool| {
+                    !(matches!(tool.delta.trust, Some(Dim::Unknown))
+                        && matches!(tool.delta.audience, Some(crate::contract::AudienceDelta::PendingCast)))
+                })
             })
-            .map(|tool| crate::registry::base_tool_name(&tool.name).expect("test contracts have valid names"))
+            .map(|declaration| {
+                crate::registry::base_tool_name(declaration.name()).expect("test contracts have valid names")
+            })
             .collect(),
         confined_child_return: true,
         provider_surfaces: BTreeMap::new(),
@@ -700,23 +700,20 @@ mod tests {
     use crate::authority::{
         Authority, DeclaredLabel, DeclaredTransition, Hint, Mandate, Sanitizer, SanitizerPoints, Scope,
     };
-    use crate::contract::{
-        AudienceDelta, Delta, LabelRequirements, Requires, ResolverReturn, ToolContract, ToolResolverUse,
-    };
+    use crate::contract::{AudienceDelta, Delta, LabelRequirements, Requires};
     use crate::engine::Engine;
     use crate::fact::EffectSet;
     use crate::groups::DeclaredAudience;
     use crate::label::{Audience, ReaderId};
-    use crate::names::{AuthorityName, DynamicResolverName, SanitizerName, TagName};
+    use crate::names::{AnnotatorName, AuthorityName, SanitizerName, TagName};
 
     fn chain() -> TrustChain {
         TrustChain::new(vec!["suspicious".into(), "trusted".into()])
     }
 
-    fn tool(name: &str) -> ToolContract {
-        ToolContract {
+    fn tool(name: &str) -> ToolAnnotation {
+        ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new(name),
             tags: vec![],
             delta: Delta::NONE,
@@ -726,14 +723,35 @@ mod tests {
         }
     }
 
-    fn config(tools: Vec<ToolContract>) -> RegistryConfig {
+    fn config(tools: Vec<ToolAnnotation>) -> RegistryConfig {
         RegistryConfig {
             trust_chain: chain(),
-            tools,
+            tools: tools.into_iter().map(ToolDeclaration::Declared).collect(),
+            annotators: vec![],
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![],
             membership: None,
+        }
+    }
+
+    fn classifier() -> crate::registry::AnnotatorDeclaration {
+        crate::registry::AnnotatorDeclaration {
+            name: AnnotatorName::new("classifier"),
+            trust: None,
+            audiences: None,
+            marks: None,
+            effects: None,
+        }
+    }
+
+    fn annotated(name: &str) -> ToolDeclaration {
+        ToolDeclaration::Annotated {
+            name: ToolName::new(name),
+            tags: vec![],
+            description: None,
+            parameters: crate::params::ToolParameters::open(),
+            annotator: AnnotatorName::new("classifier"),
         }
     }
 
@@ -837,8 +855,9 @@ mod tests {
     /// tool, so only an unscoped sanitizer reaches it.
     #[test]
     fn a_scoped_output_sanitizer_needs_a_confined_result_its_scope_reaches() {
-        let mut cfg = config(vec![tool("fetch"), tool("post")]);
-        cfg.tools[1].tags = vec![TagName::new("outbound")];
+        let mut post = tool("post");
+        post.tags = vec![TagName::new("outbound")];
+        let mut cfg = config(vec![tool("fetch"), post]);
         let mut scoped = output_sanitizer("redactor");
         scoped.scope = Scope {
             tags: vec![TagName::new("outbound")],
@@ -889,38 +908,37 @@ mod tests {
 
     #[test]
     fn a_provider_run_contract_may_declare_only_a_static_delta() {
-        let cases: Vec<(ProviderRunConstruct, ToolContract)> = vec![
-            (ProviderRunConstruct::Requires, {
-                let mut t = tool("search");
-                t.requires = Requires {
-                    label: LabelRequirements {
-                        trust_floor: Some(Dim::Known(Trust::new(1))),
-                        audience: Dim::Known(vec![]),
-                    },
-                    ..Requires::default()
-                };
-                t
-            }),
-            (ProviderRunConstruct::DynamicDelta, {
-                let mut t = tool("search");
-                t.uses = vec![ToolResolverUse {
-                    resolver: DynamicResolverName::new("directory"),
-                    inputs: std::collections::BTreeMap::new(),
-                    returns: [ResolverReturn::Audience].into_iter().collect(),
-                }];
-                t
-            }),
-        ];
-        for (expected, contract) in cases {
-            let cfg = config(vec![contract]);
-            let mut declaration = covering_declaration(&cfg);
-            provider_run(&mut declaration, "search");
-            assert!(matches!(
-                open(cfg, declaration, ReturnPolicy::Raw),
-                Err(LoadError::ProviderRunConstruct { tool, construct })
-                    if tool == "search" && construct == expected
-            ));
-        }
+        let asking = {
+            let mut t = tool("search");
+            t.requires = Requires {
+                label: LabelRequirements {
+                    trust_floor: Some(Dim::Known(Trust::new(1))),
+                    audience: Dim::Known(vec![]),
+                },
+                ..Requires::default()
+            };
+            t
+        };
+        let cfg = config(vec![asking]);
+        let mut declaration = covering_declaration(&cfg);
+        provider_run(&mut declaration, "search");
+        assert!(matches!(
+            open(cfg, declaration, ReturnPolicy::Raw),
+            Err(LoadError::ProviderRunConstruct { tool, construct })
+                if tool == "search" && construct == ProviderRunConstruct::Requires
+        ));
+
+        // A provider-run result reaches the model inside the inference call, so nothing would
+        // consume a per-call annotation: routing one through an Annotator is refused.
+        let mut cfg = config(vec![]);
+        cfg.annotators = vec![classifier()];
+        cfg.tools = vec![annotated("search")];
+        let mut declaration = covering_declaration(&cfg);
+        provider_run(&mut declaration, "search");
+        assert!(matches!(
+            open(cfg, declaration, ReturnPolicy::Raw),
+            Err(LoadError::ProviderRunAnnotated(tool)) if tool == "search"
+        ));
 
         // An Unknown output dimension is not one of them: a provider-run result reaches the
         // model inside the inference call, so it is never confined, and its Unknown travels to
@@ -1452,20 +1470,34 @@ mod tests {
         let profile = covering_profile(&cfg);
         let base = identity(&cfg, &ReturnPolicy::Raw, &profile);
 
-        let mut delta_edit = cfg.clone();
-        delta_edit.tools[0].delta = Delta {
-            trust: Some(Dim::Known(Trust::new(0))),
-            audience: None,
-        };
+        let delta_edit = config(vec![{
+            let mut t = tool("fetch");
+            t.delta = Delta {
+                trust: Some(Dim::Known(Trust::new(0))),
+                audience: None,
+            };
+            t
+        }]);
         assert_ne!(identity(&delta_edit, &ReturnPolicy::Raw, &profile), base);
 
-        let mut resolver_edit = cfg.clone();
-        resolver_edit.tools[0].uses = vec![crate::contract::ToolResolverUse {
-            resolver: crate::names::DynamicResolverName::new("classifier"),
-            inputs: std::collections::BTreeMap::new(),
-            returns: [crate::contract::ResolverReturn::Trust].into_iter().collect(),
-        }];
-        assert_ne!(identity(&resolver_edit, &ReturnPolicy::Raw, &profile), base);
+        // Routing the tool through an Annotator, and then narrowing that Annotator's mandate,
+        // each move the identity: what a produced annotation may say is part of the policy.
+        let routed = |trust: Option<std::collections::BTreeSet<Trust>>| {
+            let mut cfg = config(vec![]);
+            cfg.annotators = vec![crate::registry::AnnotatorDeclaration { trust, ..classifier() }];
+            cfg.tools = vec![annotated("fetch")];
+            cfg
+        };
+        let annotated_edit = routed(None);
+        assert_ne!(identity(&annotated_edit, &ReturnPolicy::Raw, &profile), base);
+        assert_ne!(
+            identity(
+                &routed(Some(std::collections::BTreeSet::from([Trust::new(0)]))),
+                &ReturnPolicy::Raw,
+                &profile
+            ),
+            identity(&annotated_edit, &ReturnPolicy::Raw, &profile)
+        );
 
         let sanitized = ReturnPolicy::Sanitized(SanitizerName::new("redactor"));
         assert_ne!(identity(&cfg, &sanitized, &profile), base);

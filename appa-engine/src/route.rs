@@ -12,7 +12,7 @@
 //! call's narrowing, an input hop, a denial — bind the exact rendered call (`RUL-3`, `RMD-16`),
 //! so they are planned for the blocked call only. A tool run first ([`RouteStep::Precede`]) has
 //! no call yet: it contributes only what its registered contract fixes before any call exists —
-//! [`StaticContract`]: no resolver answers, no placeholder recipients, a declared and established
+//! [`StaticAnnotation`]: no resolver answers, no placeholder recipients, a declared and established
 //! delta — evaluated in the success branch, where its `emits` are committed effects and its
 //! declared narrowing has folded. Anything less determined ends the route as a
 //! [`RouteOutcome::Prefix`] naming what must land before planning resumes ([`Resume`]).
@@ -44,7 +44,7 @@ use serde::{Deserialize, Serialize};
 use crate::basis::SubjectKey;
 use crate::candidate::CallStage;
 use crate::check::{self, CallReads, CheckOutcome, Gap, Narrowing, RawBlock, StateEval, UnestablishedFact};
-use crate::contract::{NotStatic, StaticContract, ToolContract};
+use crate::contract::{NotStatic, StaticAnnotation, ToolAnnotation};
 use crate::engine::Engine;
 use crate::fact::EffectKind;
 use crate::groups::{ExpansionRefusal, Expansions, GroupExpansion, MembershipNeeded};
@@ -206,8 +206,8 @@ impl From<MembershipNeeded> for RouteError {
 /// The blocked call as the engine would re-plan it: the standing candidate, its stage and role,
 /// the denials bound to its digest, and the expansions the surfacing act consumed plus what the
 /// caller answers now.
-pub(crate) struct BlockContext<'a> {
-    contract: &'a ToolContract,
+pub(crate) struct BlockContext {
+    contract: ToolAnnotation,
     call: ResolvedCall,
     stage: CallStage,
     role: CallRole,
@@ -216,20 +216,20 @@ pub(crate) struct BlockContext<'a> {
     raw: RawBlock,
 }
 
-impl<'a> BlockContext<'a> {
+impl BlockContext {
     pub(crate) fn reconstruct(
-        engine: &'a Engine,
+        engine: &Engine,
         views: &Views,
         subject: &SubjectKey,
         answers: &[GroupExpansion],
-    ) -> Result<BlockContext<'a>, RouteError> {
+    ) -> Result<BlockContext, RouteError> {
         let SubjectKey::Call { batch, .. } = subject else {
             return Err(RouteError::NotACallSubject);
         };
         let registry = engine.registry();
         let call = views.standing_call(subject).ok_or(RouteError::UnknownSubject)?.clone();
         let decided = views.decided_batch(batch).ok_or(RouteError::UnknownSubject)?;
-        let contract = registry.contract(&call).ok_or(RouteError::UnknownSubject)?;
+        let contract = registry.annotation_of(&call).ok_or(RouteError::UnknownSubject)?.clone();
 
         let mut expansions = registry.expansions_from_event(answers)?;
         if let Some((_, offers)) = views.pending_block(subject) {
@@ -247,11 +247,11 @@ impl<'a> BlockContext<'a> {
 
         let stage = views.call_stage(subject);
         let role = views.call_role(subject);
-        let raw = match check::evaluate(contract, views, &call, &stage, &expansions) {
+        let raw = match check::evaluate(&contract, views, &call, &stage, &expansions) {
             CheckOutcome::Allow => return Err(RouteError::NotBlocked),
             CheckOutcome::Block(raw) => raw,
         };
-        expansions.require(plan::block_groups(registry, contract, &raw, role).iter())?;
+        expansions.require(plan::block_groups(registry, &contract, &raw, role).iter())?;
         let denied = views.denied_authorities(&call.digest()).cloned().unwrap_or_default();
         Ok(BlockContext {
             contract,
@@ -276,8 +276,8 @@ struct RouteState {
 }
 
 impl RouteState {
-    fn after(&self, tool: &StaticContract<'_>, expansions: &Expansions) -> RouteState {
-        let contract = tool.contract();
+    fn after(&self, tool: &StaticAnnotation<'_>, expansions: &Expansions) -> RouteState {
+        let contract = tool.annotation();
         RouteState {
             label: check::committed_label(contract, &self.label, expansions),
             committed: self.committed.iter().chain(contract.emits.iter()).cloned().collect(),
@@ -392,7 +392,7 @@ enum Power {
 pub(crate) fn search(
     registry: &Registry,
     views: &Views,
-    context: &BlockContext<'_>,
+    context: &BlockContext,
     depth: RouteDepth,
 ) -> Result<Vec<RecoveryRoute>, RouteError> {
     // A fact clears an unestablished source, never a plan or a route (RMD-10, CHK-16).
@@ -417,7 +417,7 @@ pub(crate) fn search(
 struct Search<'a> {
     registry: &'a Registry,
     views: &'a Views<'a>,
-    context: &'a BlockContext<'a>,
+    context: &'a BlockContext,
     visited: BTreeSet<Visit>,
 }
 
@@ -446,7 +446,7 @@ impl Search<'_> {
     /// the engine runs before it enumerates a live block's plans.
     fn require_groups(
         &self,
-        contract: &ToolContract,
+        contract: &ToolAnnotation,
         eval: &StateEval,
         role: CallRole,
     ) -> Result<(), MembershipNeeded> {
@@ -475,7 +475,7 @@ impl Search<'_> {
         }
         let context = self.context;
         let eval = check::evaluate_state(
-            context.contract,
+            &context.contract,
             &state.label,
             &self.has_committed(state),
             &self.has_reserved(),
@@ -488,7 +488,7 @@ impl Search<'_> {
         if !eval.consumed.is_empty() || !eval.unknown_requirements.is_empty() {
             return Ok(());
         }
-        self.require_groups(context.contract, &eval, context.role)?;
+        self.require_groups(&context.contract, &eval, context.role)?;
         if eval.requirement_gaps.is_empty() && eval.narrowing.is_none() {
             found.push(self.found(
                 path.steps.clone(),
@@ -499,7 +499,7 @@ impl Search<'_> {
         } else {
             for plan in plan::enumerate_plans(
                 self.registry,
-                context.contract,
+                &context.contract,
                 &state.label,
                 &self.has_committed(state),
                 &self.has_reserved(),
@@ -530,7 +530,11 @@ impl Search<'_> {
         // A terminal plan covers every gap and no ruling covers `prior` or a cap (CHK-12), so a
         // tool that clears something exists only where no terminal plan does: the RMD-13
         // condition on tool plans holds here by construction, at every depth.
-        for tool in self.registry.tools() {
+        for tool in self
+            .registry
+            .tools()
+            .filter_map(crate::contract::ToolDeclaration::declared)
+        {
             if path.excludes(&tool.name) {
                 continue;
             }
@@ -561,7 +565,7 @@ impl Search<'_> {
     /// other gap, an unresolved dimension, or a call-dependent contract halts the route here.
     fn run(
         &mut self,
-        tool: &ToolContract,
+        tool: &ToolAnnotation,
         clears: Vec<Gap>,
         state: &RouteState,
         path: &Path,
@@ -584,7 +588,7 @@ impl Search<'_> {
             return halt(Halt::Depth);
         }
         let expansions = &self.context.expansions;
-        let static_contract = match StaticContract::of(tool, expansions) {
+        let static_contract = match StaticAnnotation::of(tool, expansions) {
             Ok(static_contract) => static_contract,
             Err(NotStatic::Arguments) => return halt(Halt::Arguments),
             Err(NotStatic::Unestablished) => return halt(Halt::Unestablished),
@@ -637,7 +641,11 @@ impl Search<'_> {
         }
         let goal = path.with_goal(&tool.name);
         let mut runs = Vec::new();
-        for first in self.registry.tools() {
+        for first in self
+            .registry
+            .tools()
+            .filter_map(crate::contract::ToolDeclaration::declared)
+        {
             if goal.excludes(&first.name) {
                 continue;
             }
@@ -899,7 +907,7 @@ mod tests {
     use crate::authority::{
         Authority, Cast, CastResolution, DeclaredLabel, Mandate, Sanitizer, SanitizerPoints, Scope,
     };
-    use crate::contract::{AudienceRequirement, Delta, HistoryRequirement, RecipientSpec, Requires, ToolContract};
+    use crate::contract::{AudienceRequirement, Delta, HistoryRequirement, RecipientSpec, Requires, ToolAnnotation};
     use crate::fact::{CloseOutcome, EffectSet, Fact};
     use crate::groups::DeclaredAudience;
     use crate::label::{Dim, EstablishedLabel, Label, ReaderId, Trust};
@@ -925,10 +933,9 @@ mod tests {
         EffectKind::new(kind)
     }
 
-    fn tool(name: &str) -> ToolContract {
-        ToolContract {
+    fn tool(name: &str) -> ToolAnnotation {
+        ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new(name),
             tags: vec![],
             delta: Delta::NONE,
@@ -938,13 +945,17 @@ mod tests {
         }
     }
 
-    fn emitting(name: &str, kinds: &[&str]) -> ToolContract {
+    fn pinned(call: &ResolvedCall) -> crate::contract::PinnedAnnotation {
+        crate::contract::PinnedAnnotation::new(tool(call.tool().as_str()), crate::contract::AnnotationMandate::Declared)
+    }
+
+    fn emitting(name: &str, kinds: &[&str]) -> ToolAnnotation {
         let mut contract = tool(name);
         contract.emits = EffectSet::new(kinds.iter().map(|kind| effect(kind))).unwrap();
         contract
     }
 
-    fn requiring_prior(mut contract: ToolContract, kinds: &[&str]) -> ToolContract {
+    fn requiring_prior(mut contract: ToolAnnotation, kinds: &[&str]) -> ToolAnnotation {
         contract
             .requires
             .history
@@ -952,7 +963,7 @@ mod tests {
         contract
     }
 
-    fn requiring_no_prior(mut contract: ToolContract, kind: &str) -> ToolContract {
+    fn requiring_no_prior(mut contract: ToolAnnotation, kind: &str) -> ToolAnnotation {
         contract
             .requires
             .history
@@ -960,7 +971,7 @@ mod tests {
         contract
     }
 
-    fn requiring_trust(mut contract: ToolContract, floor: Trust) -> ToolContract {
+    fn requiring_trust(mut contract: ToolAnnotation, floor: Trust) -> ToolAnnotation {
         contract.requires.label.trust_floor = Some(Dim::Known(floor));
         contract
     }
@@ -978,7 +989,7 @@ mod tests {
         }
     }
 
-    fn requiring_includes(mut contract: ToolContract, recipients: Audience) -> ToolContract {
+    fn requiring_includes(mut contract: ToolAnnotation, recipients: Audience) -> ToolAnnotation {
         contract
             .requires
             .label
@@ -990,7 +1001,7 @@ mod tests {
         contract
     }
 
-    fn requiring_cap(mut contract: ToolContract, cap: Audience) -> ToolContract {
+    fn requiring_cap(mut contract: ToolAnnotation, cap: Audience) -> ToolAnnotation {
         contract
             .requires
             .label
@@ -1000,7 +1011,7 @@ mod tests {
         contract
     }
 
-    fn narrowing_to(mut contract: ToolContract, trust: Option<Trust>, audience: Option<Audience>) -> ToolContract {
+    fn narrowing_to(mut contract: ToolAnnotation, trust: Option<Trust>, audience: Option<Audience>) -> ToolAnnotation {
         contract.delta = Delta {
             trust: trust.map(Dim::Known),
             audience: audience.map(|audience| Dim::Known(audience).into()),
@@ -1054,7 +1065,7 @@ mod tests {
     }
 
     struct Deployment {
-        tools: Vec<ToolContract>,
+        tools: Vec<ToolAnnotation>,
         authorities: Vec<Authority>,
         sanitizers: Vec<Sanitizer>,
         casts: Vec<Cast>,
@@ -1062,7 +1073,7 @@ mod tests {
     }
 
     impl Deployment {
-        fn of(tools: Vec<ToolContract>) -> Deployment {
+        fn of(tools: Vec<ToolAnnotation>) -> Deployment {
             Deployment {
                 tools,
                 authorities: vec![],
@@ -1095,7 +1106,12 @@ mod tests {
         fn registry(self) -> Registry {
             Registry::build_covered(RegistryConfig {
                 trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into(), "vetted".into()]),
-                tools: self.tools,
+                tools: self
+                    .tools
+                    .into_iter()
+                    .map(crate::contract::ToolDeclaration::Declared)
+                    .collect(),
+                annotators: vec![],
                 authorities: self.authorities,
                 sanitizers: self.sanitizers,
                 casts: self.casts,
@@ -1132,12 +1148,12 @@ mod tests {
             trajectory: traj(),
             dispatch: DispatchId::new(traj(), seed.digest(), 0),
             tool: seed.tool().clone(),
-            contract: seed.contract_id(),
+            declaration: seed.declaration_id(),
             arguments: seed.canonical_arguments().clone(),
             proposed_label: EstablishedLabel::new(TRUSTED, Audience::Public),
             receiving: EstablishedLabel::new(TRUSTED, Audience::Public),
             proposed_effects: EffectSet::new(kinds.iter().map(|kind| effect(kind))).unwrap(),
-            tool_resolutions: vec![],
+            annotation: pinned(&seed),
             memberships: Vec::new(),
             requirement_cast: None,
             subject: crate::basis::fixture_subject(&traj()),
@@ -1168,7 +1184,7 @@ mod tests {
     }
 
     fn raw_block(registry: &Registry, views: &Views, call: &ResolvedCall) -> RawBlock {
-        let contract = registry.contract(call).unwrap();
+        let contract = registry.annotation_of(call).unwrap();
         match check::evaluate(contract, views, call, &CallStage::default(), &Expansions::default()) {
             CheckOutcome::Block(raw) => raw,
             other => panic!("expected a block, got {other:?}"),
@@ -1191,7 +1207,7 @@ mod tests {
         let trajectory = traj();
         let views = projection.view(&trajectory);
         let context = BlockContext {
-            contract: registry.contract(call).unwrap(),
+            contract: registry.annotation_of(call).unwrap().clone(),
             call: call.clone(),
             stage: CallStage::default(),
             role: CallRole::Ordinary,
@@ -1873,7 +1889,9 @@ mod tests {
                 &views,
                 plan::BlockedCall {
                     call: &proposal,
-                    contract: registry.tool(proposal.tool()).expect("the fixture registers the tool"),
+                    contract: registry
+                        .annotation_of(&proposal)
+                        .expect("the fixture registers the tool"),
                     raw: &raw_block(&registry, &views, &proposal),
                     stage: &CallStage::default(),
                     role: CallRole::Ordinary,

@@ -8,7 +8,7 @@
 //! narrows the audience can plan around the narrowing instead of discovering
 //! it as a block.
 
-use appa_engine::contract::{AudienceDelta, ToolContract};
+use appa_engine::contract::{AudienceDelta, ToolDeclaration};
 use appa_engine::label::Dim;
 use appa_engine::registry::TrustChain;
 use appa_example_agent::wire::WireTool;
@@ -28,26 +28,26 @@ pub fn advertised(config: &Config, forking: bool) -> Vec<WireTool> {
     registry
         .tools
         .iter()
-        .filter(|contract| forking || contract.name.as_str() != FORK)
-        .map(|contract| schema(contract, &registry.trust_chain))
+        .filter(|declaration| forking || declaration.name().as_str() != FORK)
+        .map(|declaration| schema(declaration, &registry.trust_chain))
         .collect()
 }
 
-fn schema(contract: &ToolContract, chain: &TrustChain) -> WireTool {
+fn schema(declaration: &ToolDeclaration, chain: &TrustChain) -> WireTool {
     WireTool::new(
-        contract.name.as_str(),
-        match contract.name.as_str() {
-            FORK => fork_description(contract, chain),
-            _ => contract_description(contract, chain),
+        declaration.name().as_str(),
+        match declaration.name().as_str() {
+            FORK => fork_description(declaration, chain),
+            _ => contract_description(declaration, chain),
         },
-        contract.parameters.normalized(),
+        declaration.parameters().normalized(),
     )
 }
 
 /// The spawn tool carries the one piece of advice the control tool cannot:
 /// what to do instead of accepting a narrowing. Only a host that has a spawn
 /// tool can offer that escape, so only a host says it.
-fn fork_description(contract: &ToolContract, chain: &TrustChain) -> String {
+fn fork_description(declaration: &ToolDeclaration, chain: &TrustChain) -> String {
     format!(
         "Run one self-contained task in a child trajectory. Scope the child to the restrictive \
          read and the work that must sit beside it: every later call in that child runs under the \
@@ -56,13 +56,23 @@ fn fork_description(contract: &ToolContract, chain: &TrustChain) -> String {
          work needs your current label. A child inherits your label and can never widen it. The \
          child's final message is its return, and it crosses checked — a child that did the work \
          itself should finish by saying nothing. {}",
-        contract_description(contract, chain)
+        contract_description(declaration, chain)
     )
 }
 
 /// One contract as clauses: what the output is labelled, what the call
 /// demands, and what it commits.
-fn contract_description(contract: &ToolContract, chain: &TrustChain) -> String {
+fn contract_description(declaration: &ToolDeclaration, chain: &TrustChain) -> String {
+    let contract = match declaration {
+        ToolDeclaration::Declared(contract) => contract,
+        ToolDeclaration::Annotated { annotator, .. } => {
+            return format!(
+                "APPA contract: annotator {} produces this call's complete contract — output \
+                 labels, requirements, and effects — from the call itself.",
+                annotator.as_str()
+            );
+        }
+    };
     let mut clauses = Vec::new();
     let delta = &contract.delta;
     match &delta.trust {
@@ -82,31 +92,6 @@ fn contract_description(contract: &ToolContract, chain: &TrustChain) -> String {
     }
     if delta.is_none() {
         clauses.push("output label is neutral".to_string());
-    }
-    for uses in &contract.uses {
-        let read = match uses.inputs.is_empty() {
-            true => "the complete call".to_string(),
-            false => {
-                let sources: Vec<String> = uses.inputs.values().map(|source| source.spelling()).collect();
-                sources.join(", ")
-            }
-        };
-        let returned: Vec<&str> = uses
-            .returns
-            .iter()
-            .map(|field| match field {
-                appa_engine::contract::ResolverReturn::Trust => "output trust",
-                appa_engine::contract::ResolverReturn::Audience => "output audience",
-                appa_engine::contract::ResolverReturn::RequiredTrust => "a required trust floor",
-                appa_engine::contract::ResolverReturn::RequiredAudience => "required recipients",
-                appa_engine::contract::ResolverReturn::Attention => "review marks",
-            })
-            .collect();
-        clauses.push(format!(
-            "resolver {} classifies {read} into {}",
-            uses.resolver.as_str(),
-            returned.join(", ")
-        ));
     }
     match contract.requires.label.trust_floor.as_ref() {
         Some(Dim::Known(trust)) => clauses.push(format!(
@@ -189,9 +174,9 @@ parameters = { type = "object", properties = { task = { type = "string" } }, req
                     .registry_config()
                     .tools
                     .iter()
-                    .find(|contract| contract.name.as_str() == "read_hr")
+                    .find(|declaration| declaration.name().as_str() == "read_hr")
                     .expect("read_hr is registered")
-                    .parameters
+                    .parameters()
                     .normalized()
             ),
         );

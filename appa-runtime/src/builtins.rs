@@ -566,7 +566,7 @@ mod tests {
             (Section::Authorities, "redact-email"),
             (Section::Sanitizers, "approve"),
             (Section::Casts, "approve"),
-            (Section::Dynamic, "redact-email"),
+            (Section::Annotators, "redact-email"),
             (Section::Membership, "approve"),
         ] {
             assert_eq!(Stock::for_section(section, name), None, "{section:?}/{name}");

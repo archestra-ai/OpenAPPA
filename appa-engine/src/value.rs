@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::contract::{PinnedMembership, PinnedRequirementCast, PinnedToolResolution};
+use crate::contract::{PinnedAnnotation, PinnedMembership, PinnedRequirementCast};
 use crate::label::Label;
 use crate::params::CanonicalArguments;
 
@@ -66,7 +66,7 @@ impl CanonicalDigest {
     }
 
     /// Digest one proposal batch's policy-content payload: domain-separated over each call's
-    /// ordered rendered digest and the dynamic resolutions pinned to it, so a repeat carrying the
+    /// ordered rendered digest and the annotation evidence pinned to it, so a repeat carrying the
     /// same content binds the same payload and anything else is an identity conflict.
     pub(crate) fn of_batch<'a>(
         calls: impl IntoIterator<Item = &'a ResolvedCall>,
@@ -85,14 +85,14 @@ impl CanonicalDigest {
         for call in calls {
             hasher.update([0u8]);
             hasher.update(call.digest().0);
-            for resolution in &call.tool_resolutions {
-                hasher.update(canonical_json(resolution));
+            if let Some(pinned) = &call.annotation {
+                hasher.update([3u8]);
+                hasher.update(canonical_json(pinned));
             }
             hasher.update([1u8]);
             for membership in &call.memberships {
                 hasher.update(canonical_json(membership));
             }
-            // Pin-free calls hash as before: the marker is written only beside a pin.
             if let Some(pinned) = &call.requirement_cast {
                 hasher.update([2u8]);
                 hasher.update(canonical_json(pinned));
@@ -411,14 +411,14 @@ impl LabeledValue {
     }
 }
 
-/// The ordinal of a checkable contract among contracts for the same harness tool.
+/// The ordinal of a tool declaration among declarations for the same harness tool.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct ToolContractId(u32);
+pub struct ToolDeclarationId(u32);
 
-impl ToolContractId {
+impl ToolDeclarationId {
     pub(crate) fn new(ordinal: usize) -> Option<Self> {
-        ordinal.try_into().ok().map(ToolContractId)
+        ordinal.try_into().ok().map(ToolDeclarationId)
     }
 
     pub(crate) fn ordinal(self) -> usize {
@@ -429,9 +429,9 @@ impl ToolContractId {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ResolvedCall {
     tool: ToolName,
-    contract: ToolContractId,
+    declaration: ToolDeclarationId,
     arguments: CanonicalArguments,
-    tool_resolutions: Vec<PinnedToolResolution>,
+    annotation: Option<PinnedAnnotation>,
     memberships: Vec<PinnedMembership>,
     requirement_cast: Option<PinnedRequirementCast>,
 }
@@ -441,10 +441,9 @@ impl<'de> Deserialize<'de> for ResolvedCall {
         #[derive(Deserialize)]
         struct WireCall {
             tool: ToolName,
-            contract: ToolContractId,
+            declaration: ToolDeclarationId,
             arguments: CanonicalArguments,
-            #[serde(default)]
-            tool_resolutions: Vec<PinnedToolResolution>,
+            annotation: Option<PinnedAnnotation>,
             #[serde(default)]
             memberships: Vec<PinnedMembership>,
             requirement_cast: Option<PinnedRequirementCast>,
@@ -452,19 +451,13 @@ impl<'de> Deserialize<'de> for ResolvedCall {
 
         let wire = WireCall::deserialize(deserializer)?;
         let pinned_memberships = wire.memberships.clone();
-        let pinned_tool_resolutions = wire.tool_resolutions.clone();
-        let canonical = ResolvedCall::new_keyed(wire.tool, wire.contract, wire.arguments)
-            .with_tool_resolutions(wire.tool_resolutions)
+        let canonical = ResolvedCall::new_keyed(wire.tool, wire.declaration, wire.arguments)
+            .with_annotation(wire.annotation)
             .with_memberships(wire.memberships)
             .with_requirement_cast(wire.requirement_cast);
         if canonical.memberships != pinned_memberships {
             return Err(serde::de::Error::custom(
                 "pinned membership answers are not in their canonical order",
-            ));
-        }
-        if canonical.tool_resolutions != pinned_tool_resolutions {
-            return Err(serde::de::Error::custom(
-                "pinned tool resolutions are not in their canonical order",
             ));
         }
         Ok(canonical)
@@ -474,15 +467,15 @@ impl<'de> Deserialize<'de> for ResolvedCall {
 impl ResolvedCall {
     #[cfg(test)]
     pub(crate) fn new(tool: ToolName, arguments: CanonicalArguments) -> Self {
-        Self::new_keyed(tool, ToolContractId::default(), arguments)
+        Self::new_keyed(tool, ToolDeclarationId::default(), arguments)
     }
 
-    pub(crate) fn new_keyed(tool: ToolName, contract: ToolContractId, arguments: CanonicalArguments) -> Self {
+    pub(crate) fn new_keyed(tool: ToolName, declaration: ToolDeclarationId, arguments: CanonicalArguments) -> Self {
         ResolvedCall {
             tool,
-            contract,
+            declaration,
             arguments,
-            tool_resolutions: Vec::new(),
+            annotation: None,
             memberships: Vec::new(),
             requirement_cast: None,
         }
@@ -492,8 +485,8 @@ impl ResolvedCall {
         &self.tool
     }
 
-    pub fn contract_id(&self) -> ToolContractId {
-        self.contract
+    pub fn declaration_id(&self) -> ToolDeclarationId {
+        self.declaration
     }
 
     pub fn arguments(&self) -> &serde_json::Value {
@@ -508,19 +501,16 @@ impl ResolvedCall {
         self.arguments
     }
 
-    /// Attach the resolver answers pinned to this call. Canonical order only: a
-    /// duplicate binding is not merged here — the boundary refuses it
-    /// ([`crate::check::validate_tool_resolutions`]) — so the set the runtime handed over is
-    /// exactly the set the call carries, and which label a flow commits never depends on the
-    /// order two conflicting answers arrived in.
-    pub fn with_tool_resolutions(mut self, resolutions: Vec<PinnedToolResolution>) -> Self {
-        self.tool_resolutions = resolutions;
-        self.tool_resolutions.sort_by_cached_key(canonical_json);
+    /// Attach the complete annotation pinned to this call. `None` is the static case: the
+    /// declaration is the annotation, and the engine reads it from the registry. Whether a pinned
+    /// annotation is admissible on this call is [`crate::check::validate_annotation`]'s to decide.
+    pub fn with_annotation(mut self, annotation: Option<PinnedAnnotation>) -> Self {
+        self.annotation = annotation;
         self
     }
 
-    pub fn tool_resolutions(&self) -> &[PinnedToolResolution] {
-        &self.tool_resolutions
+    pub fn annotation(&self) -> Option<&PinnedAnnotation> {
+        self.annotation.as_ref()
     }
 
     /// Attach the membership answers pinned to this call. Canonical order only: a
@@ -555,27 +545,22 @@ impl ResolvedCall {
     }
 
     /// The canonical digest of this exact rendered call, recomputed from the tool and arguments.
-    /// The pinned answers are **not** part of it: a repeat is the same rendered call whatever a
-    /// resolver said, which is why anything holding a call by identity alone must compare the call
+    /// The pinned answers are **not** part of it: a repeat is the same rendered call whatever an
+    /// Annotator said, which is why anything holding a call by identity alone must compare the call
     /// itself where the answers decide a check.
     pub fn digest(&self) -> CanonicalDigest {
         CanonicalDigest::of_call(&self.tool, &self.arguments)
     }
 
     /// The call a substitution of this one's arguments renders: the same callee, the
-    /// replacement arguments, the resolver answers this call carries, and only those membership
-    /// answers the replacement leaves standing.
+    /// replacement arguments, and only those membership answers the replacement leaves standing.
     ///
-    /// A resolver answers about the call it was consulted on, and a substitution within one
-    /// ordered contract is a registered sanitizer's rewrite of that call, so the answers ride
-    /// along here rather than being dropped. Riding along is not standing: whether a carried
-    /// answer is admissible on the rewritten call is [`crate::check::validate_tool_resolutions`]'s
-    /// to decide, against the call last consulted on the record. A rewrite whose arguments select
-    /// another ordered contract never renders through here: it is a new call under that contract,
-    /// carrying only the answers consulted for it. A membership answer expands the group one
-    /// argument names, so it survives only while that argument's value is unchanged. A requirement
-    /// cast judged the exact call it was answered for, so none rides along: the rewritten call
-    /// is judged afresh or not at all.
+    /// Annotation evidence is exact-call evidence: it binds the canonical digest of the call the
+    /// Annotator saw, and a substitution renders a different canonical call, so no pinned
+    /// annotation rides along — the rewritten call is annotated afresh or not at all. A
+    /// membership answer expands the group one argument names, so it survives only while that
+    /// argument's value is unchanged. A requirement cast judged the exact call it was answered
+    /// for, so none rides along either.
     pub(crate) fn substituting(&self, arguments: CanonicalArguments) -> ResolvedCall {
         let unchanged = |argument: &str| arguments.value().get(argument) == self.arguments.value().get(argument);
         let memberships = self
@@ -584,15 +569,14 @@ impl ResolvedCall {
             .filter(|membership| unchanged(membership.argument()))
             .cloned()
             .collect();
-        ResolvedCall::new_keyed(self.tool.clone(), self.contract, arguments)
-            .with_tool_resolutions(self.tool_resolutions.clone())
-            .with_memberships(memberships)
+        ResolvedCall::new_keyed(self.tool.clone(), self.declaration, arguments).with_memberships(memberships)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contract::{AnnotationMandate, Delta, PinnedAnnotation, Requires, ToolAnnotation};
     use crate::params::ToolParameters;
     use serde_json::json;
 
@@ -602,6 +586,24 @@ mod tests {
 
     fn call(tool: &str, value: serde_json::Value) -> ResolvedCall {
         ResolvedCall::new(ToolName::new(tool), args(value))
+    }
+
+    fn pinned(tool: &str, annotator: &str) -> PinnedAnnotation {
+        PinnedAnnotation::new(
+            ToolAnnotation {
+                name: ToolName::new(tool),
+                tags: vec![],
+                description: None,
+                parameters: ToolParameters::open(),
+                delta: Delta {
+                    trust: Some(crate::label::Dim::Known(crate::label::Trust::new(0))),
+                    audience: None,
+                },
+                emits: Default::default(),
+                requires: Requires::default(),
+            },
+            AnnotationMandate::Annotator(crate::names::AnnotatorName::new(annotator)),
+        )
     }
 
     #[test]
@@ -664,6 +666,22 @@ mod tests {
     }
 
     #[test]
+    fn a_pinned_annotation_is_part_of_the_batch_identity() {
+        let bare = call("Bash", json!({ "command": "ls" }));
+        let annotated = |annotator: &str| bare.clone().with_annotation(Some(pinned("Bash", annotator)));
+        let unpinned = CanonicalDigest::of_batch([&bare], None);
+        assert_ne!(unpinned, CanonicalDigest::of_batch([&annotated("a")], None));
+        assert_ne!(
+            CanonicalDigest::of_batch([&annotated("a")], None),
+            CanonicalDigest::of_batch([&annotated("b")], None)
+        );
+        assert_eq!(
+            CanonicalDigest::of_batch([&annotated("a")], None),
+            CanonicalDigest::of_batch([&annotated("a")], None)
+        );
+    }
+
+    #[test]
     fn an_offer_id_round_trips_through_its_hex_wire_form() {
         let id = OfferId::of_plan(&BlockId([7u8; 32]), 3, b"plan-bytes");
         let hex = id.to_hex();
@@ -718,140 +736,28 @@ mod tests {
     }
 
     #[test]
-    fn a_substitution_renders_every_resolver_answer_and_judges_none() {
-        let uses = crate::contract::ToolResolverUse {
-            resolver: crate::names::DynamicResolverName::new("classifier"),
-            inputs: std::collections::BTreeMap::new(),
-            returns: [crate::contract::ResolverReturn::Trust].into_iter().collect(),
-        };
-        let contract = crate::contract::ToolContract {
-            name: ToolName::new("lookup"),
-            tags: vec![],
-            description: Some("Looks one thing up.".to_string()),
-            parameters: ToolParameters::open(),
-            uses: vec![uses.clone()],
-            delta: crate::contract::Delta::NONE,
-            emits: Default::default(),
-            requires: Default::default(),
-        };
+    fn a_substitution_drops_the_pinned_annotation() {
+        // Annotation evidence binds the exact canonical call, so a rewrite renders a call
+        // that must be annotated afresh — the pin never rides along.
         let base = call("lookup", json!({ "id": 7, "deep": true }));
-        let resolved = base.clone().with_tool_resolutions(vec![
-            PinnedToolResolution::from_answer(
-                uses.clone(),
-                contract.resolver_args_digest(&uses, base.tool(), base.canonical_arguments().value()),
-                Some(crate::label::Trust::new(0)),
-                None,
-                None,
-                None,
-                None,
-            )
-            .expect("the declared answer pins"),
-        ]);
+        let resolved = base.clone().with_annotation(Some(pinned("lookup", "classifier")));
         assert_eq!(
             base.digest(),
             resolved.digest(),
-            "resolver evidence is not rendered-call identity"
+            "annotation evidence is not rendered-call identity"
         );
-        // Whatever the rewrite touches, and whatever shape the use reads: the answers render onto
-        // the substituted call. Whether one of them stands is
-        // [`crate::check::validate_tool_resolutions`]'s, against the proposal on the record.
         for replacement in [json!({ "deep": true, "id": 7 }), json!({ "id": 8, "deep": true })] {
-            assert_eq!(
-                resolved.substituting(args(replacement)).tool_resolutions(),
-                resolved.tool_resolutions()
-            );
+            assert_eq!(resolved.substituting(args(replacement)).annotation(), None);
         }
     }
 
     #[test]
-    fn a_pin_free_batch_digest_is_stable_across_the_resolver_model() {
-        // Golden bytes: histories written before tool-level resolvers existed replay
-        // against this exact framing, so a pin-free batch's digest must never move.
-        let base = call("send", json!({ "to": "a" }));
-        let digest = CanonicalDigest::of_batch([&base], None);
-        let hex: String = digest.bytes().iter().map(|byte| format!("{byte:02x}")).collect();
-        assert_eq!(hex, "2ab7f6ab0653cb3d6dfdd732d2e48f7fb00376ab4196904c58c00ca6bd78a99d");
-    }
-
-    #[test]
-    fn pinned_answers_are_a_set_whatever_order_they_arrive_in() {
-        let answer = |resolver: &str, reader: &str| {
-            PinnedToolResolution::from_answer(
-                crate::contract::ToolResolverUse {
-                    resolver: crate::names::DynamicResolverName::new(resolver),
-                    inputs: std::collections::BTreeMap::from([(
-                        "recipient".to_string(),
-                        crate::contract::ToolCallSource::argument("recipient").expect("a plain name is a source"),
-                    )]),
-                    returns: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
-                },
-                crate::contract::ResolverArgsDigest::of(b""),
-                None,
-                Some(crate::label::Audience::restricted([crate::label::ReaderId::new(
-                    reader,
-                )])),
-                None,
-                None,
-                None,
-            )
-            .expect("a literal reader set pins")
-        };
-        let base = call("send", json!({ "recipient": "room" }));
-        let one = base
-            .clone()
-            .with_tool_resolutions(vec![answer("directory", "alice"), answer("acl", "bob")]);
-        let other = base.with_tool_resolutions(vec![answer("acl", "bob"), answer("directory", "alice")]);
-        assert_eq!(one, other);
+    fn a_pinned_annotation_round_trips_through_the_calls_wire_form() {
+        let annotated = call("Bash", json!({ "command": "ls" })).with_annotation(Some(pinned("Bash", "classifier")));
+        let wire = serde_json::to_value(&annotated).expect("a call serializes");
         assert_eq!(
-            CanonicalDigest::of_batch([&one], None),
-            CanonicalDigest::of_batch([&other], None)
-        );
-    }
-
-    #[test]
-    fn persisted_pinned_answers_refuse_a_non_canonical_spelling() {
-        let answer = |resolver: &str| {
-            PinnedToolResolution::from_answer(
-                crate::contract::ToolResolverUse {
-                    resolver: crate::names::DynamicResolverName::new(resolver),
-                    inputs: std::collections::BTreeMap::from([(
-                        "recipient".to_string(),
-                        crate::contract::ToolCallSource::argument("recipient").expect("a plain name is a source"),
-                    )]),
-                    returns: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
-                },
-                crate::contract::ResolverArgsDigest::of(b""),
-                None,
-                Some(crate::label::Audience::restricted([crate::label::ReaderId::new(
-                    "alice",
-                )])),
-                None,
-                None,
-                None,
-            )
-            .expect("a literal reader set pins")
-        };
-        let canonical = call("send", json!({ "recipient": "room" }))
-            .with_tool_resolutions(vec![answer("acl"), answer("directory")]);
-        let wire = serde_json::to_value(&canonical).expect("a call serializes");
-        assert_eq!(
-            serde_json::from_value::<ResolvedCall>(wire.clone()).expect("the canonical form round-trips"),
-            canonical
-        );
-
-        let mut tampered = wire.clone();
-        tampered["tool_resolutions"] =
-            serde_json::to_value(vec![answer("directory"), answer("acl")]).expect("answers serialize");
-        assert!(serde_json::from_value::<ResolvedCall>(tampered).is_err());
-
-        let duplicated = vec![answer("acl"), answer("acl"), answer("directory")];
-        let mut carried = wire;
-        carried["tool_resolutions"] = serde_json::to_value(&duplicated).expect("answers serialize");
-        assert_eq!(
-            serde_json::from_value::<ResolvedCall>(carried)
-                .expect("a canonically ordered duplicate is carried, not merged")
-                .tool_resolutions(),
-            duplicated.as_slice()
+            serde_json::from_value::<ResolvedCall>(wire).expect("the wire form round-trips"),
+            annotated
         );
     }
 

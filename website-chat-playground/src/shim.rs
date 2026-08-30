@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::approvals::Approvals;
 use crate::derive::Derivations;
-use crate::world::{AUTHORITY_PATH, DYNAMIC_RESOLVER_PATH, MEMBERSHIP_PATH, SANITIZER_PATH, TOOLS_PATH};
+use crate::world::{ANNOTATOR_PATH, AUTHORITY_PATH, MEMBERSHIP_PATH, SANITIZER_PATH, TOOLS_PATH};
 
 use crate::systems::{
     CreateCustomerArgs, CreateError, CreateIssueArgs, SendEmailArgs, System, TransferArgs, Verb, create, list,
@@ -49,7 +49,7 @@ pub async fn serve(world: World) -> std::io::Result<SocketAddr> {
         .route(TOOLS_PATH, post(handle))
         .route(&format!("{AUTHORITY_PATH}/{{name}}"), post(authority))
         .route(&format!("{SANITIZER_PATH}/{{name}}"), post(sanitize))
-        .route(DYNAMIC_RESOLVER_PATH, post(dynamic_resolver))
+        .route(ANNOTATOR_PATH, post(annotator))
         .route(MEMBERSHIP_PATH, post(membership))
         .with_state(Arc::new(world));
     tokio::spawn(async move {
@@ -144,19 +144,19 @@ pub struct SanitizerInput {
 }
 
 #[derive(Debug, Deserialize)]
-struct DynamicResolverArtifact {
-    /// Exactly what the policy's `uses` entry selected. This directory declares one input,
-    /// `to`, so that is the only key it reads.
-    args: DynamicResolverArgs,
+struct AnnotatorArtifact {
+    /// Exactly what the annotator's declared inputs selected. This directory declares one
+    /// input, `to`, so that is the only key it reads.
+    args: AnnotatorArgs,
 }
 
 #[derive(Debug, Deserialize)]
-struct DynamicResolverArgs {
+struct AnnotatorArgs {
     to: String,
 }
 
-async fn dynamic_resolver(
-    axum::Json(request): axum::Json<Consult<DynamicResolverArtifact>>,
+async fn annotator(
+    axum::Json(request): axum::Json<Consult<AnnotatorArtifact>>,
 ) -> (StatusCode, axum::Json<serde_json::Value>) {
     if request.version != 1 || request.name != "email-recipient-readers" {
         return (StatusCode::NOT_FOUND, axum::Json(serde_json::json!({})));
@@ -167,10 +167,20 @@ async fn dynamic_resolver(
         "all@acme.com" => vec!["ceo@acme.com", "staff@acme.com"],
         recipient => vec![recipient],
     };
-    // The answer carries exactly the result this resolver declares.
+    // The complete annotation this directory produces: no output-label change, a
+    // trusted-source floor, and the resolved readers as required recipients.
     let answer = serde_json::json!({
         "version": 1,
-        "answer": { "requires.audience": { "contains": readers } }
+        "answer": {
+            "delta": {},
+            "requires": {
+                "trust": "trusted",
+                "audience": { "contains": readers },
+                "history": [],
+                "attention": [],
+            },
+            "emits": [],
+        }
     });
     (StatusCode::OK, axum::Json(answer))
 }
@@ -454,36 +464,40 @@ mod tests {
         let resolve = |value: &str| Consult {
             version: 1,
             name: "email-recipient-readers".to_string(),
-            artifact: DynamicResolverArtifact {
-                args: DynamicResolverArgs { to: value.to_string() },
+            artifact: AnnotatorArtifact {
+                args: AnnotatorArgs { to: value.to_string() },
             },
         };
+        let produced = |readers: serde_json::Value| {
+            serde_json::json!({
+                "version": 1,
+                "answer": {
+                    "delta": {},
+                    "requires": {
+                        "trust": "trusted",
+                        "audience": { "contains": readers },
+                        "history": [],
+                        "attention": [],
+                    },
+                    "emits": [],
+                }
+            })
+        };
 
-        let (status, axum::Json(answer)) = dynamic_resolver(axum::Json(resolve("ap-review@corp.example"))).await;
+        let (status, axum::Json(answer)) = annotator(axum::Json(resolve("ap-review@corp.example"))).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
-            answer["answer"]["requires.audience"]["contains"],
-            serde_json::json!(["cfo@corp.example", "ap-lead@corp.example"])
-        );
-        assert_eq!(
-            answer["answer"].as_object().map(|result| result.len()),
-            Some(1),
-            "the answer carries exactly the one result this resolver declares"
+            answer,
+            produced(serde_json::json!(["cfo@corp.example", "ap-lead@corp.example"]))
         );
 
-        let (status, axum::Json(answer)) = dynamic_resolver(axum::Json(resolve("all@acme.com"))).await;
+        let (status, axum::Json(answer)) = annotator(axum::Json(resolve("all@acme.com"))).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(
-            answer["answer"]["requires.audience"]["contains"],
-            serde_json::json!(["ceo@acme.com", "staff@acme.com"])
-        );
+        assert_eq!(answer, produced(serde_json::json!(["ceo@acme.com", "staff@acme.com"])));
 
-        let (status, axum::Json(answer)) = dynamic_resolver(axum::Json(resolve("person@corp.example"))).await;
+        let (status, axum::Json(answer)) = annotator(axum::Json(resolve("person@corp.example"))).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(
-            answer["answer"]["requires.audience"]["contains"],
-            serde_json::json!(["person@corp.example"])
-        );
+        assert_eq!(answer, produced(serde_json::json!(["person@corp.example"])));
     }
 
     #[tokio::test]
@@ -491,15 +505,15 @@ mod tests {
         let consult = |version: u32, name: &str| Consult {
             version,
             name: name.to_string(),
-            artifact: DynamicResolverArtifact {
-                args: DynamicResolverArgs {
+            artifact: AnnotatorArtifact {
+                args: AnnotatorArgs {
                     to: "ap-review@corp.example".to_string(),
                 },
             },
         };
-        let (status, _) = dynamic_resolver(axum::Json(consult(1, "someone-elses-resolver"))).await;
+        let (status, _) = annotator(axum::Json(consult(1, "someone-elses-annotator"))).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
-        let (status, _) = dynamic_resolver(axum::Json(consult(2, "email-recipient-readers"))).await;
+        let (status, _) = annotator(axum::Json(consult(2, "email-recipient-readers"))).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
 

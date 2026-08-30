@@ -90,10 +90,10 @@ impl Scope {
         Some(match views.value_provenance(value)? {
             crate::value::Provenance::ToolResult { dispatch } => {
                 let call = views.dispatch_call(dispatch)?;
-                self.covers(&registry.contract(call)?.tags)
+                self.covers(&registry.annotation_of(call)?.tags)
             }
             crate::value::Provenance::ProviderRun { tool, .. } => {
-                self.covers(&registry.provider_run_contract(tool)?.tags)
+                self.covers(&registry.provider_run_annotation(tool)?.tags)
             }
             crate::value::Provenance::ChildReturn { .. } => self.is_unscoped(),
         })

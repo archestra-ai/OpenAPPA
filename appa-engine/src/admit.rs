@@ -92,7 +92,7 @@ pub(crate) fn observe_success(
     observed: ObservedResult,
 ) -> Result<Vec<Fact>, AdmitError> {
     let contract = registry
-        .contract(call)
+        .annotation_of(call)
         .ok_or_else(|| AdmitError::UnknownTool(call.tool().as_str().to_string()))?;
     if dispatch.digest() != &call.digest() {
         return Err(AdmitError::DigestMismatch);
@@ -130,7 +130,7 @@ pub(crate) fn bound_candidate(
     registry: &Registry,
     views: &Views,
     dispatch: &DispatchId,
-    contract: &crate::contract::ToolContract,
+    contract: &crate::contract::ToolAnnotation,
     sanitizer: &SanitizerName,
     raw_digest: RawResultDigest,
     body: ValueBody,
@@ -142,8 +142,7 @@ pub(crate) fn bound_candidate(
     let registered = registry
         .sanitizer(sanitizer)
         .ok_or_else(|| AdmitError::UnknownTool(sanitizer.as_str().to_string()))?;
-    let raw_label =
-        contract.output_label_for_resolutions(views.tool_resolutions(dispatch).unwrap_or_default(), expansions);
+    let raw_label = contract.output_label(expansions);
     let derived = registered
         .derive_output(&raw_label, &contract.tags, expansions)
         .ok_or(AdmitError::SanitizerTransitionUnmet)?;
@@ -183,14 +182,13 @@ pub(crate) fn cast_candidate(
     registry: &Registry,
     views: &Views,
     dispatch: &DispatchId,
-    contract: &crate::contract::ToolContract,
+    contract: &crate::contract::ToolAnnotation,
     cast: &CastName,
     body: ValueBody,
     resolved: &EstablishedLabel,
     expansions: &Expansions,
 ) -> Result<DerivedCandidate, AdmitError> {
-    let output_label =
-        contract.output_label_for_resolutions(views.tool_resolutions(dispatch).unwrap_or_default(), expansions);
+    let output_label = contract.output_label(expansions);
     validate_pending_cast(registry, contract, &output_label, cast, resolved, expansions)?;
     let baseline = cast_baseline(views, dispatch).ok_or(AdmitError::NotOpen)?;
     let label = resolved.clone().into_label();
@@ -220,7 +218,7 @@ fn refusal_error(refusal: CastRefusal) -> AdmitError {
 /// label past the ceiling or move a dimension the contract settled.
 pub(crate) fn validate_pending_cast(
     registry: &Registry,
-    contract: &crate::contract::ToolContract,
+    contract: &crate::contract::ToolAnnotation,
     output_label: &Label,
     cast: &CastName,
     resolved: &EstablishedLabel,
@@ -279,7 +277,7 @@ pub(crate) fn admit_result(
     expansions: &Expansions,
 ) -> Result<Vec<Fact>, AdmitError> {
     let contract = registry
-        .contract(call)
+        .annotation_of(call)
         .ok_or_else(|| AdmitError::UnknownTool(call.tool().as_str().to_string()))?;
     if dispatch.digest() != &call.digest() {
         return Err(AdmitError::DigestMismatch);
@@ -312,8 +310,7 @@ pub(crate) fn admit_result(
     }
 
     let trajectory = views.trajectory().clone();
-    let output_label =
-        || contract.output_label_for_resolutions(views.tool_resolutions(dispatch).unwrap_or_default(), expansions);
+    let output_label = || contract.output_label(expansions);
     let close_success = || Fact::DispatchClosed {
         trajectory: trajectory.clone(),
         dispatch: dispatch.clone(),
@@ -523,7 +520,7 @@ mod tests {
     use crate::authority::{
         Cast, CastCeiling, CastResolution, DeclaredLabel, DeclaredTransition, Sanitizer, SanitizerPoints, Scope,
     };
-    use crate::contract::{Delta, PinnedToolResolution, ResolverReturn, ToolContract, ToolResolverUse};
+    use crate::contract::{AnnotationMandate, Delta, PinnedAnnotation, ToolAnnotation, ToolDeclaration};
     use crate::fact::EffectKind;
     use crate::groups::DeclaredAudience;
     use crate::label::{Audience, Dim, ReaderId, Trust};
@@ -538,28 +535,19 @@ mod tests {
         Audience::restricted([ReaderId::new("internal")])
     }
 
-    fn dynamic_binding() -> ToolResolverUse {
-        ToolResolverUse {
-            resolver: crate::names::DynamicResolverName::new("directory"),
-            inputs: std::collections::BTreeMap::from([(
-                "room".to_string(),
-                crate::contract::ToolCallSource::argument("room").expect("a plain name is a source"),
-            )]),
-            returns: [ResolverReturn::Audience].into_iter().collect(),
-        }
-    }
-
-    fn audience_pin(audience: Audience) -> PinnedToolResolution {
-        PinnedToolResolution::from_answer(
-            dynamic_binding(),
-            crate::contract::ResolverArgsDigest::of(b""),
-            None,
-            Some(audience),
-            None,
-            None,
-            None,
+    fn pinned(call: &ResolvedCall) -> PinnedAnnotation {
+        PinnedAnnotation::new(
+            ToolAnnotation {
+                name: call.tool().clone(),
+                tags: vec![],
+                description: None,
+                parameters: crate::params::ToolParameters::open(),
+                delta: Delta::NONE,
+                emits: EffectSet::default(),
+                requires: Default::default(),
+            },
+            AnnotationMandate::Declared,
         )
-        .expect("a literal reader set pins")
     }
 
     fn traj() -> TrajectoryId {
@@ -574,9 +562,8 @@ mod tests {
     }
 
     fn registry() -> Registry {
-        let get = ToolContract {
+        let get = ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("get_ticket"),
             tags: vec![],
             delta: Delta {
@@ -633,9 +620,8 @@ mod tests {
             scope: Scope::default(),
             hint: None,
         };
-        let scan = ToolContract {
+        let scan = ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("scan_inbox"),
             tags: vec![],
             delta: Delta {
@@ -646,9 +632,8 @@ mod tests {
             emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
             requires: Default::default(),
         };
-        let poll = ToolContract {
+        let poll = ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("poll_room"),
             tags: vec![],
             delta: Delta {
@@ -659,22 +644,28 @@ mod tests {
             emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
             requires: Default::default(),
         };
-        let dynamic_scan = ToolContract {
-            description: Some("A test tool.".to_string()),
-            uses: vec![dynamic_binding()],
+        let dynamic_scan = ToolDeclaration::Annotated {
             name: ToolName::new("dynamic_scan"),
             tags: vec![],
-            delta: Delta {
-                trust: Some(Dim::Unknown),
-                audience: None,
-            },
+            description: Some("A test tool.".to_string()),
             parameters: crate::params::test_string_argument_schema("room"),
-            emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
-            requires: Default::default(),
+            annotator: crate::names::AnnotatorName::new("directory"),
         };
         Registry::build_covered(RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![get, scan, poll, dynamic_scan],
+            tools: vec![
+                ToolDeclaration::Declared(get),
+                ToolDeclaration::Declared(scan),
+                ToolDeclaration::Declared(poll),
+                dynamic_scan,
+            ],
+            annotators: vec![crate::registry::AnnotatorDeclaration {
+                name: crate::names::AnnotatorName::new("directory"),
+                trust: None,
+                audiences: None,
+                marks: None,
+                effects: None,
+            }],
             authorities: vec![],
             sanitizers: vec![out_san, finance_san],
             casts: vec![resolver_cast, const_cast],
@@ -697,12 +688,12 @@ mod tests {
             trajectory: traj(),
             dispatch: dispatch.clone(),
             tool: call.tool().clone(),
-            contract: call.contract_id(),
+            declaration: call.declaration_id(),
             arguments: call.canonical_arguments().clone(),
             proposed_label: EstablishedLabel::top(),
             receiving: EstablishedLabel::top(),
             proposed_effects: EffectSet::new([EffectKind::new("read")]).unwrap(),
-            tool_resolutions: Vec::new(),
+            annotation: call.annotation().cloned().unwrap_or_else(|| pinned(call)),
             memberships: Vec::new(),
             requirement_cast: None,
             subject: crate::basis::fixture_subject(&traj()),
@@ -914,9 +905,8 @@ mod tests {
 
     #[test]
     fn a_scoped_cast_applies_only_to_covered_tool_results() {
-        let fetch = ToolContract {
+        let fetch = ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("fetch"),
             tags: vec![crate::names::TagName::new("web")],
             delta: Delta {
@@ -927,9 +917,8 @@ mod tests {
             emits: EffectSet::default(),
             requires: Default::default(),
         };
-        let note = ToolContract {
+        let note = ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("note"),
             tags: vec![],
             delta: Delta {
@@ -962,7 +951,8 @@ mod tests {
         };
         let reg = Registry::build_covered(RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![fetch, note],
+            tools: vec![ToolDeclaration::Declared(fetch), ToolDeclaration::Declared(note)],
+            annotators: vec![],
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![webby, fallback],
@@ -1243,9 +1233,8 @@ mod tests {
 
     #[test]
     fn a_public_resolution_is_admitted_under_a_public_cap() {
-        let fetch = ToolContract {
+        let fetch = ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("fetch_page"),
             tags: vec![],
             delta: Delta {
@@ -1269,7 +1258,8 @@ mod tests {
         };
         let reg = Registry::build_covered(RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![fetch],
+            tools: vec![ToolDeclaration::Declared(fetch)],
+            annotators: vec![],
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![librarian],
@@ -1332,29 +1322,29 @@ mod tests {
     }
 
     #[test]
-    fn a_dynamic_audience_survives_trust_cast_acceptance_and_admission() {
+    fn an_annotated_audience_survives_trust_cast_acceptance_and_admission() {
         let reg = registry();
         let call = ResolvedCall::new(
             ToolName::new("dynamic_scan"),
             crate::params::test_arguments(&json!({ "room": "internal" })),
         )
-        .with_tool_resolutions(vec![audience_pin(Audience::restricted([ReaderId::new("finance")]))]);
-        let dispatch = DispatchId::new(traj(), call.digest(), 0);
-        let log = vec![Fact::DispatchOpened {
-            trajectory: traj(),
-            dispatch: dispatch.clone(),
-            tool: call.tool().clone(),
-            contract: call.contract_id(),
-            arguments: call.canonical_arguments().clone(),
-            proposed_label: EstablishedLabel::top(),
-            receiving: EstablishedLabel::top(),
-            proposed_effects: EffectSet::new([EffectKind::new("read")]).unwrap(),
-            tool_resolutions: vec![audience_pin(internal())],
-            memberships: Vec::new(),
-            requirement_cast: None,
-            subject: crate::basis::fixture_subject(&traj()),
-            resolutions: vec![],
-        }];
+        .with_annotation(Some(PinnedAnnotation::new(
+            ToolAnnotation {
+                name: ToolName::new("dynamic_scan"),
+                tags: vec![],
+                description: Some("A test tool.".to_string()),
+                parameters: crate::params::test_string_argument_schema("room"),
+                delta: Delta {
+                    trust: Some(Dim::Unknown),
+                    audience: Some(Dim::Known(internal()).into()),
+                },
+                emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
+                requires: Default::default(),
+            },
+            AnnotationMandate::Annotator(crate::names::AnnotatorName::new("directory")),
+        )));
+        let (record, dispatch) = dispatch_opened(&call);
+        let log = vec![record];
         let projection = views_of(&log);
         let trajectory = traj();
         let views = projection.view(&trajectory);
@@ -1806,8 +1796,7 @@ mod tests {
             sanitizer: crate::names::SanitizerName::new("declassify"),
             contribution: crate::plan::bound_contribution(
                 &reg,
-                reg.tool(call.tool()).expect("the fixture registers the tool"),
-                &call,
+                reg.annotation_of(&call).expect("the fixture registers the tool"),
                 &crate::names::SanitizerName::new("declassify"),
                 &Expansions::default(),
             )

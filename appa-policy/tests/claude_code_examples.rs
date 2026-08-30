@@ -57,8 +57,14 @@ fn every_shipped_example_loads() {
 fn the_casts_example_registers_what_it_describes() {
     let config = load("claude-code-casts.appa.toml");
     let registry = config.registry();
-    // Each example tool has one contract, so the name alone finds it.
-    let tool = |name: &str| registry.tools().find(|tool| tool.name.as_str() == name);
+    // Each example tool has one declaration, so the name alone finds it; every tool in this
+    // example is statically declared.
+    let tool = |name: &str| {
+        registry
+            .tools()
+            .filter_map(appa_engine::contract::ToolDeclaration::declared)
+            .find(|tool| tool.name.as_str() == name)
+    };
 
     // Both declare an Unknown trust; only WebFetch is a confined result point, so only its
     // raw page waits for the cast.

@@ -53,7 +53,7 @@ pub enum PlanError {
 /// persisted release is held to is the one the live path enforced.
 pub(crate) fn rulings_cover<'a>(
     registry: &Registry,
-    contract: &crate::contract::ToolContract,
+    contract: &crate::contract::ToolAnnotation,
     block: &crate::check::RawBlock,
     rulings: impl Iterator<Item = (&'a AuthorityName, &'a [Gap])> + Clone,
     expansions: &Expansions,
@@ -85,7 +85,7 @@ pub(crate) fn rulings_cover<'a>(
 mod tests {
     use super::*;
     use crate::authority::{Authority, Mandate, Scope};
-    use crate::contract::{Delta, LabelRequirements, Requires, ToolContract};
+    use crate::contract::{Delta, LabelRequirements, Requires, ToolAnnotation};
     use crate::fact::EffectSet;
     use crate::label::Dim;
     use crate::label::Trust;
@@ -106,10 +106,9 @@ mod tests {
         }
     }
 
-    fn wire() -> ToolContract {
-        ToolContract {
+    fn wire() -> ToolAnnotation {
+        ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Delta::NONE,
@@ -146,7 +145,8 @@ mod tests {
         };
         Registry::build_covered(crate::registry::RegistryConfig {
             trust_chain: chain(),
-            tools: vec![wire()],
+            tools: vec![crate::contract::ToolDeclaration::Declared(wire())],
+            annotators: vec![],
             authorities: vec![officer, attester],
             sanitizers: vec![],
             casts: vec![],
@@ -169,7 +169,7 @@ mod tests {
         let name = AuthorityName::new(authority);
         rulings_cover(
             &registry,
-            registry.tool(&ToolName::new("wire")).unwrap(),
+            registry.tool(&ToolName::new("wire")).unwrap().declared().unwrap(),
             block,
             [(&name, covers)].into_iter(),
             &Expansions::default(),
@@ -186,7 +186,7 @@ mod tests {
         let registry = registry();
         let refused = rulings_cover(
             &registry,
-            registry.tool(&ToolName::new("wire")).unwrap(),
+            registry.tool(&ToolName::new("wire")).unwrap().declared().unwrap(),
             &block(vec![floor_gap()]),
             std::iter::empty(),
             &Expansions::default(),

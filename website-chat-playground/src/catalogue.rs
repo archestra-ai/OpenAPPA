@@ -14,7 +14,7 @@
 //! would have to be an engine-typed helper on the harness library, which is
 //! the one thing the runtime's API boundary keeps out.
 
-use appa_engine::contract::{AudienceDelta, ToolContract};
+use appa_engine::contract::{AudienceDelta, ToolDeclaration};
 use appa_engine::label::Dim;
 use appa_engine::registry::TrustChain;
 use appa_example_agent::wire::WireTool;
@@ -25,17 +25,27 @@ pub fn advertised(config: &Config) -> Vec<WireTool> {
     registry
         .tools
         .iter()
-        .map(|contract| {
+        .map(|declaration| {
             WireTool::new(
-                contract.name.as_str(),
-                describe(contract, &registry.trust_chain),
-                contract.parameters.normalized(),
+                declaration.name().as_str(),
+                describe(declaration, &registry.trust_chain),
+                declaration.parameters().normalized(),
             )
         })
         .collect()
 }
 
-fn describe(contract: &ToolContract, chain: &TrustChain) -> String {
+fn describe(declaration: &ToolDeclaration, chain: &TrustChain) -> String {
+    let contract = match declaration {
+        ToolDeclaration::Declared(contract) => contract,
+        ToolDeclaration::Annotated { annotator, .. } => {
+            return format!(
+                "APPA contract: annotator {} produces this call's complete contract — output \
+                 labels, requirements, and effects — from the call itself.",
+                annotator.as_str()
+            );
+        }
+    };
     let mut clauses = Vec::new();
     let delta = &contract.delta;
     match &delta.trust {
@@ -55,31 +65,6 @@ fn describe(contract: &ToolContract, chain: &TrustChain) -> String {
     }
     if delta.is_none() {
         clauses.push("output label is neutral".to_string());
-    }
-    for uses in &contract.uses {
-        let read = match uses.inputs.is_empty() {
-            true => "the complete call".to_string(),
-            false => {
-                let sources: Vec<String> = uses.inputs.values().map(|source| source.spelling()).collect();
-                sources.join(", ")
-            }
-        };
-        let returned: Vec<&str> = uses
-            .returns
-            .iter()
-            .map(|field| match field {
-                appa_engine::contract::ResolverReturn::Trust => "output trust",
-                appa_engine::contract::ResolverReturn::Audience => "output audience",
-                appa_engine::contract::ResolverReturn::RequiredTrust => "a required trust floor",
-                appa_engine::contract::ResolverReturn::RequiredAudience => "required recipients",
-                appa_engine::contract::ResolverReturn::Attention => "review marks",
-            })
-            .collect();
-        clauses.push(format!(
-            "resolver {} classifies {read} into {}",
-            uses.resolver.as_str(),
-            returned.join(", ")
-        ));
     }
     match contract.requires.label.trust_floor.as_ref() {
         Some(Dim::Known(trust)) => clauses.push(format!(
@@ -138,12 +123,12 @@ mod tests {
         assert_eq!(advertised.len(), checked.tool_count);
         let registry = checked.config.registry_config();
         for tool in &advertised {
-            let contract = registry
+            let declaration = registry
                 .tools
                 .iter()
-                .find(|contract| contract.name.as_str() == tool.function.name)
+                .find(|declaration| declaration.name().as_str() == tool.function.name)
                 .expect("every advertised tool is registered");
-            assert_eq!(tool.function.parameters, Some(contract.parameters.normalized()));
+            assert_eq!(tool.function.parameters, Some(declaration.parameters().normalized()));
         }
     }
 }

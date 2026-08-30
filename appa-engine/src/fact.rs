@@ -211,7 +211,7 @@ pub enum Fact {
         trajectory: TrajectoryId,
         dispatch: DispatchId,
         tool: ToolName,
-        contract: crate::value::ToolContractId,
+        declaration: crate::value::ToolDeclarationId,
         arguments: crate::params::CanonicalArguments,
         proposed_label: EstablishedLabel,
         /// The established bound this dispatch's result is received against, snapshotted here
@@ -221,8 +221,9 @@ pub enum Fact {
         /// computed from, and what a confined candidate's residual is measured against.
         receiving: EstablishedLabel,
         proposed_effects: EffectSet,
-        #[serde(default)]
-        tool_resolutions: Vec<crate::contract::PinnedToolResolution>,
+        /// The one complete annotation this dispatch was released under, with the mandate that
+        /// authorized it. No default: a record without it is not this engine's record.
+        annotation: crate::contract::PinnedAnnotation,
         #[serde(default)]
         memberships: Vec<crate::contract::PinnedMembership>,
         #[serde(default)]

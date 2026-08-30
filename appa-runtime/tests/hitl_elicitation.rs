@@ -189,7 +189,7 @@ async fn dynamic_deployment() -> Deployment {
     let resolver = axum::Router::new().route(
         "/",
         axum::routing::post(|| async {
-            r#"{"version":1,"answer":{"delta.trust":"suspicious","requires.trust":"trusted","requires.attention":["operator-signoff"]}}"#
+            r#"{"version":1,"answer":{"delta":{"trust":"suspicious"},"requires":{"trust":"trusted","history":[],"attention":["operator-signoff"]},"emits":[]}}"#
         }),
     );
     tokio::spawn(async move {
@@ -201,10 +201,9 @@ async fn dynamic_deployment() -> Deployment {
 [policy]
 version = 1
 
-[[policy.dynamic_resolver]]
+[[policy.annotator]]
 name = "classifier"
-inputs = ["command"]
-returns = ["delta.trust", "requires.trust", "requires.attention"]
+inputs = {{ command = "$tool_call.arguments.command" }}
 
 [policy.deployment]
 starting_label = {{ trust = "suspicious" }}
@@ -213,7 +212,7 @@ starting_label = {{ trust = "suspicious" }}
 name = "Bash"
 description = "Runs one shell command and returns its output."
 parameters = {{ type = "object", properties = {{ command = {{ type = "string" }} }}, required = ["command"] }}
-uses = [{{ resolver = "classifier", inputs = {{ command = "$tool_call.arguments.command" }} }}]
+annotator = "classifier"
 
 [[policy.authority]]
 name = "operator"
@@ -228,7 +227,7 @@ timeout_ms = 1000
 review_timeout_ms = 5000
 max_body_bytes = 4096
 
-[externals.dynamic.classifier]
+[externals.annotators.classifier]
 url = "{resolver_url}"
 
 [externals.authorities.operator]

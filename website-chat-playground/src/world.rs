@@ -110,7 +110,7 @@ pub fn merge_policy(policy: &str, enabled: &BTreeSet<System>) -> Result<MergedPo
 pub const TOOLS_PATH: &str = "/tools";
 pub const AUTHORITY_PATH: &str = "/authority";
 pub const SANITIZER_PATH: &str = "/sanitizer";
-pub const DYNAMIC_RESOLVER_PATH: &str = "/dynamic-resolver";
+pub const ANNOTATOR_PATH: &str = "/annotator";
 pub const MEMBERSHIP_PATH: &str = "/membership";
 
 const CONSULT_TIMEOUT: Duration = Duration::from_secs(300);
@@ -161,15 +161,10 @@ pub fn externals_for(policy: &appa_policy::Config, base: &str) -> ExternalBindin
         .collect();
     // The playground serves no classifier route, so a resolver-backed cast stays
     // unbound and refuses the policy at open. Constant casts need no binding.
-    // The playground routes every named resolver to the same handler.
-    bindings.dynamic = policy
-        .dynamic_resolver_names()
-        .map(|name| {
-            (
-                name.as_str().to_string(),
-                endpoint(format!("{base}{DYNAMIC_RESOLVER_PATH}")),
-            )
-        })
+    // The playground routes every named annotator to the same handler.
+    bindings.annotators = policy
+        .annotator_names()
+        .map(|name| (name.as_str().to_string(), endpoint(format!("{base}{ANNOTATOR_PATH}"))))
         .collect();
     bindings.membership = registry
         .membership

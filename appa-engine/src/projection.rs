@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::basis::SubjectKey;
 use crate::candidate::{DerivedCandidate, SanitizerLineage};
-use crate::contract::PinnedToolResolution;
+use crate::contract::{AnnotationMandate, PinnedAnnotation};
 use crate::fact::{
     BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ForkSnapshot, ObservedResult, ReturnPolicy,
 };
@@ -102,11 +102,6 @@ pub(crate) struct RecordedCandidate {
     pub(crate) via: crate::candidate::DerivedVia,
     pub(crate) derived: DerivedCandidate,
     pub(crate) lineage: SanitizerLineage,
-    /// The rewritten call the resolvers were last consulted about, where an input hop selected
-    /// another ordered contract on the way to this candidate. `None` where every hop stayed in
-    /// the proposal's contract — the proposal is then the call consulted — or where the fold met
-    /// no standing call to compare against.
-    pub(crate) consulted: Option<ResolvedCall>,
     /// The group resolutions the hop that derived this candidate consumed: what a later read of
     /// the candidate under its own contract inherits, as it inherits an offer's.
     pub(crate) resolutions: Vec<GroupResolution>,
@@ -500,11 +495,11 @@ impl Projection {
                     trajectory,
                     dispatch,
                     tool,
-                    contract,
+                    declaration,
                     arguments,
                     receiving,
                     proposed_effects,
-                    tool_resolutions,
+                    annotation,
                     memberships,
                     requirement_cast,
                     subject,
@@ -513,8 +508,11 @@ impl Projection {
                 } => {
                     dispatch_calls.insert(
                         dispatch.clone(),
-                        ResolvedCall::new_keyed(tool.clone(), *contract, arguments.clone())
-                            .with_tool_resolutions(tool_resolutions.clone())
+                        ResolvedCall::new_keyed(tool.clone(), *declaration, arguments.clone())
+                            .with_annotation(match annotation.mandate() {
+                                AnnotationMandate::Declared => None,
+                                AnnotationMandate::Annotator(_) => Some(annotation.clone()),
+                            })
                             .with_memberships(memberships.clone())
                             .with_requirement_cast(requirement_cast.clone()),
                     );
@@ -603,34 +601,12 @@ impl Projection {
                             .derivation_unresolved
                             .extend(derivation_unresolved.iter().copied());
                     }
-                    // A rewrite that selects another ordered contract was consulted afresh and
-                    // is the call the answers of every later same-contract rewrite are about;
-                    // one that stays in its contract carries its predecessor's. Read before this
-                    // candidate replaces the one it descends from.
-                    let consulted = match derived {
-                        DerivedCandidate::Call { call, .. } => {
-                            let held = candidates.get(subject);
-                            let standing = held
-                                .and_then(|held| match &held.derived {
-                                    DerivedCandidate::Call { call, .. } => Some(call),
-                                    DerivedCandidate::Result { .. } | DerivedCandidate::Return { .. } => None,
-                                })
-                                .or_else(|| proposal_of(decided, subject));
-                            match standing {
-                                Some(standing) if standing.contract_id() != call.contract_id() => Some(call.clone()),
-                                Some(_) => held.and_then(|held| held.consulted.clone()),
-                                None => None,
-                            }
-                        }
-                        DerivedCandidate::Result { .. } | DerivedCandidate::Return { .. } => None,
-                    };
                     candidates.insert(
                         subject.clone(),
                         RecordedCandidate {
                             via: via.clone(),
                             derived: derived.clone(),
                             lineage: lineage.clone(),
-                            consulted,
                             resolutions: match derived {
                                 DerivedCandidate::Call { .. } => resolutions.clone(),
                                 DerivedCandidate::Result { .. } | DerivedCandidate::Return { .. } => Vec::new(),
@@ -893,6 +869,11 @@ impl Projection {
         self.offers.get(offer).map(|recorded| &recorded.trajectory)
     }
 
+    /// The canonical call one dispatch opened under, as the validator held its record.
+    pub(crate) fn dispatch_call_of(&self, dispatch: &DispatchId) -> Option<&ResolvedCall> {
+        self.dispatch_calls.get(dispatch)
+    }
+
     pub(crate) fn view<'a>(&'a self, trajectory: &'a TrajectoryId) -> Views<'a> {
         Views {
             projection: self,
@@ -907,28 +888,13 @@ pub struct Views<'a> {
 }
 
 impl Views<'_> {
-    /// The resolver answers a dispatch pinned, read off the canonical call the opening
-    /// recorded — the one representation the validator held that record to.
-    pub(crate) fn tool_resolutions(&self, dispatch: &DispatchId) -> Option<&[PinnedToolResolution]> {
-        self.projection
-            .dispatch_calls
-            .get(dispatch)
-            .map(ResolvedCall::tool_resolutions)
-    }
-
-    /// The answer a resolver pinned, under this call's tool and contract, to the same resolver
-    /// inputs, in a proposal this trajectory still has an act prepared on: an open offer that
-    /// stands at its basis, or an approval it has not spent. The re-proposal that pursues the
-    /// offer or spends the approval spells the call they were prepared for instead of
-    /// consulting again. Once nothing stands on the pinned call, a new proposal is classified
-    /// afresh: a directory may have changed since. Standing acts whose pins disagree name no
-    /// single answer.
-    pub fn pinned_tool_resolution(
-        &self,
-        call: &ResolvedCall,
-        uses: &crate::contract::ToolResolverUse,
-        args: crate::contract::ResolverArgsDigest,
-    ) -> Option<&PinnedToolResolution> {
+    /// The annotation an Annotator pinned to this same canonical call, in a proposal this
+    /// trajectory still has an act prepared on: an open offer that stands at its basis, or an
+    /// approval it has not spent. The re-proposal that pursues the offer or spends the approval
+    /// spells the call it was prepared for instead of consulting again. Once nothing stands on
+    /// the pinned call, a new proposal is annotated afresh: the Annotator may judge it
+    /// differently since. Standing acts whose pins disagree name no single answer.
+    pub fn pinned_annotation(&self, call: &ResolvedCall) -> Option<&PinnedAnnotation> {
         let offered = self
             .projection
             .offers
@@ -946,11 +912,11 @@ impl Views<'_> {
                     && approval.basis == self.basis_for(&SubjectKey::Approval(**offer))
             })
             .map(|(_, approval)| &approval.call);
+        let digest = call.digest();
         let mut pins = offered
             .chain(approved)
-            .filter(|standing| standing.tool() == call.tool() && standing.contract_id() == call.contract_id())
-            .flat_map(ResolvedCall::tool_resolutions)
-            .filter(|pin| pin.uses() == uses && pin.args() == args);
+            .filter(|standing| standing.digest() == digest && standing.declaration_id() == call.declaration_id())
+            .filter_map(ResolvedCall::annotation);
         let first = pins.next()?;
         pins.all(|pin| pin == first).then_some(first)
     }
@@ -1419,19 +1385,6 @@ impl Views<'_> {
         proposal_of(&self.projection.decided, subject)
     }
 
-    /// The call this subject's resolvers were last consulted about: the proposal, or the latest
-    /// input hop whose rewrite selected another ordered contract. A same-contract rewrite carries
-    /// that call's answers without consulting again, so it is the call those answers may be about —
-    /// see [`crate::check::validate_tool_resolutions`]. `None` wherever the record does not name
-    /// one, which fails the pin closed.
-    pub(crate) fn consulted_call(&self, subject: &SubjectKey) -> Option<&ResolvedCall> {
-        self.projection
-            .candidates
-            .get(subject)
-            .and_then(|held| held.consulted.as_ref())
-            .or_else(|| self.proposed_call(subject))
-    }
-
     /// The group resolutions the hop that derived this subject's candidate consumed; empty for a
     /// subject no hop has touched.
     pub(crate) fn candidate_resolutions(&self, subject: &SubjectKey) -> &[GroupResolution] {
@@ -1548,26 +1501,19 @@ mod tests {
     }
 
     #[test]
-    fn a_pinned_resolution_is_not_reused_once_no_act_stands_on_its_call() {
-        use crate::contract::{PinnedToolResolution, ResolverArgsDigest, ResolverReturn, ToolResolverUse};
-        use crate::names::DynamicResolverName;
-
-        let uses = ToolResolverUse {
-            resolver: DynamicResolverName::new("classifier"),
-            inputs: BTreeMap::new(),
-            returns: [ResolverReturn::Audience].into_iter().collect(),
-        };
-        let args = ResolverArgsDigest::of(&crate::params::canonical_bytes(&json!({ "id": 7 })));
-        let pin = PinnedToolResolution::from_answer(
-            uses.clone(),
-            args,
-            None,
-            Some(Audience::restricted([ReaderId::new("support")])),
-            None,
-            None,
-            None,
-        )
-        .expect("the declared audience answer pins");
+    fn a_pinned_annotation_is_not_reused_once_no_act_stands_on_its_call() {
+        let pin = crate::contract::PinnedAnnotation::new(
+            crate::contract::ToolAnnotation {
+                name: ToolName::new("lookup"),
+                tags: vec![],
+                description: None,
+                parameters: crate::params::ToolParameters::open(),
+                delta: crate::contract::Delta::NONE,
+                emits: EffectSet::default(),
+                requires: crate::contract::Requires::default(),
+            },
+            crate::contract::AnnotationMandate::Annotator(crate::names::AnnotatorName::new("classifier")),
+        );
         let call = ResolvedCall::new(
             ToolName::new("lookup"),
             crate::params::test_arguments(&json!({ "id": 7 })),
@@ -1577,14 +1523,14 @@ mod tests {
             Fact::ProposalBatchDecided {
                 trajectory: traj("a"),
                 batch: crate::transition::ProposalBatchId::new("b1"),
-                proposals: vec![call.clone().with_tool_resolutions(vec![pin])],
+                proposals: vec![call.clone().with_annotation(Some(pin))],
                 spawn: None,
                 released: vec![],
                 resolutions: vec![],
             },
         ];
         assert_eq!(
-            build(&log).view(&traj("a")).pinned_tool_resolution(&call, &uses, args),
+            build(&log).view(&traj("a")).pinned_annotation(&call),
             None,
             "a decided call with no open offer and no unspent approval is history, not a standing act"
         );
@@ -1655,92 +1601,6 @@ mod tests {
         ] {
             assert_eq!(views.proposed_call(&other), None, "a subject that is not a call's");
         }
-    }
-
-    #[test]
-    fn the_consulted_call_is_the_proposal_until_a_hop_selects_another_contract() {
-        let read = |path: &str, contract: usize| {
-            ResolvedCall::new_keyed(
-                ToolName::new("read"),
-                crate::value::ToolContractId::new(contract).unwrap(),
-                crate::params::test_arguments(&json!({ "path": path })),
-            )
-        };
-        let batch = crate::transition::ProposalBatchId::new("b1");
-        let subject = |trajectory: &str| SubjectKey::Call {
-            trajectory: traj(trajectory),
-            batch: batch.clone(),
-            position: 0,
-        };
-        let block = crate::value::BlockId::of_proposal(
-            &crate::value::OfferNonce::new([7u8; 32]),
-            &traj("a"),
-            &batch,
-            0,
-            &read("private/q3.md", 1).digest(),
-        );
-        let hop = |trajectory: &str, call: ResolvedCall| Fact::CandidateDerived {
-            trajectory: traj(trajectory),
-            subject: subject(trajectory),
-            via: crate::candidate::DerivedVia::Sanitizer {
-                name: SanitizerName::new("redact"),
-                transition: crate::authority::Transition::Audience {
-                    from_includes: Audience::Public,
-                    to: Audience::Public,
-                },
-            },
-            derived: DerivedCandidate::Call {
-                source: crate::value::RawResultDigest::of(&[]),
-                from: crate::value::OfferId::of_plan(&block, 0, b"plan"),
-                call,
-                label: base().into_label(),
-            },
-            lineage: SanitizerLineage::default(),
-            resolutions: vec![],
-        };
-        let consulted = |log: &[Fact], trajectory: &str| {
-            build(log)
-                .view(&traj(trajectory))
-                .consulted_call(&subject(trajectory))
-                .cloned()
-        };
-
-        let mut log = vec![opened("a")];
-        log.extend(fork_pair("a", "b", ForkSnapshot::freeze(base(), [], [])));
-        log.push(Fact::ProposalBatchDecided {
-            trajectory: traj("a"),
-            batch: batch.clone(),
-            proposals: vec![read("private/q3.md", 1)],
-            spawn: None,
-            released: vec![],
-            resolutions: vec![],
-        });
-        assert_eq!(consulted(&log, "a"), Some(read("private/q3.md", 1)), "the proposal");
-        log.push(hop("a", read("private/q4.md", 1)));
-        assert_eq!(
-            consulted(&log, "a"),
-            Some(read("private/q3.md", 1)),
-            "a hop within the contract"
-        );
-        log.push(hop("a", read("public/q3.md", 0)));
-        assert_eq!(
-            consulted(&log, "a"),
-            Some(read("public/q3.md", 0)),
-            "a hop that selects another"
-        );
-        log.push(hop("a", read("public/q4.md", 0)));
-        assert_eq!(
-            consulted(&log, "a"),
-            Some(read("public/q3.md", 0)),
-            "and a hop within that one"
-        );
-        log.push(hop("a", read("private/q5.md", 1)));
-        assert_eq!(consulted(&log, "a"), Some(read("private/q5.md", 1)), "back again");
-
-        // A candidate on a subject whose batch its own trajectory never decided has no standing
-        // call to compare against: no consulted call, never the candidate itself, and no panic.
-        log.push(hop("b", read("public/q3.md", 0)));
-        assert_eq!(consulted(&log, "b"), None);
     }
 
     #[test]
@@ -1825,6 +1685,21 @@ mod tests {
         assert!(!p.is_opened(&traj("c")));
     }
 
+    fn pinned(tool: &str) -> crate::contract::PinnedAnnotation {
+        crate::contract::PinnedAnnotation::new(
+            crate::contract::ToolAnnotation {
+                name: ToolName::new(tool),
+                tags: vec![],
+                description: None,
+                parameters: crate::params::ToolParameters::open(),
+                delta: crate::contract::Delta::NONE,
+                emits: EffectSet::default(),
+                requires: crate::contract::Requires::default(),
+            },
+            crate::contract::AnnotationMandate::Declared,
+        )
+    }
+
     #[test]
     fn effects_are_family_wide_and_commit_only_on_success() {
         let egress = EffectKind::new("egress");
@@ -1833,12 +1708,12 @@ mod tests {
                 trajectory: traj("a"),
                 dispatch: dispatch("a"),
                 tool: ToolName::new("tool"),
-                contract: Default::default(),
+                declaration: Default::default(),
                 arguments: crate::params::test_arguments(&json!({ "t": "a" })),
                 proposed_label: EstablishedLabel::top(),
                 receiving: EstablishedLabel::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
-                tool_resolutions: Vec::new(),
+                annotation: pinned("tool"),
                 memberships: Vec::new(),
                 requirement_cast: None,
                 subject: crate::basis::fixture_subject(&traj("a")),
@@ -1865,12 +1740,12 @@ mod tests {
                 trajectory: traj("a"),
                 dispatch: dispatch("a"),
                 tool: ToolName::new("tool"),
-                contract: Default::default(),
+                declaration: Default::default(),
                 arguments: crate::params::test_arguments(&json!({ "t": "a" })),
                 proposed_label: EstablishedLabel::top(),
                 receiving: EstablishedLabel::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
-                tool_resolutions: Vec::new(),
+                annotation: pinned("tool"),
                 memberships: Vec::new(),
                 requirement_cast: None,
                 subject: crate::basis::fixture_subject(&traj("a")),
@@ -1896,12 +1771,12 @@ mod tests {
                 trajectory: traj("a"),
                 dispatch: dispatch("a"),
                 tool: ToolName::new("tool"),
-                contract: Default::default(),
+                declaration: Default::default(),
                 arguments: crate::params::test_arguments(&json!({ "t": "a" })),
                 proposed_label: EstablishedLabel::top(),
                 receiving: EstablishedLabel::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
-                tool_resolutions: Vec::new(),
+                annotation: pinned("tool"),
                 memberships: Vec::new(),
                 requirement_cast: None,
                 subject: crate::basis::fixture_subject(&traj("a")),
@@ -2287,12 +2162,12 @@ mod tests {
                 trajectory: traj("a"),
                 dispatch: dispatch("a"),
                 tool: ToolName::new("fetch_meeting"),
-                contract: Default::default(),
+                declaration: Default::default(),
                 arguments: crate::params::test_arguments(&json!({ "t": "a" })),
                 proposed_label: EstablishedLabel::top(),
                 receiving: EstablishedLabel::top(),
                 proposed_effects: EffectSet::new([]).unwrap(),
-                tool_resolutions: Vec::new(),
+                annotation: pinned("fetch_meeting"),
                 memberships: Vec::new(),
                 requirement_cast: None,
                 subject: crate::basis::fixture_subject(&traj("a")),
