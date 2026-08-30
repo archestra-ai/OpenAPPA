@@ -110,7 +110,7 @@ fn canonical_json<T: Serialize>(pinned: &T) -> Vec<u8> {
     serde_json_canonicalizer::to_vec(pinned).expect("a pinned answer canonicalizes")
 }
 
-/// A digest of a raw tool result. Binds a cast resolution or a child-return derivation to the bytes it
+/// A digest of a raw tool result. Binds a child-return derivation to the bytes it
 /// derived from, so a later differing result cannot silently reuse an old derivative.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct RawResultDigest(#[serde(with = "crate::hex32")] [u8; 32]);

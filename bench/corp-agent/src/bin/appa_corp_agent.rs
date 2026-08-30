@@ -277,7 +277,6 @@ fn bind_hosted_externals(config: &mut Config, origin: &str) -> usize {
         .authorities
         .values_mut()
         .chain(externals.sanitizers.values_mut())
-        .chain(externals.casts.values_mut())
         .chain(externals.membership.values_mut())
         .filter_map(|implementation| match implementation {
             Implementation::Resolver(endpoint) => Some(endpoint),
@@ -348,9 +347,6 @@ fn replay(entries: &[AuditEntry]) {
                     label(from),
                     label(to)
                 );
-            }
-            AuditEvent::Cast { cast, resolved } => {
-                eprintln!("appa: [{at}] cast {cast} resolved to {}", label(resolved));
             }
             AuditEvent::SanitizerBound { sanitizer } => {
                 eprintln!("appa: [{at}] the raw result is withheld for {sanitizer}");

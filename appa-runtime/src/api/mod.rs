@@ -129,10 +129,6 @@ pub enum OpenError {
     #[error("[externals] binds {kind} {name}, which the policy does not declare")]
     UndeclaredExternal { kind: &'static str, name: String },
     #[error(
-        "cast {0} declares a constant, which the engine answers from the policy — remove its [externals.casts] binding"
-    )]
-    BoundConstantCast(String),
-    #[error(
         "annotator {0} names a builtin on its declaration and takes no [externals.annotators] binding — remove the binding"
     )]
     BoundBuiltinAnnotator(String),
@@ -894,22 +890,6 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
             .filter(|sanitizer| !sanitizer.name.is_attest_schema())
             .map(|sanitizer| sanitizer.name.as_str()),
         &externals.sanitizers,
-    )?;
-    // A resolver-backed cast classifies over the wire, so it needs a binding. A constant
-    // is answered from the policy itself and binds nothing.
-    if let Some(cast) = rc.casts.iter().find(|cast| {
-        matches!(cast.resolution, appa_engine::authority::CastResolution::Constant(_))
-            && externals.casts.contains_key(cast.name.as_str())
-    }) {
-        return Err(OpenError::BoundConstantCast(cast.name.as_str().to_string()));
-    }
-    bound_exactly(
-        "cast",
-        rc.casts.iter().filter_map(|cast| match cast.resolution {
-            appa_engine::authority::CastResolution::Resolver { .. } => Some(cast.name.as_str()),
-            appa_engine::authority::CastResolution::Constant(_) => None,
-        }),
-        &externals.casts,
     )?;
     // A declared builtin is served by the runtime itself, so it is refused when it is also
     // bound, and when this deployment cannot serve it: a consult that can never answer is

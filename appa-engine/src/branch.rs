@@ -149,10 +149,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use crate::admit::{CastAnswer, CastError, admit_cast};
-    use crate::authority::{
-        Cast, CastResolution, DeclaredLabel, DeclaredTransition, Sanitizer, SanitizerPoints, Scope,
-    };
+    use crate::authority::{DeclaredTransition, Sanitizer, SanitizerPoints, Scope};
     use crate::fact::{CloseOutcome, EffectKind, EffectSet, ForkSnapshot};
     use crate::groups::DeclaredAudience;
     use crate::label::Adequacy;
@@ -160,7 +157,7 @@ mod tests {
     use crate::label::EstablishedLabel;
     use crate::label::PartialLabel;
     use crate::label::{Audience, Dim, Label, ReaderId, Trust};
-    use crate::names::{CastName, SanitizerName};
+    use crate::names::SanitizerName;
     use crate::projection::Projection;
     use crate::registry::{RegistryConfig, TrustChain};
     use crate::value::{DispatchId, LabeledValue, Provenance, ResolvedCall, ToolName, ValueBody, ValueId};
@@ -195,18 +192,6 @@ mod tests {
 
     fn opened(trajectory: TrajectoryId, label: Label) -> Fact {
         crate::profile::opening_at(trajectory, label)
-    }
-
-    fn read_tool() -> crate::contract::ToolAnnotation {
-        crate::contract::ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("read"),
-            tags: vec![],
-            delta: crate::contract::Delta::NONE,
-            parameters: crate::params::ToolParameters::open(),
-            emits: EffectSet::default(),
-            requires: crate::contract::Requires::default(),
-        }
     }
 
     fn pinned(call: &ResolvedCall) -> crate::contract::PinnedAnnotation {
@@ -285,7 +270,6 @@ mod tests {
             annotators: vec![],
             authorities: vec![],
             sanitizers: vec![declassify],
-            casts: vec![],
             membership: None,
         })
         .unwrap()
@@ -424,12 +408,11 @@ mod tests {
         let unknown_value = ValueId::new(0);
         let projection = build(&log);
         assert_eq!(raw_return_narrowing(&projection.view(&parent()), &child()), Ok(None));
-        assert_eq!(resolve(&log, &parent(), 0), Err(CastError::ForeignValue));
 
         let projection = build(&log);
         let ret = merged(
             submit_child_return(
-                &cast_registry(),
+                &registry(),
                 &projection.view(&parent()),
                 &child(),
                 &raw("found"),
@@ -446,18 +429,6 @@ mod tests {
             vec![unknown_value]
         );
         assert!(parent_label.is_established(Dimension::Audience));
-
-        let batch = resolve(&log, &parent(), 0).expect("a merge-carried identity is in reach");
-        log.extend(batch);
-        let projection = build(&log);
-        assert_eq!(
-            projection.view(&parent()).current_label(),
-            partial(SUSPICIOUS, Audience::Public)
-        );
-        assert_eq!(
-            projection.view(&child()).current_label(),
-            partial(SUSPICIOUS, Audience::Public)
-        );
     }
 
     #[test]
@@ -501,7 +472,6 @@ mod tests {
                 .current_label()
                 .is_established(Dimension::Audience)
         );
-        assert_eq!(resolve(&log, &parent(), 1), Err(CastError::ForeignValue));
 
         let projection = build(&log);
         let batch = merged(
@@ -774,24 +744,6 @@ mod tests {
         assert!(projection.view(&parent()).has_effect(&egress));
     }
 
-    fn cast_registry() -> Registry {
-        Registry::build_covered(RegistryConfig {
-            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![crate::contract::ToolDeclaration::Declared(read_tool())],
-            annotators: vec![],
-            authorities: vec![],
-            sanitizers: vec![],
-            casts: vec![Cast {
-                name: CastName::new("classify"),
-                resolution: CastResolution::Constant(DeclaredLabel::literal(established(SUSPICIOUS, Audience::Public))),
-                scope: Scope::default(),
-                hint: None,
-            }],
-            membership: None,
-        })
-        .unwrap()
-    }
-
     fn unknown_source(log: &mut Vec<Fact>, trajectory: TrajectoryId) {
         admit(log, trajectory, Label::new(Dim::Unknown, Dim::Known(Audience::Public)));
     }
@@ -827,20 +779,6 @@ mod tests {
             .expect("the fork was prepared with a snapshot")
     }
 
-    fn resolve(log: &[Fact], actor: &TrajectoryId, value: u64) -> Result<Vec<Fact>, CastError> {
-        let projection = build(log);
-        admit_cast(
-            &cast_registry(),
-            &projection.view(actor),
-            ValueId::new(value),
-            CastAnswer {
-                cast: CastName::new("classify"),
-                resolved: established(SUSPICIOUS, Audience::Public),
-            },
-            &Expansions::default(),
-        )
-    }
-
     fn unresolved_trust(log: &[Fact], trajectory: &TrajectoryId) -> Vec<ValueId> {
         build(log)
             .view(trajectory)
@@ -850,7 +788,7 @@ mod tests {
     }
 
     #[test]
-    fn a_fork_at_an_unresolved_parent_carries_the_source_and_shares_its_resolution() {
+    fn a_fork_at_an_unresolved_parent_carries_the_source_in_its_snapshot() {
         let mut log = opened_unknown_parent();
         fork_under(&mut log, &parent(), &child());
 
@@ -864,53 +802,16 @@ mod tests {
         let snapshot = snapshot_of(&log, &child());
         assert_eq!(snapshot.inherited(), &BTreeSet::from([ValueId::new(0)]));
         assert_eq!(snapshot.seed(), &at_fork);
-
-        let batch = resolve(&log, &parent(), 0).expect("a branch resolves its own source");
-        log.extend(batch);
-        let projection = build(&log);
-        assert_eq!(
-            projection.view(&child()).current_label(),
-            partial(SUSPICIOUS, Audience::Public)
-        );
-        assert_eq!(
-            projection.view(&child()).current_label().meets_floor(SUSPICIOUS),
-            Adequacy::Holds
-        );
-        assert_eq!(snapshot_of(&log, &child()).seed(), &at_fork);
     }
 
     #[test]
-    fn a_childs_resolution_of_an_inherited_source_reaches_the_parent_and_its_siblings() {
-        let sibling = TrajectoryId::new("sibling");
-        let mut log = opened_unknown_parent();
-        fork_under(&mut log, &parent(), &child());
-        fork_under(&mut log, &parent(), &sibling);
-
-        let batch = resolve(&log, &child(), 0).expect("an inherited source is in reach");
-        log.extend(batch);
-        let projection = build(&log);
-        for branch in [parent(), child(), sibling] {
-            assert_eq!(
-                projection.view(&branch).current_label(),
-                partial(SUSPICIOUS, Audience::Public),
-                "the resolution is shared with every branch holding the source"
-            );
-        }
-        assert_eq!(resolve(&log, &parent(), 0), Err(CastError::AlreadyEstablished));
-    }
-
-    #[test]
-    fn a_branch_may_not_resolve_a_sibling_or_post_fork_value() {
+    fn a_post_fork_source_stays_private_to_the_branch_that_admitted_it() {
         let sibling = TrajectoryId::new("sibling");
         let mut log = opened_unknown_parent();
         fork_under(&mut log, &parent(), &child());
         fork_under(&mut log, &parent(), &sibling);
         unknown_source(&mut log, parent());
         unknown_source(&mut log, child());
-
-        assert_eq!(resolve(&log, &child(), 1), Err(CastError::ForeignValue));
-        assert_eq!(resolve(&log, &sibling, 2), Err(CastError::ForeignValue));
-        assert_eq!(resolve(&log, &parent(), 2), Err(CastError::ForeignValue));
 
         assert_eq!(
             unresolved_trust(&log, &parent()),
@@ -933,23 +834,6 @@ mod tests {
             snapshot.inherited(),
             &BTreeSet::from([ValueId::new(0), ValueId::new(1)])
         );
-
-        let batch = resolve(&log, &grandchild, 0).expect("an inherited ancestor source is in reach");
-        log.extend(batch);
-        assert_eq!(unresolved_trust(&log, &parent()), vec![]);
-        assert_eq!(unresolved_trust(&log, &child()), vec![ValueId::new(1)]);
-        assert_eq!(unresolved_trust(&log, &grandchild), vec![ValueId::new(1)]);
-    }
-
-    #[test]
-    fn competing_first_answers_admit_exactly_one() {
-        let mut log = opened_unknown_parent();
-        fork_under(&mut log, &parent(), &child());
-        let by_child = resolve(&log, &child(), 0).unwrap();
-        resolve(&log, &parent(), 0).unwrap();
-
-        log.extend(by_child);
-        assert_eq!(resolve(&log, &parent(), 0), Err(CastError::AlreadyEstablished));
     }
 
     #[test]

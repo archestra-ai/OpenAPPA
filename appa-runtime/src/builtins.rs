@@ -104,9 +104,9 @@ fn is_emailish(token: &str) -> bool {
     }
 }
 
-/// Which of the two module-capable kinds a module implements. Casts,
-/// dynamic resolvers, and membership take no module — a descriptor
-/// naming any other kind is refused.
+/// Which of the two module-capable kinds a module implements. Annotators
+/// and membership take no module — a descriptor naming any other kind is
+/// refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ModuleKind {
     Authority,
@@ -565,7 +565,6 @@ mod tests {
             (Section::Authorities, "hitl"),
             (Section::Authorities, "redact-email"),
             (Section::Sanitizers, "approve"),
-            (Section::Casts, "approve"),
             (Section::Annotators, "redact-email"),
             (Section::Membership, "approve"),
         ] {

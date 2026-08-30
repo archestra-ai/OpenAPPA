@@ -1,9 +1,7 @@
 # Example deployment for protecting a Claude Code session.
 #
 # Every built-in tool of the harness is named: a tool the policy does
-# not name has every requirement unknown, so only a cast covering
-# undeclared tools can decide it — this file registers none, and such
-# a call is blocked. A named tool without a `delta` key restricts
+# not name is refused before it runs. A named tool without a `delta` key restricts
 # nothing, the same statement as `delta = {}`: the result's label is the
 # combination of its sources, unchanged.
 #

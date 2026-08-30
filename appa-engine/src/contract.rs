@@ -122,17 +122,6 @@ impl PinnedRequirementCast {
             RequirementSlot::Attention => self.attention.is_some(),
         }
     }
-
-    pub(crate) fn answer(&self) -> RequirementAnswer {
-        RequirementAnswer {
-            trust: self.required_trust,
-            audience: self
-                .required_audience
-                .as_ref()
-                .and_then(|required| required.includes.clone()),
-            attention: self.attention.clone(),
-        }
-    }
 }
 
 impl<'de> Deserialize<'de> for PinnedRequirementCast {

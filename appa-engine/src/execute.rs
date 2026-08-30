@@ -29,7 +29,7 @@ pub struct AuthorityReview {
 pub enum PlanError {
     #[error("the call has an unestablished dimension — a fact clears it, never a plan")]
     Unestablished(Vec<UnestablishedFact>),
-    #[error("the tool's requirement is unknown on {0:?} — a cast establishes it, never a plan")]
+    #[error("the tool's requirement is unknown on {0:?} — nothing answers it, never a plan")]
     UnknownRequirement(Vec<crate::contract::RequirementSlot>),
     #[error("no authority registered as {0}")]
     UnknownAuthority(String),
@@ -149,7 +149,6 @@ mod tests {
             annotators: vec![],
             authorities: vec![officer, attester],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
         })
         .unwrap()

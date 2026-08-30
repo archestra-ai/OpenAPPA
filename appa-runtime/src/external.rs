@@ -18,7 +18,7 @@ use crate::config::{
     AnnotatorImplementation, CLAUDE_CODE_BUILTIN, Endpoint, EndpointHost, Externals, Implementation, LLM_BUILTIN,
     ResolverCommand, Section,
 };
-use crate::consult::{Consult, ConsultBody, ConsultKind, ModelPrompt, model_dynamic_answer_error};
+use crate::consult::{Consult, ConsultBody, ConsultKind, ModelPrompt};
 use crate::elicit::Elicitation;
 use crate::llm::{LlmBackend, LlmGate};
 use appa_policy::AnnotatorBuiltin;
@@ -81,18 +81,6 @@ struct ConsultResponse {
     answer: serde_json::Value,
 }
 
-/// Model classifiers use the policy vocabulary carried in their declaration. Keep the
-/// diagnostic short and body-free: it may reach a blocking hook's stderr.
-fn validate_model_answer(consult: &Consult, answer: serde_json::Value) -> Result<serde_json::Value, NoAnswerReason> {
-    match &consult.body {
-        ConsultBody::RequirementCast { declaration, .. } => match model_dynamic_answer_error(&answer, declaration) {
-            Some(detail) => Err(NoAnswerReason::MalformedAnswer(detail)),
-            None => Ok(answer),
-        },
-        _ => Ok(answer),
-    }
-}
-
 fn read_answer(body: &[u8]) -> Result<serde_json::Value, NoAnswerReason> {
     let response: ConsultResponse = serde_json::from_slice(body).map_err(|_| NoAnswerReason::Malformed)?;
     match response.version {
@@ -117,7 +105,6 @@ fn kind_of(section: Section) -> ConsultKind {
     match section {
         Section::Authorities => ConsultKind::Authority,
         Section::Sanitizers => ConsultKind::Sanitizer,
-        Section::Casts => ConsultKind::Cast,
         Section::Annotators => ConsultKind::Annotation,
         Section::Membership => ConsultKind::Membership,
     }
@@ -235,7 +222,6 @@ impl ExternalServices {
         let tables = [
             (Section::Authorities, config.authorities),
             (Section::Sanitizers, config.sanitizers),
-            (Section::Casts, config.casts),
             (Section::Membership, config.membership),
         ];
         let mut backends: BTreeMap<ConsultKind, BTreeMap<String, Backend>> = BTreeMap::new();
@@ -314,15 +300,9 @@ impl ExternalServices {
                     Err(NoAnswerReason::Unreachable)
                 }
             },
-            Backend::ClaudeCode(claude) => self
-                .consult_claude(claude, consult)
-                .await
-                .and_then(|answer| validate_model_answer(consult, answer)),
+            Backend::ClaudeCode(claude) => self.consult_claude(claude, consult).await,
             Backend::Llm(llm) => match ModelPrompt::new(consult) {
-                Some(prompt) => llm
-                    .consult(&prompt)
-                    .await
-                    .and_then(|answer| validate_model_answer(consult, answer)),
+                Some(prompt) => llm.consult(&prompt).await,
                 None => Err(NoAnswerReason::Unregistered),
             },
         };
@@ -480,14 +460,14 @@ fn builtin_backend(
     let module = match section {
         Section::Authorities => registry.authority(&builtin),
         Section::Sanitizers => registry.sanitizer(&builtin),
-        Section::Casts | Section::Annotators | Section::Membership => None,
+        Section::Annotators | Section::Membership => None,
     };
     let backend = match (section, builtin.as_str()) {
         (Section::Authorities, HITL) => Some(Backend::Hitl),
-        (Section::Authorities | Section::Sanitizers | Section::Casts | Section::Annotators, CLAUDE_CODE_BUILTIN) => {
+        (Section::Authorities | Section::Sanitizers | Section::Annotators, CLAUDE_CODE_BUILTIN) => {
             Some(Backend::ClaudeCode(claude.clone()))
         }
-        (Section::Authorities | Section::Sanitizers | Section::Casts | Section::Annotators, LLM_BUILTIN) => {
+        (Section::Authorities | Section::Sanitizers | Section::Annotators, LLM_BUILTIN) => {
             llm.cloned().map(Backend::Llm)
         }
         _ => Stock::for_section(section, &builtin)
@@ -818,8 +798,8 @@ mod tests {
     use crate::config::Token;
     use crate::consult::{
         AnnotationArtifact, AnnotationDeclaration, AuthorityArtifact, AuthorityDeclaration, DeclaredPermits,
-        DeclaredSanitizerTransition, DynamicArtifact, DynamicDeclaration, MembershipArtifact, ReadersAnswer,
-        SanitizerArtifact, SanitizerDeclaration, SanitizerPoint, WireAudience,
+        DeclaredSanitizerTransition, MembershipArtifact, ReadersAnswer, SanitizerArtifact, SanitizerDeclaration,
+        SanitizerPoint, WireAudience,
     };
 
     async fn raw_stub(response: &'static [u8], hold_open: bool) -> String {
@@ -874,7 +854,6 @@ mod tests {
             max_body_bytes: cap,
             authorities: BTreeMap::new(),
             sanitizers: BTreeMap::new(),
-            casts: BTreeMap::new(),
             annotators,
             membership,
             claude_code: Default::default(),
@@ -962,40 +941,6 @@ mod tests {
                 artifact: AnnotationArtifact { args },
             },
         }
-    }
-
-    #[test]
-    fn a_model_requirement_answer_names_the_undeclared_audience_field() {
-        let requirement_cast = Consult {
-            name: "judge".to_string(),
-            body: ConsultBody::RequirementCast {
-                declaration: DynamicDeclaration {
-                    returns: vec!["requires.trust".to_string(), "requires.audience".to_string()],
-                    trust_ranks: vec!["suspicious".to_string(), "trusted".to_string()],
-                    audiences: vec!["public".to_string(), "bob@example.com".to_string()],
-                    attention_marks: vec![],
-                },
-                artifact: DynamicArtifact {
-                    args: serde_json::json!({"command": "pwd"}),
-                },
-            },
-        };
-        let answer = |reader: &str| {
-            serde_json::json!({
-                "requires.trust": "trusted",
-                "requires.audience": {"contains": [reader]},
-            })
-        };
-        assert!(validate_model_answer(&requirement_cast, answer("bob@example.com")).is_ok());
-        assert_eq!(
-            validate_model_answer(&requirement_cast, answer("secret")),
-            Err(NoAnswerReason::MalformedAnswer(
-                "field=requires.audience.contains value=\"secret\" allowed=declaration.audiences".to_string()
-            ))
-        );
-        // The vocabulary check is scoped to the requirement-cast wire: an annotation consult
-        // passes through untouched here, because its strict decode happens at the engine seam.
-        assert!(validate_model_answer(&annotation_consult("judge", serde_json::json!({})), answer("secret")).is_ok());
     }
 
     fn membership_consult(name: &str, group: &str) -> Consult {
@@ -1609,7 +1554,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         );
         let mut config = externals(None, 2000, 65_536);
         config.claude_code.command = command;
-        for section in [&mut config.authorities, &mut config.sanitizers, &mut config.casts] {
+        for section in [&mut config.authorities, &mut config.sanitizers] {
             section.insert(
                 "judge".to_string(),
                 Implementation::Builtin(CLAUDE_CODE_BUILTIN.to_string()),
@@ -1677,7 +1622,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         };
         let mut config = externals(None, 2000, 65_536);
         config.llm = Some(profile.clone());
-        for section in [&mut config.authorities, &mut config.sanitizers, &mut config.casts] {
+        for section in [&mut config.authorities, &mut config.sanitizers] {
             section.insert("judge".to_string(), Implementation::Builtin(LLM_BUILTIN.to_string()));
         }
         let services = services_declaring(config, declared("judge", AnnotatorBuiltin::Llm));
@@ -1946,16 +1891,11 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
 
     #[tokio::test]
     async fn a_builtin_of_the_wrong_kind_is_a_dangling_reference() {
-        for (section, builtin) in [
-            ("sanitizers", "approve"),
-            ("authorities", "redact-email"),
-            ("casts", "hitl"),
-        ] {
+        for (section, builtin) in [("sanitizers", "approve"), ("authorities", "redact-email")] {
             let mut config = externals(None, 2000, 65536);
             let table = match section {
                 "sanitizers" => &mut config.sanitizers,
-                "authorities" => &mut config.authorities,
-                _ => &mut config.casts,
+                _ => &mut config.authorities,
             };
             table.insert("x".to_string(), Implementation::Builtin(builtin.to_string()));
             match ExternalServices::new(

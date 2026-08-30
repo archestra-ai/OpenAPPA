@@ -6,10 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Deserialize;
 use thiserror::Error;
 
-use appa_engine::authority::{
-    Authority, Cast, CastCeiling, CastResolution, DeclaredLabel, DeclaredTransition, Hint, Mandate, Sanitizer,
-    SanitizerPoints, Scope,
-};
+use appa_engine::authority::{Authority, DeclaredTransition, Hint, Mandate, Sanitizer, SanitizerPoints, Scope};
 use appa_engine::contract::{
     AudienceDelta, AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, RecipientSpec, Requires,
     ToolAnnotation, ToolDeclaration,
@@ -20,8 +17,7 @@ use appa_engine::fact::{EffectKind, EffectSet};
 use appa_engine::groups::DeclaredAudience;
 use appa_engine::label::{Audience, Dim, Label, ReaderId, Trust};
 use appa_engine::names::{
-    AnnotatorName, AuthorityName, CastName, GroupName, MarkName, MembershipResolverName, SanitizerName, SurfaceName,
-    TagName,
+    AnnotatorName, AuthorityName, GroupName, MarkName, MembershipResolverName, SanitizerName, SurfaceName, TagName,
 };
 use appa_engine::params::ToolParameters;
 use appa_engine::profile::{
@@ -356,11 +352,6 @@ impl Config {
             sanitizers.push(s.convert(&trust_chain)?);
         }
 
-        let mut casts = Vec::new();
-        for c in raw.cast {
-            casts.push(c.convert(&trust_chain)?);
-        }
-
         let planner_cap = match raw.limits.as_ref().and_then(|l| l.planner_cap) {
             None => PlannerCap::default(),
             Some(cap) => PlannerCap::new(cap).ok_or(ConfigError::ZeroPlannerCap)?,
@@ -410,7 +401,6 @@ impl Config {
             annotators: annotator_declarations,
             authorities,
             sanitizers,
-            casts,
             membership,
         };
         let engine = Engine::open(DeploymentPolicy {
@@ -474,8 +464,6 @@ struct RawConfig {
     authority: Vec<RawAuthority>,
     #[serde(default)]
     sanitizer: Vec<RawSanitizer>,
-    #[serde(default)]
-    cast: Vec<RawCast>,
     #[serde(default)]
     annotator: Vec<RawAnnotator>,
     membership: Option<RawMembership>,
@@ -1033,129 +1021,7 @@ struct RawTrustTransition {
     to: String,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawCast {
-    name: String,
-    #[serde(default)]
-    hint: Option<String>,
-    constant: Option<RawConstantLabel>,
-    resolver: Option<RawCastResolver>,
-    #[serde(default)]
-    tags: Vec<String>,
-}
-
-impl RawCast {
-    fn convert(self, chain: &TrustChain) -> Result<Cast, ConfigError> {
-        let ctx = format!("cast {}", self.name);
-        let scope = Scope {
-            tags: self.tags.into_iter().map(TagName::new).collect(),
-        };
-        let resolution = match (self.constant, self.resolver) {
-            (Some(_), Some(_)) => {
-                return Err(bad_impl(
-                    "cast",
-                    &self.name,
-                    "declares both a constant and a resolver — a cast resolves one way or the other",
-                ));
-            }
-            (Some(constant), None) => CastResolution::Constant(constant.convert(chain, &ctx)?),
-            (None, Some(resolver)) => CastResolution::Resolver {
-                may_cast: resolver.convert(chain, &self.name)?,
-            },
-            (None, None) => {
-                return Err(bad_impl(
-                    "cast",
-                    &self.name,
-                    "declares neither a constant nor a resolver",
-                ));
-            }
-        };
-        Ok(Cast {
-            name: CastName::new(self.name),
-            resolution,
-            scope,
-            hint: self.hint.map(Hint::new),
-        })
-    }
-}
-
-/// A resolver-backed cast as the policy writes it: the ceiling only. The endpoint binds
-/// at the deployment, so any binding key here is refused like every other inline binding.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawCastResolver {
-    may_cast: RawMayCast,
-    url: Option<toml::Value>,
-    builtin: Option<toml::Value>,
-    token_env: Option<toml::Value>,
-}
-
-impl RawCastResolver {
-    fn convert(self, chain: &TrustChain, name: &str) -> Result<CastCeiling, ConfigError> {
-        if self.url.is_some() || self.builtin.is_some() || self.token_env.is_some() {
-            return Err(ConfigError::ForbiddenInlineBinding {
-                kind: "cast",
-                name: name.to_string(),
-            });
-        }
-        let ctx = format!("cast {name} may_cast");
-        Ok(CastCeiling {
-            trust: self
-                .may_cast
-                .trust
-                .iter()
-                .map(|rank| parse_trust(rank, chain, &ctx))
-                .collect::<Result<_, _>>()?,
-            audience: parse_declared_audience(&self.may_cast.audience, &ctx)?,
-        })
-    }
-}
-
-/// The complete product ceiling: the trust ranks a resolver may grant, and the cap its
-/// resolved audience must stay within. An empty `trust` admits no unresolved trust at all.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawMayCast {
-    #[serde(default)]
-    trust: Vec<String>,
-    audience: Vec<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawConstantLabel {
-    trust: String,
-    audience: Vec<String>,
-    attention: Option<Vec<String>>,
-}
-
-impl RawConstantLabel {
-    fn convert(self, chain: &TrustChain, ctx: &str) -> Result<DeclaredLabel, ConfigError> {
-        Ok(DeclaredLabel {
-            trust: parse_trust(&self.trust, chain, ctx)?,
-            audience: parse_declared_audience(&self.audience, ctx)?,
-            // One spelling per mark set: the identity and the pin both read the canonical form.
-            attention: self.attention.map(|marks| {
-                let mut marks: Vec<appa_engine::names::MarkName> =
-                    marks.into_iter().map(appa_engine::names::MarkName::new).collect();
-                marks.sort();
-                marks.dedup();
-                marks
-            }),
-        })
-    }
-}
-
 // --- shared conversion helpers -------------------------------------------------
-
-fn bad_impl(kind: &'static str, name: &str, reason: &str) -> ConfigError {
-    ConfigError::BadImplementation {
-        kind,
-        name: name.to_string(),
-        reason: reason.to_string(),
-    }
-}
 
 fn parse_trust(name: &str, chain: &TrustChain, context: &str) -> Result<Trust, ConfigError> {
     chain.rank_of(name).ok_or_else(|| ConfigError::UnknownTrustRank {
@@ -1345,10 +1211,6 @@ confined_results = ["lookup"]
                 "version = 1\n[[annotator]]\nname = \"d\"\nimplementation = { url = \"https://annotator.invalid\" }\n",
             ),
             (
-                "cast",
-                "version = 1\n[[cast]]\nname = \"c\"\nresolver = { url = \"https://cast.invalid\", may_cast = { trust = [\"trusted\"], audience = [\"public\"] } }\n",
-            ),
-            (
                 "membership resolver",
                 "version = 1\n[membership]\nname = \"directory\"\nurl = \"https://directory.invalid\"\n",
             ),
@@ -1382,89 +1244,6 @@ confined_results = ["lookup"]
             assert!(
                 matches!(Config::from_toml_str(&policy), Err(ConfigError::BadAudience { .. })),
                 "{site} admitted `unknown` as a reader"
-            );
-        }
-    }
-
-    #[test]
-    fn a_resolver_cast_registers_the_ceiling_the_policy_declares() {
-        let policy = "version = 1\n\
-             [[tool]]\nname = \"fetch\"\ntags = [\"web\"]\ndelta = { trust = \"unknown\" }\n\
-             [[cast]]\nname = \"content-classifier\"\n\
-             resolver = { may_cast = { trust = [\"suspicious\"], audience = [\"public\"] } }\n\
-             tags = [\"web\"]\n";
-        let config = Config::from_toml_str(policy).expect("a resolver cast loads");
-        let cast = config
-            .registry()
-            .cast(&CastName::new("content-classifier"))
-            .expect("content-classifier registers");
-        match &cast.resolution {
-            CastResolution::Resolver { may_cast } => {
-                assert_eq!(may_cast.trust, vec![Trust::new(0)]);
-                assert_eq!(may_cast.audience, DeclaredAudience::Public);
-            }
-            other => panic!("expected a resolver ceiling, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn a_cast_hint_registers_advisory_and_bounded() {
-        let with_hint = |hint: &str| {
-            format!(
-                "version = 1\n\
-                 [[tool]]\nname = \"fetch\"\ntags = [\"web\"]\ndelta = {{ trust = \"unknown\" }}\n\
-                 [[cast]]\nname = \"content-classifier\"\nhint = \"{hint}\"\n\
-                 resolver = {{ may_cast = {{ trust = [\"suspicious\"], audience = [\"public\"] }} }}\n\
-                 tags = [\"web\"]\n"
-            )
-        };
-        let hinted = Config::from_toml_str(&with_hint("label fetched pages by their origin")).expect("loads");
-        let cast = hinted
-            .registry()
-            .cast(&CastName::new("content-classifier"))
-            .expect("content-classifier registers");
-        assert_eq!(
-            cast.hint.as_ref().map(Hint::as_str),
-            Some("label fetched pages by their origin")
-        );
-        let bare = with_hint("").replace("hint = \"\"\n", "");
-        assert_eq!(
-            hinted.engine().identity(),
-            Config::from_toml_str(&bare).expect("loads").engine().identity()
-        );
-        assert!(matches!(
-            Config::from_toml_str(&with_hint(&"x".repeat(appa_engine::registry::MAX_HINT_CHARS + 1))),
-            Err(ConfigError::Registry(LoadError::HintTooLong { .. }))
-        ));
-    }
-
-    #[test]
-    fn a_may_cast_omitting_trust_admits_no_unresolved_trust() {
-        let policy = "version = 1\n\
-             [[tool]]\nname = \"fetch\"\ndelta = { audience = \"unknown\" }\n\
-             [[cast]]\nname = \"audience-only\"\n\
-             resolver = { may_cast = { audience = [\"public\"] } }\n\
-             [deployment]\nconfined_results = [\"fetch\"]\n";
-        let config = Config::from_toml_str(policy).expect("an audience-only ceiling loads");
-        assert!(matches!(
-            &config.registry().cast(&CastName::new("audience-only")).expect("it registers").resolution,
-            CastResolution::Resolver { may_cast } if may_cast.trust.is_empty()
-        ));
-    }
-
-    #[test]
-    fn a_cast_declaring_both_forms_or_neither_is_refused() {
-        let both = "version = 1\n[[cast]]\nname = \"c\"\n\
-             constant = { trust = \"suspicious\", audience = [\"public\"] }\n\
-             resolver = { may_cast = { trust = [\"trusted\"], audience = [\"public\"] } }\n";
-        let neither = "version = 1\n[[cast]]\nname = \"c\"\n";
-        for (case, policy) in [("both", both), ("neither", neither)] {
-            assert!(
-                matches!(
-                    Config::from_toml_str(policy),
-                    Err(ConfigError::BadImplementation { kind: "cast", .. })
-                ),
-                "a cast declaring {case} must be refused"
             );
         }
     }
@@ -1969,10 +1748,6 @@ on = ["tool_output"]
 [sanitizer.permits]
 audience = { from = ["internal"], to = ["@team"] }
 
-[[cast]]
-name = "paranoid"
-constant = { trust = "suspicious", audience = ["@team"] }
-
 [deployment]
 dispatch = "enforced"
 confined_results = ["read", "send"]
@@ -2009,10 +1784,6 @@ confined_results = ["read", "send"]
         assert!(matches!(
             &registry.sanitizer(&SanitizerName::new("declassify")).expect("declassify registers").transition,
             DeclaredTransition::Audience { to, .. } if to.groups().count() == 1
-        ));
-        assert!(matches!(
-            &registry.cast(&CastName::new("paranoid")).expect("paranoid registers").resolution,
-            CastResolution::Constant(constant) if constant.audience.groups().count() == 1
         ));
 
         let unregistered = policy.replace("[membership]\nname = \"directory\"\n", "");

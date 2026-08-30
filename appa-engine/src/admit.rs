@@ -1,17 +1,16 @@
-//! Result and cast admission: closing a dispatch and admitting (or withholding) its value.
+//! Result admission: closing a dispatch and admitting (or withholding) its value.
 
 use thiserror::Error;
 
-use crate::authority::CastRefusal;
 use crate::candidate::{ConfinedFrom, DerivedCandidate, SanitizerLineage};
 use crate::check::Narrowing;
 use crate::fact::{CloseOutcome, EffectSet, Fact, ObservedResult};
 use crate::groups::Expansions;
 use crate::label::{EstablishedLabel, Label};
-use crate::names::{CastName, SanitizerName};
+use crate::names::SanitizerName;
 use crate::projection::Views;
 use crate::registry::Registry;
-use crate::value::{DispatchId, LabeledValue, Provenance, RawResultDigest, ResolvedCall, ValueBody, ValueId};
+use crate::value::{DispatchId, LabeledValue, Provenance, RawResultDigest, ResolvedCall, ValueBody};
 
 pub enum ResultAdmission {
     Failure,
@@ -19,11 +18,6 @@ pub enum ResultAdmission {
     SuccessNoValue,
     SuccessRaw {
         body: ValueBody,
-    },
-    SuccessCast {
-        body: ValueBody,
-        cast: CastName,
-        resolved: EstablishedLabel,
     },
     SuccessSanitized {
         body: ValueBody,
@@ -46,24 +40,6 @@ pub enum AdmitError {
     ForeignDispatch,
     #[error("dispatch is not open")]
     NotOpen,
-    #[error("the contract declares a pending-cast output: only a cast-resolved admission may carry a value")]
-    OutputPendingCast,
-    #[error("the contract declares no pending-cast output")]
-    NotPendingCast,
-    #[error("no cast registered as {0}")]
-    UnknownCast(String),
-    #[error("cast answer does not match the constant cast's declared label")]
-    ConstantMismatch,
-    #[error("cast answer exceeds the resolver's may_cast ceiling")]
-    CeilingExceeded,
-    #[error("cast answer holds a non-literal reader id")]
-    NonLiteralAnswer,
-    #[error("cast answer changes a dimension the output label already establishes")]
-    EstablishedMismatch,
-    #[error("the dispatched tool is outside the cast's scope")]
-    OutOfScopeCast,
-    #[error("the cast resolution narrows the trajectory label: admission requires the agent's acceptance")]
-    NarrowingUnaccepted,
     #[error("the dispatch already recorded its success checkpoint")]
     AlreadySucceeded,
     #[error("the dispatch recorded success: a failure or indeterminate close contradicts it")]
@@ -163,111 +139,6 @@ pub(crate) fn bound_candidate(
     ))
 }
 
-/// The bound a pending-cast resolution on `dispatch` is measured from: the receiving bound the
-/// dispatch pinned, narrowed by the acceptance its release recorded, if one did. The static
-/// part of the tool's delta was accepted at the check, so admission owes no second acceptance
-/// for it; anything the resolution narrows beyond that accepted bound stays owed. Only the
-/// dispatch's own facts move the baseline — never the live fold.
-pub(crate) fn cast_baseline(views: &Views, dispatch: &DispatchId) -> Option<EstablishedLabel> {
-    let receiving = views.receiving_bound(dispatch)?;
-    Some(match views.accepted_narrowing(dispatch) {
-        Some(accepted) => receiving.combine(&accepted.to),
-        None => receiving.clone(),
-    })
-}
-
-/// The candidate a validated pending-cast resolution makes of one confined result.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn cast_candidate(
-    registry: &Registry,
-    views: &Views,
-    dispatch: &DispatchId,
-    contract: &crate::contract::ToolAnnotation,
-    cast: &CastName,
-    body: ValueBody,
-    resolved: &EstablishedLabel,
-    expansions: &Expansions,
-) -> Result<DerivedCandidate, AdmitError> {
-    let output_label = contract.output_label(expansions);
-    validate_pending_cast(registry, contract, &output_label, cast, resolved, expansions)?;
-    let baseline = cast_baseline(views, dispatch).ok_or(AdmitError::NotOpen)?;
-    let label = resolved.clone().into_label();
-    let residual = confined_residual(&baseline, &label);
-    Ok(DerivedCandidate::Result {
-        dispatch: dispatch.clone(),
-        source: RawResultDigest::of(body.as_str().as_bytes()),
-        from: ConfinedFrom::Bound,
-        value: LabeledValue::new(body, label),
-        residual,
-    })
-}
-
-fn refusal_error(refusal: CastRefusal) -> AdmitError {
-    match refusal {
-        CastRefusal::NonLiteralReader => AdmitError::NonLiteralAnswer,
-        CastRefusal::ConstantMismatch => AdmitError::ConstantMismatch,
-        CastRefusal::EstablishedMismatch(_) => AdmitError::EstablishedMismatch,
-        CastRefusal::CeilingExceeded(_) => AdmitError::CeilingExceeded,
-    }
-}
-
-/// Validate a pending-cast resolution against the contract and the registered cast: the contract
-/// must declare a pending-cast output, and the answer must be the complete whole-source
-/// resolution of that output label — established dimensions preserved exactly, the pending one
-/// inside the registered declaration — so a misbehaving resolver (or runtime) cannot widen a
-/// label past the ceiling or move a dimension the contract settled.
-pub(crate) fn validate_pending_cast(
-    registry: &Registry,
-    contract: &crate::contract::ToolAnnotation,
-    output_label: &Label,
-    cast: &CastName,
-    resolved: &EstablishedLabel,
-    expansions: &Expansions,
-) -> Result<(), AdmitError> {
-    if registry.confined_pending_cast(contract).is_none() {
-        return Err(AdmitError::NotPendingCast);
-    }
-    let registered = registry
-        .cast(cast)
-        .ok_or_else(|| AdmitError::UnknownCast(cast.as_str().to_string()))?;
-    if !registered.scope.covers(&contract.tags) {
-        return Err(AdmitError::OutOfScopeCast);
-    }
-    registered
-        .resolution
-        .validate(output_label, resolved, expansions)
-        .map_err(refusal_error)
-}
-
-/// A registered cast's complete answer for one source: the whole label, never a
-/// single dimension.
-pub struct CastAnswer {
-    pub cast: CastName,
-    pub resolved: EstablishedLabel,
-}
-
-#[derive(Debug, Error, PartialEq, Eq)]
-pub enum CastError {
-    #[error("no cast registered as {0}")]
-    UnknownCast(String),
-    #[error("cast answer exceeds the resolver's may_cast ceiling")]
-    CeilingExceeded,
-    #[error("cast answer does not match the constant cast's declared label")]
-    ConstantMismatch,
-    #[error("cast answer holds a non-literal reader id")]
-    NonLiteralAnswer,
-    #[error("cast answer changes a dimension the source already establishes")]
-    EstablishedMismatch,
-    #[error("target value is unknown or out of range")]
-    UnknownValue,
-    #[error("target value is neither admitted by nor inherited into this branch")]
-    ForeignValue,
-    #[error("target value's originating tool is outside the cast's scope")]
-    OutOfScope,
-    #[error("target value's label is already fully established")]
-    AlreadyEstablished,
-}
-
 pub(crate) fn admit_result(
     registry: &Registry,
     views: &Views,
@@ -293,9 +164,7 @@ pub(crate) fn admit_result(
         return Err(AdmitError::SuccessContradicted);
     }
     let reported = match &admission {
-        ResultAdmission::SuccessRaw { body } | ResultAdmission::SuccessCast { body, .. } => {
-            Some(RawResultDigest::of(body.as_str().as_bytes()))
-        }
+        ResultAdmission::SuccessRaw { body } => Some(RawResultDigest::of(body.as_str().as_bytes())),
         ResultAdmission::SuccessSanitized { raw_digest, .. } => Some(*raw_digest),
         ResultAdmission::CandidateAccepted { .. }
         | ResultAdmission::CandidateAdmissible
@@ -350,40 +219,8 @@ pub(crate) fn admit_result(
         ResultAdmission::SuccessNoValue => vec![close_success()],
         ResultAdmission::SuccessRaw { body } => {
             // An Unknown dimension is a missing fact, not a withheld one: the value admits
-            // raw and stays unresolved until a sink asks. Confining the result point is what
-            // turns that into "resolve before the model sees it", and the deployment declares
-            // it per tool.
-            if registry.confined_pending_cast(contract).is_some() {
-                return Err(AdmitError::OutputPendingCast);
-            }
+            // raw and stays unresolved, and a sink that requires the dimension blocks.
             vec![close_success(), admit_value(output_label(), body)]
-        }
-        ResultAdmission::SuccessCast { body, cast, resolved } => {
-            let candidate = cast_candidate(registry, views, dispatch, contract, &cast, body, &resolved, expansions)?;
-            let DerivedCandidate::Result {
-                source,
-                value,
-                residual,
-                ..
-            } = candidate
-            else {
-                unreachable!("a pending-cast resolution derives a confined result")
-            };
-            if residual.is_some() {
-                return Err(AdmitError::NarrowingUnaccepted);
-            }
-            vec![
-                close_success(),
-                Fact::OutputCastApplied {
-                    trajectory: trajectory.clone(),
-                    dispatch: dispatch.clone(),
-                    cast,
-                    resolved,
-                    raw_digest: source,
-                    resolutions: registry.resolutions(expansions),
-                },
-                admit_derived(value),
-            ]
         }
         ResultAdmission::SuccessSanitized {
             body,
@@ -419,7 +256,6 @@ pub(crate) fn admit_result(
         ResultAdmission::CandidateAccepted { offer } => {
             let subject = crate::basis::SubjectKey::ConfinedResult(dispatch.clone());
             let Some(DerivedCandidate::Result {
-                source,
                 value,
                 residual: Some(narrowing),
                 ..
@@ -436,18 +272,6 @@ pub(crate) fn admit_result(
                 },
                 close_success(),
             ];
-            if let Some(crate::candidate::DerivedVia::Cast { name }) = views.candidate_via(&subject) {
-                let resolved = EstablishedLabel::from_label(&value.label)
-                    .expect("a cast candidate carries the complete resolved label");
-                facts.push(Fact::OutputCastApplied {
-                    trajectory: trajectory.clone(),
-                    dispatch: dispatch.clone(),
-                    cast: name.clone(),
-                    resolved,
-                    raw_digest: *source,
-                    resolutions: registry.resolutions(expansions),
-                });
-            }
             facts.push(admit_derived(value.clone()));
             facts
         }
@@ -466,67 +290,19 @@ pub(crate) fn admit_result(
     Ok(facts)
 }
 
-/// Validate a whole-source cast answer against the registered cast and the target value, then
-/// emit the one `CastApplied` fact: the complete resolution or nothing.
-pub(crate) fn admit_cast(
-    registry: &Registry,
-    views: &Views,
-    value: ValueId,
-    answer: CastAnswer,
-    expansions: &Expansions,
-) -> Result<Vec<Fact>, CastError> {
-    let cast = registry
-        .cast(&answer.cast)
-        .ok_or_else(|| CastError::UnknownCast(answer.cast.as_str().to_string()))?;
-    let prior = views.value_label(value).ok_or(CastError::UnknownValue)?;
-    if !views.may_resolve(value) {
-        return Err(CastError::ForeignValue);
-    }
-    // The scope gate, the one routing predicate planning and validation also run.
-    let applicable = cast
-        .scope
-        .reaches(registry, views, value)
-        .expect("admission resolves casts only for values whose routing records the log retains");
-    if !applicable {
-        return Err(CastError::OutOfScope);
-    }
-    if EstablishedLabel::from_label(prior).is_some() {
-        return Err(CastError::AlreadyEstablished);
-    }
-    cast.resolution
-        .validate(prior, &answer.resolved, expansions)
-        .map_err(|refusal| match refusal {
-            CastRefusal::NonLiteralReader => CastError::NonLiteralAnswer,
-            CastRefusal::ConstantMismatch => CastError::ConstantMismatch,
-            CastRefusal::EstablishedMismatch(_) => CastError::EstablishedMismatch,
-            CastRefusal::CeilingExceeded(_) => CastError::CeilingExceeded,
-        })?;
-
-    let fact = Fact::CastApplied {
-        trajectory: views.trajectory().clone(),
-        value,
-        resolved: answer.resolved,
-        cast: answer.cast,
-        resolutions: registry.resolutions(expansions),
-    };
-    Ok(vec![fact])
-}
-
 #[cfg(test)]
 mod tests {
     const BODY: &str = "the result";
 
     use super::*;
-    use crate::authority::{
-        Cast, CastCeiling, CastResolution, DeclaredLabel, DeclaredTransition, Sanitizer, SanitizerPoints, Scope,
-    };
+    use crate::authority::{DeclaredTransition, Sanitizer, SanitizerPoints, Scope};
     use crate::contract::{AnnotationMandate, Delta, PinnedAnnotation, ToolAnnotation, ToolDeclaration};
     use crate::fact::EffectKind;
     use crate::groups::DeclaredAudience;
     use crate::label::{Audience, Dim, ReaderId, Trust};
     use crate::projection::Projection;
     use crate::registry::{RegistryConfig, TrustChain};
-    use crate::value::{LabeledValue, ToolName, TrajectoryId};
+    use crate::value::{ToolName, TrajectoryId};
     use serde_json::json;
 
     const SUSPICIOUS: Trust = Trust::new(0);
@@ -600,26 +376,6 @@ mod tests {
             scope: Scope::default(),
             hint: None,
         };
-        let const_cast = Cast {
-            name: CastName::new("paranoid"),
-            resolution: CastResolution::Constant(DeclaredLabel::literal(EstablishedLabel::new(SUSPICIOUS, internal()))),
-            scope: Scope::default(),
-            hint: None,
-        };
-        let resolver_cast = Cast {
-            name: CastName::new("classifier"),
-            resolution: CastResolution::Resolver {
-                may_cast: CastCeiling {
-                    trust: vec![SUSPICIOUS],
-                    audience: DeclaredAudience::literal(Audience::restricted([
-                        ReaderId::new("finance"),
-                        ReaderId::new("audit"),
-                    ])),
-                },
-            },
-            scope: Scope::default(),
-            hint: None,
-        };
         let scan = ToolAnnotation {
             description: Some("A test tool.".to_string()),
             name: ToolName::new("scan_inbox"),
@@ -668,7 +424,6 @@ mod tests {
             }],
             authorities: vec![],
             sanitizers: vec![out_san, finance_san],
-            casts: vec![resolver_cast, const_cast],
             membership: None,
         })
         .unwrap()
@@ -723,78 +478,6 @@ mod tests {
             0,
             b"acceptance",
         )
-    }
-
-    fn staged_cast_candidate(
-        dispatch: &DispatchId,
-        body: &str,
-        resolved: EstablishedLabel,
-        residual: Narrowing,
-    ) -> Fact {
-        Fact::CandidateDerived {
-            trajectory: traj(),
-            subject: crate::basis::SubjectKey::ConfinedResult(dispatch.clone()),
-            via: crate::candidate::DerivedVia::Cast {
-                name: CastName::new("paranoid"),
-            },
-            derived: DerivedCandidate::Result {
-                dispatch: dispatch.clone(),
-                source: RawResultDigest::of(body.as_bytes()),
-                from: ConfinedFrom::Bound,
-                value: LabeledValue::new(ValueBody::new(body), resolved.into_label()),
-                residual: Some(residual),
-            },
-            lineage: SanitizerLineage::default(),
-            resolutions: vec![],
-        }
-    }
-
-    #[test]
-    fn foreign_trajectory_cannot_close_or_cast() {
-        let reg = registry();
-        let call = get_call();
-        let (log, dispatch) = open_log(&call);
-        let p = views_of(&log);
-        let sibling = TrajectoryId::new("sibling");
-        assert_eq!(
-            admit_result(
-                &reg,
-                &p.view(&sibling),
-                &dispatch,
-                &call,
-                ResultAdmission::SuccessNoValue,
-                &Expansions::default()
-            ),
-            Err(AdmitError::ForeignDispatch)
-        );
-        let value_log = unknown_value_log();
-        let p2 = views_of(&value_log);
-        assert_eq!(
-            admit_cast(
-                &reg,
-                &p2.view(&sibling),
-                ValueId::new(0),
-                CastAnswer {
-                    cast: CastName::new("classifier"),
-                    resolved: EstablishedLabel::new(SUSPICIOUS, Audience::Public),
-                },
-                &Expansions::default()
-            ),
-            Err(CastError::ForeignValue)
-        );
-        assert_eq!(
-            admit_cast(
-                &reg,
-                &p2.view(&sibling),
-                ValueId::new(99),
-                CastAnswer {
-                    cast: CastName::new("classifier"),
-                    resolved: EstablishedLabel::new(SUSPICIOUS, Audience::Public),
-                },
-                &Expansions::default()
-            ),
-            Err(CastError::UnknownValue)
-        );
     }
 
     #[test]
@@ -890,546 +573,6 @@ mod tests {
         );
     }
 
-    fn unknown_value_log() -> Vec<Fact> {
-        let (mut log, dispatch) = open_log(&scan_call());
-        log.push(Fact::ValueAdmitted {
-            trajectory: traj(),
-            value: LabeledValue::new(
-                ValueBody::new("body"),
-                Label::new(Dim::Unknown, Dim::Known(Audience::Public)),
-            ),
-            provenance: Provenance::ToolResult { dispatch },
-        });
-        log
-    }
-
-    #[test]
-    fn a_scoped_cast_applies_only_to_covered_tool_results() {
-        let fetch = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("fetch"),
-            tags: vec![crate::names::TagName::new("web")],
-            delta: Delta {
-                trust: Some(Dim::Unknown),
-                audience: Some(Dim::Known(Audience::Public).into()),
-            },
-            parameters: crate::params::ToolParameters::open(),
-            emits: EffectSet::default(),
-            requires: Default::default(),
-        };
-        let note = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("note"),
-            tags: vec![],
-            delta: Delta {
-                trust: Some(Dim::Unknown),
-                audience: Some(Dim::Known(Audience::Public).into()),
-            },
-            parameters: crate::params::ToolParameters::open(),
-            emits: EffectSet::default(),
-            requires: Default::default(),
-        };
-        let webby = Cast {
-            name: CastName::new("webby"),
-            resolution: CastResolution::Constant(DeclaredLabel::literal(EstablishedLabel::new(
-                SUSPICIOUS,
-                Audience::Public,
-            ))),
-            scope: Scope {
-                tags: vec![crate::names::TagName::new("web")],
-            },
-            hint: None,
-        };
-        let fallback = Cast {
-            name: CastName::new("fallback"),
-            resolution: CastResolution::Constant(DeclaredLabel::literal(EstablishedLabel::new(
-                SUSPICIOUS,
-                Audience::Public,
-            ))),
-            scope: Scope::default(),
-            hint: None,
-        };
-        let reg = Registry::build_covered(RegistryConfig {
-            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![ToolDeclaration::Declared(fetch), ToolDeclaration::Declared(note)],
-            annotators: vec![],
-            authorities: vec![],
-            sanitizers: vec![],
-            casts: vec![webby, fallback],
-            membership: None,
-        })
-        .unwrap();
-        let fetch_call = ResolvedCall::new(ToolName::new("fetch"), crate::params::test_arguments(&json!({})));
-        let note_call = ResolvedCall::new(ToolName::new("note"), crate::params::test_arguments(&json!({})));
-        let (fetch_opened, fetch_dispatch) = dispatch_opened(&fetch_call);
-        let (note_opened, note_dispatch) = dispatch_opened(&note_call);
-        let log = vec![
-            opened(),
-            fetch_opened,
-            note_opened,
-            Fact::ValueAdmitted {
-                trajectory: traj(),
-                value: LabeledValue::new(
-                    ValueBody::new("page"),
-                    Label::new(Dim::Unknown, Dim::Known(Audience::Public)),
-                ),
-                provenance: Provenance::ToolResult {
-                    dispatch: fetch_dispatch,
-                },
-            },
-            Fact::ValueAdmitted {
-                trajectory: traj(),
-                value: LabeledValue::new(
-                    ValueBody::new("note"),
-                    Label::new(Dim::Unknown, Dim::Known(Audience::Public)),
-                ),
-                provenance: Provenance::ToolResult {
-                    dispatch: note_dispatch,
-                },
-            },
-            Fact::ValueAdmitted {
-                trajectory: traj(),
-                value: LabeledValue::new(
-                    ValueBody::new("digest"),
-                    Label::new(Dim::Unknown, Dim::Known(Audience::Public)),
-                ),
-                provenance: Provenance::ChildReturn {
-                    child: TrajectoryId::new("child"),
-                    id: crate::value::ChildReturnId::new(TrajectoryId::new("child"), 0),
-                },
-            },
-        ];
-        let p = views_of(&log);
-        let answer = |cast: &str| CastAnswer {
-            cast: CastName::new(cast),
-            resolved: EstablishedLabel::new(SUSPICIOUS, Audience::Public),
-        };
-        assert!(
-            admit_cast(
-                &reg,
-                &p.view(&traj()),
-                ValueId::new(0),
-                answer("webby"),
-                &Expansions::default()
-            )
-            .is_ok()
-        );
-        assert_eq!(
-            admit_cast(
-                &reg,
-                &p.view(&traj()),
-                ValueId::new(1),
-                answer("webby"),
-                &Expansions::default()
-            ),
-            Err(CastError::OutOfScope)
-        );
-        assert!(
-            admit_cast(
-                &reg,
-                &p.view(&traj()),
-                ValueId::new(1),
-                answer("fallback"),
-                &Expansions::default()
-            )
-            .is_ok()
-        );
-        assert_eq!(
-            admit_cast(
-                &reg,
-                &p.view(&traj()),
-                ValueId::new(2),
-                answer("webby"),
-                &Expansions::default()
-            ),
-            Err(CastError::OutOfScope)
-        );
-        assert!(
-            admit_cast(
-                &reg,
-                &p.view(&traj()),
-                ValueId::new(2),
-                answer("fallback"),
-                &Expansions::default()
-            )
-            .is_ok()
-        );
-    }
-
-    #[test]
-    fn cast_within_ceiling_admits_and_resolves_fold() {
-        let reg = registry();
-        let log = unknown_value_log();
-        let p = views_of(&log);
-        let t = traj();
-        let batch = admit_cast(
-            &reg,
-            &p.view(&t),
-            ValueId::new(0),
-            CastAnswer {
-                cast: CastName::new("classifier"),
-                resolved: EstablishedLabel::new(SUSPICIOUS, Audience::Public),
-            },
-            &Expansions::default(),
-        )
-        .unwrap();
-        let mut next = log.clone();
-        next.extend(batch);
-        let p2 = views_of(&next);
-        let current = p2.view(&t).current_label();
-        assert!(current.is_fully_established());
-        assert_eq!(current.bound().trust, SUSPICIOUS);
-    }
-
-    #[test]
-    fn cast_exceeding_ceiling_rejected() {
-        let reg = registry();
-        let log = unknown_value_log();
-        let p = views_of(&log);
-        let t = traj();
-        assert_eq!(
-            admit_cast(
-                &reg,
-                &p.view(&t),
-                ValueId::new(0),
-                CastAnswer {
-                    cast: CastName::new("classifier"),
-                    resolved: EstablishedLabel::new(Trust::new(1), Audience::Public),
-                },
-                &Expansions::default()
-            ),
-            Err(CastError::CeilingExceeded)
-        );
-    }
-
-    #[test]
-    fn a_mismatched_established_dimension_is_refused_whole() {
-        let reg = registry();
-        let log = unknown_value_log();
-        let p = views_of(&log);
-        let t = traj();
-        assert_eq!(
-            admit_cast(
-                &reg,
-                &p.view(&t),
-                ValueId::new(0),
-                CastAnswer {
-                    cast: CastName::new("classifier"),
-                    resolved: EstablishedLabel::new(SUSPICIOUS, Audience::restricted([ReaderId::new("finance")])),
-                },
-                &Expansions::default()
-            ),
-            Err(CastError::EstablishedMismatch)
-        );
-    }
-
-    #[test]
-    fn a_second_resolution_after_the_first_admitted_answer_is_refused() {
-        let reg = registry();
-        let mut log = unknown_value_log();
-        let p = views_of(&log);
-        let t = traj();
-        let first = admit_cast(
-            &reg,
-            &p.view(&t),
-            ValueId::new(0),
-            CastAnswer {
-                cast: CastName::new("classifier"),
-                resolved: EstablishedLabel::new(SUSPICIOUS, Audience::Public),
-            },
-            &Expansions::default(),
-        )
-        .unwrap();
-        log.extend(first);
-        let p = views_of(&log);
-        assert_eq!(
-            admit_cast(
-                &reg,
-                &p.view(&t),
-                ValueId::new(0),
-                CastAnswer {
-                    cast: CastName::new("paranoid"),
-                    resolved: EstablishedLabel::new(SUSPICIOUS, internal()),
-                },
-                &Expansions::default()
-            ),
-            Err(CastError::AlreadyEstablished)
-        );
-        assert_eq!(
-            p.view(&t).value_label(ValueId::new(0)),
-            Some(&EstablishedLabel::new(SUSPICIOUS, Audience::Public).into_label())
-        );
-    }
-
-    #[test]
-    fn a_moved_established_dimension_demands_acceptance() {
-        let reg = registry();
-        let call = scan_call();
-        let (mut log, dispatch) = open_log(&call);
-        log.push(Fact::ValueAdmitted {
-            trajectory: traj(),
-            value: LabeledValue::new(
-                ValueBody::new("merged from a child"),
-                Label::new(
-                    Dim::Known(SUSPICIOUS),
-                    Dim::Known(Audience::restricted([ReaderId::new("finance")])),
-                ),
-            ),
-            provenance: Provenance::ChildReturn {
-                child: TrajectoryId::new("child"),
-                id: crate::value::ChildReturnId::new(TrajectoryId::new("child"), 0),
-            },
-        });
-        let p = views_of(&log);
-        let t = traj();
-        assert_eq!(
-            admit_result(
-                &reg,
-                &p.view(&t),
-                &dispatch,
-                &call,
-                ResultAdmission::SuccessCast {
-                    body: ValueBody::new("inbox contents"),
-                    cast: CastName::new("paranoid"),
-                    resolved: EstablishedLabel::new(SUSPICIOUS, internal()),
-                },
-                &Expansions::default()
-            ),
-            Err(AdmitError::NarrowingUnaccepted)
-        );
-    }
-
-    #[test]
-    fn an_audience_resolution_is_bounded_at_the_engine_not_the_wire() {
-        let reg = registry();
-        let call = ResolvedCall::new(ToolName::new("poll_room"), crate::params::test_arguments(&json!({})));
-        let (log, dispatch) = open_log(&call);
-        let t = traj();
-        let attempt = |audience: Audience| {
-            let p = views_of(&log);
-            admit_result(
-                &reg,
-                &p.view(&t),
-                &dispatch,
-                &call,
-                ResultAdmission::SuccessCast {
-                    body: ValueBody::new("room roster"),
-                    cast: CastName::new("classifier"),
-                    resolved: EstablishedLabel::new(SUSPICIOUS, audience),
-                },
-                &Expansions::default(),
-            )
-        };
-        for malformed in [
-            Audience::restricted([ReaderId::new("@hr")]),
-            Audience::restricted([ReaderId::new("public")]),
-        ] {
-            assert_eq!(attempt(malformed), Err(AdmitError::NonLiteralAnswer));
-        }
-        for out_of_cap in [Audience::Public, Audience::restricted([ReaderId::new("stranger")])] {
-            assert_eq!(attempt(out_of_cap), Err(AdmitError::CeilingExceeded));
-        }
-    }
-
-    #[test]
-    fn a_public_resolution_is_admitted_under_a_public_cap() {
-        let fetch = ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new("fetch_page"),
-            tags: vec![],
-            delta: Delta {
-                trust: None,
-                audience: Some(Dim::Unknown.into()),
-            },
-            parameters: crate::params::ToolParameters::open(),
-            emits: EffectSet::default(),
-            requires: Default::default(),
-        };
-        let librarian = Cast {
-            name: CastName::new("librarian"),
-            resolution: CastResolution::Resolver {
-                may_cast: CastCeiling {
-                    trust: vec![SUSPICIOUS],
-                    audience: DeclaredAudience::literal(Audience::Public),
-                },
-            },
-            scope: Scope::default(),
-            hint: None,
-        };
-        let reg = Registry::build_covered(RegistryConfig {
-            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![ToolDeclaration::Declared(fetch)],
-            annotators: vec![],
-            authorities: vec![],
-            sanitizers: vec![],
-            casts: vec![librarian],
-            membership: None,
-        })
-        .unwrap();
-        let call = ResolvedCall::new(ToolName::new("fetch_page"), crate::params::test_arguments(&json!({})));
-        let (log, dispatch) = open_log(&call);
-        let t = traj();
-        let attempt = |resolved: Audience| {
-            let p = views_of(&log);
-            admit_result(
-                &reg,
-                &p.view(&t),
-                &dispatch,
-                &call,
-                ResultAdmission::SuccessCast {
-                    body: ValueBody::new("wiki article"),
-                    cast: CastName::new("librarian"),
-                    resolved: EstablishedLabel::new(Trust::new(u8::MAX), resolved),
-                },
-                &Expansions::default(),
-            )
-        };
-        assert_eq!(
-            attempt(Audience::restricted([ReaderId::new("public")])),
-            Err(AdmitError::NonLiteralAnswer)
-        );
-        let batch = attempt(Audience::Public).unwrap();
-        match batch.last().unwrap() {
-            Fact::ValueAdmitted { value, .. } => {
-                assert_eq!(value.label.audience, Dim::Known(Audience::Public));
-            }
-            other => panic!("expected ValueAdmitted, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn an_audience_pending_cast_follows_the_same_acceptance_discipline() {
-        let reg = registry();
-        let call = ResolvedCall::new(ToolName::new("poll_room"), crate::params::test_arguments(&json!({})));
-        let (log, dispatch) = open_log(&call);
-        let t = traj();
-        let p = views_of(&log);
-        assert_eq!(
-            admit_result(
-                &reg,
-                &p.view(&t),
-                &dispatch,
-                &call,
-                ResultAdmission::SuccessCast {
-                    body: ValueBody::new("room roster"),
-                    cast: CastName::new("paranoid"),
-                    resolved: EstablishedLabel::new(SUSPICIOUS, internal()),
-                },
-                &Expansions::default()
-            ),
-            Err(AdmitError::NarrowingUnaccepted)
-        );
-    }
-
-    #[test]
-    fn an_annotated_audience_survives_trust_cast_acceptance_and_admission() {
-        let reg = registry();
-        let call = ResolvedCall::new(
-            ToolName::new("dynamic_scan"),
-            crate::params::test_arguments(&json!({ "room": "internal" })),
-        )
-        .with_annotation(Some(PinnedAnnotation::new(
-            ToolAnnotation {
-                name: ToolName::new("dynamic_scan"),
-                tags: vec![],
-                description: Some("A test tool.".to_string()),
-                parameters: crate::params::test_string_argument_schema("room"),
-                delta: Delta {
-                    trust: Some(Dim::Unknown),
-                    audience: Some(Dim::Known(internal()).into()),
-                },
-                emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
-                requires: Default::default(),
-            },
-            AnnotationMandate::Annotator(crate::names::AnnotatorName::new("directory")),
-        )));
-        let (record, dispatch) = dispatch_opened(&call);
-        let log = vec![record];
-        let projection = views_of(&log);
-        let trajectory = traj();
-        let views = projection.view(&trajectory);
-        let expected = Narrowing {
-            from: EstablishedLabel::top(),
-            to: EstablishedLabel::new(SUSPICIOUS, internal()),
-        };
-        let resolved = EstablishedLabel::new(SUSPICIOUS, internal());
-        assert_eq!(
-            confined_residual(&EstablishedLabel::top(), &resolved.clone().into_label()),
-            Some(expected.clone())
-        );
-        assert_eq!(
-            admit_result(
-                &reg,
-                &views,
-                &dispatch,
-                &call,
-                ResultAdmission::SuccessCast {
-                    body: ValueBody::new("scan"),
-                    cast: CastName::new("classifier"),
-                    resolved: EstablishedLabel::new(SUSPICIOUS, Audience::restricted([ReaderId::new("finance")])),
-                },
-                &Expansions::default()
-            ),
-            Err(AdmitError::EstablishedMismatch)
-        );
-        assert_eq!(
-            admit_result(
-                &reg,
-                &views,
-                &dispatch,
-                &call,
-                ResultAdmission::SuccessCast {
-                    body: ValueBody::new("scan"),
-                    cast: CastName::new("paranoid"),
-                    resolved: resolved.clone(),
-                },
-                &Expansions::default()
-            ),
-            Err(AdmitError::NarrowingUnaccepted)
-        );
-
-        let mut log = log;
-        log.push(staged_cast_candidate(&dispatch, "scan", resolved, expected));
-        let projection = views_of(&log);
-        let batch = admit_result(
-            &reg,
-            &projection.view(&trajectory),
-            &dispatch,
-            &call,
-            ResultAdmission::CandidateAccepted { offer: offer() },
-            &Expansions::default(),
-        )
-        .unwrap();
-        match batch.last().unwrap() {
-            Fact::ValueAdmitted { value, .. } => {
-                assert_eq!(value.label, Label::new(Dim::Known(SUSPICIOUS), Dim::Known(internal())));
-            }
-            other => panic!("expected ValueAdmitted, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn pending_cast_confines_raw_admission() {
-        let reg = registry();
-        let call = scan_call();
-        let (log, dispatch) = open_log(&call);
-        let p = views_of(&log);
-        let t = traj();
-        assert_eq!(
-            admit_result(
-                &reg,
-                &p.view(&t),
-                &dispatch,
-                &call,
-                ResultAdmission::SuccessRaw {
-                    body: ValueBody::new("raw bytes"),
-                },
-                &Expansions::default()
-            ),
-            Err(AdmitError::OutputPendingCast)
-        );
-    }
-
     fn narrowed_open_log(call: &ResolvedCall) -> (Vec<Fact>, DispatchId) {
         let (mut log, dispatch) = open_log(call);
         log[0] = crate::profile::opening_at(traj(), Label::new(Dim::Known(SUSPICIOUS), Dim::Known(internal())));
@@ -1438,125 +581,6 @@ mod tests {
         };
         *receiving = EstablishedLabel::new(SUSPICIOUS, internal());
         (log, dispatch)
-    }
-
-    #[test]
-    fn a_non_narrowing_cast_admits_at_the_resolved_label() {
-        let reg = registry();
-        let call = scan_call();
-        let (log, dispatch) = narrowed_open_log(&call);
-        let p = views_of(&log);
-        let t = traj();
-        let batch = admit_result(
-            &reg,
-            &p.view(&t),
-            &dispatch,
-            &call,
-            ResultAdmission::SuccessCast {
-                body: ValueBody::new("inbox contents"),
-                cast: CastName::new("paranoid"),
-                resolved: EstablishedLabel::new(SUSPICIOUS, internal()),
-            },
-            &Expansions::default(),
-        )
-        .unwrap();
-        assert!(matches!(
-            &batch[0],
-            Fact::DispatchClosed { outcome: CloseOutcome::Success { effects }, .. } if effects == &EffectSet::new([EffectKind::new("read")]).unwrap()
-        ));
-        assert!(matches!(
-            &batch[1],
-            Fact::OutputCastApplied { resolved, .. } if resolved == &EstablishedLabel::new(SUSPICIOUS, internal())
-        ));
-        match &batch[2] {
-            Fact::ValueAdmitted { value, .. } => {
-                assert_eq!(value.label.trust, Dim::Known(SUSPICIOUS));
-                assert_eq!(value.label.audience, Dim::Known(internal()));
-            }
-            other => panic!("expected ValueAdmitted, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn a_narrowing_cast_resolution_requires_acceptance() {
-        let reg = registry();
-        let call = scan_call();
-        let (log, dispatch) = open_log(&call);
-        let p = views_of(&log);
-        let t = traj();
-        assert_eq!(
-            admit_result(
-                &reg,
-                &p.view(&t),
-                &dispatch,
-                &call,
-                ResultAdmission::SuccessCast {
-                    body: ValueBody::new("inbox contents"),
-                    cast: CastName::new("paranoid"),
-                    resolved: EstablishedLabel::new(SUSPICIOUS, internal()),
-                },
-                &Expansions::default()
-            ),
-            Err(AdmitError::NarrowingUnaccepted)
-        );
-    }
-
-    #[test]
-    fn an_accepted_cast_narrowing_admits_in_one_batch() {
-        let reg = registry();
-        let call = scan_call();
-        let (mut log, dispatch) = open_log(&call);
-        let t = traj();
-        let accepted = Narrowing {
-            from: EstablishedLabel::top(),
-            to: EstablishedLabel::new(SUSPICIOUS, internal()),
-        };
-        let resolved = EstablishedLabel::new(SUSPICIOUS, internal());
-        log.push(staged_cast_candidate(
-            &dispatch,
-            "inbox contents",
-            resolved.clone(),
-            accepted.clone(),
-        ));
-        let p = views_of(&log);
-        let batch = admit_result(
-            &reg,
-            &p.view(&t),
-            &dispatch,
-            &call,
-            ResultAdmission::CandidateAccepted { offer: offer() },
-            &Expansions::default(),
-        )
-        .unwrap();
-        assert!(matches!(
-            &batch[0],
-            Fact::CandidateAccepted { narrowing, .. } if narrowing == &accepted
-        ));
-        assert!(matches!(
-            &batch[1],
-            Fact::DispatchClosed {
-                outcome: CloseOutcome::Success { .. },
-                ..
-            }
-        ));
-        assert!(matches!(
-            &batch[2],
-            Fact::OutputCastApplied { cast, resolved: restated, raw_digest, .. }
-                if cast.as_str() == "paranoid"
-                    && restated == &resolved
-                    && raw_digest == &RawResultDigest::of(b"inbox contents")
-        ));
-        match &batch[3] {
-            Fact::ValueAdmitted { value, .. } => {
-                assert_eq!(value.label.trust, Dim::Known(SUSPICIOUS));
-                assert_eq!(value.label.audience, Dim::Known(internal()));
-            }
-            other => panic!("expected ValueAdmitted, got {other:?}"),
-        }
-        let mut next = log.clone();
-        next.extend(batch);
-        let p2 = views_of(&next);
-        assert_eq!(p2.view(&t).current_label().bound().trust, SUSPICIOUS);
     }
 
     #[test]
@@ -1576,85 +600,6 @@ mod tests {
                 &Expansions::default()
             ),
             Err(AdmitError::NoCandidate)
-        );
-        let mut log = log;
-        log.push(staged_cast_candidate(
-            &dispatch,
-            "inbox contents",
-            EstablishedLabel::new(SUSPICIOUS, internal()),
-            Narrowing {
-                from: EstablishedLabel::top(),
-                to: EstablishedLabel::new(SUSPICIOUS, internal()),
-            },
-        ));
-        let p = views_of(&log);
-        assert_eq!(
-            admit_result(
-                &reg,
-                &p.view(&t),
-                &dispatch,
-                &call,
-                ResultAdmission::CandidateAdmissible,
-                &Expansions::default()
-            ),
-            Err(AdmitError::NoCandidate)
-        );
-    }
-
-    #[test]
-    fn pending_cast_admission_validates_the_resolution() {
-        let reg = registry();
-        let call = scan_call();
-        let (log, dispatch) = open_log(&call);
-        let t = traj();
-        let admission = |cast: &str, resolved: EstablishedLabel| ResultAdmission::SuccessCast {
-            body: ValueBody::new("inbox contents"),
-            cast: CastName::new(cast),
-            resolved,
-        };
-        let attempt = |adm: ResultAdmission| {
-            let p = views_of(&log);
-            admit_result(&reg, &p.view(&t), &dispatch, &call, adm, &Expansions::default())
-        };
-        assert_eq!(
-            attempt(admission(
-                "classifier",
-                EstablishedLabel::new(Trust::new(1), internal())
-            )),
-            Err(AdmitError::CeilingExceeded)
-        );
-        assert_eq!(
-            attempt(admission("paranoid", EstablishedLabel::new(Trust::new(1), internal()))),
-            Err(AdmitError::ConstantMismatch)
-        );
-        assert_eq!(
-            attempt(admission(
-                "classifier",
-                EstablishedLabel::new(SUSPICIOUS, Audience::restricted([ReaderId::new("finance")]))
-            )),
-            Err(AdmitError::EstablishedMismatch)
-        );
-        assert_eq!(
-            attempt(admission("bogus", EstablishedLabel::new(SUSPICIOUS, internal()))),
-            Err(AdmitError::UnknownCast("bogus".to_string()))
-        );
-        let plain = get_call();
-        let (plain_log, plain_dispatch) = open_log(&plain);
-        let p = views_of(&plain_log);
-        assert_eq!(
-            admit_result(
-                &reg,
-                &p.view(&t),
-                &plain_dispatch,
-                &plain,
-                ResultAdmission::SuccessCast {
-                    body: ValueBody::new("x"),
-                    cast: CastName::new("paranoid"),
-                    resolved: EstablishedLabel::new(SUSPICIOUS, internal()),
-                },
-                &Expansions::default()
-            ),
-            Err(AdmitError::NotPendingCast)
         );
     }
 
@@ -1706,10 +651,8 @@ mod tests {
             &p.view(&t),
             &dispatch,
             &call,
-            ResultAdmission::SuccessCast {
+            ResultAdmission::SuccessRaw {
                 body: ValueBody::new(BODY),
-                cast: CastName::new("paranoid"),
-                resolved: EstablishedLabel::new(SUSPICIOUS, internal()),
             },
             &Expansions::default(),
         )
@@ -1725,6 +668,104 @@ mod tests {
         let p = views_of(&log);
         assert!(p.view(&t).has_effect(&EffectKind::new("read")));
         assert!(!p.view(&t).is_open(&dispatch));
+    }
+
+    #[test]
+    fn a_foreign_trajectory_cannot_close_a_dispatch() {
+        let reg = registry();
+        let call = get_call();
+        let (log, dispatch) = open_log(&call);
+        let p = views_of(&log);
+        let sibling = TrajectoryId::new("sibling");
+        assert_eq!(
+            admit_result(
+                &reg,
+                &p.view(&sibling),
+                &dispatch,
+                &call,
+                ResultAdmission::SuccessNoValue,
+                &Expansions::default()
+            ),
+            Err(AdmitError::ForeignDispatch)
+        );
+    }
+
+    #[test]
+    fn a_pending_trust_result_admits_raw_with_the_unknown_dimension() {
+        let reg = registry();
+        let call = scan_call();
+        let (log, dispatch) = open_log(&call);
+        let p = views_of(&log);
+        let t = traj();
+        let batch = admit_result(
+            &reg,
+            &p.view(&t),
+            &dispatch,
+            &call,
+            ResultAdmission::SuccessRaw {
+                body: ValueBody::new("raw bytes"),
+            },
+            &Expansions::default(),
+        )
+        .unwrap();
+        assert!(matches!(
+            &batch[0],
+            Fact::DispatchClosed {
+                outcome: CloseOutcome::Success { .. },
+                ..
+            }
+        ));
+        match batch.last().unwrap() {
+            Fact::ValueAdmitted { value, .. } => {
+                assert_eq!(value.label, Label::new(Dim::Unknown, Dim::Known(internal())));
+            }
+            other => panic!("expected ValueAdmitted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_annotated_pending_trust_result_admits_raw_with_its_annotated_audience() {
+        let reg = registry();
+        let call = ResolvedCall::new(
+            ToolName::new("dynamic_scan"),
+            crate::params::test_arguments(&json!({ "room": "internal" })),
+        )
+        .with_annotation(Some(PinnedAnnotation::new(
+            ToolAnnotation {
+                name: ToolName::new("dynamic_scan"),
+                tags: vec![],
+                description: Some("A test tool.".to_string()),
+                parameters: crate::params::test_string_argument_schema("room"),
+                delta: Delta {
+                    trust: Some(Dim::Unknown),
+                    audience: Some(Dim::Known(internal()).into()),
+                },
+                emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
+                requires: Default::default(),
+            },
+            AnnotationMandate::Annotator(crate::names::AnnotatorName::new("directory")),
+        )));
+        let (record, dispatch) = dispatch_opened(&call);
+        let log = vec![record];
+        let projection = views_of(&log);
+        let trajectory = traj();
+        let batch = admit_result(
+            &reg,
+            &projection.view(&trajectory),
+            &dispatch,
+            &call,
+            ResultAdmission::SuccessRaw {
+                body: ValueBody::new("scan"),
+            },
+            &Expansions::default(),
+        )
+        .unwrap();
+        match batch.last().unwrap() {
+            Fact::ValueAdmitted { value, .. } => {
+                assert_eq!(value.label, Label::new(Dim::Unknown, Dim::Known(internal())));
+            }
+            other => panic!("expected ValueAdmitted, got {other:?}"),
+        }
     }
 
     #[test]

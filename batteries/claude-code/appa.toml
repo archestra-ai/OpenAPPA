@@ -28,20 +28,9 @@ name = "Read"
 description = "Reads a file and returns its contents."
 annotator = "claude-code.read-sensitivity"
 
-# Every tool this policy does not name — an MCP server's tools, for one — is
-# not refused for being unnamed: the model reads the call as written and
-# answers the trust, audience, and review marks it requires, and the session's
-# label decides the call like any declared tool's. A requirement is a floor
-# against the session: a fresh session meets any floor, and the answer gains
-# force as the session absorbs suspicious or private content. Review marks are
-# the root policy's vocabulary — a root registering `hitl` lets the model
-# demand a person's sign-off.
-[[policy.cast]]
-name = "claude-code.undeclared-tool"
-resolver = { may_cast = { trust = ["suspicious", "trusted"], audience = ["public"] } }
+# A tool this policy does not name — an MCP server's tool, for one — is
+# refused before it runs: name the tools your session uses, or add a root
+# rule for them.
 
 [externals.annotators."claude-code.read-sensitivity"]
 command = ["python3", "./read-sensitivity.py"]
-
-[externals.casts."claude-code.undeclared-tool"]
-builtin = "claude-code"

@@ -39,8 +39,7 @@ use appa_engine::candidate::DerivedVia;
 use appa_engine::check::UnestablishedFact;
 use appa_engine::contract::{
     AnnotationMandate, AudienceDelta, AudienceRequirement, Delta, HistoryRequirement, LabelRequirements,
-    PinnedAnnotation, PinnedMembership, PinnedRequirementCast, RecipientSpec, RequirementSlot, Requires,
-    ToolAnnotation, ToolDeclaration,
+    PinnedAnnotation, PinnedMembership, RecipientSpec, RequirementSlot, Requires, ToolAnnotation, ToolDeclaration,
 };
 pub(crate) use appa_engine::engine::ForkStatus;
 use appa_engine::engine::{Engine, EngineError};
@@ -48,7 +47,7 @@ use appa_engine::execute::{AuthorityEvidence, AuthorityReview};
 use appa_engine::fact::{BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ReturnDerivation};
 use appa_engine::groups::{DeclaredAudience, GroupExpansion};
 use appa_engine::label::{Audience, Dim, Dimension, EstablishedLabel, Label, PartialLabel, ReaderId, Trust};
-use appa_engine::names::{CastName, GroupName, MarkName};
+use appa_engine::names::{GroupName, MarkName};
 use appa_engine::plan::{ExecutableRemedyPlan, PlanId, PlannedBlock, RemedyPlan, RequiredRuling};
 use appa_engine::profile::PolicyFileKey as EnginePolicyFileKey;
 use appa_engine::projection::Views;
@@ -59,11 +58,10 @@ use appa_engine::transition::Blocked as CoreBlocked;
 /// the event or passed with the read.
 pub(crate) use appa_engine::transition::EngineView;
 use appa_engine::transition::{
-    ApplicableCast, ApplicableRequirementCast, ChildFollowUp, ChildReport, ChildSubmission, EngineEvent as CoreEvent,
-    Evidence, EvidenceRequest, FollowUp, ForkBinding, OfferConsult, OfferExecution, OfferFollowUp, OfferOutcome,
-    OutcomeBody as CoreOutcomeBody, OutcomeFollowUp, ProposalBatch, ProposalBatchId, ProposedCall as CoreProposedCall,
-    Released, SpawnMark, ToolOutcome as CoreToolOutcome, ToolReport, TransitionError, TransitionRefusal,
-    ValidatedFactBatch,
+    ChildFollowUp, ChildReport, ChildSubmission, EngineEvent as CoreEvent, Evidence, EvidenceRequest, FollowUp,
+    ForkBinding, OfferConsult, OfferExecution, OfferFollowUp, OfferOutcome, OutcomeBody as CoreOutcomeBody,
+    OutcomeFollowUp, ProposalBatch, ProposalBatchId, ProposedCall as CoreProposedCall, Released, SpawnMark,
+    ToolOutcome as CoreToolOutcome, ToolReport, TransitionError, TransitionRefusal, ValidatedFactBatch,
 };
 use appa_engine::value::{
     ChildReturnId, DispatchId as EngineDispatchId, ForkId, OfferId as EngineOfferId, OfferNonce as EngineOfferNonce,
@@ -76,9 +74,8 @@ use std::collections::BTreeMap;
 use crate::api::OutcomeBody;
 pub(crate) use crate::api::{OfferId, ProposedCall, SpawnBinding, ToolOutcome, TrajectoryId};
 use crate::consult::{
-    AnnotationAnswer, AnnotationDeclaration, AuthorityAnswer, AuthorityArtifact, AuthorityDeclaration, CastAnswer,
-    CastDeclaration, CastTool, DynamicAnswer, DynamicDeclaration, HistoryEntry, Requirement, Ruling, SanitizerArtifact,
-    SanitizerDeclaration, SanitizerPoint, WireAudience,
+    AnnotationAnswer, AnnotationDeclaration, AuthorityAnswer, AuthorityArtifact, AuthorityDeclaration, HistoryEntry,
+    Requirement, Ruling, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint, WireAudience,
 };
 
 /// One fresh 256-bit random number per act that can surface offers; the
@@ -136,122 +133,6 @@ pub enum ExternalRequest {
         resolver: String,
         group: String,
     },
-    /// Classify a result the model has not seen. The applicable casts travel in
-    /// registration order and a constant among them arrives already resolved, so the
-    /// session answers it without a call.
-    PendingCast {
-        source: RawResultDigest,
-        ask: CastAsk,
-    },
-    /// Classify one admitted value a blocked act reads. Same cascade, same order: the two
-    /// asks differ only in what the answer resolves.
-    Cast {
-        value: ValueId,
-        ask: CastAsk,
-    },
-    /// Answer the requirement slots a proposed call's contract leaves Unknown, before the call
-    /// is proposed. The casts travel in registration order; a constant among them arrives
-    /// already answered.
-    RequirementCast {
-        call: appa_engine::value::CanonicalDigest,
-        ask: RequirementAsk,
-    },
-}
-
-/// One requirement ask as the session answers it: the casts still to try, and the complete
-/// call every resolver consult carries under the declaration naming the slots to answer.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RequirementAsk {
-    pub casts: Vec<ApplicableRequirementCast>,
-    pub declaration: DynamicDeclaration,
-    pub args: serde_json::Value,
-}
-
-impl RequirementAsk {
-    /// The same ask continued past `cast`: only the casts registered after it are left.
-    fn after(&self, cast: &CastName) -> RequirementAsk {
-        RequirementAsk {
-            casts: self
-                .casts
-                .iter()
-                .skip_while(|candidate| candidate.name != *cast)
-                .skip(1)
-                .cloned()
-                .collect(),
-            declaration: self.declaration.clone(),
-            args: self.args.clone(),
-        }
-    }
-}
-
-/// One cast's requirement answer as the session obtained it: a declared constant echoed
-/// back, or a resolver's wire answer still to be read against the policy.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RequirementVerdict {
-    pub cast: CastName,
-    pub answer: RequirementLabel,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum RequirementLabel {
-    Declared(appa_engine::contract::RequirementAnswer),
-    Classified(DynamicAnswer),
-}
-
-/// One cast ask as the session answers it: the casts still to try, in registration order,
-/// and the value's bytes every classifier consult carries. Evidence carries the ask it
-/// answers, so an answer the engine refuses is followed by the ask's next cast without
-/// recomputing anything.
-#[derive(Debug, Clone, PartialEq)]
-pub struct CastAsk {
-    pub casts: Vec<CastCandidate>,
-    pub body: ValueBody,
-}
-
-/// One applicable cast as the session tries it: answered from the policy, or consulted
-/// under its declaration.
-#[derive(Debug, Clone, PartialEq)]
-pub struct CastCandidate {
-    pub name: String,
-    pub resolution: CandidateResolution,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum CandidateResolution {
-    Constant(EstablishedLabel),
-    Resolver(CastDeclaration),
-}
-
-impl CastAsk {
-    /// The same ask continued past `cast`: only the casts registered after it are left.
-    fn after(&self, cast: &str) -> CastAsk {
-        CastAsk {
-            casts: self
-                .casts
-                .iter()
-                .skip_while(|candidate| candidate.name != cast)
-                .skip(1)
-                .cloned()
-                .collect(),
-            body: self.body.clone(),
-        }
-    }
-}
-
-/// One cast's answer as the session obtained it.
-#[derive(Debug, Clone, PartialEq)]
-pub struct CastVerdict {
-    pub cast: String,
-    pub label: CastLabel,
-}
-
-/// Where a cast's label came from. A declared constant is the engine's own read echoed
-/// back; a classified answer is a resolver's wire strings, still to be read against the
-/// policy's trust chain.
-#[derive(Debug, Clone, PartialEq)]
-pub enum CastLabel {
-    Declared(EstablishedLabel),
-    Classified(CastAnswer),
 }
 
 /// A typed external answer. `None`/`Abstain` mean the external gave
@@ -280,78 +161,17 @@ pub enum ExternalEvidence {
         group: String,
         readers: Option<Vec<String>>,
     },
-    /// `None` means every cast the ask still carried was asked and none answered usably.
-    PendingCast {
-        source: RawResultDigest,
-        verdict: Option<CastVerdict>,
-        ask: CastAsk,
-    },
-    Cast {
-        value: ValueId,
-        verdict: Option<CastVerdict>,
-        ask: CastAsk,
-    },
-    /// `None` means every cast the ask still carried was asked and none answered usably.
-    RequirementCast {
-        call: appa_engine::value::CanonicalDigest,
-        verdict: Option<RequirementVerdict>,
-        ask: RequirementAsk,
-    },
 }
 
 impl ExternalEvidence {
-    /// Does this answer the same cast ask as `other`? A later answer for the same source
-    /// supersedes the earlier one: the cascade continued past a refused cast.
+    /// Does this answer the same ask as `other`? A later answer for the same subject
+    /// supersedes the earlier one.
     pub(crate) fn answers_same_ask(&self, other: &ExternalEvidence) -> bool {
         match (self, other) {
-            (ExternalEvidence::Cast { value: mine, .. }, ExternalEvidence::Cast { value: theirs, .. }) => {
-                mine == theirs
-            }
-            (
-                ExternalEvidence::PendingCast { source: mine, .. },
-                ExternalEvidence::PendingCast { source: theirs, .. },
-            ) => mine == theirs,
-            (
-                ExternalEvidence::RequirementCast { call: mine, .. },
-                ExternalEvidence::RequirementCast { call: theirs, .. },
-            ) => mine == theirs,
             (ExternalEvidence::Annotation { call: mine, .. }, ExternalEvidence::Annotation { call: theirs, .. }) => {
                 mine == theirs
             }
             _ => false,
-        }
-    }
-
-    /// The ask continued past the cast that gave this answer, for an answer the engine
-    /// refused. An ask with no cast left is still repeated: the session answers it with no
-    /// answer, which supersedes the refused one and ends the cascade.
-    fn continued(&self) -> Option<ExternalRequest> {
-        match self {
-            ExternalEvidence::Cast {
-                value,
-                verdict: Some(verdict),
-                ask,
-            } => Some(ExternalRequest::Cast {
-                value: *value,
-                ask: ask.after(&verdict.cast),
-            }),
-            ExternalEvidence::PendingCast {
-                source,
-                verdict: Some(verdict),
-                ask,
-            } => Some(ExternalRequest::PendingCast {
-                source: *source,
-                ask: ask.after(&verdict.cast),
-            }),
-            ExternalEvidence::RequirementCast {
-                call,
-                verdict: Some(verdict),
-                ask,
-            } => Some(ExternalRequest::RequirementCast {
-                call: *call,
-                ask: ask.after(&verdict.cast),
-            }),
-            _ => None,
         }
     }
 }
@@ -548,10 +368,6 @@ pub enum AuditEvent {
     Narrowed {
         from: AuditLabel,
         to: AuditLabel,
-    },
-    Cast {
-        cast: String,
-        resolved: AuditLabel,
     },
     SanitizerBound {
         sanitizer: String,
@@ -995,12 +811,6 @@ impl RuntimeEngine {
                 from: self.render_label(&PartialLabel::established(narrowing.from.clone()))?,
                 to: self.render_label(&PartialLabel::established(narrowing.to.clone()))?,
             },
-            Fact::CastApplied { cast, resolved, .. } | Fact::OutputCastApplied { cast, resolved, .. } => {
-                AuditEvent::Cast {
-                    cast: terminal_safe(cast.as_str()),
-                    resolved: self.render_label(&PartialLabel::established(resolved.clone()))?,
-                }
-            }
             Fact::OutputSanitizerBound { sanitizer, .. } => AuditEvent::SanitizerBound {
                 sanitizer: terminal_safe(sanitizer.as_str()),
             },
@@ -1008,7 +818,6 @@ impl RuntimeEngine {
                 DerivedVia::Sanitizer { name, .. } => AuditEvent::Sanitized {
                     sanitizer: terminal_safe(name.as_str()),
                 },
-                DerivedVia::Cast { .. } => return Some(None),
             },
             Fact::ChildReturn { value, derivation, .. } => AuditEvent::ChildReturn {
                 sanitizer: match derivation {
@@ -1100,7 +909,6 @@ impl RuntimeEngine {
         let CallAnswers {
             annotation,
             memberships,
-            requirement_cast,
         } = match self.answers_for(&views, &resolved, evidence) {
             Ok(answers) => answers,
             Err(Resolution::Feedback(text)) => return Ok(deny(text)),
@@ -1111,13 +919,13 @@ impl RuntimeEngine {
             arguments: call.arguments.get().as_bytes().to_vec(),
             annotation,
             memberships,
-            requirement_cast,
+            requirement_cast: None,
         };
         let expansions = self.membership_evidence(evidence);
         // A deployment that does not control context releases the marked call
         // unmarked, so the batch may be decided twice. The mark is all that
         // differs between the two attempts.
-        let judge = |evidence: &[ExternalEvidence]| {
+        let judge = || {
             let decide = |marked: bool| {
                 let batch = ProposalBatch {
                     id: batch_id(entropy),
@@ -1126,7 +934,7 @@ impl RuntimeEngine {
                     proposals: vec![proposed.clone()],
                     spawn: marked.then(|| SpawnMark::at(0)),
                     offer_nonce: engine_nonce(entropy),
-                    evidence: cast_evidence(self.engine.registry().trust_chain(), evidence),
+                    evidence: Vec::new(),
                     expansions: expansions.expansions(),
                 };
                 self.engine.handle(view, CoreEvent::Proposals(batch))
@@ -1136,7 +944,7 @@ impl RuntimeEngine {
                 decided => decided,
             }
         };
-        let decision = match judge(evidence) {
+        let decision = match judge() {
             Ok(decision) => decision,
             Err(TransitionError::MembershipNeeded { needed }) => {
                 return match self.membership_consult(&expansions, needed)? {
@@ -1146,22 +954,10 @@ impl RuntimeEngine {
                     MembershipConsult::Unresolved(group) => Ok(deny(unresolved_group(&call.tool, &group))),
                 };
             }
-            Err(error) if refused_cast(&error) => {
-                let continued = continued_casts(evidence, |subset| {
-                    judge(subset).is_err_and(|error| refused_cast(&error))
-                });
-                return Ok(match continued.is_empty() {
-                    true => deny(
-                        "[appa] the classifier's answer was not admissible; the call is not decided and may be proposed again"
-                            .to_string(),
-                    ),
-                    false => EngineDecision::deliver(Next::ResolveExternal(continued)),
-                });
-            }
             Err(error) => return Err(proposal_refusal(error)),
         };
         let append = decision.append.map(ValidatedFactBatch::into_unsealed);
-        let then = self.deliver_proposals(view, trajectory, decision.follow_up, evidence)?;
+        let then = self.deliver_proposals(view, trajectory, decision.follow_up)?;
         Ok(EngineDecision { append, then })
     }
 
@@ -1170,40 +966,11 @@ impl RuntimeEngine {
         view: &EngineView,
         trajectory: &TrajectoryId,
         follow_up: FollowUp,
-        evidence: &[ExternalEvidence],
     ) -> Result<Next, EngineRefusal> {
         match follow_up {
-            // The engine wants a value classified before it decides. Every ask goes out in one
-            // round so a batch naming several unresolved sources costs one redrive, not one per
-            // source; a cast already asked and unanswered is not asked again.
-            FollowUp::ProposalsResolve(requests) => {
-                let chain = self.engine.registry().trust_chain();
-                let acting = engine_id(trajectory);
-                let mut consults = Vec::new();
-                let mut settled = false;
-                for request in requests {
-                    let EvidenceRequest::Cast { casts, value, body } = request else {
-                        return Err(EngineRefusal::Invariant {
-                            detail: "a proposal batch asked for something other than a cast".to_string(),
-                        });
-                    };
-                    match cast_state(chain, evidence, value) {
-                        CastAnswerState::Missing => consults.push(ExternalRequest::Cast {
-                            value,
-                            ask: self.cast_ask(value_source(view, &acting, value), casts, body),
-                        }),
-                        CastAnswerState::Unreadable(continued) => consults.push(*continued),
-                        // This source will not be asked again: it answered, or it was
-                        // asked and answered nothing. The rest of the batch still goes
-                        // out, so one settled source does not cost the others a redrive.
-                        CastAnswerState::NoAnswer | CastAnswerState::Resolved => settled = true,
-                    }
-                }
-                match (settled, consults.is_empty()) {
-                    (true, true) => Ok(deny_next(NO_CAST_ANSWERED.to_string())),
-                    _ => Ok(Next::ResolveExternal(consults)),
-                }
-            }
+            FollowUp::ProposalsResolve(_) => Err(EngineRefusal::Invariant {
+                detail: "a proposal batch asked for evidence no runtime path resolves".to_string(),
+            }),
             FollowUp::Proposals {
                 released: releases,
                 blocked,
@@ -1283,11 +1050,7 @@ impl RuntimeEngine {
             let report = ToolReport {
                 dispatch: dispatch.clone(),
                 outcome: engine_outcome(outcome),
-                evidence: [
-                    sanitizer_evidence(evidence),
-                    cast_evidence(self.engine.registry().trust_chain(), evidence),
-                ]
-                .concat(),
+                evidence: sanitizer_evidence(evidence),
                 offer_nonce: engine_nonce(entropy),
                 expansions: expansions.expansions(),
             };
@@ -1295,25 +1058,6 @@ impl RuntimeEngine {
         };
         let decision = match judge(evidence) {
             Ok(decision) => decision,
-            // A classifier's answer the engine will not admit — over its ceiling, out of
-            // scope, or disagreeing with a dimension already established. The classifier
-            // misbehaved; the log is not in question, so the cascade continues with the
-            // cast registered after it, and the report stays repeatable rather than
-            // refusing the session.
-            Err(error) if refused_cast(&error) => {
-                let continued = continued_casts(evidence, |subset| {
-                    judge(subset).is_err_and(|error| refused_cast(&error))
-                });
-                return Ok(match continued.is_empty() {
-                    true => EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
-                        feedback:
-                            "[appa] the classifier's answer was not admissible; the result is withheld and may be retried"
-                                .to_string(),
-                        offers: Vec::new(),
-                    })),
-                    false => EngineDecision::deliver(Next::ResolveExternal(continued)),
-                });
-            }
             Err(TransitionError::MembershipNeeded { needed }) => {
                 return match self.membership_consult(&expansions, needed)? {
                     MembershipConsult::Requests(requests) => {
@@ -1342,7 +1086,7 @@ impl RuntimeEngine {
                 Some(dispatch),
                 request,
                 evidence,
-                "[appa] no registered cast or sanitizer answered; the result is withheld and may be retried",
+                "[appa] no registered sanitizer answered; the result is withheld and may be retried",
             )?,
             FollowUp::Outcome(OutcomeFollowUp::Staged(confined)) => Next::PresentToModel(self.stage_delivery(
                 "[appa] the cleaned result still narrows this session.",
@@ -1409,9 +1153,7 @@ impl RuntimeEngine {
                 // unchanged-argument rule), but an Annotated declaration is still annotated
                 // afresh — the digest is the annotation's key, so a sanitizer rewrite always
                 // re-annotates. A derivation the engine cannot mint a call from is the
-                // engine's to refuse. A requirement cast judged the call as proposed, never a
-                // rewrite of it, so the input stage carries no requirement answer: the engine
-                // refuses a rewrite into a contract that leaves a slot Unknown.
+                // engine's to refuse.
                 let (annotation, memberships) = match self
                     .engine
                     .resolve_call(call.tool().clone(), derived.as_str().as_bytes())
@@ -1677,11 +1419,7 @@ impl RuntimeEngine {
                 child: engine_id(child),
                 fork: fork.clone(),
                 submission: submission.clone(),
-                evidence: [
-                    sanitizer_evidence(evidence),
-                    cast_evidence(self.engine.registry().trust_chain(), evidence),
-                ]
-                .concat(),
+                evidence: sanitizer_evidence(evidence),
                 offer_nonce: engine_nonce(entropy),
                 expansions: expansions.expansions(),
             };
@@ -1689,20 +1427,6 @@ impl RuntimeEngine {
         };
         let decision = match judge(evidence) {
             Ok(decision) => decision,
-            Err(error) if refused_cast(&error) => {
-                let continued = continued_casts(evidence, |subset| {
-                    judge(subset).is_err_and(|error| refused_cast(&error))
-                });
-                return Ok(match continued.is_empty() {
-                    true => EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
-                        feedback:
-                            "[appa] the classifier's answer was not admissible; the return is withheld and may be retried"
-                                .to_string(),
-                        offers: Vec::new(),
-                    })),
-                    false => EngineDecision::deliver(Next::ResolveExternal(continued)),
-                });
-            }
             Err(TransitionError::MembershipNeeded { needed }) => {
                 return match self.membership_consult(&expansions, needed)? {
                     MembershipConsult::Requests(requests) => {
@@ -1741,7 +1465,7 @@ impl RuntimeEngine {
                 None,
                 request,
                 evidence,
-                "[appa] no registered cast or return sanitizer answered; the return is withheld and may be retried",
+                "[appa] no registered return sanitizer answered; the return is withheld and may be retried",
             )?,
             other => {
                 return Err(EngineRefusal::Invariant {
@@ -1754,9 +1478,8 @@ impl RuntimeEngine {
 
     /// Every answer a call must carry before it is proposed, from the evidence gathered so
     /// far, or the consults still owed: the produced annotation for an Annotated declaration,
-    /// the membership pins for the placeholder groups a declared contract's arguments name,
-    /// and the cast answer for the requirement slots it leaves Unknown. Every consult still
-    /// owed goes out in one round; feedback ends the proposal.
+    /// and the membership pins for the placeholder groups a declared contract's arguments
+    /// name. Every consult still owed goes out in one round; feedback ends the proposal.
     fn answers_for(
         &self,
         views: &Views,
@@ -1770,30 +1493,37 @@ impl RuntimeEngine {
             .expect("a resolved call names its registered declaration");
         let mut requests = Vec::new();
         // An Annotated declaration owes exactly one thing: its produced annotation, which is
-        // complete, concrete, and literal — so it carries no membership pins and leaves no
-        // requirement slot for a cast to answer.
-        let (annotation, memberships, requirement) = match declaration {
+        // complete, concrete, and literal — so it carries no membership pins. A declared
+        // contract that leaves a requirement slot unwritten is refused before the call runs:
+        // nothing can answer it.
+        let (annotation, memberships) = match declaration {
             ToolDeclaration::Declared(contract) => {
+                let slots: Vec<RequirementSlot> = contract.requires.unknown_slots().collect();
+                if !slots.is_empty() {
+                    return Err(Resolution::Feedback(uncovered_requirements(
+                        self.engine.registry().classify(resolved.tool()),
+                        resolved.tool().as_str(),
+                        &slots,
+                    )));
+                }
                 let memberships = gather(&mut requests, self.memberships_for(contract, resolved, evidence))?;
-                let requirement = gather(&mut requests, self.requirement_cast_for(contract, resolved, evidence))?;
-                (Some(None), memberships, requirement)
+                (Some(None), memberships)
             }
             ToolDeclaration::Annotated { .. } => {
                 let annotation = gather(
                     &mut requests,
                     self.annotation_for(views, declaration, resolved, evidence),
                 )?;
-                (annotation.map(Some), Some(Vec::new()), Some(None))
+                (annotation.map(Some), Some(Vec::new()))
             }
         };
-        match (annotation, memberships, requirement) {
-            (Some(annotation), Some(memberships), Some(requirement_cast)) => Ok(CallAnswers {
+        match (annotation, memberships) {
+            (Some(annotation), Some(memberships)) => Ok(CallAnswers {
                 annotation,
                 memberships,
-                requirement_cast,
             }),
             _ => {
-                // A group both an argument and a cast's ceiling name is asked for once.
+                // A group several arguments name is asked for once.
                 let mut distinct: Vec<ExternalRequest> = Vec::with_capacity(requests.len());
                 for request in requests {
                     if !distinct.contains(&request) {
@@ -1803,132 +1533,6 @@ impl RuntimeEngine {
                 Err(Resolution::Consult(distinct))
             }
         }
-    }
-
-    /// The cast answer for the requirement slots `contract` leaves Unknown: none where it
-    /// leaves nothing Unknown; the engine's own listing tried in order otherwise, a declared
-    /// constant answering without a consult. No cast reaching the tool is a denial the model
-    /// hears — for an undeclared tool, that it is undeclared. An answer the engine would refuse
-    /// continues the cascade past its cast, and a cascade that runs dry is a denial.
-    fn requirement_cast_for(
-        &self,
-        contract: &ToolAnnotation,
-        resolved: &ResolvedCall,
-        evidence: &[ExternalEvidence],
-    ) -> Result<Option<PinnedRequirementCast>, Resolution> {
-        let slots: Vec<RequirementSlot> = contract.requires.unknown_slots().collect();
-        if slots.is_empty() {
-            return Ok(None);
-        }
-        let tool = resolved.tool().as_str();
-        let gathered = self.membership_evidence(evidence);
-        let expansions = gathered.expansions();
-        let listed = match self.engine.requirement_casts(resolved, &expansions) {
-            Ok(listed) => listed,
-            Err(TransitionError::MembershipNeeded { needed }) => {
-                return match self.membership_consult(&gathered, needed) {
-                    Ok(MembershipConsult::Requests(requests)) => Err(Resolution::Consult(requests)),
-                    Ok(MembershipConsult::Unresolved(group)) => {
-                        Err(Resolution::Feedback(unresolved_group(tool, &group)))
-                    }
-                    Err(refusal) => Err(Resolution::Feedback(format!("[appa] {tool}: {refusal}"))),
-                };
-            }
-            Err(error) => return Err(Resolution::Feedback(format!("[appa] {tool}: {error}"))),
-        };
-        if listed.is_empty() {
-            return Err(Resolution::Feedback(uncovered_requirements(
-                self.engine.registry().classify(resolved.tool()),
-                tool,
-                &slots,
-            )));
-        }
-        let digest = resolved.digest();
-        let reported = evidence.iter().find_map(|entry| match entry {
-            ExternalEvidence::RequirementCast { call, verdict, .. } if *call == digest => Some((verdict, entry)),
-            _ => None,
-        });
-        let Some((verdict, entry)) = reported else {
-            // A constant listed first answers here, with no evidence round: the engine projected
-            // it onto the slots, so its pin is admitted by construction.
-            if let Some(first) = listed.first()
-                && let Some(answer) = first.constant.clone()
-            {
-                let pinned = PinnedRequirementCast::from_answer(first.name.clone(), digest, answer);
-                let admitted = pinned.filter(|pinned| {
-                    let judged = resolved.clone().with_requirement_cast(Some(pinned.clone()));
-                    self.engine.requirement_cast_admits(&judged, &expansions)
-                });
-                return match admitted {
-                    Some(pinned) => Ok(Some(pinned)),
-                    None => Err(Resolution::Feedback(no_requirement_cast_answered(tool))),
-                };
-            }
-            let declaration = self.requirement_declaration(&slots);
-            let ask = RequirementAsk {
-                casts: listed,
-                declaration,
-                args: contract.complete_call(resolved.tool(), resolved.arguments()),
-            };
-            return Err(Resolution::Consult(vec![ExternalRequest::RequirementCast {
-                call: digest,
-                ask,
-            }]));
-        };
-        let Some(verdict) = verdict else {
-            return Err(Resolution::Feedback(no_requirement_cast_answered(tool)));
-        };
-        let continued = || match entry.continued() {
-            Some(continued) => Err(Resolution::Consult(vec![continued])),
-            None => Err(Resolution::Feedback(no_requirement_cast_answered(tool))),
-        };
-        let Some(pinned) = self.requirement_pin(verdict, digest) else {
-            return continued();
-        };
-        let judged = resolved.clone().with_requirement_cast(Some(pinned.clone()));
-        match self.engine.requirement_cast_admits(&judged, &expansions) {
-            true => Ok(Some(pinned)),
-            false => continued(),
-        }
-    }
-
-    /// What a requirement cast is told to answer: the Unknown slots as declared returns.
-    fn requirement_declaration(&self, slots: &[RequirementSlot]) -> DynamicDeclaration {
-        let returns = slots.iter().map(|slot| slot.wire_name().to_string()).collect();
-        self.dynamic_declaration(returns)
-    }
-
-    /// The pin a verdict yields, or `None` where the answer cannot be read against the policy:
-    /// an unknown rank, an audience ceiling where a floor was asked, or nothing answered.
-    fn requirement_pin(
-        &self,
-        verdict: &RequirementVerdict,
-        call: appa_engine::value::CanonicalDigest,
-    ) -> Option<PinnedRequirementCast> {
-        let answer = match &verdict.answer {
-            RequirementLabel::Declared(answer) => answer.clone(),
-            RequirementLabel::Classified(classified) => {
-                let chain = self.engine.registry().trust_chain();
-                let trust = match classified.required_trust.as_deref() {
-                    Some(name) => Some(chain.rank_of(name)?),
-                    None => None,
-                };
-                let audience = match &classified.required_audience {
-                    Some(required) if required.cap.is_none() => Some(resolved_audience(required.includes.as_ref()?)),
-                    Some(_) => return None,
-                    None => None,
-                };
-                appa_engine::contract::RequirementAnswer {
-                    trust,
-                    audience,
-                    attention: classified
-                        .attention
-                        .clone()
-                        .map(|marks| marks.into_iter().map(MarkName::new).collect()),
-                }
-            }
-        };
-        PinnedRequirementCast::from_answer(verdict.cast.clone(), call, answer)
     }
 
     /// The pinned annotation an Annotated declaration owes: a pin standing on an open offer
@@ -2069,21 +1673,6 @@ impl RuntimeEngine {
         }
     }
 
-    /// What one requirement-cast consult declares: the slots to answer and the policy's
-    /// vocabulary the answer may use.
-    fn dynamic_declaration(&self, returns: Vec<String>) -> DynamicDeclaration {
-        let registry = self.engine.registry();
-        DynamicDeclaration::of(
-            returns,
-            registry.trust_chain(),
-            registry.audiences().map(str::to_string).collect(),
-            registry
-                .attention_marks()
-                .map(|mark| mark.as_str().to_string())
-                .collect(),
-        )
-    }
-
     /// One sanitizer consult: the registered declaration at the point the offer applies
     /// it, and the value with the tool it belongs to.
     fn sanitizer_request(
@@ -2142,43 +1731,8 @@ impl RuntimeEngine {
         }
     }
 
-    /// One cast ask, ready for the session: the casts the engine selected — each answered
-    /// from the policy or carrying its declaration — and the value's bytes. The tool whose
-    /// result the value is rides in every resolver's declaration.
-    fn cast_ask(&self, source: CastSource, casts: Vec<ApplicableCast>, body: ValueBody) -> CastAsk {
-        let registry = self.engine.registry();
-        let CastSource { tool, call } = source;
-        let tool = match call.as_ref().and_then(|call| registry.declaration(call)) {
-            Some(declaration) => Some(CastTool::of(declaration)),
-            None => tool.map(|tool| CastTool {
-                name: tool.as_str().to_string(),
-                description: None,
-            }),
-        };
-        let casts = casts
-            .into_iter()
-            .map(|applicable| CastCandidate {
-                resolution: match applicable.constant {
-                    Some(constant) => CandidateResolution::Constant(constant),
-                    None => {
-                        let registered = registry
-                            .cast(&applicable.name)
-                            .expect("the engine selects only registered casts");
-                        CandidateResolution::Resolver(
-                            CastDeclaration::of(registered, registry.trust_chain(), tool.clone())
-                                .expect("a cast the engine did not answer resolves by resolver"),
-                        )
-                    }
-                },
-                name: applicable.name.as_str().to_string(),
-            })
-            .collect();
-        CastAsk { casts, body }
-    }
-
     /// The next step for an evidence request an outcome or a return raised: the ask, or the
-    /// withheld presentation where every applicable answer was already obtained. `dispatch`
-    /// is the one a pending cast classifies the result of.
+    /// withheld presentation where every applicable answer was already obtained.
     fn resolve_or_withhold(
         &self,
         view: &EngineView,
@@ -2188,7 +1742,6 @@ impl RuntimeEngine {
         evidence: &[ExternalEvidence],
         withheld: &str,
     ) -> Result<Next, EngineRefusal> {
-        let chain = self.engine.registry().trust_chain();
         let blocked = || {
             Ok(Next::PresentToModel(Presentation::Blocked {
                 feedback: withheld.to_string(),
@@ -2218,30 +1771,6 @@ impl RuntimeEngine {
                     SanitizerSubject::Output { tool },
                 )]))
             }
-            EvidenceRequest::PendingCast { casts, source, body } => {
-                match pending_cast_state(chain, evidence, &source) {
-                    CastAnswerState::Missing => {
-                        let call = dispatch.and_then(|dispatch| {
-                            view.views(trajectory)
-                                .and_then(|views| views.dispatch_call(dispatch).cloned())
-                        });
-                        Ok(Next::ResolveExternal(vec![ExternalRequest::PendingCast {
-                            source,
-                            ask: self.cast_ask(CastSource::from_call(call), casts, body),
-                        }]))
-                    }
-                    CastAnswerState::Unreadable(continued) => Ok(Next::ResolveExternal(vec![*continued])),
-                    CastAnswerState::NoAnswer | CastAnswerState::Resolved => blocked(),
-                }
-            }
-            EvidenceRequest::Cast { casts, value, body } => match cast_state(chain, evidence, value) {
-                CastAnswerState::Missing => Ok(Next::ResolveExternal(vec![ExternalRequest::Cast {
-                    value,
-                    ask: self.cast_ask(value_source(view, trajectory, value), casts, body),
-                }])),
-                CastAnswerState::Unreadable(continued) => Ok(Next::ResolveExternal(vec![*continued])),
-                CastAnswerState::NoAnswer | CastAnswerState::Resolved => blocked(),
-            },
         }
     }
 
@@ -2379,7 +1908,6 @@ impl RuntimeEngine {
 struct CallAnswers {
     annotation: Option<PinnedAnnotation>,
     memberships: Vec<PinnedMembership>,
-    requirement_cast: Option<PinnedRequirementCast>,
 }
 
 /// The consult artifact an annotation request carries: the complete call — its proposed
@@ -2437,25 +1965,19 @@ fn gather<T>(requests: &mut Vec<ExternalRequest>, answer: Result<T, Resolution>)
     }
 }
 
-/// The denial for a call whose contract leaves requirement slots Unknown that no cast reaches:
-/// an undeclared tool with no cast covering undeclared tools, or a declared tool whose lazy
-/// slots no cast's scope reaches.
+/// The denial for a call whose contract leaves requirement slots Unknown: nothing can answer
+/// them, so the call is refused before it runs — an undeclared tool, or a declared tool whose
+/// policy leaves a requirement unwritten.
 fn uncovered_requirements(kind: appa_engine::registry::ToolKind, tool: &str, slots: &[RequirementSlot]) -> String {
     match kind {
         appa_engine::registry::ToolKind::Undeclared => {
-            format!("[appa] tool {tool} is not declared in this policy and no cast covers undeclared tools")
+            format!("[appa] tool {tool} is not declared in this policy; the call is refused before it runs")
         }
         _ => format!(
-            "[appa] {tool}: its policy leaves {} unknown and no cast reaches it; the call was not checked",
+            "[appa] {tool}: its policy leaves {} unknown and nothing can answer it; the call was not checked",
             slots.iter().map(|slot| slot.wire_name()).collect::<Vec<_>>().join(", ")
         ),
     }
-}
-
-fn no_requirement_cast_answered(tool: &str) -> String {
-    format!(
-        "[appa] no registered cast answered what {tool} requires; the call is not decided yet and may be proposed again"
-    )
 }
 
 fn unresolved_group(tool: &str, group: &GroupName) -> String {
@@ -2643,143 +2165,6 @@ fn outcome_presentation(outcome: &ToolOutcome, admitted: Option<ValueBody>) -> P
         (ToolOutcome::Failure { .. } | ToolOutcome::Indeterminate, None) => Presentation::KeepOutput,
         (ToolOutcome::Success { .. }, None) => Presentation::ReplaceOutput {
             placeholder: "[appa] the result is withheld".to_string(),
-        },
-    }
-}
-
-/// Whether the session has an answer for a cast the engine asked about. The states are what
-/// stops a redrive loop: an answer the policy cannot read — a rank outside the chain — is
-/// `Unreadable`, and the ask continues past the cast that gave it rather than being repeated,
-/// so a classifier that cannot be read is asked once.
-enum CastAnswerState {
-    Missing,
-    NoAnswer,
-    Unreadable(Box<ExternalRequest>),
-    Resolved,
-}
-
-/// Did the engine refuse a submitted cast answer — over its ceiling, out of scope, or
-/// disagreeing with a dimension already established? A pending cast reports it as one
-/// refusal; a lazily driven cast names the reason. Either way the log is untouched.
-fn refused_cast(error: &TransitionError) -> bool {
-    matches!(
-        error,
-        TransitionError::InadmissibleResolution | TransitionError::Resolution(_)
-    )
-}
-
-/// The feedback for a call whose casts were all asked and none established the value.
-const NO_CAST_ANSWERED: &str = "[appa] no registered cast could establish what this call reads; the call is not decided yet and may be proposed again";
-
-/// Which submitted cast answers the engine refused, continued past the refusing cast. The
-/// refusal names no answer, so each one is judged on its own beside the non-cast evidence
-/// — the core validates every submitted answer before it asks for a missing one — and a
-/// single submitted answer is the refused one without a second judgment.
-fn continued_casts(
-    evidence: &[ExternalEvidence],
-    refuses: impl Fn(&[ExternalEvidence]) -> bool,
-) -> Vec<ExternalRequest> {
-    let (answers, rest): (Vec<ExternalEvidence>, Vec<ExternalEvidence>) =
-        evidence.iter().cloned().partition(|entry| entry.continued().is_some());
-    let refused = |answer: &ExternalEvidence| {
-        if answers.len() == 1 {
-            return true;
-        }
-        let mut alone = rest.clone();
-        alone.push(answer.clone());
-        refuses(&alone)
-    };
-    answers
-        .iter()
-        .filter(|answer| refused(answer))
-        .filter_map(ExternalEvidence::continued)
-        .collect()
-}
-
-/// The engine-side audience a classifier's wire audience resolves to.
-fn resolved_audience(audience: &WireAudience) -> Audience {
-    match audience {
-        WireAudience::Public => Audience::Public,
-        WireAudience::Readers(readers) => Audience::restricted(readers.iter().map(ReaderId::new)),
-    }
-}
-
-fn cast_label(chain: &TrustChain, verdict: &CastVerdict) -> Option<EstablishedLabel> {
-    match &verdict.label {
-        CastLabel::Declared(label) => Some(label.clone()),
-        CastLabel::Classified(answer) => {
-            let trust = chain.rank_of(&answer.trust)?;
-            Some(EstablishedLabel::new(trust, resolved_audience(&answer.audience)))
-        }
-    }
-}
-
-fn cast_evidence(chain: &TrustChain, evidence: &[ExternalEvidence]) -> Vec<Evidence> {
-    evidence
-        .iter()
-        .filter_map(|entry| match entry {
-            ExternalEvidence::PendingCast {
-                source,
-                verdict: Some(verdict),
-                ..
-            } => Some(Evidence::PendingCast {
-                cast: appa_engine::names::CastName::new(verdict.cast.clone()),
-                source: *source,
-                resolved: cast_label(chain, verdict)?,
-            }),
-            ExternalEvidence::Cast {
-                value,
-                verdict: Some(verdict),
-                ..
-            } => Some(Evidence::Cast {
-                cast: appa_engine::names::CastName::new(verdict.cast.clone()),
-                value: *value,
-                resolved: cast_label(chain, verdict)?,
-            }),
-            _ => None,
-        })
-        .collect()
-}
-
-fn pending_cast_state(chain: &TrustChain, evidence: &[ExternalEvidence], source: &RawResultDigest) -> CastAnswerState {
-    for entry in evidence {
-        if let ExternalEvidence::PendingCast {
-            source: reported,
-            verdict,
-            ..
-        } = entry
-            && reported == source
-        {
-            return answer_state(chain, entry, verdict.as_ref());
-        }
-    }
-    CastAnswerState::Missing
-}
-
-fn cast_state(chain: &TrustChain, evidence: &[ExternalEvidence], value: ValueId) -> CastAnswerState {
-    for entry in evidence {
-        if let ExternalEvidence::Cast {
-            value: reported,
-            verdict,
-            ..
-        } = entry
-            && *reported == value
-        {
-            return answer_state(chain, entry, verdict.as_ref());
-        }
-    }
-    CastAnswerState::Missing
-}
-
-fn answer_state(chain: &TrustChain, entry: &ExternalEvidence, verdict: Option<&CastVerdict>) -> CastAnswerState {
-    match verdict {
-        None => CastAnswerState::NoAnswer,
-        Some(verdict) => match cast_label(chain, verdict) {
-            Some(_) => CastAnswerState::Resolved,
-            None => match entry.continued() {
-                Some(continued) => CastAnswerState::Unreadable(Box::new(continued)),
-                None => CastAnswerState::NoAnswer,
-            },
         },
     }
 }
@@ -3029,40 +2414,6 @@ fn unestablished_source(views: &Views, value: ValueId) -> String {
     }
 }
 
-/// The tool whose result `value` is, as a cast's classifier is told it. A child return
-/// originates from no tool.
-/// The tool a cast classifies a value of, and the call that produced it where a dispatch did:
-/// under ordered contracts the call, not the name, selects the contract whose requirements
-/// the classifier sees. A provider-run value names its tool; no dispatch released it.
-#[derive(Default)]
-struct CastSource {
-    tool: Option<ToolName>,
-    call: Option<ResolvedCall>,
-}
-
-impl CastSource {
-    fn from_call(call: Option<ResolvedCall>) -> Self {
-        CastSource {
-            tool: call.as_ref().map(|call| call.tool().clone()),
-            call,
-        }
-    }
-}
-
-fn value_source(view: &EngineView, trajectory: &EngineTrajectoryId, value: ValueId) -> CastSource {
-    let Some(views) = view.views(trajectory) else {
-        return CastSource::default();
-    };
-    match views.value_provenance(value) {
-        Some(Provenance::ToolResult { dispatch }) => CastSource::from_call(views.dispatch_call(dispatch).cloned()),
-        Some(Provenance::ProviderRun { tool, .. }) => CastSource {
-            tool: Some(tool.clone()),
-            call: None,
-        },
-        Some(Provenance::ChildReturn { .. }) | None => CastSource::default(),
-    }
-}
-
 /// The typed form of one unestablished source, under the same ownership rule as the prose:
 /// a value the receiving trajectory did not admit itself is cited by id alone.
 fn unestablished_value(views: &Views, fact: &UnestablishedFact) -> UnestablishedValue {
@@ -3306,32 +2657,6 @@ mod tests {
     fn opened_view(engine: &RuntimeEngine, trajectory: &TrajectoryId) -> EngineView {
         let opening = engine.root_opening(trajectory, b"policy");
         engine.validated(opening, trajectory, 1).expect("the opening validates")
-    }
-
-    #[test]
-    fn static_policy_vocabularies_reach_requirement_cast_consults_without_an_authority() {
-        let policy = appa_policy::Config::from_toml_str(
-            r#"
-                version = 1
-                [[tool]]
-                name = "blocked"
-                description = "A statically blocked operation."
-                delta = {}
-                requires = { attention = ["blocked"] }
-                [[tool]]
-                name = "private-data"
-                description = "Returns private data."
-                delta = { audience = ["private"] }
-            "#,
-        )
-        .expect("a closed attention vocabulary does not require an authority");
-        let engine = RuntimeEngine::new(policy.engine().clone(), BTreeMap::new());
-
-        let declaration = engine.dynamic_declaration(vec!["requires.attention".to_string()]);
-
-        assert_eq!(declaration.returns, ["requires.attention"]);
-        assert_eq!(declaration.attention_marks, ["blocked"]);
-        assert_eq!(declaration.audiences, ["public", "private"]);
     }
 
     /// The annotated-tool policy: one Annotator producing `lookup`'s semantics per call, and

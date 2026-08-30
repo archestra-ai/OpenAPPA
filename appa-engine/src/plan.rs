@@ -34,8 +34,8 @@
 //! (narrowing), `Sanitize` (an output sanitizer's relabel standing in for the raw crossing),
 //! `Derive` (an input sanitizer's substitution of the whole argument set), and `Redispatch` over direct `prior(k)` emitters and static cap-narrowing tools, in
 //! name order — the agent picks, and each redispatch is separately checked for real.
-//! Cast resolution of an Unknown is outside the subset: the harness attempts it itself at
-//! check and at admission, and it is never surfaced as a plan object. The empty-proof is
+//! Resolution of an Unknown is outside the subset: nothing establishes an Unknown
+//! dimension, so it is never surfaced as a plan object. The empty-proof is
 //! complete over exactly this subset.
 //!
 //! **A sanitize step settles a narrowing and never a requirement gap**. The gaps are
@@ -196,8 +196,8 @@ pub struct PlannedBlock {
 impl PlannedBlock {
     /// Is any remedy available? **Empty is a proof no plan exists** over the implemented remedy
     /// subset — the assertion concerns requirement gaps and narrowing. A block with any
-    /// `unestablished` source offers no plan *by design*: only a cast fact clears it, and that
-    /// fact must land before its gaps are planned, so its emptiness is not unliftability. Fork
+    /// `unestablished` source offers no plan *by design*: nothing clears the missing fact,
+    /// so the call is undecidable there. Fork
     /// advice is not a remedy and never enters this verdict.
     pub fn is_curable(&self) -> bool {
         !self.plans.is_empty()
@@ -217,9 +217,8 @@ pub(crate) enum CallRole {
 /// Plan the remedies for a raw block. Emits the executable plans when the block clears in one
 /// atomic step, and every direct redispatch when only a prior tool call unlocks it. Both land in
 /// the one `plans` list; fork advice is separate and never a remedy. A block with an
-/// `unestablished` source lists nothing: no plan clears the missing fact, and the engine
-/// requests every applicable cast before it composes, so the block arises only where no cast
-/// applies. See the module docs for the direct-clearing model.
+/// `unestablished` source lists nothing: no plan clears the missing fact.
+/// See the module docs for the direct-clearing model.
 /// One refused call as planning receives it: the call, the contract its check resolved,
 /// the block that check found, and the stage and role it was found at. The contract is
 /// carried rather than looked up again — an empty plan set is read as a proof that the
@@ -251,8 +250,8 @@ pub(crate) fn plan(
 
     let has_committed = |kind: &EffectKind| views.has_effect(kind);
     let has_reserved = |kind: &EffectKind| views.has_reservation(kind);
-    // Neither a missing value fact nor an Unknown requirement is planned around: a cast
-    // establishes them, or the call stays undecidable.
+    // Neither a missing value fact nor an Unknown requirement is planned around: nothing
+    // establishes them, so the call stays undecidable.
     let plannable = raw.unestablished.is_empty() && raw.unknown_requirements.is_empty();
     let mut plans: Vec<RemedyPlan> = match plannable {
         true => enumerate_plans(
@@ -689,8 +688,8 @@ pub(crate) fn input_hops(
     if !gaps.iter().any(|gap| matches!(gap, Gap::Includes { .. })) {
         return Vec::new();
     }
-    // An input rewrite is judged as a new call without the requirement-cast pin the blocked
-    // call carried, and the rewrite path consults no cast: a hop under a contract leaving a
+    // An input rewrite is judged as a new call without the requirement pin the blocked
+    // call carried: a hop under a contract leaving a
     // slot Unknown could never execute, so none is offered.
     if contract.requires.unknown_slots().next().is_some() {
         return Vec::new();
@@ -735,9 +734,6 @@ fn applicable_output_sanitizers<'r>(
     output: &Label,
     expansions: &Expansions,
 ) -> Vec<&'r Sanitizer> {
-    if registry.confined_pending_cast(contract).is_some() {
-        return Vec::new();
-    }
     registry
         .sanitizers()
         .filter(|sanitizer| !sanitizer.name.is_attest_schema())
@@ -783,11 +779,6 @@ pub(crate) fn confined_hop_helps(receiving: &EstablishedLabel, candidate: &Label
 /// never stuck whatever the catalogue holds, and no chain is precomputed — each hop persists one
 /// candidate and this runs again from it. The order is presentation only; hops come
 /// first because a hop costs the trajectory nothing and acceptance costs exactly the residual.
-///
-/// A pending-cast candidate's stage is the acceptance alone: the two confinement paths do not
-/// compose, so no sanitizer hop is ever offered over a cast-resolved result. The
-/// contract decides — a pending-cast dispatch is never sanitizer-bound, so its confined candidate
-/// is always the cast's.
 pub(crate) fn confined_stage(
     registry: &Registry,
     contract: &ToolAnnotation,
@@ -798,23 +789,21 @@ pub(crate) fn confined_stage(
     expansions: &Expansions,
 ) -> Vec<ExecutableRemedyPlan> {
     let mut plans: Vec<ExecutableRemedyPlan> = Vec::new();
-    if registry.confined_pending_cast(contract).is_none() {
-        let hops = registry
-            .sanitizers()
-            .filter(|sanitizer| !lineage.contains(&sanitizer.name))
-            .filter(|sanitizer| !sanitizer.name.is_attest_schema())
-            .filter(|sanitizer| {
-                sanitizer
-                    .derive_output(candidate, &contract.tags, expansions)
-                    .is_some_and(|derived| confined_hop_helps(receiving, candidate, &derived))
-            });
-        for sanitizer in hops {
-            plans.push(ExecutableRemedyPlan {
-                id: PlanId(plans.len() as u32),
-                steps: vec![RemedyStep::Derive(sanitizer.name.clone())],
-                required: Vec::new(),
-            });
-        }
+    let hops = registry
+        .sanitizers()
+        .filter(|sanitizer| !lineage.contains(&sanitizer.name))
+        .filter(|sanitizer| !sanitizer.name.is_attest_schema())
+        .filter(|sanitizer| {
+            sanitizer
+                .derive_output(candidate, &contract.tags, expansions)
+                .is_some_and(|derived| confined_hop_helps(receiving, candidate, &derived))
+        });
+    for sanitizer in hops {
+        plans.push(ExecutableRemedyPlan {
+            id: PlanId(plans.len() as u32),
+            steps: vec![RemedyStep::Derive(sanitizer.name.clone())],
+            required: Vec::new(),
+        });
     }
     plans.push(ExecutableRemedyPlan {
         id: PlanId(plans.len() as u32),
@@ -826,7 +815,6 @@ pub(crate) fn confined_stage(
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ReturnStagePlan {
-    Resolve { value: crate::value::ValueId },
     Stage(Vec<ExecutableRemedyPlan>),
 }
 
@@ -858,14 +846,9 @@ pub(crate) fn return_stage(
             if sanitizer.name.is_attest_schema() && !attest_applicable(views, child, body, &sanitizer.transition) {
                 continue;
             }
-            let dim = sanitizer.transition.dimension();
-            if !fold.is_established(dim) {
-                if sanitizer.derive_output(candidate, &[], expansions).is_none() {
-                    continue;
-                }
-                if let Some(value) = resolvable_source(registry, views, fold, dim, expansions) {
-                    return ReturnStagePlan::Resolve { value };
-                }
+            // An unestablished consumed dimension has nothing to establish it: the
+            // sanitizer cannot hop here.
+            if !fold.is_established(sanitizer.transition.dimension()) {
                 continue;
             }
             if sanitizer
@@ -915,61 +898,6 @@ pub(crate) fn attest_applicable(
     views
         .fork_seed(child)
         .is_some_and(|seed| seed.is_established(crate::label::Dimension::Trust) && seed.bound().trust >= *to)
-}
-
-/// The first unresolved source on `dim` a registered cast can establish, in registry order —
-/// deterministic, so the deciding engine and the transition validator name the same request.
-/// A cast applies where its scope covers the source's originating contract and the
-/// log retains the bytes a resolver would read; a bodiless source is charged to no cast here
-/// and fails closed at whatever consumes it.
-pub(crate) fn resolvable_source(
-    registry: &Registry,
-    views: &Views,
-    fold: &PartialLabel,
-    dim: crate::label::Dimension,
-    expansions: &Expansions,
-) -> Option<crate::value::ValueId> {
-    fold.unresolved(dim).find(|value| {
-        views.value_body(*value).is_some()
-            && views.value_label(*value).is_some_and(|prior| {
-                registry.casts().iter().any(|cast| {
-                    cast.resolution.can_establish(prior, expansions)
-                        && cast.scope.reaches(registry, views, *value).unwrap_or(false)
-                })
-            })
-    })
-}
-
-/// Every registered cast that could establish `value`, in registration order, beside the bytes
-/// they would read. The runtime tries them in that order until one answers, so a constant
-/// registered last is the declared fallback here exactly as it is at a held result. A constant
-/// arrives already resolved against the memberships pinned for this act.
-/// `None` where the value kept no body, carries no label, or no registered cast reaches it — each
-/// leaves the value unestablished, which fails closed at whatever consumes it.
-pub(crate) fn castable_sources(
-    registry: &Registry,
-    views: &Views,
-    value: crate::value::ValueId,
-    expansions: &Expansions,
-) -> Option<(Vec<crate::transition::ApplicableCast>, crate::value::ValueBody)> {
-    let body = views.value_body(value)?.clone();
-    let prior = views.value_label(value)?;
-    let casts: Vec<crate::transition::ApplicableCast> = registry
-        .casts()
-        .iter()
-        .filter(|cast| {
-            cast.resolution.can_establish(prior, expansions)
-                && cast.scope.reaches(registry, views, value).unwrap_or(false)
-        })
-        .map(|cast| crate::transition::ApplicableCast {
-            name: cast.name.clone(),
-            constant: match &cast.resolution {
-                crate::authority::CastResolution::Constant(constant) => Some(constant.resolve(expansions)),
-                crate::authority::CastResolution::Resolver { .. } => None,
-            },
-        })
-        .collect();
-    (!casts.is_empty()).then_some((casts, body))
 }
 
 /// The established contribution a bound output sanitizer's first derivation would make, resolved
@@ -1047,10 +975,7 @@ pub(crate) fn block_groups(
             }
         }
     }
-    if raw.narrowing.is_some()
-        && registry.confined_pending_cast(contract).is_none()
-        && registry.profile().confines_result(&contract.name)
-    {
+    if raw.narrowing.is_some() && registry.profile().confines_result(&contract.name) {
         for sanitizer in registry.sanitizers() {
             if sanitizer.on.output && !sanitizer.name.is_attest_schema() && sanitizer.applies_to(&contract.tags) {
                 groups.extend(sanitizer.groups().cloned());
@@ -1092,16 +1017,12 @@ pub(crate) fn plan_groups(
 }
 
 /// The groups one confined candidate's stage reads: the transition of every
-/// in-scope output sanitizer the chain has not spent. A pending-cast candidate's stage is the
-/// acceptance alone and reads none.
+/// in-scope output sanitizer the chain has not spent.
 pub(crate) fn confined_stage_groups(
     registry: &Registry,
     contract: &ToolAnnotation,
     lineage: &SanitizerLineage,
 ) -> Vec<GroupName> {
-    if registry.confined_pending_cast(contract).is_some() {
-        return Vec::new();
-    }
     registry
         .sanitizers()
         .filter(|sanitizer| !lineage.contains(&sanitizer.name))
@@ -1112,8 +1033,8 @@ pub(crate) fn confined_stage_groups(
 }
 
 /// The groups one child return's stage reads: where the deployment
-/// confines the return, the transition of every unscoped output sanitizer the chain has not spent
-/// and the constant of every registered cast — selection reads it before any answer.
+/// confines the return, the transition of every unscoped output sanitizer the chain has not
+/// spent.
 pub(crate) fn return_stage_groups(registry: &Registry, lineage: &SanitizerLineage) -> Vec<GroupName> {
     let mut groups: Vec<GroupName> = Vec::new();
     if registry.profile().confines_child_return() {
@@ -1122,42 +1043,8 @@ pub(crate) fn return_stage_groups(registry: &Registry, lineage: &SanitizerLineag
                 groups.extend(sanitizer.groups().cloned());
             }
         }
-        groups.extend(cast_selection_groups(registry));
     }
     groups
-}
-
-/// The groups selecting a cast for `value` reads: the declared audience of every constant cast
-/// whose scope reaches it. Scope routing needs no directory answer, so narrowing by it first
-/// keeps a constant scoped elsewhere from pulling a membership consult into a decision its
-/// answer cannot affect.
-pub(crate) fn constant_groups_reaching(
-    registry: &Registry,
-    views: &Views,
-    value: crate::value::ValueId,
-) -> Vec<GroupName> {
-    registry
-        .casts()
-        .iter()
-        .filter(|cast| cast.scope.reaches(registry, views, value).unwrap_or(false))
-        .filter_map(|cast| match &cast.resolution {
-            crate::authority::CastResolution::Constant(constant) => Some(constant.audience.groups().cloned()),
-            crate::authority::CastResolution::Resolver { .. } => None,
-        })
-        .flatten()
-        .collect()
-}
-
-pub(crate) fn cast_selection_groups(registry: &Registry) -> Vec<GroupName> {
-    registry
-        .casts()
-        .iter()
-        .filter_map(|cast| match &cast.resolution {
-            crate::authority::CastResolution::Constant(constant) => Some(constant.audience.groups().cloned()),
-            crate::authority::CastResolution::Resolver { .. } => None,
-        })
-        .flatten()
-        .collect()
 }
 
 fn direct_redispatches(
@@ -1341,7 +1228,6 @@ mod tests {
             tools: declared(vec![gate, vault]),
             authorities: vec![steward],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
             annotators: vec![],
         });
@@ -1435,7 +1321,6 @@ mod tests {
                 scope: Scope::default(),
                 hint: None,
             }],
-            casts: vec![],
             membership: None,
             annotators: vec![],
         });
@@ -1507,7 +1392,6 @@ mod tests {
             }],
             authorities: vec![],
             sanitizers: vec![redact],
-            casts: vec![],
             membership: None,
             annotators: vec![crate::registry::AnnotatorDeclaration {
                 name: crate::names::AnnotatorName::new("classifier"),
@@ -1612,7 +1496,6 @@ mod tests {
                     },
                 ),
             ],
-            casts: vec![],
             membership: None,
             annotators: vec![],
         });
@@ -1675,7 +1558,6 @@ mod tests {
                     },
                 ),
             ],
-            casts: vec![],
             membership: None,
             annotators: vec![crate::registry::AnnotatorDeclaration {
                 name: crate::names::AnnotatorName::new("directory"),
@@ -1729,7 +1611,6 @@ mod tests {
                     to: DeclaredAudience::literal(Audience::Public),
                 },
             )],
-            casts: vec![],
             membership: None,
             annotators: vec![],
         });
@@ -1813,7 +1694,6 @@ mod tests {
             tools: declared(vec![backup.clone(), wipe.clone()]),
             authorities: vec![],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
             annotators: vec![],
         });
@@ -1829,7 +1709,6 @@ mod tests {
             tools: declared(vec![backup, wipe]),
             authorities: vec![],
             sanitizers: vec![scrub],
-            casts: vec![],
             membership: None,
             annotators: vec![],
         });
@@ -1900,7 +1779,6 @@ mod tests {
             tools: declared(vec![emitter, prior_target, narrower, cap_target]),
             authorities: vec![],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
             annotators: vec![],
         });
@@ -1971,7 +1849,6 @@ mod tests {
             tools: declared(vec![send]),
             authorities: vec![generous],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
             annotators: vec![],
         });
@@ -2026,7 +1903,6 @@ mod tests {
             ]),
             authorities: vec![],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
             annotators: vec![],
         });
@@ -2089,7 +1965,6 @@ mod tests {
             ],
             authorities: vec![],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
             annotators: vec![crate::registry::AnnotatorDeclaration {
                 name: crate::names::AnnotatorName::new("acl"),
@@ -2144,7 +2019,6 @@ mod tests {
             tools: declared(vec![send, fixer]),
             authorities: vec![],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
             annotators: vec![],
         });
@@ -2194,7 +2068,6 @@ mod tests {
             tools: declared(vec![tool]),
             authorities: vec![officer],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
             annotators: vec![],
         });
@@ -2248,7 +2121,6 @@ mod tests {
             tools: declared(vec![tool]),
             authorities: vec![officer("officer-a"), officer("officer-b"), attester],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
             annotators: vec![],
         });
@@ -2330,7 +2202,6 @@ mod tests {
             tools: declared(vec![tool]),
             authorities: vec![officer("executive", Trust::new(2)), officer("officer", TRUSTED)],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
             annotators: vec![],
         });
@@ -2381,7 +2252,6 @@ mod tests {
                 desk("exact", Audience::restricted([ReaderId::new("hr")])),
             ],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
             annotators: vec![],
         });
@@ -2424,7 +2294,6 @@ mod tests {
             tools: declared(vec![tool]),
             authorities: vec![desk("desk", TRUSTED)],
             sanitizers: vec![],
-            casts: vec![],
             membership: Some(crate::names::MembershipResolverName::new("directory")),
             annotators: vec![],
         });
@@ -2466,7 +2335,6 @@ mod tests {
                 waiver("narrow", vec!["spend", "spend"]),
             ],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
             annotators: vec![],
         });
@@ -2534,7 +2402,6 @@ mod tests {
             tools: declared(vec![guard]),
             authorities: vec![keeper],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
             annotators: vec![],
         });
@@ -2578,7 +2445,6 @@ mod tests {
             tools: declared(vec![delete, backup]),
             authorities: vec![],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
             annotators: vec![],
         });
@@ -2641,7 +2507,6 @@ mod tests {
                 ),
             ],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
             annotators: vec![],
         });
@@ -2687,7 +2552,6 @@ mod tests {
                 officer("weak", TRUSTED, Audience::restricted([ReaderId::new("hr")])),
             ],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
             annotators: vec![],
         });
@@ -2738,7 +2602,6 @@ mod tests {
             tools: declared(vec![tool()]),
             authorities: vec![officer("a", None), officer("b", None)],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
             annotators: vec![],
         });
@@ -2750,7 +2613,6 @@ mod tests {
                 officer("b", Some(Hint::new("the fast lane — prefer this desk"))),
             ],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
             annotators: vec![],
         });
@@ -2800,7 +2662,6 @@ mod tests {
             tools: declared(vec![tool]),
             authorities: vec![officer("officer-a"), officer("officer-b")],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
             annotators: vec![],
         })
@@ -2871,7 +2732,6 @@ mod tests {
             tools: declared(vec![tool]),
             authorities: vec![officer],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
             annotators: vec![],
         });
@@ -2923,7 +2783,6 @@ mod tests {
             tools: declared(vec![target, emitter]),
             authorities: vec![officer],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
             annotators: vec![],
         });
@@ -2979,7 +2838,6 @@ mod tests {
             tools: declared(vec![target, emitter]),
             authorities: vec![gate],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
             annotators: vec![],
         });
@@ -3024,7 +2882,6 @@ mod tests {
             tools: declared(vec![tool]),
             authorities: vec![attester("a"), attester("b")],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
             annotators: vec![],
         });
@@ -3073,7 +2930,6 @@ mod tests {
             tools: declared(vec![tool]),
             authorities: vec![officer],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
             annotators: vec![],
         });
@@ -3110,7 +2966,6 @@ mod tests {
             tools: declared(vec![tool]),
             authorities: vec![],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
             annotators: vec![],
         });
@@ -3140,7 +2995,6 @@ mod tests {
             tools: declared(vec![tool]),
             authorities: vec![],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
             annotators: vec![],
         });
@@ -3184,7 +3038,6 @@ mod tests {
             tools: declared(vec![delete, backup]),
             authorities: vec![],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
             annotators: vec![],
         });
@@ -3225,7 +3078,6 @@ mod tests {
             tools: declared(vec![delete, backup("backup_full"), backup("backup_fast")]),
             authorities: vec![],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
             annotators: vec![],
         });
@@ -3282,7 +3134,6 @@ mod tests {
             tools: declared(vec![delete, backup]),
             authorities: vec![],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
             annotators: vec![],
         });
@@ -3333,7 +3184,6 @@ mod tests {
             tools: declared(vec![archive, send]),
             authorities: vec![],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
             annotators: vec![],
         });
@@ -3365,7 +3215,6 @@ mod tests {
             tools: declared(vec![delete]),
             authorities: vec![],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
             annotators: vec![],
         });
@@ -3404,7 +3253,6 @@ mod tests {
             tools: declared(vec![tool]),
             authorities: vec![officer],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
             annotators: vec![],
         });
@@ -3444,7 +3292,6 @@ mod tests {
             tools: declared(vec![tool]),
             authorities: vec![officer],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
             annotators: vec![],
         });
@@ -3484,7 +3331,6 @@ mod tests {
             tools: declared(vec![a, b]),
             authorities: vec![],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
             annotators: vec![],
         });
@@ -3760,7 +3606,6 @@ mod tests {
                 tools: declared(tools),
                 authorities,
                 sanitizers,
-                casts: vec![],
                 membership: None,
                 annotators: vec![],
             });
@@ -3867,7 +3712,6 @@ mod tests {
                 tools: declared(tools),
                 authorities,
                 sanitizers,
-                casts: vec![],
                 membership: None,
                 annotators: vec![],
             });
@@ -4021,7 +3865,6 @@ mod tests {
                 tools: declared(tools),
                 authorities: authorities.clone(),
                 sanitizers: vec![],
-                casts: vec![],
                 membership: None,
                 annotators: vec![],
             });

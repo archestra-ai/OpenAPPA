@@ -43,7 +43,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::basis::SubjectKey;
 use crate::candidate::CallStage;
-use crate::check::{self, CallReads, CheckOutcome, Gap, Narrowing, RawBlock, StateEval, UnestablishedFact};
+use crate::check::{self, CallReads, CheckOutcome, Gap, Narrowing, RawBlock, StateEval};
 use crate::contract::{NotStatic, StaticAnnotation, ToolAnnotation};
 use crate::engine::Engine;
 use crate::fact::EffectKind;
@@ -156,9 +156,6 @@ pub enum Halt {
     Arguments,
     /// Its result label is established only at admission (unannotated or pending-cast).
     Unestablished,
-    /// Its check consumes an unresolved dimension; a registered cast can establish each source
-    /// (`CHK-16`), and the resolved label decides the rest.
-    Cast(Vec<UnestablishedFact>),
     /// Its own block carries call-bound gaps; its rulings or hops are planned at that block.
     Block(Vec<Gap>),
     /// The depth bound ends here.
@@ -601,25 +598,16 @@ impl Search<'_> {
             &self.has_reserved(),
             expansions,
         );
-        // An Unknown requirement is undecidable until a cast establishes it: no route runs
-        // through the call, so nothing it reads is required.
+        // An Unknown requirement slot has no answerer, so the call is undecidable: no route
+        // runs through it, and nothing it reads is required.
         if !eval.unknown_requirements.is_empty() {
             return Ok(Vec::new());
         }
         self.require_groups(tool, &eval, CallRole::Ordinary)?;
+        // A consumed dimension with unresolved sources stays unresolved: nothing can
+        // establish it, so no route runs through the call.
         if !eval.consumed.is_empty() {
-            let sources = check::unestablished_facts(&state.label, &eval.consumed);
-            for source in &sources {
-                expansions.require(&plan::constant_groups_reaching(self.registry, self.views, source.value))?;
-            }
-            let castable = sources
-                .iter()
-                .all(|source| plan::castable_sources(self.registry, self.views, source.value, expansions).is_some());
-            return if castable {
-                halt(Halt::Cast(sources))
-            } else {
-                Ok(Vec::new())
-            };
+            return Ok(Vec::new());
         }
         if eval
             .requirement_gaps
@@ -904,14 +892,11 @@ fn disclosure_cmp(a: Option<&Audience>, b: Option<&Audience>) -> Option<Ordering
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authority::{
-        Authority, Cast, CastResolution, DeclaredLabel, Mandate, Sanitizer, SanitizerPoints, Scope,
-    };
+    use crate::authority::{Authority, Mandate, Sanitizer, SanitizerPoints, Scope};
     use crate::contract::{AudienceRequirement, Delta, HistoryRequirement, RecipientSpec, Requires, ToolAnnotation};
     use crate::fact::{CloseOutcome, EffectSet, Fact};
     use crate::groups::DeclaredAudience;
     use crate::label::{Dim, EstablishedLabel, Label, ReaderId, Trust};
-    use crate::names::CastName;
     use crate::projection::Projection;
     use crate::registry::{RegistryConfig, TrustChain};
     use crate::value::{DispatchId, LabeledValue, Provenance, TrajectoryId, ValueBody};
@@ -1068,7 +1053,6 @@ mod tests {
         tools: Vec<ToolAnnotation>,
         authorities: Vec<Authority>,
         sanitizers: Vec<Sanitizer>,
-        casts: Vec<Cast>,
         membership: Option<crate::names::MembershipResolverName>,
     }
 
@@ -1078,14 +1062,8 @@ mod tests {
                 tools,
                 authorities: vec![],
                 sanitizers: vec![],
-                casts: vec![],
                 membership: None,
             }
-        }
-
-        fn grouped(mut self) -> Deployment {
-            self.membership = Some(crate::names::MembershipResolverName::new("directory"));
-            self
         }
 
         fn authorities(mut self, authorities: Vec<Authority>) -> Deployment {
@@ -1095,11 +1073,6 @@ mod tests {
 
         fn sanitizers(mut self, sanitizers: Vec<Sanitizer>) -> Deployment {
             self.sanitizers = sanitizers;
-            self
-        }
-
-        fn casts(mut self, casts: Vec<Cast>) -> Deployment {
-            self.casts = casts;
             self
         }
 
@@ -1114,7 +1087,6 @@ mod tests {
                 annotators: vec![],
                 authorities: self.authorities,
                 sanitizers: self.sanitizers,
-                casts: self.casts,
                 membership: self.membership,
             })
             .unwrap()
@@ -1545,86 +1517,6 @@ mod tests {
         assert!(
             routes(&uncastable, &log_unknown, &wipe, depth(2)).is_empty(),
             "an unresolved source nothing casts fails closed at the call that consumes it"
-        );
-        let castable = Deployment::of(tools)
-            .casts(vec![Cast {
-                name: CastName::new("vouch"),
-                hint: None,
-                resolution: CastResolution::Constant(DeclaredLabel {
-                    trust: TRUSTED,
-                    audience: DeclaredAudience::Public,
-                    attention: None,
-                }),
-                scope: Scope::default(),
-            }])
-            .registry();
-        let found = routes(&castable, &log_unknown, &wipe, depth(2));
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].steps, vec![]);
-        assert!(
-            matches!(
-                &found[0].outcome,
-                RouteOutcome::Prefix(Resume::Propose { tool, halt: Halt::Cast(sources), .. })
-                    if tool.as_str() == "backup" && sources.len() == 1
-            ),
-            "got {:?}",
-            found[0].outcome
-        );
-    }
-
-    #[test]
-    fn a_grouped_constant_cast_on_a_preceding_call_reads_its_group_before_it_is_offered() {
-        let board = GroupName::new("board");
-        let consuming = requiring_trust(emitting("backup", &["backup"]), TRUSTED);
-        let registry = Deployment::of(vec![
-            tool("seed"),
-            consuming,
-            requiring_prior(tool("wipe"), &["backup"]),
-        ])
-        .casts(vec![Cast {
-            name: CastName::new("vouch"),
-            hint: None,
-            resolution: CastResolution::Constant(DeclaredLabel {
-                trust: TRUSTED,
-                audience: DeclaredAudience::declared([], [board.clone()]).unwrap(),
-                attention: None,
-            }),
-            scope: Scope::default(),
-        }])
-        .grouped()
-        .registry();
-        let log = vec![
-            opened(TRUSTED, Audience::Public),
-            dispatched("admitted", &[]),
-            admitted(Label::new(Dim::Unknown, Dim::Unknown)),
-        ];
-        let wipe = call("wipe", json!({}));
-
-        assert_eq!(
-            routes_with(&registry, &log, &wipe, depth(2), &[]),
-            Err(RouteError::MembershipNeeded(vec![board.clone()])),
-            "the cast that would establish `backup`'s source writes a group the search cannot resolve"
-        );
-        let answered = routes_with(
-            &registry,
-            &log,
-            &wipe,
-            depth(2),
-            &[GroupExpansion::new(board, []).unwrap()],
-        )
-        .expect("the answer lets the cast be judged");
-        assert!(
-            matches!(
-                &answered[..],
-                [RecoveryRoute {
-                    outcome: RouteOutcome::Prefix(Resume::Propose {
-                        halt: Halt::Cast(_),
-                        ..
-                    }),
-                    ..
-                }]
-            ),
-            "{answered:?}"
         );
     }
 

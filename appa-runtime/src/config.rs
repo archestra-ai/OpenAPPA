@@ -49,7 +49,6 @@ pub struct ExternalBindings {
     pub max_body_bytes: usize,
     pub authorities: BTreeMap<String, Binding>,
     pub sanitizers: BTreeMap<String, Binding>,
-    pub casts: BTreeMap<String, Binding>,
     pub annotators: BTreeMap<String, Binding>,
     pub membership: BTreeMap<String, Binding>,
     pub claude_code: ClaudeCode,
@@ -66,7 +65,6 @@ impl ExternalBindings {
             max_body_bytes,
             authorities: BTreeMap::new(),
             sanitizers: BTreeMap::new(),
-            casts: BTreeMap::new(),
             annotators: BTreeMap::new(),
             membership: BTreeMap::new(),
             claude_code: ClaudeCode::default(),
@@ -144,9 +142,6 @@ pub struct Externals {
     pub max_body_bytes: usize,
     pub authorities: BTreeMap<String, Implementation>,
     pub sanitizers: BTreeMap<String, Implementation>,
-    /// A resolver-backed `[[cast]]` binds here; a constant cast is answered from the policy
-    /// and binds nothing.
-    pub casts: BTreeMap<String, Implementation>,
     /// One implementation per policy-declared `[[annotator]]` that names no `builtin` on
     /// its declaration. An Annotator that carries a stock builtin takes no entry here.
     pub annotators: BTreeMap<String, AnnotatorImplementation>,
@@ -388,22 +383,20 @@ pub enum ConfigError {
     UnrepresentableEmbeddedSetting { field: &'static str },
 }
 
-/// The five sections a component binds under. Every section takes the same three
+/// The four sections a component binds under. Every section takes the same three
 /// transports; which builtin names a section accepts is the one difference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Section {
     Authorities,
     Sanitizers,
-    Casts,
     Annotators,
     Membership,
 }
 
 impl Section {
-    pub(crate) const ALL: [Section; 5] = [
+    pub(crate) const ALL: [Section; 4] = [
         Section::Authorities,
         Section::Sanitizers,
-        Section::Casts,
         Section::Annotators,
         Section::Membership,
     ];
@@ -412,7 +405,6 @@ impl Section {
         match self {
             Section::Authorities => "authorities",
             Section::Sanitizers => "sanitizers",
-            Section::Casts => "casts",
             Section::Annotators => "annotators",
             Section::Membership => "membership",
         }
@@ -429,9 +421,8 @@ impl Section {
 
     /// Whether `builtin` is a name this section may bind. Authorities and sanitizers take
     /// the stock names, the model builtins, and any module-grammar name (the module's
-    /// presence is checked when the deployment opens); casts take only the model builtins;
-    /// an Annotator names a stock builtin on its policy declaration instead, and a
-    /// membership resolver is never a builtin.
+    /// presence is checked when the deployment opens); an Annotator names a stock builtin
+    /// on its policy declaration instead, and a membership resolver is never a builtin.
     fn check_builtin(self, name: &str, builtin: &str) -> Result<(), ConfigError> {
         let allowed = match self {
             Section::Annotators | Section::Membership => {
@@ -441,7 +432,6 @@ impl Section {
                 });
             }
             Section::Authorities | Section::Sanitizers => crate::builtins::valid_implementation_name(builtin),
-            Section::Casts => builtin == CLAUDE_CODE_BUILTIN || builtin == LLM_BUILTIN,
         };
         // The subscription transport is a local process under a process group, which only
         // Unix provides; like a `command`, it is refused where it cannot be cleaned up.
@@ -491,8 +481,6 @@ struct RawExternals {
     #[serde(default)]
     sanitizers: BTreeMap<String, RawBinding>,
     #[serde(default)]
-    casts: BTreeMap<String, RawBinding>,
-    #[serde(default)]
     annotators: BTreeMap<String, RawBinding>,
     #[serde(default)]
     membership: BTreeMap<String, RawBinding>,
@@ -505,7 +493,6 @@ impl RawExternals {
         match section {
             Section::Authorities => &self.authorities,
             Section::Sanitizers => &self.sanitizers,
-            Section::Casts => &self.casts,
             Section::Annotators => &self.annotators,
             Section::Membership => &self.membership,
         }
@@ -669,7 +656,6 @@ impl Config {
             max_body_bytes,
             authorities,
             sanitizers,
-            casts,
             annotators,
             membership,
             claude_code,
@@ -696,7 +682,6 @@ impl Config {
                 max_body_bytes,
                 authorities: resolve(Section::Authorities, authorities)?,
                 sanitizers: resolve(Section::Sanitizers, sanitizers)?,
-                casts: resolve(Section::Casts, casts)?,
                 annotators: resolve(Section::Annotators, annotators)?
                     .into_iter()
                     .map(|(name, implementation)| (name, annotator_implementation(implementation)))
@@ -732,7 +717,6 @@ fn embedded_document(policy: toml::Value, bindings: &ExternalBindings) -> Result
     for (section, entries) in [
         (Section::Authorities, &bindings.authorities),
         (Section::Sanitizers, &bindings.sanitizers),
-        (Section::Casts, &bindings.casts),
         (Section::Annotators, &bindings.annotators),
         (Section::Membership, &bindings.membership),
     ] {
@@ -980,10 +964,7 @@ fn compose_include(
         if field == "version" {
             continue;
         }
-        if !matches!(
-            field.as_str(),
-            "tool" | "annotator" | "authority" | "sanitizer" | "cast"
-        ) {
+        if !matches!(field.as_str(), "tool" | "annotator" | "authority" | "sanitizer") {
             return Err(ConfigError::IncludedPolicyField {
                 path: include_path.display().to_string(),
                 field,
@@ -1306,7 +1287,6 @@ mod tests {
         let table = match section {
             Section::Authorities => &config.externals.authorities,
             Section::Sanitizers => &config.externals.sanitizers,
-            Section::Casts => &config.externals.casts,
             Section::Membership => &config.externals.membership,
             Section::Annotators => {
                 return config
@@ -1485,23 +1465,10 @@ mod tests {
                 Some(Bound::Builtin(name)) if name == builtin
             ));
         };
-        let refuses = |section: Section, builtin: &str| {
-            assert!(
-                matches!(cell(section, builtin), Err(ConfigError::InvalidBuiltinName { .. })),
-                "{} must refuse builtin {builtin}",
-                section.name()
-            );
-        };
         for section in [Section::Authorities, Section::Sanitizers] {
             for builtin in ["hitl", "approve", "redact-email", "claude-code", "llm", "some-module"] {
                 accepts(section, builtin);
             }
-        }
-        for builtin in ["claude-code", "llm"] {
-            accepts(Section::Casts, builtin);
-        }
-        for builtin in ["hitl", "approve", "redact-email", "some-module"] {
-            refuses(Section::Casts, builtin);
         }
         // An Annotator names a stock builtin on its policy declaration, never here.
         for section in [Section::Annotators, Section::Membership] {
@@ -1517,7 +1484,7 @@ mod tests {
 
     #[test]
     fn the_llm_builtin_needs_the_llm_table() {
-        for section in [Section::Authorities, Section::Sanitizers, Section::Casts] {
+        for section in [Section::Authorities, Section::Sanitizers] {
             let text = format!("{MINIMAL}\n[externals.{}.x]\nbuiltin = \"llm\"\n", section.name());
             assert!(
                 matches!(parse(&text), Err(ConfigError::LlmNotConfigured { .. })),
@@ -1629,7 +1596,7 @@ mod tests {
     #[cfg(not(unix))]
     #[test]
     fn the_claude_code_builtin_is_refused_on_an_unsupported_platform() {
-        let text = format!("{MINIMAL}\n[externals.casts.classifier]\nbuiltin = \"claude-code\"\n");
+        let text = format!("{MINIMAL}\n[externals.sanitizers.classifier]\nbuiltin = \"claude-code\"\n");
         assert!(matches!(
             parse(&text),
             Err(ConfigError::UnsupportedClaudeCodePlatform { name, .. }) if name == "classifier"
@@ -1728,8 +1695,6 @@ mod tests {
                 command = ["python3", "resolver.py"]
                 [externals.sanitizers.scrub]
                 command = ["python3", "scrub.py"]
-                [externals.casts.classify]
-                command = ["python3", "classify.py"]
                 [externals.membership.directory]
                 command = ["python3", "directory.py"]
             "#,
@@ -1748,7 +1713,6 @@ mod tests {
         for (section, name) in [
             (Section::Annotators, "battery"),
             (Section::Sanitizers, "scrub"),
-            (Section::Casts, "classify"),
             (Section::Membership, "directory"),
         ] {
             assert_eq!(
@@ -1808,7 +1772,7 @@ mod tests {
         let second_dir = tempfile::tempdir().expect("second command directory");
         let make = |argument: &str, cwd: &Path| {
             let mut bindings = ExternalBindings::new(Duration::from_millis(5000), 65_536);
-            bindings.casts.insert(
+            bindings.sanitizers.insert(
                 "classifier".to_string(),
                 Binding::Command {
                     argv: vec!["python3".to_string(), argument.to_string()],
@@ -1828,7 +1792,7 @@ mod tests {
         std::fs::write(&stored, first.policy_file().bytes()).expect("write stored embedded config");
         let reloaded = Config::load(&stored).expect("stored embedded config reloads");
         assert_eq!(reloaded.policy_file().bytes(), first.policy_file().bytes());
-        let Some(Implementation::Command(command)) = reloaded.externals.casts.get("classifier") else {
+        let Some(Implementation::Command(command)) = reloaded.externals.sanitizers.get("classifier") else {
             panic!("reloaded classifier is a command")
         };
         assert_eq!(command.argv, ["python3", "resolver.py"]);

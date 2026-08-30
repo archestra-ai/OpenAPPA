@@ -16,9 +16,8 @@ use crate::names::{AnnotatorName, AudienceArgument, GroupName, MarkName};
 use crate::projection::Views;
 use crate::value::{ResolvedCall, ValueId};
 
-/// A source whose consumed dimension no registered cast has established: named once,
-/// with every dimension still unresolved on it — a whole-source cast establishes them all in one
-/// fact. A missing fact, cleared by a cast landing, never by a ruling or a plan.
+/// A source whose consumed dimension is unresolved: named once, with every dimension still
+/// unresolved on it. A missing fact nothing establishes — never cleared by a ruling or a plan.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnestablishedFact {
     pub value: ValueId,
@@ -52,8 +51,8 @@ pub struct RawBlock {
     pub requirement_gaps: Vec<Gap>,
     pub narrowing: Option<Narrowing>,
     pub unestablished: Vec<UnestablishedFact>,
-    /// Requirement slots the policy left Unknown. Like `unestablished`, no plan clears them: a
-    /// cast establishes the requirement, or the call stays undecidable.
+    /// Requirement slots the policy left Unknown. Like `unestablished`, no plan clears them:
+    /// the call stays undecidable.
     pub unknown_requirements: Vec<crate::contract::RequirementSlot>,
 }
 
@@ -72,9 +71,8 @@ pub(crate) struct StateEval {
     pub(crate) requirement_gaps: Vec<Gap>,
     pub(crate) narrowing: Option<Narrowing>,
     pub(crate) consumed: Vec<Dimension>,
-    /// Requirement slots the policy left Unknown and no pinned requirement cast answered: the
-    /// check cannot judge the flow against them, so the call is not decidable until a cast
-    /// establishes each one.
+    /// Requirement slots the policy left Unknown that nothing answers: the check cannot
+    /// judge the flow against them, so the call is not decidable.
     pub(crate) unknown_requirements: Vec<crate::contract::RequirementSlot>,
 }
 
@@ -286,7 +284,7 @@ fn pinned_audience_requirements<'a>(
 }
 
 /// The block's `unestablished` slot: every source unresolved on a consumed dimension,
-/// named once with all of its unresolved dimensions — a whole-source cast clears them together.
+/// named once with all of its unresolved dimensions.
 /// The branch return check builds its report through this same function.
 pub(crate) fn unestablished_facts(current: &PartialLabel, dims: &[Dimension]) -> Vec<UnestablishedFact> {
     let mut sources: BTreeSet<ValueId> = BTreeSet::new();
@@ -596,24 +594,17 @@ pub(crate) enum MembershipRefusal {
 pub(crate) enum RequirementCastRefusal {
     /// The annotation leaves these slots Unknown and the call carries no answer.
     Needed(Vec<RequirementSlot>),
-    /// The pin is not about this call: no such cast, a cast whose scope does not reach the
-    /// annotation, an answer for other arguments or other slots, or a constant's groups the
-    /// record does not expand.
+    /// Nothing registered produces requirement answers, so every submitted pin is foreign.
     Foreign(String),
-    /// The answer is not one the cast gives: a value outside the policy vocabulary, off the
-    /// constant, or over `may_cast`.
-    OutsidePolicy(String),
 }
 
-/// Hold a call's requirement-cast pin to the annotation's Unknown slots and the cast's
-/// declaration: exactly the Unknown slots are answered, for exactly this canonical call, by a
-/// registered cast reaching the annotation, with a constant's own values or within a resolver's
-/// ceiling. The one validator the check, composition, and replay consume.
+/// Hold a call's requirement-cast pin to the annotation's Unknown slots. Nothing registered
+/// answers a requirement slot, so a submitted pin is always foreign, and Unknown slots
+/// without one stay unanswerable. The one validator the check, composition, and replay
+/// consume.
 pub(crate) fn validate_requirement_cast(
-    registry: &crate::registry::Registry,
     annotation: &ToolAnnotation,
     call: &ResolvedCall,
-    expansions: &Expansions,
 ) -> Result<(), RequirementCastRefusal> {
     let slots: Vec<RequirementSlot> = annotation.requires.unknown_slots().collect();
     let Some(pinned) = call.requirement_cast() else {
@@ -622,58 +613,8 @@ pub(crate) fn validate_requirement_cast(
             false => Err(RequirementCastRefusal::Needed(slots)),
         };
     };
-    let name = pinned.cast().as_str().to_string();
-    let foreign = || RequirementCastRefusal::Foreign(name.clone());
-    if slots.is_empty() || pinned.answered_for() != &call.digest() {
-        return Err(foreign());
-    }
-    // The pin names a cast the engine consults for this annotation: covering it, able to answer
-    // the slots, and before or at the first constant in registration order.
-    let cast = registry
-        .requirement_cast_order(&annotation.tags, &slots)
-        .find(|cast| cast.name == *pinned.cast())
-        .ok_or_else(foreign)?;
-    if [
-        RequirementSlot::Trust,
-        RequirementSlot::Audience,
-        RequirementSlot::Attention,
-    ]
-    .into_iter()
-    .any(|slot| pinned.covers(slot) != slots.contains(&slot))
-    {
-        return Err(foreign());
-    }
-    if expansions.require(cast.resolution.groups()).is_err() {
-        return Err(foreign());
-    }
-    let outside = || RequirementCastRefusal::OutsidePolicy(name.clone());
-    if pinned
-        .required_trust()
-        .is_some_and(|trust| !registry.trust_chain().contains_rank(trust))
-        || pinned
-            .attention()
-            .into_iter()
-            .flatten()
-            .any(|mark| !registry.knows_attention_mark(mark))
-    {
-        return Err(outside());
-    }
-    match cast.resolution.admits_requirement(pinned, expansions) {
-        true => Ok(()),
-        false => Err(outside()),
-    }
-}
-
-/// The groups a call's pinned requirement cast reads: a constant's declared audience, a
-/// resolver's ceiling. Composition requires them beside the annotation's own.
-pub(crate) fn requirement_cast_groups<'a>(
-    registry: &'a crate::registry::Registry,
-    call: &ResolvedCall,
-) -> impl Iterator<Item = &'a crate::names::GroupName> {
-    call.requirement_cast()
-        .and_then(|pinned| registry.cast(pinned.cast()))
-        .into_iter()
-        .flat_map(|cast| cast.resolution.groups())
+    let _ = slots;
+    Err(RequirementCastRefusal::Foreign(pinned.cast().as_str().to_string()))
 }
 
 /// The pinned answers a checked call may carry are exactly the ones its placeholders spell:
@@ -808,7 +749,6 @@ mod tests {
             annotators,
             authorities: vec![],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
         })
         .expect("the fixture policy loads")

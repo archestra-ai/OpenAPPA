@@ -4,16 +4,13 @@
 use std::sync::Arc;
 
 use crate::elicit::Elicitation;
-use appa_engine::value::ValueBody;
 
 use crate::consult::{
-    AnnotationAnswer, AnnotationArtifact, CastAnswer, CastArtifact, CastDeclaration, Consult, ConsultBody,
-    DynamicAnswer, DynamicArtifact, MembershipArtifact, ReadersAnswer, SanitizerAnswer,
+    AnnotationAnswer, AnnotationArtifact, Consult, ConsultBody, MembershipArtifact, ReadersAnswer, SanitizerAnswer,
 };
 use crate::engine::{
-    AuthorityVerdict, CandidateResolution, CastAsk, CastLabel, CastVerdict, EngineDecision, EngineEvent, EngineView,
-    ExternalEvidence, ExternalRequest, Feedback, ForkStatus, Liveness, Next, OfferNonce, OpenDispatch, Presentation,
-    RequirementAsk, RequirementLabel, RequirementVerdict, engine_id,
+    AuthorityVerdict, EngineDecision, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Feedback, ForkStatus,
+    Liveness, Next, OfferNonce, OpenDispatch, Presentation, engine_id,
 };
 use crate::external::ConsultOutcome;
 
@@ -655,9 +652,9 @@ impl Session {
         // Resolver answers carry the label context they were classified under, and the
         // engine matches them only while the call's current context is that one — a moved
         // trajectory consults again by construction, so this loop carries evidence blindly.
-        // Every round either decides or gathers an answer the engine did not hold: a missing
-        // resolver answer, or the cast behind a refused one. Both are finite, so a round that
-        // changes nothing is the only way this loop fails to converge.
+        // Every round either decides or gathers an answer the engine did not hold: a
+        // missing resolver answer. Rounds are finite, so a round that changes nothing is
+        // the only way this loop fails to converge.
         let mut evidence: Vec<ExternalEvidence> = Vec::new();
         loop {
             let carried = evidence.clone();
@@ -857,21 +854,6 @@ impl Session {
                     answer,
                 }
             }
-            ExternalRequest::PendingCast { source, ask } => ExternalEvidence::PendingCast {
-                source: *source,
-                verdict: self.cascade(ask).await,
-                ask: ask.clone(),
-            },
-            ExternalRequest::Cast { value, ask } => ExternalEvidence::Cast {
-                value: *value,
-                verdict: self.cascade(ask).await,
-                ask: ask.clone(),
-            },
-            ExternalRequest::RequirementCast { call, ask } => ExternalEvidence::RequirementCast {
-                call: *call,
-                verdict: self.cascade_requirement(ask).await,
-                ask: ask.clone(),
-            },
             ExternalRequest::Membership { resolver, group } => {
                 let consult = Consult {
                     name: resolver.clone(),
@@ -890,81 +872,6 @@ impl Session {
                 }
             }
         })
-    }
-
-    /// Every cast the ask still carries, in registration order, until one answers. A constant
-    /// arrives already resolved and answers without a call; a resolver is consulted. A cast
-    /// that gives no answer is skipped so a constant registered last serves as the declared
-    /// fallback. The first answer obtained is the one submitted, and the engine alone judges
-    /// it: an answer it refuses comes back as the same ask continued past that cast.
-    async fn cascade(&self, ask: &CastAsk) -> Option<CastVerdict> {
-        for cast in &ask.casts {
-            let label = match &cast.resolution {
-                CandidateResolution::Constant(constant) => CastLabel::Declared(constant.clone()),
-                CandidateResolution::Resolver(declaration) => {
-                    match self.classify(&cast.name, declaration, &ask.body).await {
-                        Some(answer) => CastLabel::Classified(answer),
-                        None => continue,
-                    }
-                }
-            };
-            return Some(CastVerdict {
-                cast: cast.name.clone(),
-                label,
-            });
-        }
-        None
-    }
-
-    /// The requirement cascade: the same order and the same first-answer rule as [`Self::cascade`],
-    /// with a resolver consulted about the proposed call under the slots it must answer.
-    async fn cascade_requirement(&self, ask: &RequirementAsk) -> Option<RequirementVerdict> {
-        // One consult body for the cascade: the proposed call is the same at every cast.
-        let mut consult = Consult {
-            name: String::new(),
-            body: ConsultBody::RequirementCast {
-                declaration: ask.declaration.clone(),
-                artifact: DynamicArtifact { args: ask.args.clone() },
-            },
-        };
-        for cast in &ask.casts {
-            let answer = match &cast.constant {
-                Some(constant) => RequirementLabel::Declared(constant.clone()),
-                None => {
-                    consult.name = cast.name.as_str().to_string();
-                    match self.deployment.externals.consult(&consult, None).await {
-                        ConsultOutcome::Answer(answer) => match DynamicAnswer::from_wire(&answer, &ask.declaration) {
-                            Some(answer) => RequirementLabel::Classified(answer),
-                            None => continue,
-                        },
-                        ConsultOutcome::NoAnswer(_) => continue,
-                    }
-                }
-            };
-            return Some(RequirementVerdict {
-                cast: cast.name.clone(),
-                answer,
-            });
-        }
-        None
-    }
-
-    /// One classifier consult. Every failure — unbound, unreachable, malformed, over the
-    /// body cap — is the same no-answer: a classifier that cannot speak grants nothing.
-    async fn classify(&self, cast: &str, declaration: &CastDeclaration, body: &ValueBody) -> Option<CastAnswer> {
-        let consult = Consult {
-            name: cast.to_string(),
-            body: ConsultBody::Cast {
-                declaration: declaration.clone(),
-                artifact: CastArtifact {
-                    body: body.as_str().to_string(),
-                },
-            },
-        };
-        match self.deployment.externals.consult(&consult, None).await {
-            ConsultOutcome::Answer(answer) => CastAnswer::from_wire(&answer),
-            ConsultOutcome::NoAnswer(_) => None,
-        }
     }
 }
 
@@ -1016,8 +923,8 @@ impl Decided<'_> {
     }
 }
 
-/// Keep `answered` and drop the earlier answer to the same cast ask, if any: the cascade
-/// continued past a cast the engine refused, and the later answer is the one that stands.
+/// Keep `answered` and drop the earlier answer to the same ask, if any: the later answer
+/// is the one that stands.
 fn supersede(evidence: &mut Vec<ExternalEvidence>, answered: ExternalEvidence) {
     evidence.retain(|held| !answered.answers_same_ask(held));
     evidence.push(answered);
@@ -1181,49 +1088,6 @@ attention = ["irreversible"]
     }
 
     #[test]
-    fn a_pending_cast_contract_opens_with_a_registered_cast() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let policy = r#"
-version = 1
-[[policy.tool]]
-name = "fetch"
-delta = { trust = "unknown" }
-[[policy.cast]]
-name = "paranoid"
-constant = { trust = "suspicious", audience = ["public"] }
-[policy.deployment]
-confined_results = ["fetch"]
-"#;
-        assert!(
-            Runtime::open(config_with(policy, None), dir.path().join("appa.db"), None).is_ok(),
-            "a pending-cast delta is served, not refused"
-        );
-    }
-
-    #[test]
-    fn a_resolver_cast_must_be_bound_at_the_deployment() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let policy = r#"
-version = 1
-[[policy.tool]]
-name = "fetch"
-delta = { trust = "unknown" }
-[[policy.cast]]
-name = "classifier"
-resolver = { may_cast = { trust = ["suspicious"], audience = ["public"] } }
-[policy.deployment]
-confined_results = ["fetch"]
-"#;
-        assert!(
-            matches!(
-                Runtime::open(config_with(policy, None), dir.path().join("appa.db"), None),
-                Err(OpenError::UnboundExternal { kind: "cast", .. }),
-            ),
-            "a classifier with no endpoint cannot answer, so the deployment does not open"
-        );
-    }
-
-    #[test]
     fn a_non_neutral_starting_label_seeds_the_root_and_survives_a_restart() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let db = dir.path().join("appa.db");
@@ -1255,52 +1119,6 @@ starting_label = { trust = "suspicious" }
             runtime.live(&root(), &TrajectoryId("cc:never-bound".to_string())),
             Err(EventError::UnknownTrajectory),
         ));
-    }
-
-    #[test]
-    fn a_constant_cast_declaration_binds_nothing_and_opens() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let policy = r#"
-version = 1
-[[policy.tool]]
-name = "fetch"
-[[policy.cast]]
-name = "channel-class"
-constant = { trust = "trusted", audience = ["public"] }
-"#;
-        assert!(
-            Runtime::open(config_with(policy, None), dir.path().join("appa.db"), None).is_ok(),
-            "a constant is answered from the policy, so it needs no [externals] entry"
-        );
-    }
-
-    #[test]
-    fn a_constant_cast_bound_to_an_endpoint_refuses_open() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let text = r#"
-[policy]
-version = 1
-[[policy.tool]]
-name = "fetch"
-[[policy.cast]]
-name = "channel-class"
-constant = { trust = "trusted", audience = ["public"] }
-[externals]
-timeout_ms = 2000
-max_body_bytes = 65536
-[externals.casts.channel-class]
-url = "https://classify.example/label"
-"#;
-        let path = dir.path().join("appa.toml");
-        std::fs::write(&path, text).expect("the fixture writes");
-        let config = Config::load(&path).expect("the fixture validates");
-        assert!(
-            matches!(
-                Runtime::open(config, dir.path().join("appa.db"), None),
-                Err(OpenError::BoundConstantCast(_)),
-            ),
-            "an endpoint the engine would never call leaves the deployment believing a classifier runs"
-        );
     }
 
     #[test]

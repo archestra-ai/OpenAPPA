@@ -159,8 +159,6 @@ pub fn externals_for(policy: &appa_policy::Config, base: &str) -> ExternalBindin
             (name, endpoint(url))
         })
         .collect();
-    // The playground serves no classifier route, so a resolver-backed cast stays
-    // unbound and refuses the policy at open. Constant casts need no binding.
     // The playground routes every named annotator to the same handler.
     bindings.annotators = policy
         .annotator_names()

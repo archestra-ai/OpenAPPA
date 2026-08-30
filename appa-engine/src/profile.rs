@@ -374,7 +374,6 @@ fn identity_document_from_registry(registry: &Registry, child_return: &ReturnPol
             annotators: Vec::new(),
             authorities: registry.authorities().to_vec(),
             sanitizers: registry.sanitizers().cloned().collect(),
-            casts: registry.casts().to_vec(),
             membership: registry.membership().cloned(),
         },
         child_return,
@@ -470,24 +469,10 @@ fn identity_document(
         })
         .collect();
 
-    let mut casts: Vec<_> = registry.casts.iter().collect();
-    casts.sort_by(|a, b| a.name.cmp(&b.name));
-    let casts: Vec<serde_json::Value> = casts
-        .into_iter()
-        .map(|cast| {
-            serde_json::json!({
-                "name": cast.name,
-                "resolution": cast.resolution,
-                "scope": sorted_set(&cast.scope.tags),
-            })
-        })
-        .collect();
-
     serde_json::json!({
         "trust_chain": registry.trust_chain,
         "authorities": authorities,
         "sanitizers": sanitizers,
-        "casts": casts,
         // Which directory expands a group is part of what the policy means.
         "membership": registry.membership,
         "child_return": child_return,
@@ -566,9 +551,9 @@ pub(crate) fn validate_coverage(
         }
     }
 
-    // A confined result point admits its value only through a cast, and one cast answers one
-    // dimension. An unconfined Unknown dimension needs no such answer: it leaves admission
-    // unresolved and a sink resolves it, so both dimensions may be Unknown at once.
+    // A confined result point declares at most one pending output dimension. An unconfined
+    // Unknown dimension leaves admission unresolved, so both dimensions may be Unknown at
+    // once.
     for tool in registry.tools().filter_map(ToolDeclaration::declared) {
         if profile.confines_result(&tool.name)
             && matches!(tool.delta.trust, Some(Dim::Unknown))
@@ -648,7 +633,6 @@ pub(crate) fn opening_at(trajectory: crate::value::TrajectoryId, starting_label:
         annotators: Vec::new(),
         authorities: Vec::new(),
         sanitizers: Vec::new(),
-        casts: Vec::new(),
         membership: None,
     };
     let profile = DeploymentProfile::declare(ProfileDeclaration {
@@ -676,8 +660,8 @@ pub(crate) fn covering_declaration(config: &RegistryConfig) -> ProfileDeclaratio
         confined_results: config
             .tools
             .iter()
-            // A result point whose label is Unknown in both dimensions cannot be confined: one
-            // cast answers one dimension, so the maximal profile leaves it to resolve at a sink.
+            // A result point whose label is Unknown in both dimensions cannot be confined (the
+            // DualPendingCast lint), so the maximal profile leaves it unconfined.
             .filter(|declaration| {
                 declaration.declared().is_none_or(|tool| {
                     !(matches!(tool.delta.trust, Some(Dim::Unknown))
@@ -697,9 +681,7 @@ pub(crate) fn covering_declaration(config: &RegistryConfig) -> ProfileDeclaratio
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authority::{
-        Authority, DeclaredLabel, DeclaredTransition, Hint, Mandate, Sanitizer, SanitizerPoints, Scope,
-    };
+    use crate::authority::{Authority, DeclaredTransition, Hint, Mandate, Sanitizer, SanitizerPoints, Scope};
     use crate::contract::{AudienceDelta, Delta, LabelRequirements, Requires};
     use crate::engine::Engine;
     use crate::fact::EffectSet;
@@ -730,7 +712,6 @@ mod tests {
             annotators: vec![],
             authorities: vec![],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
         }
     }
@@ -1374,34 +1355,6 @@ mod tests {
     }
 
     #[test]
-    fn rescoping_a_cast_moves_the_identity() {
-        // The origin carries the tag the cast is rescoped to, so both configurations are
-        // ones the engine would load: the identity is only meaningful for those.
-        let mut origin = tool("fetch");
-        origin.tags = vec![TagName::new("inbound")];
-        origin.delta = Delta {
-            trust: Some(Dim::Unknown),
-            audience: None,
-        };
-        let mut cfg = config(vec![origin]);
-        cfg.casts = vec![crate::authority::Cast {
-            name: crate::names::CastName::new("vouch"),
-            resolution: crate::authority::CastResolution::Constant(DeclaredLabel::literal(
-                crate::label::EstablishedLabel::new(Trust::new(1), Audience::Public),
-            )),
-            scope: Scope::default(),
-            hint: None,
-        }];
-        let profile = covering_profile(&cfg);
-        let unscoped = identity(&cfg, &ReturnPolicy::Raw, &profile);
-
-        cfg.casts[0].scope = Scope {
-            tags: vec![TagName::new("inbound")],
-        };
-        assert_ne!(identity(&cfg, &ReturnPolicy::Raw, &profile), unscoped);
-    }
-
-    #[test]
     fn rescoping_a_sanitizer_moves_the_identity() {
         let mut cfg = config(vec![tool("fetch")]);
         cfg.sanitizers = vec![output_sanitizer("redactor")];
@@ -1423,24 +1376,6 @@ mod tests {
     #[test]
     fn declaration_order_moves_the_identity_only_where_order_is_semantic() {
         let mut cfg = config(vec![tool("a"), tool("b")]);
-        cfg.casts = vec![
-            crate::authority::Cast {
-                name: crate::names::CastName::new("paranoid"),
-                resolution: crate::authority::CastResolution::Constant(DeclaredLabel::literal(
-                    crate::label::EstablishedLabel::new(Trust::new(0), Audience::Public),
-                )),
-                scope: Scope::default(),
-                hint: None,
-            },
-            crate::authority::Cast {
-                name: crate::names::CastName::new("yolo"),
-                resolution: crate::authority::CastResolution::Constant(DeclaredLabel::literal(
-                    crate::label::EstablishedLabel::new(Trust::new(1), Audience::Public),
-                )),
-                scope: Scope::default(),
-                hint: None,
-            },
-        ];
         let officer = |name: &str| Authority {
             name: AuthorityName::new(name),
             mandate: Mandate {
@@ -1456,7 +1391,6 @@ mod tests {
 
         let mut permuted = cfg.clone();
         permuted.tools.reverse();
-        permuted.casts.reverse();
         assert_eq!(identity(&permuted, &ReturnPolicy::Raw, &profile), base);
 
         let mut rerouted = cfg.clone();

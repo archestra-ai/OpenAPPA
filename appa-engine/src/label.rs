@@ -12,7 +12,7 @@ use crate::value::ValueId;
 /// `Unknown` is not a rank on any scale — `trusted < unknown < suspicious` does not exist. It
 /// means this source's contribution has not been established yet. Under the fold it is identity
 /// for the established bound and absorbing only for the source's identity, which joins the
-/// dimension's unresolved set until a registered cast establishes the whole source.
+/// dimension's unresolved set.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Dim<T> {
     Known(T),
@@ -35,8 +35,7 @@ pub enum Dimension {
 /// Three-valued outcome of one adequacy test.
 ///
 /// A requirement is *checked*, never folded. [`Adequacy::Unresolved`] is returned when the
-/// consumed dimension still has unresolved sources: the check cannot decide until a cast
-/// resolves them. It is deliberately distinct from [`Adequacy::Fails`] — an unresolved
+/// consumed dimension still has unresolved sources: the check cannot decide. It is deliberately distinct from [`Adequacy::Fails`] — an unresolved
 /// dimension is not a violation, it is a missing fact.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Adequacy {
@@ -70,7 +69,7 @@ impl Trust {
 /// and a group is expanded to literal IDs by the membership resolver before a reader set is
 /// built. The constructor cannot enforce that, so the
 /// rule is [`is_literal`](ReaderId::is_literal), applied on the ingresses that carry it:
-/// registry declarations at load, cast answers against their ceiling, dynamic resolver answers,
+/// registry declarations at load, dynamic resolver answers,
 /// and membership expansions. A `$recipient` argument never reaches the constructor with either
 /// spelling: the check reads `public` and `@group` as what they are first.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -92,8 +91,7 @@ impl ReaderId {
     /// A literal reader ID: `public` and `unknown` are reserved label states — the whole
     /// audience, and a contribution not yet established — never readers, and the `@` mark is
     /// reserved for group names, which only a membership resolver may expand. Every ingress
-    /// that builds a reader set applies this rule: a declared audience at load, a cast answer
-    /// against its ceiling, a dynamic resolver answer, and a membership expansion.
+    /// that builds a reader set applies this rule: a declared audience at load, a dynamic resolver answer, and a membership expansion.
     pub fn is_literal(&self) -> bool {
         self.0 != "public" && self.0 != UNKNOWN_STATE && !self.0.starts_with('@')
     }
@@ -151,7 +149,7 @@ fn bool_adequacy(holds: bool) -> Adequacy {
 
 impl Dim<Trust> {
     /// Does this one value's trust meet `floor`? An unestablished contribution is
-    /// [`Adequacy::Unresolved`]. Per-value checks (a sanitizer's `from`, a cast's exact-match)
+    /// [`Adequacy::Unresolved`]. Per-value checks (a sanitizer's `from`)
     /// use this; trajectory-side checks go through [`PartialLabel`].
     pub fn meets_floor(&self, floor: Trust) -> Adequacy {
         match self {

@@ -184,8 +184,7 @@ pub struct Projection {
     occurrences: BTreeMap<(TrajectoryId, CanonicalDigest), u32>,
     dispatch_calls: BTreeMap<DispatchId, ResolvedCall>,
     receiving_bounds: BTreeMap<DispatchId, EstablishedLabel>,
-    /// The narrowing accepted at the check of each dispatch released under an acceptance: the
-    /// one narrowing a pending-cast resolution on that dispatch need not be accepted again.
+    /// The narrowing accepted at the check of each dispatch released under an acceptance.
     accepted_narrowings: BTreeMap<DispatchId, crate::check::Narrowing>,
     dispatch_resolutions: BTreeMap<DispatchId, Vec<GroupResolution>>,
     subject_dispatches: BTreeMap<crate::basis::SubjectKey, DispatchId>,
@@ -554,11 +553,6 @@ impl Projection {
                         CloseOutcome::Indeterminate => {}
                     }
                 }
-                Fact::CastApplied { value, resolved, .. } => {
-                    if let Some(v) = usize::try_from(value.index()).ok().and_then(|i| values.get_mut(i)) {
-                        v.label = resolved.clone().into_label();
-                    }
-                }
                 Fact::Acceptance {
                     dispatch, narrowing, ..
                 } => {
@@ -577,7 +571,6 @@ impl Projection {
                         .or_default()
                         .insert(authority.clone());
                 }
-                Fact::OutputCastApplied { .. } => {}
                 Fact::OutputSanitizerBound {
                     dispatch, sanitizer, ..
                 } => {
@@ -806,12 +799,6 @@ impl Projection {
         )
     }
 
-    /// Every trajectory the log opened — the family membership the transition validator carries
-    /// forward when it resumes from a validated view.
-    pub(crate) fn trajectories(&self) -> impl Iterator<Item = &TrajectoryId> {
-        self.opening.iter().map(|(root, _)| root).chain(self.fork_of.keys())
-    }
-
     /// The exposed provider-run results one batch identity admitted, in order: the
     /// trajectory, tool and body of each. See [`Views::provider_admissions`].
     pub(crate) fn provider_admissions(
@@ -925,10 +912,6 @@ impl Views<'_> {
         self.trajectory
     }
 
-    pub(crate) fn value_label(&self, id: ValueId) -> Option<&Label> {
-        self.projection.value_label(id)
-    }
-
     /// The provenance of an admitted value by id — what an Authority reviews for a referenced
     /// argument. Read-only audit context; the fold never consumes it.
     pub fn value_provenance(&self, id: ValueId) -> Option<&Provenance> {
@@ -939,7 +922,7 @@ impl Views<'_> {
     }
 
     /// The tool an opened dispatch called — the originating tool behind a
-    /// [`Provenance::ToolResult`], read by the cast scope gate and by readers naming a
+    /// [`Provenance::ToolResult`], read by readers naming a
     /// value's producer. The fold never consumes it.
     pub fn dispatch_tool(&self, dispatch: &DispatchId) -> Option<&ToolName> {
         self.projection.dispatch_calls.get(dispatch).map(ResolvedCall::tool)
@@ -983,24 +966,6 @@ impl Views<'_> {
     /// itself; the scoping trajectory plays no part.
     pub(crate) fn is_prepared(&self, fork: &ForkId) -> bool {
         self.projection.prepared_fork(fork).is_some()
-    }
-
-    /// May this branch resolve `id`? A locally admitted value, an ancestor value in
-    /// its frozen inherited set, or an identity a merge carried into its partial label — the
-    /// resolution belongs to the immutable source, not the actor, so whoever holds the source
-    /// may establish it. A sibling-only or post-fork value stays out of reach until a merge
-    /// carries its identity in.
-    pub(crate) fn may_resolve(&self, id: ValueId) -> bool {
-        self.owns_value(id)
-            || self
-                .projection
-                .snapshot_of(self.trajectory)
-                .is_some_and(|snapshot| snapshot.inherited().contains(&id))
-            || self
-                .projection
-                .absorbed
-                .get(self.trajectory)
-                .is_some_and(|table| table.contains_key(&id))
     }
 
     /// What this batch identity is already bound to, family-wide: the trajectory that decided it
@@ -1136,7 +1101,7 @@ impl Views<'_> {
     /// trajectory, seeded from its fork (a child begins at the parent's current label, never at
     /// top). Branch-local — a value in a sibling branch does not lower this fold. The
     /// established bound carries every known restriction; the unresolved sets name
-    /// the sources casts have not yet established.
+    /// the sources still unestablished.
     pub fn current_label(&self) -> PartialLabel {
         self.projection.fold_for(self.trajectory)
     }
@@ -1232,15 +1197,6 @@ impl Views<'_> {
         self.projection.snapshot_of(child).map(ForkSnapshot::seed)
     }
 
-    /// The body an admitted value retains, where its provenance keeps one — what a cast
-    /// resolver would be handed to read.
-    pub(crate) fn value_body(&self, id: ValueId) -> Option<&crate::value::ValueBody> {
-        usize::try_from(id.index())
-            .ok()
-            .and_then(|i| self.projection.values.get(i))
-            .and_then(|value| value.body.as_ref())
-    }
-
     /// How many dispatches of this digest this branch has already opened — the occurrence of the
     /// next one (a repeat identical call is a new dispatch, not a re-issue).
     pub(crate) fn dispatch_count(&self, digest: &CanonicalDigest) -> u32 {
@@ -1332,7 +1288,7 @@ impl Views<'_> {
     }
 
     /// The transformer this subject's live candidate claims: the sanitizer hop that
-    /// derived it, or the cast whose resolution it stages. The crossing paths branch on it.
+    /// derived it. The crossing paths branch on it.
     pub(crate) fn candidate_via(&self, subject: &SubjectKey) -> Option<&crate::candidate::DerivedVia> {
         self.projection.candidates.get(subject).map(|held| &held.via)
     }
@@ -1417,12 +1373,6 @@ impl Views<'_> {
     /// a race-dependent second acceptance when the live fold has moved since the opening.
     pub(crate) fn receiving_bound(&self, dispatch: &DispatchId) -> Option<&EstablishedLabel> {
         self.projection.receiving_bounds.get(dispatch)
-    }
-
-    /// The narrowing this dispatch was released under, where its check-time block was cleared
-    /// by an acceptance. `None` where the call narrowed nothing at its check.
-    pub(crate) fn accepted_narrowing(&self, dispatch: &DispatchId) -> Option<&crate::check::Narrowing> {
-        self.projection.accepted_narrowings.get(dispatch)
     }
 
     pub(crate) fn dispatch_resolutions(&self, dispatch: &DispatchId) -> Option<&[GroupResolution]> {
@@ -1601,43 +1551,6 @@ mod tests {
         ] {
             assert_eq!(views.proposed_call(&other), None, "a subject that is not a call's");
         }
-    }
-
-    #[test]
-    fn a_cast_fact_rebuilds_the_same_fold_as_a_resolved_admission() {
-        let resolved = EstablishedLabel::new(Trust::new(0), Audience::restricted([ReaderId::new("internal")]));
-        let via_cast = vec![
-            opened("t"),
-            admit(
-                "t",
-                LabeledValue::new(ValueBody::new("body"), Label::new(Dim::Unknown, Dim::Unknown)),
-            ),
-            Fact::CastApplied {
-                trajectory: traj("t"),
-                value: ValueId::new(0),
-                resolved: resolved.clone(),
-                cast: crate::names::CastName::new("classifier"),
-                resolutions: vec![],
-            },
-        ];
-        let direct = vec![
-            opened("t"),
-            admit(
-                "t",
-                LabeledValue::new(ValueBody::new("body"), resolved.clone().into_label()),
-            ),
-        ];
-
-        let cast_fold = Projection::build(&via_cast, 3).view(&traj("t")).current_label();
-        let direct_fold = Projection::build(&direct, 2).view(&traj("t")).current_label();
-        assert_eq!(cast_fold, direct_fold);
-        assert!(cast_fold.is_fully_established());
-        assert_eq!(cast_fold.bound(), &resolved);
-        let p = Projection::build(&via_cast, 3);
-        assert_eq!(
-            p.view(&traj("t")).value_label(ValueId::new(0)),
-            Some(&resolved.into_label())
-        );
     }
 
     fn dispatch(t: &str) -> DispatchId {
@@ -1932,106 +1845,6 @@ mod tests {
     }
 
     #[test]
-    fn a_source_resolved_between_derivation_and_merge_is_still_absorbed() {
-        let id = ChildReturnId::new(traj("kid"), 0);
-        let body = ValueBody::new("what I found");
-        let crossed = LabeledValue::new(
-            ValueBody::new("clean"),
-            Label::new(Dim::Known(Trust::new(2)), Dim::Known(Audience::Public)),
-        );
-        let log = vec![
-            opened("root"),
-            admit("root", labeled(2, Audience::Public)),
-            Fact::ForkPrepared {
-                trajectory: traj("root"),
-                fork: ForkId::of(&dispatch("root")),
-                snapshot: ForkSnapshot::freeze(
-                    base(),
-                    [(ValueId::new(0), &labeled(2, Audience::Public).label)],
-                    std::iter::empty(),
-                ),
-                return_policy: ReturnPolicy::Raw,
-                shape: None,
-            },
-            Fact::ForkOpened {
-                trajectory: traj("kid"),
-                fork: ForkId::of(&dispatch("root")),
-            },
-            admit(
-                "kid",
-                LabeledValue::new(ValueBody::new("page"), Label::new(Dim::Unknown, Dim::Unknown)),
-            ),
-            Fact::ReturnSubmitted {
-                trajectory: traj("kid"),
-                id: id.clone(),
-                fork: ForkId::of(&dispatch("root")),
-                parent: traj("root"),
-                label: PartialLabel::established(base()),
-                digest: RawResultDigest::of(body.as_str().as_bytes()),
-                body: body.clone(),
-                policy: ReturnPolicy::Raw,
-                resolutions: vec![],
-            },
-            Fact::CandidateDerived {
-                trajectory: traj("root"),
-                subject: crate::basis::SubjectKey::Return(id.clone()),
-                via: crate::candidate::DerivedVia::Sanitizer {
-                    name: crate::names::SanitizerName::new("redactor"),
-                    transition: crate::authority::Transition::Trust {
-                        from_floor: Trust::new(0),
-                        to: Trust::new(2),
-                    },
-                },
-                derived: crate::candidate::DerivedCandidate::Return {
-                    source: RawResultDigest::of(body.as_str().as_bytes()),
-                    from: crate::candidate::ConfinedFrom::Bound,
-                    value: crossed.clone(),
-                    residual: None,
-                },
-                lineage: crate::candidate::SanitizerLineage::default(),
-                resolutions: vec![],
-            },
-            Fact::CastApplied {
-                trajectory: traj("kid"),
-                value: ValueId::new(1),
-                resolved: EstablishedLabel::new(Trust::new(0), Audience::Public),
-                cast: crate::names::CastName::new("classifier"),
-                resolutions: vec![],
-            },
-            Fact::ChildReturn {
-                trajectory: traj("kid"),
-                id: id.clone(),
-                value: crossed.clone(),
-                derivation: crate::fact::ReturnDerivation::Sanitized {
-                    sanitizer: crate::names::SanitizerName::new("redactor"),
-                    raw_digest: RawResultDigest::of(body.as_str().as_bytes()),
-                    transition: crate::authority::Transition::Trust {
-                        from_floor: Trust::new(0),
-                        to: Trust::new(2),
-                    },
-                },
-                resolutions: vec![],
-            },
-            Fact::ValueAdmitted {
-                trajectory: traj("root"),
-                value: crossed,
-                provenance: Provenance::ChildReturn {
-                    child: traj("kid"),
-                    id: id.clone(),
-                },
-            },
-            Fact::Boundary {
-                trajectory: traj("root"),
-                kind: BoundaryKind::Merge { child_return: id },
-            },
-        ];
-        assert_eq!(
-            build(&log).view(&traj("root")).current_label().bound(),
-            &EstablishedLabel::new(Trust::new(0), Audience::Public)
-        );
-    }
-
-    #[test]
     fn a_consuming_hop_discharges_the_recorded_mask_on_its_dimension() {
         let id = ChildReturnId::new(traj("kid"), 0);
         let body = ValueBody::new("what I found");
@@ -2093,13 +1906,6 @@ mod tests {
                     residual: None,
                 },
                 lineage: crate::candidate::SanitizerLineage::default(),
-                resolutions: vec![],
-            },
-            Fact::CastApplied {
-                trajectory: traj("kid"),
-                value: ValueId::new(1),
-                resolved: EstablishedLabel::new(Trust::new(0), Audience::Public),
-                cast: crate::names::CastName::new("classifier"),
                 resolutions: vec![],
             },
             Fact::CandidateDerived {

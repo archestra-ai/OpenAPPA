@@ -5,17 +5,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::authority::{Authority, Cast, CastResolution, DeclaredLabel, DeclaredTransition, Hint, Sanitizer};
+use crate::authority::{Authority, DeclaredTransition, Hint, Sanitizer};
 use crate::contract::{
-    AudienceDelta, AudienceRequirement, HistoryRequirement, RecipientSpec, RequirementSlot, ToolAnnotation,
-    ToolDeclaration,
+    AudienceDelta, AudienceRequirement, HistoryRequirement, RecipientSpec, ToolAnnotation, ToolDeclaration,
 };
 use crate::fact::EffectKind;
 use crate::groups::{DeclaredAudience, ExpansionRefusal, Expansions, GroupExpansion, GroupResolution};
 use crate::label::{Audience, Dim, Dimension, ReaderId, Trust};
-use crate::names::{
-    AnnotatorName, AuthorityName, CastName, GroupName, MarkName, MembershipResolverName, SanitizerName, TagName,
-};
+use crate::names::{AnnotatorName, AuthorityName, GroupName, MarkName, MembershipResolverName, SanitizerName, TagName};
 use crate::value::{ToolDeclarationId, ToolName};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -322,7 +319,6 @@ pub struct RegistryConfig {
     pub annotators: Vec<AnnotatorDeclaration>,
     pub authorities: Vec<Authority>,
     pub sanitizers: Vec<Sanitizer>,
-    pub casts: Vec<Cast>,
     /// The deployment's one membership resolver, registered by name. Every
     /// `@group` a placeholder argument names resolves through it; without one, such an argument
     /// names a reader set nothing can expand.
@@ -362,17 +358,11 @@ pub enum LoadError {
     DuplicateAuthority(String),
     #[error("duplicate sanitizer: {0}")]
     DuplicateSanitizer(String),
-    #[error("duplicate cast: {0}")]
-    DuplicateCast(String),
     #[error("authority {0} has an empty mandate (covers nothing)")]
     EmptyMandate(String),
     #[error("trust rank {rank} out of the chain (length {len}) in {context}")]
     RankOutOfChain { rank: u8, len: usize, context: String },
-    #[error("cast {0} is unreachable: no registered origin in its scope can use it")]
-    UnreachableCast(String),
-    #[error("cast {cast} is shadowed by earlier constant {by} at every origin it can receive")]
-    ShadowedCast { cast: String, by: String },
-    #[error("tool {0} declares both output dimensions pending-cast (a cast resolves exactly one)")]
+    #[error("tool {0} declares both output dimensions pending-cast (at most one output dimension may be pending)")]
     DualPendingCast(String),
     #[error("tool {tool} declares a pending-cast {dimension:?} output and a `requires` on that dimension")]
     PendingCastWithRequirement { tool: String, dimension: Dimension },
@@ -393,7 +383,7 @@ pub enum LoadError {
     #[error("group {group} is written in a configuration that registers no membership resolver")]
     GroupWithoutResolver { group: String },
     #[error(
-        "deployment starting label: the {dimension:?} dimension is unestablished — an unknown starting dimension has no source value a cast could resolve"
+        "deployment starting label: the {dimension:?} dimension is unestablished — nothing can establish an unknown starting dimension"
     )]
     UnresolvedStartingDimension { dimension: Dimension },
     #[error("the deployment declaration names unregistered tool {tool} in {slot}")]
@@ -625,24 +615,21 @@ fn worst_case_plan_alternatives(
             .filter(|sanitizer| !sanitizer.name.is_attest_schema())
             .filter(|sanitizer| sanitizer.on.output && sanitizer.applies_to(tags))
             .count(),
-        ToolDeclaration::Declared(tool) => match tool.pending_cast_dim() {
-            Some(_) => 0,
-            None if tool.delta.groups().next().is_some() => sanitizers
+        ToolDeclaration::Declared(tool) if tool.delta.groups().next().is_some() => sanitizers
+            .iter()
+            .filter(|sanitizer| !sanitizer.name.is_attest_schema())
+            .filter(|sanitizer| sanitizer.on.output && sanitizer.applies_to(tags))
+            .count(),
+        ToolDeclaration::Declared(tool) => {
+            let output = tool.output_label(literal);
+            sanitizers
                 .iter()
                 .filter(|sanitizer| !sanitizer.name.is_attest_schema())
-                .filter(|sanitizer| sanitizer.on.output && sanitizer.applies_to(tags))
-                .count(),
-            None => {
-                let output = tool.output_label(literal);
-                sanitizers
-                    .iter()
-                    .filter(|sanitizer| !sanitizer.name.is_attest_schema())
-                    .filter(|sanitizer| {
-                        sanitizer.on.output && sanitizer.applies_to(tags) && sanitizer.transition.may_admit(&output)
-                    })
-                    .count()
-            }
-        },
+                .filter(|sanitizer| {
+                    sanitizer.on.output && sanitizer.applies_to(tags) && sanitizer.transition.may_admit(&output)
+                })
+                .count()
+        }
     };
     multiply(applicable + 1);
 
@@ -689,17 +676,14 @@ fn worst_case_plan_alternatives(
         .iter()
         .filter(|sanitizer| sanitizer.on.input && sanitizer.applies_to(tags))
         .count() as u128;
-    let pending_cast = declaration
-        .declared()
-        .is_some_and(|tool| tool.pending_cast_dim().is_some());
     count
         .saturating_add(redispatches)
         .saturating_add(input_hops)
-        .max(worst_case_confined_stage(sanitizers, confined, pending_cast, tags))
+        .max(worst_case_confined_stage(sanitizers, confined, tags))
 }
 
-fn worst_case_confined_stage(sanitizers: &[Sanitizer], confined: bool, pending_cast: bool, tags: &[TagName]) -> u128 {
-    if !confined || pending_cast {
+fn worst_case_confined_stage(sanitizers: &[Sanitizer], confined: bool, tags: &[TagName]) -> u128 {
+    if !confined {
         return 1;
     }
     1u128.saturating_add(
@@ -737,8 +721,7 @@ pub enum ToolKind {
 }
 
 /// The annotation of a tool the policy never declared: every slot Unknown. Nothing about it is
-/// known until a cast establishes each slot at its point of need, so the call is undecidable
-/// until then and its result travels Unknown.
+/// known, so the call is undecidable and its result travels Unknown.
 fn undeclared_annotation() -> ToolAnnotation {
     use crate::contract::{Delta, LabelRequirements, Requires};
     ToolAnnotation {
@@ -780,7 +763,6 @@ pub struct Registry {
     authorities: Vec<Authority>,
     attention_marks: BTreeSet<MarkName>,
     sanitizers: BTreeMap<SanitizerName, Sanitizer>,
-    casts: Vec<Cast>,
     membership: Option<MembershipResolverName>,
     groups: Vec<GroupName>,
     profile: crate::profile::DeploymentProfile,
@@ -953,7 +935,6 @@ impl Registry {
                     .flat_map(|authority| authority.mandate.groups()),
             )
             .chain(sanitizers.values().flat_map(Sanitizer::groups))
-            .chain(config.casts.iter().flat_map(|cast| cast.resolution.groups()))
             .cloned()
             .collect();
         groups.sort();
@@ -994,106 +975,6 @@ impl Registry {
             });
         }
 
-        let mut casts: Vec<Cast> = Vec::new();
-        for cast in config.casts {
-            match &cast.resolution {
-                CastResolution::Resolver { may_cast } => {
-                    for rank in &may_cast.trust {
-                        check_rank(&config.trust_chain, Some(*rank), || {
-                            format!("cast {} may_cast", cast.name.as_str())
-                        })?;
-                    }
-                    check_declared_readers(&may_cast.audience, || format!("cast {} may_cast", cast.name.as_str()))?;
-                }
-                CastResolution::Constant(constant) => {
-                    check_rank(&config.trust_chain, Some(constant.trust), || {
-                        format!("cast {} constant", cast.name.as_str())
-                    })?;
-                    check_declared_readers(&constant.audience, || format!("cast {} constant", cast.name.as_str()))?;
-                }
-            }
-            check_hint(cast.hint.as_ref(), || format!("cast {}", cast.name.as_str()))?;
-            if casts.iter().any(|earlier| earlier.name == cast.name) {
-                return Err(LoadError::DuplicateCast(cast.name.as_str().to_string()));
-            }
-            casts.push(cast);
-        }
-
-        // Cast lints read declared annotations only: a produced annotation is complete and
-        // established — never pending-cast, never with an Unknown requirement slot — so an
-        // Annotated declaration can neither reach a cast nor prove one shadowed.
-        let writes_group = |tool: &ToolAnnotation, cast: &Cast| {
-            tool.delta.groups().next().is_some() || cast.resolution.groups().next().is_some()
-        };
-        let unknown_tool = undeclared_annotation();
-        let unknown_slots = |tool: &ToolAnnotation| -> Vec<RequirementSlot> { tool.requires.unknown_slots().collect() };
-        for (i, cast) in casts.iter().enumerate() {
-            let covered: Vec<&ToolAnnotation> = tools
-                .values()
-                .flatten()
-                .filter_map(|(_, d)| d.declared())
-                .filter(|tool| cast.scope.covers(&tool.tags))
-                .collect();
-            let castable: Vec<&ToolAnnotation> = covered
-                .iter()
-                .copied()
-                .filter(|tool| crate::label::EstablishedLabel::from_label(&tool.output_label(&literal)).is_none())
-                .collect();
-            if !cast.scope.is_unscoped() {
-                let meets_a_value = castable.iter().any(|tool| match &cast.resolution {
-                    CastResolution::Constant(constant) => constant_can_meet(tool, constant, &literal),
-                    CastResolution::Resolver { may_cast } => {
-                        matches!(tool.output_label(&literal).trust, Dim::Known(_)) || !may_cast.trust.is_empty()
-                    }
-                });
-                // A cast is also reached as the requirement cast of a covered tool whose policy
-                // leaves a slot Unknown, whatever that tool's output label.
-                let answers_a_requirement = covered.iter().any(|tool| {
-                    let slots = unknown_slots(tool);
-                    !slots.is_empty() && cast.resolution.can_answer_requirement(&slots)
-                });
-                if !meets_a_value && !answers_a_requirement {
-                    return Err(LoadError::UnreachableCast(cast.name.as_str().to_string()));
-                }
-            }
-            // The tools whose Unknown requirement slots this cast may be asked for: an unscoped
-            // cast is also asked for every undeclared tool.
-            let requirers: Vec<&ToolAnnotation> = covered
-                .iter()
-                .copied()
-                .chain(cast.scope.is_unscoped().then_some(&unknown_tool))
-                .filter(|tool| !unknown_slots(tool).is_empty())
-                .collect();
-            if castable.is_empty() && requirers.is_empty() {
-                continue;
-            }
-            // An earlier constant shadows this cast when it answers first at every value and every
-            // requirement this cast could be asked for: the engine stops at the first covering
-            // constant, so what it cannot answer reaches the casts after it.
-            let shadowing = casts[..i].iter().find(|earlier| {
-                let CastResolution::Constant(constant) = &earlier.resolution else {
-                    return false;
-                };
-                earlier.scope.covers_scope(&cast.scope)
-                    && requirers
-                        .iter()
-                        .all(|tool| earlier.resolution.can_answer_requirement(&unknown_slots(tool)))
-                    && castable.iter().all(|tool| {
-                        !writes_group(tool, earlier)
-                            && earlier
-                                .resolution
-                                .validate(&tool.output_label(&literal), &constant.resolve(&literal), &literal)
-                                .is_ok()
-                    })
-            });
-            if let Some(earlier) = shadowing {
-                return Err(LoadError::ShadowedCast {
-                    cast: cast.name.as_str().to_string(),
-                    by: earlier.name.as_str().to_string(),
-                });
-            }
-        }
-
         // Attention names are a policy vocabulary, not an authority vocabulary. A policy may
         // deliberately use a mark as an unremediable denial (for example `blocked`) while
         // registering no authority at all. An Annotator must be able to produce those marks,
@@ -1111,10 +992,6 @@ impl Registry {
                     .iter()
                     .flat_map(|authority| authority.mandate.attends.iter().cloned()),
             )
-            .chain(casts.iter().flat_map(|cast| match &cast.resolution {
-                CastResolution::Constant(constant) => constant.attention.iter().flatten().cloned().collect(),
-                CastResolution::Resolver { .. } => Vec::new(),
-            }))
             .chain(
                 annotator_declarations
                     .values()
@@ -1163,6 +1040,7 @@ impl Registry {
             })
             .collect();
 
+        let unknown_tool = undeclared_annotation();
         Ok(Registry {
             trust_chain: config.trust_chain,
             audience_readers,
@@ -1173,7 +1051,6 @@ impl Registry {
             authorities: config.authorities,
             attention_marks,
             sanitizers,
-            casts,
             membership: config.membership,
             groups,
             profile,
@@ -1188,28 +1065,6 @@ impl Registry {
     /// index resolutions into ([`crate::groups::GroupIndex`]) and the set an event's expansions may name.
     pub fn groups(&self) -> &[GroupName] {
         &self.groups
-    }
-
-    /// The casts consulted, in order, for an annotation with `tags` leaving `slots` Unknown: every
-    /// covering cast that can answer the slots, up to and including the first constant — a
-    /// constant always answers, so nothing after it is reached. The engine lists from this and
-    /// the check holds a pin to it.
-    pub(crate) fn requirement_cast_order<'a>(
-        &'a self,
-        tags: &'a [TagName],
-        slots: &'a [RequirementSlot],
-    ) -> impl Iterator<Item = &'a Cast> + 'a {
-        let mut answered = false;
-        self.casts
-            .iter()
-            .filter(move |cast| cast.scope.covers(tags) && cast.resolution.can_answer_requirement(slots))
-            .take_while(move |cast| {
-                if answered {
-                    return false;
-                }
-                answered = matches!(cast.resolution, CastResolution::Constant(_));
-                true
-            })
     }
 
     /// An event's answers as one operation's expansions: each names a group this
@@ -1231,16 +1086,6 @@ impl Registry {
 
     pub fn profile(&self) -> &crate::profile::DeploymentProfile {
         &self.profile
-    }
-
-    /// The dimension a cast must resolve before the result is admitted: an annotation's Unknown
-    /// dimension at a result point the deployment confines. An Unknown dimension at an
-    /// unconfined result point is a missing fact the value carries out of admission and a sink
-    /// resolves later, so it names no admission-time cast.
-    pub(crate) fn confined_pending_cast(&self, annotation: &ToolAnnotation) -> Option<Dimension> {
-        annotation
-            .pending_cast_dim()
-            .filter(|_| self.profile.confines_result(&annotation.name))
     }
 
     pub fn trust_chain(&self) -> &TrustChain {
@@ -1392,10 +1237,6 @@ impl Registry {
         self.attention_marks.iter()
     }
 
-    pub(crate) fn knows_attention_mark(&self, mark: &MarkName) -> bool {
-        self.attention_marks.contains(mark)
-    }
-
     pub fn authority(&self, name: &AuthorityName) -> Option<&Authority> {
         self.authorities.iter().find(|a| &a.name == name)
     }
@@ -1406,14 +1247,6 @@ impl Registry {
 
     pub fn sanitizers(&self) -> impl Iterator<Item = &Sanitizer> {
         self.sanitizers.values()
-    }
-
-    pub fn cast(&self, name: &CastName) -> Option<&Cast> {
-        self.casts.iter().find(|cast| &cast.name == name)
-    }
-
-    pub fn casts(&self) -> &[Cast] {
-        &self.casts
     }
 }
 
@@ -1448,49 +1281,6 @@ fn validate_pending_cast(tool: &ToolAnnotation) -> Result<(), LoadError> {
         return Err(refused(Dimension::Audience));
     }
     Ok(())
-}
-
-/// Can a scoped constant ever answer for this origin? Every established output dimension of
-/// the origin must be able to equal the constant's under some membership answers: trust by
-/// equality, audience by the declared shapes. An Unknown origin dimension — pending-cast —
-/// compares nothing.
-fn constant_can_meet(tool: &ToolAnnotation, constant: &DeclaredLabel, literal: &Expansions) -> bool {
-    let trust_meets = match tool.output_label(literal).trust {
-        Dim::Known(trust) => trust == constant.trust,
-        Dim::Unknown => true,
-    };
-    let origin_audience = match &tool.delta.audience {
-        Some(AudienceDelta::Static(audience)) => Some(audience.clone()),
-        Some(AudienceDelta::PendingCast) => None,
-        None => Some(DeclaredAudience::Public),
-    };
-    trust_meets && origin_audience.is_none_or(|origin| audience_equalizable(&origin, &constant.audience))
-}
-
-/// Can two declared audiences resolve to the same reader set under some membership answers?
-/// A group answers with any literal reader set, the empty one included, and one answer serves
-/// every mention of its name; `public` never crosses to a reader list.
-fn audience_equalizable(origin: &DeclaredAudience, constant: &DeclaredAudience) -> bool {
-    match (origin, constant) {
-        (DeclaredAudience::Public, DeclaredAudience::Public) => true,
-        (DeclaredAudience::Public, DeclaredAudience::Restricted { .. })
-        | (DeclaredAudience::Restricted { .. }, DeclaredAudience::Public) => false,
-        (
-            DeclaredAudience::Restricted {
-                readers: origin_readers,
-                groups: origin_groups,
-            },
-            DeclaredAudience::Restricted {
-                readers: constant_readers,
-                groups: constant_groups,
-            },
-        ) => match (origin_groups.is_empty(), constant_groups.is_empty()) {
-            (false, false) => true,
-            (true, false) => constant_readers.is_subset(origin_readers),
-            (false, true) => origin_readers.is_subset(constant_readers),
-            (true, true) => origin_readers == constant_readers,
-        },
-    }
 }
 
 fn check_audience_bindings(tool: &ToolAnnotation) -> Result<(), LoadError> {
@@ -1622,12 +1412,6 @@ fn configured_audience_readers(
             add_declared(&mut readers, to);
         }
     }
-    for cast in &config.casts {
-        match &cast.resolution {
-            CastResolution::Resolver { may_cast } => add_declared(&mut readers, &may_cast.audience),
-            CastResolution::Constant(constant) => add_declared(&mut readers, &constant.audience),
-        }
-    }
     readers
 }
 
@@ -1637,10 +1421,9 @@ mod tests {
 
     use super::*;
     use crate::authority::SanitizerPoints;
-    use crate::authority::{CastCeiling, DeclaredLabel, Mandate, Scope};
+    use crate::authority::{Mandate, Scope};
     use crate::contract::{AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, Requires};
     use crate::fact::{EffectKind, EffectSet};
-    use crate::label::EstablishedLabel;
     use crate::label::{Audience, ReaderId, Trust};
     use crate::names::{AuthorityName, MarkName, TagName};
 
@@ -1655,7 +1438,6 @@ mod tests {
             annotators: vec![],
             authorities: vec![],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
         }
     }
@@ -1804,28 +1586,6 @@ mod tests {
             to: DeclaredAudience::literal(named.clone()),
         })];
 
-        let cast = |name, resolution| Cast {
-            name: CastName::new(name),
-            resolution,
-            scope: Scope::default(),
-            hint: None,
-        };
-        let mut may_cast = base();
-        may_cast.casts = vec![cast(
-            "classifier",
-            CastResolution::Resolver {
-                may_cast: CastCeiling {
-                    trust: vec![Trust::new(0)],
-                    audience: DeclaredAudience::literal(named.clone()),
-                },
-            },
-        )];
-        let mut constant = base();
-        constant.casts = vec![cast(
-            "paranoid",
-            CastResolution::Constant(DeclaredLabel::literal(EstablishedLabel::new(Trust::new(0), named))),
-        )];
-
         vec![
             ("tool emit delta", delta),
             ("tool emit contains", includes),
@@ -1833,8 +1593,6 @@ mod tests {
             ("authority officer reader ceiling", ceiling),
             ("sanitizer redactor from", transition_from),
             ("sanitizer redactor to", transition_to),
-            ("cast classifier may_cast", may_cast),
-            ("cast paranoid constant", constant),
         ]
     }
 
@@ -2196,507 +1954,6 @@ mod tests {
             Registry::build_covered(cfg),
             Err(LoadError::RankOutOfChain { rank: 9, .. })
         ));
-    }
-
-    fn internal() -> Audience {
-        Audience::restricted([ReaderId::new("internal")])
-    }
-
-    fn origin(name: &str, tags: &[&str], delta: Delta) -> ToolAnnotation {
-        ToolAnnotation {
-            description: Some("A test tool.".to_string()),
-            name: ToolName::new(name),
-            tags: tags.iter().copied().map(crate::names::TagName::new).collect(),
-            delta,
-            parameters: crate::params::ToolParameters::open(),
-            emits: EffectSet::default(),
-            requires: Requires::default(),
-        }
-    }
-
-    fn pending_trust(audience: Audience) -> Delta {
-        Delta {
-            trust: Some(Dim::Unknown),
-            audience: Some(Dim::Known(audience).into()),
-        }
-    }
-
-    fn pending_audience(trust: Trust) -> Delta {
-        Delta {
-            trust: Some(Dim::Known(trust)),
-            audience: Some(Dim::Unknown.into()),
-        }
-    }
-
-    fn scoped(tags: &[&str]) -> Scope {
-        Scope {
-            tags: tags.iter().copied().map(crate::names::TagName::new).collect(),
-        }
-    }
-
-    fn constant_cast(name: &str, label: EstablishedLabel, scope: Scope) -> Cast {
-        Cast {
-            name: CastName::new(name),
-            resolution: CastResolution::Constant(DeclaredLabel::literal(label)),
-            scope,
-            hint: None,
-        }
-    }
-
-    fn resolver_cast(name: &str, trust: Vec<Trust>, audience: Audience, scope: Scope) -> Cast {
-        Cast {
-            name: CastName::new(name),
-            resolution: CastResolution::Resolver {
-                may_cast: CastCeiling {
-                    trust,
-                    audience: DeclaredAudience::literal(audience),
-                },
-            },
-            scope,
-            hint: None,
-        }
-    }
-
-    #[test]
-    fn casts_keep_registration_order() {
-        let mut cfg = base();
-        cfg.tools = declared(vec![origin("inbox", &[], pending_trust(internal()))]);
-        cfg.casts = vec![
-            resolver_cast("zeta", vec![Trust::new(0)], Audience::Public, Scope::default()),
-            constant_cast(
-                "alpha",
-                EstablishedLabel::new(Trust::new(0), internal()),
-                Scope::default(),
-            ),
-        ];
-        let reg = Registry::build_covered(cfg).unwrap();
-        let names: Vec<&str> = reg.casts().iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, vec!["zeta", "alpha"]);
-    }
-
-    #[test]
-    fn an_earlier_resolver_never_shadows_a_later_cast() {
-        let mut cfg = base();
-        cfg.tools = declared(vec![origin("inbox", &[], pending_trust(internal()))]);
-        cfg.casts = vec![
-            resolver_cast("classifier", vec![Trust::new(0)], Audience::Public, Scope::default()),
-            constant_cast(
-                "fallback",
-                EstablishedLabel::new(Trust::new(0), internal()),
-                Scope::default(),
-            ),
-        ];
-        assert!(Registry::build_covered(cfg).is_ok());
-    }
-
-    #[test]
-    fn an_earlier_constant_valid_at_every_origin_shadows_a_later_cast() {
-        let fallback = |attention: Option<Vec<MarkName>>| Cast {
-            name: CastName::new("fallback"),
-            resolution: CastResolution::Constant(DeclaredLabel {
-                trust: Trust::new(0),
-                audience: DeclaredAudience::literal(internal()),
-                attention,
-            }),
-            scope: Scope::default(),
-            hint: None,
-        };
-        let mut cfg = base();
-        cfg.tools = declared(vec![origin("inbox", &[], pending_trust(internal()))]);
-        cfg.casts = vec![
-            fallback(Some(vec![])),
-            resolver_cast("classifier", vec![Trust::new(0)], Audience::Public, Scope::default()),
-        ];
-        assert!(matches!(
-            Registry::build_covered(cfg),
-            Err(LoadError::ShadowedCast { cast, by }) if cast == "classifier" && by == "fallback"
-        ));
-
-        // Without attention marks the constant answers no undeclared tool, whose attention slot
-        // is Unknown, so an unscoped cast after it is still reached.
-        let mut cfg = base();
-        cfg.tools = declared(vec![origin("inbox", &[], pending_trust(internal()))]);
-        cfg.casts = vec![
-            fallback(None),
-            resolver_cast("classifier", vec![Trust::new(0)], Audience::Public, Scope::default()),
-        ];
-        assert!(Registry::build_covered(cfg).is_ok());
-    }
-
-    #[test]
-    fn a_resolver_without_a_trust_ceiling_reaches_no_trust_slot() {
-        let asking = |trust_floor: Option<Dim<Trust>>, audience: Dim<Vec<AudienceRequirement>>| {
-            let mut tool = origin("send", &["mail"], Delta::NONE);
-            tool.requires = Requires {
-                label: LabelRequirements { trust_floor, audience },
-                ..Requires::default()
-            };
-            tool
-        };
-        let mut cfg = base();
-        cfg.tools = declared(vec![asking(Some(Dim::Unknown), Dim::Known(vec![]))]);
-        cfg.casts = vec![resolver_cast("classifier", vec![], Audience::Public, scoped(&["mail"]))];
-        assert!(matches!(
-            Registry::build_covered(cfg),
-            Err(LoadError::UnreachableCast(name)) if name == "classifier"
-        ));
-
-        let mut cfg = base();
-        cfg.tools = declared(vec![asking(None, Dim::Unknown)]);
-        cfg.casts = vec![resolver_cast("classifier", vec![], Audience::Public, scoped(&["mail"]))];
-        assert!(
-            Registry::build_covered(cfg).is_ok(),
-            "an audience slot is answered under an empty trust ceiling"
-        );
-    }
-
-    #[test]
-    fn shadowing_follows_the_requirement_slots_a_constant_can_answer() {
-        let constant = |name: &str, attention: Option<Vec<MarkName>>, scope: Scope| Cast {
-            name: CastName::new(name),
-            resolution: CastResolution::Constant(DeclaredLabel {
-                trust: Trust::new(0),
-                audience: DeclaredAudience::Public,
-                attention,
-            }),
-            scope,
-            hint: None,
-        };
-        // Two constants both answering a lone Unknown floor: the engine stops at the first.
-        let mut floor = origin("send", &["mail"], Delta::NONE);
-        floor.requires = Requires {
-            label: LabelRequirements {
-                trust_floor: Some(Dim::Unknown),
-                audience: Dim::Known(vec![]),
-            },
-            ..Requires::default()
-        };
-        let mut cfg = base();
-        cfg.tools = declared(vec![floor]);
-        cfg.casts = vec![
-            constant("first", None, scoped(&["mail"])),
-            constant("second", None, scoped(&["mail"])),
-        ];
-        assert!(matches!(
-            Registry::build_covered(cfg),
-            Err(LoadError::ShadowedCast { cast, by }) if cast == "second" && by == "first"
-        ));
-
-        // A constant without marks establishes the value but cannot answer the attention slot,
-        // so the resolver after it is consulted for that slot.
-        let mut reviewed = origin("inbox", &["mail"], pending_trust(Audience::Public));
-        reviewed.requires = Requires {
-            attention: Dim::Unknown,
-            ..Requires::default()
-        };
-        let mut cfg = base();
-        cfg.tools = declared(vec![reviewed]);
-        cfg.casts = vec![
-            constant("first", None, scoped(&["mail"])),
-            resolver_cast("classifier", vec![Trust::new(0)], Audience::Public, scoped(&["mail"])),
-        ];
-        assert!(Registry::build_covered(cfg).is_ok());
-    }
-
-    #[test]
-    fn a_group_writing_constant_neither_shadows_nor_reads_as_unreachable() {
-        let grouped = |trust: Trust| {
-            CastResolution::Constant(crate::authority::DeclaredLabel {
-                trust,
-                audience: DeclaredAudience::declared([], [GroupName::new("team")]).unwrap(),
-                attention: None,
-            })
-        };
-        let mut cfg = base();
-        cfg.membership = Some(MembershipResolverName::new("directory"));
-        cfg.tools = declared(vec![origin("inbox", &[], pending_trust(internal()))]);
-        cfg.casts = vec![
-            Cast {
-                name: CastName::new("fallback"),
-                resolution: grouped(Trust::new(0)),
-                scope: Scope::default(),
-                hint: None,
-            },
-            resolver_cast("classifier", vec![Trust::new(0)], Audience::Public, Scope::default()),
-        ];
-        let registry = Registry::build_covered(cfg).expect("a group-writing constant shadows nothing");
-        assert_eq!(registry.groups(), [GroupName::new("team")]);
-
-        let mut cfg = base();
-        cfg.membership = Some(MembershipResolverName::new("directory"));
-        cfg.tools = declared(vec![origin("inbox", &["mail"], pending_trust(internal()))]);
-        cfg.casts = vec![Cast {
-            name: CastName::new("mailroom"),
-            resolution: grouped(Trust::new(0)),
-            scope: scoped(&["mail"]),
-            hint: None,
-        }];
-        assert!(Registry::build_covered(cfg).is_ok());
-
-        let mut cfg = base();
-        cfg.tools = declared(vec![origin("inbox", &[], pending_trust(internal()))]);
-        cfg.casts = vec![Cast {
-            name: CastName::new("fallback"),
-            resolution: grouped(Trust::new(0)),
-            scope: Scope::default(),
-            hint: None,
-        }];
-        assert!(matches!(
-            Registry::build_covered(cfg),
-            Err(LoadError::GroupWithoutResolver { group }) if group == "@team"
-        ));
-    }
-
-    #[test]
-    fn a_constant_failing_at_one_origin_shadows_nothing() {
-        let mut cfg = base();
-        cfg.tools = declared(vec![
-            origin("inbox", &[], pending_trust(internal())),
-            origin("board", &[], pending_audience(Trust::new(1))),
-        ]);
-        cfg.casts = vec![
-            constant_cast(
-                "fallback",
-                EstablishedLabel::new(Trust::new(0), internal()),
-                Scope::default(),
-            ),
-            resolver_cast("classifier", vec![Trust::new(0)], Audience::Public, Scope::default()),
-        ];
-        assert!(Registry::build_covered(cfg).is_ok());
-    }
-
-    /// Cast lints read declared annotations only: an Annotated declaration's output and
-    /// requirements exist only per call, so it can neither make a scoped cast reachable nor
-    /// prove one shadowed.
-    #[test]
-    fn an_annotated_declaration_gives_a_scoped_cast_no_origin() {
-        let mut cfg = base();
-        cfg.annotators = vec![annotator("classifier")];
-        cfg.tools = vec![ToolDeclaration::Annotated {
-            name: ToolName::new("shell"),
-            tags: vec![TagName::new("t")],
-            description: None,
-            parameters: crate::params::ToolParameters::open(),
-            annotator: AnnotatorName::new("classifier"),
-        }];
-        cfg.casts = vec![resolver_cast(
-            "vouch",
-            vec![Trust::new(0)],
-            Audience::Public,
-            scoped(&["t"]),
-        )];
-        assert!(matches!(
-            Registry::build_covered(cfg),
-            Err(LoadError::UnreachableCast(name)) if name == "vouch"
-        ));
-    }
-
-    #[test]
-    fn a_tag_superset_scope_covers_and_shadows_the_subset() {
-        let mut cfg = base();
-        cfg.tools = declared(vec![origin("inbox", &["mail"], pending_trust(internal()))]);
-        cfg.casts = vec![
-            constant_cast(
-                "fallback",
-                EstablishedLabel::new(Trust::new(0), internal()),
-                scoped(&["mail", "web"]),
-            ),
-            resolver_cast("classifier", vec![Trust::new(0)], Audience::Public, scoped(&["mail"])),
-        ];
-        assert!(matches!(
-            Registry::build_covered(cfg),
-            Err(LoadError::ShadowedCast { cast, by }) if cast == "classifier" && by == "fallback"
-        ));
-    }
-
-    #[test]
-    fn a_tag_subset_scope_does_not_cover_the_superset() {
-        let mut cfg = base();
-        cfg.tools = declared(vec![origin("inbox", &["mail"], pending_trust(internal()))]);
-        cfg.casts = vec![
-            constant_cast(
-                "fallback",
-                EstablishedLabel::new(Trust::new(0), internal()),
-                scoped(&["mail"]),
-            ),
-            resolver_cast(
-                "classifier",
-                vec![Trust::new(0)],
-                Audience::Public,
-                scoped(&["mail", "web"]),
-            ),
-        ];
-        assert!(Registry::build_covered(cfg).is_ok());
-    }
-
-    #[test]
-    fn a_scoped_constant_no_covered_origin_can_equal_is_unreachable() {
-        let mut cfg = base();
-        cfg.membership = Some(MembershipResolverName::new("directory"));
-        cfg.tools = declared(vec![origin("board", &["mail"], pending_audience(Trust::new(1)))]);
-        cfg.casts = vec![Cast {
-            name: CastName::new("fallback"),
-            resolution: CastResolution::Constant(crate::authority::DeclaredLabel {
-                trust: Trust::new(0),
-                audience: DeclaredAudience::declared([], [GroupName::new("team")]).unwrap(),
-                attention: None,
-            }),
-            scope: scoped(&["mail"]),
-            hint: None,
-        }];
-        assert!(
-            matches!(
-                Registry::build_covered(cfg),
-                Err(LoadError::UnreachableCast(name)) if name == "fallback"
-            ),
-            "the origin's established trust never equals the constant's"
-        );
-
-        let mut cfg = base();
-        cfg.membership = Some(MembershipResolverName::new("directory"));
-        cfg.tools = declared(vec![origin(
-            "inbox",
-            &["mail"],
-            Delta {
-                trust: Some(Dim::Unknown),
-                audience: Some(AudienceDelta::Static(
-                    DeclaredAudience::declared([ReaderId::new("alice")], [GroupName::new("team")]).unwrap(),
-                )),
-            },
-        )]);
-        cfg.casts = vec![constant_cast(
-            "fallback",
-            EstablishedLabel::new(Trust::new(0), Audience::Public),
-            scoped(&["mail"]),
-        )];
-        assert!(
-            matches!(
-                Registry::build_covered(cfg),
-                Err(LoadError::UnreachableCast(name)) if name == "fallback"
-            ),
-            "a reader list never resolves to public"
-        );
-    }
-
-    #[test]
-    fn a_scoped_constant_some_membership_answer_equalizes_loads() {
-        let mut cfg = base();
-        cfg.membership = Some(MembershipResolverName::new("directory"));
-        cfg.tools = declared(vec![origin(
-            "inbox",
-            &["mail"],
-            Delta {
-                trust: Some(Dim::Unknown),
-                audience: Some(AudienceDelta::Static(
-                    DeclaredAudience::declared([ReaderId::new("alice")], [GroupName::new("team")]).unwrap(),
-                )),
-            },
-        )]);
-        cfg.casts = vec![constant_cast(
-            "fallback",
-            EstablishedLabel::new(Trust::new(0), Audience::restricted([ReaderId::new("alice")])),
-            scoped(&["mail"]),
-        )];
-        assert!(Registry::build_covered(cfg).is_ok(), "an empty team answer equalizes");
-    }
-
-    #[test]
-    fn a_scoped_cast_reaching_only_an_unknown_requirement_slot_loads() {
-        let asks_a_floor = || {
-            let mut tool = origin("send", &["mail"], Delta::NONE);
-            tool.requires = Requires {
-                label: LabelRequirements {
-                    trust_floor: Some(Dim::Unknown),
-                    audience: Dim::Known(vec![]),
-                },
-                ..Requires::default()
-            };
-            tool
-        };
-        let mut cfg = base();
-        cfg.tools = declared(vec![asks_a_floor()]);
-        cfg.casts = vec![resolver_cast(
-            "classifier",
-            vec![Trust::new(0)],
-            Audience::Public,
-            scoped(&["mail"]),
-        )];
-        assert!(
-            Registry::build_covered(cfg).is_ok(),
-            "a resolver answers the floor per call"
-        );
-
-        let mut cfg = base();
-        cfg.tools = declared(vec![asks_a_floor()]);
-        cfg.casts = vec![Cast {
-            name: CastName::new("fallback"),
-            resolution: CastResolution::Constant(DeclaredLabel {
-                trust: Trust::new(0),
-                audience: DeclaredAudience::Public,
-                attention: None,
-            }),
-            scope: scoped(&["mail"]),
-            hint: None,
-        }];
-        assert!(
-            Registry::build_covered(cfg).is_ok(),
-            "a constant answers the floor inline"
-        );
-    }
-
-    #[test]
-    fn a_scoped_cast_covering_no_registered_origin_is_unreachable() {
-        let mut cfg = base();
-        cfg.tools = declared(vec![origin("inbox", &["mail"], pending_trust(internal()))]);
-        cfg.casts = vec![resolver_cast(
-            "classifier",
-            vec![Trust::new(0)],
-            Audience::Public,
-            scoped(&["ghost"]),
-        )];
-        assert!(matches!(
-            Registry::build_covered(cfg),
-            Err(LoadError::UnreachableCast(name)) if name == "classifier"
-        ));
-    }
-
-    #[test]
-    fn a_scoped_resolver_no_covered_origin_can_use_is_unreachable() {
-        let mut cfg = base();
-        cfg.tools = declared(vec![origin("inbox", &["mail"], pending_trust(internal()))]);
-        cfg.casts = vec![resolver_cast("classifier", vec![], Audience::Public, scoped(&["mail"]))];
-        assert!(matches!(
-            Registry::build_covered(cfg),
-            Err(LoadError::UnreachableCast(name)) if name == "classifier"
-        ));
-    }
-
-    #[test]
-    fn an_audience_only_scoped_resolver_loads_for_an_established_trust_origin() {
-        let mut cfg = base();
-        cfg.tools = declared(vec![
-            origin("inbox", &["mail"], pending_trust(internal())),
-            origin("board", &["mail"], pending_audience(Trust::new(1))),
-        ]);
-        cfg.casts = vec![resolver_cast("classifier", vec![], Audience::Public, scoped(&["mail"]))];
-        assert!(Registry::build_covered(cfg).is_ok());
-    }
-
-    #[test]
-    fn an_audience_only_ceiling_loads() {
-        let mut cfg = base();
-        cfg.casts = vec![Cast {
-            name: CastName::new("classifier"),
-            resolution: CastResolution::Resolver {
-                may_cast: CastCeiling {
-                    trust: vec![],
-                    audience: DeclaredAudience::literal(Audience::Public),
-                },
-            },
-            scope: Scope::default(),
-            hint: None,
-        }];
-        assert!(Registry::build_covered(cfg).is_ok());
     }
 
     #[test]

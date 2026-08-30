@@ -128,9 +128,8 @@ pub enum HookDecision {
     },
     PassControl,
     /// The call is blocked. `unestablished` names every value the call reads
-    /// whose label no registered cast can establish; the prose in `feedback`
-    /// says the same to the model, but a harness that acts on it reads the
-    /// typed entries.
+    /// whose label stays unestablished; the prose in `feedback` says the same
+    /// to the model, but a harness that acts on it reads the typed entries.
     DenyCall {
         feedback: String,
         unestablished: Vec<UnestablishedValue>,
@@ -156,8 +155,7 @@ pub enum HookDecision {
 }
 
 /// One value a blocked call reads whose label stays unestablished: no
-/// registered cast reaches it, so no remedy plan can clear the block
-/// until a cast fact does.
+/// remedy plan can clear the block.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct UnestablishedValue {
     /// The value's id, as the audit's `unresolved_trust` and

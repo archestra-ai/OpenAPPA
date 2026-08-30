@@ -160,9 +160,6 @@ struct ExternalsConfig {
     /// The directory endpoint of the policy's membership resolver, by resolver name.
     #[serde(default)]
     membership: BTreeMap<String, EndpointConfig>,
-    /// The classifier endpoint of every resolver-backed cast, by cast name.
-    #[serde(default)]
-    casts: BTreeMap<String, EndpointConfig>,
 }
 
 #[derive(serde::Deserialize)]
@@ -213,7 +210,6 @@ impl SessionInner {
                     })
                     .collect()
             };
-            bindings.casts = bound(parsed.casts);
             bindings.annotators = bound(parsed.annotators);
             bindings.membership = bound(parsed.membership);
             bindings

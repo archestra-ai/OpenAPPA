@@ -9,7 +9,7 @@
 //! a narration the service invented.
 //!
 //! The mapping is lossy on purpose: audit detail the chat does not render
-//! (cast records, per-value provenance) stays in the log.
+//! (per-value provenance) stays in the log.
 
 use appa_engine::label::{Audience, Dim, Label};
 use appa_engine::registry::TrustChain;
@@ -230,7 +230,7 @@ impl AuditReader {
                 events
             }
             // Algebraically detailed records the chat does not render.
-            AuditEvent::Cast { .. } | AuditEvent::SanitizerBound { .. } | AuditEvent::VoidReturn => Vec::new(),
+            AuditEvent::SanitizerBound { .. } | AuditEvent::VoidReturn => Vec::new(),
         }
     }
 }

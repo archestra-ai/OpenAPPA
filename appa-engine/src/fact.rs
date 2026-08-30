@@ -8,7 +8,7 @@ use crate::candidate::{DerivedCandidate, DerivedVia, SanitizerLineage};
 use crate::check::{Gap, Narrowing};
 use crate::execute::AuthorityReview;
 use crate::label::{EstablishedLabel, Label, PartialLabel};
-use crate::names::{AuthorityName, CastName, SanitizerName};
+use crate::names::{AuthorityName, SanitizerName};
 use crate::plan::PlanId;
 use crate::profile::{DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyFileKey, PolicyIdentityV1};
 use crate::value::{
@@ -41,7 +41,7 @@ pub enum ReturnDerivation {
 
 /// Why a mandatory return sanitizer was inapplicable at submission. Closed and
 /// body-free: the reason names the failed precondition, never the refused bytes. A consumed
-/// dimension no cast can establish names every source unresolved on it by value id, with all
+/// dimension nothing can establish names every source unresolved on it by value id, with all
 /// of that source's unresolved dimensions — never a bare verdict.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReturnRejection {
@@ -269,23 +269,6 @@ pub enum Fact {
         child_return: ChildReturnId,
         narrowing: Narrowing,
     },
-    CastApplied {
-        trajectory: TrajectoryId,
-        value: ValueId,
-        resolved: EstablishedLabel,
-        cast: CastName,
-        #[serde(default)]
-        resolutions: Vec<crate::groups::GroupResolution>,
-    },
-    OutputCastApplied {
-        trajectory: TrajectoryId,
-        dispatch: DispatchId,
-        cast: CastName,
-        resolved: EstablishedLabel,
-        raw_digest: RawResultDigest,
-        #[serde(default)]
-        resolutions: Vec<crate::groups::GroupResolution>,
-    },
     OutputSanitizerBound {
         trajectory: TrajectoryId,
         dispatch: DispatchId,
@@ -452,8 +435,6 @@ impl Fact {
             | Fact::Denial { trajectory, .. }
             | Fact::Acceptance { trajectory, .. }
             | Fact::ChildReturnAcceptance { trajectory, .. }
-            | Fact::CastApplied { trajectory, .. }
-            | Fact::OutputCastApplied { trajectory, .. }
             | Fact::OutputSanitizerBound { trajectory, .. }
             | Fact::CandidateDerived { trajectory, .. }
             | Fact::CandidateAccepted { trajectory, .. }
