@@ -12,8 +12,8 @@ use crate::value::{ChildReturnId, DispatchId, ForkId, OfferId, TrajectoryId};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct FamilyVersion(u64);
 
-/// How many decisions have moved **one trajectory's** flow state: its label, its unresolved
-/// sources or its denials, or a release whose result can restrict any of them.
+/// How many decisions have moved **one trajectory's** flow state: its label or its denials, or
+/// a release whose result can restrict either.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct FlowVersion(u64);
 

@@ -35,7 +35,6 @@ impl SanitizerName {
     }
 }
 
-name_newtype!(CastName);
 name_newtype!(AnnotatorName);
 name_newtype!(MembershipResolverName);
 name_newtype!(GroupName);

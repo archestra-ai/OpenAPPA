@@ -6,7 +6,7 @@ use crate::candidate::{ConfinedFrom, DerivedCandidate, SanitizerLineage};
 use crate::check::Narrowing;
 use crate::fact::{CloseOutcome, EffectSet, Fact, ObservedResult};
 use crate::groups::Expansions;
-use crate::label::{EstablishedLabel, Label};
+use crate::label::Label;
 use crate::names::SanitizerName;
 use crate::projection::Views;
 use crate::registry::Registry;
@@ -92,8 +92,8 @@ pub(crate) fn observe_success(
 
 /// What a confined candidate still narrows against the bound its dispatch pinned, or `None` where
 /// it narrows nothing and may admit immediately.
-pub(crate) fn confined_residual(receiving: &EstablishedLabel, derived: &Label) -> Option<Narrowing> {
-    let to = receiving.combine(&derived.established_part());
+pub(crate) fn confined_residual(receiving: &Label, derived: &Label) -> Option<Narrowing> {
+    let to = receiving.combine(derived);
     (&to != receiving).then(|| Narrowing {
         from: receiving.clone(),
         to,
@@ -218,8 +218,7 @@ pub(crate) fn admit_result(
         }],
         ResultAdmission::SuccessNoValue => vec![close_success()],
         ResultAdmission::SuccessRaw { body } => {
-            // An Unknown dimension is a missing fact, not a withheld one: the value admits
-            // raw and stays unresolved, and a sink that requires the dimension blocks.
+            // A raw success admits at the tool's declared output label, unsanitized.
             vec![close_success(), admit_value(output_label(), body)]
         }
         ResultAdmission::SuccessSanitized {
@@ -242,7 +241,7 @@ pub(crate) fn admit_result(
                 Fact::CandidateDerived {
                     trajectory: trajectory.clone(),
                     subject: crate::basis::SubjectKey::ConfinedResult(dispatch.clone()),
-                    via: crate::candidate::DerivedVia::Sanitizer {
+                    via: crate::candidate::DerivedVia {
                         name: sanitizer,
                         transition,
                     },
@@ -299,7 +298,7 @@ mod tests {
     use crate::contract::{AnnotationMandate, Delta, PinnedAnnotation, ToolAnnotation, ToolDeclaration};
     use crate::fact::EffectKind;
     use crate::groups::DeclaredAudience;
-    use crate::label::{Audience, Dim, ReaderId, Trust};
+    use crate::label::{Audience, ReaderId, Trust};
     use crate::projection::Projection;
     use crate::registry::{RegistryConfig, TrustChain};
     use crate::value::{ToolName, TrajectoryId};
@@ -331,10 +330,7 @@ mod tests {
     }
 
     fn opened() -> Fact {
-        crate::profile::opening_at(
-            traj(),
-            Label::new(Dim::Known(Trust::new(1)), Dim::Known(Audience::Public)),
-        )
+        crate::profile::opening_at(traj(), Label::new(Trust::new(1), Audience::Public))
     }
 
     fn registry() -> Registry {
@@ -343,8 +339,8 @@ mod tests {
             name: ToolName::new("get_ticket"),
             tags: vec![],
             delta: Delta {
-                trust: Some(Dim::Known(SUSPICIOUS)),
-                audience: Some(Dim::Known(internal()).into()),
+                trust: Some(SUSPICIOUS),
+                audience: Some(DeclaredAudience::literal(internal())),
             },
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
@@ -381,8 +377,8 @@ mod tests {
             name: ToolName::new("scan_inbox"),
             tags: vec![],
             delta: Delta {
-                trust: Some(Dim::Unknown),
-                audience: Some(Dim::Known(internal()).into()),
+                trust: Some(SUSPICIOUS),
+                audience: Some(DeclaredAudience::literal(internal())),
             },
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
@@ -393,8 +389,8 @@ mod tests {
             name: ToolName::new("poll_room"),
             tags: vec![],
             delta: Delta {
-                trust: Some(Dim::Known(SUSPICIOUS)),
-                audience: Some(Dim::Unknown.into()),
+                trust: Some(SUSPICIOUS),
+                audience: Some(DeclaredAudience::literal(internal())),
             },
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
@@ -445,12 +441,11 @@ mod tests {
             tool: call.tool().clone(),
             declaration: call.declaration_id(),
             arguments: call.canonical_arguments().clone(),
-            proposed_label: EstablishedLabel::top(),
-            receiving: EstablishedLabel::top(),
+            proposed_label: Label::top(),
+            receiving: Label::top(),
             proposed_effects: EffectSet::new([EffectKind::new("read")]).unwrap(),
             annotation: call.annotation().cloned().unwrap_or_else(|| pinned(call)),
             memberships: Vec::new(),
-            requirement_cast: None,
             subject: crate::basis::fixture_subject(&traj()),
             resolutions: vec![],
         };
@@ -504,8 +499,8 @@ mod tests {
         ));
         match &batch[1] {
             Fact::ValueAdmitted { value, .. } => {
-                assert_eq!(value.label.trust, Dim::Known(SUSPICIOUS));
-                assert_eq!(value.label.audience, Dim::Known(internal()));
+                assert_eq!(value.label.trust, SUSPICIOUS);
+                assert_eq!(value.label.audience, internal());
             }
             other => panic!("expected ValueAdmitted, got {other:?}"),
         }
@@ -575,11 +570,11 @@ mod tests {
 
     fn narrowed_open_log(call: &ResolvedCall) -> (Vec<Fact>, DispatchId) {
         let (mut log, dispatch) = open_log(call);
-        log[0] = crate::profile::opening_at(traj(), Label::new(Dim::Known(SUSPICIOUS), Dim::Known(internal())));
+        log[0] = crate::profile::opening_at(traj(), Label::new(SUSPICIOUS, internal()));
         let Fact::DispatchOpened { receiving, .. } = &mut log[1] else {
             unreachable!("open_log holds exactly one DispatchOpened")
         };
-        *receiving = EstablishedLabel::new(SUSPICIOUS, internal());
+        *receiving = Label::new(SUSPICIOUS, internal());
         (log, dispatch)
     }
 
@@ -688,84 +683,6 @@ mod tests {
             ),
             Err(AdmitError::ForeignDispatch)
         );
-    }
-
-    #[test]
-    fn a_pending_trust_result_admits_raw_with_the_unknown_dimension() {
-        let reg = registry();
-        let call = scan_call();
-        let (log, dispatch) = open_log(&call);
-        let p = views_of(&log);
-        let t = traj();
-        let batch = admit_result(
-            &reg,
-            &p.view(&t),
-            &dispatch,
-            &call,
-            ResultAdmission::SuccessRaw {
-                body: ValueBody::new("raw bytes"),
-            },
-            &Expansions::default(),
-        )
-        .unwrap();
-        assert!(matches!(
-            &batch[0],
-            Fact::DispatchClosed {
-                outcome: CloseOutcome::Success { .. },
-                ..
-            }
-        ));
-        match batch.last().unwrap() {
-            Fact::ValueAdmitted { value, .. } => {
-                assert_eq!(value.label, Label::new(Dim::Unknown, Dim::Known(internal())));
-            }
-            other => panic!("expected ValueAdmitted, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn an_annotated_pending_trust_result_admits_raw_with_its_annotated_audience() {
-        let reg = registry();
-        let call = ResolvedCall::new(
-            ToolName::new("dynamic_scan"),
-            crate::params::test_arguments(&json!({ "room": "internal" })),
-        )
-        .with_annotation(Some(PinnedAnnotation::new(
-            ToolAnnotation {
-                name: ToolName::new("dynamic_scan"),
-                tags: vec![],
-                description: Some("A test tool.".to_string()),
-                parameters: crate::params::test_string_argument_schema("room"),
-                delta: Delta {
-                    trust: Some(Dim::Unknown),
-                    audience: Some(Dim::Known(internal()).into()),
-                },
-                emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
-                requires: Default::default(),
-            },
-            AnnotationMandate::Annotator(crate::names::AnnotatorName::new("directory")),
-        )));
-        let (record, dispatch) = dispatch_opened(&call);
-        let log = vec![record];
-        let projection = views_of(&log);
-        let trajectory = traj();
-        let batch = admit_result(
-            &reg,
-            &projection.view(&trajectory),
-            &dispatch,
-            &call,
-            ResultAdmission::SuccessRaw {
-                body: ValueBody::new("scan"),
-            },
-            &Expansions::default(),
-        )
-        .unwrap();
-        match batch.last().unwrap() {
-            Fact::ValueAdmitted { value, .. } => {
-                assert_eq!(value.label, Label::new(Dim::Unknown, Dim::Known(internal())));
-            }
-            other => panic!("expected ValueAdmitted, got {other:?}"),
-        }
     }
 
     #[test]

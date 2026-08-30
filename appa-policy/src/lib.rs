@@ -8,14 +8,14 @@ use thiserror::Error;
 
 use appa_engine::authority::{Authority, DeclaredTransition, Hint, Mandate, Sanitizer, SanitizerPoints, Scope};
 use appa_engine::contract::{
-    AudienceDelta, AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, RecipientSpec, Requires,
-    ToolAnnotation, ToolDeclaration,
+    AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, RecipientSpec, Requires, ToolAnnotation,
+    ToolDeclaration,
 };
 use appa_engine::engine::Engine;
 use appa_engine::fact::ReturnPolicy;
 use appa_engine::fact::{EffectKind, EffectSet};
 use appa_engine::groups::DeclaredAudience;
-use appa_engine::label::{Audience, Dim, Label, ReaderId, Trust};
+use appa_engine::label::{Audience, Label, ReaderId, Trust};
 use appa_engine::names::{
     AnnotatorName, AuthorityName, GroupName, MarkName, MembershipResolverName, SanitizerName, SurfaceName, TagName,
 };
@@ -95,8 +95,6 @@ pub enum ConfigError {
         reads: String,
         reason: String,
     },
-    #[error("{context} expected a mark list, found {found:?}")]
-    BadAttention { context: String, found: String },
     #[error("[limits] planner_cap is 0: a tool's worst case is at least one plan, so a zero cap refuses every tool")]
     ZeroPlannerCap,
     #[error("[deployment] {field}: expected one of {expected}, found {found:?}")]
@@ -511,10 +509,7 @@ impl RawDeployment {
             Some(label) => {
                 let trust = match label.trust {
                     Some(name) => parse_trust(&name, chain, "deployment starting_label")?,
-                    None => match neutral.trust {
-                        Dim::Known(top) => top,
-                        Dim::Unknown => unreachable!("the neutral starting label is established"),
-                    },
+                    None => neutral.trust,
                 };
                 let audience = match label.audience {
                     None => Audience::Public,
@@ -528,7 +523,7 @@ impl RawDeployment {
                     }
                     Some(RawStartingAudience::List(a)) => parse_audience(&a, "deployment starting_label audience")?,
                 };
-                Label::new(Dim::Known(trust), Dim::Known(audience))
+                Label::new(trust, audience)
             }
             None => neutral,
         };
@@ -627,12 +622,12 @@ impl RawBoundary {
             Some(a) => parse_audience(&a, "boundary audience")?,
             None => Audience::Public,
         };
-        Ok(Label::new(Dim::Known(trust), Dim::Known(audience)))
+        Ok(Label::new(trust, audience))
     }
 }
 
 fn default_boundary_label(chain: &TrustChain) -> Label {
-    Label::new(Dim::Known(top_trust(chain)), Dim::Known(Audience::Public))
+    Label::new(top_trust(chain), Audience::Public)
 }
 
 fn top_trust(chain: &TrustChain) -> Trust {
@@ -697,8 +692,7 @@ impl RawTool {
         }
         // Declaring the tool is the deployment saying it knows it, so an omitted `delta` and
         // `delta = {}` say the same thing: the dimensions this annotation does not describe
-        // restrict nothing. Unknown is asked for by name (`"unknown"`); a tool with no
-        // declaration at all is the only whole-contract unknown.
+        // restrict nothing.
         let delta = match self.delta {
             Some(d) => d.convert(chain, &ctx())?,
             None => Delta::default(),
@@ -729,37 +723,17 @@ impl RawTool {
 #[serde(deny_unknown_fields)]
 struct RawDelta {
     trust: Option<String>,
-    audience: Option<RawDeltaAudience>,
+    audience: Option<Vec<String>>,
 }
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum RawDeltaAudience {
-    Token(String),
-    List(Vec<String>),
-}
-
-const UNKNOWN_TOKEN: &str = "unknown";
 
 impl RawDelta {
     fn convert(self, chain: &TrustChain, ctx: &str) -> Result<Delta, ConfigError> {
         let trust = match self.trust.as_deref() {
-            Some(UNKNOWN_TOKEN) => Some(Dim::Unknown),
-            Some(value) => Some(Dim::Known(parse_trust(value, chain, ctx)?)),
+            Some(value) => Some(parse_trust(value, chain, ctx)?),
             None => None,
         };
         let audience = match self.audience {
-            Some(RawDeltaAudience::Token(token)) if token == UNKNOWN_TOKEN => Some(AudienceDelta::PendingCast),
-            Some(RawDeltaAudience::Token(token)) => {
-                return Err(ConfigError::BadAudience {
-                    context: format!("{ctx} delta audience"),
-                    reason: format!("expected [...] or \"unknown\", found {token:?}"),
-                });
-            }
-            Some(RawDeltaAudience::List(a)) => Some(AudienceDelta::Static(parse_declared_audience(
-                &a,
-                &format!("{ctx} delta audience"),
-            )?)),
+            Some(a) => Some(parse_declared_audience(&a, &format!("{ctx} delta audience"))?),
             None => None,
         };
         Ok(Delta { trust, audience })
@@ -770,58 +744,29 @@ impl RawDelta {
 #[serde(deny_unknown_fields)]
 struct RawRequires {
     trust: Option<String>,
-    audience: Option<RawRequiresAudienceField>,
+    audience: Option<RawRequiresAudience>,
     effects: Option<RawHistory>,
     #[serde(default)]
-    attention: Option<RawAttention>,
+    attention: Option<Vec<String>>,
 }
 
 /// Static `requires.audience`; an attached resolver owns this destination through `returns`.
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum RawRequiresAudienceField {
-    Reference(String),
-    Operators(RawRequiresAudience),
-}
-
-/// Static `requires.attention`; an attached resolver owns this destination through `returns`.
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum RawAttention {
-    Reference(String),
-    Marks(Vec<String>),
-}
-
 impl RawRequires {
     fn convert(self, chain: &TrustChain, ctx: &str) -> Result<Requires, ConfigError> {
         let mut audience = Vec::new();
-        let mut audience_unknown = false;
-        match self.audience {
-            Some(RawRequiresAudienceField::Reference(value)) if value == UNKNOWN_TOKEN => audience_unknown = true,
-            Some(RawRequiresAudienceField::Reference(value)) => {
-                let context = format!("{ctx} requires audience");
-                return Err(ConfigError::BadAudience {
-                    context,
-                    reason: format!(
-                        "expected {{ contains = [...] }}, {{ within = [...] }} or \"{UNKNOWN_TOKEN}\", found {value:?}"
-                    ),
-                });
+        if let Some(a) = self.audience {
+            if let Some(inc) = a.contains {
+                audience.push(AudienceRequirement::Includes(parse_recipient_spec(
+                    &inc,
+                    &format!("{ctx} requires contains"),
+                )?));
             }
-            Some(RawRequiresAudienceField::Operators(a)) => {
-                if let Some(inc) = a.contains {
-                    audience.push(AudienceRequirement::Includes(parse_recipient_spec(
-                        &inc,
-                        &format!("{ctx} requires contains"),
-                    )?));
-                }
-                if let Some(cap) = a.within {
-                    audience.push(AudienceRequirement::Cap(parse_declared_audience(
-                        &cap,
-                        &format!("{ctx} requires within"),
-                    )?));
-                }
+            if let Some(cap) = a.within {
+                audience.push(AudienceRequirement::Cap(parse_declared_audience(
+                    &cap,
+                    &format!("{ctx} requires within"),
+                )?));
             }
-            None => {}
         }
         let mut history = Vec::new();
         if let Some(e) = self.effects {
@@ -837,25 +782,12 @@ impl RawRequires {
             );
         }
         let trust_floor = match self.trust.as_deref() {
-            Some(UNKNOWN_TOKEN) => Some(Dim::Unknown),
-            Some(value) => Some(Dim::Known(parse_trust(value, chain, ctx)?)),
+            Some(value) => Some(parse_trust(value, chain, ctx)?),
             None => None,
         };
         let attention = match self.attention {
-            Some(RawAttention::Reference(value)) if value == UNKNOWN_TOKEN => Dim::Unknown,
-            Some(RawAttention::Reference(value)) => {
-                return Err(ConfigError::BadAttention {
-                    context: format!("{ctx} requires attention"),
-                    found: value,
-                });
-            }
-            Some(RawAttention::Marks(marks)) => Dim::Known(marks.into_iter().map(MarkName::new).collect()),
-            None => Dim::Known(Vec::new()),
-        };
-        let audience = if audience_unknown {
-            Dim::Unknown
-        } else {
-            Dim::Known(audience)
+            Some(marks) => marks.into_iter().map(MarkName::new).collect(),
+            None => Vec::new(),
         };
         Ok(Requires {
             label: LabelRequirements { trust_floor, audience },
@@ -1222,28 +1154,6 @@ confined_results = ["lookup"]
                     Err(ConfigError::ForbiddenInlineBinding { kind: found, .. }) if found == kind
                 ),
                 "{kind} inline binding was accepted"
-            );
-        }
-    }
-
-    #[test]
-    fn the_reserved_rank_name_is_refused_by_the_engine() {
-        assert!(matches!(
-            Config::from_toml_str("version = 1\ntrust_chain = [\"unknown\", \"trusted\"]\n"),
-            Err(ConfigError::Registry(LoadError::ReservedRankName))
-        ));
-    }
-
-    #[test]
-    fn the_reserved_state_is_never_a_declared_reader() {
-        for site in [
-            "delta = { audience = [\"unknown\"] }",
-            "requires = { audience = { contains = [\"unknown\"] } }\ndelta = {}",
-        ] {
-            let policy = format!("version = 1\n[[tool]]\nname = \"send\"\n{site}\n");
-            assert!(
-                matches!(Config::from_toml_str(&policy), Err(ConfigError::BadAudience { .. })),
-                "{site} admitted `unknown` as a reader"
             );
         }
     }
@@ -1770,9 +1680,7 @@ confined_results = ["read", "send"]
             .expect("read is declared");
         assert_eq!(
             read.delta.audience.as_ref(),
-            Some(&AudienceDelta::Static(
-                DeclaredAudience::declared([ReaderId::new("auditor")], [GroupName::new("team")]).unwrap()
-            ))
+            Some(&DeclaredAudience::declared([ReaderId::new("auditor")], [GroupName::new("team")]).unwrap())
         );
         let officer = registry
             .authority(&AuthorityName::new("officer"))
@@ -1838,16 +1746,10 @@ confined_results = ["read", "send"]
             );
             Config::from_toml_str(&policy)
         };
-        let pending = delta("\"unknown\"").expect("the unknown token loads");
-        let tool = pending
-            .registry()
-            .tools()
-            .find(|tool| tool.name().as_str() == "t")
-            .expect("t registers")
-            .declared()
-            .expect("t is declared");
-        assert!(matches!(tool.delta.audience.as_ref(), Some(AudienceDelta::PendingCast)));
-        assert!(matches!(delta("[\"unknown\"]"), Err(ConfigError::BadAudience { .. })));
+        assert!(
+            delta("\"public\"").is_err(),
+            "a tool delta audience is a reader list, never a token"
+        );
         assert!(matches!(delta("[]"), Err(ConfigError::BadAudience { .. })));
     }
 

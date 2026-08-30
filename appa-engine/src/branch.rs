@@ -44,7 +44,7 @@ pub(crate) fn submit_child_return(
     Ok(RawCrossing::Merged(crossing_facts(
         parent,
         child,
-        LabeledValue::new(body.clone(), fold.bound().clone().into_label()),
+        LabeledValue::new(body.clone(), fold.clone()),
         ReturnDerivation::Raw,
         None,
         registry.resolutions(expansions),
@@ -134,12 +134,12 @@ pub(crate) fn raw_return_narrowing(parent: &Views, child: &TrajectoryId) -> Resu
     }
     let fold = parent.branch_label(child);
     let current = parent.current_label();
-    let candidate = current.bound().combine(fold.bound());
-    if &candidate == current.bound() {
+    let candidate = current.combine(&fold);
+    if candidate == current {
         return Ok(None);
     }
     Ok(Some(Narrowing {
-        from: current.bound().clone(),
+        from: current,
         to: candidate,
     }))
 }
@@ -152,11 +152,7 @@ mod tests {
     use crate::authority::{DeclaredTransition, Sanitizer, SanitizerPoints, Scope};
     use crate::fact::{CloseOutcome, EffectKind, EffectSet, ForkSnapshot};
     use crate::groups::DeclaredAudience;
-    use crate::label::Adequacy;
-    use crate::label::Dimension;
-    use crate::label::EstablishedLabel;
-    use crate::label::PartialLabel;
-    use crate::label::{Audience, Dim, Label, ReaderId, Trust};
+    use crate::label::{Audience, Label, ReaderId, Trust};
     use crate::names::SanitizerName;
     use crate::projection::Projection;
     use crate::registry::{RegistryConfig, TrustChain};
@@ -175,15 +171,11 @@ mod tests {
     }
 
     fn known(trust: Trust, audience: Audience) -> Label {
-        Label::new(Dim::Known(trust), Dim::Known(audience))
+        Label::new(trust, audience)
     }
 
-    fn established(trust: Trust, audience: Audience) -> EstablishedLabel {
-        EstablishedLabel::new(trust, audience)
-    }
-
-    fn partial(trust: Trust, audience: Audience) -> PartialLabel {
-        PartialLabel::established(EstablishedLabel::new(trust, audience))
+    fn established(trust: Trust, audience: Audience) -> Label {
+        Label::new(trust, audience)
     }
 
     fn internal() -> Audience {
@@ -227,12 +219,11 @@ mod tests {
             tool: call.tool().clone(),
             declaration: call.declaration_id(),
             arguments: call.canonical_arguments().clone(),
-            proposed_label: EstablishedLabel::top(),
-            receiving: EstablishedLabel::top(),
+            proposed_label: Label::top(),
+            receiving: Label::top(),
             proposed_effects: EffectSet::default(),
             annotation: pinned(&call),
             memberships: Vec::new(),
-            requirement_cast: None,
             subject: crate::basis::fixture_subject(&trajectory),
             resolutions: vec![],
         });
@@ -334,12 +325,9 @@ mod tests {
         let projection = build(&log);
         assert_eq!(
             projection.view(&child()).current_label(),
-            partial(SUSPICIOUS, internal())
+            established(SUSPICIOUS, internal())
         );
-        assert_ne!(
-            projection.view(&child()).current_label(),
-            PartialLabel::established(EstablishedLabel::top())
-        );
+        assert_ne!(projection.view(&child()).current_label(), Label::top());
     }
 
     #[test]
@@ -373,7 +361,7 @@ mod tests {
         }
         assert_eq!(
             projection.view(&parent()).current_label(),
-            partial(SUSPICIOUS, internal())
+            established(SUSPICIOUS, internal())
         );
     }
 
@@ -391,154 +379,10 @@ mod tests {
                 &Expansions::default()
             ),
             Ok(RawCrossing::Narrows(Narrowing {
-                from: EstablishedLabel::new(TRUSTED, Audience::Public),
-                to: EstablishedLabel::new(SUSPICIOUS, internal()),
+                from: Label::new(TRUSTED, Audience::Public),
+                to: Label::new(SUSPICIOUS, internal()),
             }))
         );
-    }
-
-    #[test]
-    fn an_unknown_dimension_crosses_as_identity_not_a_block() {
-        let mut log = forked(known(TRUSTED, Audience::Public));
-        admit(
-            &mut log,
-            child(),
-            Label::new(Dim::Unknown, Dim::Known(Audience::Public)),
-        );
-        let unknown_value = ValueId::new(0);
-        let projection = build(&log);
-        assert_eq!(raw_return_narrowing(&projection.view(&parent()), &child()), Ok(None));
-
-        let projection = build(&log);
-        let ret = merged(
-            submit_child_return(
-                &registry(),
-                &projection.view(&parent()),
-                &child(),
-                &raw("found"),
-                &Expansions::default(),
-            )
-            .unwrap(),
-        );
-        log.extend(ret);
-        let projection = build(&log);
-        let parent_label = projection.view(&parent()).current_label();
-        assert_eq!(parent_label.bound(), &established(TRUSTED, Audience::Public));
-        assert_eq!(
-            parent_label.unresolved(Dimension::Trust).collect::<Vec<_>>(),
-            vec![unknown_value]
-        );
-        assert!(parent_label.is_established(Dimension::Audience));
-    }
-
-    #[test]
-    fn a_crossing_carries_each_unresolved_dimension_it_rode_in_with() {
-        let mut log = forked(known(TRUSTED, Audience::Public));
-        admit(&mut log, child(), Label::new(Dim::Unknown, Dim::Unknown));
-        admit(&mut log, parent(), Label::new(Dim::Known(TRUSTED), Dim::Unknown));
-        let projection = build(&log);
-        assert_eq!(raw_return_narrowing(&projection.view(&parent()), &child()), Ok(None));
-        let ret = merged(
-            submit_child_return(
-                &registry(),
-                &projection.view(&parent()),
-                &child(),
-                &raw("found"),
-                &Expansions::default(),
-            )
-            .unwrap(),
-        );
-        log.extend(ret);
-        let label = build(&log).view(&parent()).current_label();
-        assert_eq!(
-            label.unresolved(Dimension::Trust).collect::<Vec<_>>(),
-            vec![ValueId::new(0)]
-        );
-        assert_eq!(
-            label.unresolved(Dimension::Audience).collect::<Vec<_>>(),
-            vec![ValueId::new(0), ValueId::new(1)]
-        );
-    }
-
-    #[test]
-    fn absorption_activates_only_at_the_merge() {
-        let mut log = forked(known(SUSPICIOUS, Audience::Public));
-        admit(&mut log, child(), known(SUSPICIOUS, Audience::Public));
-        admit(&mut log, child(), Label::new(Dim::Known(SUSPICIOUS), Dim::Unknown));
-        let unknown_value = ValueId::new(1);
-        assert!(
-            build(&log)
-                .view(&parent())
-                .current_label()
-                .is_established(Dimension::Audience)
-        );
-
-        let projection = build(&log);
-        let batch = merged(
-            submit_child_return(
-                &registry(),
-                &projection.view(&parent()),
-                &child(),
-                &raw("found"),
-                &Expansions::default(),
-            )
-            .unwrap(),
-        );
-        let (merge, before) = batch.split_last().expect("the crossing ends at its merge");
-        assert!(matches!(
-            merge,
-            Fact::Boundary {
-                kind: BoundaryKind::Merge { .. },
-                ..
-            }
-        ));
-        let truncated = [log.clone(), before.to_vec()].concat();
-        assert!(
-            build(&truncated)
-                .view(&parent())
-                .current_label()
-                .is_established(Dimension::Audience)
-        );
-        let complete = [log, batch.clone()].concat();
-        assert_eq!(
-            build(&complete)
-                .view(&parent())
-                .current_label()
-                .unresolved(Dimension::Audience)
-                .collect::<Vec<_>>(),
-            vec![unknown_value]
-        );
-    }
-
-    #[test]
-    fn a_known_return_merges_into_an_unknown_parent() {
-        let mut log = forked(known(TRUSTED, Audience::Public));
-        admit(&mut log, parent(), Label::new(Dim::Known(TRUSTED), Dim::Unknown));
-        let projection = build(&log);
-        assert_eq!(raw_return_narrowing(&projection.view(&parent()), &child()), Ok(None));
-
-        let batch = merged(
-            submit_child_return(
-                &registry(),
-                &projection.view(&parent()),
-                &child(),
-                &raw("result"),
-                &Expansions::default(),
-            )
-            .expect("a known return merges into an Unknown parent"),
-        );
-        assert!(
-            batch
-                .iter()
-                .any(|fact| matches!(fact, Fact::ChildReturn { trajectory, .. } if *trajectory == child()))
-        );
-        assert!(batch.iter().any(|fact| matches!(
-            fact,
-            Fact::Boundary {
-                kind: BoundaryKind::Merge { .. },
-                ..
-            }
-        )));
     }
 
     #[test]
@@ -724,12 +568,11 @@ mod tests {
             tool: call.tool().clone(),
             declaration: call.declaration_id(),
             arguments: call.canonical_arguments().clone(),
-            proposed_label: EstablishedLabel::top(),
-            receiving: EstablishedLabel::top(),
+            proposed_label: Label::top(),
+            receiving: Label::top(),
             proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
             annotation: pinned(&call),
             memberships: Vec::new(),
-            requirement_cast: None,
             subject: crate::basis::fixture_subject(&child()),
             resolutions: vec![],
         });
@@ -744,13 +587,13 @@ mod tests {
         assert!(projection.view(&parent()).has_effect(&egress));
     }
 
-    fn unknown_source(log: &mut Vec<Fact>, trajectory: TrajectoryId) {
-        admit(log, trajectory, Label::new(Dim::Unknown, Dim::Known(Audience::Public)));
+    fn narrowing_source(log: &mut Vec<Fact>, trajectory: TrajectoryId) {
+        admit(log, trajectory, Label::new(SUSPICIOUS, Audience::Public));
     }
 
-    fn opened_unknown_parent() -> Vec<Fact> {
+    fn opened_narrowed_parent() -> Vec<Fact> {
         let mut log = vec![opened(parent(), known(TRUSTED, Audience::Public))];
-        unknown_source(&mut log, parent());
+        narrowing_source(&mut log, parent());
         log
     }
 
@@ -779,26 +622,15 @@ mod tests {
             .expect("the fork was prepared with a snapshot")
     }
 
-    fn unresolved_trust(log: &[Fact], trajectory: &TrajectoryId) -> Vec<ValueId> {
-        build(log)
-            .view(trajectory)
-            .current_label()
-            .unresolved(Dimension::Trust)
-            .collect()
-    }
-
     #[test]
-    fn a_fork_at_an_unresolved_parent_carries_the_source_in_its_snapshot() {
-        let mut log = opened_unknown_parent();
+    fn a_fork_snapshot_carries_the_parents_sources_and_seed() {
+        let mut log = opened_narrowed_parent();
         fork_under(&mut log, &parent(), &child());
 
         let projection = build(&log);
         let at_fork = projection.view(&parent()).current_label();
         assert_eq!(projection.view(&child()).current_label(), at_fork);
-        assert_eq!(
-            projection.view(&child()).current_label().meets_floor(SUSPICIOUS),
-            Adequacy::Unresolved
-        );
+        assert!(!projection.view(&child()).current_label().meets_floor(TRUSTED));
         let snapshot = snapshot_of(&log, &child());
         assert_eq!(snapshot.inherited(), &BTreeSet::from([ValueId::new(0)]));
         assert_eq!(snapshot.seed(), &at_fork);
@@ -807,26 +639,37 @@ mod tests {
     #[test]
     fn a_post_fork_source_stays_private_to_the_branch_that_admitted_it() {
         let sibling = TrajectoryId::new("sibling");
-        let mut log = opened_unknown_parent();
+        let mut log = opened_narrowed_parent();
         fork_under(&mut log, &parent(), &child());
         fork_under(&mut log, &parent(), &sibling);
-        unknown_source(&mut log, parent());
-        unknown_source(&mut log, child());
-
-        assert_eq!(
-            unresolved_trust(&log, &parent()),
-            vec![ValueId::new(0), ValueId::new(1)]
+        admit(&mut log, parent(), Label::new(SUSPICIOUS, internal()));
+        admit(
+            &mut log,
+            child(),
+            Label::new(SUSPICIOUS, Audience::restricted([ReaderId::new("child")])),
         );
-        assert_eq!(unresolved_trust(&log, &child()), vec![ValueId::new(0), ValueId::new(2)]);
-        assert_eq!(unresolved_trust(&log, &sibling), vec![ValueId::new(0)]);
+
+        let projection = build(&log);
+        assert_eq!(
+            projection.view(&parent()).current_label(),
+            established(SUSPICIOUS, internal())
+        );
+        assert_eq!(
+            projection.view(&child()).current_label(),
+            established(SUSPICIOUS, Audience::restricted([ReaderId::new("child")]))
+        );
+        assert_eq!(
+            projection.view(&sibling).current_label(),
+            established(SUSPICIOUS, Audience::Public)
+        );
     }
 
     #[test]
     fn a_nested_fork_flattens_its_inherited_set() {
         let grandchild = TrajectoryId::new("grandchild");
-        let mut log = opened_unknown_parent();
+        let mut log = opened_narrowed_parent();
         fork_under(&mut log, &parent(), &child());
-        unknown_source(&mut log, child());
+        narrowing_source(&mut log, child());
         fork_under(&mut log, &child(), &grandchild);
 
         let snapshot = snapshot_of(&log, &grandchild);
@@ -848,12 +691,11 @@ mod tests {
             tool: call.tool().clone(),
             declaration: call.declaration_id(),
             arguments: call.canonical_arguments().clone(),
-            proposed_label: EstablishedLabel::top(),
-            receiving: EstablishedLabel::top(),
+            proposed_label: Label::top(),
+            receiving: Label::top(),
             proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
             annotation: pinned(&call),
             memberships: Vec::new(),
-            requirement_cast: None,
             subject: crate::basis::fixture_subject(&child()),
             resolutions: vec![],
         });

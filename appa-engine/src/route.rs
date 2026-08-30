@@ -48,7 +48,7 @@ use crate::contract::{NotStatic, StaticAnnotation, ToolAnnotation};
 use crate::engine::Engine;
 use crate::fact::EffectKind;
 use crate::groups::{ExpansionRefusal, Expansions, GroupExpansion, MembershipNeeded};
-use crate::label::{Audience, PartialLabel};
+use crate::label::{Audience, Label};
 use crate::names::{AuthorityName, GroupName, SanitizerName};
 use crate::plan::{self, CallRole, ExecutableRemedyPlan, GapPower, RemedyStep};
 use crate::projection::Views;
@@ -154,8 +154,6 @@ pub enum Resume {
 pub enum Halt {
     /// Its check reads the call's arguments (a resolver answer or a placeholder recipient).
     Arguments,
-    /// Its result label is established only at admission (unannotated or pending-cast).
-    Unestablished,
     /// Its own block carries call-bound gaps; its rulings or hops are planned at that block.
     Block(Vec<Gap>),
     /// The depth bound ends here.
@@ -262,13 +260,12 @@ impl BlockContext {
     }
 }
 
-/// The abstract security state a route has reached: the branch's partial label — bound and
-/// unresolved sources — and the effect kinds the route's preceding tools have committed on top of
-/// the log. Reservations are the log's own and never move: a tool the route runs is taken in its
+/// The abstract security state a route has reached: the branch's label and the effect kinds the
+/// route's preceding tools have committed on top of the log. Reservations are the log's own and never move: a tool the route runs is taken in its
 /// success branch, where its reservation has become effects.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RouteState {
-    label: PartialLabel,
+    label: Label,
     committed: BTreeSet<EffectKind>,
 }
 
@@ -392,10 +389,6 @@ pub(crate) fn search(
     context: &BlockContext,
     depth: RouteDepth,
 ) -> Result<Vec<RecoveryRoute>, RouteError> {
-    // A fact clears an unestablished source, never a plan or a route (RMD-10, CHK-16).
-    if !context.raw.unestablished.is_empty() {
-        return Ok(Vec::new());
-    }
     let mut search = Search {
         registry,
         views,
@@ -450,8 +443,6 @@ impl Search<'_> {
         let block = RawBlock {
             requirement_gaps: eval.requirement_gaps.clone(),
             narrowing: eval.narrowing.clone(),
-            unestablished: Vec::new(),
-            unknown_requirements: eval.unknown_requirements.clone(),
         };
         self.context
             .expansions
@@ -480,11 +471,6 @@ impl Search<'_> {
             &context.stage,
             &context.expansions,
         );
-        // Unresolved sources never move along a route, so what the block did not consume at
-        // its check it does not consume here; the initial block is gated in `search`.
-        if !eval.consumed.is_empty() || !eval.unknown_requirements.is_empty() {
-            return Ok(());
-        }
         self.require_groups(&context.contract, &eval, context.role)?;
         if eval.requirement_gaps.is_empty() && eval.narrowing.is_none() {
             found.push(self.found(
@@ -559,7 +545,7 @@ impl Search<'_> {
 
     /// Every way `tool` runs first from `state`, with `budget` preceding tools still allowed,
     /// this one included. Its own `prior`/cap gaps recurse into the tools that clear them; any
-    /// other gap, an unresolved dimension, or a call-dependent contract halts the route here.
+    /// other gap or a call-dependent contract halts the route here.
     fn run(
         &mut self,
         tool: &ToolAnnotation,
@@ -588,7 +574,6 @@ impl Search<'_> {
         let static_contract = match StaticAnnotation::of(tool, expansions) {
             Ok(static_contract) => static_contract,
             Err(NotStatic::Arguments) => return halt(Halt::Arguments),
-            Err(NotStatic::Unestablished) => return halt(Halt::Unestablished),
             Err(NotStatic::Membership(needed)) => return Err(MembershipNeeded { needed }),
         };
         let eval = check::evaluate_static(
@@ -598,17 +583,7 @@ impl Search<'_> {
             &self.has_reserved(),
             expansions,
         );
-        // An Unknown requirement slot has no answerer, so the call is undecidable: no route
-        // runs through it, and nothing it reads is required.
-        if !eval.unknown_requirements.is_empty() {
-            return Ok(Vec::new());
-        }
         self.require_groups(tool, &eval, CallRole::Ordinary)?;
-        // A consumed dimension with unresolved sources stays unresolved: nothing can
-        // establish it, so no route runs through the call.
-        if !eval.consumed.is_empty() {
-            return Ok(Vec::new());
-        }
         if eval
             .requirement_gaps
             .iter()
@@ -682,7 +657,7 @@ impl Search<'_> {
 
     /// A route as emitted from `state`, whose requirement gaps are `gaps`.
     fn found(&self, steps: Vec<RouteStep>, outcome: RouteOutcome, state: &RouteState, gaps: &[Gap]) -> Found {
-        let disclosure = self.disclosure(&steps, &state.label.bound().audience);
+        let disclosure = self.disclosure(&steps, &state.label.audience);
         let powers = self.powers(&steps, gaps);
         let mut keys: Vec<Gap> = self.context.raw.requirement_gaps.iter().map(requirement_key).collect();
         for (key, _) in &powers {
@@ -896,10 +871,10 @@ mod tests {
     use crate::contract::{AudienceRequirement, Delta, HistoryRequirement, RecipientSpec, Requires, ToolAnnotation};
     use crate::fact::{CloseOutcome, EffectSet, Fact};
     use crate::groups::DeclaredAudience;
-    use crate::label::{Dim, EstablishedLabel, Label, ReaderId, Trust};
+    use crate::label::{Label, ReaderId, Trust};
     use crate::projection::Projection;
     use crate::registry::{RegistryConfig, TrustChain};
-    use crate::value::{DispatchId, LabeledValue, Provenance, TrajectoryId, ValueBody};
+    use crate::value::{DispatchId, TrajectoryId};
     use serde_json::json;
 
     const SUSPICIOUS: Trust = Trust::new(0);
@@ -957,21 +932,8 @@ mod tests {
     }
 
     fn requiring_trust(mut contract: ToolAnnotation, floor: Trust) -> ToolAnnotation {
-        contract.requires.label.trust_floor = Some(Dim::Known(floor));
+        contract.requires.label.trust_floor = Some(floor);
         contract
-    }
-
-    trait Written {
-        fn written(&mut self) -> &mut Vec<AudienceRequirement>;
-    }
-
-    impl Written for Dim<Vec<AudienceRequirement>> {
-        fn written(&mut self) -> &mut Vec<AudienceRequirement> {
-            let Dim::Known(requirements) = self else {
-                panic!("a test contract writes its requirements")
-            };
-            requirements
-        }
     }
 
     fn requiring_includes(mut contract: ToolAnnotation, recipients: Audience) -> ToolAnnotation {
@@ -979,7 +941,6 @@ mod tests {
             .requires
             .label
             .audience
-            .written()
             .push(AudienceRequirement::Includes(RecipientSpec::Static(
                 DeclaredAudience::literal(recipients),
             )));
@@ -991,15 +952,14 @@ mod tests {
             .requires
             .label
             .audience
-            .written()
             .push(AudienceRequirement::Cap(DeclaredAudience::literal(cap)));
         contract
     }
 
     fn narrowing_to(mut contract: ToolAnnotation, trust: Option<Trust>, audience: Option<Audience>) -> ToolAnnotation {
         contract.delta = Delta {
-            trust: trust.map(Dim::Known),
-            audience: audience.map(|audience| Dim::Known(audience).into()),
+            trust,
+            audience: audience.map(DeclaredAudience::literal),
         };
         contract
     }
@@ -1094,7 +1054,7 @@ mod tests {
     }
 
     fn opened(trust: Trust, audience: Audience) -> Fact {
-        crate::profile::opening_at(traj(), Label::new(Dim::Known(trust), Dim::Known(audience)))
+        crate::profile::opening_at(traj(), Label::new(trust, audience))
     }
 
     fn seed_call(tag: &str) -> ResolvedCall {
@@ -1122,12 +1082,11 @@ mod tests {
             tool: seed.tool().clone(),
             declaration: seed.declaration_id(),
             arguments: seed.canonical_arguments().clone(),
-            proposed_label: EstablishedLabel::new(TRUSTED, Audience::Public),
-            receiving: EstablishedLabel::new(TRUSTED, Audience::Public),
+            proposed_label: Label::new(TRUSTED, Audience::Public),
+            receiving: Label::new(TRUSTED, Audience::Public),
             proposed_effects: EffectSet::new(kinds.iter().map(|kind| effect(kind))).unwrap(),
             annotation: pinned(&seed),
             memberships: Vec::new(),
-            requirement_cast: None,
             subject: crate::basis::fixture_subject(&traj()),
             resolutions: vec![],
         }
@@ -1135,16 +1094,6 @@ mod tests {
 
     fn reserved(kind: &str) -> Fact {
         dispatched(kind, &[kind])
-    }
-
-    fn admitted(label: Label) -> Fact {
-        Fact::ValueAdmitted {
-            trajectory: traj(),
-            value: LabeledValue::new(ValueBody::new("body"), label),
-            provenance: Provenance::ToolResult {
-                dispatch: DispatchId::new(traj(), seed_call("admitted").digest(), 0),
-            },
-        }
     }
 
     fn call(name: &str, args: serde_json::Value) -> ResolvedCall {
@@ -1362,8 +1311,8 @@ mod tests {
                         tool: ToolName::new("backup"),
                         clears: vec![prior("backup")],
                         accepts: Some(Narrowing {
-                            from: EstablishedLabel::new(TRUSTED, Audience::Public),
-                            to: EstablishedLabel::new(SUSPICIOUS, Audience::Public),
+                            from: Label::new(TRUSTED, Audience::Public),
+                            to: Label::new(SUSPICIOUS, Audience::Public),
                         }),
                     },
                     RouteStep::Authorize {
@@ -1420,8 +1369,8 @@ mod tests {
                         tool: ToolName::new("backup"),
                         clears: vec![prior("backup")],
                         accepts: Some(Narrowing {
-                            from: EstablishedLabel::new(TRUSTED, Audience::Public),
-                            to: EstablishedLabel::new(TRUSTED, internal),
+                            from: Label::new(TRUSTED, Audience::Public),
+                            to: Label::new(TRUSTED, internal),
                         }),
                     },
                     RouteStep::Authorize {
@@ -1453,8 +1402,8 @@ mod tests {
                     tool: ToolName::new("read_internal"),
                     clears: vec![Gap::Cap { cap: internal.clone() }],
                     accepts: Some(Narrowing {
-                        from: EstablishedLabel::new(TRUSTED, Audience::Public),
-                        to: EstablishedLabel::new(TRUSTED, internal),
+                        from: Label::new(TRUSTED, Audience::Public),
+                        to: Label::new(TRUSTED, internal),
                     }),
                 }],
                 RouteOutcome::Complete,
@@ -1475,21 +1424,12 @@ mod tests {
             )]
         };
 
-        let mut unestablished = emitting("backup", &["backup"]);
-        unestablished.delta = Delta {
-            trust: Some(Dim::Unknown),
-            audience: None,
-        };
-        let registry = Deployment::of(vec![unestablished, requiring_prior(tool("wipe"), &["backup"])]).registry();
-        assert_eq!(routes(&registry, &log, &wipe, depth(2)), prefix(Halt::Unestablished));
-
         let mut placeholder = emitting("backup", &["backup"]);
         placeholder.parameters = crate::params::test_string_argument_schema("to");
         placeholder
             .requires
             .label
             .audience
-            .written()
             .push(AudienceRequirement::Includes(RecipientSpec::Placeholder(
                 "to".to_string(),
             )));
@@ -1504,19 +1444,6 @@ mod tests {
             routes(&registry, &log_internal, &wipe, depth(2)),
             prefix(Halt::Block(vec![Gap::Includes { recipients: partner }])),
             "a call-bound gap of the preceding call is planned at its own block"
-        );
-
-        let consuming = requiring_trust(emitting("backup", &["backup"]), TRUSTED);
-        let tools = vec![tool("seed"), consuming, requiring_prior(tool("wipe"), &["backup"])];
-        let log_unknown = vec![
-            opened(TRUSTED, Audience::Public),
-            dispatched("admitted", &[]),
-            admitted(Label::new(Dim::Unknown, Dim::Known(Audience::Public))),
-        ];
-        let uncastable = Deployment::of(tools.clone()).registry();
-        assert!(
-            routes(&uncastable, &log_unknown, &wipe, depth(2)).is_empty(),
-            "an unresolved source nothing casts fails closed at the call that consumes it"
         );
     }
 
@@ -1558,8 +1485,8 @@ mod tests {
             routes(&registry, &log, &call("read_internal", json!({})), depth(2)),
             vec![route(
                 vec![RouteStep::Accept(Narrowing {
-                    from: EstablishedLabel::new(TRUSTED, Audience::Public),
-                    to: EstablishedLabel::new(TRUSTED, internal),
+                    from: Label::new(TRUSTED, Audience::Public),
+                    to: Label::new(TRUSTED, internal),
                 })],
                 RouteOutcome::Complete,
                 Certainty::Guaranteed
@@ -1846,18 +1773,5 @@ mod tests {
             };
             assert_eq!(executable(&found), executable(&expected));
         }
-    }
-
-    #[test]
-    fn an_unestablished_source_at_the_block_leaves_no_route_at_any_depth() {
-        let registry = Deployment::of(vec![tool("seed"), requiring_trust(tool("gate"), TRUSTED)])
-            .authorities(vec![trust_authority("officer", VETTED)])
-            .registry();
-        let log = vec![
-            opened(TRUSTED, Audience::Public),
-            admitted(Label::new(Dim::Unknown, Dim::Known(Audience::Public))),
-        ];
-
-        assert!(routes(&registry, &log, &call("gate", json!({})), depth(4)).is_empty());
     }
 }

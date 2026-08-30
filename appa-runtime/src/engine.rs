@@ -35,18 +35,16 @@
 //! the plan from the live views and matches it by value, so an offer whose
 //! basis has moved declines instead of executing.
 
-use appa_engine::candidate::DerivedVia;
-use appa_engine::check::UnestablishedFact;
 use appa_engine::contract::{
-    AnnotationMandate, AudienceDelta, AudienceRequirement, Delta, HistoryRequirement, LabelRequirements,
-    PinnedAnnotation, PinnedMembership, RecipientSpec, RequirementSlot, Requires, ToolAnnotation, ToolDeclaration,
+    AnnotationMandate, AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, PinnedAnnotation,
+    PinnedMembership, RecipientSpec, Requires, ToolAnnotation, ToolDeclaration,
 };
 pub(crate) use appa_engine::engine::ForkStatus;
 use appa_engine::engine::{Engine, EngineError};
 use appa_engine::execute::{AuthorityEvidence, AuthorityReview};
 use appa_engine::fact::{BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ReturnDerivation};
 use appa_engine::groups::{DeclaredAudience, GroupExpansion};
-use appa_engine::label::{Audience, Dim, Dimension, EstablishedLabel, Label, PartialLabel, ReaderId, Trust};
+use appa_engine::label::{Audience, Label, ReaderId, Trust};
 use appa_engine::names::{GroupName, MarkName};
 use appa_engine::plan::{ExecutableRemedyPlan, PlanId, PlannedBlock, RemedyPlan, RequiredRuling};
 use appa_engine::profile::PolicyFileKey as EnginePolicyFileKey;
@@ -64,11 +62,10 @@ use appa_engine::transition::{
     ToolOutcome as CoreToolOutcome, ToolReport, TransitionError, TransitionRefusal, ValidatedFactBatch,
 };
 use appa_engine::value::{
-    ChildReturnId, DispatchId as EngineDispatchId, ForkId, OfferId as EngineOfferId, OfferNonce as EngineOfferNonce,
-    Provenance, RawResultDigest, ResolvedCall, ToolName, TrajectoryId as EngineTrajectoryId, ValueBody, ValueId,
+    DispatchId as EngineDispatchId, ForkId, OfferId as EngineOfferId, OfferNonce as EngineOfferNonce, RawResultDigest,
+    ResolvedCall, ToolName, TrajectoryId as EngineTrajectoryId, ValueBody,
 };
 use appa_eventlog::Log;
-use appa_runtime_api::{LabelDimension, UnestablishedValue};
 use std::collections::BTreeMap;
 
 use crate::api::OutcomeBody;
@@ -100,8 +97,6 @@ pub struct ReleasedCall {
 pub struct Feedback {
     pub text: String,
     pub offers: Vec<OfferId>,
-    /// The sources the block names as unestablished, typed; `text` says the same in prose.
-    pub unestablished: Vec<UnestablishedValue>,
 }
 
 /// One external consult the session must resolve before the same semantic
@@ -310,20 +305,14 @@ pub struct TrajectoryStatus {
     pub trajectory: String,
     pub trust: String,
     pub audience: String,
-    /// The ids of the admitted values whose trust is still unresolved. `trust` is the
-    /// established bound: every known restriction, readable while these stand.
-    pub unresolved_trust: Vec<u64>,
-    pub unresolved_audience: Vec<u64>,
 }
 
-/// One label rendered for a display surface: the established bound per dimension as chain
-/// names and reader ids, plus the ids of the sources still unresolved on it.
+/// One label rendered for a display surface: each dimension as chain
+/// names and reader ids.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct AuditLabel {
     pub trust: String,
     pub audience: String,
-    pub unresolved_trust: Vec<u64>,
-    pub unresolved_audience: Vec<u64>,
 }
 
 /// One decision the family log recorded, in log order (the
@@ -657,39 +646,32 @@ impl RuntimeEngine {
             trajectory: terminal_safe(&trajectory.0),
             trust: label.trust,
             audience: label.audience,
-            unresolved_trust: label.unresolved_trust,
-            unresolved_audience: label.unresolved_audience,
         })
     }
 
-    /// The established bound by name, and the ids of the sources still unresolved beside
-    /// it: an unresolved source never hides a known restriction.
-    fn render_label(&self, label: &PartialLabel) -> Option<AuditLabel> {
+    /// The label by name: each dimension as chain names and reader ids.
+    fn render_label(&self, label: &Label) -> Option<AuditLabel> {
         let chain = self.engine.registry().trust_chain();
-        let bound = label.bound();
-        let trust = if bound.trust == Trust::new(u8::MAX) {
+        let trust = if label.trust == Trust::new(u8::MAX) {
             chain
                 .name_of(Trust::new((chain.len() - 1) as u8))
                 .expect("a validated chain names its top rank")
                 .to_string()
         } else {
-            match chain.name_of(bound.trust) {
+            match chain.name_of(label.trust) {
                 Some(name) => name.to_string(),
                 None => {
                     tracing::warn!(
-                        rank = bound.trust.rank(),
+                        rank = label.trust.rank(),
                         "render refused: the trust bound has no chain name"
                     );
                     return None;
                 }
             }
         };
-        let unresolved = |dim| label.unresolved(dim).map(ValueId::index).collect();
         Some(AuditLabel {
             trust: terminal_safe(&trust),
-            audience: terminal_safe(&audience_wire(&bound.audience)),
-            unresolved_trust: unresolved(Dimension::Trust),
-            unresolved_audience: unresolved(Dimension::Audience),
+            audience: terminal_safe(&audience_wire(&label.audience)),
         })
     }
 
@@ -701,44 +683,23 @@ impl RuntimeEngine {
         // The validator takes the records; this read keeps its own copy of
         // them, which is why the audit — and only the audit — clones a log.
         self.validated(facts.clone(), &root, log.basis())?;
-        let mut prepared: std::collections::HashMap<ForkId, (String, PartialLabel)> = std::collections::HashMap::new();
-        // A value's id is its admission's position in the family log, as the projection
-        // numbers it; a child return is cited by the admission its merge appended.
-        let mut returned: std::collections::HashMap<ChildReturnId, ValueId> = std::collections::HashMap::new();
-        let mut admissions: u64 = 0;
+        let mut prepared: std::collections::HashMap<ForkId, (String, Label)> = std::collections::HashMap::new();
         for fact in &facts {
-            match fact {
-                Fact::ForkPrepared {
-                    fork,
-                    snapshot,
-                    trajectory,
-                    ..
-                } => {
-                    prepared.insert(
-                        fork.clone(),
-                        (terminal_safe(trajectory.as_str()), snapshot.seed().clone()),
-                    );
-                }
-                Fact::ValueAdmitted { provenance, .. } => {
-                    if let Provenance::ChildReturn { id, .. } = provenance {
-                        returned.insert(id.clone(), ValueId::new(admissions));
-                    }
-                    admissions += 1;
-                }
-                _ => {}
+            if let Fact::ForkPrepared {
+                fork,
+                snapshot,
+                trajectory,
+                ..
+            } = fact
+            {
+                prepared.insert(
+                    fork.clone(),
+                    (terminal_safe(trajectory.as_str()), snapshot.seed().clone()),
+                );
             }
         }
-        let mut admissions: u64 = 0;
         let mut entries = Vec::new();
         for fact in &facts {
-            let admitted = match fact {
-                Fact::ValueAdmitted { .. } => {
-                    admissions += 1;
-                    Some(ValueId::new(admissions - 1))
-                }
-                Fact::ChildReturn { id, .. } => returned.get(id).copied(),
-                _ => None,
-            };
             let event = match fact {
                 Fact::ForkOpened { fork, .. } => match prepared.get(fork) {
                     Some((parent, seed)) => match self.render_label(seed) {
@@ -752,7 +713,7 @@ impl RuntimeEngine {
                     // A child opened with no recorded preparation in this read.
                     None => continue,
                 },
-                _ => match self.audit_event(fact, admitted) {
+                _ => match self.audit_event(fact) {
                     Some(Some(event)) => event,
                     // A record the audit does not show.
                     Some(None) => continue,
@@ -768,8 +729,7 @@ impl RuntimeEngine {
         Ok(Some(entries))
     }
 
-    /// `admitted` is the id of the value this fact admits, where it admits one.
-    fn audit_event(&self, fact: &Fact, admitted: Option<ValueId>) -> Option<Option<AuditEvent>> {
+    fn audit_event(&self, fact: &Fact) -> Option<Option<AuditEvent>> {
         let event = match fact {
             Fact::DispatchOpened {
                 tool,
@@ -778,7 +738,7 @@ impl RuntimeEngine {
                 ..
             } => AuditEvent::Released {
                 tool: terminal_safe(tool.as_str()),
-                label: self.render_label(&PartialLabel::established(proposed_label.clone()))?,
+                label: self.render_label(proposed_label)?,
                 effects: effect_names(proposed_effects),
             },
             Fact::DispatchSucceeded { effects, .. } => AuditEvent::EffectsCommitted {
@@ -794,10 +754,7 @@ impl RuntimeEngine {
                 },
             },
             Fact::ValueAdmitted { value, .. } => AuditEvent::Admitted {
-                label: self.render_label(&value_fold(
-                    admitted.expect("the audit numbers every admission it reads"),
-                    &value.label,
-                ))?,
+                label: self.render_label(&value.label)?,
             },
             Fact::Ruling { authority, .. } => AuditEvent::Ruled {
                 authority: terminal_safe(authority.as_str()),
@@ -808,26 +765,21 @@ impl RuntimeEngine {
             Fact::Acceptance { narrowing, .. }
             | Fact::ChildReturnAcceptance { narrowing, .. }
             | Fact::CandidateAccepted { narrowing, .. } => AuditEvent::Narrowed {
-                from: self.render_label(&PartialLabel::established(narrowing.from.clone()))?,
-                to: self.render_label(&PartialLabel::established(narrowing.to.clone()))?,
+                from: self.render_label(&narrowing.from)?,
+                to: self.render_label(&narrowing.to)?,
             },
             Fact::OutputSanitizerBound { sanitizer, .. } => AuditEvent::SanitizerBound {
                 sanitizer: terminal_safe(sanitizer.as_str()),
             },
-            Fact::CandidateDerived { via, .. } => match via {
-                DerivedVia::Sanitizer { name, .. } => AuditEvent::Sanitized {
-                    sanitizer: terminal_safe(name.as_str()),
-                },
+            Fact::CandidateDerived { via, .. } => AuditEvent::Sanitized {
+                sanitizer: terminal_safe(via.name.as_str()),
             },
             Fact::ChildReturn { value, derivation, .. } => AuditEvent::ChildReturn {
                 sanitizer: match derivation {
                     ReturnDerivation::Raw => None,
                     ReturnDerivation::Sanitized { sanitizer, .. } => Some(terminal_safe(sanitizer.as_str())),
                 },
-                label: self.render_label(&value_fold(
-                    admitted.expect("a merge admits the value its crossing carries"),
-                    &value.label,
-                ))?,
+                label: self.render_label(&value.label)?,
             },
             Fact::Boundary { kind, .. } => match kind {
                 BoundaryKind::Merge { .. } => AuditEvent::Merged,
@@ -919,7 +871,6 @@ impl RuntimeEngine {
             arguments: call.arguments.get().as_bytes().to_vec(),
             annotation,
             memberships,
-            requirement_cast: None,
         };
         let expansions = self.membership_evidence(evidence);
         // A deployment that does not control context releases the marked call
@@ -957,20 +908,12 @@ impl RuntimeEngine {
             Err(error) => return Err(proposal_refusal(error)),
         };
         let append = decision.append.map(ValidatedFactBatch::into_unsealed);
-        let then = self.deliver_proposals(view, trajectory, decision.follow_up)?;
+        let then = self.deliver_proposals(decision.follow_up)?;
         Ok(EngineDecision { append, then })
     }
 
-    fn deliver_proposals(
-        &self,
-        view: &EngineView,
-        trajectory: &TrajectoryId,
-        follow_up: FollowUp,
-    ) -> Result<Next, EngineRefusal> {
+    fn deliver_proposals(&self, follow_up: FollowUp) -> Result<Next, EngineRefusal> {
         match follow_up {
-            FollowUp::ProposalsResolve(_) => Err(EngineRefusal::Invariant {
-                detail: "a proposal batch asked for evidence no runtime path resolves".to_string(),
-            }),
             FollowUp::Proposals {
                 released: releases,
                 blocked,
@@ -985,7 +928,7 @@ impl RuntimeEngine {
                     });
                 }
                 if let Some(block) = blocked.into_iter().next() {
-                    let feedback = self.block_delivery(view, trajectory, &block);
+                    let feedback = self.block_delivery(&block);
                     return Ok(Next::ModelResponse {
                         invocations: Vec::new(),
                         feedback: vec![feedback],
@@ -1007,33 +950,18 @@ impl RuntimeEngine {
         }
     }
 
-    fn block_delivery(&self, view: &EngineView, trajectory: &TrajectoryId, block: &CoreBlocked) -> Feedback {
-        let owner = engine_id(trajectory);
-        let views = view
-            .views(&owner)
-            .expect("a block is delivered for the opened trajectory whose proposal the engine decided");
-        let (text, offers) = self.rendered_block(&views, block);
-        let unestablished = block
-            .block
-            .raw
-            .unestablished
-            .iter()
-            .map(|fact| unestablished_value(&views, fact))
-            .collect();
-        Feedback {
-            text,
-            offers,
-            unestablished,
-        }
+    fn block_delivery(&self, block: &CoreBlocked) -> Feedback {
+        let (text, offers) = self.rendered_block(block);
+        Feedback { text, offers }
     }
 
-    fn rendered_block(&self, views: &Views, block: &CoreBlocked) -> (String, Vec<OfferId>) {
+    fn rendered_block(&self, block: &CoreBlocked) -> (String, Vec<OfferId>) {
         let offers: Vec<(OfferId, PlanId)> = block
             .offers
             .iter()
             .map(|(offer, plan)| (offer_id(offer), *plan))
             .collect();
-        let text = block_feedback(views, &block.block, &offers, self.engine.registry().trust_chain());
+        let text = block_feedback(&block.block, &offers, self.engine.registry().trust_chain());
         (text, offers.into_iter().map(|(offer, _)| offer).collect())
     }
 
@@ -1256,11 +1184,9 @@ impl RuntimeEngine {
             FollowUp::Offer(OfferFollowUp::Invalidated) => Next::PresentToModel(Presentation::Declined {
                 feedback: "[appa] the state changed and this offer no longer applies; re-propose the call".to_string(),
             }),
-            FollowUp::Offer(OfferFollowUp::Denied { block }) => {
-                Next::PresentToModel(self.offer_block_delivery(&views, &block))
-            }
+            FollowUp::Offer(OfferFollowUp::Denied { block }) => Next::PresentToModel(self.offer_block_delivery(&block)),
             FollowUp::Offer(OfferFollowUp::Substituted { block }) => {
-                Next::PresentToModel(self.offer_block_delivery(&views, &block))
+                Next::PresentToModel(self.offer_block_delivery(&block))
             }
             FollowUp::Offer(OfferFollowUp::Staged(confined)) => Next::PresentToModel(self.stage_delivery(
                 "[appa] the cleaned result still narrows this session.",
@@ -1347,8 +1273,8 @@ impl RuntimeEngine {
         AuthorityOutcome::Outcome(OfferOutcome::Approved(approvals))
     }
 
-    fn offer_block_delivery(&self, views: &Views, block: &CoreBlocked) -> Presentation {
-        let (feedback, offers) = self.rendered_block(views, block);
+    fn offer_block_delivery(&self, block: &CoreBlocked) -> Presentation {
+        let (feedback, offers) = self.rendered_block(block);
         Presentation::Blocked { feedback, offers }
     }
 
@@ -1493,19 +1419,9 @@ impl RuntimeEngine {
             .expect("a resolved call names its registered declaration");
         let mut requests = Vec::new();
         // An Annotated declaration owes exactly one thing: its produced annotation, which is
-        // complete, concrete, and literal — so it carries no membership pins. A declared
-        // contract that leaves a requirement slot unwritten is refused before the call runs:
-        // nothing can answer it.
+        // complete, concrete, and literal — so it carries no membership pins.
         let (annotation, memberships) = match declaration {
             ToolDeclaration::Declared(contract) => {
-                let slots: Vec<RequirementSlot> = contract.requires.unknown_slots().collect();
-                if !slots.is_empty() {
-                    return Err(Resolution::Feedback(uncovered_requirements(
-                        self.engine.registry().classify(resolved.tool()),
-                        resolved.tool().as_str(),
-                        &slots,
-                    )));
-                }
                 let memberships = gather(&mut requests, self.memberships_for(contract, resolved, evidence))?;
                 (Some(None), memberships)
             }
@@ -1641,18 +1557,15 @@ impl RuntimeEngine {
             description: declaration.description().map(str::to_string),
             parameters: declaration.parameters().clone(),
             delta: Delta {
-                trust: answer.delta_trust.as_deref().map(|name| Dim::Known(rank(name))),
-                audience: answer
-                    .delta_audience
-                    .as_ref()
-                    .map(|audience| AudienceDelta::Static(declared(audience))),
+                trust: answer.delta_trust.as_deref().map(rank),
+                audience: answer.delta_audience.as_ref().map(declared),
             },
             emits: EffectSet::new(answer.emits.iter().map(|kind| EffectKind::new(kind.as_str())))
                 .expect("a decoded annotation answer holds no duplicate effect"),
             requires: Requires {
                 label: LabelRequirements {
-                    trust_floor: answer.required_trust.as_deref().map(|name| Dim::Known(rank(name))),
-                    audience: Dim::Known(requirements),
+                    trust_floor: answer.required_trust.as_deref().map(rank),
+                    audience: requirements,
                 },
                 history: answer
                     .history
@@ -1662,13 +1575,11 @@ impl RuntimeEngine {
                         HistoryEntry::Excludes(kind) => HistoryRequirement::NoPrior(EffectKind::new(kind.as_str())),
                     })
                     .collect(),
-                attention: Dim::Known(
-                    answer
-                        .attention
-                        .iter()
-                        .map(|mark| MarkName::new(mark.as_str()))
-                        .collect(),
-                ),
+                attention: answer
+                    .attention
+                    .iter()
+                    .map(|mark| MarkName::new(mark.as_str()))
+                    .collect(),
             },
         }
     }
@@ -1965,21 +1876,6 @@ fn gather<T>(requests: &mut Vec<ExternalRequest>, answer: Result<T, Resolution>)
     }
 }
 
-/// The denial for a call whose contract leaves requirement slots Unknown: nothing can answer
-/// them, so the call is refused before it runs — an undeclared tool, or a declared tool whose
-/// policy leaves a requirement unwritten.
-fn uncovered_requirements(kind: appa_engine::registry::ToolKind, tool: &str, slots: &[RequirementSlot]) -> String {
-    match kind {
-        appa_engine::registry::ToolKind::Undeclared => {
-            format!("[appa] tool {tool} is not declared in this policy; the call is refused before it runs")
-        }
-        _ => format!(
-            "[appa] {tool}: its policy leaves {} unknown and nothing can answer it; the call was not checked",
-            slots.iter().map(|slot| slot.wire_name()).collect::<Vec<_>>().join(", ")
-        ),
-    }
-}
-
 fn unresolved_group(tool: &str, group: &GroupName) -> String {
     format!(
         "[appa] {tool}: membership of {group} could not be resolved; the call was not checked — propose it again later"
@@ -2030,7 +1926,6 @@ fn deny_next(text: String) -> Next {
         feedback: vec![Feedback {
             text,
             offers: Vec::new(),
-            unestablished: Vec::new(),
         }],
     }
 }
@@ -2309,14 +2204,6 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// One admitted value's own contribution as a fold: a known dimension is the bound, an
-/// unknown one names the value itself as the unresolved source.
-fn value_fold(id: ValueId, label: &Label) -> PartialLabel {
-    let mut fold = PartialLabel::established(EstablishedLabel::top());
-    fold.fold_value(id, label);
-    fold
-}
-
 fn effect_names(effects: &EffectSet) -> Vec<String> {
     effects.iter().map(|effect| terminal_safe(effect.as_str())).collect()
 }
@@ -2387,74 +2274,6 @@ fn gap_text(gap: &appa_engine::check::Gap) -> String {
         Gap::NoPrior(effect) => format!("forbidden after a {} effect", effect.as_str()),
         Gap::Attention(mark) => format!("requires attention: {}", mark.as_str()),
     }
-}
-
-/// Name a blocked value by where it came from, keeping its id: `ValueId(0)` alone tells the model
-/// nothing, and the id stays because the trail cites it.
-///
-/// Only a value the receiving trajectory admitted itself is named this way. A blocked child return
-/// is parent-facing while its facts are the child's, and `submit_result` is the ONLY channel
-/// carrying child-derived data back: naming the tool the child chose would make this
-/// feedback a second one, so a value the scope does not own stays id-only.
-fn unestablished_source(views: &Views, value: ValueId) -> String {
-    if !views.owns_value(value) {
-        return format!("value {value:?}");
-    }
-    let source = match views.value_provenance(value) {
-        Some(Provenance::ToolResult { dispatch }) => views
-            .dispatch_tool(dispatch)
-            .map(|tool| format!("the result of {}", tool.as_str())),
-        Some(Provenance::ChildReturn { .. }) => Some("a subagent's return".to_string()),
-        Some(Provenance::ProviderRun { tool, .. }) => Some(format!("the provider's {} result", tool.as_str())),
-        None => None,
-    };
-    match source {
-        Some(source) => format!("{source} ({value:?})"),
-        None => format!("value {value:?}"),
-    }
-}
-
-/// The typed form of one unestablished source, under the same ownership rule as the prose:
-/// a value the receiving trajectory did not admit itself is cited by id alone.
-fn unestablished_value(views: &Views, fact: &UnestablishedFact) -> UnestablishedValue {
-    let tool = match views.owns_value(fact.value) {
-        false => None,
-        true => match views.value_provenance(fact.value) {
-            Some(Provenance::ToolResult { dispatch }) => views.dispatch_tool(dispatch).map(ToolName::as_str),
-            Some(Provenance::ProviderRun { tool, .. }) => Some(tool.as_str()),
-            Some(Provenance::ChildReturn { .. }) | None => None,
-        },
-    };
-    UnestablishedValue {
-        value: fact.value.index(),
-        tool: tool.map(terminal_safe),
-        dimensions: fact
-            .dimensions
-            .iter()
-            .map(|dim| match dim {
-                Dimension::Trust => LabelDimension::Trust,
-                Dimension::Audience => LabelDimension::Audience,
-            })
-            .collect(),
-    }
-}
-
-fn unestablished_feedback(views: &Views, facts: &[UnestablishedFact]) -> String {
-    let entries: Vec<String> = facts
-        .iter()
-        .map(|fact| {
-            let dims: Vec<String> = fact.dimensions.iter().map(|dim| format!("{dim:?}")).collect();
-            format!(
-                "{} is missing label facts for {}",
-                unestablished_source(views, fact.value),
-                dims.join(", ")
-            )
-        })
-        .collect();
-    format!(
-        "{}. A fact must resolve this before a remedy can run",
-        entries.join("; ")
-    )
 }
 
 fn trust_feedback(trust: Trust, chain: &TrustChain) -> String {
@@ -2540,19 +2359,13 @@ fn remedy_lines(planned: &PlannedBlock, offers: &[(OfferId, PlanId)]) -> Vec<Str
         .collect()
 }
 
-fn block_feedback(views: &Views, planned: &PlannedBlock, offers: &[(OfferId, PlanId)], chain: &TrustChain) -> String {
+fn block_feedback(planned: &PlannedBlock, offers: &[(OfferId, PlanId)], chain: &TrustChain) -> String {
     let mut reasons = Vec::new();
     for gap in &planned.raw.requirement_gaps {
         reasons.push(terminal_safe(&gap_text(gap)));
     }
     if let Some(narrowing) = &planned.raw.narrowing {
         reasons.extend(narrowing_feedback(narrowing, chain));
-    }
-    if !planned.raw.unestablished.is_empty() {
-        reasons.push(terminal_safe(&unestablished_feedback(
-            views,
-            &planned.raw.unestablished,
-        )));
     }
 
     let mut lines = vec![
@@ -2588,12 +2401,10 @@ mod tests {
         remedy_lines, terminal_safe,
     };
     use crate::consult::{AnnotationAnswer, HistoryEntry, RequiredAudienceAnswer, SanitizerPoint, WireAudience};
-    use appa_engine::contract::{
-        AnnotationMandate, AudienceDelta, AudienceRequirement, HistoryRequirement, RecipientSpec,
-    };
+    use appa_engine::contract::{AnnotationMandate, AudienceRequirement, HistoryRequirement, RecipientSpec};
     use appa_engine::fact::{EffectKind, EffectSet};
     use appa_engine::groups::DeclaredAudience;
-    use appa_engine::label::{Audience, Dim, ReaderId, Trust};
+    use appa_engine::label::{Audience, ReaderId, Trust};
     use appa_engine::names::{AnnotatorName, MarkName};
     use appa_engine::plan::{ExecutableRemedyPlan, PlanId, PlannedBlock, RemedyPlan, RemedyStep};
     use appa_engine::value::{RawResultDigest, ToolName, ValueBody};
@@ -2778,7 +2589,7 @@ mod tests {
             .expect("the recorded annotation pins without evidence");
         assert_eq!(
             pin.annotation().requires.attention,
-            Dim::Known(vec![MarkName::new("privacy-review")])
+            vec![MarkName::new("privacy-review")]
         );
 
         // Evidence for a call the trajectory already annotated is not a second answer: the
@@ -2893,26 +2704,23 @@ mod tests {
         let produced = pin.annotation();
         assert_eq!(produced.name, ToolName::new("lookup"));
         assert_eq!(produced.description.as_deref(), Some("Looks one record up."));
-        assert_eq!(produced.delta.trust, Some(Dim::Known(Trust::new(0))));
-        assert_eq!(
-            produced.delta.audience,
-            Some(AudienceDelta::Static(DeclaredAudience::Public))
-        );
-        assert_eq!(produced.requires.label.trust_floor, Some(Dim::Known(Trust::new(1))));
+        assert_eq!(produced.delta.trust, Some(Trust::new(0)));
+        assert_eq!(produced.delta.audience, Some(DeclaredAudience::Public));
+        assert_eq!(produced.requires.label.trust_floor, Some(Trust::new(1)));
         assert_eq!(
             produced.requires.label.audience,
-            Dim::Known(vec![
+            vec![
                 AudienceRequirement::Includes(RecipientSpec::Static(DeclaredAudience::restricted([ReaderId::new(
                     "support"
                 )]))),
                 AudienceRequirement::Cap(DeclaredAudience::Public),
-            ])
+            ]
         );
         assert_eq!(
             produced.requires.history,
             vec![HistoryRequirement::NoPrior(EffectKind::new("send"))]
         );
-        assert_eq!(produced.requires.attention, Dim::Known(Vec::new()));
+        assert_eq!(produced.requires.attention, Vec::<MarkName>::new());
         assert_eq!(
             produced.emits,
             EffectSet::new([EffectKind::new("read")]).expect("one kind is no duplicate")
@@ -2957,8 +2765,6 @@ mod tests {
             raw: appa_engine::check::RawBlock {
                 requirement_gaps: vec![],
                 narrowing: None,
-                unestablished: vec![],
-                unknown_requirements: vec![],
             },
             plans: vec![
                 RemedyPlan::Executable(plan(3)),

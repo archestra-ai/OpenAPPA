@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 use crate::contract::{ToolAnnotation, ToolDeclaration};
 use crate::fact::ReturnPolicy;
-use crate::label::{Dim, Dimension, Label, Trust};
+use crate::label::{Label, Trust};
 use crate::names::SurfaceName;
 use crate::registry::{LoadError, PlannerCap, Registry, RegistryConfig, TrustChain, check_rank, check_readers};
 use crate::value::ToolName;
@@ -99,7 +99,7 @@ pub struct ProfileDeclaration {
 
 /// The immutable, normalized deployment profile — the typed form of the policy file's
 /// `[deployment]` table. Construction and deserialization both run
-/// [`DeploymentProfile::declare`], so a profile with an unestablished starting dimension or an
+/// [`DeploymentProfile::declare`], so a profile with an
 /// exception equal to its own default is unrepresentable, and a replayed opening record meets the
 /// same rules the loader reports.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -148,16 +148,6 @@ impl DeploymentProfile {
             provider_surfaces,
             binding,
         } = declaration;
-        if matches!(starting_label.trust, Dim::Unknown) {
-            return Err(LoadError::UnresolvedStartingDimension {
-                dimension: Dimension::Trust,
-            });
-        }
-        if matches!(starting_label.audience, Dim::Unknown) {
-            return Err(LoadError::UnresolvedStartingDimension {
-                dimension: Dimension::Audience,
-            });
-        }
         executor_exceptions.retain(|_, class| *class != dispatch);
         Ok(DeploymentProfile {
             starting_label,
@@ -238,7 +228,7 @@ impl<'de> Deserialize<'de> for DeploymentProfile {
 /// rank of the trust chain.
 pub fn neutral_starting_label(chain: &TrustChain) -> Label {
     let top = Trust::new(chain.len().saturating_sub(1) as u8);
-    Label::new(Dim::Known(top), Dim::Known(crate::label::Audience::Public))
+    Label::new(top, crate::label::Audience::Public)
 }
 
 /// The version of the policy configuration dialect a policy file was written in, carried on the
@@ -322,10 +312,10 @@ fn identity_document_from_registry(registry: &Registry, child_return: &ReturnPol
             "delta": tool.delta,
             "emits": tool.emits,
             "requires": {
-                "trust_floor": trust_slot(tool.requires.label.trust_floor.as_ref()),
-                "audience": list_slot(&tool.requires.label.audience),
+                "trust_floor": tool.requires.label.trust_floor,
+                "audience": sorted_set(&tool.requires.label.audience),
                 "history": sorted_set(&tool.requires.history),
-                "attention": list_slot(&tool.requires.attention),
+                "attention": sorted_set(&tool.requires.attention),
             },
         })
     }
@@ -405,23 +395,6 @@ pub(crate) fn identity_of(
 
 fn canonical_value(value: &impl Serialize) -> serde_json::Value {
     serde_json::to_value(value).expect("an engine declaration serializes")
-}
-
-/// A requirement list slot in identity: its sorted members, or `"unknown"`.
-fn list_slot<T: Serialize>(slot: &Dim<Vec<T>>) -> serde_json::Value {
-    match slot {
-        Dim::Known(values) => serde_json::Value::Array(sorted_set(values)),
-        Dim::Unknown => serde_json::json!("unknown"),
-    }
-}
-
-/// The trust-floor slot in identity: the rank, `null` for no floor, or `"unknown"`.
-fn trust_slot(slot: Option<&Dim<Trust>>) -> serde_json::Value {
-    match slot {
-        None => serde_json::Value::Null,
-        Some(Dim::Known(floor)) => canonical_value(floor),
-        Some(Dim::Unknown) => serde_json::json!("unknown"),
-    }
 }
 
 fn sorted_set(values: &[impl Serialize]) -> Vec<serde_json::Value> {
@@ -517,15 +490,15 @@ pub(crate) fn validate_coverage(
 ) -> Result<(), LoadError> {
     let profile = registry.profile();
     let chain = registry.trust_chain();
-    if let Dim::Known(trust) = profile.starting_label.trust {
-        check_rank(chain, Some(trust), || "deployment starting label".to_string())?;
-    }
-    if let Dim::Known(audience) = &profile.starting_label.audience {
-        check_readers(audience, || "deployment starting label".to_string())?;
-    }
+    check_rank(chain, Some(profile.starting_label.trust), || {
+        "deployment starting label".to_string()
+    })?;
+    check_readers(&profile.starting_label.audience, || {
+        "deployment starting label".to_string()
+    })?;
 
     // Coverage names declared tools only: an undeclared name resolves to the engine-built
-    // Unknown contract at a proposal, but a deployment declaration naming one is a typo.
+    // fail-closed contract at a proposal, but a deployment declaration naming one is a typo.
     let registered = |tool: &ToolName| registry.declared(tool) || registry.provider_run_annotation(tool).is_some();
     for tool in declaration.executor_exceptions.keys() {
         if !registered(tool) {
@@ -548,18 +521,6 @@ pub(crate) fn validate_coverage(
             return Err(LoadError::ConfinedProviderRun {
                 tool: tool.as_str().to_string(),
             });
-        }
-    }
-
-    // A confined result point declares at most one pending output dimension. An unconfined
-    // Unknown dimension leaves admission unresolved, so both dimensions may be Unknown at
-    // once.
-    for tool in registry.tools().filter_map(ToolDeclaration::declared) {
-        if profile.confines_result(&tool.name)
-            && matches!(tool.delta.trust, Some(Dim::Unknown))
-            && matches!(tool.delta.audience, Some(crate::contract::AudienceDelta::PendingCast))
-        {
-            return Err(LoadError::DualPendingCast(tool.name.as_str().to_string()));
         }
     }
 
@@ -660,14 +621,6 @@ pub(crate) fn covering_declaration(config: &RegistryConfig) -> ProfileDeclaratio
         confined_results: config
             .tools
             .iter()
-            // A result point whose label is Unknown in both dimensions cannot be confined (the
-            // DualPendingCast lint), so the maximal profile leaves it unconfined.
-            .filter(|declaration| {
-                declaration.declared().is_none_or(|tool| {
-                    !(matches!(tool.delta.trust, Some(Dim::Unknown))
-                        && matches!(tool.delta.audience, Some(crate::contract::AudienceDelta::PendingCast)))
-                })
-            })
             .map(|declaration| {
                 crate::registry::base_tool_name(declaration.name()).expect("test contracts have valid names")
             })
@@ -682,7 +635,7 @@ pub(crate) fn covering_declaration(config: &RegistryConfig) -> ProfileDeclaratio
 mod tests {
     use super::*;
     use crate::authority::{Authority, DeclaredTransition, Hint, Mandate, Sanitizer, SanitizerPoints, Scope};
-    use crate::contract::{AudienceDelta, Delta, LabelRequirements, Requires};
+    use crate::contract::{Delta, LabelRequirements, Requires};
     use crate::engine::Engine;
     use crate::fact::EffectSet;
     use crate::groups::DeclaredAudience;
@@ -773,42 +726,6 @@ mod tests {
         declaration.confined_results.remove(&ToolName::new(name));
     }
 
-    /// An Unknown output dimension loads with or without a confined result point: confining it
-    /// asks for a cast before the model reads the result, and leaving it unconfined lets the
-    /// value carry the Unknown to whichever sink consumes it.
-    #[test]
-    fn an_unknown_output_dimension_loads_confined_or_not() {
-        let mut scan = tool("scan");
-        scan.delta = Delta {
-            trust: Some(Dim::Unknown),
-            audience: None,
-        };
-        let cfg = config(vec![scan]);
-        let mut unconfined = covering_declaration(&cfg);
-        unconfined.confined_results.clear();
-        assert!(open(cfg.clone(), unconfined, ReturnPolicy::Raw).is_ok());
-        assert!(open(cfg.clone(), covering_declaration(&cfg), ReturnPolicy::Raw).is_ok());
-    }
-
-    /// One cast answers one dimension, so a confined result point cannot wait on two. Unconfined,
-    /// nothing waits: both dimensions travel Unknown and resolve at a sink.
-    #[test]
-    fn both_dimensions_unknown_is_refused_only_at_a_confined_result_point() {
-        let mut scan = tool("scan");
-        scan.delta = Delta {
-            trust: Some(Dim::Unknown),
-            audience: Some(Dim::Unknown.into()),
-        };
-        let cfg = config(vec![scan]);
-        let mut confined = covering_declaration(&cfg);
-        confined.confined_results.insert(ToolName::new("scan"));
-        assert!(matches!(
-            open(cfg.clone(), confined, ReturnPolicy::Raw),
-            Err(LoadError::DualPendingCast(name)) if name == "scan"
-        ));
-        assert!(open(cfg.clone(), covering_declaration(&cfg), ReturnPolicy::Raw).is_ok());
-    }
-
     #[test]
     fn an_output_sanitizer_needs_some_confined_application_point() {
         let mut cfg = config(vec![tool("fetch")]);
@@ -893,8 +810,8 @@ mod tests {
             let mut t = tool("search");
             t.requires = Requires {
                 label: LabelRequirements {
-                    trust_floor: Some(Dim::Known(Trust::new(1))),
-                    audience: Dim::Known(vec![]),
+                    trust_floor: Some(Trust::new(1)),
+                    audience: vec![],
                 },
                 ..Requires::default()
             };
@@ -920,19 +837,6 @@ mod tests {
             open(cfg, declaration, ReturnPolicy::Raw),
             Err(LoadError::ProviderRunAnnotated(tool)) if tool == "search"
         ));
-
-        // An Unknown output dimension is not one of them: a provider-run result reaches the
-        // model inside the inference call, so it is never confined, and its Unknown travels to
-        // whichever sink consumes it.
-        let mut search = tool("search");
-        search.delta = Delta {
-            trust: Some(Dim::Unknown),
-            audience: None,
-        };
-        let cfg = config(vec![search]);
-        let mut declaration = covering_declaration(&cfg);
-        provider_run(&mut declaration, "search");
-        assert!(open(cfg, declaration, ReturnPolicy::Raw).is_ok());
         let cfg = config(vec![tool("search")]);
         let mut declaration = covering_declaration(&cfg);
         provider_run(&mut declaration, "search");
@@ -993,35 +897,16 @@ mod tests {
     }
 
     #[test]
-    fn the_starting_label_must_be_established_and_in_the_deployment_vocabulary() {
+    fn the_starting_label_must_be_in_the_deployment_vocabulary() {
         let cfg = config(vec![tool("fetch")]);
         let mut declaration = covering_declaration(&cfg);
-        declaration.starting_label = Label::new(Dim::Unknown, Dim::Known(Audience::Public));
-        assert!(matches!(
-            DeploymentProfile::declare(declaration),
-            Err(LoadError::UnresolvedStartingDimension {
-                dimension: Dimension::Trust
-            })
-        ));
-        let mut declaration = covering_declaration(&cfg);
-        declaration.starting_label = Label::new(Dim::Known(Trust::new(0)), Dim::Unknown);
-        assert!(matches!(
-            DeploymentProfile::declare(declaration),
-            Err(LoadError::UnresolvedStartingDimension {
-                dimension: Dimension::Audience
-            })
-        ));
-        let mut declaration = covering_declaration(&cfg);
-        declaration.starting_label = Label::new(Dim::Known(Trust::new(9)), Dim::Known(Audience::Public));
+        declaration.starting_label = Label::new(Trust::new(9), Audience::Public);
         assert!(matches!(
             open(cfg.clone(), declaration, ReturnPolicy::Raw),
             Err(LoadError::RankOutOfChain { rank: 9, .. })
         ));
         let mut declaration = covering_declaration(&cfg);
-        declaration.starting_label = Label::new(
-            Dim::Known(Trust::new(1)),
-            Dim::Known(Audience::restricted([ReaderId::new("@auditors")])),
-        );
+        declaration.starting_label = Label::new(Trust::new(1), Audience::restricted([ReaderId::new("@auditors")]));
         assert!(matches!(
             open(cfg, declaration, ReturnPolicy::Raw),
             Err(LoadError::NonLiteralReader { reader, .. }) if reader == "@auditors"
@@ -1105,9 +990,9 @@ mod tests {
         let mut leak = tool("leak");
         leak.delta = Delta {
             trust: None,
-            audience: Some(AudienceDelta::Static(DeclaredAudience::literal(Audience::restricted(
-                [ReaderId::new("internal")],
-            )))),
+            audience: Some(DeclaredAudience::literal(Audience::restricted([ReaderId::new(
+                "internal",
+            )]))),
         };
         let mut cfg = config(vec![leak]);
         cfg.sanitizers = vec![Sanitizer {
@@ -1129,7 +1014,7 @@ mod tests {
     fn public_trajectory_log() -> Vec<crate::fact::Fact> {
         vec![opening_at(
             crate::value::TrajectoryId::new("t"),
-            Label::new(Dim::Known(Trust::new(1)), Dim::Known(Audience::Public)),
+            Label::new(Trust::new(1), Audience::Public),
         )]
     }
 
@@ -1266,7 +1151,7 @@ mod tests {
         let profile = DeploymentProfile::declare(declaration).unwrap();
         let wire = serde_json::to_string(&profile).unwrap();
         assert_eq!(serde_json::from_str::<DeploymentProfile>(&wire).unwrap(), profile);
-        let corrupt = wire.replace(r#"{"Known":1}"#, r#""Unknown""#);
+        let corrupt = wire.replace(r#""trust":1"#, r#""trust":"unknown""#);
         assert!(serde_json::from_str::<DeploymentProfile>(&corrupt).is_err());
     }
 
@@ -1407,7 +1292,7 @@ mod tests {
         let delta_edit = config(vec![{
             let mut t = tool("fetch");
             t.delta = Delta {
-                trust: Some(Dim::Known(Trust::new(0))),
+                trust: Some(Trust::new(0)),
                 audience: None,
             };
             t

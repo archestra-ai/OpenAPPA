@@ -3,9 +3,8 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::check::{Gap, UnestablishedFact};
+use crate::check::Gap;
 use crate::groups::Expansions;
-use crate::label::PartialLabel;
 use crate::names::AuthorityName;
 use crate::plan::covers_gap;
 use crate::registry::Registry;
@@ -22,15 +21,11 @@ pub struct AuthorityEvidence {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthorityReview {
     pub tool: crate::value::ToolName,
-    pub trajectory_label: PartialLabel,
+    pub trajectory_label: crate::label::Label,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PlanError {
-    #[error("the call has an unestablished dimension — a fact clears it, never a plan")]
-    Unestablished(Vec<UnestablishedFact>),
-    #[error("the tool's requirement is unknown on {0:?} — nothing answers it, never a plan")]
-    UnknownRequirement(Vec<crate::contract::RequirementSlot>),
     #[error("no authority registered as {0}")]
     UnknownAuthority(String),
     #[error("a ruling claims a gap the current block does not carry")]
@@ -87,7 +82,6 @@ mod tests {
     use crate::authority::{Authority, Mandate, Scope};
     use crate::contract::{Delta, LabelRequirements, Requires, ToolAnnotation};
     use crate::fact::EffectSet;
-    use crate::label::Dim;
     use crate::label::Trust;
     use crate::names::MarkName;
     use crate::value::ToolName;
@@ -116,8 +110,8 @@ mod tests {
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
-                    trust_floor: Some(Dim::Known(TRUSTED)),
-                    audience: Dim::Known(vec![]),
+                    trust_floor: Some(TRUSTED),
+                    audience: vec![],
                 },
                 ..Requires::default()
             },
@@ -158,8 +152,6 @@ mod tests {
         crate::check::RawBlock {
             requirement_gaps: gaps,
             narrowing: None,
-            unestablished: vec![],
-            unknown_requirements: Vec::new(),
         }
     }
 

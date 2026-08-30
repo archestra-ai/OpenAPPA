@@ -8,8 +8,7 @@
 //! narrows the audience can plan around the narrowing instead of discovering
 //! it as a block.
 
-use appa_engine::contract::{AudienceDelta, ToolDeclaration};
-use appa_engine::label::Dim;
+use appa_engine::contract::ToolDeclaration;
 use appa_engine::registry::TrustChain;
 use appa_example_agent::wire::WireTool;
 use appa_policy::Config;
@@ -75,46 +74,42 @@ fn contract_description(declaration: &ToolDeclaration, chain: &TrustChain) -> St
     };
     let mut clauses = Vec::new();
     let delta = &contract.delta;
-    match &delta.trust {
-        Some(Dim::Known(trust)) => clauses.push(format!(
+    if let Some(trust) = &delta.trust {
+        clauses.push(format!(
             "output trust={}",
             chain
                 .name_of(*trust)
                 .expect("validated tool trust rank is in the chain")
-        )),
-        Some(Dim::Unknown) => clauses.push("output trust=unknown".to_string()),
-        None => {}
+        ));
     }
-    match &delta.audience {
-        Some(AudienceDelta::Static(audience)) => clauses.push(format!("output audience={audience:?}")),
-        Some(AudienceDelta::PendingCast) => clauses.push("output audience=unknown".to_string()),
-        None => {}
+    if let Some(audience) = &delta.audience {
+        clauses.push(format!("output audience={audience:?}"));
     }
     if delta.is_none() {
         clauses.push("output label is neutral".to_string());
     }
-    match contract.requires.label.trust_floor.as_ref() {
-        Some(Dim::Known(trust)) => clauses.push(format!(
+    if let Some(trust) = contract.requires.label.trust_floor.as_ref() {
+        clauses.push(format!(
             "requires trust>={}",
             chain
                 .name_of(*trust)
                 .expect("validated requirement trust rank is in the chain")
-        )),
-        Some(Dim::Unknown) => clauses.push("requires trust=unknown".to_string()),
-        None => {}
+        ));
     }
-    match &contract.requires.label.audience {
-        Dim::Known(requirements) if requirements.is_empty() => {}
-        Dim::Known(requirements) => clauses.push(format!("audience requirements={requirements:?}")),
-        Dim::Unknown => clauses.push("audience requirements=unknown".to_string()),
+    if !contract.requires.label.audience.is_empty() {
+        clauses.push(format!("audience requirements={:?}", contract.requires.label.audience));
     }
-    match &contract.requires.attention {
-        Dim::Known(marks) if marks.is_empty() => {}
-        Dim::Known(marks) => clauses.push(format!(
+    if !contract.requires.attention.is_empty() {
+        clauses.push(format!(
             "requires review marks=[{}]",
-            marks.iter().map(|mark| mark.as_str()).collect::<Vec<_>>().join(",")
-        )),
-        Dim::Unknown => clauses.push("requires review marks=unknown".to_string()),
+            contract
+                .requires
+                .attention
+                .iter()
+                .map(|mark| mark.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
     }
     if !contract.requires.history.is_empty() {
         clauses.push(format!("history requirements={:?}", contract.requires.history));

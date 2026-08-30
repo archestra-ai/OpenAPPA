@@ -73,13 +73,7 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             .await
             {
                 Ok(ToolCallDecision::Allow { spawn }) => HookDecision::AllowCall { spawn },
-                Ok(ToolCallDecision::Deny {
-                    feedback,
-                    unestablished,
-                }) => HookDecision::DenyCall {
-                    feedback,
-                    unestablished,
-                },
+                Ok(ToolCallDecision::Deny { feedback }) => HookDecision::DenyCall { feedback },
                 Err(error) => fold(error, deny),
             }
         }
@@ -236,10 +230,7 @@ fn fold(error: EventError, family: fn(String) -> HookDecision) -> HookDecision {
 }
 
 fn deny(feedback: String) -> HookDecision {
-    HookDecision::DenyCall {
-        feedback,
-        unestablished: Vec::new(),
-    }
+    HookDecision::DenyCall { feedback }
 }
 
 fn block(reason: String) -> HookDecision {

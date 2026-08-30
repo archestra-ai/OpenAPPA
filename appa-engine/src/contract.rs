@@ -6,185 +6,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::fact::{EffectKind, EffectSet};
 use crate::groups::{DeclaredAudience, Expansions};
-use crate::label::{Audience, Dim, Dimension, EstablishedLabel, Label, ReaderId, Trust};
+use crate::label::{Audience, Label, ReaderId, Trust};
 use crate::names::{AnnotatorName, MarkName, TagName};
 use crate::value::ToolName;
 
 /// A **declared** restrictive label contribution: what a successful call folds into the trajectory.
 /// Every delta only ever narrows — minimum trust, intersect audience — so a permissive delta is
-/// unrepresentable. A dimension may also be declared [`Dim::Unknown`]: **pending-cast** — the
-/// result's actual state is established by a registered cast at admission, so the raw result
-/// is confined until then.
+/// unrepresentable.
 ///
-/// An omitted dimension is neutral, not unknown: annotating the call is what says the deployment
+/// An omitted dimension is neutral: annotating the call is what says the deployment
 /// knows it, and a dimension the annotation does not describe restricts nothing ([`Delta::NONE`],
 /// `delta = {}` on the config surface, is the same statement written out).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Delta {
-    pub trust: Option<Dim<Trust>>,
-    pub audience: Option<AudienceDelta>,
-}
-
-/// The audience half of a `requires` answer: an `includes` floor, a `cap` ceiling, or both.
-/// Dynamic answers may not contain groups: the exact literal audiences are pinned with the
-/// call and replayed verbatim.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RequiredAudience {
-    pub includes: Option<Audience>,
-    pub cap: Option<Audience>,
-}
-
-/// One cast's answer to the requirement slots a contract leaves Unknown: the floor the call's
-/// inputs must meet, the readers they must be disclosable to (read as `contains`), and the marks
-/// the call carries. A slot is answered only where the contract leaves it Unknown; a slot the
-/// contract writes is not a cast's to change.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RequirementAnswer {
     pub trust: Option<Trust>,
-    pub audience: Option<Audience>,
-    pub attention: Option<Vec<MarkName>>,
-}
-
-/// A cast's requirement answer pinned to the call it judged. The pin carries the digest of the
-/// canonical call it was answered for, which binds it to that call alone;
-/// [`crate::check::validate_requirement_cast`] re-derives the digest and holds the answer to the
-/// contract's Unknown slots and the cast's declaration, at the check and again on replay.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct PinnedRequirementCast {
-    cast: crate::names::CastName,
-    call: crate::value::CanonicalDigest,
-    required_trust: Option<Trust>,
-    required_audience: Option<RequiredAudience>,
-    attention: Option<Vec<MarkName>>,
-}
-
-impl PinnedRequirementCast {
-    /// An answer covering at least one slot, with literal readers only; the marks are
-    /// canonicalized.
-    pub fn from_answer(
-        cast: crate::names::CastName,
-        call: crate::value::CanonicalDigest,
-        answer: RequirementAnswer,
-    ) -> Option<Self> {
-        let RequirementAnswer {
-            trust,
-            audience,
-            attention,
-        } = answer;
-        if trust.is_none() && audience.is_none() && attention.is_none() {
-            return None;
-        }
-        if matches!(&audience, Some(Audience::Restricted(readers)) if !readers.iter().all(ReaderId::is_literal)) {
-            return None;
-        }
-        let attention = attention.map(|mut marks| {
-            marks.sort();
-            marks.dedup();
-            marks
-        });
-        Some(PinnedRequirementCast {
-            cast,
-            call,
-            required_trust: trust,
-            required_audience: audience.map(|includes| RequiredAudience {
-                includes: Some(includes),
-                cap: None,
-            }),
-            attention,
-        })
-    }
-
-    pub fn cast(&self) -> &crate::names::CastName {
-        &self.cast
-    }
-
-    /// The digest of the canonical call this answer was given for.
-    pub fn answered_for(&self) -> &crate::value::CanonicalDigest {
-        &self.call
-    }
-
-    pub fn required_trust(&self) -> Option<Trust> {
-        self.required_trust
-    }
-
-    pub fn required_audience(&self) -> Option<&RequiredAudience> {
-        self.required_audience.as_ref()
-    }
-
-    pub fn attention(&self) -> Option<&[MarkName]> {
-        self.attention.as_deref()
-    }
-
-    pub fn covers(&self, slot: RequirementSlot) -> bool {
-        match slot {
-            RequirementSlot::Trust => self.required_trust.is_some(),
-            RequirementSlot::Audience => self.required_audience.is_some(),
-            RequirementSlot::Attention => self.attention.is_some(),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for PinnedRequirementCast {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct Wire {
-            cast: crate::names::CastName,
-            call: crate::value::CanonicalDigest,
-            required_trust: Option<Trust>,
-            required_audience: Option<RequiredAudience>,
-            attention: Option<Vec<MarkName>>,
-        }
-
-        let wire = Wire::deserialize(deserializer)?;
-        let audience = match wire.required_audience {
-            None => None,
-            Some(RequiredAudience {
-                includes: Some(includes),
-                cap: None,
-            }) => Some(includes),
-            Some(_) => {
-                return Err(serde::de::Error::custom(
-                    "a pinned requirement cast answers the audience as a `contains` floor only",
-                ));
-            }
-        };
-        let answer = PinnedRequirementCast::from_answer(
-            wire.cast,
-            wire.call,
-            RequirementAnswer {
-                trust: wire.required_trust,
-                audience,
-                attention: wire.attention.clone(),
-            },
-        )
-        .ok_or_else(|| serde::de::Error::custom("a pinned requirement cast must answer a slot with literal readers"))?;
-        if answer.attention != wire.attention {
-            return Err(serde::de::Error::custom(
-                "pinned requirement-cast attention is not in canonical order",
-            ));
-        }
-        Ok(answer)
-    }
-}
-
-/// The declared audience contribution: a written reader set — literal readers and groups an
-/// operation resolves when it reads them — or a pending cast.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AudienceDelta {
-    Static(DeclaredAudience),
-    PendingCast,
-}
-
-impl From<Dim<Audience>> for AudienceDelta {
-    fn from(value: Dim<Audience>) -> Self {
-        match value {
-            Dim::Known(audience) => Self::Static(DeclaredAudience::literal(audience)),
-            Dim::Unknown => Self::PendingCast,
-        }
-    }
+    pub audience: Option<DeclaredAudience>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -249,46 +85,18 @@ impl Delta {
         audience: None,
     };
 
-    /// The delta as a label — the output label a raw result carries. Absent dimensions fill with
-    /// the fold identity, so they neither narrow the trajectory nor lower the value's own label; a
-    /// pending-cast dimension stays [`Dim::Unknown`] (admission refuses a raw value until a cast
-    /// resolves it). A written group reads as the operation resolved it.
+    /// The delta as a label — the output label a raw result carries, and the meet operand a
+    /// successful call narrows the trajectory by. Absent dimensions fill with the fold identity,
+    /// so they neither narrow the trajectory nor lower the value's own label. A written group
+    /// reads as the operation resolved it.
     pub fn output_label(&self, expansions: &Expansions) -> Label {
         Label::new(
-            self.trust.clone().unwrap_or(Dim::Known(Trust::new(u8::MAX))),
+            self.trust.unwrap_or(Trust::new(u8::MAX)),
             match &self.audience {
-                Some(AudienceDelta::Static(a)) => Dim::Known(a.resolve(expansions)),
-                Some(AudienceDelta::PendingCast) => Dim::Unknown,
-                None => Dim::Known(Audience::Public),
+                Some(audience) => audience.resolve(expansions),
+                None => Audience::Public,
             },
         )
-    }
-
-    /// The narrowing a successful call would commit, on the check's clock: the delta's
-    /// **established** dimensions only, as a meet operand. A pending-cast dimension
-    /// contributes identity here — its actual contribution folds at admission, at the resolved
-    /// label, where every later call re-checks against it. (Sound because load validation
-    /// refuses an annotation that pairs a pending-cast dimension with a `requires` on that same
-    /// dimension, so no check this projection feeds can depend on the unestablished state.)
-    pub fn established_narrowing(&self, expansions: &Expansions) -> EstablishedLabel {
-        EstablishedLabel::new(
-            match &self.trust {
-                Some(Dim::Known(t)) => *t,
-                Some(Dim::Unknown) | None => Trust::new(u8::MAX),
-            },
-            match &self.audience {
-                Some(AudienceDelta::Static(a)) => a.resolve(expansions),
-                Some(AudienceDelta::PendingCast) | None => Audience::Public,
-            },
-        )
-    }
-
-    pub fn pending_cast_dim(&self) -> Option<Dimension> {
-        match (&self.trust, &self.audience) {
-            (Some(Dim::Unknown), _) => Some(Dimension::Trust),
-            (_, Some(AudienceDelta::PendingCast)) => Some(Dimension::Audience),
-            _ => None,
-        }
     }
 
     pub fn is_none(&self) -> bool {
@@ -296,21 +104,19 @@ impl Delta {
     }
 
     pub fn groups(&self) -> impl Iterator<Item = &crate::names::GroupName> {
-        match &self.audience {
-            Some(AudienceDelta::Static(audience)) => Some(audience.groups()),
-            _ => None,
-        }
-        .into_iter()
-        .flatten()
+        self.audience
+            .as_ref()
+            .map(DeclaredAudience::groups)
+            .into_iter()
+            .flatten()
     }
 }
 
 /// An annotation the check can evaluate with no call at hand: nothing it reads comes from a call —
-/// no placeholder recipients, every group it names already expanded — and its output contribution
-/// is declared and established (no pending-cast dimension), so the label a successful call
-/// commits is known before the call exists. This is the only shape a recovery route plans a
-/// preceding tool over (RMD-20): its check and its successor state are argument-independent facts
-/// of the registry. An Annotator-produced annotation never qualifies: it exists only per call.
+/// no placeholder recipients, every group it names already expanded. This is the only shape a
+/// recovery route plans a preceding tool over (RMD-20): its check and its successor state are
+/// argument-independent facts of the registry. An Annotator-produced annotation never qualifies:
+/// it exists only per call.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct StaticAnnotation<'a>(&'a ToolAnnotation);
 
@@ -320,8 +126,6 @@ pub(crate) enum NotStatic {
     /// A placeholder recipient reads the call's arguments, or the annotation itself is produced
     /// per call by an Annotator.
     Arguments,
-    /// The result label is established only at admission — pending-cast.
-    Unestablished,
     /// Groups the annotation names that these expansions do not answer.
     Membership(Vec<crate::names::GroupName>),
 }
@@ -339,9 +143,6 @@ impl<'a> StaticAnnotation<'a> {
         });
         if placeholder {
             return Err(NotStatic::Arguments);
-        }
-        if annotation.delta.pending_cast_dim().is_some() {
-            return Err(NotStatic::Unestablished);
         }
         expansions
             .require(annotation.groups())
@@ -370,7 +171,7 @@ pub enum AudienceRequirement {
 
 impl AudienceRequirement {
     /// The groups this requirement writes: a static recipient set's and a cap's. A
-    /// placeholder's group is the call's, pinned to it, and a dynamic form names none.
+    /// placeholder's group is the call's, pinned to it.
     pub fn groups(&self) -> impl Iterator<Item = &crate::names::GroupName> {
         match self {
             AudienceRequirement::Includes(RecipientSpec::Static(recipients)) => Some(recipients.groups()),
@@ -388,89 +189,34 @@ pub enum HistoryRequirement {
     NoPrior(EffectKind),
 }
 
-/// The label side of a requirement. Each slot is `(T | empty) | unknown`, like a delta
-/// dimension: an omitted floor is no floor, an empty audience list demands nothing, and
-/// [`Dim::Unknown`] is a requirement the policy did not state — the engine cannot check a
-/// flow against it and asks a cast at the proposal, the point of need.
+/// The label side of a requirement: an omitted floor is no floor, and an empty audience list
+/// demands nothing.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LabelRequirements {
-    pub trust_floor: Option<Dim<Trust>>,
-    pub audience: Dim<Vec<AudienceRequirement>>,
+    pub trust_floor: Option<Trust>,
+    pub audience: Vec<AudienceRequirement>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Requires {
     pub label: LabelRequirements,
     pub history: Vec<HistoryRequirement>,
-    /// Marks the call must carry: the same monad as the label slots.
-    pub attention: Dim<Vec<MarkName>>,
-}
-
-/// One requirement slot a cast can establish when the policy left it Unknown.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub enum RequirementSlot {
-    Trust,
-    Audience,
-    Attention,
-}
-
-impl RequirementSlot {
-    /// The slot as a policy author writes it.
-    pub fn wire_name(self) -> &'static str {
-        match self {
-            RequirementSlot::Trust => "requires.trust",
-            RequirementSlot::Audience => "requires.audience",
-            RequirementSlot::Attention => "requires.attention",
-        }
-    }
+    /// Marks the call must carry; an empty list demands none.
+    pub attention: Vec<MarkName>,
 }
 
 impl Requires {
-    /// The static trust floor, when the policy stated one.
+    /// The trust floor, when the policy stated one.
     pub fn trust_floor(&self) -> Option<Trust> {
-        match self.label.trust_floor {
-            Some(Dim::Known(floor)) => Some(floor),
-            Some(Dim::Unknown) | None => None,
-        }
+        self.label.trust_floor
     }
 
-    /// The static audience requirements; an Unknown slot contributes none, it is asked instead.
     pub fn audience_requirements(&self) -> &[AudienceRequirement] {
-        match &self.label.audience {
-            Dim::Known(requirements) => requirements,
-            Dim::Unknown => &[],
-        }
+        &self.label.audience
     }
 
-    /// The static marks; an Unknown slot contributes none, it is asked instead.
     pub fn attention_marks(&self) -> &[MarkName] {
-        match &self.attention {
-            Dim::Known(marks) => marks,
-            Dim::Unknown => &[],
-        }
-    }
-
-    /// Whether the policy wrote anything into the slot — a value or `"unknown"`.
-    pub(crate) fn declares(&self, slot: RequirementSlot) -> bool {
-        match slot {
-            RequirementSlot::Trust => self.label.trust_floor.is_some(),
-            RequirementSlot::Audience => !matches!(&self.label.audience, Dim::Known(list) if list.is_empty()),
-            RequirementSlot::Attention => !matches!(&self.attention, Dim::Known(marks) if marks.is_empty()),
-        }
-    }
-
-    /// The slots the policy left Unknown, in slot order.
-    pub fn unknown_slots(&self) -> impl Iterator<Item = RequirementSlot> + '_ {
-        [
-            (
-                RequirementSlot::Trust,
-                matches!(self.label.trust_floor, Some(Dim::Unknown)),
-            ),
-            (RequirementSlot::Audience, matches!(self.label.audience, Dim::Unknown)),
-            (RequirementSlot::Attention, matches!(self.attention, Dim::Unknown)),
-        ]
-        .into_iter()
-        .filter_map(|(slot, unknown)| unknown.then_some(slot))
+        &self.attention
     }
 }
 
@@ -498,12 +244,12 @@ pub struct ToolAnnotation {
 }
 
 impl ToolAnnotation {
-    /// The complete call as a consult artifact — what an Annotator without an input mapping and a
-    /// requirement cast both read: the proposed tool name, this annotation's description when the
-    /// policy declares one, and the canonical arguments. A tool without a description sends no
-    /// `description` key. The name is the one the actor proposed, not the annotation's own: a
-    /// declaration selected by pattern answers for many names, and a classifier that saw the
-    /// pattern would be judging a call it cannot identify.
+    /// The complete call as a consult artifact — what an Annotator without an input mapping
+    /// reads: the proposed tool name, this annotation's description when the policy declares
+    /// one, and the canonical arguments. A tool without a description sends no `description`
+    /// key. The name is the one the actor proposed, not the annotation's own: a declaration
+    /// selected by pattern answers for many names, and a classifier that saw the pattern would
+    /// be judging a call it cannot identify.
     pub fn complete_call(&self, called: &ToolName, arguments: &serde_json::Value) -> serde_json::Value {
         let mut call = serde_json::Map::new();
         call.insert("name".into(), serde_json::Value::String(called.as_str().to_string()));
@@ -514,8 +260,8 @@ impl ToolAnnotation {
         serde_json::Value::Object(call)
     }
 
-    /// The output shape this annotation gives a raw result. Every dimension is exactly what the
-    /// annotation describes; a pending-cast dimension stays Unknown until admission resolves it.
+    /// The output shape this annotation gives a raw result: exactly what the annotation
+    /// describes, with omitted dimensions at the fold identity.
     pub fn output_label(&self, expansions: &Expansions) -> Label {
         self.delta.output_label(expansions)
     }
@@ -529,11 +275,6 @@ impl ToolAnnotation {
                 .iter()
                 .flat_map(AudienceRequirement::groups),
         )
-    }
-
-    /// The single dimension this annotation declares pending-cast, if any.
-    pub fn pending_cast_dim(&self) -> Option<Dimension> {
-        self.delta.pending_cast_dim()
     }
 }
 
@@ -752,8 +493,8 @@ mod tests {
         let pinned = PinnedAnnotation::new(
             ToolAnnotation {
                 delta: Delta {
-                    trust: Some(Dim::Known(Trust::new(1))),
-                    audience: Some(AudienceDelta::Static(DeclaredAudience::literal(Audience::Public))),
+                    trust: Some(Trust::new(1)),
+                    audience: Some(crate::groups::DeclaredAudience::literal(Audience::Public)),
                 },
                 ..annotation("Bash")
             },

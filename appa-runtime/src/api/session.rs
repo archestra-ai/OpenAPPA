@@ -276,10 +276,6 @@ impl Session {
                     tracing::debug!(trajectory = %self.trajectory.0, "call blocked");
                     Ok(ToolCallDecision::Deny {
                         feedback: join_feedback(feedback),
-                        unestablished: feedback
-                            .iter()
-                            .flat_map(|entry| entry.unestablished.iter().cloned())
-                            .collect(),
                     })
                 }
                 _ => Err(EventError::UnexpectedDecision),
@@ -951,10 +947,7 @@ pub(crate) fn raw(value: serde_json::Value) -> Box<serde_json::value::RawValue> 
 mod real_engine_tests {
     use super::super::{OpenError, OutcomeBody, Runtime};
     use super::*;
-    use crate::api::{
-        LabelDimension, RemedyDecision, SpawnBinding, ToolCallDecision, ToolOutcome, ToolResultDecision,
-        UnestablishedValue,
-    };
+    use crate::api::{RemedyDecision, SpawnBinding, ToolCallDecision, ToolOutcome, ToolResultDecision};
     use crate::config::Config;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -981,12 +974,18 @@ mod real_engine_tests {
     const FETCH_AND_SEND: &str = r#"
 version = 1
 
-# Unclassified in both dimensions and not a confined result point, so a fetched value carries
-# its Unknown to the sink that consumes it.
+# A neutral fetch: its result folds at the trajectory's own label, so the
+# lifecycle tests release it freely. `taint` brings outside content in at the
+# low rank; releasing it takes the narrowing acceptance its block offers.
 [[policy.tool]]
 name = "fetch"
 parameters = { type = "object", properties = { b = { type = "integer" }, a = { type = "integer" } } }
-delta = { trust = "unknown", audience = "unknown" }
+delta = {}
+
+[[policy.tool]]
+name = "taint"
+parameters = { type = "object", properties = { a = { type = "integer" } } }
+delta = { trust = "suspicious" }
 
 [[policy.tool]]
 name = "send"
@@ -1000,6 +999,13 @@ context_control = true
 
     fn root() -> TrajectoryId {
         TrajectoryId("cc:root".to_string())
+    }
+
+    fn taint(spelling: serde_json::Value) -> ProposedCall {
+        ProposedCall {
+            tool: "taint".to_string(),
+            arguments: raw(spelling),
+        }
     }
 
     fn fetch(spelling: serde_json::Value) -> ProposedCall {
@@ -1716,24 +1722,12 @@ delta = { audience = ["@team"] }
     }
 
     #[tokio::test]
-    async fn an_unestablished_block_is_terminal_feedback() {
+    async fn a_suspicious_result_blocks_a_trusted_floor_sink() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let session = runtime.create_session(root()).expect("a fresh id opens");
-        session
-            .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
-            .await
-            .expect("the fetch is decided");
-        session
-            .on_tool_result(
-                fetch(serde_json::json!({"a": 1})),
-                ToolOutcome::Success {
-                    body: OutcomeBody::Available("untrusted data".to_string()),
-                },
-            )
-            .await
-            .expect("the result is admitted at Unknown");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        admit_success(&runtime, &mut session, taint(serde_json::json!({"a": 1}))).await;
 
         let decision = session
             .on_tool_call(
@@ -1745,17 +1739,9 @@ delta = { audience = ["@team"] }
             )
             .await
             .expect("the block is delivered");
-        let ToolCallDecision::Deny { unestablished, .. } = decision else {
-            panic!("a consumed Unknown dimension must block the sink");
-        };
-        assert_eq!(
-            unestablished,
-            vec![UnestablishedValue {
-                value: 0,
-                tool: Some("fetch".to_string()),
-                dimensions: vec![LabelDimension::Trust, LabelDimension::Audience],
-            }],
-            "the block names the source by value, its producing tool, and every dimension still unresolved on it"
+        assert!(
+            matches!(decision, ToolCallDecision::Deny { .. }),
+            "a narrowed trajectory must block the trusted-floor sink, got {decision:?}"
         );
         assert!(runtime.open_dispatches(&root(), &root()).pop().is_none());
     }
@@ -1889,7 +1875,7 @@ context_control = false
     }
 
     #[tokio::test]
-    async fn a_child_return_with_unknown_fold_crosses_and_charges_the_parent() {
+    async fn a_child_returns_crossing_narrows_the_parent_and_charges_its_sink() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
@@ -1900,29 +1886,31 @@ context_control = false
             TrajectoryId("cc:child".to_string()),
         )
         .await;
-        child
-            .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
-            .await
-            .expect("the child's fetch is decided");
-        child
-            .on_tool_result(
-                fetch(serde_json::json!({"a": 1})),
-                ToolOutcome::Success {
-                    body: OutcomeBody::Available("untrusted".to_string()),
-                },
-            )
-            .await
-            .expect("the child's result is admitted at Unknown");
+        let mut child = child;
+        admit_success(&runtime, &mut child, taint(serde_json::json!({"a": 1}))).await;
 
-        let returned = child
+        // The raw return narrows the parent, so the crossing is staged behind the
+        // parent's own acceptance instead of merging silently.
+        let staged = child
             .on_child_end(Some("summary of untrusted data".to_string()))
             .await
-            .expect("the crossing merges");
+            .expect("the staged return is delivered");
+        assert!(
+            matches!(staged, crate::api::ChildReturnDecision::Blocked { .. }),
+            "a narrowing return is staged, not crossed: {staged:?}"
+        );
+        let quoted = runtime
+            .minted_offers(&root(), &root())
+            .first()
+            .expect("the stage surfaced the parent's acceptance")
+            .clone();
+        let offer = runtime.resolve_in(&root(), &quoted).expect("the quoted id resolves").0;
         assert_eq!(
-            returned,
-            crate::api::ChildReturnDecision::Returned {
+            session.on_remedy(offer, None).await.expect("the acceptance executes"),
+            RemedyDecision::Returned {
                 value: "summary of untrusted data".to_string()
             },
+            "accepting the narrowing crosses the staged return"
         );
         assert!(matches!(
             runtime.live(&root(), &TrajectoryId("cc:child".to_string())),
@@ -1939,6 +1927,11 @@ context_control = false
             .await
             .expect("the spawn dispatch closes");
 
+        assert_eq!(
+            runtime.status(&root()).expect("the root answers").trust,
+            "suspicious",
+            "the merged crossing narrowed the parent"
+        );
         let decision = session
             .on_tool_call(
                 ProposedCall {
@@ -1949,16 +1942,9 @@ context_control = false
             )
             .await
             .expect("the block is delivered");
-        let ToolCallDecision::Deny { feedback, .. } = decision else {
-            panic!("the crossed unresolved identity must charge the parent's send, got {decision:?}");
-        };
         assert!(
-            !feedback.contains("fetch"),
-            "a parent-facing block must not name the child's tool: {feedback}"
-        );
-        assert!(
-            feedback.contains("value ValueId(0)"),
-            "the charged value is named by its id: {feedback}"
+            matches!(decision, ToolCallDecision::Deny { .. }),
+            "the crossed narrowing must charge the parent's send, got {decision:?}"
         );
     }
 
@@ -3186,12 +3172,11 @@ confined_child_return = true
     const MARKED: &str = r#"
 version = 1
 
-# Unclassified in both dimensions, and no confined result point, so the value carries its
-# Unknown out of admission and names itself as the unresolved source.
+# A neutral second tool: its result folds at the trajectory's own label.
 [[policy.tool]]
 name = "fetch"
 parameters = { type = "object", properties = { b = { type = "integer" }, a = { type = "integer" } } }
-delta = { trust = "unknown", audience = "unknown" }
+delta = {}
 
 [[policy.tool]]
 name = "mark"
@@ -3282,28 +3267,6 @@ context_control = true
         let status = runtime.status(&root()).expect("the root answers");
         assert_eq!(status.trust, "suspicious", "the fold never widens");
         assert_eq!(status.audience, "public", "a neutral admission resolves cleanly");
-    }
-
-    #[tokio::test]
-    async fn an_unresolved_dimension_keeps_its_bound_and_names_its_sources() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime =
-            Runtime::open(config_with(MARKED, None), dir.path().join("appa.db"), None).expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
-        admit_success(&runtime, &mut session, mark()).await;
-        admit_success(&runtime, &mut session, fetch(serde_json::json!({"a": 1}))).await;
-        let status = runtime.status(&root()).expect("the root answers");
-        assert_eq!(
-            status.trust, "suspicious",
-            "the restriction already known is not hidden"
-        );
-        assert_eq!(status.audience, "public");
-        assert_eq!(
-            status.unresolved_trust,
-            vec![1],
-            "the unannotated result is the unresolved source"
-        );
-        assert_eq!(status.unresolved_audience, vec![1]);
     }
 
     #[tokio::test]

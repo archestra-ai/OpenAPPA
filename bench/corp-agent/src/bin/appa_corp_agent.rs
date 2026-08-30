@@ -376,17 +376,7 @@ fn replay(entries: &[AuditEntry]) {
 }
 
 fn label(label: &AuditLabel) -> String {
-    let unresolved = |name: &str, ids: &[u64]| match ids.is_empty() {
-        true => String::new(),
-        false => format!(" {name}={ids:?}"),
-    };
-    format!(
-        "trust={} audience={}{}{}",
-        label.trust,
-        label.audience,
-        unresolved("unresolved_trust", &label.unresolved_trust),
-        unresolved("unresolved_audience", &label.unresolved_audience)
-    )
+    format!("trust={} audience={}", label.trust, label.audience)
 }
 
 fn committing(effects: &[String]) -> String {

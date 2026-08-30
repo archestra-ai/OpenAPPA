@@ -83,7 +83,6 @@ mod tests {
     use super::*;
 
     use appa_engine::authority::DeclaredTransition;
-    use appa_engine::contract::AudienceDelta;
     use appa_engine::groups::DeclaredAudience;
     use appa_engine::label::ReaderId;
     use appa_engine::value::ToolName;
@@ -110,14 +109,13 @@ mod tests {
         let appa_engine::contract::ToolDeclaration::Declared(invoices) = invoices else {
             panic!("list_invoices is a declared contract");
         };
-        assert!(matches!(
+        assert_eq!(
             invoices.delta.audience.as_ref(),
-            Some(AudienceDelta::Static(audience))
-                if *audience == DeclaredAudience::restricted([
-                    ReaderId::new("cfo@corp.example"),
-                    ReaderId::new("ap-lead@corp.example"),
-                ])
-        ));
+            Some(&DeclaredAudience::restricted([
+                ReaderId::new("cfo@corp.example"),
+                ReaderId::new("ap-lead@corp.example"),
+            ]))
+        );
         let email = checked
             .config
             .registry()

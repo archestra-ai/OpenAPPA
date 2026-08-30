@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::contract::{PinnedAnnotation, PinnedMembership, PinnedRequirementCast};
+use crate::contract::{PinnedAnnotation, PinnedMembership};
 use crate::label::Label;
 use crate::params::CanonicalArguments;
 
@@ -92,10 +92,6 @@ impl CanonicalDigest {
             hasher.update([1u8]);
             for membership in &call.memberships {
                 hasher.update(canonical_json(membership));
-            }
-            if let Some(pinned) = &call.requirement_cast {
-                hasher.update([2u8]);
-                hasher.update(canonical_json(pinned));
             }
         }
         CanonicalDigest(hasher.finalize().into())
@@ -433,7 +429,6 @@ pub struct ResolvedCall {
     arguments: CanonicalArguments,
     annotation: Option<PinnedAnnotation>,
     memberships: Vec<PinnedMembership>,
-    requirement_cast: Option<PinnedRequirementCast>,
 }
 
 impl<'de> Deserialize<'de> for ResolvedCall {
@@ -446,15 +441,13 @@ impl<'de> Deserialize<'de> for ResolvedCall {
             annotation: Option<PinnedAnnotation>,
             #[serde(default)]
             memberships: Vec<PinnedMembership>,
-            requirement_cast: Option<PinnedRequirementCast>,
         }
 
         let wire = WireCall::deserialize(deserializer)?;
         let pinned_memberships = wire.memberships.clone();
         let canonical = ResolvedCall::new_keyed(wire.tool, wire.declaration, wire.arguments)
             .with_annotation(wire.annotation)
-            .with_memberships(wire.memberships)
-            .with_requirement_cast(wire.requirement_cast);
+            .with_memberships(wire.memberships);
         if canonical.memberships != pinned_memberships {
             return Err(serde::de::Error::custom(
                 "pinned membership answers are not in their canonical order",
@@ -477,7 +470,6 @@ impl ResolvedCall {
             arguments,
             annotation: None,
             memberships: Vec::new(),
-            requirement_cast: None,
         }
     }
 
@@ -527,17 +519,6 @@ impl ResolvedCall {
         &self.memberships
     }
 
-    /// Attach the cast answer pinned to this call's Unknown requirement slots. Whether it is
-    /// admissible on this call is [`crate::check::validate_requirement_cast`]'s to decide.
-    pub fn with_requirement_cast(mut self, pinned: Option<PinnedRequirementCast>) -> Self {
-        self.requirement_cast = pinned;
-        self
-    }
-
-    pub fn requirement_cast(&self) -> Option<&PinnedRequirementCast> {
-        self.requirement_cast.as_ref()
-    }
-
     pub fn membership(&self, argument: &str) -> Option<&PinnedMembership> {
         self.memberships
             .iter()
@@ -559,8 +540,7 @@ impl ResolvedCall {
     /// Annotator saw, and a substitution renders a different canonical call, so no pinned
     /// annotation rides along — the rewritten call is annotated afresh or not at all. A
     /// membership answer expands the group one argument names, so it survives only while that
-    /// argument's value is unchanged. A requirement cast judged the exact call it was answered
-    /// for, so none rides along either.
+    /// argument's value is unchanged.
     pub(crate) fn substituting(&self, arguments: CanonicalArguments) -> ResolvedCall {
         let unchanged = |argument: &str| arguments.value().get(argument) == self.arguments.value().get(argument);
         let memberships = self
@@ -596,7 +576,7 @@ mod tests {
                 description: None,
                 parameters: ToolParameters::open(),
                 delta: Delta {
-                    trust: Some(crate::label::Dim::Known(crate::label::Trust::new(0))),
+                    trust: Some(crate::label::Trust::new(0)),
                     audience: None,
                 },
                 emits: Default::default(),
@@ -604,65 +584,6 @@ mod tests {
             },
             AnnotationMandate::Annotator(crate::names::AnnotatorName::new(annotator)),
         )
-    }
-
-    #[test]
-    fn a_pinned_requirement_cast_round_trips_through_the_calls_wire_form() {
-        use crate::contract::{PinnedRequirementCast, RequirementAnswer};
-        let bare = call("ghost", json!({ "q": 1 }));
-        let pinned = bare.clone().with_requirement_cast(PinnedRequirementCast::from_answer(
-            crate::names::CastName::new("open"),
-            bare.digest(),
-            RequirementAnswer {
-                trust: Some(crate::label::Trust::new(0)),
-                audience: Some(crate::label::Audience::Public),
-                attention: Some(vec![crate::names::MarkName::new("b"), crate::names::MarkName::new("a")]),
-            },
-        ));
-        let wire = serde_json::to_value(&pinned).unwrap();
-        assert_eq!(serde_json::from_value::<ResolvedCall>(wire.clone()).unwrap(), pinned);
-        assert_eq!(
-            wire["requirement_cast"]["attention"],
-            json!(["a", "b"]),
-            "marks are pinned in canonical order"
-        );
-        let mut disordered = wire.clone();
-        disordered["requirement_cast"]["attention"] = json!(["b", "a"]);
-        assert!(serde_json::from_value::<ResolvedCall>(disordered).is_err());
-        let mut capped = wire;
-        capped["requirement_cast"]["required_audience"] = json!({ "includes": null, "cap": "public" });
-        assert!(serde_json::from_value::<ResolvedCall>(capped).is_err());
-        assert_eq!(
-            serde_json::from_value::<ResolvedCall>(serde_json::to_value(&bare).unwrap()).unwrap(),
-            bare
-        );
-    }
-
-    #[test]
-    fn a_requirement_cast_pin_is_part_of_the_batch_identity() {
-        use crate::contract::{PinnedRequirementCast, RequirementAnswer};
-        let bare = call("ghost", json!({ "q": 1 }));
-        let pinned_by = |cast: &str| {
-            bare.clone().with_requirement_cast(PinnedRequirementCast::from_answer(
-                crate::names::CastName::new(cast),
-                bare.digest(),
-                RequirementAnswer {
-                    trust: Some(crate::label::Trust::new(0)),
-                    audience: Some(crate::label::Audience::Public),
-                    attention: Some(vec![]),
-                },
-            ))
-        };
-        let unpinned = CanonicalDigest::of_batch([&bare], None);
-        assert_ne!(unpinned, CanonicalDigest::of_batch([&pinned_by("open")], None));
-        assert_ne!(
-            CanonicalDigest::of_batch([&pinned_by("open")], None),
-            CanonicalDigest::of_batch([&pinned_by("other")], None)
-        );
-        assert_eq!(
-            CanonicalDigest::of_batch([&pinned_by("open")], None),
-            CanonicalDigest::of_batch([&pinned_by("open")], None)
-        );
     }
 
     #[test]

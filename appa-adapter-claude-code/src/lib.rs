@@ -1003,7 +1003,6 @@ mod tests {
                 &event,
                 &HookDecision::DenyCall {
                     feedback: "blocked: the recipient cannot read this".to_string(),
-                    unestablished: Vec::new(),
                 }
             ),
             serde_json::json!({

@@ -5,10 +5,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::fact::EffectKind;
 use crate::groups::{DeclaredAudience, Expansions};
-use crate::label::{Adequacy, Audience, Dim, Dimension, Label, Trust};
+use crate::label::{Audience, Label, Trust};
 use crate::names::{AuthorityName, GroupName, MarkName, SanitizerName, TagName};
 
-/// Operator prose on a registered authority, sanitizer, or cast: why this entry exists, in the
+/// Operator prose on a registered authority or sanitizer: why this entry exists, in the
 /// deployer's own words. It travels with every remedy plan naming the entity, so an agent chooses
 /// among plans on stated purpose rather than on a bare name, and a reviewer reads the intent beside
 /// the mandate. Advisory only: a hint NEVER enters a check, an enumeration, or an ordering, and it
@@ -62,7 +62,7 @@ impl Mandate {
 }
 
 /// A component's jurisdiction: the tags it covers. Empty = everything (small configs stay
-/// small). Authorities, casts, and sanitizers all route by this one shape.
+/// small). Authorities and sanitizers route by this one shape.
 /// Attention gaps ignore scope — they route by their own currency (the attended mark).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Scope {
@@ -105,8 +105,7 @@ pub struct SanitizerPoints {
 /// A sanitizer's declared transition: the one transition its mandate MAY claim, on one
 /// dimension, as a `from` and a `to`. Trust and audience are bound on the same terms, and the enum
 /// keeps a mandate claiming both dimensions at once unrepresentable. The `to` is fixed at
-/// registration — a sanitizer does not decide its derivation label per value, as a
-/// resolver-implemented [`Cast`] does — so the declared `to` is the transition ceiling. The
+/// registration, so the declared `to` is the transition ceiling. The
 /// undeclared dimension is untouched: the derivation carries the raw value's label on it unchanged.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeclaredTransition {
@@ -121,13 +120,6 @@ pub enum DeclaredTransition {
 }
 
 impl DeclaredTransition {
-    pub fn dimension(&self) -> Dimension {
-        match self {
-            DeclaredTransition::Audience { .. } => Dimension::Audience,
-            DeclaredTransition::Trust { .. } => Dimension::Trust,
-        }
-    }
-
     /// The groups this mandate writes: the application that reads it requires them
     /// together, because `from` and `to` are one declaration.
     pub fn groups(&self) -> impl Iterator<Item = &GroupName> {
@@ -165,9 +157,9 @@ impl DeclaredTransition {
                     DeclaredAudience::Public => Audience::Public,
                     DeclaredAudience::Restricted { readers, .. } => Audience::restricted(readers.iter().cloned()),
                 };
-                raw.audience.covers(&widest) == Adequacy::Holds
+                raw.covers(&widest)
             }
-            DeclaredTransition::Trust { from_floor, .. } => raw.trust.meets_floor(*from_floor) == Adequacy::Holds,
+            DeclaredTransition::Trust { from_floor, .. } => raw.meets_floor(*from_floor),
         }
     }
 }
@@ -182,20 +174,11 @@ pub enum Transition {
 }
 
 impl Transition {
-    pub fn dimension(&self) -> Dimension {
+    /// Does the raw value satisfy the `from` precondition?
+    pub fn admits(&self, raw: &Label) -> bool {
         match self {
-            Transition::Audience { .. } => Dimension::Audience,
-            Transition::Trust { .. } => Dimension::Trust,
-        }
-    }
-
-    /// Does the raw value satisfy the `from` precondition? An Unknown on the transitioned
-    /// dimension is [`Adequacy::Unresolved`] — a sanitizer moves an established state, never an
-    /// unestablished one.
-    pub fn admits(&self, raw: &Label) -> Adequacy {
-        match self {
-            Transition::Audience { from_includes, .. } => raw.audience.covers(from_includes),
-            Transition::Trust { from_floor, .. } => raw.trust.meets_floor(*from_floor),
+            Transition::Audience { from_includes, .. } => raw.covers(from_includes),
+            Transition::Trust { from_floor, .. } => raw.meets_floor(*from_floor),
         }
     }
 
@@ -203,8 +186,8 @@ impl Transition {
     /// `to`. The other dimension rides through untouched.
     pub fn derive(&self, raw: &Label) -> Label {
         match self {
-            Transition::Audience { to, .. } => Label::new(raw.trust.clone(), Dim::Known(to.clone())),
-            Transition::Trust { to, .. } => Label::new(Dim::Known(*to), raw.audience.clone()),
+            Transition::Audience { to, .. } => Label::new(raw.trust, to.clone()),
+            Transition::Trust { to, .. } => Label::new(*to, raw.audience.clone()),
         }
     }
 }
@@ -262,7 +245,7 @@ impl Sanitizer {
 
     fn derives(&self, raw: &crate::label::Label, expansions: &Expansions) -> Option<crate::label::Label> {
         let transition = self.transition.resolve(expansions);
-        (transition.admits(raw) == crate::label::Adequacy::Holds).then(|| transition.derive(raw))
+        transition.admits(raw).then(|| transition.derive(raw))
     }
 
     pub fn groups(&self) -> impl Iterator<Item = &GroupName> {
@@ -286,9 +269,8 @@ mod tests {
                 .expect("a literal reader and a group"),
             to: DeclaredAudience::literal(Audience::Public),
         };
-        let raw = |audience: Dim<Audience>| Label::new(Dim::Known(Trust::new(1)), audience);
-        assert!(transition.may_admit(&raw(Dim::Known(readers(&["alice", "carol"])))));
-        assert!(!transition.may_admit(&raw(Dim::Known(readers(&["bob"])))));
-        assert!(!transition.may_admit(&raw(Dim::Unknown)));
+        let raw = |audience: Audience| Label::new(Trust::new(1), audience);
+        assert!(transition.may_admit(&raw(readers(&["alice", "carol"]))));
+        assert!(!transition.may_admit(&raw(readers(&["bob"]))));
     }
 }
