@@ -294,6 +294,8 @@ pub enum EngineRefusal {
     UnknownOffer,
     #[error("the fork and the child are already bound elsewhere")]
     Unbindable,
+    #[error("tool {tool} is not declared in this policy and no wildcard covers it; the call is refused before it runs")]
+    UndeclaredTool { tool: String },
 }
 
 /// One trajectory's current label rendered for a display surface — the
@@ -850,6 +852,9 @@ impl RuntimeEngine {
             .resolve_call(ToolName::new(call.tool.clone()), call.arguments.get().as_bytes())
         {
             Ok(resolved) => resolved,
+            // A tool no declaration and no wildcard covers is refused before anything is
+            // judged: a typed refusal, never model feedback, and nothing is appended.
+            Err(EngineError::UnknownTool(tool)) => return Err(EngineRefusal::UndeclaredTool { tool }),
             Err(error) => return Ok(deny(malformed_feedback(&error))),
         };
         let owner = engine_id(trajectory);

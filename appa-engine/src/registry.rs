@@ -329,8 +329,16 @@ pub enum LoadError {
     TrustChainTooLong { len: usize, max: usize },
     #[error("duplicate trust rank {0:?} in the chain")]
     DuplicateRank(String),
-    #[error("tool name \"*\" is reserved: it names the engine-built contract of an undeclared tool")]
-    ReservedToolName,
+    #[error(
+        "the wildcard tool \"*\" declares static semantics — it covers calls the policy does not name, so it routes through an annotator: give it `annotator` and nothing else"
+    )]
+    WildcardStatic,
+    #[error(
+        "the wildcard tool \"*\" carries metadata or an argument selector — it covers calls the policy does not name, so it describes none of them"
+    )]
+    WildcardMetadata,
+    #[error("the policy writes more than one wildcard tool \"*\"")]
+    DuplicateWildcard,
     #[error("duplicate tool contract: {0}")]
     DuplicateTool(String),
     #[error("malformed tool selector {0:?}")]
@@ -688,36 +696,18 @@ fn worst_case_return_stage(sanitizers: &[Sanitizer], confined: bool) -> u128 {
     )
 }
 
-/// The name of the engine-built contract every undeclared tool resolves to. Reserved: a policy
-/// cannot declare it.
-pub const UNDECLARED_TOOL_NAME: &str = "*";
+/// The wildcard's spelling in a policy: `[[tool]] name = "*"` covers every tool call the policy
+/// does not name exactly, and routes each covered call through its annotator.
+pub const WILDCARD_TOOL_NAME: &str = "*";
 
 /// How the registry classifies a proposed tool name: declared and checkable, declared as
-/// provider-run (never checked), or undeclared — the engine-built fail-closed contract.
+/// provider-run (never checked), or covered by the wildcard — annotated per call. A name in
+/// none of these classes has no contract at all, and a proposal naming it is refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolKind {
     Declared,
     ProviderRun,
-    Undeclared,
-}
-
-/// The annotation of a tool the policy never declared: it commits the maximally restrictive
-/// label. Nothing about the tool is known, so its result is fail-closed — folding it narrows the
-/// trajectory to the bottom of the lattice, and the check surfaces that narrowing before release.
-fn undeclared_annotation() -> ToolAnnotation {
-    use crate::contract::{Delta, Requires};
-    ToolAnnotation {
-        name: ToolName::new(UNDECLARED_TOOL_NAME),
-        tags: Vec::new(),
-        description: None,
-        parameters: crate::params::ToolParameters::open(),
-        delta: Delta {
-            trust: Some(crate::label::Trust::new(0)),
-            audience: Some(DeclaredAudience::literal(crate::label::Audience::restricted([]))),
-        },
-        emits: crate::fact::EffectSet::default(),
-        requires: Requires::default(),
-    }
+    Wildcard,
 }
 
 /// The validated, indexed, immutable registry: the engine's whole static capability, declarations
@@ -732,8 +722,10 @@ pub struct Registry {
     audience_readers: BTreeSet<ReaderId>,
     tools: BTreeMap<ToolName, Vec<(ToolMatcher, ToolDeclaration)>>,
     provider_run: BTreeMap<ToolName, ToolAnnotation>,
-    /// The one declaration every undeclared name resolves to; in no listing, vector, or identity.
-    unknown_tool: ToolDeclaration,
+    /// The wildcard declaration, when the policy writes one: the Annotated declaration every
+    /// tool call the policy does not name exactly resolves to. In no listing or vector; the
+    /// policy identity carries it through the declared configuration.
+    wildcard: Option<ToolDeclaration>,
     annotators: BTreeMap<AnnotatorName, AnnotatorMandate>,
     authorities: Vec<Authority>,
     attention_marks: BTreeSet<MarkName>,
@@ -807,12 +799,41 @@ impl Registry {
 
         let mut tools: BTreeMap<ToolName, Vec<(ToolMatcher, ToolDeclaration)>> = BTreeMap::new();
         let mut provider_run: BTreeMap<ToolName, ToolAnnotation> = BTreeMap::new();
+        let mut wildcard: Option<ToolDeclaration> = None;
         for mut declaration in config.tools {
             let (base_name, matcher) = parse_tool_selector(declaration.name().as_str())?;
-            if base_name.as_str() == UNDECLARED_TOOL_NAME {
-                return Err(LoadError::ReservedToolName);
-            }
             declaration.set_name(base_name);
+            if declaration.name().as_str() == WILDCARD_TOOL_NAME {
+                let ToolDeclaration::Annotated {
+                    tags,
+                    description,
+                    parameters,
+                    annotator,
+                    ..
+                } = &declaration
+                else {
+                    return Err(LoadError::WildcardStatic);
+                };
+                if !annotator_declarations.contains_key(annotator) {
+                    return Err(LoadError::UnknownAnnotator {
+                        tool: WILDCARD_TOOL_NAME.to_string(),
+                        annotator: annotator.as_str().to_string(),
+                    });
+                }
+                // The wildcard covers calls this policy knows nothing about: metadata and
+                // argument selectors describe a specific tool, so it carries none.
+                if matcher != ToolMatcher::Bare
+                    || !tags.is_empty()
+                    || description.is_some()
+                    || *parameters != crate::params::ToolParameters::open()
+                {
+                    return Err(LoadError::WildcardMetadata);
+                }
+                if wildcard.replace(declaration).is_some() {
+                    return Err(LoadError::DuplicateWildcard);
+                }
+                continue;
+            }
             match &declaration {
                 ToolDeclaration::Declared(tool) => {
                     check_rank(&config.trust_chain, tool.delta.trust, || {
@@ -920,7 +941,7 @@ impl Registry {
 
         let sanitizer_list: Vec<Sanitizer> = sanitizers.values().cloned().collect();
         let checkable_tools: Vec<&ToolDeclaration> = tools.values().flatten().map(|(_, d)| d).collect();
-        for declaration in tools.values().flatten().map(|(_, d)| d) {
+        for declaration in tools.values().flatten().map(|(_, d)| d).chain(wildcard.as_ref()) {
             let count = worst_case_plan_alternatives(
                 declaration,
                 profile.confines_result(declaration.name()),
@@ -1010,13 +1031,12 @@ impl Registry {
             })
             .collect();
 
-        let unknown_tool = undeclared_annotation();
         Ok(Registry {
             trust_chain: config.trust_chain,
             audience_readers,
             tools,
             provider_run,
-            unknown_tool: ToolDeclaration::Declared(unknown_tool),
+            wildcard,
             annotators,
             authorities: config.authorities,
             attention_marks,
@@ -1068,41 +1088,45 @@ impl Registry {
         std::iter::once("public").chain(self.audience_readers.iter().map(ReaderId::as_str))
     }
 
-    /// The one classification every name lookup derives from.
-    pub fn classify(&self, name: &ToolName) -> ToolKind {
+    /// The one classification every name lookup derives from. An exact declaration always wins;
+    /// the wildcard covers only a name the policy does not write. `None` is a name no contract
+    /// covers: a proposal naming it is refused.
+    pub fn classify(&self, name: &ToolName) -> Option<ToolKind> {
         if self.tools.contains_key(name) {
-            ToolKind::Declared
+            Some(ToolKind::Declared)
         } else if self.provider_run.contains_key(name) {
-            ToolKind::ProviderRun
+            Some(ToolKind::ProviderRun)
+        } else if self.wildcard.is_some() {
+            Some(ToolKind::Wildcard)
         } else {
-            ToolKind::Undeclared
+            None
         }
     }
 
-    /// Whether the policy declares this checkable tool. Deployment coverage and provider-result
-    /// admission read this: an undeclared name resolves to a declaration at a proposal, but a
-    /// deployment declaration naming one is a typo.
+    /// Whether the policy declares this checkable tool exactly. Deployment coverage and
+    /// provider-result admission read this: the wildcard covers a name at a proposal, but a
+    /// deployment declaration naming an unwritten tool is a typo.
     pub(crate) fn declared(&self, name: &ToolName) -> bool {
-        self.classify(name) == ToolKind::Declared
+        self.classify(name) == Some(ToolKind::Declared)
     }
 
     /// The first declaration of a name, for tests that register one declaration per tool.
     #[cfg(test)]
     pub(crate) fn tool(&self, name: &ToolName) -> Option<&ToolDeclaration> {
-        match self.classify(name) {
+        match self.classify(name)? {
             ToolKind::Declared => self.tools.get(name)?.first().map(|(_, d)| d),
             ToolKind::ProviderRun => None,
-            ToolKind::Undeclared => Some(&self.unknown_tool),
+            ToolKind::Wildcard => self.wildcard.as_ref(),
         }
     }
 
-    /// The declaration a persisted call names. An undeclared tool has exactly one, at
+    /// The declaration a persisted call names. A wildcard-covered tool has exactly one, at
     /// ordinal zero; a record naming another ordinal for it is forged.
     pub(crate) fn keyed_tool(&self, name: &ToolName, id: ToolDeclarationId) -> Option<&ToolDeclaration> {
-        match self.classify(name) {
+        match self.classify(name)? {
             ToolKind::Declared => self.tools.get(name)?.get(id.ordinal()).map(|(_, d)| d),
             ToolKind::ProviderRun => None,
-            ToolKind::Undeclared => (id.ordinal() == 0).then_some(&self.unknown_tool),
+            ToolKind::Wildcard => (id.ordinal() == 0).then_some(self.wildcard.as_ref()).flatten(),
         }
     }
 
@@ -1128,7 +1152,7 @@ impl Registry {
         name: &ToolName,
         arguments: &serde_json::Value,
     ) -> Option<(ToolDeclarationId, &ToolDeclaration)> {
-        match self.classify(name) {
+        match self.classify(name)? {
             ToolKind::Declared => {
                 self.tools
                     .get(name)?
@@ -1143,7 +1167,10 @@ impl Registry {
                     })
             }
             ToolKind::ProviderRun => None,
-            ToolKind::Undeclared => Some((ToolDeclarationId::default(), &self.unknown_tool)),
+            ToolKind::Wildcard => self
+                .wildcard
+                .as_ref()
+                .map(|declaration| (ToolDeclarationId::default(), declaration)),
         }
     }
 
@@ -1152,10 +1179,10 @@ impl Registry {
             .is_some_and(|(selected, _)| selected == call.declaration_id())
     }
 
-    /// Whether a proposal naming this tool has a checkable declaration: declared or undeclared. A
-    /// provider-run tool is the one name with no checkable declaration.
+    /// Whether a proposal naming this tool has a checkable declaration: written exactly, or
+    /// covered by the wildcard. A provider-run tool or a name nothing covers has none.
     pub(crate) fn contains_tool(&self, name: &ToolName) -> bool {
-        self.classify(name) != ToolKind::ProviderRun
+        matches!(self.classify(name), Some(ToolKind::Declared | ToolKind::Wildcard))
     }
 
     pub fn variants(&self, name: &ToolName) -> impl Iterator<Item = &ToolDeclaration> {
@@ -1914,59 +1941,91 @@ mod tests {
         ));
     }
 
+    /// The wildcard is one Annotated declaration covering every name the policy does not
+    /// write, at ordinal zero only, exact declarations first, and in no listing.
     #[test]
-    fn refuses_the_reserved_tool_name() {
-        let mut cfg = base();
-        cfg.tools = declared(vec![tool(UNDECLARED_TOOL_NAME)]);
-        assert!(matches!(Registry::build_covered(cfg), Err(LoadError::ReservedToolName)));
-    }
-
-    /// Every undeclared name resolves to the one engine-built fail-closed declaration: it
-    /// commits the bottom label, at ordinal zero only, distinct from a declared tool's first
-    /// declaration, and in no listing.
-    #[test]
-    fn an_undeclared_name_resolves_to_the_reserved_fail_closed_contract() {
+    fn the_wildcard_covers_every_name_the_policy_does_not_write() {
         let mut cfg = base();
         cfg.tools = declared(vec![tool("read")]);
+        cfg.tools.push(annotated(WILDCARD_TOOL_NAME, "any"));
+        cfg.annotators = vec![annotator("any")];
         let registry = Registry::build_covered(cfg).unwrap();
         let read = ToolName::new("read");
         let ghost = ToolName::new("ghost");
-        assert_eq!(registry.classify(&read), ToolKind::Declared);
-        assert_eq!(registry.classify(&ghost), ToolKind::Undeclared);
+        assert_eq!(registry.classify(&read), Some(ToolKind::Declared));
+        assert_eq!(registry.classify(&ghost), Some(ToolKind::Wildcard));
         assert!(registry.declared(&read));
         assert!(!registry.declared(&ghost));
         assert!(registry.contains_tool(&ghost));
 
-        let (id, reserved) = registry.select_tool(&ghost, &serde_json::json!({})).unwrap();
+        let (id, covered) = registry.select_tool(&ghost, &serde_json::json!({})).unwrap();
         assert_eq!(id, ToolDeclarationId::default());
-        let reserved = reserved.declared().expect("the reserved declaration is static");
-        assert_eq!(reserved.name.as_str(), UNDECLARED_TOOL_NAME);
-        assert_eq!(reserved.delta.trust, Some(Trust::new(0)));
-        assert_eq!(
-            reserved.delta.audience,
-            Some(DeclaredAudience::literal(Audience::restricted([])))
-        );
-        assert_eq!(reserved.requires, crate::contract::Requires::default());
+        assert_eq!(covered.annotator(), Some(&AnnotatorName::new("any")));
+        assert!(covered.declared().is_none(), "the wildcard carries no static contract");
 
-        let first = registry.keyed_tool(&read, ToolDeclarationId::default()).unwrap();
-        assert_ne!(first.name(), &reserved.name);
-        assert_eq!(
-            registry
-                .keyed_tool(&ghost, ToolDeclarationId::default())
-                .map(ToolDeclaration::name),
-            Some(&reserved.name)
-        );
+        let (_, exact) = registry.select_tool(&read, &serde_json::json!({})).unwrap();
+        assert!(exact.declared().is_some(), "an exact declaration beats the wildcard");
         assert!(
             registry
                 .keyed_tool(&ghost, ToolDeclarationId::new(1).unwrap())
                 .is_none()
         );
-        assert!(
-            registry
-                .tools()
-                .all(|tool| tool.name().as_str() != UNDECLARED_TOOL_NAME)
-        );
-        assert!(registry.tool_names().all(|name| name.as_str() != UNDECLARED_TOOL_NAME));
+        assert!(registry.tools().all(|tool| tool.name().as_str() != WILDCARD_TOOL_NAME));
+        assert!(registry.tool_names().all(|name| name.as_str() != WILDCARD_TOOL_NAME));
+    }
+
+    #[test]
+    fn a_name_no_declaration_and_no_wildcard_covers_has_no_contract() {
+        let mut cfg = base();
+        cfg.tools = declared(vec![tool("read")]);
+        let registry = Registry::build_covered(cfg).unwrap();
+        let ghost = ToolName::new("ghost");
+        assert_eq!(registry.classify(&ghost), None);
+        assert!(!registry.contains_tool(&ghost));
+        assert!(registry.select_tool(&ghost, &serde_json::json!({})).is_none());
+        assert!(registry.keyed_tool(&ghost, ToolDeclarationId::default()).is_none());
+    }
+
+    #[test]
+    fn a_wildcard_declares_no_statics_no_metadata_and_registers_once() {
+        let statics = {
+            let mut cfg = base();
+            cfg.tools = declared(vec![tool(WILDCARD_TOOL_NAME)]);
+            Registry::build_covered(cfg)
+        };
+        assert!(matches!(statics, Err(LoadError::WildcardStatic)));
+
+        let tagged = {
+            let mut cfg = base();
+            cfg.annotators = vec![annotator("any")];
+            cfg.tools = vec![ToolDeclaration::Annotated {
+                name: ToolName::new(WILDCARD_TOOL_NAME),
+                tags: vec![crate::names::TagName::new("web")],
+                description: None,
+                parameters: crate::params::ToolParameters::open(),
+                annotator: AnnotatorName::new("any"),
+            }];
+            Registry::build_covered(cfg)
+        };
+        assert!(matches!(tagged, Err(LoadError::WildcardMetadata)));
+
+        let doubled = {
+            let mut cfg = base();
+            cfg.annotators = vec![annotator("any")];
+            cfg.tools = vec![
+                annotated(WILDCARD_TOOL_NAME, "any"),
+                annotated(WILDCARD_TOOL_NAME, "any"),
+            ];
+            Registry::build_covered(cfg)
+        };
+        assert!(matches!(doubled, Err(LoadError::DuplicateWildcard)));
+
+        let unregistered = {
+            let mut cfg = base();
+            cfg.tools = vec![annotated(WILDCARD_TOOL_NAME, "ghost")];
+            Registry::build_covered(cfg)
+        };
+        assert!(matches!(unregistered, Err(LoadError::UnknownAnnotator { .. })));
     }
 
     #[test]

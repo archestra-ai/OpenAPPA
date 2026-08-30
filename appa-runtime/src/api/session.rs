@@ -1366,12 +1366,12 @@ name = "execute_remedy_plan"
     }
 
     #[tokio::test]
-    async fn an_unknown_tool_call_returns_deny_feedback() {
+    async fn a_tool_nothing_covers_is_refused_typed_before_it_runs() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
         let session = runtime.create_session(root()).expect("a fresh id opens");
-        let decision = session
+        let refused = session
             .on_tool_call(
                 ProposedCall {
                     tool: "wrench".to_string(),
@@ -1379,9 +1379,12 @@ name = "execute_remedy_plan"
                 },
                 false,
             )
-            .await
-            .expect("the refusal is delivered as feedback");
-        assert!(matches!(decision, ToolCallDecision::Deny { .. }));
+            .await;
+        assert!(matches!(
+            refused,
+            Err(EventError::UndeclaredTool { tool }) if tool == "wrench"
+        ));
+        assert!(only_the_opening(&runtime), "the refusal appends nothing");
     }
 
     fn latest_offer(runtime: &Runtime) -> OfferId {
@@ -1439,12 +1442,9 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
         let new = runtime
             .create_session(TrajectoryId("cc:new".to_string()))
             .expect("a fresh id opens");
-        let denied = new
-            .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
-            .await
-            .expect("the new root decides");
+        let refused = new.on_tool_call(fetch(serde_json::json!({"a": 1})), false).await;
         assert!(
-            matches!(denied, ToolCallDecision::Deny { .. }),
+            matches!(refused, Err(EventError::UndeclaredTool { tool }) if tool == "fetch"),
             "fetch is gone for new roots"
         );
         let allowed = new
@@ -4305,9 +4305,8 @@ context_control = true
         assert!(matches!(
             session
                 .on_tool_call(control_call("mcp__evil__execute_remedy_plan"), false)
-                .await
-                .expect("the lookalike is decided"),
-            ToolCallDecision::Deny { .. },
+                .await,
+            Err(EventError::UndeclaredTool { tool }) if tool == "mcp__evil__execute_remedy_plan",
         ));
     }
 

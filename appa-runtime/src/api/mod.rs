@@ -180,6 +180,8 @@ pub(crate) enum EventError {
     EngineInvariant(String),
     #[error("annotator={annotator} error={reason}")]
     AnnotationRefused { annotator: String, reason: String },
+    #[error("tool {tool} is not declared in this policy and no wildcard covers it; the call is refused before it runs")]
+    UndeclaredTool { tool: String },
     #[error("storage failure: {0}")]
     Storage(String),
 }
@@ -199,6 +201,7 @@ impl EventError {
             | EventError::EngineInvariant(_)
             | EventError::Contended { .. }
             | EventError::AnnotationRefused { .. }
+            | EventError::UndeclaredTool { .. }
             | EventError::UnexpectedDecision => true,
             EventError::CallOutstanding
             | EventError::SubstitutionAbandoned { .. }
@@ -227,6 +230,7 @@ impl From<EngineRefusal> for EventError {
             EngineRefusal::DispatchClosed => EventError::UnknownDispatch,
             EngineRefusal::UnknownOffer => EventError::UnknownOffer,
             EngineRefusal::Unbindable => EventError::BindingMismatch,
+            EngineRefusal::UndeclaredTool { tool } => EventError::UndeclaredTool { tool },
         }
     }
 }

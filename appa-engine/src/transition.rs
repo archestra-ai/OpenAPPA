@@ -1985,9 +1985,9 @@ impl<'a> Sequence<'a> {
     }
 
     /// Can this release's result restrict the trajectory or arrive through a bound sanitizer?
-    /// An undeclared tool admits at the fail-closed bottom label, so it can, and so can any tool
-    /// with a declared delta or an Annotator-declared contract — its delta exists only per call;
-    /// the deliberate static neutral `delta = {}` cannot.
+    /// Any tool with a declared delta can, and so can an Annotator-declared contract — the
+    /// wildcard included — whose delta exists only per call; the deliberate static neutral
+    /// `delta = {}` cannot.
     fn result_can_restrict(
         &self,
         tool: &crate::value::ToolName,

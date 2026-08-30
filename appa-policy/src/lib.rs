@@ -1287,6 +1287,63 @@ confined_results = ["lookup"]
     }
 
     #[test]
+    fn the_wildcard_tool_loads_with_an_annotator_and_nothing_else() {
+        let policy = "version = 1\n[[annotator]]\nname = \"any\"\n\
+                      [[tool]]\nname = \"*\"\nannotator = \"any\"\n";
+        let config = Config::from_toml_str(policy).expect("the wildcard loads");
+        assert_eq!(
+            config.registry().classify(&appa_engine::value::ToolName::new("ghost")),
+            Some(appa_engine::registry::ToolKind::Wildcard)
+        );
+    }
+
+    #[test]
+    fn a_second_wildcard_tool_is_refused() {
+        let policy = "version = 1\n[[annotator]]\nname = \"any\"\n\
+                      [[tool]]\nname = \"*\"\nannotator = \"any\"\n\
+                      [[tool]]\nname = \"*\"\nannotator = \"any\"\n";
+        assert!(matches!(
+            Config::from_toml_str(policy),
+            Err(ConfigError::Registry(LoadError::DuplicateWildcard))
+        ));
+    }
+
+    #[test]
+    fn a_wildcard_tool_with_static_semantics_is_refused() {
+        for statics in ["", "delta = {}"] {
+            let policy = format!("version = 1\n[[tool]]\nname = \"*\"\n{statics}\n");
+            assert!(
+                matches!(
+                    Config::from_toml_str(&policy),
+                    Err(ConfigError::Registry(LoadError::WildcardStatic))
+                ),
+                "a wildcard without an annotator (statics: {statics:?}) must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wildcard_tool_with_metadata_is_refused() {
+        for metadata in [
+            "description = \"Anything.\"",
+            "tags = [\"web\"]",
+            "parameters = { type = \"object\", properties = { path = { type = \"string\" } } }",
+        ] {
+            let policy = format!(
+                "version = 1\n[[annotator]]\nname = \"any\"\n\
+                 [[tool]]\nname = \"*\"\nannotator = \"any\"\n{metadata}\n"
+            );
+            assert!(
+                matches!(
+                    Config::from_toml_str(&policy),
+                    Err(ConfigError::Registry(LoadError::WildcardMetadata))
+                ),
+                "wildcard metadata {metadata:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
     fn an_annotator_mandate_resolves_omitted_bounds_to_the_whole_vocabulary() {
         let policy = r#"
 version = 1

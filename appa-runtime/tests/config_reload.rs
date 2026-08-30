@@ -117,8 +117,10 @@ fn allowed(decision: &HookDecision) -> bool {
     matches!(decision, HookDecision::AllowCall { .. })
 }
 
-fn denied(decision: &HookDecision) -> bool {
-    matches!(decision, HookDecision::DenyCall { .. })
+/// After a swap removes the declaration, nothing covers `notes`: the refusal is
+/// typed and names the tool.
+fn refused_undeclared(decision: &HookDecision) -> bool {
+    matches!(decision, HookDecision::Refuse { detail } if detail.contains("notes"))
 }
 
 #[tokio::test]
@@ -141,7 +143,7 @@ async fn a_running_root_keeps_its_opening_policy_and_a_new_root_binds_the_new_fi
     let after = TrajectoryId("reload:after".to_string());
     start(&deployment.runtime, &after).await;
     assert!(
-        denied(&propose_notes(&deployment.runtime, &after).await),
+        refused_undeclared(&propose_notes(&deployment.runtime, &after).await),
         "a root opened after the swap binds the new file"
     );
 }
@@ -285,7 +287,7 @@ async fn reload_rereads_includes_and_a_broken_include_refuses() {
     let after = TrajectoryId("reload:included-edit".to_string());
     start(&runtime, &after).await;
     assert!(
-        denied(&propose_notes(&runtime, &after).await),
+        refused_undeclared(&propose_notes(&runtime, &after).await),
         "a fresh root sees the edited include"
     );
 }

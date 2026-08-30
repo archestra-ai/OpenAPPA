@@ -497,8 +497,8 @@ pub(crate) fn validate_coverage(
         "deployment starting label".to_string()
     })?;
 
-    // Coverage names declared tools only: an undeclared name resolves to the engine-built
-    // fail-closed contract at a proposal, but a deployment declaration naming one is a typo.
+    // Coverage names declared tools only: the wildcard covers a name at a proposal, but a
+    // deployment declaration naming an unwritten tool is a typo.
     let registered = |tool: &ToolName| registry.declared(tool) || registry.provider_run_annotation(tool).is_some();
     for tool in declaration.executor_exceptions.keys() {
         if !registered(tool) {
@@ -621,6 +621,8 @@ pub(crate) fn covering_declaration(config: &RegistryConfig) -> ProfileDeclaratio
         confined_results: config
             .tools
             .iter()
+            // Coverage names written tools only: the wildcard is not a name a deployment confines.
+            .filter(|declaration| declaration.name().as_str() != crate::registry::WILDCARD_TOOL_NAME)
             .map(|declaration| {
                 crate::registry::base_tool_name(declaration.name()).expect("test contracts have valid names")
             })

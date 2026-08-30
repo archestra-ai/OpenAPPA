@@ -3254,7 +3254,7 @@ impl Engine {
     /// engine. Tool lookup, strict JSON scanning, schema validation, and RFC 8785 rendering
     /// happen together, so outer runtimes cannot construct a call under a different schema.
     pub fn resolve_call(&self, tool: ToolName, raw_arguments: &[u8]) -> Result<ResolvedCall, EngineError> {
-        if self.registry.classify(&tool) == ToolKind::ProviderRun {
+        if self.registry.classify(&tool) == Some(ToolKind::ProviderRun) {
             return Err(EngineError::ProviderRunTool(tool.as_str().to_string()));
         }
         select_call(&self.registry, tool, raw_arguments).map(|(call, _)| call)
@@ -3354,9 +3354,14 @@ fn select_call<'a>(
     raw_arguments: &[u8],
 ) -> Result<(ResolvedCall, &'a crate::contract::ToolDeclaration), EngineError> {
     let parsed = CanonicalArguments::parse(raw_arguments).map_err(EngineError::InvalidCall)?;
-    let (id, declaration) = registry
-        .select_tool(&tool, parsed.value())
-        .ok_or(EngineError::InvalidCall(ArgumentError::NoMatchingContract))?;
+    let (id, declaration) = registry.select_tool(&tool, parsed.value()).ok_or_else(|| {
+        // A name no declaration and no wildcard covers has no contract at all; a declared
+        // name whose arguments select no ordered variant is a malformed call under it.
+        match registry.classify(&tool) {
+            None => EngineError::UnknownTool(tool.as_str().to_string()),
+            Some(_) => EngineError::InvalidCall(ArgumentError::NoMatchingContract),
+        }
+    })?;
     declaration
         .parameters()
         .validate(parsed.value())
@@ -3905,6 +3910,17 @@ mod tests {
             description: tool.description,
             parameters: tool.parameters,
             annotator: crate::names::AnnotatorName::new(annotator),
+        }
+    }
+
+    /// The policy's wildcard: `name = "*"`, no metadata, routed through `by`.
+    fn wildcard(by: &str) -> crate::contract::ToolDeclaration {
+        crate::contract::ToolDeclaration::Annotated {
+            name: ToolName::new(crate::registry::WILDCARD_TOOL_NAME),
+            tags: vec![],
+            description: None,
+            parameters: crate::params::ToolParameters::open(),
+            annotator: crate::names::AnnotatorName::new(by),
         }
     }
 
@@ -9134,20 +9150,28 @@ mod tests {
         );
     }
 
-    /// An undeclared tool resolves to the engine-built fail-closed contract, so a check on it
-    /// is a blocking narrowing to the bottom label rather than an error.
+    /// Two-tier selection on the proposal path: a name the policy writes decides under its
+    /// exact declaration and never falls to the wildcard; only a name it does not write owes
+    /// the wildcard annotator's annotation.
     #[test]
-    fn an_undeclared_tool_checks_fail_closed_as_a_narrowing_to_bottom() {
-        let e = engine(vec![]);
-        match check(&e, &[opened(&e)], &call("ghost", json!({}))) {
-            CheckOutcome::Block(raw) => {
-                assert!(raw.requirement_gaps.is_empty());
-                let narrowing = raw.narrowing.expect("an undeclared result narrows fail-closed");
-                assert_eq!(narrowing.to.trust, Trust::new(0));
-                assert_eq!(narrowing.to.audience, Audience::restricted([]));
-            }
-            other => panic!("expected a fail-closed narrowing block, got {other:?}"),
-        }
+    fn an_exact_declaration_beats_the_wildcard_on_a_proposal() {
+        let mut cfg = test_config(vec![plain_tool("read")]);
+        cfg.tools.push(wildcard("any"));
+        cfg.annotators.push(annotator("any"));
+        let e = open_engine(cfg);
+        let log = vec![opened(&e)];
+        let exact = proposed(&e, &log, "b1", nonce(), call("read", json!({}))).expect("the static declaration decides");
+        assert!(
+            matches!(&exact.follow_up, FollowUp::Proposals { released, .. } if !released.is_empty()),
+            "the exact declaration releases without an annotation consult: {:?}",
+            exact.follow_up
+        );
+        assert_eq!(
+            proposed(&e, &log, "b2", nonce(), call("ghost", json!({}))).err(),
+            Some(TransitionError::AnnotationNeeded {
+                annotators: vec![crate::names::AnnotatorName::new("any")]
+            })
+        );
     }
 
     #[test]
@@ -9312,15 +9336,20 @@ mod tests {
             e.resolve_call(ToolName::new("send"), br#"{"bogus":true}"#),
             Err(EngineError::InvalidCall(ArgumentError::Schema(_)))
         ));
-        // An undeclared name resolves onto the engine-built fail-closed contract at ordinal zero.
-        let ghost = e
+        // A name no declaration and no wildcard covers has no contract: the refusal is typed.
+        assert!(matches!(
+            e.resolve_call(ToolName::new("ghost"), br#"{}"#),
+            Err(EngineError::UnknownTool(name)) if name == "ghost"
+        ));
+        // With a wildcard, the same name resolves onto it at ordinal zero.
+        let mut cfg = test_config(vec![strict_tool("send")]);
+        cfg.tools.push(wildcard("any"));
+        cfg.annotators.push(annotator("any"));
+        let covered = open_engine(cfg);
+        let ghost = covered
             .resolve_call(ToolName::new("ghost"), br#"{}"#)
-            .expect("an undeclared tool resolves");
+            .expect("the wildcard covers the name");
         assert_eq!(ghost.declaration_id(), crate::value::ToolDeclarationId::default());
-        assert_eq!(
-            e.registry.annotation_of(&ghost).map(|contract| contract.name.as_str()),
-            Some(crate::registry::UNDECLARED_TOOL_NAME)
-        );
     }
 
     #[test]
@@ -10078,9 +10107,16 @@ mod tests {
                 },
             ]
         };
+        // A record naming a tool nothing covers is refused by name, before any backing check.
         let ghost_call = call("ghost", json!({}));
         assert_eq!(
             e.validate_replay(&dispatched("ghost", json!({}), &ghost_call)),
+            Err(TransitionRefusal::UnknownTool("ghost".to_string()))
+        );
+        // A dispatch no decision backs is refused as such.
+        let undecided = call("send", json!({ "to": "hr" }));
+        assert_eq!(
+            e.validate_replay(&dispatched("send", json!({ "to": "hr" }), &undecided)),
             Err(TransitionRefusal::UnbackedDecision)
         );
         let smuggled = call("send", json!({ "bogus": 1 }));
@@ -10267,11 +10303,11 @@ mod tests {
         ));
     }
 
-    /// An undeclared tool has exactly one contract, the engine-built fail-closed one at ordinal
-    /// zero. A persisted release of it is a misdecided batch — the check blocks the call on its
-    /// fail-closed narrowing — and so is a record naming any other ordinal for it.
+    /// A released tool nothing covers is refused by name on replay. Under a wildcard the name
+    /// is covered, but the wildcard prescribes its annotator's mandate: a record carrying a
+    /// static pin for it is forged, and so is a record naming any other ordinal.
     #[test]
-    fn replay_refuses_a_released_undeclared_tool_and_a_forged_ordinal_for_it() {
+    fn replay_refuses_a_released_tool_nothing_covers_and_a_forged_wildcard_record() {
         let e = engine(vec![crm_tool()]);
         let ghost = call("ghost", json!({}));
         let forged = |proposal: ResolvedCall| {
@@ -10302,19 +10338,39 @@ mod tests {
                 },
             ]
         };
-        // The live path blocks the call on its fail-closed narrowing, so it never decides
-        // such a batch.
+        // No wildcard: the name has no contract at all, and replay refuses it as such.
         assert_eq!(
             e.validate_replay(&forged(ghost.clone())),
-            Err(TransitionRefusal::MisdecidedBatch)
+            Err(TransitionRefusal::UnknownTool("ghost".to_string()))
+        );
+
+        // A wildcard covers the name, but the record's static pin is not its annotator's.
+        let mut cfg = test_config(vec![crm_tool()]);
+        cfg.tools.push(wildcard("any"));
+        cfg.annotators.push(annotator("any"));
+        let covered = open_engine(cfg);
+        let forged_static = {
+            let mut log = forged(ghost.clone());
+            log[0] = opened(&covered);
+            log
+        };
+        assert_eq!(
+            covered.validate_replay(&forged_static),
+            Err(TransitionRefusal::ForgedResolution)
         );
         let second = ResolvedCall::new_keyed(
             ghost.tool().clone(),
             crate::value::ToolDeclarationId::new(1).unwrap(),
             ghost.canonical_arguments().clone(),
         );
+        // A covered name has exactly one ordinal: a fresh selection contradicts the record.
+        let forged_ordinal = {
+            let mut log = forged(second);
+            log[0] = opened(&covered);
+            log
+        };
         assert_eq!(
-            e.validate_replay(&forged(second)),
+            covered.validate_replay(&forged_ordinal),
             Err(TransitionRefusal::MisdecidedBatch)
         );
     }
@@ -10776,29 +10832,13 @@ mod tests {
     fn a_malformed_sibling_mediates_none_of_them_and_the_admissions_stand() {
         let e = batch_engine();
         let log = opening_log(&e);
-        // An undeclared sibling is not malformed: it resolves onto the fail-closed contract and
-        // blocks on its bottom narrowing like any other checkable call.
-        let undeclared = e
-            .handle(
-                &viewing(&e, &log),
-                batch(
-                    "b1",
-                    vec![exposed("seen", "the provider ran it")],
-                    vec![raw(&call("quiet", json!({}))), raw_call("nowhere", b"{}")],
-                ),
-            )
-            .expect("an undeclared sibling checks fail-closed instead of failing the batch");
-        match &undeclared.follow_up {
-            FollowUp::Proposals { blocked, .. } => {
-                assert_eq!(blocked.len(), 1, "the undeclared call blocks; its sibling releases");
-                assert!(
-                    blocked[0].block.raw.narrowing.is_some(),
-                    "the block carries the fail-closed narrowing"
-                );
-            }
-            other => panic!("expected proposals, got {other:?}"),
-        }
-        for (position, malformed) in [(1, raw_call("seen", b"{}")), (1, raw_call("quiet", b"not json"))] {
+        // A sibling nothing covers is one of the malformed shapes: no contract, no decision,
+        // and the provider-run admissions stand.
+        for (position, malformed) in [
+            (1, raw_call("seen", b"{}")),
+            (1, raw_call("quiet", b"not json")),
+            (1, raw_call("nowhere", b"{}")),
+        ] {
             let decision = e
                 .handle(
                     &viewing(&e, &log),

@@ -830,3 +830,134 @@ effects = ["egress"]"#,
         "the refused call released nothing"
     );
 }
+
+fn wildcard_policy(url: &str) -> String {
+    format!(
+        r#"
+[policy]
+version = 1
+
+[[policy.annotator]]
+name = "gatekeeper"
+
+[[policy.tool]]
+name = "read"
+delta = {{}}
+
+[[policy.tool]]
+name = "*"
+annotator = "gatekeeper"
+
+[[policy.authority]]
+name = "operator"
+[policy.authority.permits]
+attention = ["signoff"]
+
+[externals]
+timeout_ms = 2000
+review_timeout_ms = 1000
+max_body_bytes = 65536
+
+[externals.annotators.gatekeeper]
+url = "{url}"
+
+[externals.authorities.operator]
+builtin = "hitl"
+"#
+    )
+}
+
+fn call(tool: &str, arguments: serde_json::Value) -> ProposedCall {
+    ProposedCall {
+        tool: tool.to_string(),
+        arguments: raw(arguments),
+    }
+}
+
+/// Scenario 5: the policy writes `read` exactly and covers everything else with the
+/// wildcard. An unwritten money-moving tool is annotated per call — the gatekeeper sees
+/// the actual call — and its strict trust-and-attention contract blocks the call. The
+/// exact declaration decides `read` without a consult.
+#[tokio::test]
+async fn the_wildcard_annotates_an_unwritten_tool_and_an_exact_declaration_never_consults() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, annotator) = serve_annotator().await;
+    annotator.set(
+        "gatekeeper",
+        Answer::Wire(serde_json::json!({
+            "version": 1,
+            "answer": {
+                "delta": {},
+                "requires": { "trust": "trusted", "attention": ["signoff"], "history": [] },
+                "emits": [],
+            }
+        })),
+    );
+    let runtime = open_runtime(&dir, &wildcard_policy(&url)).await;
+
+    let decision = propose(
+        &runtime,
+        call("send_money_via_wire", serde_json::json!({"amount": 9000})),
+    )
+    .await;
+    assert!(
+        matches!(decision, HookDecision::DenyCall { .. }),
+        "the produced attention requirement blocks the unwritten tool: {decision:?}"
+    );
+    let requests = annotator.requests();
+    assert_eq!(requests.len(), 1, "the wildcard consulted once");
+    // The annotation subject is the actual call, not the wildcard's spelling.
+    assert_eq!(requests[0]["artifact"]["args"]["name"], "send_money_via_wire");
+    assert_eq!(
+        requests[0]["artifact"]["args"]["arguments"],
+        serde_json::json!({"amount": 9000})
+    );
+
+    assert_eq!(
+        propose(&runtime, call("read", serde_json::json!({"path": "a.txt"}))).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    ran(&runtime, call("read", serde_json::json!({"path": "a.txt"}))).await;
+    assert_eq!(
+        annotator.requests().len(),
+        1,
+        "the exact declaration decides without a consult"
+    );
+}
+
+/// A produced restricting delta blocks a wildcard-covered call before release, and
+/// proposing it again holds the block.
+#[tokio::test]
+async fn a_wildcard_calls_produced_narrowing_blocks_and_holds() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, annotator) = serve_annotator().await;
+    annotator.set("gatekeeper", Answer::Wire(produced("suspicious")));
+    let runtime = open_runtime(&dir, &wildcard_policy(&url)).await;
+
+    for _ in 0..2 {
+        let decision = propose(&runtime, call("ghost_tool", serde_json::json!({}))).await;
+        assert!(
+            matches!(decision, HookDecision::DenyCall { .. }),
+            "the produced narrowing blocks the call: {decision:?}"
+        );
+    }
+}
+
+/// Without a wildcard, a tool the policy does not write has no contract at all: the hook
+/// refuses it as a typed operational error naming the tool, and appends nothing.
+#[tokio::test]
+async fn a_tool_nothing_covers_refuses_the_hook_and_appends_nothing() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, _annotator) = serve_annotator().await;
+    let runtime = open_runtime(&dir, &http_policy(&url)).await;
+    let before = audit_len(&runtime);
+
+    let decision = propose(&runtime, call("wrench", serde_json::json!({}))).await;
+    match decision {
+        HookDecision::Refuse { detail } => {
+            assert!(detail.contains("wrench"), "the refusal names the tool: {detail}");
+        }
+        other => panic!("expected a typed refusal, got {other:?}"),
+    }
+    assert_eq!(audit_len(&runtime), before, "the refusal appends nothing");
+}
