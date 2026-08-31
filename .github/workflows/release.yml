@@ -102,6 +102,7 @@ jobs:
       pull-requests: write # Required to create and update the approval PR.
     steps:
       - name: Create or update next release PR
+        id: release-pr
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
           token: ${{ github.token }}
@@ -109,6 +110,43 @@ jobs:
           manifest-file: .github/release-please/.release-please-manifest.json
           target-branch: main
           skip-github-release: true
+
+      - name: Checkout release PR
+        if: ${{ steps.release-pr.outputs.prs_created == 'true' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ fromJSON(steps.release-pr.outputs.pr).headBranchName }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Synchronize release version
+        if: ${{ steps.release-pr.outputs.prs_created == 'true' }}
+        run: |
+          version=$(tr -d '\r\n' < .github/release-please/version.txt)
+          cargo update --workspace
+          cargo_version=$(cargo metadata --locked --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "appa") | .version')
+          plugin_version=$(jq -r '.version' \
+            integrations/claude-code/plugin/.claude-plugin/plugin.json)
+          test "$cargo_version" = "$version"
+          test "$plugin_version" = "$version"
+
+      - name: Update release PR
+        if: ${{ steps.release-pr.outputs.prs_created == 'true' }}
+        env:
+          RELEASE_BRANCH: ${{ fromJSON(steps.release-pr.outputs.pr).headBranchName }}
+          RELEASE_PUSH_TOKEN: ${{ github.token }}
+        run: |
+          if git diff --quiet; then
+            exit 0
+          fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add Cargo.lock
+          git commit -m "chore: synchronize release version"
+          git -c credential.helper= \
+            -c 'credential.helper=!f() { test "$1" = get && printf "%s\n" "username=x-access-token" "password=$RELEASE_PUSH_TOKEN"; }; f' \
+            push origin "HEAD:${RELEASE_BRANCH}"
 
   build-binaries:
     name: Build release binaries

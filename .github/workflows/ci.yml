@@ -42,6 +42,16 @@ jobs:
       - name: Test battery externals
         run: python3 -m unittest discover -s batteries/claude-code -p 'test_*.py'
 
+      - name: Check release versions
+        run: |
+          version=$(tr -d '\r\n' < .github/release-please/version.txt)
+          cargo_version=$(cargo metadata --locked --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "appa") | .version')
+          plugin_version=$(jq -r '.version' \
+            integrations/claude-code/plugin/.claude-plugin/plugin.json)
+          test "$cargo_version" = "$version"
+          test "$plugin_version" = "$version"
+
   rust-checks:
     name: Rust Checks
     runs-on: ubuntu-latest
