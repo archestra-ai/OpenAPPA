@@ -148,22 +148,67 @@ jobs:
             -c 'credential.helper=!f() { test "$1" = get && printf "%s\n" "username=x-access-token" "password=$RELEASE_PUSH_TOKEN"; }; f' \
             push origin "HEAD:${RELEASE_BRANCH}"
 
+  plugin-artifact:
+    name: Build the plugin artifact
+    if: ${{ needs.release-please.outputs.should_publish == 'true' }}
+    needs: release-please
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      sha256: ${{ steps.package.outputs.sha256 }}
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The same ref the binaries are built from. `github.sha` would be the
+          # commit that triggered this run, which is not the release tag when
+          # publishing an existing release.
+          ref: ${{ needs.release-please.outputs.tag_name }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Package the plugin
+        id: package
+        env:
+          VERSION: ${{ needs.release-please.outputs.version }}
+        run: |
+          mkdir -p dist
+          sh scripts/appa-stage-plugin-bundle.sh staged
+          tar -C staged -czf "dist/appa-plugin-${VERSION}.tar.gz" .
+          digest=$(sha256sum "dist/appa-plugin-${VERSION}.tar.gz" | cut -d' ' -f1)
+          echo "sha256=${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the plugin artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: appa-plugin
+          path: dist/appa-plugin-${{ needs.release-please.outputs.version }}.tar.gz
+          archive: false
+          if-no-files-found: error
+          retention-days: 7
+
   build-binaries:
     name: Build release binaries
     if: ${{ needs.release-please.outputs.should_publish == 'true' }}
-    needs: release-please
+    needs:
+      - release-please
+      - plugin-artifact
     permissions:
       contents: read # Required by the reusable workflow to check out the release tag.
     uses: ./.github/workflows/build-appa-runtime-binaries.yml
     with:
       source_ref: ${{ needs.release-please.outputs.tag_name }}
       expected_version: ${{ needs.release-please.outputs.version }}
+      plugin_sha256: ${{ needs.plugin-artifact.outputs.sha256 }}
 
   publish-release:
     name: Publish GitHub release
     if: ${{ needs.release-please.outputs.should_publish == 'true' }}
     needs:
       - release-please
+      - plugin-artifact
       - build-binaries
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -183,9 +228,12 @@ jobs:
         working-directory: dist
         env:
           EXPECTED_VERSION: ${{ needs.release-please.outputs.version }}
+          PLUGIN_SHA256: ${{ needs.plugin-artifact.outputs.sha256 }}
           TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
         run: |
           test "$TAG_NAME" = "v${EXPECTED_VERSION}"
+          # Six binary-only platform archives plus the one platform-independent
+          # plugin artifact every binary of this release is built to accept.
           expected_archives=(
             appa-x86_64-unknown-linux-gnu.tar.gz
             appa-aarch64-unknown-linux-gnu.tar.gz
@@ -193,6 +241,7 @@ jobs:
             appa-aarch64-apple-darwin.tar.gz
             appa-x86_64-pc-windows-msvc.zip
             appa-aarch64-pc-windows-msvc.zip
+            "appa-plugin-${EXPECTED_VERSION}.tar.gz"
           )
           for archive in "${expected_archives[@]}"; do
             test -f "$archive" || {
@@ -203,7 +252,14 @@ jobs:
           shopt -s nullglob
           actual_archives=(appa-*.tar.gz appa-*.zip)
           if [ "${#actual_archives[@]}" -ne "${#expected_archives[@]}" ]; then
-            echo "::error::expected exactly 6 release archives, found ${#actual_archives[@]}"
+            echo "::error::expected exactly ${#expected_archives[@]} release archives, found ${#actual_archives[@]}"
+            exit 1
+          fi
+          # The binaries were built with this digest compiled in; a mismatch
+          # here would ship a release whose binaries refuse their own plugin.
+          published=$(sha256sum "appa-plugin-${EXPECTED_VERSION}.tar.gz" | cut -d' ' -f1)
+          if [ "$published" != "$PLUGIN_SHA256" ]; then
+            echo "::error::the published plugin artifact is not the one the binaries accept"
             exit 1
           fi
           sha256sum "${expected_archives[@]}" > SHA256SUMS

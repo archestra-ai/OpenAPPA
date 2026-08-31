@@ -27,10 +27,17 @@ jobs:
       - name: Check plugin shell syntax
         run: |
           sh -n integrations/claude-code/plugin/hooks/ensure-runtime.sh \
-            integrations/claude-code/plugin/statusline.sh
+            integrations/claude-code/plugin/hooks/hook.sh \
+            integrations/claude-code/plugin/hooks/appa-paths.sh \
+            integrations/claude-code/plugin/statusline.sh \
+            scripts/appa-stage-plugin-bundle.sh
 
       - name: Lint plugin shell scripts
-        run: shellcheck -s sh integrations/claude-code/plugin/hooks/ensure-runtime.sh
+        run: |
+          shellcheck -x -s sh integrations/claude-code/plugin/hooks/ensure-runtime.sh \
+            integrations/claude-code/plugin/hooks/hook.sh \
+            integrations/claude-code/plugin/hooks/appa-paths.sh \
+            scripts/appa-stage-plugin-bundle.sh
 
       - name: Validate plugin JSON
         run: |
@@ -77,6 +84,32 @@ jobs:
 
       - name: Rust tests
         run: cargo test --workspace --locked
+
+  macos-deployment-checks:
+    name: macOS Deployment Checks
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Setup Rust
+        run: rustup show
+
+      # Only what is platform-specific here: the config and data directory
+      # rules, the proc_pidpath process discovery the stop set verifies with,
+      # and the hooks a materialized deployment renders. Not a second full
+      # workspace check, clippy and test run.
+      - name: Deployment tests
+        run: |
+          cargo test --locked --package appa --lib init:: -- --include-ignored --skip real_claude
+          cargo test --locked --package appa --lib plugin_bundle::
+          cargo test --locked --package appa --test init_cli
+          cargo test --locked --package appa --test plugin_hooks
+          cargo test --locked --package appa --test rendered_hooks
 
   python-binding-checks:
     name: Python Binding Checks
