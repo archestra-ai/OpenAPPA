@@ -7,19 +7,19 @@ description: Declarations, syntax, and rules for OpenAPPA policy TOML files.
 
 OpenAPPA reads a root TOML file. The root can compose policy fragments with `include = ["battery.toml"]`. Root declarations run first. Included declarations follow in list order. An included file cannot include another file or replace root-wide settings. Duplicate external names within one kind are an error.
 
-This document is a reference guide for writing and reviewing OpenAPPA policy TOML files. It covers global settings, audience lists and conditions, contract declarations (`[[tool]]`, `[[authority]]`, `[[sanitizer]]`, `[[cast]]`), and policy review red flags.
+This document is a reference guide for writing and reviewing OpenAPPA policy TOML files. It covers global settings, audience lists and conditions, contract declarations (`[[tool]]`, `[[annotator]]`, `[[authority]]`, `[[sanitizer]]`), and policy review red flags.
 
 ```toml
 version = 1
 
-# Optional. The trust chain, least-trusted first; the rank names are yours,
-# except `unknown`, which is reserved. Omitted, it defaults to `suspicious < trusted`.
+# Optional. The trust chain, least-trusted first; the rank names are yours.
+# Omitted, it defaults to `suspicious < trusted`.
 trust_chain = ["suspicious", "trusted"]
 ```
 
 ### Audience lists and conditions
 
-An audience is a list of readers. Where a policy states the audience a value carries, it writes the list itself: `delta = { audience = ["support"] }`. The list `["public"]` is the unrestricted audience. The same bare list form sets `[boundary].audience`, `starting_label.audience`, and a cast's `constant.audience`.
+An audience is a list of readers. Where a policy states the audience a value carries, it writes the list itself: `delta = { audience = ["support"] }`. The list `["public"]` is the unrestricted audience. The same bare list form sets `[boundary].audience` and `starting_label.audience`.
 
 Where a policy checks the current audience or the trajectory's history, it names the condition:
 
@@ -91,36 +91,39 @@ delta = {}
 TOML reads backslashes too, so a selector escape passes through two layers. A basic string, in double quotes, needs every selector backslash doubled: `\\*`, `\\)`, `\\,`, `\\\\`. A literal string, in single quotes, passes backslashes through unchanged, so write the selector escape directly.
 
 ```toml
+[[tool]]
 name = "search(query:a\\,b)"   # a basic string doubles the backslash
-name = 'search(query:a\,b)'    # a literal string does not
+
+[[tool]]
+name = 'search(title:a\,b)'    # a literal string does not
 ```
 
 A missing or non-string argument does not match. Clause order does not change the result: `tool(owner:x,repo:y)` and `tool(repo:y,owner:x)` are the same contract. A selector can name each argument only once. A bare tool name matches every argument object and is typically the fallback.
 
-OpenAPPA selects the contract before it validates that contract's `parameters` schema. A schema failure does not continue to a later contract. A `tool_input` rewrite is judged by the contract its rewritten arguments select: a rewrite that stays in its contract keeps the resolver answers of the call last consulted; one that selects another contract is a new call under that contract, and its resolvers are consulted for the rewritten arguments. Provider-run tools cannot use argument selectors.
+OpenAPPA selects the contract before it validates that contract's `parameters` schema. A schema failure does not continue to a later contract. A `tool_input` rewrite is judged by the contract its rewritten arguments select. An annotation binds the exact call, so a rewrite of an annotator-backed tool is annotated afresh, whichever contract it selects. Provider-run tools cannot use argument selectors.
 
-### Dynamic resolvers
+### Annotators
 
-A dynamic resolver classifies a proposed tool call before the engine checks it. It returns selected fields of the tool's contract: output-label values for `delta`, and call-time constraints for `requires`. It does not resolve `@group` membership.
+Every released tool call carries one complete annotation: the `delta` its result contributes, the `requires` it must meet, and the effects it emits. A `[[tool]]` entry usually writes that annotation statically. Where the right contract depends on the call itself — a file path, a recipient, a command line — the entry names a registered **annotator** instead, and the annotator answers the complete annotation for each proposed call. An annotator does not resolve `@group` membership.
 
-A `[[dynamic_resolver]]` declares two things: the `inputs` a tool must supply, and the contract destinations it owns through `returns`. A `[[tool]]` attaches one with `uses` and maps each declared input from the proposed call. Attaching it assigns every destination in `returns` to that resolver. Resolver names are opaque non-empty strings and can contain dots.
+An `[[annotator]]` declares two things: the `inputs` it reads from a proposed call, and its **mandate** — the closed vocabulary its answers may use. A `[[tool]]` routes through it with `annotator = "<name>"`; that entry then writes no `delta`, `requires`, or `effects` of its own, because the annotator produces all three. Annotator names are opaque non-empty strings and can contain dots.
 
 #### Example: pass the complete call
 
-Omit `inputs` on the resolver and its `uses` entry to pass the complete tool call: its name, its description when the tool declares one, and its arguments.
+Omit `inputs` on the annotator to pass the complete tool call: its name, its description when the tool declares one, and its arguments.
 
 ```toml
-[[dynamic_resolver]]
-name    = "classify-command"
-returns = ["delta.trust", "delta.audience"]
+[[annotator]]
+name  = "classify-command"
+ranks = ["suspicious", "trusted"]              # The trust ranks its answers may use
 
 [[tool]]
 name        = "Bash"
 description = "Runs one shell command and returns its output."
-uses        = [{ resolver = "classify-command" }]
+annotator   = "classify-command"
 ```
 
-The resolver receives this value as the consult's `artifact.args`:
+The annotator receives this value as the consult's `artifact.args`:
 
 ```json
 {
@@ -138,54 +141,56 @@ This form does not need a tool parameter schema. It does not need a `description
 #### Example: pass one argument
 
 ```toml
-[[dynamic_resolver]]
-name    = "classify-customer"
-inputs  = ["subject"]
-returns = ["delta.trust", "delta.audience"]
+[[annotator]]
+name      = "classify-customer"
+inputs    = { subject = "$tool_call.arguments.customer_id" }
+ranks     = ["suspicious", "trusted"]
+audiences = ["finance", "support"]             # The readers a restricted audience answer may name
 
 [[tool]]
 name       = "get_customer"
 parameters = { type = "object", properties = { customer_id = { type = "string" } }, required = ["customer_id"] }
-uses       = [{ resolver = "classify-customer", inputs = { subject = "$tool_call.arguments.customer_id" } }]
-
-requires = { trust = "trusted" }
+annotator  = "classify-customer"
 ```
 
-The resolver receives only `customer_id`, under the name `subject`. Its declaration owns both output-label fields. The static `requires.trust` field does not overlap.
+The annotator receives only `customer_id`, under the name `subject`. Its answer is still the complete contract for the call.
 
-#### Example: use several resolvers
+#### Example: cover the long tail with a wildcard
+
+The wildcard entry `name = "*"` covers every call the policy does not name. It must name an `annotator` and nothing else — no static fields, no metadata, no argument selector — and a policy writes at most one. An exact declaration always wins over it.
 
 ```toml
-[[dynamic_resolver]]
-name    = "trust-classifier"
-inputs  = ["subject"]
-returns = ["delta.trust"]
-
-[[dynamic_resolver]]
-name    = "record-acl"
-inputs  = ["record"]
-returns = ["delta.audience"]
+[[annotator]]
+name      = "classify-anything"
+ranks     = ["suspicious"]                     # The long tail never earns trust
+audiences = ["internal"]
 
 [[tool]]
-name       = "get_customer"
-parameters = { type = "object", properties = { customer_id = { type = "string" } }, required = ["customer_id"] }
-uses = [
-  { resolver = "trust-classifier", inputs = { subject = "$tool_call.arguments.customer_id" } },
-  { resolver = "record-acl", inputs = { record = "$tool_call.arguments.customer_id" } }
-]
+name      = "*"
+annotator = "classify-anything"
 ```
 
-OpenAPPA sends one request to each resolver. Both requests use the same current state.
+A call no declaration and no wildcard covers is refused before it runs. That refusal is operational, not a policy denial.
+
+#### The mandate
+
+The mandate is the vocabulary an annotator's answers may use. Every bound is optional; an omitted bound admits the whole policy vocabulary, so a reviewed mandate is written, not implied.
+
+| Key | Bounds | Omitted |
+|---|---|---|
+| `ranks` | The trust ranks an answer may write in `delta.trust` and `requires.trust`. | Every rank in the trust chain. |
+| `audiences` | The literal readers a restricted audience answer may name. `public` is always admissible and is never listed as a reader; a group is never admissible. | Every reader the policy writes. |
+| `marks` | The attention marks an answer may require. | Every mark an authority names under `permits.attention`. |
+| `effects` | The effect kinds an answer may emit or check in history. | Every effect kind the policy declares. |
 
 #### Rules
 
-- A resolver declares its inputs and all contract destinations it owns through `returns`.
-- A tool can use zero or more resolvers. Omit `uses` when it uses none.
-- A resolver always returns every declared result. Attaching it assigns all declared destinations to it.
-- A tool field has one owner: a static policy value or one attached resolver. Static and resolver ownership cannot overlap. Two resolvers cannot own the same destination.
-- If a resolver fails or returns an invalid result, OpenAPPA does not run the tool.
+- An annotator declares its inputs and its mandate. A tool routes through at most one, with `annotator`; that replaces the static `delta`, `requires`, and `effects`, and writing it beside any of them is a load error.
+- The answer is one complete annotation. An omitted leaf is the identity: no restriction on that dimension, no requirement in that slot.
+- The answer is pinned to the exact call it annotated. A pinned recheck and a replay never consult the annotator again, and a `tool_input` rewrite is annotated afresh for its own bytes.
+- If the annotator fails or answers outside its mandate, the call does not run. The refusal is operational — the call was never judged — and nothing is appended: the call can be proposed again.
 
-A tool maps each declared input from the proposed call. `$tool_call` is the only special source.
+An annotator maps each declared input from the proposed call. `$tool_call` is the only source.
 
 | Value | Meaning |
 |---|---|
@@ -195,44 +200,33 @@ A tool maps each declared input from the proposed call. `$tool_call` is the only
 | `$tool_call.arguments` | Complete argument object |
 | `$tool_call.arguments.<name>` | One top-level argument |
 
-A resolver with no `inputs` receives `$tool_call` as its `args`. `$tool_call.description` needs a tool `description`; `$tool_call` does not, and omits the key when there is none. A single argument needs a tool parameter schema, and the schema must mark that top-level argument as required. The resolver then receives whatever JSON value the call carries under that name.
+An annotator with no `inputs` receives `$tool_call` as its `args`. `$tool_call.description` needs a tool `description`; `$tool_call` does not, and omits the key when there is none. A single argument needs a tool parameter schema, and the schema must mark that top-level argument as required. The annotator then receives whatever JSON value the call carries under that name.
 
-A result is named for the one contract field it fills. These five names are the whole vocabulary:
+#### Implementing an annotator
 
-| Result | Value |
-|---|---|
-| `delta.trust` | A rank from the trust chain |
-| `delta.audience` | `"public"` or a list of literal readers |
-| `requires.trust` | A rank from the trust chain |
-| `requires.audience` | `contains`, `within`, or both |
-| `requires.attention` | Marks from the attended list |
-
-Ownership, pinning, and what a `tool_input` sanitizer can do to a pinned answer are in [How it works](/how-it-works).
-
-#### Implementing a resolver
-
-A resolver either carries its implementation or leaves it to the deployment. A resolver that carries a stock model builtin names it on its declaration with `builtin = "claude-code"` or `builtin = "llm"` and takes no `[externals.dynamic]` binding. Every other resolver is bound by name under `[externals.dynamic.<name>]` to an HTTP endpoint or a Unix command. [Externals](#externals) has the binding rule, the transports, and the consult every kind shares. `builtin` under `[externals.dynamic.<name>]` is a configuration error. A registered resolver without a binding, a binding no `[[dynamic_resolver]]` registers, a binding for a resolver that carries a builtin, and a declared builtin the deployment cannot serve — `llm` without `[externals.llm]`, `claude-code` where no Unix process group exists — refuse the deployment when it opens and when it reloads.
+An annotator either carries its implementation or leaves it to the deployment. An annotator that carries a stock model builtin names it on its declaration with `builtin = "claude-code"` or `builtin = "llm"` and takes no `[externals.annotators]` binding. Every other annotator is bound by name under `[externals.annotators.<name>]` to an HTTP endpoint or a Unix command. [Externals](#externals) has the binding rule, the transports, and the consult every kind shares. `builtin` under `[externals.annotators.<name>]` is a configuration error. A registered annotator without a binding, a binding no `[[annotator]]` registers, a binding for an annotator that carries a builtin, and a declared builtin the deployment cannot serve — `llm` without `[externals.llm]`, `claude-code` where no Unix process group exists — refuse the deployment when it opens and when it reloads.
 
 ```toml
-[[dynamic_resolver]]
+[[annotator]]
 name    = "classify-call"
 builtin = "claude-code"
-returns = ["delta.trust"]
 ```
 
-A dynamic resolver has no `permits` and no ceiling. Its answer is trusted classifier evidence, whichever transport serves it, and every transport passes the same exact-shape, policy-vocabulary, audience, and pin validation. A pinned recheck and a replay never consult it again, and neither does a later proposal under the same contract with the same resolver inputs while an offer or an approval prepared for the pinned call stands in the trajectory.
+The mandate is the ceiling policy review relies on, whichever transport serves the annotator: every transport passes the same exact-shape and mandate validation before an annotation is admitted.
 
-The consult's declaration is the resolver's vocabulary; its artifact is `args`. For the one-argument example above:
+The consult's declaration is the annotator's resolved mandate and input names; its artifact is `args`. For the one-argument example above:
 
 ```json
 {
   "version": 1,
-  "kind": "dynamic",
+  "kind": "annotation",
   "name": "classify-customer",
   "declaration": {
-    "returns": ["delta.trust", "delta.audience"],
+    "inputs": ["subject"],
     "trust_ranks": ["suspicious", "trusted"],
-    "attention_marks": ["privacy-review"]
+    "audiences": ["finance", "support"],
+    "attention_marks": [],
+    "effects": []
   },
   "artifact": { "args": { "subject": "cust-7" } }
 }
@@ -240,12 +234,14 @@ The consult's declaration is the resolver's vocabulary; its artifact is `args`. 
 
 | Key | Meaning |
 |---|---|
-| `declaration.returns` | The results the resolver declared. The answer holds exactly these. |
-| `declaration.trust_ranks` | The policy's trust chain, least-trusted first. A trust result must name one of these. |
-| `declaration.attention_marks` | The attended marks. An attention result must name these only. |
-| `artifact.args` | The data the tool's input mapping selected, under the resolver's declared input names. Without a mapping, the complete call: `name`, `description` when declared, and `arguments`. |
+| `declaration.inputs` | The declared input names. Empty when the annotator reads the complete call. |
+| `declaration.trust_ranks` | The mandate's trust ranks, least-trusted first. A trust value must name one of these. |
+| `declaration.audiences` | The mandate's readers. A restricted audience value may name these only. |
+| `declaration.attention_marks` | The mandate's attention marks. An attention value must name these only. |
+| `declaration.effects` | The mandate's effect kinds. An `emits` or history value must name these only. |
+| `artifact.args` | The data the input mapping selected, under the declared input names. Without a mapping, the complete call: `name`, `description` when declared, and `arguments`. |
 
-The consult carries nothing about the trajectory: no current label, no rank, no reader ids, no history. A resolver with mapped inputs that needs the tool name or its description reads it as an input.
+The consult carries nothing about the trajectory: no current label, no rank, no reader ids, no history. An annotator with mapped inputs that needs the tool name or its description reads it as an input.
 
 Response, from an endpoint or a command:
 
@@ -253,25 +249,26 @@ Response, from an endpoint or a command:
 {
   "version": 1,
   "answer": {
-    "delta.trust": "trusted",
-    "delta.audience": ["finance"]
+    "delta": { "trust": "suspicious", "audience": ["finance"] },
+    "requires": { "history": [], "attention": [] },
+    "emits": []
   }
 }
 ```
 
-`version` must match the consult. `answer` holds every result the resolver declared, keyed by the result's own name — including a result this tool does not read. A model builtin answers the same object without the envelope.
+`version` must match the consult. `answer` is exactly one object with exactly three keys: `delta`, `requires`, and `emits`. `requires` always carries its `history` and `attention` arrays, even empty; every other leaf is optional and means the identity when omitted. A model builtin answers the same object without the envelope.
 
-OpenAPPA rejects a missing result, an extra result, and a `null` result. It rejects an extra key beside `version` and `answer`. Trust and attention values must come from the declaration, whether or not the tool reads them: a result no field reads establishes nothing, but the record keeps it, so it answers to the same vocabulary. `delta.audience` is `"public"` or a list of reader names, and never a group. `requires.audience` is an object with `contains`, `within`, or both: `{"contains": [...], "within": [...]}`. An empty reader list is a valid, maximally restrictive answer. An empty attention list is valid, and it is the only valid attention answer when `attention_marks` is empty. A model transport's dynamic answer may name only readers that appear in `args`: the artifact is the only input a model has, so any other reader is invented. Command and endpoint resolvers answer from directories of their own and are not held to this.
+OpenAPPA rejects a `null` anywhere, an unknown key anywhere, an empty `audience` object, a duplicate `emits` kind, and any value outside the mandate. `delta.audience` and the audience leaves of `requires` are `"public"` or a list of the mandate's readers, and never a group. `requires.audience` is an object with `contains`, `within`, or both. Each `history` entry is one object with one key: `{"contains": "<effect>"}` or `{"excludes": "<effect>"}`. A rejected answer is no answer: the call does not run, nothing is recorded, and the call can be proposed again.
 
 ### Deployment coverage
 
 The `[deployment]` table declares the capabilities of your hosting environment—such as starting security labels, enforced execution points, raw output withholding, and child branch isolation.
 
 During policy load, OpenAPPA validates that all declared constructs are supported by the deployment. If a policy requires a capability the deployment lacks, loading fails with an explicit error:
-- A `tool_output` sanitizer requires a deployment that can withhold raw tool results.
-- A tool listed in `confined_results` requires a deployment that can withhold raw results; a pending cast (`delta = { trust = "unknown" }`) on an unlisted tool crosses unresolved and is cast where a check needs it.
+- A `tool_output` sanitizer requires an application point the deployment can withhold: a tool listed in `confined_results`, or the child-return crossing (`confined_child_return = true`).
+- A tool listed in `confined_results` requires a deployment that can withhold raw results. A provider-run tool cannot be listed: its result reaches the model inside the inference call, before any host could withhold it.
 - A `[child]` section requires child context isolation.
-- Provider-run tools (tools executed directly inside a provider inference call) cannot declare `requires`, dynamic resolvers, or pending casts.
+- Provider-run tools (tools executed directly inside a provider inference call) may declare only a static `delta`: no `requires`, no `annotator`, and no argument selectors.
 
 Uncovered vectors are explicitly declared in the deployment configuration so security leaders can audit them, rather than silently degrading guarantees.
 
@@ -282,25 +279,25 @@ A tool contract is short: a name, a `delta`, and often `effects` and a `[tool.re
 | Review Area | Red Flag / Misconfiguration | Safe / Correct Pattern | Spec Invariant & Risk |
 |---|---|---|---|
 | **`delta` Accuracy** | Tool reads sensitive customer data but declares `delta = {}` or omits `delta`. | Declare explicit restriction, e.g. `delta = { audience = ["support"] }`. | Undermines downstream checks; over-restricting is safe (costs reach, doesn't leak). |
-| **Unknown slots** | Omitting `delta` in the belief that the result enters as `Unknown`. | Omit `delta`, or write `delta = {}`, for a result that carries no restriction; write `delta = { trust = "unknown" }` for one a cast must classify. | An omitted slot is empty and restricts nothing; only `"unknown"` and a resolver-owned field enter as `Unknown`. |
+| **Expecting late classification** | Omitting `delta` in the belief that something will classify the result later. | Omit `delta`, or write `delta = {}`, for a result that carries no restriction; name an `annotator` when the restriction depends on the call. | An unwritten dimension is the identity, not a pending state; nothing classifies it later. |
 | **`effects` Completeness** | Mutation or deployment tool omits `effects`. | Declare all side effects, e.g., `effects = ["migration.applied", "mutation"]`. | Under-declared effects pass `excludes` checks silently without triggering history constraints. |
-| **Dynamic Recipients** | Static readers when an ACL depends on an argument. | Use a placeholder for a recipient the call names — a literal reader, `public`, or an `@group` — or a dynamic resolver for an argument-derived reader set. | Static readers can ignore the proposed argument; placeholder groups and dynamic resolution pin their answer to the call. |
-| **Overlapping resolvers** | Two `uses` entries whose `returns` include the same destination. | Give each destination one owner. | It does not load because a contract field cannot have two values. |
-| **Input sanitizer over a resolver** | A `tool_input` sanitizer whose `tags` cover a resolver-backed tool. | Tag the tool so no `tool_input` sanitizer covers it, unless you accept its rewrite under the earlier resolver answer. | A rewrite that stays in its contract keeps the classification of the call last consulted. One that selects another ordered contract is judged as a new call under it, with that contract's resolvers consulted. |
+| **Dynamic Recipients** | Static readers when an ACL depends on an argument. | Use a placeholder for a recipient the call names — a literal reader, `public`, or an `@group` — or an annotator for an argument-derived contract. | Static readers can ignore the proposed argument; placeholder groups and annotations pin their answer to the call. |
+| **Annotator beside statics** | A `[[tool]]` that names an `annotator` and also writes `delta`, `requires`, or `effects`. | Give the contract one producer: a static declaration, or an annotator that answers all three. | It does not load: `annotator` replaces the static semantic fields. |
+| **Unbounded wildcard mandate** | `name = "*"` routed through an annotator that declares no `ranks`, `audiences`, `marks`, or `effects`. | Bound the wildcard annotator's mandate to the vocabulary the long tail actually needs. | An omitted bound admits the whole policy vocabulary; the mandate is the ceiling review relies on, not the annotator's judgment. |
 | **Combined Read & Release** | Single tool `share_doc(doc, recipient)` fetching and releasing in one step. | Split into `fetch_doc` (read) and `grant_doc_access` (release). | Combined tools force authorities to approve releases before content is fetched. |
 | **What an authority permits** | A wide `permits` table, such as `audience_missing = ["public"]`. | Restrict the authority's `permits` and `tags` to the minimum the desk needs. | An authority cannot rule beyond its `permits`, but a wide `permits` weakens the review gate. |
 | **Auto-Approval Wiring** | `builtin = "approve"` behind a wide `permits` — an automated yes across everything it permits. | Keep what an auto-approval authority permits narrow; reserve wide `permits` for `hitl` or a reviewed resolver. | `builtin = "approve"` creates an automated open gate for all matching actions. Keep its `permits` and `tags` minimal. |
 | **Model Judge Wiring** | `builtin = "claude-code"` or `builtin = "llm"` behind a wide `permits`, or on a sanitizer with a wide transition. | Keep a model authority's `permits` narrow and its `hint` exact; give a model sanitizer the narrowest transition its job needs. | `permits` caps what a model ruling clears and what a model derivation claims, not how well the model judged. The model sees only the declaration and the artifact, never the trajectory. |
-| **Hint Accuracy** | A `hint` describing a power the `permits` or `may_cast` does not hold, or content the sanitizer does not remove. | Restate what the component permits in your own words: say what the entity covers, strips, or labels, and nothing more. | A hint reaches the agent with every plan naming the entity, reaches a model implementation as its charter, and grants nothing. A misleading one steers plan choice wrongly and misleads review. |
+| **Hint Accuracy** | A `hint` describing a power the `permits` does not hold, or content the sanitizer does not remove. | Restate what the component permits in your own words: say what the entity covers, strips, or labels, and nothing more. | A hint reaches the agent with every plan naming the entity, reaches a model implementation as its charter, and grants nothing. A misleading one steers plan choice wrongly and misleads review. |
 
 ## Tools
 
-A `[[tool]]` entry defines its name and `description`, its output restrictions (`delta`), side effects (`effects`), dispatch conditions (`requires`), and the resolvers it `uses`.
+A `[[tool]]` entry defines its name and `description`, then its output restrictions (`delta`), side effects (`effects`), and dispatch conditions (`requires`) — or the `annotator` that produces that whole contract per call.
 
 ```toml
 [[tool]]
 name = "fetch_support_ticket"
-tags = ["support"]                                     # Authorities, sanitizers, and casts select tools by tag
+tags = ["support"]                                     # Authorities and sanitizers select tools by tag
 
 [tool.delta]
 trust    = "suspicious"                                # The ticket body is customer-written text
@@ -323,11 +320,11 @@ excludes = ["migration.applied"]                       # Neither recorded nor re
 ### Key contract rules
 
 - **`delta` is strictly restrictive**: A tool's delta can only narrow the audience or lower trust. Within an annotated `delta`, an omitted dimension defaults to identity (unchanged).
-- **Pending-cast deltas (`delta = { trust = "unknown" }` or `delta = { audience = "unknown" }`)**: Holds a label dimension pending resolution by a registered `[[cast]]`. Both dimensions may be pending unless the tool is listed in `confined_results`, where one cast must answer the withheld result whole. Declaring both `requires` and `unknown` delta on the same dimension is a load error. `"unknown"` is reserved: it can name neither a trust rank nor a reader.
-- **Unknown requirements (`requires = { trust = "unknown" }`, `audience = "unknown"`, or `attention = "unknown"`)**: Leaves the slot to a cast whose scope covers the tool. The cast reads the proposed call and answers the slot; the answer is pinned to that call and holds on replay. A resolver and `"unknown"` cannot own the same slot. A tool the policy never declares has every slot Unknown, and only a cast without `tags` reaches it.
+- **Omitted is identity**: An omitted `delta` and `delta = {}` say the same thing — the result carries no restriction. An omitted `requires` slot asks nothing. There is no pending state: what the annotation does not restrict, nothing restricts later.
+- **Annotators (`annotator`)**: Routes every call of the tool through one registered `[[annotator]]`, which answers the complete contract — `delta`, `requires`, and effects — for that call, inside its declared mandate. The answer is pinned to the exact call and holds on replay.
+- **One producer per contract**: A contract's semantics have one source — the static fields, or the named annotator. `annotator` beside `delta`, `requires`, or `effects` is a load error.
 - **Dynamic argument placeholders (`$arg`)**: `requires.audience = { contains = ["$recipient"] }` evaluates `$recipient` against the actual call argument at runtime. The argument value can be a literal reader ID, the reserved word `public`, or an `@group` expanded by the membership resolver. Placeholders are supported only inside `contains`. The argument must be declared as a required top-level string in the tool's `parameters` schema.
-- **Dynamic resolvers (`uses`)**: Attaches registered resolvers to classify proposed calls. Each entry maps required inputs from `$tool_call`. Mapped arguments must be required top-level properties in the tool schema. Without an explicit input mapping, a resolver receives the complete tool call: `name`, `description` when declared, and `arguments`.
-- **Single field ownership**: Each contract field has one source: a static policy value or an attached resolver whose `returns` includes that destination. Static and resolver ownership cannot overlap. Two attached resolvers cannot own the same destination.
+- **Wildcard tool (`name = "*"`)**: Covers every call the policy does not name. It must name an `annotator` and nothing else — no static fields, no metadata, no argument selector — and a policy writes at most one. An exact declaration always wins over it. A call no declaration and no wildcard covers is refused before it runs.
 - **History checks (`requires.effects`)**: `contains` passes when the trajectory already recorded the effect. `excludes` passes when the effect is neither recorded nor reserved by an unsettled dispatch (a dispatch released with that effect that has not yet succeeded or failed).
 - **Attention demands (`requires.attention`)**: Forces fresh authority sign-off on *every* call; never satisfied by execution history.
 - **Dual-gate contracts**: When a contract defines both a restrictive `delta` and a `requires` check (e.g., `search_and_share`), OpenAPPA evaluates both gates before dispatch.
@@ -386,6 +383,11 @@ An authority consult's declaration is `{"hint": …, "permits": …}` as the pol
 A `[[sanitizer]]` defines a formal label transition for data passed through a registered scrubbing pipeline (such as a PII redactor or HTML safety filter). Its `permits` table names the one transition its derivation can claim.
 
 ```toml
+[[tool]]
+name  = "fetch_support_ticket"
+tags  = ["support"]
+delta = { trust = "suspicious", audience = ["finance"] }
+
 [[sanitizer]]
 name = "pii-redactor"
 on   = ["tool_output"]                         # Tool results and child sub-execution returns
@@ -396,6 +398,9 @@ tags = ["support"]                             # Applies only to values from too
 [sanitizer.permits]
 # `from`: the source audience must contain these readers; `to`: the output gets exactly this audience
 audience = { from = ["finance"], to = ["public"] }
+
+[deployment]
+confined_results = ["fetch_support_ticket"]    # The host can withhold this tool's raw result
 ```
 
 ```toml
@@ -420,19 +425,37 @@ A sanitizer consult's declaration is `{"hint": …, "on": "tool_input" | "tool_o
 A sanitizer permits one dimension. For trust, `from` is the rank the source must meet or exceed, and `to` is the rank the derivation carries — this is how a scrubber vouches untrusted fetched text back up:
 
 ```toml
+[[sanitizer]]
+name = "vouch-fetched-text"
+on   = ["tool_output"]
+
 [sanitizer.permits]
 trust = { from = "suspicious", to = "trusted" } # Instead of `audience`, never alongside it
+
+[deployment]
+confined_child_return = true                    # The child-return crossing is an application point
 ```
 
 When a tool result would narrow the trajectory label, OpenAPPA checks if a registered `tool_output` sanitizer can improve the label. If selected, the host withholds the raw result and runs the sanitizer. If the cleaned derivation prevents narrowing, it enters the trajectory label. If residual narrowing remains, the agent can accept the residual or apply another compatible sanitizer. A sanitizer whose declared transition cannot improve the label is never offered.
 
-Like a cast or an authority, a sanitizer can name `tags`: it then applies only to values whose originating tool carries one of them. A child sub-execution return originates from no tool, so only a sanitizer without `tags` applies at that crossing.
+Like an authority, a sanitizer can name `tags`: it then applies only to values whose originating tool carries one of them. A child sub-execution return originates from no tool, so only a sanitizer without `tags` applies at that crossing.
 
-At `tool_input`, the sanitizer derives a replacement for the whole argument set of one call, and the harness dispatches exactly the substituted bytes. This substitution can satisfy an unmet `contains` audience requirement, but cannot clear a `within` or trust requirement (`within` bounds the trajectory's own reach, and rewriting arguments does not change the decision to invoke the tool). A rewritten call that stays in its contract keeps the resolver answers pinned to the call last consulted (the proposal, or an earlier rewrite that selected this contract), and preserves a group membership answer only if the argument naming that group is unchanged. A rewritten call that selects another ordered contract is judged as a new call under that contract: the sanitizer's `tags` must reach that contract too, its resolvers are consulted for the rewritten arguments, and its effects and requirements apply.
+At `tool_input`, the sanitizer derives a replacement for the whole argument set of one call, and the harness dispatches exactly the substituted bytes. This substitution can satisfy an unmet `contains` audience requirement, but cannot clear a `within` or trust requirement (`within` bounds the trajectory's own reach, and rewriting arguments does not change the decision to invoke the tool). A rewritten call is judged by the ordered contract its rewritten arguments select: the sanitizer's `tags` must reach that contract too, and its effects and requirements apply. An annotation binds the exact call, so a rewrite of an annotator-backed tool is annotated afresh, whichever contract it selects; a group membership answer survives only when the rewrite stays in its contract and the argument naming the group is unchanged.
 
 To enforce automated return sanitization across all child sub-executions, policies can bind a default return sanitizer:
 
 ```toml
+[[sanitizer]]
+name = "pii-redactor"
+on   = ["tool_output"]
+
+[sanitizer.permits]
+audience = { from = ["finance"], to = ["public"] }
+
+[deployment]
+context_control       = true        # [child] needs child context isolation
+confined_child_return = true
+
 [child]
 return_sanitizer = "pii-redactor"   # Forces all child sub-execution returns through pii-redactor
 ```
@@ -450,79 +473,12 @@ hint = "Verifies the sub-agent returned valid structured data matching the schem
 
 [sanitizer.permits]
 trust = { from = "suspicious", to = "trusted" }
+
+[deployment]
+confined_child_return = true
 ```
 
 Registering `name = "attest-schema"` is sufficient; OpenAPPA applies it natively without an `[externals]` entry (binding one is a load error).
-
-## Casts
-
-Pending-cast tools return data in an `Unknown` label state. A `[[cast]]` resolves the whole value at once, using static rules or external classifiers: its answer is one complete label that preserves every dimension already established and makes every unresolved dimension concrete, admitted atomically or not at all.
-
-A block lists each Unknown source by value under `unestablished`, together with the dimensions no applicable cast reaches. No remedy plan clears that slot; only an admitted cast does. While any source in a block is unestablished, the block offers no executable plan.
-
-A cast also answers the other Unknown: a `requires` slot written as `"unknown"`, and every slot of a tool the policy never declares (an omitted `requires` slot is empty and asks nothing). The runtime consults the cast with the proposed call — kind `requirement-cast`, the same `args` a dynamic resolver without an input mapping reads — and the cast answers `requires.trust`, `requires.audience` (its `contains` readers), and `requires.attention` in the dynamic-answer vocabulary. A constant answers from its declared label, and covers the attention slot only when it declares `attention` (`[]` for no marks). A cast with `tags` reaches the declared tools its tags cover; only a cast without `tags` reaches an undeclared tool. Casts are consulted in registration order until one answers; an answer outside the cast's `may_cast` ceiling continues to the next cast, and when none answers the call is blocked.
-
-```toml
-[[cast]]
-name     = "content-classifier"
-hint     = "Labels a support ticket by how far its text can be trusted."
-                                              # What the classifier is for, in the deployer's words
-tags     = ["support"]                        # Applies only to values from tools with these tags
-resolver = { may_cast = { trust = ["suspicious"], audience = ["public"] } }
-                                              # The answer must be one of these ranks and within
-                                              # these readers; the ceiling is policy, the classifier deployment
-
-[[cast]]
-name     = "paranoid-default"
-constant = { trust = "suspicious", audience = ["public"] }
-                                              # Complete label; fallback without tags, registered last
-```
-
-```toml
-[externals.casts.content-classifier]           # the deployment binds the classifier
-url = "https://classify.corp/label"
-# builtin = "claude-code"                      # A model labels the value, within `may_cast`
-# builtin = "llm"                              # A model labels it through [externals.llm]
-```
-
-A resolver-backed cast binds under `[externals.casts.<name>]` to an HTTP endpoint, a local command, or a model builtin, always under its `may_cast` ceiling. A constant cast is defined directly in policy, so it takes no `[externals]` binding, and binding one is a load error.
-
-When resolving an `Unknown` value, OpenAPPA evaluates applicable casts (selected by `tags`) in registration order until one returns an answer. If a resolver is unreachable or fails, OpenAPPA moves to the next registered cast. Place fallback constant casts last, as any cast registered after a constant cast without `tags` will never be reached.
-
-OpenAPPA validates every resolver answer against the declared `may_cast` ceiling before admitting the value. An answer outside the ceiling is refused, and the cascade continues with the next applicable cast in registration order; the first answer OpenAPPA admits stands. A `may_cast` audience of `["public"]` allows a resolver to lift audience restrictions entirely; review such ceilings carefully.
-
-A classifier can be consulted again for the same value after a runtime restart or a concurrent-write retry, so a cast implementation must be idempotent.
-
-The runtime consults a resolver-backed cast with the common envelope. The comments explain each key; they are not sent.
-
-```jsonc
-{
-  // WHY: Identifies the consult shape.
-  "version": 1,
-
-  // WHY: Says which external kind is consulted.
-  "kind": "cast",
-
-  // WHY: Selects the cast when one service answers for several.
-  "name": "content-classifier",
-
-  // WHY: What the policy declared: the deployer's hint, the ceiling the answer
-  // must stay within, and the tool whose result the value is (absent for a
-  // subagent's return).
-  "declaration": {
-    "hint": "Labels a support ticket by how far its text can be trusted.",
-    "may_cast": { "trust": ["suspicious"], "audience": "public" },
-    "tool": { "name": "read_ticket", "description": "Reads one support ticket." }
-  },
-
-  // WHY: The value's bytes, and nothing else — no current label, no history.
-  "artifact": { "body": "the ticket text" }
-}
-```
-
-The response is `{"version": 1, "answer": {"trust": "suspicious", "audience": "public"}}`, where `audience` is `"public"` or an array of literal reader ids; a model builtin answers the inner object alone. Anything else — an error status, a timeout, a malformed body, or an empty answer — is no answer: nothing is recorded, the next applicable cast is consulted, and when none answers the call stays undecided and can be proposed again.
-
-A tool contract can also declare a pending dimension with `delta = { trust = "unknown" }`. When the tool is listed in `confined_results`, the runtime withholds raw results from the model until the cast evaluates the value; if the resolved label restricts the trajectory, OpenAPPA presents a narrowing prompt to the agent before delivering the data. Not listed, the result crosses unresolved and the cast runs where a check needs it.
 
 ## Externals
 
@@ -540,17 +496,14 @@ token_env = "APPA_APPROVER_TOKEN"     # an APPA_* variable; its value is sent as
 [externals.sanitizers.pii-redactor]
 builtin = "redact-email"
 
-[externals.casts.content-classifier]
-command = ["/usr/local/bin/classify", "--json"]
-
-[externals.dynamic.classify-customer]
+[externals.annotators.classify-customer]
 url = "https://classifier.corp/label"
 
 [externals.membership.corp-directory]
 url = "https://directory.corp/members"
 ```
 
-An entry is `[externals.<kind>.<name>]`, with `<kind>` one of `authorities`, `sanitizers`, `casts`, `dynamic`, or `membership`. An authority, sanitizer, or cast entry takes exactly one of `url`, `command`, or `builtin`. A dynamic or membership entry takes exactly one of `url` or `command`; `builtin` there is a configuration error. A dynamic resolver that names `builtin = "claude-code"` or `builtin = "llm"` on its `[[dynamic_resolver]]` declaration takes no entry, and neither do a constant cast and the reserved `attest-schema` sanitizer. An entry whose name no declaration registers refuses the deployment when it opens, and so does a registered sanitizer, cast, dynamic resolver, or membership resolver without its entry. An authority may stay unbound; it then returns no answer, so a remedy that names it cannot release the call. An included fragment can add entries, and it can declare a dynamic resolver with a builtin: every deployment that includes it then serves that builtin — `[externals.llm]` for `llm`, a Unix host for `claude-code`. The root-wide settings (`timeout_ms`, `max_body_bytes`, `review_timeout_ms`, `[externals.claude_code]`, `[externals.llm]`) stay in the root, and the same name in two files is an error.
+An entry is `[externals.<kind>.<name>]`, with `<kind>` one of `authorities`, `sanitizers`, `annotators`, or `membership`. An authority or sanitizer entry takes exactly one of `url`, `command`, or `builtin`. An annotator or membership entry takes exactly one of `url` or `command`; `builtin` there is a configuration error. An annotator that names `builtin = "claude-code"` or `builtin = "llm"` on its `[[annotator]]` declaration takes no entry, and neither does the reserved `attest-schema` sanitizer. An entry whose name no declaration registers refuses the deployment when it opens, and so does a registered sanitizer, annotator, or membership resolver without its entry. An authority may stay unbound; it then returns no answer, so a remedy that names it cannot release the call. An included fragment can add entries, and it can declare an annotator with a builtin: every deployment that includes it then serves that builtin — `[externals.llm]` for `llm`, a Unix host for `claude-code`. The root-wide settings (`timeout_ms`, `max_body_bytes`, `review_timeout_ms`, `[externals.claude_code]`, `[externals.llm]`) stay in the root, and the same name in two files is an error.
 
 ### Transports
 
@@ -561,8 +514,8 @@ An entry is `[externals.<kind>.<name>]`, with `<kind>` one of `authorities`, `sa
 | `builtin = "hitl"` | authorities | The harness asks a person. |
 | `builtin = "approve"` | authorities | Approves within `permits`. |
 | `builtin = "redact-email"` | sanitizers | Replaces email addresses with a placeholder. |
-| `builtin = "claude-code"` | authorities, sanitizers, casts; a dynamic resolver names it on its declaration | Unix only. One isolated `claude -p` process per consult, tuned in `[externals.claude_code]`. |
-| `builtin = "llm"` | authorities, sanitizers, casts; a dynamic resolver names it on its declaration | The API-key profile in `[externals.llm]`. |
+| `builtin = "claude-code"` | authorities, sanitizers; an annotator names it on its declaration | Unix only. One isolated `claude -p` process per consult, tuned in `[externals.claude_code]`. |
+| `builtin = "llm"` | authorities, sanitizers; an annotator names it on its declaration | The API-key profile in `[externals.llm]`. |
 | `builtin = "<module>"` | authorities, sanitizers | A deployer module from `--modules-dir`, called in-process. |
 
 ### The consult
@@ -582,28 +535,27 @@ Every transport receives one JSON object per consult:
 | Key | Meaning |
 |---|---|
 | `version` | The consult shape. It is `1`. |
-| `kind` | `authority`, `sanitizer`, `cast`, `dynamic`, or `membership`. |
+| `kind` | `authority`, `sanitizer`, `annotation`, or `membership`. |
 | `name` | The registered name, for one service that answers for several. |
-| `declaration` | The policy's own words for this component: its `hint`, its `permits` or `may_cast`, its `returns` and vocabulary. The policy author wrote it; the agent never can. |
-| `artifact` | The value under judgment: the call and its unmet requirements, the body to rewrite or label, the resolver's `args`, or the group name. |
+| `declaration` | The policy's own words for this component: its `hint` and `permits`, or an annotator's mandate vocabulary. The policy author wrote it; the agent never can. |
+| `artifact` | The value under judgment: the call and its unmet requirements, the body to rewrite, an annotator's `args`, or the group name. |
 
 | Kind | `declaration` | `artifact` | `answer` |
 |---|---|---|---|
 | `authority` | `hint`, `permits` | `tool`, `arguments`, `requirements` | `ruling` (`approve` or `deny`), optional `reason` |
 | `sanitizer` | `hint`, `on`, `permits`, `parameters` (for `tool_input`) | `tool` (when known), `body` | `body` |
-| `cast` | `hint`, `may_cast`, `tool` (when known) | `body` | `trust`, `audience` |
-| `dynamic` | `returns`, `trust_ranks`, `attention_marks` | `args` | one value per declared result |
+| `annotation` | `inputs`, `trust_ranks`, `audiences`, `attention_marks`, `effects` | `args` | `delta`, `requires`, `emits` |
 | `membership` | empty | `group` | `readers` |
 
 The consult never carries the trajectory: no current label, no rank, no reader ids, no history, no user turn. A component judges the artifact against its own declaration and nothing else.
 
-An endpoint or a command answers `{"version": 1, "answer": { … }}`. `version` must be `1`, `answer` must hold exactly the keys its kind defines, and no other key may appear. Anything else — an error status, a non-zero exit, a timeout, an oversized body, a malformed answer — is no answer: nothing is recorded, and the flow that asked stays where it was (a blocked call, a withheld result, the next cast in the cascade). A failed consult is never a denial.
+An endpoint or a command answers `{"version": 1, "answer": { … }}`. `version` must be `1`, `answer` must hold exactly the keys its kind defines, and no other key may appear. Anything else — an error status, a non-zero exit, a timeout, an oversized body, a malformed answer — is no answer: nothing is recorded, and the flow that asked stays where it was (a blocked call, a withheld result, an unannotated call that never runs). A failed consult is never a denial.
 
 ### Model transports
 
-`claude-code` and `llm` render the same consult for a model: a fixed per-kind preamble and the `declaration` JSON as the system prompt, the `artifact` JSON as the only user turn, and an output schema built from the declaration — the `ruling` enum, the `may_cast` ranks, the declared results. The model answers the bare per-kind object; the artifact is treated as data, never as instructions. The prompt and the raw model output are never persisted; only the validated answer is.
+`claude-code` and `llm` render the same consult for a model: a fixed per-kind preamble and the `declaration` JSON as the system prompt, the `artifact` JSON as the only user turn, and an output schema built from the declaration — the `ruling` enum, an annotation's mandate vocabulary. The model answers the bare per-kind object; the artifact is treated as data, never as instructions. The prompt and the raw model output are never persisted; only the validated answer is.
 
-A model answer can do what the kind allows any implementation: an authority's ruling stays within `permits`, a cast's label within `may_cast`, and a sanitizer's derivation carries exactly the `permits` transition. A dynamic resolver has no ceiling, so a model bound there is trusted classifier evidence, exactly as an endpoint is. A model sanitizer deserves a second look: `permits` caps the label the derivation claims, not the bytes the model leaves in it, so keep its transition narrow and its `hint` exact.
+A model answer can do what the kind allows any implementation: an authority's ruling stays within `permits`, an annotation within its annotator's mandate, and a sanitizer's derivation carries exactly the `permits` transition. A model sanitizer deserves a second look: `permits` caps the label the derivation claims, not the bytes the model leaves in it, so keep its transition narrow and its `hint` exact.
 
 `[externals.claude_code]` tunes the subscription transport: `command` sets the executable, `model` pins the model, and `timeout_ms` gives a consult its own budget. Each consult is one `claude -p` process in safe mode with no tools, no project settings, no session persistence, a fresh temporary working directory, and every `APPA_*` variable removed from its environment. At most four run at once per runtime.
 

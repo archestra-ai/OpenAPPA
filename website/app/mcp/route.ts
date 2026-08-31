@@ -89,7 +89,7 @@ const handler = createMcpHandler(
       {
         title: "Define an OpenAPPA term",
         description:
-          "Glossary definition of an OpenAPPA policy/model term exactly as the docs define it — e.g. delta, requires, audience, attention, Unknown, trajectory.",
+          "Glossary definition of an OpenAPPA policy/model term exactly as the docs define it — e.g. delta, requires, audience, attention, annotator, trajectory.",
         inputSchema: z.object({
           term: z.string().describe('The term, e.g. "delta" or "permits"'),
         }),
