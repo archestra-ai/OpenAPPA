@@ -11,6 +11,7 @@ use std::fmt;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -65,6 +66,16 @@ pub enum PluginBundleError {
     MalformedArchive { path: PathBuf, reason: String },
     #[error("cannot reserve a working directory under {path}")]
     NoReservation { path: PathBuf },
+    #[error("cannot fetch the plugin artifact from {url}: {reason}")]
+    Fetch { url: String, reason: String },
+    #[error(
+        "the plugin artifact at {url} is not the one this build accepts: expected {expected}, got {actual}"
+    )]
+    DigestMismatch {
+        url: String,
+        expected: PluginDigest,
+        actual: PluginDigest,
+    },
 }
 
 /// The SHA-256 of a plugin artifact: what a binary was built with, and what a
@@ -141,9 +152,18 @@ impl PluginSource {
     /// `--plugin-source` when given, otherwise this build's release artifact.
     /// A development build with neither refuses rather than guessing.
     pub fn resolve(explicit: Option<&str>) -> Result<Self, PluginBundleError> {
+        Self::decide(explicit, expected_plugin_digest())
+    }
+
+    /// The decision itself, with this build's digest supplied rather than read,
+    /// so it is testable without touching the process environment.
+    pub fn decide(
+        explicit: Option<&str>,
+        baked: Option<PluginDigest>,
+    ) -> Result<Self, PluginBundleError> {
         match explicit {
             Some(path) => Ok(Self::Explicit(canonical_source(Path::new(path))?)),
-            None => expected_plugin_digest()
+            None => baked
                 .map(Self::Release)
                 .ok_or(PluginBundleError::NoBakedDigest {
                     version: env!("CARGO_PKG_VERSION"),
@@ -691,9 +711,17 @@ fn extract_archive(archive: &Path, destination: &Path) -> Result<(), PluginBundl
             .path()
             .map_err(|error| malformed(format!("unreadable entry path: {error}")))?
             .into_owned();
-        let relative = safe_relative(&path).ok_or_else(|| {
-            malformed(format!("{} escapes the archive root", path.display()))
-        })?;
+        let relative = match safe_relative(&path) {
+            EntryPath::Relative(relative) => relative,
+            // A `./` root entry carries no content of its own.
+            EntryPath::ArchiveRoot => continue,
+            EntryPath::Escaping => {
+                return Err(malformed(format!(
+                    "{} escapes the archive root",
+                    path.display()
+                )));
+            }
+        };
         let target = destination.join(&relative);
         let write = |source: std::io::Error| PluginBundleError::WriteDeployment {
             path: target.clone(),
@@ -730,17 +758,30 @@ fn extract_archive(archive: &Path, destination: &Path) -> Result<(), PluginBundl
     Ok(())
 }
 
-/// A relative, traversal-free path, or nothing.
-fn safe_relative(path: &Path) -> Option<PathBuf> {
+/// What an archive entry's path denotes.
+#[derive(Debug, PartialEq, Eq)]
+enum EntryPath {
+    Relative(PathBuf),
+    /// `.` or `./`: the archive root itself, which carries no content.
+    ArchiveRoot,
+    /// Absolute, or climbing out with `..`.
+    Escaping,
+}
+
+fn safe_relative(path: &Path) -> EntryPath {
     let mut relative = PathBuf::new();
     for component in path.components() {
         match component {
             std::path::Component::Normal(part) => relative.push(part),
             std::path::Component::CurDir => {}
-            _ => return None,
+            _ => return EntryPath::Escaping,
         }
     }
-    (!relative.as_os_str().is_empty()).then_some(relative)
+    if relative.as_os_str().is_empty() {
+        EntryPath::ArchiveRoot
+    } else {
+        EntryPath::Relative(relative)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -910,6 +951,191 @@ fn sh_literal(value: &str) -> String {
 /// Total for any UTF-8 path: single-quoted, with embedded `'` doubled.
 fn ps_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+// ---------------------------------------------------------------------------
+// Release artifact fetch and cache
+// ---------------------------------------------------------------------------
+
+const RELEASE_BASE_URL: &str = "https://github.com/archestra-ai/OpenAPPA/releases/download";
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+const MAX_REDIRECTS: usize = 5;
+/// The archive is a few hundred KB; this bounds a hostile or wrong response.
+const MAX_ARCHIVE_BYTES: u64 = 32 * 1024 * 1024;
+
+fn artifact_name(version: &str) -> String {
+    format!("appa-plugin-{version}.tar.gz")
+}
+
+/// The cache is content-addressed by name, so an entry can never be the wrong
+/// bytes under the right name without the re-hash catching it.
+fn cached_archive_path(cache_dir: &Path, version: &str, digest: PluginDigest) -> PathBuf {
+    cache_dir.join(format!("appa-plugin-{version}-{digest}.tar.gz"))
+}
+
+/// The release download base. `APPA_RELEASE_BASE_URL` overrides it in debug
+/// builds only, and init reads it once at the boundary rather than leaving the
+/// fetch to consult the environment underneath its caller.
+pub fn release_base_url() -> String {
+    let configured = if cfg!(debug_assertions) {
+        env::var("APPA_RELEASE_BASE_URL").ok()
+    } else {
+        None
+    };
+    configured.unwrap_or_else(|| RELEASE_BASE_URL.to_owned())
+}
+
+/// The verified archive for this build's release, from the cache when it is
+/// already there and from the release otherwise.
+///
+/// Every path ends in the same check against the digest this binary was built
+/// with, so the cache cannot be used to bypass a refusal.
+pub fn ensure_archive(
+    digest: PluginDigest,
+    version: &str,
+    cache_dir: &Path,
+    base_url: &str,
+) -> Result<PathBuf, PluginBundleError> {
+    let cached = cached_archive_path(cache_dir, version, digest);
+    if cached.is_file() {
+        match digest_of_file(&cached) {
+            Ok(actual) if actual == digest => return Ok(cached),
+            // A corrupt or truncated cache entry is replaced by a fresh
+            // download rather than trusted or reported as fatal.
+            Ok(_) | Err(_) => {
+                tracing::debug!(path = %cached.display(), "re-fetching a cache entry that no longer matches its digest");
+            }
+        }
+    }
+
+    fs::create_dir_all(cache_dir).map_err(|source| PluginBundleError::WriteDeployment {
+        path: cache_dir.to_path_buf(),
+        source,
+    })?;
+
+    let url = format!("{base_url}/v{version}/{}", artifact_name(version));
+    let incoming = tempfile::NamedTempFile::new_in(cache_dir).map_err(|source| {
+        PluginBundleError::WriteDeployment {
+            path: cache_dir.to_path_buf(),
+            source,
+        }
+    })?;
+    download(&url, incoming.path())?;
+
+    // The check runs against the temp file. Nothing enters the cache before it
+    // passes, so a failed check leaves the cache empty.
+    let actual = digest_of_file(incoming.path())?;
+    if actual != digest {
+        return Err(PluginBundleError::DigestMismatch {
+            url,
+            expected: digest,
+            actual,
+        });
+    }
+
+    incoming
+        .persist(&cached)
+        .map_err(|error| PluginBundleError::WriteDeployment {
+            path: cached.clone(),
+            source: error.error,
+        })?;
+    Ok(cached)
+}
+
+fn digest_of_file(path: &Path) -> Result<PluginDigest, PluginBundleError> {
+    let mut file = fs::File::open(path).map_err(|source| PluginBundleError::ReadSource {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = std::io::Read::read(&mut file, &mut buffer).map_err(|source| {
+            PluginBundleError::ReadSource {
+                path: path.to_path_buf(),
+                source,
+            }
+        })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(PluginDigest::from_hasher(hasher))
+}
+
+/// Stream the artifact to `destination`, enforcing the size cap as it goes.
+///
+/// Init is the synchronous CLI path and never runs under an existing reactor, so
+/// this owns a current-thread runtime for the duration of the fetch.
+fn download(url: &str, destination: &Path) -> Result<(), PluginBundleError> {
+    crate::tls::install_crypto_provider();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|source| PluginBundleError::Fetch {
+            url: url.to_owned(),
+            reason: format!("cannot start a runtime for the download: {source}"),
+        })?;
+
+    runtime.block_on(async {
+        let failed = |reason: String| PluginBundleError::Fetch {
+            url: url.to_owned(),
+            reason,
+        };
+        let client = reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::limited(MAX_REDIRECTS))
+            .build()
+            .map_err(|error| failed(error.to_string()))?;
+
+        let response = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|error| failed(error.to_string()))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(failed(format!("the release responded {status}")));
+        }
+        if let Some(length) = response.content_length()
+            && length > MAX_ARCHIVE_BYTES
+        {
+            return Err(failed(format!(
+                "it declares {length} bytes, more than the {MAX_ARCHIVE_BYTES} accepted"
+            )));
+        }
+
+        let mut file = fs::File::create(destination).map_err(|source| {
+            PluginBundleError::WriteDeployment {
+                path: destination.to_path_buf(),
+                source,
+            }
+        })?;
+        let mut written = 0u64;
+        let mut stream = response;
+        while let Some(chunk) = stream
+            .chunk()
+            .await
+            .map_err(|error| failed(error.to_string()))?
+        {
+            written = written.saturating_add(chunk.len() as u64);
+            if written > MAX_ARCHIVE_BYTES {
+                return Err(failed(format!(
+                    "it exceeds the {MAX_ARCHIVE_BYTES} bytes accepted"
+                )));
+            }
+            std::io::Write::write_all(&mut file, &chunk).map_err(|source| {
+                PluginBundleError::WriteDeployment {
+                    path: destination.to_path_buf(),
+                    source,
+                }
+            })?;
+        }
+        Ok(())
+    })
 }
 
 #[cfg(test)]
@@ -1136,14 +1362,148 @@ mod tests {
         assert_eq!(ps_literal("it's"), "'it''s'");
     }
 
+    /// A one-shot artifact server on an ephemeral loopback port. Serves `body`
+    /// to every request until dropped.
+    fn serve(body: Vec<u8>) -> (String, std::sync::mpsc::Sender<()>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (stop, stopped) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for connection in listener.incoming() {
+                if stopped.try_recv().is_ok() {
+                    return;
+                }
+                let Ok(mut connection) = connection else {
+                    return;
+                };
+                let mut scratch = [0u8; 2048];
+                let _ = connection.read(&mut scratch);
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = connection.write_all(header.as_bytes());
+                let _ = connection.write_all(&body);
+                let _ = connection.flush();
+            }
+        });
+        (base, stop)
+    }
+
+    #[test]
+    fn a_verified_download_lands_in_the_cache() {
+        let cache = tempfile::tempdir().unwrap();
+        let body = b"an archive".to_vec();
+        let digest = PluginDigest::of(&body);
+        let (base, _stop) = serve(body);
+
+        let archive = ensure_archive(digest, "9.9.9", cache.path(), &base).unwrap();
+
+        assert_eq!(digest_of_file(&archive).unwrap(), digest);
+        assert!(
+            archive.file_name().unwrap().to_string_lossy().contains(&digest.to_string()),
+            "the cache is content-addressed by name"
+        );
+    }
+
+    #[test]
+    fn a_wrong_artifact_is_refused_and_leaves_the_cache_empty() {
+        let cache = tempfile::tempdir().unwrap();
+        let (base, _stop) = serve(b"someone else's bytes".to_vec());
+        let expected = PluginDigest::of(b"what this build accepts");
+
+        let refused = ensure_archive(expected, "9.9.9", cache.path(), &base);
+
+        assert!(matches!(
+            refused,
+            Err(PluginBundleError::DigestMismatch { .. })
+        ));
+        let leftovers: Vec<_> = fs::read_dir(cache.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .collect();
+        assert!(leftovers.is_empty(), "a failed check left {leftovers:?}");
+    }
+
+    #[test]
+    fn a_cached_artifact_is_used_without_a_release_to_reach() {
+        let cache = tempfile::tempdir().unwrap();
+        let body = b"an archive".to_vec();
+        let digest = PluginDigest::of(&body);
+        fs::write(cached_archive_path(cache.path(), "9.9.9", digest), &body).unwrap();
+
+        // Nothing is listening here, so any request would fail.
+        let archive =
+            ensure_archive(digest, "9.9.9", cache.path(), "http://127.0.0.1:1").unwrap();
+
+        assert_eq!(fs::read(archive).unwrap(), body);
+    }
+
+    #[test]
+    fn a_corrupt_cache_entry_is_replaced_rather_than_trusted() {
+        let cache = tempfile::tempdir().unwrap();
+        let body = b"an archive".to_vec();
+        let digest = PluginDigest::of(&body);
+        let path = cached_archive_path(cache.path(), "9.9.9", digest);
+        fs::write(&path, b"corrupted").unwrap();
+
+        let (base, _stop) = serve(body.clone());
+        let archive = ensure_archive(digest, "9.9.9", cache.path(), &base).unwrap();
+
+        assert_eq!(fs::read(archive).unwrap(), body);
+    }
+
+    #[test]
+    fn a_development_build_refuses_to_download() {
+        assert!(matches!(
+            PluginSource::decide(None, None),
+            Err(PluginBundleError::NoBakedDigest { .. })
+        ));
+    }
+
+    #[test]
+    fn an_extracted_archive_materializes() {
+        let source = tempfile::tempdir().unwrap();
+        let deployments = tempfile::tempdir().unwrap();
+        sample_tree(source.path());
+
+        let archive = source.path().parent().unwrap().join("bundle.tar.gz");
+        let packed = fs::File::create(&archive).unwrap();
+        let mut builder =
+            tar::Builder::new(flate2::write::GzEncoder::new(packed, flate2::Compression::fast()));
+        builder.append_dir_all(".", source.path()).unwrap();
+        builder.into_inner().unwrap().finish().unwrap();
+
+        let deployment = materialize(
+            Population::Archive(&archive),
+            deployments.path(),
+            Path::new("/data/bin/appa"),
+            Path::new("/config/appa.toml"),
+            Path::new("/data"),
+            &Endpoint::parse(DEFAULT_ENDPOINT_URL).unwrap(),
+        )
+        .unwrap();
+
+        assert!(deployment.root.join("plugin/hooks/hooks.json").is_file());
+        assert!(deployment.root.join(PATHS_SH).is_file());
+        // The platform selection removes the map this platform does not use.
+        assert!(!deployment.root.join(WINDOWS_HOOKS).is_file());
+        fs::remove_file(&archive).unwrap();
+    }
+
     #[test]
     fn extraction_refuses_traversal_and_specials() {
-        assert!(safe_relative(Path::new("../escape")).is_none());
-        assert!(safe_relative(Path::new("/absolute")).is_none());
-        assert!(safe_relative(Path::new("plugin/../../escape")).is_none());
+        for escaping in ["../escape", "/absolute", "plugin/../../escape"] {
+            assert_eq!(safe_relative(Path::new(escaping)), EntryPath::Escaping);
+        }
+        assert_eq!(safe_relative(Path::new(".")), EntryPath::ArchiveRoot);
         assert_eq!(
-            safe_relative(Path::new("./plugin/hooks.json")).unwrap(),
-            PathBuf::from("plugin/hooks.json")
+            safe_relative(Path::new("./plugin/hooks.json")),
+            EntryPath::Relative(PathBuf::from("plugin/hooks.json"))
         );
     }
 }
