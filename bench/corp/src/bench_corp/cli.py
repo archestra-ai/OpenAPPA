@@ -269,7 +269,10 @@ def main(argv: list[str] | None = None) -> int:
         help=f"Model to run (repeatable). Default: {', '.join(CANARY_MODELS)}.",
     )
     canary_parser.add_argument(
-        "--timeout", type=float, default=300.0, help="Per-episode timeout in seconds (default 300)."
+        "--timeout",
+        type=float,
+        default=1200.0,
+        help="Per-episode timeout in seconds (default 1200: nightly runs trade latency for fewer provider timeouts).",
     )
     canary_parser.add_argument(
         "-j", "--jobs", type=int, default=-1, help="Concurrent episodes (default -1: all CPUs; 1: sequential)."

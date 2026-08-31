@@ -25,7 +25,8 @@ use std::time::Duration;
 use anyhow::Context;
 use appa_example_agent::wire::WireMessage;
 use appa_example_agent::{
-    Agent, ArgumentKey, Limits, OpenAiCompatible, Outcome, SpawnTool, ToolCatalogue, ToolName, ToolShim, TranscriptHead,
+    Agent, ArgumentKey, Limits, OpenAiCompatible, OpenAiConfig, Outcome, SpawnTool, ToolCatalogue, ToolName, ToolShim,
+    TranscriptHead,
 };
 use appa_runtime::api::{AuditEntry, AuditEvent, AuditLabel, DispatchOutcome, Runtime, TrajectoryId};
 use appa_runtime::config::{AnnotatorImplementation, Config, Endpoint, Implementation};
@@ -175,7 +176,11 @@ async fn main() -> anyhow::Result<()> {
     let runtime = Arc::new(runtime);
     let mut agent = Agent::new(
         Arc::clone(&runtime),
-        OpenAiCompatible::openrouter(args.model.clone(), api_key),
+        // A slow OpenRouter upstream can spend minutes on one completion, and
+        // retrying a cut-off completion never helps — give each attempt room.
+        OpenAiCompatible::new(
+            OpenAiConfig::openrouter(args.model.clone(), api_key).with_request_timeout(Duration::from_secs(180)),
+        ),
         ToolShim::new(format!("{origin}{}", shim::TOOLS_PATH)),
         ToolCatalogue::new(catalogue::advertised(&compiled, forking)),
     )
@@ -186,7 +191,10 @@ async fn main() -> anyhow::Result<()> {
         // offer here names a call to propose again rather than running
         // it, so every acceptance costs a second call.
         max_tool_calls: 64,
-        run_deadline: Duration::from_secs(240),
+        // Bounds runaway loops, not slow inference: with 180s per provider
+        // attempt, a deadline near the old 240s would cut off episodes that
+        // are merely waiting on a slow upstream.
+        run_deadline: Duration::from_secs(900),
         max_forks: args.max_forks,
         max_fork_depth: args.max_fork_depth,
     });
