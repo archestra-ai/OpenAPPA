@@ -12,10 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 pub use crate::engine::{AuditEntry, AuditEvent, AuditLabel, DispatchOutcome, TrajectoryStatus};
-pub use appa_runtime_api::{
-    Actor, LabelDimension, OutcomeBody, ProposedCall, SpawnBinding, SpawnRef, ToolOutcome, TrajectoryId,
-    UnestablishedValue,
-};
+pub use appa_runtime_api::{Actor, OutcomeBody, ProposedCall, SpawnBinding, SpawnRef, ToolOutcome, TrajectoryId};
 pub(crate) use session::{LateOpen, Session, is_control_tool};
 
 use crate::config::Config;
@@ -49,13 +46,8 @@ impl ExactCall {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ToolCallDecision {
-    Allow {
-        spawn: Option<SpawnBinding>,
-    },
-    Deny {
-        feedback: String,
-        unestablished: Vec<UnestablishedValue>,
-    },
+    Allow { spawn: Option<SpawnBinding> },
+    Deny { feedback: String },
 }
 
 /// What the adapter gives the harness as the tool output. `Keep`: use
@@ -119,7 +111,7 @@ pub enum OpenError {
     #[error("builtin modules refused: {0}")]
     Modules(String),
     #[error("policy refused: {0}")]
-    Policy(appa_policy::ConfigError),
+    Policy(Box<appa_policy::ConfigError>),
     #[error("unsupported policy: {0}")]
     UnsupportedPolicy(String),
     #[error("policy declares reserved tool name {0}")]
@@ -129,17 +121,13 @@ pub enum OpenError {
     #[error("[externals] binds {kind} {name}, which the policy does not declare")]
     UndeclaredExternal { kind: &'static str, name: String },
     #[error(
-        "cast {0} declares a constant, which the engine answers from the policy — remove its [externals.casts] binding"
+        "annotator {0} names a builtin on its declaration and takes no [externals.annotators] binding — remove the binding"
     )]
-    BoundConstantCast(String),
-    #[error(
-        "dynamic resolver {0} names a builtin on its declaration and takes no [externals.dynamic] binding — remove the binding"
-    )]
-    BoundBuiltinResolver(String),
-    #[error("dynamic resolver {0} names the builtin \"llm\", but the deployment declares no [externals.llm]")]
+    BoundBuiltinAnnotator(String),
+    #[error("annotator {0} names the builtin \"llm\", but the deployment declares no [externals.llm]")]
     LlmNotConfigured(String),
     #[error(
-        "dynamic resolver {0} names the builtin \"claude-code\", which runs a local process this platform does not support"
+        "annotator {0} names the builtin \"claude-code\", which runs a local process this platform does not support"
     )]
     UnsupportedClaudeCodePlatform(String),
     #[error("the database is damaged: {0}")]
@@ -190,8 +178,10 @@ pub(crate) enum EventError {
     PolicyUnavailable(String),
     #[error("engine invariant breach: {0}")]
     EngineInvariant(String),
-    #[error("resolver={resolver} error={reason}")]
-    ResolverUnavailable { resolver: String, reason: String },
+    #[error("annotator={annotator} error={reason}")]
+    AnnotationRefused { annotator: String, reason: String },
+    #[error("tool {tool} is not declared in this policy and no wildcard covers it; the call is refused before it runs")]
+    UndeclaredTool { tool: String },
     #[error("storage failure: {0}")]
     Storage(String),
 }
@@ -210,7 +200,8 @@ impl EventError {
             | EventError::PolicyUnavailable(_)
             | EventError::EngineInvariant(_)
             | EventError::Contended { .. }
-            | EventError::ResolverUnavailable { .. }
+            | EventError::AnnotationRefused { .. }
+            | EventError::UndeclaredTool { .. }
             | EventError::UnexpectedDecision => true,
             EventError::CallOutstanding
             | EventError::SubstitutionAbandoned { .. }
@@ -239,6 +230,7 @@ impl From<EngineRefusal> for EventError {
             EngineRefusal::DispatchClosed => EventError::UnknownDispatch,
             EngineRefusal::UnknownOffer => EventError::UnknownOffer,
             EngineRefusal::Unbindable => EventError::BindingMismatch,
+            EngineRefusal::UndeclaredTool { tool } => EventError::UndeclaredTool { tool },
         }
     }
 }
@@ -260,15 +252,15 @@ impl Deployment {
     ) -> Result<Deployment, OpenError> {
         let policy = compile_policy(&config)?;
         validate_deployment(&policy, &config.externals)?;
-        let dynamic_builtins = policy
-            .dynamic_resolvers()
-            .filter_map(|(name, builtin)| builtin.map(|builtin| (name.as_str().to_string(), builtin)))
+        let annotator_builtins = policy
+            .annotators()
+            .filter_map(|(name, binding)| binding.builtin.map(|builtin| (name.as_str().to_string(), builtin)))
             .collect();
-        let externals = ExternalServices::new(config.externals.clone(), modules, dynamic_builtins, gates)
+        let externals = ExternalServices::new(config.externals.clone(), modules, annotator_builtins, gates)
             .map_err(|error| OpenError::Modules(error.to_string()))?;
         Ok(Deployment {
             config,
-            resident: RuntimeEngine::new(policy.engine().clone()),
+            resident: RuntimeEngine::from_policy(&policy),
             externals,
         })
     }
@@ -366,7 +358,7 @@ impl Inner {
             return Ok(Arc::clone(engine));
         }
         let compiled = compile_stored_policy(bytes).map_err(EventError::PolicyUnavailable)?;
-        let engine = Arc::new(RuntimeEngine::new(compiled.engine().clone()));
+        let engine = Arc::new(RuntimeEngine::from_policy(&compiled));
         Ok(Arc::clone(
             self.retired
                 .lock()
@@ -841,7 +833,7 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
             "[deployment] provider_surfaces — this runtime never sees provider requests, so it can neither mediate a surface nor strip an undeclared one".to_string(),
         ));
     }
-    if policy.registry().provider_run_contracts().next().is_some() {
+    if policy.registry().provider_run_annotations().next().is_some() {
         return Err(OpenError::UnsupportedPolicy(
             "[deployment] provider_run_tools — this runtime never sees inference responses, so it cannot admit a provider-run result".to_string(),
         ));
@@ -849,7 +841,7 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
 
     let rc = policy.registry_config();
     for tool in &rc.tools {
-        let name = tool.name.as_str();
+        let name = tool.name().as_str();
         if is_control_tool(name) {
             return Err(OpenError::ReservedTool(name.to_string()));
         }
@@ -858,7 +850,7 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
     // Each binding names a registered component: a binding nothing registers would never
     // be consulted, so the deployment is refused rather than left believing an
     // implementation runs. Each registered name is bound, with two exceptions: an
-    // authority may stay unbound and then returns no answer, and a dynamic resolver that
+    // authority may stay unbound and then returns no answer, and an Annotator that
     // names a stock builtin on its declaration is complete as written.
     no_undeclared(
         "authority",
@@ -882,47 +874,31 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
             .map(|sanitizer| sanitizer.name.as_str()),
         &externals.sanitizers,
     )?;
-    // A resolver-backed cast classifies over the wire, so it needs a binding. A constant
-    // is answered from the policy itself and binds nothing.
-    if let Some(cast) = rc.casts.iter().find(|cast| {
-        matches!(cast.resolution, appa_engine::authority::CastResolution::Constant(_))
-            && externals.casts.contains_key(cast.name.as_str())
-    }) {
-        return Err(OpenError::BoundConstantCast(cast.name.as_str().to_string()));
-    }
-    bound_exactly(
-        "cast",
-        rc.casts.iter().filter_map(|cast| match cast.resolution {
-            appa_engine::authority::CastResolution::Resolver { .. } => Some(cast.name.as_str()),
-            appa_engine::authority::CastResolution::Constant(_) => None,
-        }),
-        &externals.casts,
-    )?;
     // A declared builtin is served by the runtime itself, so it is refused when it is also
     // bound, and when this deployment cannot serve it: a consult that can never answer is
     // a misconfiguration to refuse at open, not a no-answer to discover under an agent.
-    // Every other resolver is bound exactly once.
+    // Every other Annotator is bound exactly once.
     let mut bound_by_deployment = Vec::new();
-    for (name, builtin) in policy.dynamic_resolvers() {
+    for (name, binding) in policy.annotators() {
         let name = name.as_str();
-        let Some(builtin) = builtin else {
+        let Some(builtin) = binding.builtin else {
             bound_by_deployment.push(name);
             continue;
         };
-        if externals.dynamic.contains_key(name) {
-            return Err(OpenError::BoundBuiltinResolver(name.to_string()));
+        if externals.annotators.contains_key(name) {
+            return Err(OpenError::BoundBuiltinAnnotator(name.to_string()));
         }
         match builtin {
-            appa_policy::DynamicBuiltin::Llm if externals.llm.is_none() => {
+            appa_policy::AnnotatorBuiltin::Llm if externals.llm.is_none() => {
                 return Err(OpenError::LlmNotConfigured(name.to_string()));
             }
-            appa_policy::DynamicBuiltin::ClaudeCode if !cfg!(unix) => {
+            appa_policy::AnnotatorBuiltin::ClaudeCode if !cfg!(unix) => {
                 return Err(OpenError::UnsupportedClaudeCodePlatform(name.to_string()));
             }
-            appa_policy::DynamicBuiltin::Llm | appa_policy::DynamicBuiltin::ClaudeCode => {}
+            appa_policy::AnnotatorBuiltin::Llm | appa_policy::AnnotatorBuiltin::ClaudeCode => {}
         }
     }
-    bound_exactly("dynamic resolver", bound_by_deployment.into_iter(), &externals.dynamic)?;
+    bound_exactly("annotator", bound_by_deployment.into_iter(), &externals.annotators)?;
     bound_exactly(
         "membership resolver",
         rc.membership.iter().map(|resolver| resolver.as_str()),
@@ -964,7 +940,7 @@ fn no_undeclared<'a, Implementation>(
 fn compile_policy(config: &Config) -> Result<appa_policy::Config, OpenError> {
     let text = toml::to_string(config.policy_file().value())
         .map_err(|error| OpenError::UnsupportedPolicy(format!("the policy table does not serialize: {error}")))?;
-    appa_policy::Config::from_toml_str(&text).map_err(OpenError::Policy)
+    appa_policy::Config::from_toml_str(&text).map_err(|error| OpenError::Policy(Box::new(error)))
 }
 
 fn compile_stored_policy(bytes: &[u8]) -> Result<appa_policy::Config, String> {
@@ -1015,17 +991,17 @@ mod deployment_tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::config::{DynamicImplementation, Endpoint, ExternalBindings, LlmBinding, LlmProvider};
+    use crate::config::{AnnotatorImplementation, Endpoint, ExternalBindings, LlmBinding, LlmProvider};
 
-    /// A deployment with no `[externals.dynamic]` bindings: the policy under test names
+    /// A deployment with no `[externals.annotators]` bindings: the policy under test names
     /// `builtin = "claude-code"` on the declarations it wants answered by Claude Code.
     fn claude_config(policy: &str) -> Config {
         let bindings = ExternalBindings::new(Duration::from_secs(30), 65_536);
         Config::embedded(policy.to_string(), bindings).expect("the embedded configuration parses")
     }
 
-    fn endpoint() -> DynamicImplementation {
-        DynamicImplementation::Resolver(Endpoint::new("https://resolver.example".to_string(), None))
+    fn endpoint() -> AnnotatorImplementation {
+        AnnotatorImplementation::Resolver(Endpoint::new("https://resolver.example".to_string(), None))
     }
 
     fn load(config: Config) -> Result<Deployment, OpenError> {
@@ -1037,14 +1013,13 @@ mod deployment_tests {
         let tool_level = claude_config(
             r#"
                 version = 1
-                [[dynamic_resolver]]
+                [[annotator]]
                 name = "classifier"
                 builtin = "claude-code"
-                returns = ["delta.trust", "delta.audience", "requires.attention"]
                 [[tool]]
                 name = "lookup"
                 description = "Looks one record up."
-                uses = [{ resolver = "classifier" }]
+                annotator = "classifier"
             "#,
         );
         assert!(Deployment::load(tool_level, &crate::builtins::ModuleRegistry::empty(), test_permits()).is_ok());
@@ -1057,14 +1032,13 @@ mod deployment_tests {
             claude_config(
                 r#"
                 version = 1
-                [[dynamic_resolver]]
+                [[annotator]]
                 name = "classifier"
                 builtin = "claude-code"
-                returns = ["delta.trust"]
                 [[tool]]
                 name = "fetch"
                 description = "Fetches one URL."
-                uses = [{ resolver = "classifier" }]
+                annotator = "classifier"
             "#,
             )
         };
@@ -1100,33 +1074,29 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     }
 
     #[test]
-    fn every_dynamic_resolver_has_its_own_implementation() {
+    fn every_annotator_has_its_own_implementation() {
         let mut config = claude_config(
             r#"
                 version = 1
-                [[dynamic_resolver]]
+                [[annotator]]
                 name = "bash-classifier"
                 builtin = "claude-code"
-                returns = ["requires.attention"]
-                [[dynamic_resolver]]
+                [[annotator]]
                 name = "other-classifier"
-                returns = ["requires.attention"]
                 [[tool]]
                 name = "Bash"
                 description = "Runs one shell command."
-                delta = {}
-                uses = [{ resolver = "bash-classifier" }]
+                annotator = "bash-classifier"
                 [[tool]]
                 name = "Other"
                 description = "Does something else."
-                delta = {}
-                uses = [{ resolver = "other-classifier" }]
+                annotator = "other-classifier"
             "#,
         );
-        // The builtin resolver is complete as declared; only the other one is bound here.
+        // The builtin Annotator is complete as declared; only the other one is bound here.
         config
             .externals
-            .dynamic
+            .annotators
             .insert("other-classifier".to_string(), endpoint());
         assert!(load(config).is_ok());
     }
@@ -1157,62 +1127,65 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     }
 
     #[test]
-    fn missing_and_undeclared_dynamic_implementations_are_refused() {
+    fn missing_and_undeclared_annotator_implementations_are_refused() {
         let policy = r#"
             version = 1
-            [[dynamic_resolver]]
+            [[annotator]]
             name = "classifier"
-            returns = ["delta.trust"]
+            [[tool]]
+            name = "lookup"
+            description = "Looks one record up."
+            annotator = "classifier"
         "#;
         let missing = claude_config(policy);
         assert!(matches!(
             load(missing),
-            Err(OpenError::UnboundExternal {
-                kind: "dynamic resolver",
-                ..
-            })
+            Err(OpenError::UnboundExternal { kind: "annotator", .. })
         ));
 
         let mut extra = claude_config(policy);
-        extra.externals.dynamic.insert("classifier".to_string(), endpoint());
-        extra.externals.dynamic.insert("undeclared".to_string(), endpoint());
+        extra.externals.annotators.insert("classifier".to_string(), endpoint());
+        extra.externals.annotators.insert("undeclared".to_string(), endpoint());
         assert!(matches!(
             load(extra),
-            Err(OpenError::UndeclaredExternal {
-                kind: "dynamic resolver",
-                ..
-            })
+            Err(OpenError::UndeclaredExternal { kind: "annotator", .. })
         ));
     }
 
     #[test]
-    fn a_builtin_resolver_takes_no_deployment_binding() {
+    fn a_builtin_annotator_takes_no_deployment_binding() {
         let mut bound = claude_config(
             r#"
                 version = 1
-                [[dynamic_resolver]]
+                [[annotator]]
                 name = "classifier"
                 builtin = "claude-code"
-                returns = ["delta.trust"]
+                [[tool]]
+                name = "lookup"
+                description = "Looks one record up."
+                annotator = "classifier"
             "#,
         );
-        bound.externals.dynamic.insert("classifier".to_string(), endpoint());
+        bound.externals.annotators.insert("classifier".to_string(), endpoint());
         assert!(matches!(
             load(bound),
-            Err(OpenError::BoundBuiltinResolver(name)) if name == "classifier"
+            Err(OpenError::BoundBuiltinAnnotator(name)) if name == "classifier"
         ));
     }
 
-    /// A declared `llm` resolver opens only over a deployment that declares the profile it
+    /// A declared `llm` Annotator opens only over a deployment that declares the profile it
     /// consults — at open and at every reload.
     #[test]
-    fn a_declared_llm_resolver_needs_the_llm_table_at_open_and_reload() {
+    fn a_declared_llm_annotator_needs_the_llm_table_at_open_and_reload() {
         let policy = r#"
             version = 1
-            [[dynamic_resolver]]
+            [[annotator]]
             name = "classifier"
             builtin = "llm"
-            returns = ["delta.trust"]
+            [[tool]]
+            name = "lookup"
+            description = "Looks one record up."
+            annotator = "classifier"
         "#;
         let with_profile = || {
             let mut bindings = ExternalBindings::new(Duration::from_secs(30), 65_536);
@@ -1244,10 +1217,13 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     fn the_llm_gate_follows_the_serving_deployment_and_never_a_refused_one() {
         let policy = r#"
             version = 1
-            [[dynamic_resolver]]
+            [[annotator]]
             name = "classifier"
             builtin = "llm"
-            returns = ["delta.trust"]
+            [[tool]]
+            name = "lookup"
+            description = "Looks one record up."
+            annotator = "classifier"
             [[authority]]
             name = "auditor"
             [authority.permits]

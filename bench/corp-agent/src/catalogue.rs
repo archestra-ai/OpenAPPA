@@ -8,8 +8,7 @@
 //! narrows the audience can plan around the narrowing instead of discovering
 //! it as a block.
 
-use appa_engine::contract::{AudienceDelta, ToolContract};
-use appa_engine::label::Dim;
+use appa_engine::contract::ToolDeclaration;
 use appa_engine::registry::TrustChain;
 use appa_example_agent::wire::WireTool;
 use appa_policy::Config;
@@ -28,26 +27,26 @@ pub fn advertised(config: &Config, forking: bool) -> Vec<WireTool> {
     registry
         .tools
         .iter()
-        .filter(|contract| forking || contract.name.as_str() != FORK)
-        .map(|contract| schema(contract, &registry.trust_chain))
+        .filter(|declaration| forking || declaration.name().as_str() != FORK)
+        .map(|declaration| schema(declaration, &registry.trust_chain))
         .collect()
 }
 
-fn schema(contract: &ToolContract, chain: &TrustChain) -> WireTool {
+fn schema(declaration: &ToolDeclaration, chain: &TrustChain) -> WireTool {
     WireTool::new(
-        contract.name.as_str(),
-        match contract.name.as_str() {
-            FORK => fork_description(contract, chain),
-            _ => contract_description(contract, chain),
+        declaration.name().as_str(),
+        match declaration.name().as_str() {
+            FORK => fork_description(declaration, chain),
+            _ => contract_description(declaration, chain),
         },
-        contract.parameters.normalized(),
+        declaration.parameters().normalized(),
     )
 }
 
 /// The spawn tool carries the one piece of advice the control tool cannot:
 /// what to do instead of accepting a narrowing. Only a host that has a spawn
 /// tool can offer that escape, so only a host says it.
-fn fork_description(contract: &ToolContract, chain: &TrustChain) -> String {
+fn fork_description(declaration: &ToolDeclaration, chain: &TrustChain) -> String {
     format!(
         "Run one self-contained task in a child trajectory. Scope the child to the restrictive \
          read and the work that must sit beside it: every later call in that child runs under the \
@@ -56,80 +55,61 @@ fn fork_description(contract: &ToolContract, chain: &TrustChain) -> String {
          work needs your current label. A child inherits your label and can never widen it. The \
          child's final message is its return, and it crosses checked — a child that did the work \
          itself should finish by saying nothing. {}",
-        contract_description(contract, chain)
+        contract_description(declaration, chain)
     )
 }
 
 /// One contract as clauses: what the output is labelled, what the call
 /// demands, and what it commits.
-fn contract_description(contract: &ToolContract, chain: &TrustChain) -> String {
+fn contract_description(declaration: &ToolDeclaration, chain: &TrustChain) -> String {
+    let contract = match declaration {
+        ToolDeclaration::Declared(contract) => contract,
+        ToolDeclaration::Annotated { annotator, .. } => {
+            return format!(
+                "APPA contract: annotator {} produces this call's complete contract — output \
+                 labels, requirements, and effects — from the call itself.",
+                annotator.as_str()
+            );
+        }
+    };
     let mut clauses = Vec::new();
     let delta = &contract.delta;
-    match &delta.trust {
-        Some(Dim::Known(trust)) => clauses.push(format!(
+    if let Some(trust) = &delta.trust {
+        clauses.push(format!(
             "output trust={}",
             chain
                 .name_of(*trust)
                 .expect("validated tool trust rank is in the chain")
-        )),
-        Some(Dim::Unknown) => clauses.push("output trust=unknown".to_string()),
-        None => {}
+        ));
     }
-    match &delta.audience {
-        Some(AudienceDelta::Static(audience)) => clauses.push(format!("output audience={audience:?}")),
-        Some(AudienceDelta::PendingCast) => clauses.push("output audience=unknown".to_string()),
-        None => {}
+    if let Some(audience) = &delta.audience {
+        clauses.push(format!("output audience={audience:?}"));
     }
     if delta.is_none() {
         clauses.push("output label is neutral".to_string());
     }
-    for uses in &contract.uses {
-        let read = match uses.inputs.is_empty() {
-            true => "the complete call".to_string(),
-            false => {
-                let sources: Vec<String> = uses.inputs.values().map(|source| source.spelling()).collect();
-                sources.join(", ")
-            }
-        };
-        let returned: Vec<&str> = uses
-            .returns
-            .iter()
-            .map(|field| match field {
-                appa_engine::contract::ResolverReturn::Trust => "output trust",
-                appa_engine::contract::ResolverReturn::Audience => "output audience",
-                appa_engine::contract::ResolverReturn::RequiredTrust => "a required trust floor",
-                appa_engine::contract::ResolverReturn::RequiredAudience => "required recipients",
-                appa_engine::contract::ResolverReturn::Attention => "review marks",
-            })
-            .collect();
+    if let Some(trust) = contract.requires.label.trust_floor.as_ref() {
         clauses.push(format!(
-            "resolver {} classifies {read} into {}",
-            uses.resolver.as_str(),
-            returned.join(", ")
-        ));
-    }
-    match contract.requires.label.trust_floor.as_ref() {
-        Some(Dim::Known(trust)) => clauses.push(format!(
             "requires trust>={}",
             chain
                 .name_of(*trust)
                 .expect("validated requirement trust rank is in the chain")
-        )),
-        Some(Dim::Unknown) => clauses.push("requires trust=unknown".to_string()),
-        None => {}
+        ));
     }
-    match &contract.requires.label.audience {
-        Dim::Known(requirements) if requirements.is_empty() => {}
-        Dim::Known(requirements) => clauses.push(format!("audience requirements={requirements:?}")),
-        Dim::Unknown => clauses.push("audience requirements=unknown".to_string()),
+    if !contract.requires.label.audience.is_empty() {
+        clauses.push(format!("audience requirements={:?}", contract.requires.label.audience));
     }
-    match &contract.requires.attention {
-        Dim::Known(marks) if marks.is_empty() => {}
-        Dim::Known(marks) => clauses.push(format!(
+    if !contract.requires.attention.is_empty() {
+        clauses.push(format!(
             "requires review marks=[{}]",
-            marks.iter().map(|mark| mark.as_str()).collect::<Vec<_>>().join(",")
-        )),
-        Dim::Unknown => clauses.push("requires review marks=unknown".to_string()),
+            contract
+                .requires
+                .attention
+                .iter()
+                .map(|mark| mark.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
     }
     if !contract.requires.history.is_empty() {
         clauses.push(format!("history requirements={:?}", contract.requires.history));
@@ -189,9 +169,9 @@ parameters = { type = "object", properties = { task = { type = "string" } }, req
                     .registry_config()
                     .tools
                     .iter()
-                    .find(|contract| contract.name.as_str() == "read_hr")
+                    .find(|declaration| declaration.name().as_str() == "read_hr")
                     .expect("read_hr is registered")
-                    .parameters
+                    .parameters()
                     .normalized()
             ),
         );

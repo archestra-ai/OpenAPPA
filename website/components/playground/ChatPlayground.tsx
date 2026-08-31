@@ -250,23 +250,32 @@ function readable(summary: string): string {
 const STORY_TOOLS = new Set(["list_recordings", "list_issues", "create_issue", "list_invoices", "make_transfer", "send_email"]);
 
 /**
- * Sections the short view leaves out. The session's opening label, the resolver
- * behind an address, and how an authority or sanitizer is actually implemented
- * are all real policy — and none of them is what a reader is pointed at from
- * the stream, so the pane does not carry them.
+ * Sections the short view leaves out. The session's opening label and how an
+ * authority or sanitizer is actually implemented are real policy — and none
+ * of it is what a reader is pointed at from the stream, so the pane does not
+ * carry them. An annotator is different: a kept tool that names one would
+ * dangle without its declaration, so those stay.
  */
 const SHORT_DROP = new Set([
   "[boundary]",
-  "[[dynamic_resolver]]",
   "[authority.permits]",
   "[authority.implementation]",
   "[sanitizer.implementation]",
 ]);
 
+type PolicySection = { head: string; lead: string[]; body: string[] };
+
+/** The section's own `name = "…"` value, or the empty string. */
+function sectionName(section: PolicySection): string {
+  const line = section.body.find((entry) => /^\s*name\s*=/.test(entry));
+  return line?.split('"')[1] ?? "";
+}
+
 /**
  * The policy reduced to what the playground's stories point at: the six tools
- * the scenarios call, the authority that signs a transfer, and the two
- * sanitizers with the transitions they are allowed to make. The section
+ * the scenarios call, the annotator send_email names, the authority that signs
+ * a transfer, and the two sanitizers with the transitions they are allowed to
+ * make. The section
  * headings stay so the rules keep their shape; the explanatory prose does not,
  * including the instruction a sanitizer's transform runs under.
  *
@@ -276,7 +285,7 @@ const SHORT_DROP = new Set([
 function shortPolicy(full: string): string {
   // A comment belongs to the section it introduces, so it travels with the
   // block below it — a dropped section takes its own heading with it.
-  const groups: { head: string; lead: string[]; body: string[] }[] = [];
+  const groups: PolicySection[] = [];
   let lead: string[] = [];
   for (const line of full.split("\n")) {
     if (line.startsWith("[")) {
@@ -288,11 +297,19 @@ function shortPolicy(full: string): string {
     else if (line.trim() !== "") groups[groups.length - 1]?.body.push(line);
     else if (lead.length > 0) lead.push(line);
   }
+  const keptTool = (group: PolicySection): boolean => group.head === "[[tool]]" && STORY_TOOLS.has(sectionName(group));
+  const namedAnnotators = new Set(
+    groups.filter(keptTool).flatMap((group) => {
+      const reference = group.body.find((line) => /^\s*annotator\s*=/.test(line));
+      const name = reference?.split('"')[1];
+      return name === undefined ? [] : [name];
+    }),
+  );
   const kept = groups.filter((group) => {
     if (SHORT_DROP.has(group.head)) return false;
+    if (group.head === "[[annotator]]") return namedAnnotators.has(sectionName(group));
     if (group.head !== "[[tool]]") return true;
-    const name = group.body.find((line) => /^\s*name\s*=/.test(line));
-    return STORY_TOOLS.has(name?.split('"')[1] ?? "");
+    return keptTool(group);
   });
   return kept
     .flatMap((group) => [
@@ -368,17 +385,15 @@ function splitRuling(text: string): Ruling {
     if (!narrowing || parsed.requirement_gaps?.length) return { kind: "refusal", summary, detail: pretty, plans };
     const moved = (dim: string) => JSON.stringify(narrowing.from?.[dim]) !== JSON.stringify(narrowing.to?.[dim]);
     const dimension = moved("trust") && moved("audience") ? "both" : moved("audience") ? "audience" : "trust";
-    // A concrete reader set arrives either wrapped — `{"Known": {"Restricted":
-    // [...]}}` — or bare, `{"Restricted": [...]}`, which is what the service
-    // sends today; a trust rank likewise as `{"Known": 0}` or a plain `0`.
-    // Read both: missing either shape is what made these sentences fall back
-    // to "fewer readers" and "less trusted" instead of naming the real thing.
-    const audience = narrowing.to?.audience as { Known?: { Restricted?: unknown }; Restricted?: unknown } | undefined;
-    const restricted = audience?.Known?.Restricted ?? audience?.Restricted;
+    // A concrete reader set arrives as `{"Restricted": [...]}` and a trust rank
+    // as a plain chain index. Any other shape (e.g. `"Public"`) makes these
+    // sentences fall back to "fewer readers" and "less trusted" instead of
+    // naming the real thing.
+    const audience = narrowing.to?.audience as { Restricted?: unknown } | undefined;
+    const restricted = audience?.Restricted;
     const readers = Array.isArray(restricted) ? restricted.map(String) : undefined;
-    const trustValue = narrowing.to?.trust as { Known?: unknown } | number | undefined;
-    const rank = typeof trustValue === "number" ? trustValue : trustValue?.Known;
-    const toTrustRank = typeof rank === "number" ? rank : undefined;
+    const trustValue = narrowing.to?.trust;
+    const toTrustRank = typeof trustValue === "number" ? trustValue : undefined;
     return {
       kind: "narrowing",
       dimension,

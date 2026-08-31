@@ -2,7 +2,7 @@
 title: Batteries
 category: Integration
 order: 7
-description: Combine OpenAPPA configs and run resolver scripts.
+description: Combine OpenAPPA configs and run annotator scripts.
 ---
 
 :::proposal
@@ -44,7 +44,7 @@ OpenAPPA combines these files into one config.
 | `include` | Only the root file can use it. |
 | Paths | Paths are local and relative to the root file. |
 | Version | Every file uses the same version. |
-| Resolvers | Each resolver name must be unique. |
+| Annotators | Each annotator name must be unique. |
 | Script path | A script path is relative to the config file that names it. |
 
 OpenAPPA checks the combined config before using it. If a reload fails, the current config keeps running.
@@ -91,43 +91,42 @@ name = "mcp__claude_ai_Slack__slack_read_channel"
 delta = { audience = ["private"] }
 ```
 
-## Use resolvers in batteries
+## Use annotators in batteries
 
-A battery can ship a resolver script beside its config. See [Dynamic resolvers](/contracts#dynamic-resolvers) for what resolvers receive and return.
+A battery can ship an annotator script beside its config. See [Annotators](/contracts#annotators) for what annotators receive and return.
 
-The battery binds the resolver name to its script:
+A tool rule that names an annotator carries no static `delta`, `requires`, or `effects`: the annotator produces the call's complete contract. The battery binds the annotator name to its script:
 
 ```toml
-[[policy.dynamic_resolver]]
+[[policy.annotator]]
 name = "claude-code.read-sensitivity"
-returns = ["delta.audience"]
+audiences = ["private"]
 
 [[policy.tool]]
 name = "Read"
-uses = [{ resolver = "claude-code.read-sensitivity" }]
-delta = {}
+annotator = "claude-code.read-sensitivity"
 
-[externals.dynamic."claude-code.read-sensitivity"]
+[externals.annotators."claude-code.read-sensitivity"]
 command = ["python3", "./read-sensitivity.py"]
 ```
 
-### Run a local resolver
+### Run a local annotator
 
-On Unix systems, OpenAPPA starts the command only when the selected tool rule uses the resolver. It writes one JSON consult, reads one JSON answer, then waits for the script to exit. Other platforms reject the command binding when the configuration loads.
+On Unix systems, OpenAPPA starts the command only when the selected tool rule names the annotator. It writes one JSON consult, reads one JSON answer, then waits for the script to exit. Other platforms reject the command binding when the configuration loads.
 
 Consult:
 
 ```json
-{"version":1,"kind":"dynamic","name":"claude-code.read-sensitivity","declaration":{"returns":["delta.audience"],"trust_ranks":["suspicious","trusted"],"attention_marks":[]},"artifact":{"args":{"name":"Read","arguments":{"file_path":".env"}}}}
+{"version":1,"kind":"annotation","name":"claude-code.read-sensitivity","declaration":{"inputs":[],"trust_ranks":["suspicious","trusted"],"audiences":["private"],"attention_marks":[],"effects":[]},"artifact":{"args":{"name":"Read","arguments":{"file_path":".env"}}}}
 ```
 
 Answer:
 
 ```json
-{"version":1,"answer":{"delta.audience":["private"]}}
+{"version":1,"answer":{"delta":{"audience":["private"]},"requires":{"history":[],"attention":[]},"emits":[]}}
 ```
 
-The resolver can be any program. Here is a Python example:
+The annotator can be any program. Here is a Python example:
 
 ```python
 import json
@@ -139,50 +138,56 @@ file_path = request["artifact"]["args"]["arguments"]["file_path"]
 audience = ["private"] if PurePath(file_path).name.startswith(".") else "public"
 
 json.dump(
-    {"version": 1, "answer": {"delta.audience": audience}},
+    {
+        "version": 1,
+        "answer": {
+            "delta": {"audience": audience},
+            "requires": {"history": [], "attention": []},
+            "emits": [],
+        },
+    },
     sys.stdout,
 )
 ```
 
-`artifact.args` is the complete call: `name`, `description` when the tool declares one, and `arguments`. The `Read` rule above declares none, so the consult carries none. `declaration` is the resolver's own registration — its `returns` and the policy vocabulary its answer must use. A battery resolver must check the version, `kind`, `name`, tool name, and argument types. It must exit with an error for bad input.
+`artifact.args` is the complete call: `name`, `description` when the tool declares one, and `arguments`. The `Read` rule above declares none, so the consult carries none. When the annotator maps `inputs`, the consult carries one value per mapped input instead. `declaration` is the annotator's own registration — the mandate vocabulary its answer must use. A battery annotator must check the version, `kind`, `name`, tool name, and argument types. It must exit with an error for bad input.
 
 OpenAPPA runs the command without a shell. The script path is relative to the battery config. Its folder is the working folder.
 
 Script changes apply on the next call. No restart is needed.
 
-## Resolver precedence
+## Annotator precedence
 
-Resolvers do not have their own order. The first matching tool rule decides which resolver, if any, runs.
+Annotators do not have their own order. The first matching tool rule decides which annotator, if any, runs.
 
-A rule written above the rule that uses a resolver wins without running it. Here `README.md` is public by rule; every other path asks the resolver:
+A rule written above the rule that names an annotator wins without running it. Here `README.md` is public by rule; every other path asks the annotator:
 
 ```toml
 [[policy.tool]]
 name = "Read(file_path:README.md)"
 delta = {}
 
-[[policy.dynamic_resolver]]
+[[policy.annotator]]
 name = "claude-code.read-sensitivity"
-returns = ["delta.audience"]
+audiences = ["private"]
 
 [[policy.tool]]
 name = "Read"
-uses = [{ resolver = "claude-code.read-sensitivity" }]
-delta = {}
+annotator = "claude-code.read-sensitivity"
 
-[externals.dynamic."claude-code.read-sensitivity"]
+[externals.annotators."claude-code.read-sensitivity"]
 command = ["python3", "./read-sensitivity.py"]
 ```
 
 `README.md` matches the first rule, so `read-sensitivity.py` does not run.
 
-The resolver returns `["private"]` for hidden paths, credential and private-key
+The annotator returns `["private"]` for hidden paths, credential and private-key
 names, system-secret locations, and sensitive symlink targets. It returns
 `"public"` for other paths.
 
-The Claude Code battery also sends each Bash call to its `claude-code` model
-resolver. The resolver classifies the command's output trust and audience and
-its trust and audience requirements.
+The Claude Code battery also sends each Bash call to its stock model
+annotator. The annotator produces the command's complete contract: the
+output's trust and audience and the call's trust and audience requirements.
 
 This classification is not an operating-system sandbox. Bash can read files
 and open network connections. Use a sandbox to protect credentials and network
@@ -211,32 +216,31 @@ name = "Bash(command:kubectl *)"
 requires = { attention = ["blocked"] }
 delta = { trust = "suspicious", audience = ["private"] }
 
-[[policy.dynamic_resolver]]
+[[policy.annotator]]
 name = "local.read-sensitivity"
-returns = ["delta.audience"]
+audiences = ["private"]
 
 [[policy.tool]]
 name = "Read"
-uses = [{ resolver = "local.read-sensitivity" }]
-delta = {}
+annotator = "local.read-sensitivity"
 
-[externals.dynamic."local.read-sensitivity"]
+[externals.annotators."local.read-sensitivity"]
 command = ["python3", "./local/read-sensitivity.py"]
 ```
 
 No authority permits `blocked`, so both `kubectl` contracts have no remedy.
-Every other Bash call reaches the battery's model resolver. The root also uses
+Every other Bash call reaches the battery's model annotator. The root also uses
 a local script for `Read`.
 
 The battery files stay unchanged.
 
-## Block when a script fails
+## Refuse when a script fails
 
-OpenAPPA blocks the tool call when a resolver script is missing, crashes, times out, or returns bad data.
+OpenAPPA refuses the tool call when an annotator script is missing, crashes, times out, or returns bad data. The call is not judged: the refusal is operational, not a policy decision.
 
-The error names the resolver and the problem. It does not show the data the resolver was checking.
+The error names the annotator and the problem. It does not show the data the annotator was checking.
 
-Resolver scripts run as trusted local code. Review what they can read, run, and send.
+Annotator scripts run as trusted local code. Review what they can read, run, and send.
 
-A production file resolver must check full paths, hidden folders, symbolic links, files ignored by Git, and files outside the project.
+A production file annotator must check full paths, hidden folders, symbolic links, files ignored by Git, and files outside the project.
 :::

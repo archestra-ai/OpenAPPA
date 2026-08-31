@@ -14,95 +14,108 @@
 //! would have to be an engine-typed helper on the harness library, which is
 //! the one thing the runtime's API boundary keeps out.
 
-use appa_engine::contract::{AudienceDelta, ToolContract};
-use appa_engine::label::Dim;
+use std::collections::BTreeSet;
+
+use appa_engine::contract::ToolDeclaration;
 use appa_engine::registry::TrustChain;
 use appa_example_agent::wire::WireTool;
 use appa_policy::Config;
 
-pub fn advertised(config: &Config) -> Vec<WireTool> {
+use crate::systems::System;
+
+pub fn advertised(config: &Config, enabled: &BTreeSet<System>) -> Vec<WireTool> {
     let registry = config.registry_config();
-    registry
+    let mut tools: Vec<WireTool> = registry
         .tools
         .iter()
-        .map(|contract| {
+        .filter(|declaration| declaration.name().as_str() != "*")
+        .map(|declaration| {
             WireTool::new(
-                contract.name.as_str(),
-                describe(contract, &registry.trust_chain),
-                contract.parameters.normalized(),
+                declaration.name().as_str(),
+                describe(declaration, &registry.trust_chain),
+                declaration.parameters().normalized(),
             )
         })
-        .collect()
+        .collect();
+    // A wildcard is not a callable function: the model calls the system tools it covers.
+    // Each covered tool is advertised under its own name with the playground's schema and
+    // the wildcard's per-call annotation story.
+    if let Some(wildcard) = registry
+        .tools
+        .iter()
+        .find(|declaration| declaration.name().as_str() == "*")
+    {
+        let base_of = |name: &str| name.split('(').next().unwrap_or(name).to_string();
+        let declared: BTreeSet<String> = registry
+            .tools
+            .iter()
+            .map(|declaration| base_of(declaration.name().as_str()))
+            .collect();
+        for name in crate::world::expected_tools(enabled) {
+            if declared.contains(&name) {
+                continue;
+            }
+            let parameters =
+                crate::params::tool_parameters(&name).unwrap_or_else(|| serde_json::json!({ "type": "object" }));
+            tools.push(WireTool::new(
+                &name,
+                describe(wildcard, &registry.trust_chain),
+                parameters,
+            ));
+        }
+    }
+    tools
 }
 
-fn describe(contract: &ToolContract, chain: &TrustChain) -> String {
+fn describe(declaration: &ToolDeclaration, chain: &TrustChain) -> String {
+    let contract = match declaration {
+        ToolDeclaration::Declared(contract) => contract,
+        ToolDeclaration::Annotated { annotator, .. } => {
+            return format!(
+                "APPA contract: annotator {} produces this call's complete contract — output \
+                 labels, requirements, and effects — from the call itself.",
+                annotator.as_str()
+            );
+        }
+    };
     let mut clauses = Vec::new();
     let delta = &contract.delta;
-    match &delta.trust {
-        Some(Dim::Known(trust)) => clauses.push(format!(
+    if let Some(trust) = &delta.trust {
+        clauses.push(format!(
             "output trust={}",
             chain
                 .name_of(*trust)
                 .expect("validated tool trust rank is in the chain")
-        )),
-        Some(Dim::Unknown) => clauses.push("output trust=unknown".to_string()),
-        None => {}
+        ));
     }
-    match &delta.audience {
-        Some(AudienceDelta::Static(audience)) => clauses.push(format!("output audience={audience:?}")),
-        Some(AudienceDelta::PendingCast) => clauses.push("output audience=unknown".to_string()),
-        None => {}
+    if let Some(audience) = &delta.audience {
+        clauses.push(format!("output audience={audience:?}"));
     }
     if delta.is_none() {
         clauses.push("output label is neutral".to_string());
     }
-    for uses in &contract.uses {
-        let read = match uses.inputs.is_empty() {
-            true => "the complete call".to_string(),
-            false => {
-                let sources: Vec<String> = uses.inputs.values().map(|source| source.spelling()).collect();
-                sources.join(", ")
-            }
-        };
-        let returned: Vec<&str> = uses
-            .returns
-            .iter()
-            .map(|field| match field {
-                appa_engine::contract::ResolverReturn::Trust => "output trust",
-                appa_engine::contract::ResolverReturn::Audience => "output audience",
-                appa_engine::contract::ResolverReturn::RequiredTrust => "a required trust floor",
-                appa_engine::contract::ResolverReturn::RequiredAudience => "required recipients",
-                appa_engine::contract::ResolverReturn::Attention => "review marks",
-            })
-            .collect();
+    if let Some(trust) = contract.requires.label.trust_floor.as_ref() {
         clauses.push(format!(
-            "resolver {} classifies {read} into {}",
-            uses.resolver.as_str(),
-            returned.join(", ")
-        ));
-    }
-    match contract.requires.label.trust_floor.as_ref() {
-        Some(Dim::Known(trust)) => clauses.push(format!(
             "requires trust>={}",
             chain
                 .name_of(*trust)
                 .expect("validated requirement trust rank is in the chain")
-        )),
-        Some(Dim::Unknown) => clauses.push("requires trust=unknown".to_string()),
-        None => {}
+        ));
     }
-    match &contract.requires.label.audience {
-        Dim::Known(requirements) if requirements.is_empty() => {}
-        Dim::Known(requirements) => clauses.push(format!("audience requirements={requirements:?}")),
-        Dim::Unknown => clauses.push("audience requirements=unknown".to_string()),
+    if !contract.requires.label.audience.is_empty() {
+        clauses.push(format!("audience requirements={:?}", contract.requires.label.audience));
     }
-    match &contract.requires.attention {
-        Dim::Known(marks) if marks.is_empty() => {}
-        Dim::Known(marks) => clauses.push(format!(
+    if !contract.requires.attention.is_empty() {
+        clauses.push(format!(
             "requires review marks=[{}]",
-            marks.iter().map(|mark| mark.as_str()).collect::<Vec<_>>().join(",")
-        )),
-        Dim::Unknown => clauses.push("requires review marks=unknown".to_string()),
+            contract
+                .requires
+                .attention
+                .iter()
+                .map(|mark| mark.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
     }
     if !contract.requires.history.is_empty() {
         clauses.push(format!("history requirements={:?}", contract.requires.history));
@@ -131,19 +144,34 @@ mod tests {
     use crate::systems::System;
 
     #[test]
+    fn a_wildcard_advertises_the_covered_tools_under_their_own_names() {
+        let crm: BTreeSet<System> = [System::Crm].into_iter().collect();
+        let policy = "version = 1\n[[annotator]]\nname = \"email-recipient-readers\"\n[[tool]]\nname = \"*\"\nannotator = \"email-recipient-readers\"\n";
+        let checked = check_policy(policy, &crm).expect("the wildcard policy loads");
+        let advertised = advertised(&checked.config, &crm);
+        let mut names: Vec<&str> = advertised.iter().map(|tool| tool.function.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            vec!["create_customer_data", "list_customers"],
+            "the model is offered the covered system tools, never a literal `*`"
+        );
+    }
+
+    #[test]
     fn every_tool_is_advertised_with_the_contracts_own_parameters() {
         let all: BTreeSet<System> = System::ALL.into_iter().collect();
         let checked = check_policy(include_str!("../policies/default.toml"), &all).expect("the preset loads");
-        let advertised = advertised(&checked.config);
+        let advertised = advertised(&checked.config, &all);
         assert_eq!(advertised.len(), checked.tool_count);
         let registry = checked.config.registry_config();
         for tool in &advertised {
-            let contract = registry
+            let declaration = registry
                 .tools
                 .iter()
-                .find(|contract| contract.name.as_str() == tool.function.name)
+                .find(|declaration| declaration.name().as_str() == tool.function.name)
                 .expect("every advertised tool is registered");
-            assert_eq!(tool.function.parameters, Some(contract.parameters.normalized()));
+            assert_eq!(tool.function.parameters, Some(declaration.parameters().normalized()));
         }
     }
 }

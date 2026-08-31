@@ -233,14 +233,15 @@ fn a_changed_policy_keeps_old_roots_on_their_opening_policy() {
         r#"{"hook_event_name":"SessionStart","session_id":"new-1","source":"startup"}"#,
     )
     .expect("the new SessionStart answers");
-    let new_denies = post_hook(
-        &server,
-        r#"{"hook_event_name":"PreToolUse","session_id":"new-1","tool_name":"Bash","tool_input":{"command":"ls"},"tool_use_id":"t3"}"#,
-    )
-    .expect("the new root answers");
+    // The edited policy no longer covers Bash: the hook refuses the call typed, a
+    // non-2xx answer.
     assert!(
-        new_denies.contains("\"permissionDecision\":\"deny\""),
-        "the new root follows the edited policy: {new_denies}",
+        post_hook(
+            &server,
+            r#"{"hook_event_name":"PreToolUse","session_id":"new-1","tool_name":"Bash","tool_input":{"command":"ls"},"tool_use_id":"t3"}"#,
+        )
+        .is_none(),
+        "the new root follows the edited policy: nothing covers Bash",
     );
     let new_allows = post_hook(
         &server,
@@ -322,14 +323,15 @@ fn the_reload_route_installs_an_edited_policy_without_a_restart() {
         r#"{"hook_event_name":"SessionStart","session_id":"new-1","source":"startup"}"#,
     )
     .expect("the new SessionStart answers");
-    let new_denies = post_hook(
-        &server,
-        r#"{"hook_event_name":"PreToolUse","session_id":"new-1","tool_name":"Bash","tool_input":{"command":"ls"},"tool_use_id":"t4"}"#,
-    )
-    .expect("the new root answers");
+    // The installed policy no longer covers Bash: the hook refuses the call typed, a
+    // non-2xx answer.
     assert!(
-        new_denies.contains("\"permissionDecision\":\"deny\""),
-        "the new root follows the installed policy: {new_denies}",
+        post_hook(
+            &server,
+            r#"{"hook_event_name":"PreToolUse","session_id":"new-1","tool_name":"Bash","tool_input":{"command":"ls"},"tool_use_id":"t4"}"#,
+        )
+        .is_none(),
+        "the new root follows the installed policy: nothing covers Bash",
     );
 
     let unchanged = http(&reload, "POST", None).expect("the unchanged file reloads");

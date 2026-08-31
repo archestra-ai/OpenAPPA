@@ -6,9 +6,6 @@
 
 use std::path::PathBuf;
 
-use appa_engine::authority::CastResolution;
-use appa_engine::label::Dimension;
-use appa_engine::names::CastName;
 use appa_policy::Config;
 
 fn examples_dir() -> PathBuf {
@@ -29,8 +26,8 @@ fn policy_of(example: &str) -> String {
     toml::to_string(policy).expect("a parsed table renders")
 }
 
-fn load(example: &str) -> Config {
-    Config::from_toml_str(&policy_of(example)).unwrap_or_else(|error| panic!("{example} does not load: {error}"))
+fn load(example: &str) {
+    Config::from_toml_str(&policy_of(example)).unwrap_or_else(|error| panic!("{example} does not load: {error}"));
 }
 
 #[test]
@@ -47,38 +44,8 @@ fn every_shipped_example_loads() {
         .filter(|name| name.ends_with(".appa.toml"))
         .collect();
     examples.sort();
-    assert!(examples.len() >= 3, "expected the shipped examples, found {examples:?}");
+    assert!(!examples.is_empty(), "the shipped examples are present");
     for example in &examples {
         load(example);
     }
-}
-
-#[test]
-fn the_casts_example_registers_what_it_describes() {
-    let config = load("claude-code-casts.appa.toml");
-    let registry = config.registry();
-    // Each example tool has one contract, so the name alone finds it.
-    let tool = |name: &str| registry.tools().find(|tool| tool.name.as_str() == name);
-
-    // Both declare an Unknown trust; only WebFetch is a confined result point, so only its
-    // raw page waits for the cast.
-    let lazy = tool("mcp__github__issue_read").expect("the unclassified read registers");
-    assert_eq!(lazy.pending_cast_dim(), Some(Dimension::Trust));
-    assert!(!config.registry().profile().confines_result(&lazy.name));
-
-    let pending = tool("WebFetch").expect("the pending-cast tool registers");
-    assert_eq!(pending.pending_cast_dim(), Some(Dimension::Trust));
-    assert!(config.registry().profile().confines_result(&pending.name));
-
-    let sink = tool("mcp__github__issue_write").expect("the sink registers");
-    assert!(sink.requires.label.trust_floor.is_some());
-
-    let classifier = registry
-        .cast(&CastName::new("page-classifier"))
-        .expect("the resolver cast registers");
-    assert!(matches!(classifier.resolution, CastResolution::Resolver { .. }));
-    let fallback = registry
-        .cast(&CastName::new("github-content"))
-        .expect("the constant cast registers");
-    assert!(matches!(fallback.resolution, CastResolution::Constant(_)));
 }

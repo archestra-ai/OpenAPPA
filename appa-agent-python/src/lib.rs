@@ -9,7 +9,6 @@ use appa_runtime::config::{Binding, Config, ExternalBindings};
 use appa_runtime::hooks;
 use appa_runtime_api::{
     Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, SpawnBinding, SpawnRef, ToolOutcome, TrajectoryId,
-    UnestablishedValue,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::PyRuntimeError;
@@ -34,7 +33,6 @@ create_exception!(appa_agent_python, AppaError, PyRuntimeError);
 enum DispatchResponse {
     Blocked {
         feedback: String,
-        unestablished: Vec<UnestablishedValue>,
     },
     Delivered {
         content: String,
@@ -52,7 +50,6 @@ enum DispatchResponse {
 enum CheckResponse {
     Blocked {
         feedback: String,
-        unestablished: Vec<UnestablishedValue>,
     },
     Allowed {
         dispatched_tool: String,
@@ -73,7 +70,6 @@ enum CheckResponse {
 enum SpawnResponse {
     Blocked {
         feedback: String,
-        unestablished: Vec<UnestablishedValue>,
     },
     Opened {
         child_id: String,
@@ -156,13 +152,10 @@ struct ExternalsConfig {
     #[serde(default)]
     max_body_bytes: Option<usize>,
     #[serde(default)]
-    dynamic: BTreeMap<String, EndpointConfig>,
+    annotators: BTreeMap<String, EndpointConfig>,
     /// The directory endpoint of the policy's membership resolver, by resolver name.
     #[serde(default)]
     membership: BTreeMap<String, EndpointConfig>,
-    /// The classifier endpoint of every resolver-backed cast, by cast name.
-    #[serde(default)]
-    casts: BTreeMap<String, EndpointConfig>,
 }
 
 #[derive(serde::Deserialize)]
@@ -213,8 +206,7 @@ impl SessionInner {
                     })
                     .collect()
             };
-            bindings.casts = bound(parsed.casts);
-            bindings.dynamic = bound(parsed.dynamic);
+            bindings.annotators = bound(parsed.annotators);
             bindings.membership = bound(parsed.membership);
             bindings
         } else {
@@ -353,13 +345,7 @@ impl SessionInner {
                 *self.slot(child)? = Some(Pending { call: call.clone() });
                 Ok(Decision::Allowed { call, binding })
             }
-            HookDecision::DenyCall {
-                feedback,
-                unestablished,
-            } => Ok(Decision::Blocked {
-                feedback,
-                unestablished,
-            }),
+            HookDecision::DenyCall { feedback } => Ok(Decision::Blocked { feedback }),
             HookDecision::PassControl => Ok(Decision::Control {
                 reply: self.execute_remedy(child, &call),
             }),
@@ -404,13 +390,7 @@ impl SessionInner {
         spawn: bool,
     ) -> Result<String, String> {
         encode(match self.decide(child, tool, arguments_json, spawn)? {
-            Decision::Blocked {
-                feedback,
-                unestablished,
-            } => CheckResponse::Blocked {
-                feedback,
-                unestablished,
-            },
+            Decision::Blocked { feedback } => CheckResponse::Blocked { feedback },
             Decision::Control { reply } => CheckResponse::Control { reply },
             Decision::Allowed { call, binding } => CheckResponse::Allowed {
                 dispatched_tool: call.tool.clone(),
@@ -425,13 +405,7 @@ impl SessionInner {
             return Err("dispatch requires a bridge URL; use check and report for framework-owned tools".to_string());
         };
         match self.decide(None, tool, arguments_json, false)? {
-            Decision::Blocked {
-                feedback,
-                unestablished,
-            } => encode(DispatchResponse::Blocked {
-                feedback,
-                unestablished,
-            }),
+            Decision::Blocked { feedback } => encode(DispatchResponse::Blocked { feedback }),
             Decision::Control { reply } => encode(DispatchResponse::Control { reply }),
             Decision::Allowed { call, .. } => {
                 let outcome = self
@@ -557,13 +531,7 @@ impl SessionInner {
             return Err(format!("the child branch {} is already open in this session", child.0));
         }
         match self.decide(None, &tool, arguments_json, true)? {
-            Decision::Blocked {
-                feedback,
-                unestablished,
-            } => encode(SpawnResponse::Blocked {
-                feedback,
-                unestablished,
-            }),
+            Decision::Blocked { feedback } => encode(SpawnResponse::Blocked { feedback }),
             Decision::Control { reply } => encode(SpawnResponse::Control { reply }),
             Decision::Allowed { call, binding: None } => {
                 // The release prepared no fork, so no child exists to open. The
@@ -659,7 +627,6 @@ impl SessionInner {
 enum Decision {
     Blocked {
         feedback: String,
-        unestablished: Vec<UnestablishedValue>,
     },
     Allowed {
         call: ProposedCall,

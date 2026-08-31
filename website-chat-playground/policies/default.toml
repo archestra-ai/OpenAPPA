@@ -7,14 +7,21 @@ trust = "trusted"
 audience = ["public"]
 
 # A policy registers a component; the deployment binds who performs it.
-# You declare that recipients are resolved by a directory — the service
-# binds its own, which maps each proposed address to the literal readers
-# behind it. There is no URL to write here, and none you write would be
-# called.
-[[dynamic_resolver]]
-name    = "email-recipient-readers"
-inputs  = ["to"]
-returns = ["requires.audience"]
+# You declare that send_email's contract is produced per call by a
+# directory annotator — the service binds its own, which maps each
+# proposed address to the literal readers behind it. The mandate is
+# closed: `audiences` lists every reader a produced annotation may name.
+# There is no URL to write here, and none you write would be called.
+[[annotator]]
+name      = "email-recipient-readers"
+inputs    = { to = "$tool_call.arguments.to" }
+audiences = [
+  "cfo@corp.example",
+  "ap-lead@corp.example",
+  "person@corp.example",
+  "ceo@acme.com",
+  "staff@acme.com",
+]
 
 # --- CRM: customer records are confidential -------------
 
@@ -47,13 +54,12 @@ audience = { contains = ["public"] }
 
 # The recipient directory resolves an individual address
 # to that reader and expands a distribution list to its
-# current members. The flow must cover every resolved
-# reader and must not derive from an untrusted source.
+# current members. The annotator answers the whole contract
+# per call: the flow must cover every resolved reader and
+# must not derive from an untrusted source.
 [[tool]]
-name     = "send_email"
-uses     = [{ resolver = "email-recipient-readers", inputs = { to = "$tool_call.arguments.to" } }]
-requires = { trust = "trusted" }
-delta    = {}
+name      = "send_email"
+annotator = "email-recipient-readers"
 
 # --- Finance: confidential books, human sign-off --------
 

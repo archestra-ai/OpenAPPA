@@ -177,7 +177,7 @@ fn split_tool(name: &str) -> Option<(Verb, System)> {
 pub fn dispatch(world: &CorpWorld, call: &Dispatch) -> (StatusCode, String) {
     if call.tool == "execute_wire" {
         if !world.enabled.contains(&System::Wire) {
-            return unknown_tool(&call.tool);
+            return undeclared_tool_response(&call.tool);
         }
         return match parse::<ExecuteWireArgs>(&call.arguments) {
             Err(reason) => (StatusCode::BAD_REQUEST, reason),
@@ -200,7 +200,7 @@ pub fn dispatch(world: &CorpWorld, call: &Dispatch) -> (StatusCode, String) {
     }
     if call.tool == "share_legal_packet" {
         if !world.enabled.contains(&System::Finance) || !world.enabled.contains(&System::Email) {
-            return unknown_tool(&call.tool);
+            return undeclared_tool_response(&call.tool);
         }
         return match parse::<ShareLegalPacketArgs>(&call.arguments) {
             Err(reason) => (StatusCode::BAD_REQUEST, reason),
@@ -221,7 +221,7 @@ pub fn dispatch(world: &CorpWorld, call: &Dispatch) -> (StatusCode, String) {
     }
     if call.tool == "send_email" {
         if !world.enabled.contains(&System::Email) {
-            return unknown_tool(&call.tool);
+            return undeclared_tool_response(&call.tool);
         }
         return match parse::<SendEmailArgs>(&call.arguments) {
             Err(reason) => (StatusCode::BAD_REQUEST, reason),
@@ -238,10 +238,10 @@ pub fn dispatch(world: &CorpWorld, call: &Dispatch) -> (StatusCode, String) {
         };
     }
     let Some((verb, system)) = split_tool(&call.tool) else {
-        return unknown_tool(&call.tool);
+        return undeclared_tool_response(&call.tool);
     };
     if !world.enabled.contains(&system) {
-        return unknown_tool(&call.tool);
+        return undeclared_tool_response(&call.tool);
     }
     match verb {
         Verb::Search => match parse::<SearchArgs>(&call.arguments) {
@@ -286,7 +286,7 @@ fn parse<'a, T: Deserialize<'a>>(arguments: &'a serde_json::Value) -> Result<T, 
     T::deserialize(arguments).map_err(|error| format!("bad arguments: {error}"))
 }
 
-fn unknown_tool(name: &str) -> (StatusCode, String) {
+fn undeclared_tool_response(name: &str) -> (StatusCode, String) {
     (StatusCode::NOT_FOUND, format!("no tool named {name:?} is enabled"))
 }
 
@@ -488,7 +488,7 @@ mod tests {
     }
 
     #[test]
-    fn disabled_and_unknown_tools_answer_404() {
+    fn disabled_and_undeclared_tools_answer_404() {
         let root = scratch("disabled");
         let mut world = world(&root);
         world.enabled = [System::Hr].into_iter().collect();

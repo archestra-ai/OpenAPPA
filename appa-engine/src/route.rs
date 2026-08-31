@@ -12,7 +12,7 @@
 //! call's narrowing, an input hop, a denial — bind the exact rendered call (`RUL-3`, `RMD-16`),
 //! so they are planned for the blocked call only. A tool run first ([`RouteStep::Precede`]) has
 //! no call yet: it contributes only what its registered contract fixes before any call exists —
-//! [`StaticContract`]: no resolver answers, no placeholder recipients, a declared and established
+//! [`StaticAnnotation`]: no annotator answers, no placeholder recipients, a declared and established
 //! delta — evaluated in the success branch, where its `emits` are committed effects and its
 //! declared narrowing has folded. Anything less determined ends the route as a
 //! [`RouteOutcome::Prefix`] naming what must land before planning resumes ([`Resume`]).
@@ -43,12 +43,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::basis::SubjectKey;
 use crate::candidate::CallStage;
-use crate::check::{self, CallReads, CheckOutcome, Gap, Narrowing, RawBlock, StateEval, UnestablishedFact};
-use crate::contract::{NotStatic, StaticContract, ToolContract};
+use crate::check::{self, CallReads, CheckOutcome, Gap, Narrowing, RawBlock};
+use crate::contract::{NotStatic, StaticAnnotation, ToolAnnotation};
 use crate::engine::Engine;
 use crate::fact::EffectKind;
 use crate::groups::{ExpansionRefusal, Expansions, GroupExpansion, MembershipNeeded};
-use crate::label::{Audience, PartialLabel};
+use crate::label::{Audience, Label};
 use crate::names::{AuthorityName, GroupName, SanitizerName};
 use crate::plan::{self, CallRole, ExecutableRemedyPlan, GapPower, RemedyStep};
 use crate::projection::Views;
@@ -152,13 +152,8 @@ pub enum Resume {
 /// Why a route stops at a tool it cannot plan across.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Halt {
-    /// Its check reads the call's arguments (a resolver answer or a placeholder recipient).
+    /// Its check reads the call's arguments (an annotator answer or a placeholder recipient).
     Arguments,
-    /// Its result label is established only at admission (unannotated or pending-cast).
-    Unestablished,
-    /// Its check consumes an unresolved dimension; a registered cast can establish each source
-    /// (`CHK-16`), and the resolved label decides the rest.
-    Cast(Vec<UnestablishedFact>),
     /// Its own block carries call-bound gaps; its rulings or hops are planned at that block.
     Block(Vec<Gap>),
     /// The depth bound ends here.
@@ -206,8 +201,8 @@ impl From<MembershipNeeded> for RouteError {
 /// The blocked call as the engine would re-plan it: the standing candidate, its stage and role,
 /// the denials bound to its digest, and the expansions the surfacing act consumed plus what the
 /// caller answers now.
-pub(crate) struct BlockContext<'a> {
-    contract: &'a ToolContract,
+pub(crate) struct BlockContext {
+    contract: ToolAnnotation,
     call: ResolvedCall,
     stage: CallStage,
     role: CallRole,
@@ -216,20 +211,23 @@ pub(crate) struct BlockContext<'a> {
     raw: RawBlock,
 }
 
-impl<'a> BlockContext<'a> {
+impl BlockContext {
     pub(crate) fn reconstruct(
-        engine: &'a Engine,
+        engine: &Engine,
         views: &Views,
         subject: &SubjectKey,
         answers: &[GroupExpansion],
-    ) -> Result<BlockContext<'a>, RouteError> {
+    ) -> Result<BlockContext, RouteError> {
         let SubjectKey::Call { batch, .. } = subject else {
             return Err(RouteError::NotACallSubject);
         };
         let registry = engine.registry();
         let call = views.standing_call(subject).ok_or(RouteError::UnknownSubject)?.clone();
         let decided = views.decided_batch(batch).ok_or(RouteError::UnknownSubject)?;
-        let contract = registry.contract(&call).ok_or(RouteError::UnknownSubject)?;
+        let contract = registry
+            .annotation_of(&call)
+            .ok_or(RouteError::UnknownSubject)?
+            .into_owned();
 
         let mut expansions = registry.expansions_from_event(answers)?;
         if let Some((_, offers)) = views.pending_block(subject) {
@@ -247,11 +245,11 @@ impl<'a> BlockContext<'a> {
 
         let stage = views.call_stage(subject);
         let role = views.call_role(subject);
-        let raw = match check::evaluate(contract, views, &call, &stage, &expansions) {
+        let raw = match check::evaluate(&contract, views, &call, &stage, &expansions) {
             CheckOutcome::Allow => return Err(RouteError::NotBlocked),
             CheckOutcome::Block(raw) => raw,
         };
-        expansions.require(plan::block_groups(registry, contract, &raw, role).iter())?;
+        expansions.require(plan::block_groups(registry, &contract, &raw, role).iter())?;
         let denied = views.denied_authorities(&call.digest()).cloned().unwrap_or_default();
         Ok(BlockContext {
             contract,
@@ -265,19 +263,18 @@ impl<'a> BlockContext<'a> {
     }
 }
 
-/// The abstract security state a route has reached: the branch's partial label — bound and
-/// unresolved sources — and the effect kinds the route's preceding tools have committed on top of
-/// the log. Reservations are the log's own and never move: a tool the route runs is taken in its
+/// The abstract security state a route has reached: the branch's label and the effect kinds the
+/// route's preceding tools have committed on top of the log. Reservations are the log's own and never move: a tool the route runs is taken in its
 /// success branch, where its reservation has become effects.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RouteState {
-    label: PartialLabel,
+    label: Label,
     committed: BTreeSet<EffectKind>,
 }
 
 impl RouteState {
-    fn after(&self, tool: &StaticContract<'_>, expansions: &Expansions) -> RouteState {
-        let contract = tool.contract();
+    fn after(&self, tool: &StaticAnnotation<'_>, expansions: &Expansions) -> RouteState {
+        let contract = tool.annotation();
         RouteState {
             label: check::committed_label(contract, &self.label, expansions),
             committed: self.committed.iter().chain(contract.emits.iter()).cloned().collect(),
@@ -392,13 +389,9 @@ enum Power {
 pub(crate) fn search(
     registry: &Registry,
     views: &Views,
-    context: &BlockContext<'_>,
+    context: &BlockContext,
     depth: RouteDepth,
 ) -> Result<Vec<RecoveryRoute>, RouteError> {
-    // A fact clears an unestablished source, never a plan or a route (RMD-10, CHK-16).
-    if !context.raw.unestablished.is_empty() {
-        return Ok(Vec::new());
-    }
     let mut search = Search {
         registry,
         views,
@@ -417,7 +410,7 @@ pub(crate) fn search(
 struct Search<'a> {
     registry: &'a Registry,
     views: &'a Views<'a>,
-    context: &'a BlockContext<'a>,
+    context: &'a BlockContext,
     visited: BTreeSet<Visit>,
 }
 
@@ -446,19 +439,13 @@ impl Search<'_> {
     /// the engine runs before it enumerates a live block's plans.
     fn require_groups(
         &self,
-        contract: &ToolContract,
-        eval: &StateEval,
+        contract: &ToolAnnotation,
+        block: &RawBlock,
         role: CallRole,
     ) -> Result<(), MembershipNeeded> {
-        let block = RawBlock {
-            requirement_gaps: eval.requirement_gaps.clone(),
-            narrowing: eval.narrowing.clone(),
-            unestablished: Vec::new(),
-            unknown_requirements: eval.unknown_requirements.clone(),
-        };
         self.context
             .expansions
-            .require(plan::block_groups(self.registry, contract, &block, role).iter())
+            .require(plan::block_groups(self.registry, contract, block, role).iter())
     }
 
     /// The blocked call's stage in `state`: its own plans, then every tool that may run first.
@@ -475,7 +462,7 @@ impl Search<'_> {
         }
         let context = self.context;
         let eval = check::evaluate_state(
-            context.contract,
+            &context.contract,
             &state.label,
             &self.has_committed(state),
             &self.has_reserved(),
@@ -483,12 +470,7 @@ impl Search<'_> {
             &context.stage,
             &context.expansions,
         );
-        // Unresolved sources never move along a route, so what the block did not consume at
-        // its check it does not consume here; the initial block is gated in `search`.
-        if !eval.consumed.is_empty() || !eval.unknown_requirements.is_empty() {
-            return Ok(());
-        }
-        self.require_groups(context.contract, &eval, context.role)?;
+        self.require_groups(&context.contract, &eval, context.role)?;
         if eval.requirement_gaps.is_empty() && eval.narrowing.is_none() {
             found.push(self.found(
                 path.steps.clone(),
@@ -499,7 +481,7 @@ impl Search<'_> {
         } else {
             for plan in plan::enumerate_plans(
                 self.registry,
-                context.contract,
+                &context.contract,
                 &state.label,
                 &self.has_committed(state),
                 &self.has_reserved(),
@@ -530,7 +512,11 @@ impl Search<'_> {
         // A terminal plan covers every gap and no ruling covers `prior` or a cap (CHK-12), so a
         // tool that clears something exists only where no terminal plan does: the RMD-13
         // condition on tool plans holds here by construction, at every depth.
-        for tool in self.registry.tools() {
+        for tool in self
+            .registry
+            .tools()
+            .filter_map(crate::contract::ToolDeclaration::declared)
+        {
             if path.excludes(&tool.name) {
                 continue;
             }
@@ -558,10 +544,10 @@ impl Search<'_> {
 
     /// Every way `tool` runs first from `state`, with `budget` preceding tools still allowed,
     /// this one included. Its own `prior`/cap gaps recurse into the tools that clear them; any
-    /// other gap, an unresolved dimension, or a call-dependent contract halts the route here.
+    /// other gap or a call-dependent contract halts the route here.
     fn run(
         &mut self,
-        tool: &ToolContract,
+        tool: &ToolAnnotation,
         clears: Vec<Gap>,
         state: &RouteState,
         path: &Path,
@@ -584,10 +570,9 @@ impl Search<'_> {
             return halt(Halt::Depth);
         }
         let expansions = &self.context.expansions;
-        let static_contract = match StaticContract::of(tool, expansions) {
+        let static_contract = match StaticAnnotation::of(tool, expansions) {
             Ok(static_contract) => static_contract,
             Err(NotStatic::Arguments) => return halt(Halt::Arguments),
-            Err(NotStatic::Unestablished) => return halt(Halt::Unestablished),
             Err(NotStatic::Membership(needed)) => return Err(MembershipNeeded { needed }),
         };
         let eval = check::evaluate_static(
@@ -597,26 +582,7 @@ impl Search<'_> {
             &self.has_reserved(),
             expansions,
         );
-        // An Unknown requirement is undecidable until a cast establishes it: no route runs
-        // through the call, so nothing it reads is required.
-        if !eval.unknown_requirements.is_empty() {
-            return Ok(Vec::new());
-        }
         self.require_groups(tool, &eval, CallRole::Ordinary)?;
-        if !eval.consumed.is_empty() {
-            let sources = check::unestablished_facts(&state.label, &eval.consumed);
-            for source in &sources {
-                expansions.require(&plan::constant_groups_reaching(self.registry, self.views, source.value))?;
-            }
-            let castable = sources
-                .iter()
-                .all(|source| plan::castable_sources(self.registry, self.views, source.value, expansions).is_some());
-            return if castable {
-                halt(Halt::Cast(sources))
-            } else {
-                Ok(Vec::new())
-            };
-        }
         if eval
             .requirement_gaps
             .iter()
@@ -637,7 +603,11 @@ impl Search<'_> {
         }
         let goal = path.with_goal(&tool.name);
         let mut runs = Vec::new();
-        for first in self.registry.tools() {
+        for first in self
+            .registry
+            .tools()
+            .filter_map(crate::contract::ToolDeclaration::declared)
+        {
             if goal.excludes(&first.name) {
                 continue;
             }
@@ -686,7 +656,7 @@ impl Search<'_> {
 
     /// A route as emitted from `state`, whose requirement gaps are `gaps`.
     fn found(&self, steps: Vec<RouteStep>, outcome: RouteOutcome, state: &RouteState, gaps: &[Gap]) -> Found {
-        let disclosure = self.disclosure(&steps, &state.label.bound().audience);
+        let disclosure = self.disclosure(&steps, &state.label.audience);
         let powers = self.powers(&steps, gaps);
         let mut keys: Vec<Gap> = self.context.raw.requirement_gaps.iter().map(requirement_key).collect();
         for (key, _) in &powers {
@@ -896,17 +866,14 @@ fn disclosure_cmp(a: Option<&Audience>, b: Option<&Audience>) -> Option<Ordering
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authority::{
-        Authority, Cast, CastResolution, DeclaredLabel, Mandate, Sanitizer, SanitizerPoints, Scope,
-    };
-    use crate::contract::{AudienceRequirement, Delta, HistoryRequirement, RecipientSpec, Requires, ToolContract};
+    use crate::authority::{Authority, Mandate, Sanitizer, SanitizerPoints, Scope};
+    use crate::contract::{AudienceRequirement, Delta, HistoryRequirement, RecipientSpec, Requires, ToolAnnotation};
     use crate::fact::{CloseOutcome, EffectSet, Fact};
     use crate::groups::DeclaredAudience;
-    use crate::label::{Dim, EstablishedLabel, Label, ReaderId, Trust};
-    use crate::names::CastName;
+    use crate::label::{Label, ReaderId, Trust};
     use crate::projection::Projection;
     use crate::registry::{RegistryConfig, TrustChain};
-    use crate::value::{DispatchId, LabeledValue, Provenance, TrajectoryId, ValueBody};
+    use crate::value::{DispatchId, TrajectoryId};
     use serde_json::json;
 
     const SUSPICIOUS: Trust = Trust::new(0);
@@ -925,10 +892,9 @@ mod tests {
         EffectKind::new(kind)
     }
 
-    fn tool(name: &str) -> ToolContract {
-        ToolContract {
+    fn tool(name: &str) -> ToolAnnotation {
+        ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new(name),
             tags: vec![],
             delta: Delta::NONE,
@@ -938,13 +904,13 @@ mod tests {
         }
     }
 
-    fn emitting(name: &str, kinds: &[&str]) -> ToolContract {
+    fn emitting(name: &str, kinds: &[&str]) -> ToolAnnotation {
         let mut contract = tool(name);
         contract.emits = EffectSet::new(kinds.iter().map(|kind| effect(kind))).unwrap();
         contract
     }
 
-    fn requiring_prior(mut contract: ToolContract, kinds: &[&str]) -> ToolContract {
+    fn requiring_prior(mut contract: ToolAnnotation, kinds: &[&str]) -> ToolAnnotation {
         contract
             .requires
             .history
@@ -952,7 +918,7 @@ mod tests {
         contract
     }
 
-    fn requiring_no_prior(mut contract: ToolContract, kind: &str) -> ToolContract {
+    fn requiring_no_prior(mut contract: ToolAnnotation, kind: &str) -> ToolAnnotation {
         contract
             .requires
             .history
@@ -960,50 +926,35 @@ mod tests {
         contract
     }
 
-    fn requiring_trust(mut contract: ToolContract, floor: Trust) -> ToolContract {
-        contract.requires.label.trust_floor = Some(Dim::Known(floor));
+    fn requiring_trust(mut contract: ToolAnnotation, floor: Trust) -> ToolAnnotation {
+        contract.requires.label.trust_floor = Some(floor);
         contract
     }
 
-    trait Written {
-        fn written(&mut self) -> &mut Vec<AudienceRequirement>;
-    }
-
-    impl Written for Dim<Vec<AudienceRequirement>> {
-        fn written(&mut self) -> &mut Vec<AudienceRequirement> {
-            let Dim::Known(requirements) = self else {
-                panic!("a test contract writes its requirements")
-            };
-            requirements
-        }
-    }
-
-    fn requiring_includes(mut contract: ToolContract, recipients: Audience) -> ToolContract {
+    fn requiring_includes(mut contract: ToolAnnotation, recipients: Audience) -> ToolAnnotation {
         contract
             .requires
             .label
             .audience
-            .written()
             .push(AudienceRequirement::Includes(RecipientSpec::Static(
                 DeclaredAudience::literal(recipients),
             )));
         contract
     }
 
-    fn requiring_cap(mut contract: ToolContract, cap: Audience) -> ToolContract {
+    fn requiring_cap(mut contract: ToolAnnotation, cap: Audience) -> ToolAnnotation {
         contract
             .requires
             .label
             .audience
-            .written()
             .push(AudienceRequirement::Cap(DeclaredAudience::literal(cap)));
         contract
     }
 
-    fn narrowing_to(mut contract: ToolContract, trust: Option<Trust>, audience: Option<Audience>) -> ToolContract {
+    fn narrowing_to(mut contract: ToolAnnotation, trust: Option<Trust>, audience: Option<Audience>) -> ToolAnnotation {
         contract.delta = Delta {
-            trust: trust.map(Dim::Known),
-            audience: audience.map(|audience| Dim::Known(audience).into()),
+            trust,
+            audience: audience.map(DeclaredAudience::literal),
         };
         contract
     }
@@ -1054,27 +1005,20 @@ mod tests {
     }
 
     struct Deployment {
-        tools: Vec<ToolContract>,
+        tools: Vec<ToolAnnotation>,
         authorities: Vec<Authority>,
         sanitizers: Vec<Sanitizer>,
-        casts: Vec<Cast>,
         membership: Option<crate::names::MembershipResolverName>,
     }
 
     impl Deployment {
-        fn of(tools: Vec<ToolContract>) -> Deployment {
+        fn of(tools: Vec<ToolAnnotation>) -> Deployment {
             Deployment {
                 tools,
                 authorities: vec![],
                 sanitizers: vec![],
-                casts: vec![],
                 membership: None,
             }
-        }
-
-        fn grouped(mut self) -> Deployment {
-            self.membership = Some(crate::names::MembershipResolverName::new("directory"));
-            self
         }
 
         fn authorities(mut self, authorities: Vec<Authority>) -> Deployment {
@@ -1087,18 +1031,17 @@ mod tests {
             self
         }
 
-        fn casts(mut self, casts: Vec<Cast>) -> Deployment {
-            self.casts = casts;
-            self
-        }
-
         fn registry(self) -> Registry {
             Registry::build_covered(RegistryConfig {
                 trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into(), "vetted".into()]),
-                tools: self.tools,
+                tools: self
+                    .tools
+                    .into_iter()
+                    .map(crate::contract::ToolDeclaration::Declared)
+                    .collect(),
+                annotators: vec![],
                 authorities: self.authorities,
                 sanitizers: self.sanitizers,
-                casts: self.casts,
                 membership: self.membership,
             })
             .unwrap()
@@ -1106,7 +1049,7 @@ mod tests {
     }
 
     fn opened(trust: Trust, audience: Audience) -> Fact {
-        crate::profile::opening_at(traj(), Label::new(Dim::Known(trust), Dim::Known(audience)))
+        crate::profile::opening_at(traj(), Label::new(trust, audience))
     }
 
     fn seed_call(tag: &str) -> ResolvedCall {
@@ -1132,14 +1075,13 @@ mod tests {
             trajectory: traj(),
             dispatch: DispatchId::new(traj(), seed.digest(), 0),
             tool: seed.tool().clone(),
-            contract: seed.contract_id(),
+            declaration: seed.declaration_id(),
             arguments: seed.canonical_arguments().clone(),
-            proposed_label: EstablishedLabel::new(TRUSTED, Audience::Public),
-            receiving: EstablishedLabel::new(TRUSTED, Audience::Public),
+            proposed_label: Label::new(TRUSTED, Audience::Public),
+            receiving: Label::new(TRUSTED, Audience::Public),
             proposed_effects: EffectSet::new(kinds.iter().map(|kind| effect(kind))).unwrap(),
-            tool_resolutions: vec![],
+            annotation: None,
             memberships: Vec::new(),
-            requirement_cast: None,
             subject: crate::basis::fixture_subject(&traj()),
             resolutions: vec![],
         }
@@ -1147,16 +1089,6 @@ mod tests {
 
     fn reserved(kind: &str) -> Fact {
         dispatched(kind, &[kind])
-    }
-
-    fn admitted(label: Label) -> Fact {
-        Fact::ValueAdmitted {
-            trajectory: traj(),
-            value: LabeledValue::new(ValueBody::new("body"), label),
-            provenance: Provenance::ToolResult {
-                dispatch: DispatchId::new(traj(), seed_call("admitted").digest(), 0),
-            },
-        }
     }
 
     fn call(name: &str, args: serde_json::Value) -> ResolvedCall {
@@ -1168,8 +1100,8 @@ mod tests {
     }
 
     fn raw_block(registry: &Registry, views: &Views, call: &ResolvedCall) -> RawBlock {
-        let contract = registry.contract(call).unwrap();
-        match check::evaluate(contract, views, call, &CallStage::default(), &Expansions::default()) {
+        let contract = registry.annotation_of(call).unwrap();
+        match check::evaluate(&contract, views, call, &CallStage::default(), &Expansions::default()) {
             CheckOutcome::Block(raw) => raw,
             other => panic!("expected a block, got {other:?}"),
         }
@@ -1191,7 +1123,7 @@ mod tests {
         let trajectory = traj();
         let views = projection.view(&trajectory);
         let context = BlockContext {
-            contract: registry.contract(call).unwrap(),
+            contract: registry.annotation_of(call).unwrap().into_owned(),
             call: call.clone(),
             stage: CallStage::default(),
             role: CallRole::Ordinary,
@@ -1374,8 +1306,8 @@ mod tests {
                         tool: ToolName::new("backup"),
                         clears: vec![prior("backup")],
                         accepts: Some(Narrowing {
-                            from: EstablishedLabel::new(TRUSTED, Audience::Public),
-                            to: EstablishedLabel::new(SUSPICIOUS, Audience::Public),
+                            from: Label::new(TRUSTED, Audience::Public),
+                            to: Label::new(SUSPICIOUS, Audience::Public),
                         }),
                     },
                     RouteStep::Authorize {
@@ -1432,8 +1364,8 @@ mod tests {
                         tool: ToolName::new("backup"),
                         clears: vec![prior("backup")],
                         accepts: Some(Narrowing {
-                            from: EstablishedLabel::new(TRUSTED, Audience::Public),
-                            to: EstablishedLabel::new(TRUSTED, internal),
+                            from: Label::new(TRUSTED, Audience::Public),
+                            to: Label::new(TRUSTED, internal),
                         }),
                     },
                     RouteStep::Authorize {
@@ -1465,8 +1397,8 @@ mod tests {
                     tool: ToolName::new("read_internal"),
                     clears: vec![Gap::Cap { cap: internal.clone() }],
                     accepts: Some(Narrowing {
-                        from: EstablishedLabel::new(TRUSTED, Audience::Public),
-                        to: EstablishedLabel::new(TRUSTED, internal),
+                        from: Label::new(TRUSTED, Audience::Public),
+                        to: Label::new(TRUSTED, internal),
                     }),
                 }],
                 RouteOutcome::Complete,
@@ -1487,21 +1419,12 @@ mod tests {
             )]
         };
 
-        let mut unestablished = emitting("backup", &["backup"]);
-        unestablished.delta = Delta {
-            trust: Some(Dim::Unknown),
-            audience: None,
-        };
-        let registry = Deployment::of(vec![unestablished, requiring_prior(tool("wipe"), &["backup"])]).registry();
-        assert_eq!(routes(&registry, &log, &wipe, depth(2)), prefix(Halt::Unestablished));
-
         let mut placeholder = emitting("backup", &["backup"]);
         placeholder.parameters = crate::params::test_string_argument_schema("to");
         placeholder
             .requires
             .label
             .audience
-            .written()
             .push(AudienceRequirement::Includes(RecipientSpec::Placeholder(
                 "to".to_string(),
             )));
@@ -1516,99 +1439,6 @@ mod tests {
             routes(&registry, &log_internal, &wipe, depth(2)),
             prefix(Halt::Block(vec![Gap::Includes { recipients: partner }])),
             "a call-bound gap of the preceding call is planned at its own block"
-        );
-
-        let consuming = requiring_trust(emitting("backup", &["backup"]), TRUSTED);
-        let tools = vec![tool("seed"), consuming, requiring_prior(tool("wipe"), &["backup"])];
-        let log_unknown = vec![
-            opened(TRUSTED, Audience::Public),
-            dispatched("admitted", &[]),
-            admitted(Label::new(Dim::Unknown, Dim::Known(Audience::Public))),
-        ];
-        let uncastable = Deployment::of(tools.clone()).registry();
-        assert!(
-            routes(&uncastable, &log_unknown, &wipe, depth(2)).is_empty(),
-            "an unresolved source nothing casts fails closed at the call that consumes it"
-        );
-        let castable = Deployment::of(tools)
-            .casts(vec![Cast {
-                name: CastName::new("vouch"),
-                hint: None,
-                resolution: CastResolution::Constant(DeclaredLabel {
-                    trust: TRUSTED,
-                    audience: DeclaredAudience::Public,
-                    attention: None,
-                }),
-                scope: Scope::default(),
-            }])
-            .registry();
-        let found = routes(&castable, &log_unknown, &wipe, depth(2));
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].steps, vec![]);
-        assert!(
-            matches!(
-                &found[0].outcome,
-                RouteOutcome::Prefix(Resume::Propose { tool, halt: Halt::Cast(sources), .. })
-                    if tool.as_str() == "backup" && sources.len() == 1
-            ),
-            "got {:?}",
-            found[0].outcome
-        );
-    }
-
-    #[test]
-    fn a_grouped_constant_cast_on_a_preceding_call_reads_its_group_before_it_is_offered() {
-        let board = GroupName::new("board");
-        let consuming = requiring_trust(emitting("backup", &["backup"]), TRUSTED);
-        let registry = Deployment::of(vec![
-            tool("seed"),
-            consuming,
-            requiring_prior(tool("wipe"), &["backup"]),
-        ])
-        .casts(vec![Cast {
-            name: CastName::new("vouch"),
-            hint: None,
-            resolution: CastResolution::Constant(DeclaredLabel {
-                trust: TRUSTED,
-                audience: DeclaredAudience::declared([], [board.clone()]).unwrap(),
-                attention: None,
-            }),
-            scope: Scope::default(),
-        }])
-        .grouped()
-        .registry();
-        let log = vec![
-            opened(TRUSTED, Audience::Public),
-            dispatched("admitted", &[]),
-            admitted(Label::new(Dim::Unknown, Dim::Unknown)),
-        ];
-        let wipe = call("wipe", json!({}));
-
-        assert_eq!(
-            routes_with(&registry, &log, &wipe, depth(2), &[]),
-            Err(RouteError::MembershipNeeded(vec![board.clone()])),
-            "the cast that would establish `backup`'s source writes a group the search cannot resolve"
-        );
-        let answered = routes_with(
-            &registry,
-            &log,
-            &wipe,
-            depth(2),
-            &[GroupExpansion::new(board, []).unwrap()],
-        )
-        .expect("the answer lets the cast be judged");
-        assert!(
-            matches!(
-                &answered[..],
-                [RecoveryRoute {
-                    outcome: RouteOutcome::Prefix(Resume::Propose {
-                        halt: Halt::Cast(_),
-                        ..
-                    }),
-                    ..
-                }]
-            ),
-            "{answered:?}"
         );
     }
 
@@ -1650,8 +1480,8 @@ mod tests {
             routes(&registry, &log, &call("read_internal", json!({})), depth(2)),
             vec![route(
                 vec![RouteStep::Accept(Narrowing {
-                    from: EstablishedLabel::new(TRUSTED, Audience::Public),
-                    to: EstablishedLabel::new(TRUSTED, internal),
+                    from: Label::new(TRUSTED, Audience::Public),
+                    to: Label::new(TRUSTED, internal),
                 })],
                 RouteOutcome::Complete,
                 Certainty::Guaranteed
@@ -1868,12 +1698,15 @@ mod tests {
             let projection = Projection::build(&log, log.len() as u64);
             let trajectory = traj();
             let views = projection.view(&trajectory);
+            let contract = registry
+                .annotation_of(&proposal)
+                .expect("the fixture registers the tool");
             let planned = plan::plan(
                 &registry,
                 &views,
                 plan::BlockedCall {
                     call: &proposal,
-                    contract: registry.tool(proposal.tool()).expect("the fixture registers the tool"),
+                    contract: &contract,
                     raw: &raw_block(&registry, &views, &proposal),
                     stage: &CallStage::default(),
                     role: CallRole::Ordinary,
@@ -1936,18 +1769,5 @@ mod tests {
             };
             assert_eq!(executable(&found), executable(&expected));
         }
-    }
-
-    #[test]
-    fn an_unestablished_source_at_the_block_leaves_no_route_at_any_depth() {
-        let registry = Deployment::of(vec![tool("seed"), requiring_trust(tool("gate"), TRUSTED)])
-            .authorities(vec![trust_authority("officer", VETTED)])
-            .registry();
-        let log = vec![
-            opened(TRUSTED, Audience::Public),
-            admitted(Label::new(Dim::Unknown, Dim::Known(Audience::Public))),
-        ];
-
-        assert!(routes(&registry, &log, &call("gate", json!({})), depth(4)).is_empty());
     }
 }

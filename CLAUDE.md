@@ -150,11 +150,12 @@ make invalid states unrepresentable with boring tools.** "Boring Rust"
 constrains the mechanism vocabulary (no trait acrobatics, no `dyn`, no
 type-level programming); type-first design constrains the data vocabulary
 (invariants live in the shape of data). They compose: `Label::combine` only
-ever narrows, `CastResolution` is an enum, `ResolvedCall` derives its digest
+ever narrows, `AnnotationMandate` is an enum, `ResolvedCall` derives its digest
 instead of storing it, and `CanonicalArguments` derives its RFC 8785 bytes
-from the one validated value — so a permissive delta, a cast that is both
-constant and resolver-backed, a digest belonging to different arguments, and
-a payload disagreeing with its own canonical bytes are each unrepresentable.
+from the one validated value — so a permissive delta, a tool declaration that
+is both static and Annotator-routed, a digest belonging to different
+arguments, and a payload disagreeing with its own canonical bytes are each
+unrepresentable.
 Enums,
 visibility and validated constructors do the enforcement; no typestate
 generics anywhere.
@@ -184,12 +185,12 @@ Mechanics:
   pattern matching over if-chains.
 - No `dyn`/`Box` in engine state; no trait without at least two real
   implementations or a real boundary. External backends are closed enums
-  dispatched by match (`BuiltinSanitizer`, `SanitizerBackend`,
-  `AuthorityBackend`) beside a serializable descriptor — no capturing
+  dispatched by match (`Stock`, `Implementation`,
+  `AnnotatorImplementation`) beside a serializable descriptor — no capturing
   closures, no registry of callbacks.
 - Minimize the public API surface: a few coarse operations over many tiny
   exported helpers. In core, keep state mutators `pub(crate)` (as
-  `admit_result` and `admit_cast` are) and never hoist read-only
+  `admit_result` is) and never hoist read-only
   audit/projection types — `Projection`, `Views` — into the root re-exports.
 - Treat all external input as untrusted; validate at public entry points and
   convert immediately to native types.

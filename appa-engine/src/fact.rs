@@ -7,8 +7,8 @@ use crate::basis::SubjectKey;
 use crate::candidate::{DerivedCandidate, DerivedVia, SanitizerLineage};
 use crate::check::{Gap, Narrowing};
 use crate::execute::AuthorityReview;
-use crate::label::{EstablishedLabel, Label, PartialLabel};
-use crate::names::{AuthorityName, CastName, SanitizerName};
+use crate::label::Label;
+use crate::names::{AuthorityName, SanitizerName};
 use crate::plan::PlanId;
 use crate::profile::{DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyFileKey, PolicyIdentityV1};
 use crate::value::{
@@ -40,13 +40,10 @@ pub enum ReturnDerivation {
 }
 
 /// Why a mandatory return sanitizer was inapplicable at submission. Closed and
-/// body-free: the reason names the failed precondition, never the refused bytes. A consumed
-/// dimension no cast can establish names every source unresolved on it by value id, with all
-/// of that source's unresolved dimensions — never a bare verdict.
+/// body-free: the reason names the failed precondition, never the refused bytes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReturnRejection {
     MandateUnmet,
-    ConsumedDimensionUnresolvable(Vec<crate::check::UnestablishedFact>),
     PreconditionUnmet,
 }
 
@@ -110,29 +107,24 @@ impl<'de> Deserialize<'de> for EffectSet {
     }
 }
 
-/// The content snapshot a fork freezes: the parent's established base, the source
-/// values that contributed to its label at that moment, and the partial label they derive.
+/// The content snapshot a fork freezes: the parent's base, the source
+/// values that contributed to its label at that moment, and the label they derive.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForkSnapshot {
-    base: EstablishedLabel,
+    base: Label,
     inherited: std::collections::BTreeSet<ValueId>,
-    seed: PartialLabel,
+    seed: Label,
 }
 
 impl ForkSnapshot {
-    /// Freeze a basis: the established base plus every contributing source with its label at this
-    /// moment, then the forking branch's absorbed merge-carried contributions. Nested
-    /// preparations pass their own flattened basis, so a snapshot never has to walk ancestry to
-    /// be understood.
-    pub fn freeze<'a>(
-        base: EstablishedLabel,
-        sources: impl IntoIterator<Item = (ValueId, &'a Label)>,
-        absorbed: impl IntoIterator<Item = (ValueId, Label)>,
-    ) -> ForkSnapshot {
+    /// Freeze a basis: the base plus every contributing source with its label at this
+    /// moment. Nested preparations pass their own flattened basis, so a snapshot never has to
+    /// walk ancestry to be understood.
+    pub fn freeze<'a>(base: Label, sources: impl IntoIterator<Item = (ValueId, &'a Label)>) -> ForkSnapshot {
         let sources: std::collections::BTreeMap<ValueId, &Label> = sources.into_iter().collect();
-        let mut seed = PartialLabel::from_basis(base.clone(), sources.iter().map(|(id, label)| (*id, *label)));
-        for (id, masked) in absorbed {
-            seed.fold_value(id, &masked);
+        let mut seed = base.clone();
+        for label in sources.values() {
+            seed.fold(label);
         }
         ForkSnapshot {
             base,
@@ -141,9 +133,9 @@ impl ForkSnapshot {
         }
     }
 
-    /// The fully established label the child's fold starts from — the deployment's starting label
-    /// carried down every fork, since no established contribution outside the frozen set exists.
-    pub(crate) fn base(&self) -> &EstablishedLabel {
+    /// The label the child's fold starts from — the deployment's starting label
+    /// carried down every fork.
+    pub(crate) fn base(&self) -> &Label {
         &self.base
     }
 
@@ -153,7 +145,7 @@ impl ForkSnapshot {
         &self.inherited
     }
 
-    pub fn seed(&self) -> &PartialLabel {
+    pub fn seed(&self) -> &Label {
         &self.seed
     }
 }
@@ -211,22 +203,23 @@ pub enum Fact {
         trajectory: TrajectoryId,
         dispatch: DispatchId,
         tool: ToolName,
-        contract: crate::value::ToolContractId,
+        declaration: crate::value::ToolDeclarationId,
         arguments: crate::params::CanonicalArguments,
-        proposed_label: EstablishedLabel,
+        proposed_label: Label,
         /// The established bound this dispatch's result is received against, snapshotted here
         /// because the bound is pinned at dispatch: admissions between the opening and the result
         /// move the live fold, so a later comparison against that fold would be race-dependent.
         /// `proposed_label` is the *post*-delta committed bound `L ⊓ δ(c)`; this is the `L` it was
         /// computed from, and what a confined candidate's residual is measured against.
-        receiving: EstablishedLabel,
+        receiving: Label,
         proposed_effects: EffectSet,
-        #[serde(default)]
-        tool_resolutions: Vec<crate::contract::PinnedToolResolution>,
+        /// The pin an Annotator produced for this exact call. A statically declared
+        /// dispatch stores nothing: its annotation is the declaration itself, derived from
+        /// the registry at replay, which the opening's policy identity already fixes
+        /// byte-for-byte.
+        annotation: Option<crate::contract::PinnedAnnotation>,
         #[serde(default)]
         memberships: Vec<crate::contract::PinnedMembership>,
-        #[serde(default)]
-        requirement_cast: Option<crate::contract::PinnedRequirementCast>,
         #[serde(default)]
         resolutions: Vec<crate::groups::GroupResolution>,
         subject: crate::basis::SubjectKey,
@@ -268,29 +261,12 @@ pub enum Fact {
         child_return: ChildReturnId,
         narrowing: Narrowing,
     },
-    CastApplied {
-        trajectory: TrajectoryId,
-        value: ValueId,
-        resolved: EstablishedLabel,
-        cast: CastName,
-        #[serde(default)]
-        resolutions: Vec<crate::groups::GroupResolution>,
-    },
-    OutputCastApplied {
-        trajectory: TrajectoryId,
-        dispatch: DispatchId,
-        cast: CastName,
-        resolved: EstablishedLabel,
-        raw_digest: RawResultDigest,
-        #[serde(default)]
-        resolutions: Vec<crate::groups::GroupResolution>,
-    },
     OutputSanitizerBound {
         trajectory: TrajectoryId,
         dispatch: DispatchId,
         plan: PlanId,
         sanitizer: SanitizerName,
-        contribution: EstablishedLabel,
+        contribution: Label,
         #[serde(default)]
         resolutions: Vec<crate::groups::GroupResolution>,
     },
@@ -322,7 +298,7 @@ pub enum Fact {
         id: ChildReturnId,
         fork: ForkId,
         parent: TrajectoryId,
-        label: crate::label::PartialLabel,
+        label: crate::label::Label,
         digest: RawResultDigest,
         body: crate::value::ValueBody,
         policy: ReturnPolicy,
@@ -451,8 +427,6 @@ impl Fact {
             | Fact::Denial { trajectory, .. }
             | Fact::Acceptance { trajectory, .. }
             | Fact::ChildReturnAcceptance { trajectory, .. }
-            | Fact::CastApplied { trajectory, .. }
-            | Fact::OutputCastApplied { trajectory, .. }
             | Fact::OutputSanitizerBound { trajectory, .. }
             | Fact::CandidateDerived { trajectory, .. }
             | Fact::CandidateAccepted { trajectory, .. }

@@ -260,13 +260,13 @@ mod tests {
         let answer = Answer {
             status: 409,
             body: serde_json::to_vec(&serde_json::json!({
-                "error": "resolver=claude-code error=malformed field=delta.audience value=\"secret\" allowed=declaration.audiences"
+                "error": "annotator=claude-code error=malformed field=delta.audience value=\"secret\" allowed=declaration.audiences"
             }))
             .expect("the fixture serializes"),
         };
         assert_eq!(
             refusal(&answer),
-            "status=409 resolver=claude-code error=malformed field=delta.audience value=\"secret\" allowed=declaration.audiences"
+            "status=409 annotator=claude-code error=malformed field=delta.audience value=\"secret\" allowed=declaration.audiences"
         );
 
         assert_eq!(

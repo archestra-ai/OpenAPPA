@@ -28,7 +28,7 @@ use appa_example_agent::{
     Agent, ArgumentKey, Limits, OpenAiCompatible, Outcome, SpawnTool, ToolCatalogue, ToolName, ToolShim, TranscriptHead,
 };
 use appa_runtime::api::{AuditEntry, AuditEvent, AuditLabel, DispatchOutcome, Runtime, TrajectoryId};
-use appa_runtime::config::{Config, DynamicImplementation, Endpoint, Implementation};
+use appa_runtime::config::{AnnotatorImplementation, Config, Endpoint, Implementation};
 use clap::Parser;
 use corp_systems::systems::System;
 use corporate_agent_demo::shim::{self, CorpWorld};
@@ -266,24 +266,23 @@ fn install_decision_log() {
 /// which is the right answer for a component nobody is hosting.
 fn bind_hosted_externals(config: &mut Config, origin: &str) -> usize {
     let externals = &mut config.externals;
-    let dynamic = externals
-        .dynamic
+    let annotators = externals
+        .annotators
         .values_mut()
         .filter_map(|implementation| match implementation {
-            DynamicImplementation::Resolver(endpoint) => Some(endpoint),
-            DynamicImplementation::Command(_) => None,
+            AnnotatorImplementation::Resolver(endpoint) => Some(endpoint),
+            AnnotatorImplementation::Command(_) => None,
         });
     let endpoints = externals
         .authorities
         .values_mut()
         .chain(externals.sanitizers.values_mut())
-        .chain(externals.casts.values_mut())
         .chain(externals.membership.values_mut())
         .filter_map(|implementation| match implementation {
             Implementation::Resolver(endpoint) => Some(endpoint),
             Implementation::Builtin(_) | Implementation::Command(_) => None,
         })
-        .chain(dynamic);
+        .chain(annotators);
     let mut bound = 0;
     for endpoint in endpoints {
         let Some(path) = endpoint.url.strip_prefix(UNBOUND_ORIGIN) else {
@@ -349,9 +348,6 @@ fn replay(entries: &[AuditEntry]) {
                     label(to)
                 );
             }
-            AuditEvent::Cast { cast, resolved } => {
-                eprintln!("appa: [{at}] cast {cast} resolved to {}", label(resolved));
-            }
             AuditEvent::SanitizerBound { sanitizer } => {
                 eprintln!("appa: [{at}] the raw result is withheld for {sanitizer}");
             }
@@ -380,17 +376,7 @@ fn replay(entries: &[AuditEntry]) {
 }
 
 fn label(label: &AuditLabel) -> String {
-    let unresolved = |name: &str, ids: &[u64]| match ids.is_empty() {
-        true => String::new(),
-        false => format!(" {name}={ids:?}"),
-    };
-    format!(
-        "trust={} audience={}{}{}",
-        label.trust,
-        label.audience,
-        unresolved("unresolved_trust", &label.unresolved_trust),
-        unresolved("unresolved_audience", &label.unresolved_audience)
-    )
+    format!("trust={} audience={}", label.trust, label.audience)
 }
 
 fn committing(effects: &[String]) -> String {

@@ -49,8 +49,7 @@ pub struct ExternalBindings {
     pub max_body_bytes: usize,
     pub authorities: BTreeMap<String, Binding>,
     pub sanitizers: BTreeMap<String, Binding>,
-    pub casts: BTreeMap<String, Binding>,
-    pub dynamic: BTreeMap<String, Binding>,
+    pub annotators: BTreeMap<String, Binding>,
     pub membership: BTreeMap<String, Binding>,
     pub claude_code: ClaudeCode,
     pub llm: Option<LlmBinding>,
@@ -66,8 +65,7 @@ impl ExternalBindings {
             max_body_bytes,
             authorities: BTreeMap::new(),
             sanitizers: BTreeMap::new(),
-            casts: BTreeMap::new(),
-            dynamic: BTreeMap::new(),
+            annotators: BTreeMap::new(),
             membership: BTreeMap::new(),
             claude_code: ClaudeCode::default(),
             llm: None,
@@ -144,12 +142,9 @@ pub struct Externals {
     pub max_body_bytes: usize,
     pub authorities: BTreeMap<String, Implementation>,
     pub sanitizers: BTreeMap<String, Implementation>,
-    /// A resolver-backed `[[cast]]` binds here; a constant cast is answered from the policy
-    /// and binds nothing.
-    pub casts: BTreeMap<String, Implementation>,
-    /// One implementation per policy-declared dynamic resolver that names no `builtin` on
-    /// its declaration. A resolver that carries a stock builtin takes no entry here.
-    pub dynamic: BTreeMap<String, DynamicImplementation>,
+    /// One implementation per policy-declared `[[annotator]]` that names no `builtin` on
+    /// its declaration. An Annotator that carries a stock builtin takes no entry here.
+    pub annotators: BTreeMap<String, AnnotatorImplementation>,
     /// The one resolver the policy's `[membership]` registers, under its name.
     pub membership: BTreeMap<String, Implementation>,
     /// Deployment knobs for the stock `claude-code` builtin.
@@ -215,10 +210,10 @@ pub enum Implementation {
     Builtin(String),
 }
 
-/// How one deployment-bound dynamic resolver runs: an HTTP endpoint or a local command.
-/// A stock builtin is named on the policy declaration, never bound here.
+/// How one deployment-bound Annotator runs: an HTTP endpoint or a local command. A stock
+/// builtin is named on the policy declaration, never bound here.
 #[derive(Debug, Clone)]
-pub enum DynamicImplementation {
+pub enum AnnotatorImplementation {
     Resolver(Endpoint),
     Command(ResolverCommand),
 }
@@ -388,23 +383,21 @@ pub enum ConfigError {
     UnrepresentableEmbeddedSetting { field: &'static str },
 }
 
-/// The five sections a component binds under. Every section takes the same three
+/// The four sections a component binds under. Every section takes the same three
 /// transports; which builtin names a section accepts is the one difference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Section {
     Authorities,
     Sanitizers,
-    Casts,
-    Dynamic,
+    Annotators,
     Membership,
 }
 
 impl Section {
-    pub(crate) const ALL: [Section; 5] = [
+    pub(crate) const ALL: [Section; 4] = [
         Section::Authorities,
         Section::Sanitizers,
-        Section::Casts,
-        Section::Dynamic,
+        Section::Annotators,
         Section::Membership,
     ];
 
@@ -412,8 +405,7 @@ impl Section {
         match self {
             Section::Authorities => "authorities",
             Section::Sanitizers => "sanitizers",
-            Section::Casts => "casts",
-            Section::Dynamic => "dynamic",
+            Section::Annotators => "annotators",
             Section::Membership => "membership",
         }
     }
@@ -429,19 +421,17 @@ impl Section {
 
     /// Whether `builtin` is a name this section may bind. Authorities and sanitizers take
     /// the stock names, the model builtins, and any module-grammar name (the module's
-    /// presence is checked when the deployment opens); casts take only the model builtins;
-    /// a dynamic resolver names a stock builtin on its policy declaration instead, and a
-    /// membership resolver is never a builtin.
+    /// presence is checked when the deployment opens); an Annotator names a stock builtin
+    /// on its policy declaration instead, and a membership resolver is never a builtin.
     fn check_builtin(self, name: &str, builtin: &str) -> Result<(), ConfigError> {
         let allowed = match self {
-            Section::Dynamic | Section::Membership => {
+            Section::Annotators | Section::Membership => {
                 return Err(ConfigError::BuiltinNotAllowed {
                     section: self.name(),
                     name: name.to_string(),
                 });
             }
             Section::Authorities | Section::Sanitizers => crate::builtins::valid_implementation_name(builtin),
-            Section::Casts => builtin == CLAUDE_CODE_BUILTIN || builtin == LLM_BUILTIN,
         };
         // The subscription transport is a local process under a process group, which only
         // Unix provides; like a `command`, it is refused where it cannot be cleaned up.
@@ -491,9 +481,7 @@ struct RawExternals {
     #[serde(default)]
     sanitizers: BTreeMap<String, RawBinding>,
     #[serde(default)]
-    casts: BTreeMap<String, RawBinding>,
-    #[serde(default)]
-    dynamic: BTreeMap<String, RawBinding>,
+    annotators: BTreeMap<String, RawBinding>,
     #[serde(default)]
     membership: BTreeMap<String, RawBinding>,
     claude_code: Option<RawClaudeCode>,
@@ -505,8 +493,7 @@ impl RawExternals {
         match section {
             Section::Authorities => &self.authorities,
             Section::Sanitizers => &self.sanitizers,
-            Section::Casts => &self.casts,
-            Section::Dynamic => &self.dynamic,
+            Section::Annotators => &self.annotators,
             Section::Membership => &self.membership,
         }
     }
@@ -669,8 +656,7 @@ impl Config {
             max_body_bytes,
             authorities,
             sanitizers,
-            casts,
-            dynamic,
+            annotators,
             membership,
             claude_code,
             llm,
@@ -696,10 +682,9 @@ impl Config {
                 max_body_bytes,
                 authorities: resolve(Section::Authorities, authorities)?,
                 sanitizers: resolve(Section::Sanitizers, sanitizers)?,
-                casts: resolve(Section::Casts, casts)?,
-                dynamic: resolve(Section::Dynamic, dynamic)?
+                annotators: resolve(Section::Annotators, annotators)?
                     .into_iter()
-                    .map(|(name, implementation)| (name, dynamic_implementation(implementation)))
+                    .map(|(name, implementation)| (name, annotator_implementation(implementation)))
                     .collect(),
                 membership: resolve(Section::Membership, membership)?,
                 claude_code: resolve_claude_code(claude_code)?,
@@ -732,8 +717,7 @@ fn embedded_document(policy: toml::Value, bindings: &ExternalBindings) -> Result
     for (section, entries) in [
         (Section::Authorities, &bindings.authorities),
         (Section::Sanitizers, &bindings.sanitizers),
-        (Section::Casts, &bindings.casts),
-        (Section::Dynamic, &bindings.dynamic),
+        (Section::Annotators, &bindings.annotators),
         (Section::Membership, &bindings.membership),
     ] {
         if entries.is_empty() {
@@ -980,10 +964,7 @@ fn compose_include(
         if field == "version" {
             continue;
         }
-        if !matches!(
-            field.as_str(),
-            "tool" | "dynamic_resolver" | "authority" | "sanitizer" | "cast"
-        ) {
+        if !matches!(field.as_str(), "tool" | "annotator" | "authority" | "sanitizer") {
             return Err(ConfigError::IncludedPolicyField {
                 path: include_path.display().to_string(),
                 field,
@@ -1054,12 +1035,12 @@ fn compose_include(
     Ok(())
 }
 
-/// A dynamic binding after `Section::Dynamic` refused every `builtin` at parse.
-fn dynamic_implementation(implementation: Implementation) -> DynamicImplementation {
+/// An annotator binding after `Section::Annotators` refused every `builtin` at parse.
+fn annotator_implementation(implementation: Implementation) -> AnnotatorImplementation {
     match implementation {
-        Implementation::Resolver(endpoint) => DynamicImplementation::Resolver(endpoint),
-        Implementation::Command(command) => DynamicImplementation::Command(command),
-        Implementation::Builtin(_) => unreachable!("Section::Dynamic refuses every builtin"),
+        Implementation::Resolver(endpoint) => AnnotatorImplementation::Resolver(endpoint),
+        Implementation::Command(command) => AnnotatorImplementation::Command(command),
+        Implementation::Builtin(_) => unreachable!("Section::Annotators refuses every builtin"),
     }
 }
 
@@ -1306,16 +1287,15 @@ mod tests {
         let table = match section {
             Section::Authorities => &config.externals.authorities,
             Section::Sanitizers => &config.externals.sanitizers,
-            Section::Casts => &config.externals.casts,
             Section::Membership => &config.externals.membership,
-            Section::Dynamic => {
+            Section::Annotators => {
                 return config
                     .externals
-                    .dynamic
+                    .annotators
                     .get(name)
                     .map(|implementation| match implementation {
-                        DynamicImplementation::Resolver(_) => Bound::Url,
-                        DynamicImplementation::Command(command) => Bound::Command(command),
+                        AnnotatorImplementation::Resolver(_) => Bound::Url,
+                        AnnotatorImplementation::Command(command) => Bound::Command(command),
                     });
             }
         };
@@ -1331,7 +1311,7 @@ mod tests {
         let config = parse(MINIMAL).expect("the minimal fixture validates");
         assert_eq!(config.externals.timeout, Duration::from_millis(5000));
         assert_eq!(config.externals.max_body_bytes, 65536);
-        assert!(config.externals.dynamic.is_empty());
+        assert!(config.externals.annotators.is_empty());
         assert!(config.externals.llm.is_none());
         assert_eq!(
             config.policy_file().value().get("anything").and_then(|v| v.as_str()),
@@ -1402,17 +1382,17 @@ mod tests {
     #[test]
     fn a_present_secret_resolves_and_debug_redacts_it() {
         let text = format!(
-            "{MINIMAL}\n[externals.dynamic.classifier]\nurl = \"https://resolver.internal\"\ntoken_env = \"APPA_RESOLVER_TOKEN\"\n"
+            "{MINIMAL}\n[externals.annotators.classifier]\nurl = \"https://resolver.internal\"\ntoken_env = \"APPA_RESOLVER_TOKEN\"\n"
         );
         let config = parse_with(&text, |var| {
             (var == "APPA_RESOLVER_TOKEN").then(|| "sekret".to_string())
         })
         .expect("the fixture with a set secret validates");
         assert!(!format!("{:?}", config.externals).contains("sekret"));
-        let Some(DynamicImplementation::Resolver(dynamic)) = config.externals.dynamic.get("classifier") else {
-            panic!("the named dynamic endpoint is set")
+        let Some(AnnotatorImplementation::Resolver(annotator)) = config.externals.annotators.get("classifier") else {
+            panic!("the named annotator endpoint is set")
         };
-        let token = dynamic.token.as_ref().expect("the token resolved");
+        let token = annotator.token.as_ref().expect("the token resolved");
         assert_eq!(token.reveal(), "sekret");
         assert_eq!(format!("{token:?}"), "Token(<redacted>)");
     }
@@ -1485,26 +1465,13 @@ mod tests {
                 Some(Bound::Builtin(name)) if name == builtin
             ));
         };
-        let refuses = |section: Section, builtin: &str| {
-            assert!(
-                matches!(cell(section, builtin), Err(ConfigError::InvalidBuiltinName { .. })),
-                "{} must refuse builtin {builtin}",
-                section.name()
-            );
-        };
         for section in [Section::Authorities, Section::Sanitizers] {
             for builtin in ["hitl", "approve", "redact-email", "claude-code", "llm", "some-module"] {
                 accepts(section, builtin);
             }
         }
-        for builtin in ["claude-code", "llm"] {
-            accepts(Section::Casts, builtin);
-        }
-        for builtin in ["hitl", "approve", "redact-email", "some-module"] {
-            refuses(Section::Casts, builtin);
-        }
-        // A dynamic resolver names a stock builtin on its declaration, never here.
-        for section in [Section::Dynamic, Section::Membership] {
+        // An Annotator names a stock builtin on its policy declaration, never here.
+        for section in [Section::Annotators, Section::Membership] {
             for builtin in ["hitl", "approve", "redact-email", "claude-code", "llm", "some-module"] {
                 assert!(
                     matches!(cell(section, builtin), Err(ConfigError::BuiltinNotAllowed { .. })),
@@ -1517,7 +1484,7 @@ mod tests {
 
     #[test]
     fn the_llm_builtin_needs_the_llm_table() {
-        for section in [Section::Authorities, Section::Sanitizers, Section::Casts] {
+        for section in [Section::Authorities, Section::Sanitizers] {
             let text = format!("{MINIMAL}\n[externals.{}.x]\nbuiltin = \"llm\"\n", section.name());
             assert!(
                 matches!(parse(&text), Err(ConfigError::LlmNotConfigured { .. })),
@@ -1619,7 +1586,7 @@ mod tests {
     #[cfg(not(unix))]
     #[test]
     fn a_command_binding_is_refused_on_an_unsupported_platform() {
-        let text = format!("{MINIMAL}\n[externals.dynamic.classifier]\ncommand = [\"python3\", \"resolver.py\"]\n");
+        let text = format!("{MINIMAL}\n[externals.annotators.classifier]\ncommand = [\"python3\", \"resolver.py\"]\n");
         assert!(matches!(
             parse(&text),
             Err(ConfigError::UnsupportedCommandPlatform { name, .. }) if name == "classifier"
@@ -1629,7 +1596,7 @@ mod tests {
     #[cfg(not(unix))]
     #[test]
     fn the_claude_code_builtin_is_refused_on_an_unsupported_platform() {
-        let text = format!("{MINIMAL}\n[externals.casts.classifier]\nbuiltin = \"claude-code\"\n");
+        let text = format!("{MINIMAL}\n[externals.sanitizers.classifier]\nbuiltin = \"claude-code\"\n");
         assert!(matches!(
             parse(&text),
             Err(ConfigError::UnsupportedClaudeCodePlatform { name, .. }) if name == "classifier"
@@ -1712,7 +1679,7 @@ mod tests {
                 [externals]
                 timeout_ms = 5000
                 max_body_bytes = 65536
-                [externals.dynamic.local]
+                [externals.annotators.local]
                 command = ["python3", "local.py"]
                 [externals.authorities.desk]
                 command = ["python3", "desk.py"]
@@ -1724,12 +1691,10 @@ mod tests {
             r#"
                 [policy]
                 version = 1
-                [externals.dynamic.battery]
+                [externals.annotators.battery]
                 command = ["python3", "resolver.py"]
                 [externals.sanitizers.scrub]
                 command = ["python3", "scrub.py"]
-                [externals.casts.classify]
-                command = ["python3", "classify.py"]
                 [externals.membership.directory]
                 command = ["python3", "directory.py"]
             "#,
@@ -1743,12 +1708,11 @@ mod tests {
                 _ => panic!("binding is a command"),
             };
         let canonical = std::fs::canonicalize(dir.path()).expect("canonical temp directory");
-        assert_eq!(command_cwd(Section::Dynamic, "local"), canonical);
+        assert_eq!(command_cwd(Section::Annotators, "local"), canonical);
         assert_eq!(command_cwd(Section::Authorities, "desk"), canonical);
         for (section, name) in [
-            (Section::Dynamic, "battery"),
+            (Section::Annotators, "battery"),
             (Section::Sanitizers, "scrub"),
-            (Section::Casts, "classify"),
             (Section::Membership, "directory"),
         ] {
             assert_eq!(
@@ -1808,7 +1772,7 @@ mod tests {
         let second_dir = tempfile::tempdir().expect("second command directory");
         let make = |argument: &str, cwd: &Path| {
             let mut bindings = ExternalBindings::new(Duration::from_millis(5000), 65_536);
-            bindings.casts.insert(
+            bindings.sanitizers.insert(
                 "classifier".to_string(),
                 Binding::Command {
                     argv: vec!["python3".to_string(), argument.to_string()],
@@ -1828,14 +1792,14 @@ mod tests {
         std::fs::write(&stored, first.policy_file().bytes()).expect("write stored embedded config");
         let reloaded = Config::load(&stored).expect("stored embedded config reloads");
         assert_eq!(reloaded.policy_file().bytes(), first.policy_file().bytes());
-        let Some(Implementation::Command(command)) = reloaded.externals.casts.get("classifier") else {
+        let Some(Implementation::Command(command)) = reloaded.externals.sanitizers.get("classifier") else {
             panic!("reloaded classifier is a command")
         };
         assert_eq!(command.argv, ["python3", "resolver.py"]);
         assert_eq!(command.cwd, std::fs::canonicalize(first_dir.path()).unwrap());
 
         let mut relative = ExternalBindings::new(Duration::from_millis(5000), 65_536);
-        relative.dynamic.insert(
+        relative.annotators.insert(
             "classifier".to_string(),
             Binding::Command {
                 argv: vec!["python3".to_string()],
@@ -1844,7 +1808,10 @@ mod tests {
         );
         assert!(matches!(
             embedded(relative),
-            Err(ConfigError::RelativeCommandCwd { section: "dynamic", .. })
+            Err(ConfigError::RelativeCommandCwd {
+                section: "annotators",
+                ..
+            })
         ));
     }
 
@@ -1953,7 +1920,7 @@ mod tests {
                 &root,
                 format!(
                     "include = [{includes}]\n[policy]\nversion = 1\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n\
-                     [externals.dynamic.classifier]\nurl = \"https://classifier.internal\"\n\
+                     [externals.annotators.classifier]\nurl = \"https://classifier.internal\"\n\
                      [externals.authorities.desk]\nurl = \"https://desk.internal\"\n"
                 ),
             )
@@ -1981,7 +1948,7 @@ mod tests {
             assert!(bound(section, &config, "fresh").is_some(), "{}", section.name());
         }
 
-        for (section, name) in [("dynamic", "classifier"), ("authorities", "desk")] {
+        for (section, name) in [("annotators", "classifier"), ("authorities", "desk")] {
             std::fs::write(
                 &battery,
                 format!("[policy]\nversion = 1\n[externals.{section}.{name}]\nurl = \"https://other.internal\"\n"),

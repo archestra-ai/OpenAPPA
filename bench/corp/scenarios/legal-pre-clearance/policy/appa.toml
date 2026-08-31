@@ -48,7 +48,7 @@ confined_results = ["search_task_tracker", "read_task_tracker", "create_task_tra
 
 # --- registered externals ---------------------------------------------------
 #
-# Implementations bind here, never in the policy (`CFG-15`, `IMP-3`). Resolver
+# Implementations bind here, never in the policy. External
 # URLs are loopback placeholders: the bench runner binds its fixture server on
 # an ephemeral port and rewrites them before opening the runtime, since
 # `Config::load` refuses non-loopback http.

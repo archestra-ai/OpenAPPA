@@ -6,22 +6,36 @@ trust_chain = ["suspicious", "internal"]
 trust = "internal"
 audience = ["public"]
 
-# The benchmark runner replaces this non-routable URL with an isolated
-# loopback fixture for each episode. Both declarations use the EXT-2 protocol.
-[[policy.dynamic_resolver]]
+# The benchmark runner replaces each non-routable URL with an isolated
+# loopback fixture for each episode. Every annotator produces its tool's
+# complete contract per call; `audiences` closes each mandate to the finance
+# readers an annotation may name.
+[[policy.annotator]]
 name = "document-acl"
-inputs = ["subject"]
-returns = ["delta.audience"]
+inputs = { subject = "$tool_call.arguments.file" }
+audiences = ["cfo@northwind.example", "legal-lead@northwind.example", "controller@northwind.example"]
 
-[[policy.dynamic_resolver]]
+[[policy.annotator]]
+name = "document-search-acl"
+inputs = { subject = "$tool_call.arguments.query" }
+audiences = ["cfo@northwind.example", "legal-lead@northwind.example", "controller@northwind.example"]
+
+[[policy.annotator]]
 name = "document-write-acl"
-inputs = ["subject"]
-returns = ["requires.audience"]
+inputs = { subject = "$tool_call.arguments.file" }
+audiences = ["cfo@northwind.example", "legal-lead@northwind.example", "controller@northwind.example"]
 
-[[policy.dynamic_resolver]]
+[[policy.annotator]]
 name = "distribution-list-members"
-inputs = ["subject"]
-returns = ["requires.audience"]
+inputs = { subject = "$tool_call.arguments.to" }
+audiences = ["cfo@northwind.example", "legal-lead@northwind.example", "controller@northwind.example"]
+effects = ["egress"]
+
+[[policy.annotator]]
+name = "packet-share-acl"
+inputs = { file = "$tool_call.arguments.file", to = "$tool_call.arguments.to" }
+audiences = ["cfo@northwind.example", "legal-lead@northwind.example", "controller@northwind.example"]
+effects = ["egress"]
 
 # Branching is an ordinary registered tool: the runtime checks this call like
 # any other, and releasing it is what opens a child trajectory (`BRN-2`,
@@ -34,37 +48,30 @@ parameters = { type = "object", properties = { task = { type = "string", descrip
 [[policy.tool]]
 name = "search_finance"
 parameters = { type = "object", properties = { query = { type = "string", description = "Keyword or phrase to match against file names and contents." } }, required = ["query"], additionalProperties = false }
-uses = [{ resolver = "document-acl", inputs = { subject = "$tool_call.arguments.query" } }]
+annotator = "document-search-acl"
 
 [[policy.tool]]
 name = "read_finance"
 parameters = { type = "object", properties = { file = { type = "string", description = "The exact file name to read." } }, required = ["file"], additionalProperties = false }
-uses = [{ resolver = "document-acl", inputs = { subject = "$tool_call.arguments.file" } }]
+annotator = "document-acl"
 
 [[policy.tool]]
 name = "create_finance"
 parameters = { type = "object", properties = { file = { type = "string", description = "The file name to create." }, content = { type = "string", description = "The full contents to write." } }, required = ["file", "content"], additionalProperties = false }
-requires = { trust = "internal" }
-uses = [{ resolver = "document-write-acl", inputs = { subject = "$tool_call.arguments.file" } }]
-delta = {}
+annotator = "document-write-acl"
 
 [[policy.tool]]
 name = "send_email"
 parameters = { type = "object", properties = { to = { type = "string", description = "Recipient email address." }, subject = { type = "string", description = "Subject line." }, body = { type = "string", description = "Message body." } }, required = ["to", "subject", "body"], additionalProperties = false }
-uses = [{ resolver = "distribution-list-members", inputs = { subject = "$tool_call.arguments.to" } }]
-effects = ["egress"]
-delta = {}
+annotator = "distribution-list-members"
 
-# This composite resolves both arguments before dispatch: `file` supplies the
-# output audience and `to` supplies the reader set that audience must cover.
+# This composite is annotated on both arguments before dispatch: `file`
+# supplies the output audience and `to` supplies the reader set the inputs'
+# audience must cover.
 [[policy.tool]]
 name = "share_legal_packet"
 parameters = { type = "object", properties = { file = { type = "string", description = "The exact finance file name to share." }, to = { type = "string", description = "Recipient distribution list." } }, required = ["file", "to"], additionalProperties = false }
-uses = [
-  { resolver = "document-acl", inputs = { subject = "$tool_call.arguments.file" } },
-  { resolver = "distribution-list-members", inputs = { subject = "$tool_call.arguments.to" } },
-]
-effects = ["egress"]
+annotator = "packet-share-acl"
 
 # --- deployment coverage -----------------------------------------------------
 #
@@ -80,7 +87,7 @@ confined_results = ["search_finance", "read_finance", "create_finance", "send_em
 
 # --- registered externals ---------------------------------------------------
 #
-# Each resolver has a named HTTP implementation. These URLs are loopback placeholders: the bench runner binds its fixture server on
+# Each annotator has a named HTTP implementation. These URLs are loopback placeholders: the bench runner binds its fixture server on
 # an ephemeral port and rewrites them before opening the runtime, since
 # `Config::load` refuses non-loopback http.
 
@@ -88,11 +95,17 @@ confined_results = ["search_finance", "read_finance", "create_finance", "send_em
 timeout_ms = 5000
 max_body_bytes = 65536
 
-[externals.dynamic.document-acl]
-url = "http://127.0.0.1:0/dynamic-resolver"
+[externals.annotators.document-acl]
+url = "http://127.0.0.1:0/annotator"
 
-[externals.dynamic.document-write-acl]
-url = "http://127.0.0.1:0/dynamic-resolver"
+[externals.annotators.document-search-acl]
+url = "http://127.0.0.1:0/annotator"
 
-[externals.dynamic.distribution-list-members]
-url = "http://127.0.0.1:0/dynamic-resolver"
+[externals.annotators.document-write-acl]
+url = "http://127.0.0.1:0/annotator"
+
+[externals.annotators.distribution-list-members]
+url = "http://127.0.0.1:0/annotator"
+
+[externals.annotators.packet-share-acl]
+url = "http://127.0.0.1:0/annotator"

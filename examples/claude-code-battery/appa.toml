@@ -39,16 +39,17 @@ attention = ["hitl"]
 trust = "suspicious"
 audience = ["private"]
 
-# A root contract can also replace the battery's Read rule with a local resolver.
-[[policy.dynamic_resolver]]
+# A root contract can also replace the battery's Read rule with a local
+# annotator. The local rule folds the suspicious-output delta into every
+# annotation it produces.
+[[policy.annotator]]
 name = "local.read-sensitivity"
-returns = ["delta.audience"]
+audiences = ["private"]
 
 [[policy.tool]]
 name = "Read"
 description = "Reads a file and returns its contents."
-uses = [{ resolver = "local.read-sensitivity" }]
-delta = { trust = "suspicious" }
+annotator = "local.read-sensitivity"
 
-[externals.dynamic."local.read-sensitivity"]
+[externals.annotators."local.read-sensitivity"]
 command = ["python3", "./local/read-sensitivity.py"]

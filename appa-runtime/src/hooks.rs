@@ -73,13 +73,7 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             .await
             {
                 Ok(ToolCallDecision::Allow { spawn }) => HookDecision::AllowCall { spawn },
-                Ok(ToolCallDecision::Deny {
-                    feedback,
-                    unestablished,
-                }) => HookDecision::DenyCall {
-                    feedback,
-                    unestablished,
-                },
+                Ok(ToolCallDecision::Deny { feedback }) => HookDecision::DenyCall { feedback },
                 Err(error) => fold(error, deny),
             }
         }
@@ -236,10 +230,7 @@ fn fold(error: EventError, family: fn(String) -> HookDecision) -> HookDecision {
 }
 
 fn deny(feedback: String) -> HookDecision {
-    HookDecision::DenyCall {
-        feedback,
-        unestablished: Vec::new(),
-    }
+    HookDecision::DenyCall { feedback }
 }
 
 fn block(reason: String) -> HookDecision {
@@ -425,11 +416,13 @@ mod tests {
     async fn a_deny_renders_in_the_pre_tool_use_wire() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_runtime(&dir);
+        // A declared tool with non-object arguments is a malformed call: the engine
+        // answers it as model feedback, and the feedback rides the deny wire.
         let event = serde_json::json!({
             "hook_event_name": "PreToolUse",
             "session_id": "s1",
-            "tool_name": "Curl",
-            "tool_input": {"url": "https://example.invalid"},
+            "tool_name": "Bash",
+            "tool_input": ["not", "an", "object"],
             "tool_use_id": "toolu_1",
         });
         let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&event).expect("serializes")).await;
@@ -579,10 +572,15 @@ mod tests {
             "tool_name": "mcp__evil__execute_remedy_plan",
             "tool_input": {"offer_id": "whatever"},
         });
-        let (_, answer) = call_hook(&runtime, &serde_json::to_vec(&event).expect("serializes")).await;
-        assert_eq!(
-            answer["hookSpecificOutput"]["permissionDecision"], "deny",
-            "a colliding name must reach the engine, not the exemption",
+        let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&event).expect("serializes")).await;
+        // Not the exemption's allow: the lookalike reaches the engine, and nothing
+        // covers the name, so the refusal is typed and rides the error wire.
+        assert_eq!(status, 409, "a colliding name must reach the engine, not the exemption");
+        assert!(
+            answer["error"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("mcp__evil__execute_remedy_plan")),
+            "the refusal names the tool: {answer}"
         );
     }
 
