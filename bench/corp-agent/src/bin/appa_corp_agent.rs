@@ -179,8 +179,7 @@ async fn main() -> anyhow::Result<()> {
         // A slow OpenRouter upstream can spend minutes on one completion, and
         // retrying a cut-off completion never helps — give each attempt room.
         OpenAiCompatible::new(
-            OpenAiConfig::openrouter(args.model.clone(), api_key)
-                .with_request_timeout(Duration::from_secs(180)),
+            OpenAiConfig::openrouter(args.model.clone(), api_key).with_request_timeout(Duration::from_secs(180)),
         ),
         ToolShim::new(format!("{origin}{}", shim::TOOLS_PATH)),
         ToolCatalogue::new(catalogue::advertised(&compiled, forking)),
