@@ -232,7 +232,13 @@ fn resolve_marketplace_source(explicit: Option<&str>, appa: &Path) -> Result<Mar
 }
 
 fn local_marketplace(path: PathBuf) -> Result<MarketplaceSource, InitError> {
+    #[cfg(not(windows))]
     let path = path.canonicalize().unwrap_or(path);
+    // Windows canonicalization adds a `\\?\` prefix that Claude Code rejects as
+    // an invalid marketplace source. The discovered paths are already absolute,
+    // and an explicit relative path must remain relative to this process.
+    #[cfg(windows)]
+    let path = path;
     let manifest = marketplace_manifest(&path);
     let marketplace = fs::read(&manifest)
         .ok()
@@ -365,7 +371,11 @@ fn remove_legacy_runtime(appa: &Path, paths: &DeploymentPaths) -> Result<(), Ini
     for target in targets {
         // A Unix process can keep running after Cargo has unlinked its executable. Scan the
         // two exact retired install paths even when no directory entry remains, then remove any
-        // file that is left. Windows keeps the file present while the process is running.
+        // file that is left. Windows keeps the file present while the process is running, so a
+        // missing path cannot be a live legacy runtime.
+        if cfg!(windows) && !target.exists() {
+            continue;
+        }
         stop_legacy_runtime_at(&target)?;
         if !target.exists() {
             continue;
@@ -479,8 +489,11 @@ fn stop_windows_process_at(target: &Path, process_name: &str) -> Result<(), Init
     let output = Command::new("powershell.exe")
         .args([
             "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
             "-Command",
-            "$target = $env:APPA_RUNTIME_REPLACE_TARGET; $name = $env:APPA_RUNTIME_REPLACE_NAME; Get-Process -Name $name -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $target } | Stop-Process -Force",
+            "$target = $env:APPA_RUNTIME_REPLACE_TARGET; $name = $env:APPA_RUNTIME_REPLACE_NAME; Get-Process -Name $name -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $target } | Stop-Process -Force -ErrorAction SilentlyContinue; exit 0",
         ])
         .env("APPA_RUNTIME_REPLACE_TARGET", target)
         .env("APPA_RUNTIME_REPLACE_NAME", process_name)
@@ -492,10 +505,9 @@ fn stop_windows_process_at(target: &Path, process_name: &str) -> Result<(), Init
     if output.status.success() {
         return Ok(());
     }
-    Err(InitError::InstallRuntime {
-        path: target.to_path_buf(),
-        source: std::io::Error::other(String::from_utf8_lossy(&output.stderr).trim().to_owned()),
-    })
+    // Process discovery is a migration convenience. Continue the install and let
+    // runtime identity verification reject a surviving daemon.
+    Ok(())
 }
 
 fn create_default_config(path: &Path) -> Result<bool, InitError> {
