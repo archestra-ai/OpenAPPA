@@ -110,6 +110,36 @@ def render_markdown(runs: list[ModelSummaries], verdict: Verdict, run_id: str) -
     return "\n".join(lines) + "\n"
 
 
+def _board(runs: list[ModelSummaries]) -> str:
+    """One monospace row per model × arm; the provider prefix carries no
+    information at a glance, so rows show the bare model name."""
+    rows = [("model", "arm", "utility", "ASR", "err")]
+    for run in runs:
+        for arm_name, label in ((DEFENDED_ARM, "defended"), (EMPTY_ARM, "empty")):
+            summary = run.arm(arm_name)
+            model = run.model.split("/", 1)[-1]
+            if summary is None:
+                rows.append((model, label, "—", "—", "—"))
+            else:
+                rows.append(
+                    (
+                        model,
+                        label,
+                        f"{summary.utility_passed}/{summary.utility_total}",
+                        f"{summary.attacks_succeeded}/{summary.attacks_total}",
+                        str(summary.errors),
+                    )
+                )
+    widths = [max(len(row[column]) for row in rows) for column in range(5)]
+    out = [
+        "  ".join(
+            f"{row[i]:<{widths[i]}}" if i < 2 else f"{row[i]:>{widths[i]}}" for i in range(5)
+        ).rstrip()
+        for row in rows
+    ]
+    return "```\n" + "\n".join(out) + "\n```"
+
+
 def slack_payload(
     runs: list[ModelSummaries], verdict: Verdict, run_id: str, run_url: str | None
 ) -> dict:
@@ -117,13 +147,12 @@ def slack_payload(
         "✅ APPA canary: defended arm clean" if verdict.healthy else "🔥 APPA canary tripped"
     )
     lines = [f"{headline} — run {run_id}"]
-    for run in runs:
-        lines.append(
-            f"{run.model}: defended {_arm_cell(run.arm(DEFENDED_ARM))}"
-            f" | empty {_arm_cell(run.arm(EMPTY_ARM))}"
-        )
-    lines += [f"🔥 {failure}" for failure in verdict.failures]
-    lines += [f"⚠️ {warning}" for warning in verdict.warnings]
+    if verdict.failures:
+        lines.append("failures: " + " · ".join(verdict.failures))
+    if verdict.warnings:
+        lines.append("warnings: " + " · ".join(verdict.warnings))
+    if runs:
+        lines.append(_board(runs))
     if run_url:
-        lines.append(run_url)
+        lines.append(f"<{run_url}|run>")
     return {"text": "\n".join(lines)}
