@@ -30,9 +30,28 @@ fn install_fake_curl(bin: &Path) {
     executable(&curl);
 }
 
-fn runtime_fingerprint(bin: &Path) -> String {
-    let digest = Sha256::digest(fs::read(bin.join("appa")).expect("runtime bytes"));
+fn runtime_fingerprint(deployed: &Path) -> String {
+    let digest = Sha256::digest(fs::read(deployed).expect("runtime bytes"));
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// The marketplace root a developer passes to `--plugin-source`, staged by the
+/// same script the release runs.
+fn stage_bundle(into: &Path) -> std::path::PathBuf {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let staged = into.join("plugin-source");
+    let status = Command::new("sh")
+        .arg(repository.join("scripts/appa-stage-plugin-bundle.sh"))
+        .arg(&staged)
+        .status()
+        .expect("the staging script runs");
+    assert!(status.success(), "the staging script failed");
+    staged
+}
+
+/// Where init deploys the harness binary: private to appa, never on PATH.
+fn deployed_binary(data: &Path) -> std::path::PathBuf {
+    data.join("bin/appa")
 }
 
 #[test]
@@ -49,7 +68,8 @@ fn init_installs_one_local_adapter_and_is_safe_to_run_again() {
     fs::copy(&appa, bin.join("appa-runtime")).expect("legacy runtime fixture is copied");
     executable(&bin.join("appa-runtime"));
     install_fake_curl(&bin);
-    let fingerprint = runtime_fingerprint(&bin);
+    let source = stage_bundle(directory.path());
+    let fingerprint = runtime_fingerprint(&appa);
 
     let fake_claude = bin.join("claude");
     fs::copy(
@@ -68,9 +88,13 @@ fn init_installs_one_local_adapter_and_is_safe_to_run_again() {
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
     let run = |reported_fingerprint: &str, fail_once: Option<&str>| {
         let mut command = Command::new(&appa);
+        // Run from a directory that holds no marketplace: default resolution
+        // must not consult the working directory, and an explicit source is an
+        // ordinary path argument.
         command
-            .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join(".."))
-            .args(["init", "claude-code"])
+            .current_dir(directory.path())
+            .args(["init", "claude-code", "--plugin-source"])
+            .arg(&source)
             .env("PATH", &path)
             .env("HOME", directory.path())
             .env("APPA_INSTALL_DIR", &bin)
@@ -91,9 +115,13 @@ fn init_installs_one_local_adapter_and_is_safe_to_run_again() {
     assert!(first.status.success(), "{}", String::from_utf8_lossy(&first.stderr));
     let first_stdout = String::from_utf8(first.stdout).expect("UTF-8 output");
     assert!(first_stdout.starts_with("OpenAPPA initialized for Claude Code"));
-    assert!(first_stdout.contains("Adapter   current checkout"));
+    assert!(first_stdout.contains("development source"));
     assert!(first_stdout.contains("(created)"));
+    // The harness binary lands on an appa-private path, not on PATH, and the
+    // copy that is on PATH is named rather than removed.
+    assert!(deployed_binary(&data).is_file());
     assert!(bin.join("appa").is_file());
+    assert!(first_stdout.contains("A previous appa remains at"));
     assert!(!bin.join("appa-runtime").exists());
     assert!(bin.join("clappa").is_file());
     assert!(bin.join("appa-statusline.sh").is_file());
@@ -198,7 +226,8 @@ fn init_keeps_a_custom_statusline() {
     fs::create_dir_all(&claude).expect("Claude directory");
     let appa = install_test_binaries(&bin);
     install_fake_curl(&bin);
-    let fingerprint = runtime_fingerprint(&bin);
+    let source = stage_bundle(directory.path());
+    let fingerprint = runtime_fingerprint(&appa);
 
     let fake_claude = bin.join("claude");
     fs::copy(
@@ -218,8 +247,9 @@ fn init_keeps_a_custom_statusline() {
     .expect("custom settings");
 
     let output = Command::new(appa)
-        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join(".."))
-        .args(["init", "claude-code"])
+        .current_dir(directory.path())
+        .args(["init", "claude-code", "--plugin-source"])
+        .arg(&source)
         .env(
             "PATH",
             format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default()),

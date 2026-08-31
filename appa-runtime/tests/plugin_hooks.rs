@@ -12,16 +12,19 @@ use axum::routing::post;
 const TURN_ENDS: [&str; 3] = ["Stop", "StopFailure", "SubagentStop"];
 
 fn turn_end_command() -> &'static str {
-    "[ \"${APPA_GATE:-}\" = 1 ] || exit 0; b=${APPA_INSTALL_DIR:-$HOME/.local/bin}/appa; \
-     [ -x \"$b\" ] || b=appa; \"$b\" hook --turn-end || exit 0"
+    "[ \"${APPA_GATE:-}\" = 1 ] || exit 0; sh \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.sh\" --turn-end || exit 0"
 }
 
-/// Where the shipped commands look for the binary first. Without it they would
-/// find whatever appa this machine has installed, not the one built here.
-fn install_dir() -> &'static std::path::Path {
+/// The binary the shipped commands must reach. A deployed tree has this
+/// rendered into appa-paths.sh as an absolute path; the checkout's development
+/// copy takes it from the environment, which is what lets a checkout run
+/// against the binary built here rather than whatever appa this machine has.
+fn built_binary() -> &'static std::path::Path {
     std::path::Path::new(env!("CARGO_BIN_EXE_appa"))
-        .parent()
-        .expect("the built binary sits in a directory")
+}
+
+fn plugin_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../integrations/claude-code/plugin")
 }
 
 fn shipped(file: &str) -> serde_json::Value {
@@ -39,20 +42,16 @@ fn plugin_file(file: &str) -> std::path::PathBuf {
 }
 
 #[test]
-fn runtime_starters_can_replace_the_retired_binary_name() {
+fn runtime_starters_stop_only_the_binary_this_deployment_installed() {
     let posix =
         std::fs::read_to_string(plugin_file("hooks/ensure-runtime.sh")).expect("the POSIX runtime starter is readable");
     assert!(
-        posix.contains("appa | */appa | appa-runtime | */appa-runtime"),
-        "the POSIX starter must recognize a stale pre-0.5 runtime",
+        posix.contains("appa | */appa)"),
+        "the POSIX starter must check the stale process's name before signalling it",
     );
 
     let windows =
         std::fs::read_to_string(plugin_file("hooks/hook.ps1")).expect("the Windows runtime starter is readable");
-    assert!(
-        windows.contains("$process.ProcessName -eq \"appa-runtime\""),
-        "the Windows starter must recognize a stale pre-0.5 runtime",
-    );
     assert!(
         windows.contains("[StringComparison]::OrdinalIgnoreCase"),
         "the Windows starter must verify the stale process's installed path",
@@ -176,8 +175,8 @@ fn shipped_command() -> String {
         Some(
             command
                 .replace(
-                    "; \"$b\" hook",
-                    "; sh \"${CLAUDE_PLUGIN_ROOT}/hooks/ensure-runtime.sh\" </dev/null && \"$b\" hook",
+                    "; sh",
+                    "; sh \"${CLAUDE_PLUGIN_ROOT}/hooks/ensure-runtime.sh\" </dev/null && sh",
                 )
                 .as_str()
         ),
@@ -195,7 +194,8 @@ fn run_gated(command: &str, url: &str, gated: bool) -> (i32, String) {
         .arg("-c")
         .arg(command)
         .env("APPA_RUNTIME_URL", url)
-        .env("APPA_INSTALL_DIR", install_dir())
+        .env("CLAUDE_PLUGIN_ROOT", plugin_root())
+        .env("APPA_BIN", built_binary())
         .env("APPA_GATE", if gated { "1" } else { "0" })
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

@@ -57,9 +57,11 @@ impl Adapter {
 enum Harness {
     /// Install this build's Claude Code plugin and initialize its local deployment.
     ClaudeCode {
-        /// Marketplace source. Defaults to this checkout/package, then the OpenAPPA repository.
+        /// Development override: a marketplace root to deploy instead of this
+        /// build's own release plugin. Without it, init installs only the
+        /// plugin artifact whose digest this binary was built with.
         #[arg(long)]
-        source: Option<String>,
+        plugin_source: Option<String>,
     },
 }
 
@@ -77,8 +79,8 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Command::Init {
-            harness: Harness::ClaudeCode { source },
-        } => match appa_runtime::init::claude_code(source.as_deref()) {
+            harness: Harness::ClaudeCode { plugin_source },
+        } => match appa_runtime::init::claude_code(plugin_source.as_deref()) {
             Ok(description) => {
                 print!("{description}");
                 ExitCode::SUCCESS
