@@ -44,11 +44,8 @@ fn stage_bundle(into: &Path) -> std::path::PathBuf {
 /// posted arrived at the deployment's own endpoint.
 fn recording_runtime() -> (Endpoint, mpsc::Receiver<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port");
-    let endpoint = Endpoint::parse(&format!(
-        "http://{}",
-        listener.local_addr().expect("the bound address")
-    ))
-    .expect("the bound address is a usable endpoint");
+    let endpoint = Endpoint::parse(&format!("http://{}", listener.local_addr().expect("the bound address")))
+        .expect("the bound address is a usable endpoint");
     let (record, recorded) = mpsc::channel();
 
     std::thread::spawn(move || {
@@ -143,19 +140,12 @@ fn rendered_hooks_run_the_deployed_binary_and_post_to_the_deployment_endpoint() 
     let poison = poison_dir.join("appa");
     fs::write(
         &poison,
-        format!(
-            "#!/bin/sh\nprintf 'ran\\n' >> {}\nexit 1\n",
-            poison_log.display()
-        ),
+        format!("#!/bin/sh\nprintf 'ran\\n' >> {}\nexit 1\n", poison_log.display()),
     )
     .expect("the poisoned appa is written");
     executable(&poison);
 
-    let path = format!(
-        "{}:{}",
-        poison_dir.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
+    let path = format!("{}:{}", poison_dir.display(), std::env::var("PATH").unwrap_or_default());
 
     for (event, command) in rendered_commands(&deployment.root) {
         let mut child = Command::new("sh")
@@ -195,10 +185,7 @@ fn rendered_hooks_run_the_deployed_binary_and_post_to_the_deployment_endpoint() 
                 "the {event} hook made an unexpected request: {request:?}",
             );
         }
-        assert!(
-            posted,
-            "the {event} hook posted no event to the deployment's endpoint",
-        );
+        assert!(posted, "the {event} hook posted no event to the deployment's endpoint",);
     }
 
     assert!(

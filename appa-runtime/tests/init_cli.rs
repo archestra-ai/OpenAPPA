@@ -271,3 +271,80 @@ fn init_keeps_a_custom_statusline() {
     assert!(settings.contains("my-status"));
     assert!(!bin.join("appa-statusline.sh").exists());
 }
+
+/// A relative directory override must not reach the rendered hooks as written.
+///
+/// Hooks run from whatever working directory Claude was launched in, so a
+/// relative `state/bin/appa` would resolve somewhere else entirely at hook time
+/// and find no binary, config or database.
+#[test]
+fn relative_directory_overrides_are_rendered_absolute() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = directory.path().canonicalize().expect("a resolved root");
+    let bin = root.join("bin");
+    let claude = root.join("claude");
+    let plugin = root.join("installed-plugin");
+    fs::create_dir_all(&bin).expect("bin directory");
+    fs::create_dir_all(plugin.join("hooks")).expect("plugin hooks");
+    let appa = install_test_binaries(&bin);
+    install_fake_curl(&bin);
+    let source = stage_bundle(&root);
+    let fingerprint = runtime_fingerprint(&appa);
+
+    let fake_claude = bin.join("claude");
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-claude.sh"),
+        &fake_claude,
+    )
+    .expect("fake claude is copied");
+    executable(&fake_claude);
+    let starter = plugin.join("hooks/ensure-runtime.sh");
+    fs::write(&starter, "#!/bin/sh\nexit 0\n").expect("fake starter");
+    executable(&starter);
+    fs::write(plugin.join("statusline.sh"), "#!/bin/sh\nexit 0\n").expect("statusline");
+
+    let output = Command::new(&appa)
+        .current_dir(&root)
+        .args(["init", "claude-code", "--plugin-source"])
+        .arg(&source)
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default()),
+        )
+        .env("HOME", &root)
+        // Relative, resolved against this working directory and no other.
+        .env("APPA_INSTALL_DIR", "bin")
+        .env("APPA_CONFIG_DIR", "config")
+        .env("APPA_DATA_DIR", "state")
+        .env("CLAUDE_CONFIG_DIR", &claude)
+        .env("FAKE_CLAUDE_HOME", &claude)
+        .env("FAKE_CLAUDE_LOG", root.join("claude.log"))
+        .env("FAKE_PLUGIN_ROOT", &plugin)
+        .env("FAKE_RUNTIME_FINGERPRINT", fingerprint)
+        .output()
+        .expect("appa init runs");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+
+    let deployments = root.join("state/deployments");
+    let deployment = fs::read_dir(&deployments)
+        .expect("the deployment directory exists")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.join("plugin/hooks/appa-paths.sh").is_file())
+        .expect("one materialized deployment");
+
+    let rendered =
+        fs::read_to_string(deployment.join("plugin/hooks/appa-paths.sh")).expect("the rendered paths file is readable");
+    for name in ["APPA_BIN", "APPA_CONFIG", "APPA_DATA_DIR"] {
+        let value = rendered
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{name}='")))
+            .and_then(|rest| rest.strip_suffix('\''))
+            .unwrap_or_else(|| panic!("{name} is missing from {rendered}"));
+        assert!(Path::new(value).is_absolute(), "{name} was rendered relative: {value}",);
+        assert!(
+            Path::new(value).starts_with(&root),
+            "{name} does not resolve under the working directory it was given: {value}",
+        );
+    }
+}

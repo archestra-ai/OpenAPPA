@@ -155,7 +155,7 @@ if ($EnsureRuntime) {
     if (Test-RuntimeHealthy) {
         exit 0
     }
-    [Console]::Error.WriteLine("appa protection: runtime did not become healthy at $runtimeUrl. Its own error is the last line of $(Join-Path $dataDir 'runtime.stderr.log')")
+    [Console]::Error.WriteLine("appa protection: runtime did not become healthy at $runtimeUrl. Its own error is the last line of $(Join-Path $AppaDataDir 'runtime.stderr.log')")
     exit 1
 }
 

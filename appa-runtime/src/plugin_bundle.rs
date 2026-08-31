@@ -38,39 +38,31 @@ pub enum TreeShape {
 
 #[derive(Debug, Error)]
 pub enum PluginBundleError {
-    #[error(
-        "appa {version} is a development build with no plugin artifact digest; pass --plugin-source <checkout>"
-    )]
+    #[error("appa {version} is a development build with no plugin artifact digest; pass --plugin-source <checkout>")]
     NoBakedDigest { version: &'static str },
     #[error("{value} is not a SHA-256 digest")]
     MalformedDigest { value: String },
     #[error("the plugin source at {path} is not a marketplace root: {reason}")]
     InvalidSource { path: PathBuf, reason: String },
     #[error("cannot read the plugin source at {path}: {source}")]
-    ReadSource {
-        path: PathBuf,
-        source: std::io::Error,
-    },
+    ReadSource { path: PathBuf, source: std::io::Error },
     #[error("{path} is not valid UTF-8 with `/` separators; rename it and retry")]
     UnportablePath { path: PathBuf },
     #[error("{path} is neither a regular file nor a directory")]
     UnsupportedEntry { path: PathBuf },
+    #[error("the plugin source at {path} is too large to deploy: {reason}")]
+    OversizedSource { path: PathBuf, reason: String },
     #[error("{value} is not a usable runtime endpoint: {reason}")]
     MalformedEndpoint { value: String, reason: String },
     #[error("cannot write the deployment at {path}: {source}")]
-    WriteDeployment {
-        path: PathBuf,
-        source: std::io::Error,
-    },
+    WriteDeployment { path: PathBuf, source: std::io::Error },
     #[error("the plugin archive at {path} is unusable: {reason}")]
     MalformedArchive { path: PathBuf, reason: String },
     #[error("cannot reserve a working directory under {path}")]
     NoReservation { path: PathBuf },
     #[error("cannot fetch the plugin artifact from {url}: {reason}")]
     Fetch { url: String, reason: String },
-    #[error(
-        "the plugin artifact at {url} is not the one this build accepts: expected {expected}, got {actual}"
-    )]
+    #[error("the plugin artifact at {url} is not the one this build accepts: expected {expected}, got {actual}")]
     DigestMismatch {
         url: String,
         expected: PluginDigest,
@@ -157,17 +149,12 @@ impl PluginSource {
 
     /// The decision itself, with this build's digest supplied rather than read,
     /// so it is testable without touching the process environment.
-    pub fn decide(
-        explicit: Option<&str>,
-        baked: Option<PluginDigest>,
-    ) -> Result<Self, PluginBundleError> {
+    pub fn decide(explicit: Option<&str>, baked: Option<PluginDigest>) -> Result<Self, PluginBundleError> {
         match explicit {
             Some(path) => Ok(Self::Explicit(canonical_source(Path::new(path))?)),
-            None => baked
-                .map(Self::Release)
-                .ok_or(PluginBundleError::NoBakedDigest {
-                    version: env!("CARGO_PKG_VERSION"),
-                }),
+            None => baked.map(Self::Release).ok_or(PluginBundleError::NoBakedDigest {
+                version: env!("CARGO_PKG_VERSION"),
+            }),
         }
     }
 }
@@ -294,9 +281,9 @@ impl Endpoint {
         if authority.contains('/') {
             return Err(malformed("it must carry no path and no trailing slash"));
         }
-        let listen: SocketAddr = authority.parse().map_err(|_| {
-            malformed("it must be a literal address and port, such as 127.0.0.1:8787")
-        })?;
+        let listen: SocketAddr = authority
+            .parse()
+            .map_err(|_| malformed("it must be a literal address and port, such as 127.0.0.1:8787"))?;
         if !listen.ip().is_loopback() {
             return Err(malformed("it must be a loopback address"));
         }
@@ -348,10 +335,7 @@ type StagedEntry = (String, u8, PathBuf);
 /// file in a `--plugin-source` checkout and re-running init would reuse the
 /// existing deployment and never reach Claude.
 pub fn canonical_source_digest(root: &Path) -> Result<PluginDigest, PluginBundleError> {
-    let mut entries = Vec::new();
-    collect_entries(root, root, &mut entries)?;
-    // Bytewise on the UTF-8 path bytes, never locale collation.
-    entries.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+    let entries = walk(root)?;
 
     let mut hasher = Sha256::new();
     for (relative, kind, absolute) in entries {
@@ -360,21 +344,80 @@ pub fn canonical_source_digest(root: &Path) -> Result<PluginDigest, PluginBundle
         if kind == KIND_DIRECTORY {
             absorb_field(&mut hasher, &[]);
         } else {
-            let contents = fs::read(&absolute).map_err(|source| PluginBundleError::ReadSource {
-                path: absolute.clone(),
-                source,
-            })?;
-            absorb_field(&mut hasher, &contents);
+            absorb_file(&mut hasher, &absolute)?;
         }
     }
     Ok(PluginDigest::from_hasher(hasher))
 }
 
-fn collect_entries(
-    root: &Path,
-    directory: &Path,
-    entries: &mut Vec<StagedEntry>,
-) -> Result<(), PluginBundleError> {
+/// The tree in canonical order, refused if it exceeds the source bounds.
+fn walk(root: &Path) -> Result<Vec<StagedEntry>, PluginBundleError> {
+    let mut entries = Vec::new();
+    collect_entries(root, root, &mut entries)?;
+    if entries.len() > MAX_ENTRIES {
+        return Err(PluginBundleError::OversizedSource {
+            path: root.to_path_buf(),
+            reason: format!("it holds more than {MAX_ENTRIES} entries"),
+        });
+    }
+    let mut total = 0u64;
+    for (_, kind, absolute) in &entries {
+        if *kind != KIND_FILE {
+            continue;
+        }
+        let length = fs::metadata(absolute)
+            .map_err(|source| PluginBundleError::ReadSource {
+                path: absolute.clone(),
+                source,
+            })?
+            .len();
+        total = total.saturating_add(length);
+        if total > MAX_UNCOMPRESSED_BYTES {
+            return Err(PluginBundleError::OversizedSource {
+                path: root.to_path_buf(),
+                reason: format!("it holds more than {MAX_UNCOMPRESSED_BYTES} bytes"),
+            });
+        }
+    }
+    // Bytewise on the UTF-8 path bytes, never locale collation.
+    entries.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+    Ok(entries)
+}
+
+/// A file's length prefix and then its bytes, streamed.
+///
+/// The length comes from the file's own metadata and exactly that many bytes are
+/// absorbed, so the encoding stays the length-prefixed one the digest is defined
+/// as, without holding a whole file in memory.
+fn absorb_file(hasher: &mut Sha256, path: &Path) -> Result<(), PluginBundleError> {
+    use std::io::Read;
+
+    let read = |source: std::io::Error| PluginBundleError::ReadSource {
+        path: path.to_path_buf(),
+        source,
+    };
+    let mut file = fs::File::open(path).map_err(read)?;
+    let length = file.metadata().map_err(read)?.len();
+    hasher.update(length.to_be_bytes());
+
+    let mut remaining = length;
+    let mut buffer = [0u8; 64 * 1024];
+    while remaining > 0 {
+        let wanted = remaining.min(buffer.len() as u64) as usize;
+        let filled = file.read(&mut buffer[..wanted]).map_err(read)?;
+        if filled == 0 {
+            return Err(PluginBundleError::OversizedSource {
+                path: path.to_path_buf(),
+                reason: "it changed size while being read".to_owned(),
+            });
+        }
+        hasher.update(&buffer[..filled]);
+        remaining -= filled as u64;
+    }
+    Ok(())
+}
+
+fn collect_entries(root: &Path, directory: &Path, entries: &mut Vec<StagedEntry>) -> Result<(), PluginBundleError> {
     let read = fs::read_dir(directory).map_err(|source| PluginBundleError::ReadSource {
         path: directory.to_path_buf(),
         source,
@@ -385,21 +428,16 @@ fn collect_entries(
             source,
         })?;
         let absolute = entry.path();
-        let relative =
-            absolute
-                .strip_prefix(root)
-                .map_err(|_| PluginBundleError::UnportablePath {
-                    path: absolute.clone(),
-                })?;
+        let relative = absolute
+            .strip_prefix(root)
+            .map_err(|_| PluginBundleError::UnportablePath { path: absolute.clone() })?;
         let portable = portable_relative_path(relative)?;
         // Symlinks and special files are refused here exactly as in extraction:
         // the bundle is regular files and directories.
-        let kind = entry
-            .file_type()
-            .map_err(|source| PluginBundleError::ReadSource {
-                path: absolute.clone(),
-                source,
-            })?;
+        let kind = entry.file_type().map_err(|source| PluginBundleError::ReadSource {
+            path: absolute.clone(),
+            source,
+        })?;
         if kind.is_dir() {
             entries.push((portable, KIND_DIRECTORY, absolute.clone()));
             collect_entries(root, &absolute, entries)?;
@@ -443,19 +481,19 @@ fn platform_token() -> &'static str {
 /// The lexical absolute path init constructed: no `canonicalize`, no case
 /// folding, consistent with refusing rather than normalizing elsewhere.
 fn path_identity(path: &Path) -> Result<&str, PluginBundleError> {
-    path.to_str()
-        .ok_or_else(|| PluginBundleError::UnportablePath {
-            path: path.to_path_buf(),
-        })
+    path.to_str().ok_or_else(|| PluginBundleError::UnportablePath {
+        path: path.to_path_buf(),
+    })
 }
 
 // ---------------------------------------------------------------------------
 // Materialization
 // ---------------------------------------------------------------------------
 
-/// Caps on what an archive may unpack to. The bundle is a few hundred small
-/// text files; these bound a hostile or corrupt archive without being tight
-/// enough to constrain the real one.
+/// Caps on what a plugin source may be, whichever way it arrives. The bundle is
+/// a few hundred small text files; these bound a hostile archive or a
+/// development checkout that has accumulated a large generated directory,
+/// without being tight enough to constrain the real one.
 const MAX_ENTRIES: usize = 4096;
 const MAX_UNCOMPRESSED_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -476,8 +514,9 @@ pub enum Population<'a> {
 #[derive(Debug, Clone)]
 pub struct Deployment {
     pub root: PathBuf,
-    pub digest: PluginDigest,
-    pub source_digest: PluginDigest,
+    /// Whether an existing deployment was validated and reused, rather than
+    /// materialized afresh. This is the convergence property: a rerun that
+    /// changes nothing reuses, and one that finds drift does not.
     pub reused: bool,
 }
 
@@ -502,7 +541,13 @@ pub fn materialize(
     let incoming = reserve_directory(deployments_dir, ".incoming-")?;
     let staged = || -> Result<(PluginDigest, DeploymentPlan), PluginBundleError> {
         match population {
-            Population::Tree(source) => copy_tree(source, &incoming)?,
+            Population::Tree(source) => {
+                // Bound the tree before copying it: a development source that
+                // accidentally holds a large generated directory should be
+                // refused, not duplicated into the deployment store.
+                walk(source)?;
+                copy_tree(source, &incoming)?
+            }
             Population::Archive(archive) => extract_archive(archive, &incoming)?,
         }
         validate_tree(&incoming, TreeShape::Source)?;
@@ -537,8 +582,6 @@ pub fn materialize(
                 let _ = fs::remove_dir_all(&incoming);
                 return Ok(Deployment {
                     root: published,
-                    digest,
-                    source_digest: plan.source_digest,
                     reused: true,
                 });
             }
@@ -577,8 +620,6 @@ pub fn materialize(
 
     Ok(Deployment {
         root: deployments_dir.join(digest.to_string()),
-        digest,
-        source_digest: plan.source_digest,
         reused: false,
     })
 }
@@ -609,11 +650,9 @@ fn quarantine(deployments_dir: &Path, published: &Path) -> Result<(), PluginBund
         .and_then(|name| name.to_str())
         .unwrap_or("deployment");
     let container = reserve_directory(deployments_dir, &format!("{name}.quarantine-"))?;
-    fs::rename(published, container.join("tree")).map_err(|source| {
-        PluginBundleError::WriteDeployment {
-            path: container.join("tree"),
-            source,
-        }
+    fs::rename(published, container.join("tree")).map_err(|source| PluginBundleError::WriteDeployment {
+        path: container.join("tree"),
+        source,
     })
 }
 
@@ -658,12 +697,10 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<(), PluginBundleError>
         })?;
         let from = entry.path();
         let to = destination.join(entry.file_name());
-        let kind = entry
-            .file_type()
-            .map_err(|error| PluginBundleError::ReadSource {
-                path: from.clone(),
-                source: error,
-            })?;
+        let kind = entry.file_type().map_err(|error| PluginBundleError::ReadSource {
+            path: from.clone(),
+            source: error,
+        })?;
         if kind.is_dir() {
             copy_tree(&from, &to)?;
         } else if kind.is_file() {
@@ -716,10 +753,7 @@ fn extract_archive(archive: &Path, destination: &Path) -> Result<(), PluginBundl
             // A `./` root entry carries no content of its own.
             EntryPath::ArchiveRoot => continue,
             EntryPath::Escaping => {
-                return Err(malformed(format!(
-                    "{} escapes the archive root",
-                    path.display()
-                )));
+                return Err(malformed(format!("{} escapes the archive root", path.display())));
             }
         };
         let target = destination.join(&relative);
@@ -732,19 +766,15 @@ fn extract_archive(archive: &Path, destination: &Path) -> Result<(), PluginBundl
             tar::EntryType::Directory => fs::create_dir_all(&target).map_err(write)?,
             tar::EntryType::Regular => {
                 if let Some(parent) = target.parent() {
-                    fs::create_dir_all(parent).map_err(|source| {
-                        PluginBundleError::WriteDeployment {
-                            path: parent.to_path_buf(),
-                            source,
-                        }
+                    fs::create_dir_all(parent).map_err(|source| PluginBundleError::WriteDeployment {
+                        path: parent.to_path_buf(),
+                        source,
                     })?;
                 }
                 let mut out = fs::File::create(&target).map_err(write)?;
-                std::io::copy(&mut entry, &mut out).map_err(|source| {
-                    PluginBundleError::WriteDeployment {
-                        path: target.clone(),
-                        source,
-                    }
+                std::io::copy(&mut entry, &mut out).map_err(|source| PluginBundleError::WriteDeployment {
+                    path: target.clone(),
+                    source,
                 })?;
             }
             other => {
@@ -805,15 +835,9 @@ fn select_platform_hooks(root: &Path) -> Result<(), PluginBundleError> {
     let hooks = root.join("plugin/hooks/hooks.json");
     let windows = root.join(WINDOWS_HOOKS);
     if cfg!(windows) {
-        fs::rename(&windows, &hooks).map_err(|source| PluginBundleError::WriteDeployment {
-            path: hooks,
-            source,
-        })
+        fs::rename(&windows, &hooks).map_err(|source| PluginBundleError::WriteDeployment { path: hooks, source })
     } else {
-        fs::remove_file(&windows).map_err(|source| PluginBundleError::WriteDeployment {
-            path: windows,
-            source,
-        })
+        fs::remove_file(&windows).map_err(|source| PluginBundleError::WriteDeployment { path: windows, source })
     }
 }
 
@@ -827,9 +851,7 @@ fn render_endpoint(root: &Path, endpoint_url: &str) -> Result<(), PluginBundleEr
     if endpoint_url == DEFAULT_ENDPOINT_URL {
         return Ok(());
     }
-    let mut entries = Vec::new();
-    collect_entries(root, root, &mut entries)?;
-    for (_, kind, absolute) in entries {
+    for (_, kind, absolute) in walk(root)? {
         if kind != KIND_FILE {
             continue;
         }
@@ -881,9 +903,8 @@ fn set_executable_modes(root: &Path) -> Result<(), PluginBundleError> {
 
     for relative in ["plugin/statusline.sh", "plugin/hooks/ensure-runtime.sh"] {
         let path = root.join(relative);
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).map_err(|source| {
-            PluginBundleError::WriteDeployment { path, source }
-        })?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+            .map_err(|source| PluginBundleError::WriteDeployment { path, source })?;
     }
     Ok(())
 }
@@ -906,10 +927,7 @@ fn paths_sh(plan: &DeploymentPlan) -> String {
     ] {
         rendered.push_str(&format!("{name}={}\n", sh_literal(&value.to_string_lossy())));
     }
-    rendered.push_str(&format!(
-        "APPA_ENDPOINT={}\n",
-        sh_literal(plan.endpoint.url())
-    ));
+    rendered.push_str(&format!("APPA_ENDPOINT={}\n", sh_literal(plan.endpoint.url())));
     rendered.push_str(&format!(
         "APPA_LISTEN={}\n",
         sh_literal(&plan.endpoint.listen().to_string())
@@ -925,15 +943,9 @@ fn paths_ps1(plan: &DeploymentPlan) -> String {
         ("AppaConfig", plan.config_path.as_path()),
         ("AppaDataDir", plan.data_dir.as_path()),
     ] {
-        rendered.push_str(&format!(
-            "${name} = {}\n",
-            ps_literal(&value.to_string_lossy())
-        ));
+        rendered.push_str(&format!("${name} = {}\n", ps_literal(&value.to_string_lossy())));
     }
-    rendered.push_str(&format!(
-        "$AppaEndpoint = {}\n",
-        ps_literal(plan.endpoint.url())
-    ));
+    rendered.push_str(&format!("$AppaEndpoint = {}\n", ps_literal(plan.endpoint.url())));
     rendered.push_str(&format!(
         "$AppaListen = {}\n",
         ps_literal(&plan.endpoint.listen().to_string())
@@ -1015,11 +1027,9 @@ pub fn ensure_archive(
     })?;
 
     let url = format!("{base_url}/v{version}/{}", artifact_name(version));
-    let incoming = tempfile::NamedTempFile::new_in(cache_dir).map_err(|source| {
-        PluginBundleError::WriteDeployment {
-            path: cache_dir.to_path_buf(),
-            source,
-        }
+    let incoming = tempfile::NamedTempFile::new_in(cache_dir).map_err(|source| PluginBundleError::WriteDeployment {
+        path: cache_dir.to_path_buf(),
+        source,
     })?;
     download(&url, incoming.path())?;
 
@@ -1051,11 +1061,9 @@ fn digest_of_file(path: &Path) -> Result<PluginDigest, PluginBundleError> {
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
     loop {
-        let read = std::io::Read::read(&mut file, &mut buffer).map_err(|source| {
-            PluginBundleError::ReadSource {
-                path: path.to_path_buf(),
-                source,
-            }
+        let read = std::io::Read::read(&mut file, &mut buffer).map_err(|source| PluginBundleError::ReadSource {
+            path: path.to_path_buf(),
+            source,
         })?;
         if read == 0 {
             break;
@@ -1108,30 +1116,20 @@ fn download(url: &str, destination: &Path) -> Result<(), PluginBundleError> {
             )));
         }
 
-        let mut file = fs::File::create(destination).map_err(|source| {
-            PluginBundleError::WriteDeployment {
-                path: destination.to_path_buf(),
-                source,
-            }
+        let mut file = fs::File::create(destination).map_err(|source| PluginBundleError::WriteDeployment {
+            path: destination.to_path_buf(),
+            source,
         })?;
         let mut written = 0u64;
         let mut stream = response;
-        while let Some(chunk) = stream
-            .chunk()
-            .await
-            .map_err(|error| failed(error.to_string()))?
-        {
+        while let Some(chunk) = stream.chunk().await.map_err(|error| failed(error.to_string()))? {
             written = written.saturating_add(chunk.len() as u64);
             if written > MAX_ARCHIVE_BYTES {
-                return Err(failed(format!(
-                    "it exceeds the {MAX_ARCHIVE_BYTES} bytes accepted"
-                )));
+                return Err(failed(format!("it exceeds the {MAX_ARCHIVE_BYTES} bytes accepted")));
             }
-            std::io::Write::write_all(&mut file, &chunk).map_err(|source| {
-                PluginBundleError::WriteDeployment {
-                    path: destination.to_path_buf(),
-                    source,
-                }
+            std::io::Write::write_all(&mut file, &chunk).map_err(|source| PluginBundleError::WriteDeployment {
+                path: destination.to_path_buf(),
+                source,
             })?;
         }
         Ok(())
@@ -1160,10 +1158,7 @@ mod tests {
     #[test]
     fn portable_path_uses_forward_slashes() {
         let relative: PathBuf = ["plugin", "hooks", "hooks.json"].iter().collect();
-        assert_eq!(
-            portable_relative_path(&relative).unwrap(),
-            "plugin/hooks/hooks.json"
-        );
+        assert_eq!(portable_relative_path(&relative).unwrap(), "plugin/hooks/hooks.json");
     }
 
     #[test]
@@ -1404,7 +1399,11 @@ mod tests {
 
         assert_eq!(digest_of_file(&archive).unwrap(), digest);
         assert!(
-            archive.file_name().unwrap().to_string_lossy().contains(&digest.to_string()),
+            archive
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains(&digest.to_string()),
             "the cache is content-addressed by name"
         );
     }
@@ -1417,10 +1416,7 @@ mod tests {
 
         let refused = ensure_archive(expected, "9.9.9", cache.path(), &base);
 
-        assert!(matches!(
-            refused,
-            Err(PluginBundleError::DigestMismatch { .. })
-        ));
+        assert!(matches!(refused, Err(PluginBundleError::DigestMismatch { .. })));
         let leftovers: Vec<_> = fs::read_dir(cache.path())
             .unwrap()
             .filter_map(Result::ok)
@@ -1437,8 +1433,7 @@ mod tests {
         fs::write(cached_archive_path(cache.path(), "9.9.9", digest), &body).unwrap();
 
         // Nothing is listening here, so any request would fail.
-        let archive =
-            ensure_archive(digest, "9.9.9", cache.path(), "http://127.0.0.1:1").unwrap();
+        let archive = ensure_archive(digest, "9.9.9", cache.path(), "http://127.0.0.1:1").unwrap();
 
         assert_eq!(fs::read(archive).unwrap(), body);
     }
@@ -1473,8 +1468,7 @@ mod tests {
 
         let archive = source.path().parent().unwrap().join("bundle.tar.gz");
         let packed = fs::File::create(&archive).unwrap();
-        let mut builder =
-            tar::Builder::new(flate2::write::GzEncoder::new(packed, flate2::Compression::fast()));
+        let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(packed, flate2::Compression::fast()));
         builder.append_dir_all(".", source.path()).unwrap();
         builder.into_inner().unwrap().finish().unwrap();
 
@@ -1493,6 +1487,38 @@ mod tests {
         // The platform selection removes the map this platform does not use.
         assert!(!deployment.root.join(WINDOWS_HOOKS).is_file());
         fs::remove_file(&archive).unwrap();
+    }
+
+    #[test]
+    fn an_oversized_development_source_is_refused_before_it_is_copied() {
+        let source = tempfile::tempdir().unwrap();
+        let deployments = tempfile::tempdir().unwrap();
+        sample_tree(source.path());
+
+        // A generated directory that wandered into the checkout.
+        let generated = source.path().join("plugin/generated");
+        fs::create_dir_all(&generated).unwrap();
+        for index in 0..=MAX_ENTRIES {
+            fs::write(generated.join(format!("{index}")), b"x").unwrap();
+        }
+
+        let refused = materialize(
+            Population::Tree(source.path()),
+            deployments.path(),
+            Path::new("/data/bin/appa"),
+            Path::new("/config/appa.toml"),
+            Path::new("/data"),
+            &Endpoint::parse(DEFAULT_ENDPOINT_URL).unwrap(),
+        );
+
+        assert!(matches!(refused, Err(PluginBundleError::OversizedSource { .. })));
+        // Nothing was published, and no half-copied tree was left behind.
+        let published: Vec<_> = fs::read_dir(deployments.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .collect();
+        assert!(published.is_empty(), "a refused source left {published:?}");
     }
 
     #[test]

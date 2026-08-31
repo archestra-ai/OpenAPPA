@@ -11,9 +11,7 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::plugin_bundle::{
-    self, Deployment, Endpoint, Population, PluginBundleError, PluginSource,
-};
+use crate::plugin_bundle::{self, Deployment, Endpoint, PluginBundleError, PluginSource, Population};
 
 const MARKETPLACE: &str = "appa";
 const PLUGIN: &str = "appa-runtime@appa";
@@ -50,9 +48,7 @@ pub enum InitError {
     Starter(String),
     #[error("the runtime at {endpoint} is not this installed build: {message}")]
     RuntimeIdentity { endpoint: String, message: String },
-    #[error(
-        "a previous appa runtime (pid {pid}) is still executing {path}; stop it and rerun init"
-    )]
+    #[error("a previous appa runtime (pid {pid}) is still executing {path}; stop it and rerun init")]
     RuntimeSurvived { pid: i32, path: PathBuf },
     #[error(transparent)]
     PluginBundle(#[from] PluginBundleError),
@@ -68,6 +64,18 @@ struct DeploymentPaths {
     config_dir: PathBuf,
     data_dir: PathBuf,
     claude_dir: PathBuf,
+}
+
+/// A directory override made absolute, without touching the filesystem.
+///
+/// Overrides are rendered into a deployment's hooks and hashed into its
+/// identity, and a hook runs from whatever working directory Claude was
+/// launched in. A relative override would therefore resolve somewhere else
+/// entirely at hook time, so it is made absolute here, once, before any of that.
+/// This is lexical: no `canonicalize`, no case folding, consistent with
+/// refusing rather than normalizing elsewhere.
+fn absolute_directory(path: PathBuf) -> PathBuf {
+    std::path::absolute(&path).unwrap_or(path)
 }
 
 /// The platform config file used by installed deployments and `appa describe`.
@@ -100,38 +108,39 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
         })?;
     }
     let deployed_appa = paths.data_dir.join("bin").join(appa_filename());
-    fs::create_dir_all(deployed_appa.parent().expect("the deployed binary has a parent"))
-        .map_err(|source| InitError::InstallRuntime {
+    fs::create_dir_all(deployed_appa.parent().expect("the deployed binary has a parent")).map_err(|source| {
+        InitError::InstallRuntime {
             path: deployed_appa.clone(),
             source,
-        })?;
+        }
+    })?;
     let config = paths.config_dir.join("appa.toml");
     let config_created = create_default_config(&config)?;
 
     // 3. Materialize the deployment, or validate and reuse an existing one.
-    let cache_dir = paths.data_dir.join("cache").join("plugin");
-    let archive = match &source {
-        PluginSource::Explicit(_) => None,
-        PluginSource::Release(digest) => Some(plugin_bundle::ensure_archive(
-            *digest,
-            env!("CARGO_PKG_VERSION"),
-            &cache_dir,
-            &plugin_bundle::release_base_url(),
-        )?),
+    let deployments = paths.data_dir.join("deployments");
+    let deploy = |population| {
+        plugin_bundle::materialize(
+            population,
+            &deployments,
+            &deployed_appa,
+            &config,
+            &paths.data_dir,
+            &endpoint,
+        )
     };
-    let population = match (&source, &archive) {
-        (PluginSource::Explicit(path), _) => Population::Tree(path),
-        (_, Some(archive)) => Population::Archive(archive),
-        (PluginSource::Release(_), None) => unreachable!("a release source always resolves an archive"),
+    let deployment = match &source {
+        PluginSource::Explicit(path) => deploy(Population::Tree(path))?,
+        PluginSource::Release(digest) => {
+            let archive = plugin_bundle::ensure_archive(
+                *digest,
+                env!("CARGO_PKG_VERSION"),
+                &paths.data_dir.join("cache").join("plugin"),
+                &plugin_bundle::release_base_url(),
+            )?;
+            deploy(Population::Archive(&archive))?
+        }
     };
-    let deployment = plugin_bundle::materialize(
-        population,
-        &paths.data_dir.join("deployments"),
-        &deployed_appa,
-        &config,
-        &paths.data_dir,
-        &endpoint,
-    )?;
 
     // 4. Clear the endpoint before anything is mutated. A verified runtime at a
     //    retired install path that will not stop aborts init here, rather than
@@ -263,7 +272,7 @@ fn deployment_paths() -> Result<DeploymentPaths, InitError> {
     let config_dir = installed_config_dir().ok_or(InitError::MissingHome)?;
     let data_dir = installed_data_dir().ok_or(InitError::MissingHome)?;
     let install_dir = if let Some(path) = env::var_os("APPA_INSTALL_DIR") {
-        PathBuf::from(path)
+        absolute_directory(PathBuf::from(path))
     } else if cfg!(windows) {
         data_dir.join("bin")
     } else {
@@ -271,6 +280,7 @@ fn deployment_paths() -> Result<DeploymentPaths, InitError> {
     };
     let claude_dir = env::var_os("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
+        .map(absolute_directory)
         .or_else(|| home.map(|path| path.join(".claude")))
         .ok_or(InitError::MissingHome)?;
     Ok(DeploymentPaths {
@@ -296,7 +306,7 @@ fn user_home() -> Option<PathBuf> {
 
 fn installed_config_dir() -> Option<PathBuf> {
     if let Some(path) = env::var_os("APPA_CONFIG_DIR") {
-        return Some(PathBuf::from(path));
+        return Some(absolute_directory(PathBuf::from(path)));
     }
     #[cfg(target_os = "macos")]
     return env::var_os("HOME")
@@ -317,7 +327,7 @@ fn installed_config_dir() -> Option<PathBuf> {
 
 fn installed_data_dir() -> Option<PathBuf> {
     if let Some(path) = env::var_os("APPA_DATA_DIR") {
-        return Some(PathBuf::from(path));
+        return Some(absolute_directory(PathBuf::from(path)));
     }
     #[cfg(target_os = "macos")]
     return env::var_os("HOME")
@@ -552,8 +562,7 @@ fn executable_of(pid: i32) -> Option<PathBuf> {
     const MAX: usize = 4 * libc::PATH_MAX as usize;
 
     let mut buffer = vec![0u8; MAX];
-    let written =
-        unsafe { libc::proc_pidpath(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
+    let written = unsafe { libc::proc_pidpath(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
     if written <= 0 {
         return None;
     }
@@ -691,11 +700,7 @@ fn stop_windows_processes_at(target: &Path, process_name: &str) -> Result<Vec<i3
         return Ok(Vec::new());
     }
 
-    let ids = targets
-        .iter()
-        .map(i32::to_string)
-        .collect::<Vec<_>>()
-        .join(",");
+    let ids = targets.iter().map(i32::to_string).collect::<Vec<_>>().join(",");
     let survivors = powershell(
         "$ids = $env:APPA_STOP_IDS -split ',' | ForEach-Object { [int]$_ }; \
          foreach ($id in $ids) { Stop-Process -Id $id -Force -ErrorAction Stop }; \
@@ -717,10 +722,7 @@ fn stop_windows_processes_at(target: &Path, process_name: &str) -> Result<Vec<i3
 
 /// Run one PowerShell command, surfacing its failure rather than exiting 0.
 #[cfg(windows)]
-fn powershell<const N: usize>(
-    command: &str,
-    environment: [(&str, String); N],
-) -> Result<String, InitError> {
+fn powershell<const N: usize>(command: &str, environment: [(&str, String); N]) -> Result<String, InitError> {
     let mut process = Command::new("powershell.exe");
     process.args([
         "-NoProfile",
@@ -733,7 +735,9 @@ fn powershell<const N: usize>(
     for (name, value) in environment {
         process.env(name, value);
     }
-    let output = process.output().map_err(|error| InitError::Starter(error.to_string()))?;
+    let output = process
+        .output()
+        .map_err(|error| InitError::Starter(error.to_string()))?;
     if !output.status.success() {
         return Err(InitError::Starter(
             String::from_utf8_lossy(&output.stderr).trim().to_owned(),
@@ -1072,11 +1076,7 @@ fn install_disabled_clappa(install_dir: &Path) -> Result<(), InitError> {
     Ok(())
 }
 
-fn install_statusline(
-    plugin_root: &Path,
-    paths: &DeploymentPaths,
-    endpoint: &Endpoint,
-) -> Result<(), InitError> {
+fn install_statusline(plugin_root: &Path, paths: &DeploymentPaths, endpoint: &Endpoint) -> Result<(), InitError> {
     #[cfg(windows)]
     let (source, target) = (
         plugin_root.join("statusline.ps1"),
@@ -1271,14 +1271,8 @@ mod tests {
         // reports as alive, so checking the pid would accept a process that
         // never ran.
         let ready = at.with_extension("ready");
-        let disposition = if ignores_sigterm {
-            "$SIG{TERM} = 'IGNORE'; "
-        } else {
-            ""
-        };
-        let script = format!(
-            "{disposition}open(my $f, '>', $ARGV[0]) or die; close $f; sleep 30"
-        );
+        let disposition = if ignores_sigterm { "$SIG{TERM} = 'IGNORE'; " } else { "" };
+        let script = format!("{disposition}open(my $f, '>', $ARGV[0]) or die; close $f; sleep 30");
         let mut child = Command::new(at)
             .args(["-e", &script])
             .arg(&ready)
@@ -1319,10 +1313,7 @@ mod tests {
         let survivors = stop_processes_executing(&retired).expect("the stop set runs");
 
         assert!(survivors.is_empty(), "a stoppable runtime was reported as surviving");
-        assert!(
-            !still_running(pid),
-            "the runtime at the retired path is still running",
-        );
+        assert!(!still_running(pid), "the runtime at the retired path is still running",);
     }
 
     #[cfg(unix)]
