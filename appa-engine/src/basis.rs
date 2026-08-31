@@ -8,13 +8,12 @@ use crate::transition::ProposalBatchId;
 use crate::value::{ChildReturnId, DispatchId, ForkId, OfferId, TrajectoryId};
 
 /// How many decisions have moved the **family's** shared policy state: effects reserved by a
-/// release, a reservation settled or effects recorded by an outcome, or a cast resolving a source
-/// every branch holding it can see.
+/// release, or a reservation settled or effects recorded by an outcome.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct FamilyVersion(u64);
 
-/// How many decisions have moved **one trajectory's** flow state: its label, its unresolved
-/// sources or its denials, or a release whose result can restrict any of them.
+/// How many decisions have moved **one trajectory's** flow state: its label or its denials, or
+/// a release whose result can restrict either.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct FlowVersion(u64);
 
@@ -130,8 +129,8 @@ pub enum DecidedAct {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BasisAdvance {
     pub family: bool,
-    /// Every trajectory whose flow moved. A cast resolving one shared source reaches every branch
-    /// whose frozen basis holds it, so this is a set and not one trajectory.
+    /// Every trajectory whose flow moved — a set, because one decision can move the flows of
+    /// several branches.
     pub flows: BTreeSet<TrajectoryId>,
     pub subjects: Vec<SubjectKey>,
 }

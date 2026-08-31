@@ -584,16 +584,17 @@ def test_legacy_limit_sidecar_correlates_as_completed(tmp_path) -> None:
         "task_type": "memory_poison",
         "agent_prompt_profile": "standard",
         "policy_sha256": policy_sha256,
-        "resolver_fixture_sha256": None,
+        "annotator_fixture_sha256": None,
         "events": [],
-        "resolver_requests": [],
+        "annotator_requests": [],
         "fides_audit": [],
     }
     (tmp_path / "legacy-limit.json").write_text(json.dumps(record))
     manifest = {
         "config": {
             "policy_sha256": {"fides": {"memory_poison": policy_sha256}},
-            "resolver_fixture_sha256": {},
+            "policy_sha256_by_sample": {},
+            "annotator_fixture_sha256": {},
             "agent_prompt_profile": "standard",
         }
     }

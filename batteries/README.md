@@ -1,14 +1,14 @@
 # Batteries
 
 A battery is an OpenAPPA config for one tool set. It ships its tool rules,
-its dynamic resolvers, and the scripts those resolvers run. A deployment
+its annotators and sanitizers, and the scripts those run. A deployment
 adds a battery with `include` in its root `appa.toml`; root rules run
 before battery rules, so a deployment overrides a battery without editing
 it.
 
-| Battery | Covers | Resolvers |
+| Battery | Covers | Externals |
 | --- | --- | --- |
-| `claude-code/` | `Bash` and `Read` in a Claude Code session | The Claude Code model classifies Bash calls; `read-sensitivity.py` labels file contents |
+| `claude-code/` | `Bash`, `Read`, and every tool the policy does not name in a Claude Code session | The Claude Code model annotates Bash calls and every tool the wildcard covers; `read-sensitivity.py` labels file contents |
 | `slack/` | the claude.ai Slack connector, all 19 tools: read, search, send, canvases | none |
 | `github/` | the GitHub MCP server's default tool sets: profile, repositories, issues, pull requests, users (44 tools) | none |
 | `grain/` | the Grain MCP server: meetings, transcripts, notes, deals, clips, stories, collections, workspace admin (49 tools) | none |

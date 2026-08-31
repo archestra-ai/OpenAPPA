@@ -10,10 +10,21 @@
 //!
 //! The model is two monoids: a **checked** monoid of label actions
 //! (audience × trust) and a **free** monoid of events. Propagation folds the label
-//! restrictively (min trust, intersect audience) into a partial label — an established bound
-//! plus the unresolved source identities per dimension; checking is the
-//! sink-side adequacy relation, unresolved at exactly the consumers that care. The
+//! restrictively (min trust, intersect audience) into the trajectory's one concrete label
+//! ([`label::Label`] — there is no partial or pending label state anywhere in the algebra);
+//! checking is the sink-side two-valued comparison against that label. The
 //! two are never conflated.
+//!
+//! Every released tool call carries one complete concrete annotation
+//! ([`contract::ToolAnnotation`]): its delta, its requirements, and the effects it emits.
+//! The [`contract::ToolDeclaration`] names the annotation's one producer — `Declared`, the
+//! declaration is its own annotation, or `Annotated`, a registered Annotator consulted per
+//! call whose answer is bounded by its mandate and pinned ([`contract::PinnedAnnotation`])
+//! to the producing Annotator and the call's canonical digest, so a rewrite is annotated
+//! afresh and replay never consults again. The
+//! wildcard declaration (`"*"`) routes every call the policy does not name through an
+//! Annotator; a call nothing covers is refused before it runs, and an annotation that fails
+//! to arrive is an operational refusal, never a policy denial.
 //!
 pub mod admit;
 pub mod authority;

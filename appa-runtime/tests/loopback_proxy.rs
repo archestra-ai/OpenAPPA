@@ -17,13 +17,13 @@ use axum::routing::post;
 const TOKEN_VAR: &str = "APPA_LOOPBACK_PROXY_TEST_TOKEN";
 const TOKEN: &str = "must-not-be-relayed";
 
-/// The bearer tokens the loopback resolver was presented with.
+/// The bearer tokens the loopback annotator was presented with.
 #[derive(Clone, Default)]
 struct Seen(Arc<Mutex<Vec<String>>>);
 
-/// A resolver that answers only a request carrying the expected bearer token, and
+/// An annotator that answers only a request carrying the expected bearer token, and
 /// records every token it is shown.
-async fn serve_resolver() -> (String, Seen) {
+async fn serve_annotator() -> (String, Seen) {
     let seen = Seen::default();
     let router = Router::new()
         .route(
@@ -39,7 +39,15 @@ async fn serve_resolver() -> (String, Seen) {
                 match bearer == TOKEN {
                     true => (
                         axum::http::StatusCode::OK,
-                        serde_json::json!({ "version": 1, "answer": { "delta.trust": "trusted" } }).to_string(),
+                        serde_json::json!({
+                            "version": 1,
+                            "answer": {
+                                "delta": { "trust": "trusted" },
+                                "requires": { "history": [], "attention": [] },
+                                "emits": [],
+                            },
+                        })
+                        .to_string(),
                     ),
                     false => (axum::http::StatusCode::FORBIDDEN, "no token".to_string()),
                 }
@@ -70,21 +78,20 @@ fn policy(url: &str) -> String {
 [policy]
 version = 1
 
-[[policy.dynamic_resolver]]
+[[policy.annotator]]
 name = "classifier"
-returns = ["delta.trust"]
 
 [[policy.tool]]
 name = "fetch"
 description = "Fetches one URL and returns its body."
 parameters = {{ type = "object", properties = {{ url = {{ type = "string" }} }}, required = ["url"] }}
-uses = [{{ resolver = "classifier" }}]
+annotator = "classifier"
 
 [externals]
 timeout_ms = 2000
 max_body_bytes = 65536
 
-[externals.dynamic.classifier]
+[externals.annotators.classifier]
 url = "{url}"
 token_env = "{TOKEN_VAR}"
 "#
@@ -92,8 +99,8 @@ token_env = "{TOKEN_VAR}"
 }
 
 #[tokio::test]
-async fn a_token_bearing_loopback_resolver_is_reached_directly_when_a_proxy_is_configured() {
-    let (url, seen) = serve_resolver().await;
+async fn a_token_bearing_loopback_annotator_is_reached_directly_when_a_proxy_is_configured() {
+    let (url, seen) = serve_annotator().await;
     let proxy = serve_hostile_proxy().await;
     // Set before the runtime opens: reqwest reads the proxy environment once, when it
     // builds a client. `ALL_PROXY` covers the cleartext scheme a loopback endpoint uses.
@@ -138,11 +145,11 @@ async fn a_token_bearing_loopback_resolver_is_reached_directly_when_a_proxy_is_c
     assert_eq!(
         decision,
         HookDecision::AllowCall { spawn: None },
-        "the resolver answered, so its consult was not relayed through the proxy"
+        "the annotator answered, so its consult was not relayed through the proxy"
     );
     assert_eq!(
         seen.0.lock().unwrap().as_slice(),
         [TOKEN.to_string()],
-        "the resolver itself received the token, and received it exactly once"
+        "the annotator itself received the token, and received it exactly once"
     );
 }

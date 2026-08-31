@@ -27,19 +27,18 @@ class NativeProtocolError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class Unestablished:
-    """One value the blocked call reads that no registered cast can label."""
-
-    value: int
-    tool: str | None
-    dimensions: tuple[str, ...]
-
-
-@dataclass(frozen=True)
 class Blocked:
     feedback: str
     recoverable: bool = False
-    unestablished: tuple[Unestablished, ...] = ()
+
+
+@dataclass(frozen=True)
+class Refused:
+    """The runtime refused to judge the call and failed closed: an annotation was
+    missing, inadmissible under its annotator's mandate, or malformed. This is an
+    operational refusal, never policy feedback — the call was not judged."""
+
+    detail: str
 
 
 @dataclass(frozen=True)
@@ -72,7 +71,7 @@ class Returned:
     disposition: Literal["crossed", "substituted"]
 
 
-type CheckResult = Blocked | Control | Allowed
+type CheckResult = Blocked | Control | Allowed | Refused
 type SpawnResult = Blocked | Control | Spawned
 type FinishResult = Blocked | Returned
 
@@ -91,25 +90,13 @@ def wire_tool_schema(tool: Tool) -> dict[str, object]:
 
 
 def _blocked(response: dict[str, object], has_remedy: Callable[[str], bool]) -> Blocked | None:
-    """The blocked envelope: `feedback` plus, on a call decision, the values no cast reaches."""
-    if set(response) - {"unestablished"} != {"kind", "feedback"}:
+    """The blocked envelope: exactly the policy feedback the engine surfaced."""
+    if set(response) != {"kind", "feedback"}:
         return None
     feedback = response["feedback"]
     if not isinstance(feedback, str):
         return None
-    entries = response.get("unestablished", [])
-    if not isinstance(entries, list):
-        return None
-    unestablished: list[Unestablished] = []
-    for entry in entries:
-        match entry:
-            case {"value": int() as value, "tool": str() | None as tool, "dimensions": list() as dimensions} if all(
-                dimension in ("trust", "audience") for dimension in dimensions
-            ):
-                unestablished.append(Unestablished(value, tool, tuple(dimensions)))
-            case _:
-                return None
-    return Blocked(feedback, has_remedy(feedback), tuple(unestablished))
+    return Blocked(feedback, has_remedy(feedback))
 
 
 class NativeSession:
@@ -181,12 +168,16 @@ class NativeSession:
         raise NativeProtocolError("native spawn response has an invalid envelope")
 
     def check(self, tool: str, arguments: dict[str, object]) -> CheckResult:
-        response = self._decode(
-            self._session.check(
+        if self._pending:
+            raise NativeProtocolError("a native call is already pending")
+        try:
+            raw = self._session.check(
                 tool,
                 json.dumps(arguments, separators=(",", ":"), ensure_ascii=False),
             )
-        )
+        except appa_agent_python.AppaError as error:
+            return Refused(str(error))
+        response = self._decode(raw)
         match response.get("kind"):
             case "blocked":
                 blocked = _blocked(response, self._has_remedy)
@@ -275,12 +266,14 @@ class NativeChildSession:
         self._require_live()
         if self._pending is not None:
             raise NativeProtocolError("a native child call is already pending")
-        response = NativeSession._decode(
-            self._child.check(
+        try:
+            raw = self._child.check(
                 tool,
                 json.dumps(arguments, separators=(",", ":"), ensure_ascii=False),
             )
-        )
+        except appa_agent_python.AppaError as error:
+            return Refused(str(error))
+        response = NativeSession._decode(raw)
         match response.get("kind"):
             case "blocked":
                 blocked = _blocked(response, NativeSession._has_remedy)

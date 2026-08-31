@@ -7,10 +7,10 @@ def main():
 
     if request.get("version") != 1:
         raise ValueError("unsupported request version")
-    if request.get("kind") != "dynamic":
+    if request.get("kind") != "annotation":
         raise ValueError("unexpected consult kind")
     if request.get("name") != "local.read-sensitivity":
-        raise ValueError("unexpected resolver name")
+        raise ValueError("unexpected annotator name")
 
     artifact = request.get("artifact")
     args = artifact.get("args") if isinstance(artifact, dict) else None
@@ -25,10 +25,12 @@ def main():
         file_path.startswith(".") or file_path.startswith("clients/")
     )
     audience = ["private"] if sensitive else "public"
-    json.dump(
-        {"version": 1, "answer": {"delta.audience": audience}},
-        sys.stdout,
-    )
+    annotation = {
+        "delta": {"trust": "suspicious", "audience": audience},
+        "requires": {"history": [], "attention": []},
+        "emits": [],
+    }
+    json.dump({"version": 1, "answer": annotation}, sys.stdout)
     sys.stdout.write("\n")
 
 

@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.6.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.6.0...v0.6.1) (2026-08-28)
+
+
+### Bug Fixes
+
+* give tool classifiers an evidence-based neutral baseline ([#117](https://github.com/archestra-ai/OpenAPPA/issues/117)) ([816eb59](https://github.com/archestra-ai/OpenAPPA/commit/816eb59a5ad731f015ebba7d48553dd46e01874e))
+
+## [0.6.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.5.1...v0.6.0) (2026-08-28)
+
+
+### Features
+
+* undeclared tools are cast work, and a requirement slot can be unknown ([#115](https://github.com/archestra-ai/OpenAPPA/issues/115)) ([21b8c75](https://github.com/archestra-ai/OpenAPPA/commit/21b8c7577f8db18ee7b07ee5a5e3922381f47ce1))
+
+
+### Bug Fixes
+
+* constrain dynamic audiences and surface hook errors ([#114](https://github.com/archestra-ai/OpenAPPA/issues/114)) ([238aaa1](https://github.com/archestra-ai/OpenAPPA/commit/238aaa18c3e1be512260e2d5fe6e844d49d24c1e))
+
 ## [0.5.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.5.0...v0.5.1) (2026-08-27)
 
 

@@ -6,18 +6,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::candidate::{CallStage, ConfinedFrom, DerivedCandidate, DerivedVia, SanitizerLineage};
 use crate::check::{CheckOutcome, Gap, Narrowing};
-use crate::contract::ToolContract;
+use crate::contract::ToolAnnotation;
 use crate::engine::Engine;
 use crate::execute::AuthorityEvidence;
 use crate::fact::{BoundaryKind, CloseOutcome, EffectSet, Fact, ReturnDerivation, ReturnPolicy};
 use crate::groups::{Expansions, GroupResolution};
-use crate::label::{EstablishedLabel, Label};
+use crate::label::Label;
 use crate::names::{AuthorityName, GroupName, SanitizerName};
 use crate::plan::PlannedBlock;
 use crate::profile::{DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyIdentityV1};
 use crate::projection::{Projection, Views};
 use crate::value::{
-    ChildReturnId, DispatchId, ForkId, Provenance, RawResultDigest, ResolvedCall, TrajectoryId, ValueBody, ValueId,
+    ChildReturnId, DispatchId, ForkId, Provenance, RawResultDigest, ResolvedCall, TrajectoryId, ValueBody,
 };
 
 /// The identity of one complete policy-content payload for one trajectory. Runtime
@@ -58,8 +58,8 @@ pub struct ProposalBatch {
     /// and offer identity it derives here and keeps none of it: entropy is input data, never engine
     /// state. Runtime supplies it per act and allocates no offer identity of its own.
     pub offer_nonce: crate::value::OfferNonce,
-    /// The cast answers the runtime obtained for values this batch's calls consume. A batch
-    /// carrying none is the ordinary case; the engine asks only when a block turns on a fact.
+    /// The typed evidence the runtime obtained for this act. A batch carrying none is the
+    /// ordinary case; the engine asks only when a block turns on a fact.
     pub evidence: Vec<Evidence>,
     /// The membership answers the runtime obtained for the groups this act's declarations write:
     /// every group the engine named in a `MembershipNeeded` refusal of this
@@ -67,17 +67,19 @@ pub struct ProposalBatch {
     pub expansions: Vec<crate::groups::GroupExpansion>,
 }
 
-/// One call the model proposed, as it wrote it: a tool name and untrusted argument bytes.
+/// One model-directed call as the harness presents it for dispatch: a tool name and
+/// untrusted argument bytes representing the value the harness would execute.
 /// Only the engine turns this into a [`ResolvedCall`], so no caller can present a
 /// payload under a schema the registry does not hold.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProposedCall {
     pub tool: crate::value::ToolName,
     pub arguments: Vec<u8>,
-    /// The answers the runtime resolved for this tool's resolver bindings. They are payload,
-    /// not decoration: the same tool and arguments under different resolved answers is a
-    /// different act.
-    pub tool_resolutions: Vec<crate::contract::PinnedToolResolution>,
+    /// The complete annotation the runtime obtained for this call where its declaration routes
+    /// through an Annotator, with the mandate that authorized it. Payload, not decoration: the
+    /// same tool and arguments under a different annotation is a different act. `None` proposes
+    /// a statically declared call.
+    pub annotation: Option<crate::contract::PinnedAnnotation>,
     /// The membership expansions the runtime resolved for this call's `@group` placeholder
     /// arguments. Payload on the same terms as the dynamic answers.
     pub memberships: Vec<crate::contract::PinnedMembership>,
@@ -145,9 +147,9 @@ pub enum OfferConsult {
         required: Vec<crate::plan::RequiredRuling>,
     },
     /// An input-substitution hop: the sanitizer rewrites the arguments of the call this offer
-    /// stands on. The runtime derives the sanitizer's input from the call, and — where the
-    /// rewritten arguments select another ordered contract — consults that contract's resolvers
-    /// about the rewritten call before executing.
+    /// stands on. The runtime derives the sanitizer's input from the call, and annotates the
+    /// rewritten call afresh — under the ordered contract its rewritten arguments select —
+    /// before executing.
     Rewrite {
         sanitizer: SanitizerName,
         call: ResolvedCall,
@@ -175,7 +177,7 @@ pub enum OfferOutcome {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OfferFollowUp {
-    Approved { call: ResolvedCall },
+    Approved { call: Box<ResolvedCall> },
     Denied { block: Box<Blocked> },
     Invalidated,
     Staged(Box<Confined>),
@@ -216,7 +218,7 @@ pub struct ChildReport {
     pub fork: crate::value::ForkId,
     pub submission: ChildSubmission,
     /// Typed evidence the runtime resolved for this exact report: the mandatory
-    /// sanitizer's derivation, or a cast answer the return's planning requested. An external
+    /// sanitizer's derivation. An external
     /// that gave no answer contributes nothing here and resumes nothing.
     pub evidence: Vec<Evidence>,
     /// Fresh entropy for the offers this act may surface: a narrowing submission opens
@@ -271,8 +273,8 @@ pub struct ToolReport {
     /// Fresh entropy for the offers this act may surface: a derivation that still narrows
     /// opens its confined stage in the same decision, and those plans need identities of their own.
     pub offer_nonce: crate::value::OfferNonce,
-    /// Membership answers for groups this act reads that the dispatch's record did not pin:
-    /// a cast ceiling, typically. Admission folds the delta as the check resolved it.
+    /// Membership answers for groups this act reads that the dispatch's record did not pin.
+    /// Admission folds the delta as the check resolved it.
     pub expansions: Vec<crate::groups::GroupExpansion>,
 }
 
@@ -304,25 +306,16 @@ pub enum Evidence {
         source: RawResultDigest,
         derived: ValueBody,
     },
-    /// An input sanitizer's rewrite of a call's arguments, with the answers the runtime consulted
-    /// for the rewritten call where its arguments select another ordered contract. A rewrite that
-    /// stays in its contract carries the call's own answers and hands nothing in here.
+    /// An input sanitizer's rewrite of a call's arguments, with the answers the runtime obtained
+    /// for the rewritten call. Annotation evidence binds the exact canonical call, so a rewrite
+    /// of an Annotator-declared tool is annotated afresh whatever declaration it selects; fresh
+    /// memberships ride along only where the rewrite selects another ordered declaration.
     Rewrite {
         sanitizer: SanitizerName,
         source: RawResultDigest,
         derived: ValueBody,
-        tool_resolutions: Vec<crate::contract::PinnedToolResolution>,
+        annotation: Option<crate::contract::PinnedAnnotation>,
         memberships: Vec<crate::contract::PinnedMembership>,
-    },
-    Cast {
-        cast: crate::names::CastName,
-        value: crate::value::ValueId,
-        resolved: crate::label::EstablishedLabel,
-    },
-    PendingCast {
-        cast: crate::names::CastName,
-        source: RawResultDigest,
-        resolved: crate::label::EstablishedLabel,
     },
 }
 
@@ -336,26 +329,6 @@ pub enum EvidenceRequest {
         source: RawResultDigest,
         body: ValueBody,
     },
-    Cast {
-        casts: Vec<ApplicableCast>,
-        value: crate::value::ValueId,
-        body: ValueBody,
-    },
-    PendingCast {
-        casts: Vec<ApplicableCast>,
-        source: RawResultDigest,
-        body: ValueBody,
-    },
-}
-
-/// One cast applicable to a pending result, in registration order. A constant cast arrives
-/// already resolved: the engine reads its declared label against the memberships pinned for this
-/// act, so the runtime never expands a group of its own accord. A resolver cast carries `None`
-/// and the runtime consults its endpoint.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ApplicableCast {
-    pub name: crate::names::CastName,
-    pub constant: Option<crate::label::EstablishedLabel>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -420,11 +393,6 @@ pub enum FollowUp {
         spent: Vec<ResolvedCall>,
         settled: Vec<Settled>,
     },
-    /// A blocked call in this batch consumes an unestablished value a registered cast could
-    /// establish. Nothing is decided; the batch's own admissions and any cast the evidence
-    /// already carried are appended, and no release or offer is: a resolution advances the
-    /// family basis, so every release and offer this batch would open must be stamped after it.
-    ProposalsResolve(Vec<EvidenceRequest>),
     Malformed {
         position: usize,
         error: crate::engine::EngineError,
@@ -447,12 +415,14 @@ pub enum TransitionError {
     MembershipNeeded { needed: Vec<crate::names::GroupName> },
     #[error("membership pin for argument {argument} is not one this call reads")]
     ForeignMembership { argument: String },
-    #[error("the act reads tool-level resolver bindings without answers: {resolvers:?}")]
-    ToolResolutionNeeded { resolvers: Vec<String> },
-    #[error("tool-level resolver answer from {resolver} is not one this call reads")]
-    ForeignToolResolution { resolver: String },
-    #[error("tool-level resolver answer from {resolver} contains a value outside policy")]
-    InvalidToolResolution { resolver: String },
+    #[error("the act proposes Annotator-declared calls without annotations: {}", annotators.iter().map(|a| a.as_str()).collect::<Vec<_>>().join(", "))]
+    AnnotationNeeded {
+        annotators: Vec<crate::names::AnnotatorName>,
+    },
+    #[error("the pinned annotation is not this call's under its declaration: {reason}")]
+    ForeignAnnotation { reason: String },
+    #[error("the pinned annotation is outside its mandate: {reason}")]
+    InvalidAnnotation { reason: String },
     #[error("the act's membership expansions are not evidence for it: {0}")]
     ForeignExpansion(#[from] crate::groups::ExpansionRefusal),
     #[error(transparent)]
@@ -493,8 +463,6 @@ pub enum TransitionError {
     ClosedUnobserved,
     #[error("the dispatch recorded success: a failure or indeterminate outcome contradicts it")]
     ContradictedSuccess,
-    #[error("the cast resolution is not admissible for this confined result")]
-    InadmissibleResolution,
     #[error("the bound output sanitizer does not apply to this result")]
     SanitizerUnapplicable,
     #[error("this trajectory was never forked, so it has no return channel")]
@@ -509,8 +477,6 @@ pub enum TransitionError {
     UnbindableFork,
     #[error("the return does not address the fork that opened this child")]
     ReturnForkMismatch,
-    #[error(transparent)]
-    Resolution(#[from] crate::admit::CastError),
     #[error("a fork takes an unused child identity")]
     ChildAlreadyUsed,
     #[error("the submission does not fit the fork's return shape: {0}")]
@@ -754,18 +720,6 @@ pub enum TransitionRefusal {
     ForgedResolution,
     #[error("a second value is admitted for one dispatch or child return")]
     RepeatAdmission,
-    #[error("cast record names a value not admitted earlier in the log")]
-    CastBeforeSource,
-    #[error("cast record's trajectory neither admitted nor inherited the value it resolves")]
-    ForeignResolution,
-    #[error("cast record resolves a source that is already fully established")]
-    RepeatResolution,
-    #[error("cast record names unregistered cast {0}")]
-    UnknownCast(String),
-    #[error("cast record's resolution is not admissible for its source under the registered cast")]
-    InadmissibleResolution,
-    #[error("cast record's scope does not cover the source's originating tool")]
-    OutOfScopeResolution,
     #[error("admitted value names a dispatch not opened earlier in the log")]
     UnknownDispatch,
     #[error("admitted value names a dispatch of another trajectory")]
@@ -826,7 +780,7 @@ pub enum TransitionRefusal {
     SanitizerUnapplicable,
     #[error("a ruling, acceptance or sanitizer binding names a dispatch that never opened")]
     DanglingRemedy,
-    #[error("a cast or sanitizer settled a result the log never admitted")]
+    #[error("a sanitizer settled a result the log never admitted")]
     UnadmittedDerivation,
     #[error("a staged confined result's dispatch closes only with the admission that takes its candidate")]
     StagedClose,
@@ -901,7 +855,7 @@ struct Remedy {
     reviewed: Vec<crate::execute::AuthorityReview>,
     acceptance: Option<Narrowing>,
     sanitizer: Option<SanitizerName>,
-    contribution: Option<EstablishedLabel>,
+    contribution: Option<Label>,
     resolutions: Option<Vec<GroupResolution>>,
 }
 
@@ -928,7 +882,6 @@ pub(crate) struct Sequence<'a> {
     remedies: BTreeMap<DispatchId, Remedy>,
     derived: BTreeMap<DispatchId, Derived>,
     candidate_accepted: BTreeMap<DispatchId, Narrowing>,
-    cast_restated: BTreeSet<DispatchId>,
     admitted: BTreeSet<DispatchId>,
     /// Crossings recorded and not yet admitted into the parent, and merges not yet made: a
     /// crossing ends the child, so a log that records one without folding it into the parent
@@ -998,7 +951,6 @@ struct MenuDebt {
 }
 
 enum Derived {
-    Cast(EstablishedLabel, RawResultDigest),
     Sanitized(crate::value::LabeledValue),
 }
 
@@ -1021,7 +973,6 @@ impl<'a> Sequence<'a> {
             remedies: BTreeMap::new(),
             derived: BTreeMap::new(),
             candidate_accepted: BTreeMap::new(),
-            cast_restated: BTreeSet::new(),
             admitted: BTreeSet::new(),
             crossed: BTreeMap::new(),
             return_settling: BTreeSet::new(),
@@ -1047,7 +998,6 @@ impl<'a> Sequence<'a> {
             remedies: BTreeMap::new(),
             derived: BTreeMap::new(),
             candidate_accepted: BTreeMap::new(),
-            cast_restated: BTreeSet::new(),
             admitted: view.projection().admitted_dispatches(),
             crossed: BTreeMap::new(),
             return_settling: BTreeSet::new(),
@@ -1174,69 +1124,57 @@ impl<'a> Sequence<'a> {
                 trajectory,
                 dispatch,
                 tool,
-                contract,
+                declaration,
                 arguments,
                 proposed_label,
                 receiving,
                 proposed_effects,
-                tool_resolutions,
+                annotation,
                 memberships,
                 subject,
                 resolutions,
             } => {
-                let call = ResolvedCall::new_keyed(tool.clone(), *contract, arguments.clone())
-                    .with_tool_resolutions(tool_resolutions.clone())
+                let call = ResolvedCall::new_keyed(tool.clone(), *declaration, arguments.clone())
+                    .with_annotation(annotation.clone())
                     .with_memberships(memberships.clone());
-                if call.tool_resolutions() != tool_resolutions.as_slice() {
-                    return Err(TransitionRefusal::ForgedLabel);
-                }
                 if call.memberships() != memberships.as_slice() {
                     return Err(TransitionRefusal::ForgedMembership);
                 }
                 let expansions = self.recorded_expansions(resolutions)?;
                 self.opened(trajectory, dispatch, &call, subject, released, &expansions)?;
-                let contract = self
+                let entry = self
                     .engine
                     .registry()
-                    .keyed_tool(tool, *contract)
+                    .keyed_tool(tool, *declaration)
                     .ok_or_else(|| TransitionRefusal::UnknownTool(tool.as_str().to_string()))?;
-                if crate::check::validate_memberships(contract, &call).is_err()
-                    || crate::check::pins_agree(contract, &call, &expansions).is_err()
+                // The record stores a pin only where an Annotator produced one; a static
+                // declaration's annotation is the registry's own, so a record that carries
+                // a pin for it — or none for an Annotator-routed tool — is forged. The
+                // pin's own binding — its annotator, and the digest of the exact call it
+                // judged — is validate_annotation's to hold.
+                let checked: std::borrow::Cow<'_, crate::contract::ToolAnnotation> =
+                    match (annotation, entry.declared()) {
+                        (None, Some(compiled)) => std::borrow::Cow::Borrowed(compiled),
+                        (Some(pinned), None) if Some(pinned.annotator()) == entry.annotator() => {
+                            std::borrow::Cow::Owned(pinned.tool_annotation(entry, tool))
+                        }
+                        _ => return Err(TransitionRefusal::ForgedResolution),
+                    };
+                if crate::check::validate_annotation(self.engine.registry(), entry, &call).is_err() {
+                    return Err(TransitionRefusal::ForgedResolution);
+                }
+                if crate::check::validate_memberships(&checked, &call).is_err()
+                    || crate::check::pins_agree(&checked, &call, &expansions).is_err()
                 {
                     return Err(TransitionRefusal::ForgedMembership);
                 }
                 let views = self.projection.view(trajectory);
-                // And its resolver answers, one per binding the contract spells. An opening whose
-                // call an input hop rewrote within one contract carries the answers given about the
-                // call last consulted, so that call is the one they may be about. Every opening
-                // names the call subject its decision released it for, so a record with no
-                // readable consulted call is refused rather than judged on the call alone.
-                let consulted = views
-                    .consulted_call(subject)
-                    .ok_or(TransitionRefusal::ForgedResolution)?;
-                if crate::check::validate_tool_resolutions(
-                    self.engine.registry(),
-                    contract,
-                    &call,
-                    crate::check::AnsweredFor::Consulted(consulted),
-                )
-                .is_err()
-                {
-                    return Err(TransitionRefusal::ForgedResolution);
-                }
-                if proposed_effects != &contract.emits {
+                if proposed_effects != &checked.emits {
                     return Err(TransitionRefusal::EffectsMismatch);
                 }
                 let current = views.current_label();
-                if proposed_label
-                    != crate::check::committed_label_for_call(
-                        contract,
-                        &current,
-                        crate::check::CallReads::Resolved(&call),
-                        &expansions,
-                    )
-                    .bound()
-                    || receiving != current.bound()
+                if proposed_label != &crate::check::committed_label(&checked, &current, &expansions)
+                    || receiving != &current
                 {
                     return Err(TransitionRefusal::ForgedLabel);
                 }
@@ -1282,21 +1220,6 @@ impl<'a> Sequence<'a> {
                 value,
                 provenance,
             } => self.value_admitted(trajectory, value, provenance)?,
-            Fact::CastApplied {
-                trajectory,
-                value,
-                resolved,
-                cast,
-                resolutions,
-            } => self.cast_applied(trajectory, *value, resolved, cast, resolutions)?,
-            Fact::OutputCastApplied {
-                trajectory,
-                dispatch,
-                cast,
-                resolved,
-                raw_digest,
-                resolutions,
-            } => self.output_cast_applied(trajectory, dispatch, cast, resolved, raw_digest, resolutions)?,
             Fact::CandidateDerived {
                 trajectory,
                 subject,
@@ -1592,25 +1515,27 @@ impl<'a> Sequence<'a> {
                 let contract = self
                     .engine
                     .registry()
-                    .contract(candidate)
+                    .annotation_of(candidate)
                     .ok_or_else(|| TransitionRefusal::UnknownTool(candidate.tool().as_str().to_string()))?;
                 let stage = views.call_stage(subject);
                 let role = views.call_role(subject);
-                required(expansions, contract.groups())?;
-                let CheckOutcome::Block(block) = crate::check::evaluate(contract, views, candidate, &stage, expansions)
+                let reads: Vec<crate::names::GroupName> = contract.groups().cloned().collect();
+                required(expansions, reads.iter())?;
+                let CheckOutcome::Block(block) =
+                    crate::check::evaluate(&contract, views, candidate, &stage, expansions)
                 else {
                     return Err(TransitionRefusal::UnbackedOffer);
                 };
                 required(
                     expansions,
-                    &crate::plan::block_groups(self.engine.registry(), contract, &block, role),
+                    &crate::plan::block_groups(self.engine.registry(), &contract, &block, role),
                 )?;
                 Ok(crate::plan::plan(
                     self.engine.registry(),
                     views,
                     crate::plan::BlockedCall {
                         call: candidate,
-                        contract,
+                        contract: &contract,
                         raw: &block,
                         stage: &stage,
                         role,
@@ -1647,11 +1572,11 @@ impl<'a> Sequence<'a> {
                 let contract = self.dispatch_contract(trajectory, dispatch)?;
                 required(
                     expansions,
-                    &crate::plan::confined_stage_groups(self.engine.registry(), contract, &lineage),
+                    &crate::plan::confined_stage_groups(self.engine.registry(), &contract, &lineage),
                 )?;
                 Ok(crate::plan::confined_stage(
                     self.engine.registry(),
-                    contract,
+                    &contract,
                     receiving,
                     &value.label,
                     residual,
@@ -1687,8 +1612,8 @@ impl<'a> Sequence<'a> {
                     }) => (value.label.clone(), value.body.clone(), residual.clone()),
                     Some(_) => return Err(TransitionRefusal::UnbackedOffer),
                     None => {
-                        let label = fold.bound().clone().into_label();
-                        let to = receiving.combine(&label.established_part());
+                        let label = fold.clone();
+                        let to = receiving.combine(&label);
                         if to == receiving {
                             return Err(TransitionRefusal::UnbackedOffer);
                         }
@@ -1707,20 +1632,16 @@ impl<'a> Sequence<'a> {
                     expansions,
                     &crate::plan::return_stage_groups(self.engine.registry(), &lineage),
                 )?;
-                match crate::plan::return_stage(
+                Ok(crate::plan::return_stage(
                     self.engine.registry(),
                     views,
                     child,
-                    &fold,
                     &candidate,
                     &body,
                     &residual,
                     &lineage,
                     expansions,
-                ) {
-                    crate::plan::ReturnStagePlan::Stage(plans) => Ok(plans),
-                    crate::plan::ReturnStagePlan::Resolve { .. } => Err(TransitionRefusal::UnbackedOffer),
-                }
+                ))
             }
             crate::basis::SubjectKey::Approval(_) => Err(TransitionRefusal::ForeignOffer),
         }
@@ -1819,12 +1740,12 @@ impl<'a> Sequence<'a> {
         let contract = self
             .engine
             .registry()
-            .contract(call)
+            .annotation_of(call)
             .ok_or_else(|| TransitionRefusal::UnknownTool(call.tool().as_str().to_string()))?;
         let live = views.current_label();
         if rulings
             .iter()
-            .any(|evidence| evidence.reviewed.tool != contract.name || evidence.reviewed.trajectory_label != live)
+            .any(|evidence| evidence.reviewed.tool != *call.tool() || evidence.reviewed.trajectory_label != live)
         {
             return Err(TransitionRefusal::UnbackedApproval);
         }
@@ -1841,7 +1762,7 @@ impl<'a> Sequence<'a> {
         }
         required(
             &expansions,
-            &crate::plan::plan_groups(self.engine.registry(), contract, offered),
+            &crate::plan::plan_groups(self.engine.registry(), &contract, offered),
         )?;
         Ok(())
     }
@@ -1991,7 +1912,7 @@ impl<'a> Sequence<'a> {
                 trajectory,
                 dispatch,
                 tool,
-                contract,
+                declaration,
                 proposed_effects,
                 ..
             } => {
@@ -1999,7 +1920,7 @@ impl<'a> Sequence<'a> {
                 if !proposed_effects.is_empty() {
                     advance.absorb(&BasisAdvance::family());
                 }
-                if self.result_can_restrict(tool, *contract, dispatch) {
+                if self.result_can_restrict(tool, *declaration, dispatch) {
                     advance.absorb(&BasisAdvance::flow(trajectory));
                 }
                 advance
@@ -2015,16 +1936,6 @@ impl<'a> Sequence<'a> {
                 CloseOutcome::Failure => self.effect_advance(self.projection.view(trajectory).reserves(dispatch)),
                 CloseOutcome::Indeterminate => crate::basis::BasisAdvance::default(),
             },
-            Fact::CastApplied { value, .. } => {
-                let mut advance = BasisAdvance::family();
-                advance.flows.extend(
-                    self.projection
-                        .trajectories()
-                        .filter(|member| self.projection.view(member).may_resolve(*value))
-                        .cloned(),
-                );
-                advance
-            }
             // An admission moves the flow only when it moves the trajectory's label. A block and
             // its remedies are derived from that label, so a value that leaves it where it was — a
             // metadata read, a public file — changes nothing an open offer was derived from, and
@@ -2077,13 +1988,14 @@ impl<'a> Sequence<'a> {
         }
     }
 
-    /// Can this release's result restrict the trajectory, leave it unresolved, or arrive through a
-    /// bound sanitizer? An unannotated contract admits at `Unknown`, so it can;
-    /// the deliberate neutral `delta = {}` cannot.
+    /// Can this release's result restrict the trajectory or arrive through a bound sanitizer?
+    /// Any tool with a declared delta can, and so can an Annotator-declared contract — the
+    /// wildcard included — whose delta exists only per call; the deliberate static neutral
+    /// `delta = {}` cannot.
     fn result_can_restrict(
         &self,
         tool: &crate::value::ToolName,
-        contract_id: crate::value::ToolContractId,
+        declaration: crate::value::ToolDeclarationId,
         dispatch: &DispatchId,
     ) -> bool {
         if self
@@ -2094,8 +2006,11 @@ impl<'a> Sequence<'a> {
         {
             return true;
         }
-        match self.engine.registry().keyed_tool(tool, contract_id) {
-            Some(contract) => contract.delta.as_ref().is_none_or(|delta| !delta.is_none()),
+        match self.engine.registry().keyed_tool(tool, declaration) {
+            Some(entry) => match entry.declared() {
+                None => true,
+                Some(annotation) => !annotation.delta.is_none(),
+            },
             None => true,
         }
     }
@@ -2114,7 +2029,7 @@ impl<'a> Sequence<'a> {
         if !self.remedies.is_empty() {
             return Err(TransitionRefusal::DanglingRemedy);
         }
-        if !self.derived.is_empty() || !self.candidate_accepted.is_empty() || !self.cast_restated.is_empty() {
+        if !self.derived.is_empty() || !self.candidate_accepted.is_empty() {
             return Err(TransitionRefusal::UnadmittedDerivation);
         }
         if self.crossed.values().any(|crossing| crossing != &Crossing::Merged) {
@@ -2155,17 +2070,17 @@ impl<'a> Sequence<'a> {
                 Fact::DispatchOpened {
                     dispatch,
                     tool,
-                    contract,
+                    declaration,
                     arguments,
-                    tool_resolutions,
+                    annotation,
                     memberships,
                     subject,
                     resolutions,
                     ..
                 },
             ) if dispatch == &next.dispatch => {
-                let opened = ResolvedCall::new_keyed(tool.clone(), *contract, arguments.clone())
-                    .with_tool_resolutions(tool_resolutions.clone())
+                let opened = ResolvedCall::new_keyed(tool.clone(), *declaration, arguments.clone())
+                    .with_annotation(annotation.clone())
                     .with_memberships(memberships.clone());
                 if opened != next.call || subject != &next.subject {
                     return Err(TransitionRefusal::UnbackedDecision);
@@ -2301,35 +2216,33 @@ impl<'a> Sequence<'a> {
         {
             return Err(TransitionRefusal::ForeignAdmission);
         }
+        let expansions = self.recorded_expansions(resolutions)?;
         for call in proposals {
             if !self.engine.registry().contains_tool(call.tool()) {
                 return Err(TransitionRefusal::UnknownTool(call.tool().as_str().to_string()));
             }
-            let (selected, contract) = self
+            let (selected, declaration) = self
                 .engine
                 .registry()
                 .select_tool(call.tool(), call.arguments())
                 .ok_or(TransitionRefusal::InvalidPayload(
                     crate::params::ArgumentError::NoMatchingContract,
                 ))?;
-            if selected != call.contract_id() {
+            if selected != call.declaration_id() {
                 return Err(TransitionRefusal::MisdecidedBatch);
             }
-            if crate::check::validate_memberships(contract, call).is_err() {
-                return Err(TransitionRefusal::ForgedMembership);
-            }
-            if crate::check::validate_tool_resolutions(
-                self.engine.registry(),
-                contract,
-                call,
-                crate::check::AnsweredFor::ThisCall,
-            )
-            .is_err()
-            {
+            if crate::check::validate_annotation(self.engine.registry(), declaration, call).is_err() {
                 return Err(TransitionRefusal::ForgedResolution);
             }
+            let checked = self
+                .engine
+                .registry()
+                .annotation_of(call)
+                .ok_or_else(|| TransitionRefusal::UnknownTool(call.tool().as_str().to_string()))?;
+            if crate::check::validate_memberships(&checked, call).is_err() {
+                return Err(TransitionRefusal::ForgedMembership);
+            }
         }
-        let expansions = self.recorded_expansions(resolutions)?;
         let mut working = std::borrow::Cow::Borrowed(&self.projection);
         let composed = crate::engine::compose_batch(
             self.engine.registry(),
@@ -2408,7 +2321,7 @@ impl<'a> Sequence<'a> {
         let contract = self
             .engine
             .registry()
-            .contract(call)
+            .annotation_of(call)
             .ok_or_else(|| TransitionRefusal::UnknownTool(call.tool().as_str().to_string()))?;
         contract
             .parameters
@@ -2468,21 +2381,21 @@ impl<'a> Sequence<'a> {
                     acceptance: approval.acceptance.clone(),
                     sanitizer: approval.sanitizer.clone(),
                     contribution: approval.sanitizer.as_ref().and_then(|name| {
-                        crate::plan::bound_contribution(self.engine.registry(), contract, call, name, expansions)
+                        crate::plan::bound_contribution(self.engine.registry(), &contract, name, expansions)
                     }),
                     resolutions: (!approval.rulings.is_empty() || approval.sanitizer.is_some()).then_some(recorded),
                 };
                 if remedy.is_none_or(|landed| landed != expected) {
                     return Err(TransitionRefusal::UnbackedApproval);
                 }
-                return match crate::check::evaluate(contract, &views, call, &stage, expansions) {
-                    CheckOutcome::Block(block) if block.unestablished.is_empty() => Ok(()),
+                return match crate::check::evaluate(&contract, &views, call, &stage, expansions) {
+                    CheckOutcome::Block(_) => Ok(()),
                     _ => Err(TransitionRefusal::UnreleasedDispatch),
                 };
             }
             Obligation::Free => {}
         }
-        match crate::check::evaluate(contract, &views, call, &stage, expansions) {
+        match crate::check::evaluate(&contract, &views, call, &stage, expansions) {
             CheckOutcome::Allow if remedy.is_some() => Err(TransitionRefusal::DanglingRemedy),
             CheckOutcome::Allow => Ok(()),
             CheckOutcome::Block(_) => Err(TransitionRefusal::UnreleasedDispatch),
@@ -2506,7 +2419,7 @@ impl<'a> Sequence<'a> {
                 let contract = self
                     .engine
                     .registry()
-                    .provider_run_contract(tool)
+                    .provider_run_annotation(tool)
                     .ok_or_else(|| TransitionRefusal::NotProviderRun(tool.as_str().to_string()))?;
                 let expansions = self.recorded_expansions(resolutions)?;
                 required(&expansions, contract.groups())?;
@@ -2544,7 +2457,20 @@ impl<'a> Sequence<'a> {
                 Ok(())
             }
             Provenance::ToolResult { dispatch } => {
-                let contract = self.dispatch_contract(trajectory, dispatch)?;
+                // Inlined dispatch_contract: borrowing whole `self` here would conflict with
+                // the `admitted`/`derived` field mutations below.
+                if dispatch.trajectory() != trajectory {
+                    return Err(TransitionRefusal::ForeignDispatch);
+                }
+                let call = self
+                    .projection
+                    .dispatch_call_of(dispatch)
+                    .ok_or(TransitionRefusal::UnknownDispatch)?;
+                let contract = self
+                    .engine
+                    .registry()
+                    .annotation_of(call)
+                    .ok_or_else(|| TransitionRefusal::UnknownTool(call.tool().as_str().to_string()))?;
                 let views = self.projection.view(trajectory);
                 // Admission lands with the close, and only a success admits anything.
                 if !views.closed_successfully(dispatch) {
@@ -2554,17 +2480,6 @@ impl<'a> Sequence<'a> {
                     return Err(TransitionRefusal::RepeatAdmission);
                 }
                 let expected = match self.derived.remove(dispatch) {
-                    Some(Derived::Cast(resolved, raw_digest)) => {
-                        if RawResultDigest::of(value.body.as_str().as_bytes()) != raw_digest {
-                            return Err(TransitionRefusal::ForgedLabel);
-                        }
-                        let baseline =
-                            crate::admit::cast_baseline(&views, dispatch).ok_or(TransitionRefusal::UnknownDispatch)?;
-                        if crate::admit::confined_residual(&baseline, &resolved.clone().into_label()).is_some() {
-                            return Err(TransitionRefusal::AcceptanceMismatch);
-                        }
-                        resolved.into_label()
-                    }
                     Some(Derived::Sanitized(candidate)) => {
                         if value != &candidate {
                             return Err(TransitionRefusal::ForgedLabel);
@@ -2583,19 +2498,13 @@ impl<'a> Sequence<'a> {
                             if self.candidate_accepted.remove(dispatch).as_ref() != residual.as_ref() {
                                 return Err(TransitionRefusal::AcceptanceMismatch);
                             }
-                            let subject = crate::basis::SubjectKey::ConfinedResult(dispatch.clone());
-                            if matches!(views.candidate_via(&subject), Some(DerivedVia::Cast { .. }))
-                                && !self.cast_restated.remove(dispatch)
-                            {
-                                return Err(TransitionRefusal::ForgedLabel);
-                            }
                             candidate.label.clone()
                         }
                         Some(DerivedCandidate::Call { .. } | DerivedCandidate::Return { .. }) => {
                             return Err(TransitionRefusal::ForgedLabel);
                         }
                         None => {
-                            if contract.pending_cast_dim().is_some() || views.bound_sanitizer(dispatch).is_some() {
+                            if views.bound_sanitizer(dispatch).is_some() {
                                 return Err(TransitionRefusal::ForgedLabel);
                             }
                             self.observed_as(
@@ -2603,7 +2512,7 @@ impl<'a> Sequence<'a> {
                                 dispatch,
                                 &RawResultDigest::of(value.body.as_str().as_bytes()),
                             )?;
-                            self.output_label(trajectory, dispatch, contract)
+                            self.output_label(trajectory, dispatch, &contract)
                         }
                     },
                 };
@@ -2621,10 +2530,11 @@ impl<'a> Sequence<'a> {
                 if id.child() != child || crossed != value {
                     return Err(TransitionRefusal::ForgedLabel);
                 }
-                if let Some(bound) = EstablishedLabel::from_label(&value.label) {
+                {
+                    let bound = value.label.clone();
                     let baseline = match views.submitted_return(id) {
                         Some(submitted) => submitted.receiving.clone(),
-                        None => views.current_label().bound().clone(),
+                        None => views.current_label().clone(),
                     };
                     let candidate = baseline.combine(&bound);
                     let owed = (candidate != baseline).then_some(Narrowing {
@@ -2644,43 +2554,6 @@ impl<'a> Sequence<'a> {
                 Ok(())
             }
         }
-    }
-
-    fn cast_applied(
-        &mut self,
-        trajectory: &TrajectoryId,
-        value: ValueId,
-        resolved: &EstablishedLabel,
-        cast: &crate::names::CastName,
-        resolutions: &[GroupResolution],
-    ) -> Result<(), TransitionRefusal> {
-        let expansions = self.recorded_expansions(resolutions)?;
-        let views = self.projection.view(trajectory);
-        let prior = views.value_label(value).ok_or(TransitionRefusal::CastBeforeSource)?;
-        if !views.may_resolve(value) {
-            return Err(TransitionRefusal::ForeignResolution);
-        }
-        if EstablishedLabel::from_label(prior).is_some() {
-            return Err(TransitionRefusal::RepeatResolution);
-        }
-        let registered = self
-            .engine
-            .registry()
-            .cast(cast)
-            .ok_or_else(|| TransitionRefusal::UnknownCast(cast.as_str().to_string()))?;
-        if !registered
-            .scope
-            .reaches(self.engine.registry(), &views, value)
-            .unwrap_or(false)
-        {
-            return Err(TransitionRefusal::OutOfScopeResolution);
-        }
-        required(&expansions, registered.resolution.reads(prior))?;
-        registered
-            .resolution
-            .validate(prior, resolved, &expansions)
-            .map_err(|_| TransitionRefusal::InadmissibleResolution)?;
-        Ok(())
     }
 
     fn child_return(
@@ -2721,7 +2594,7 @@ impl<'a> Sequence<'a> {
                 {
                     return Err(TransitionRefusal::ReturnRecordMismatch);
                 }
-                fold.bound().clone().into_label()
+                fold.clone()
             }
             (ReturnPolicy::Raw, ReturnDerivation::Sanitized { sanitizer, .. }) => {
                 let pending = pending.as_ref().ok_or(TransitionRefusal::ReturnPolicyMismatch)?;
@@ -2769,7 +2642,7 @@ impl<'a> Sequence<'a> {
             return Err(TransitionRefusal::ReturnRecordMismatch);
         }
         let derived_at = match views.candidate_via(&subject) {
-            Some(DerivedVia::Sanitizer { transition, .. }) => transition,
+            Some(DerivedVia { transition, .. }) => transition,
             _ => return Err(TransitionRefusal::ReturnRecordMismatch),
         };
         if derived_at != transition {
@@ -2785,7 +2658,7 @@ impl<'a> Sequence<'a> {
         id: &ChildReturnId,
         fork: &crate::value::ForkId,
         parent: &TrajectoryId,
-        label: &crate::label::PartialLabel,
+        label: &crate::label::Label,
         digest: &RawResultDigest,
         body: &crate::value::ValueBody,
         policy: &ReturnPolicy,
@@ -2826,8 +2699,8 @@ impl<'a> Sequence<'a> {
         }
         match policy {
             ReturnPolicy::Raw => {
-                let receiving = views.current_label().bound().clone();
-                if receiving.combine(fold.bound()) == receiving {
+                let receiving = views.current_label().clone();
+                if receiving.combine(&fold) == receiving {
                     return Err(TransitionRefusal::ReturnRecordMismatch);
                 }
             }
@@ -2837,14 +2710,8 @@ impl<'a> Sequence<'a> {
                     .registry()
                     .sanitizer(name)
                     .ok_or_else(|| TransitionRefusal::UnknownSanitizer(name.as_str().to_string()))?;
-                if !fold.is_established(registered.transition.dimension()) {
-                    return Err(TransitionRefusal::ReturnRecordMismatch);
-                }
                 required(&expansions, registered.groups())?;
-                if registered
-                    .derive_output(&fold.bound().clone().into_label(), &[], &expansions)
-                    .is_none()
-                {
+                if registered.derive_output(&fold, &[], &expansions).is_none() {
                     return Err(TransitionRefusal::ReturnRecordMismatch);
                 }
             }
@@ -2890,20 +2757,10 @@ impl<'a> Sequence<'a> {
             .sanitizer(name)
             .ok_or_else(|| TransitionRefusal::UnknownSanitizer(name.as_str().to_string()))?;
         let fold = views.branch_label(child);
-        let dim = registered.transition.dimension();
         let derives = match reason {
-            crate::fact::ReturnRejection::ConsumedDimensionUnresolvable(unestablished) => {
-                required(&expansions, &crate::plan::cast_selection_groups(self.engine.registry()))?;
-                !fold.is_established(dim)
-                    && crate::plan::resolvable_source(self.engine.registry(), &views, &fold, dim, &expansions).is_none()
-                    && *unestablished == crate::check::unestablished_facts(&fold, &[dim])
-            }
             crate::fact::ReturnRejection::MandateUnmet => {
                 required(&expansions, registered.groups())?;
-                fold.is_established(dim)
-                    && registered
-                        .derive_output(&fold.bound().clone().into_label(), &[], &expansions)
-                        .is_none()
+                registered.derive_output(&fold, &[], &expansions).is_none()
             }
             crate::fact::ReturnRejection::PreconditionUnmet => name.is_attest_schema(),
         };
@@ -2945,55 +2802,6 @@ impl<'a> Sequence<'a> {
         }
     }
 
-    fn output_cast_applied(
-        &mut self,
-        trajectory: &TrajectoryId,
-        dispatch: &DispatchId,
-        cast: &crate::names::CastName,
-        resolved: &crate::label::EstablishedLabel,
-        raw_digest: &RawResultDigest,
-        resolutions: &[GroupResolution],
-    ) -> Result<(), TransitionRefusal> {
-        let expansions = self.recorded_expansions(resolutions)?;
-        let contract = self.dispatch_contract(trajectory, dispatch)?;
-        self.settling(trajectory, dispatch)?;
-        self.observed_as(trajectory, dispatch, raw_digest)?;
-        let views = self.projection.view(trajectory);
-        let subject = crate::basis::SubjectKey::ConfinedResult(dispatch.clone());
-        if let Some(DerivedVia::Cast { name }) = views.candidate_via(&subject) {
-            let Some(DerivedCandidate::Result { source, value, .. }) = views.candidate(&subject) else {
-                unreachable!("a subject with a recorded provenance holds its candidate")
-            };
-            let restated = crate::label::EstablishedLabel::from_label(&value.label)
-                .is_some_and(|label| &label == resolved && name == cast && source == raw_digest);
-            if !restated {
-                return Err(TransitionRefusal::InadmissibleResolution);
-            }
-            if !self.cast_restated.insert(dispatch.clone()) {
-                return Err(TransitionRefusal::RepeatAdmission);
-            }
-            return Ok(());
-        }
-        let raw = self.output_label(trajectory, dispatch, contract);
-        self.cast_reads(cast, &raw, &expansions)?;
-        crate::admit::validate_pending_cast(self.engine.registry(), contract, &raw, cast, resolved, &expansions)
-            .map_err(|_| TransitionRefusal::InadmissibleResolution)?;
-        self.derived
-            .insert(dispatch.clone(), Derived::Cast(resolved.clone(), *raw_digest));
-        Ok(())
-    }
-
-    fn settling(&self, trajectory: &TrajectoryId, dispatch: &DispatchId) -> Result<(), TransitionRefusal> {
-        let views = self.projection.view(trajectory);
-        if !views.closed_successfully(dispatch) {
-            return Err(TransitionRefusal::DispatchNotOpen);
-        }
-        if self.admitted.contains(dispatch) || self.derived.contains_key(dispatch) {
-            return Err(TransitionRefusal::RepeatAdmission);
-        }
-        Ok(())
-    }
-
     fn observed_as(
         &self,
         trajectory: &TrajectoryId,
@@ -3014,37 +2822,21 @@ impl<'a> Sequence<'a> {
             .map_err(|_| TransitionRefusal::ForgedResolution)
     }
 
-    fn cast_reads(
-        &self,
-        cast: &crate::names::CastName,
-        prior: &Label,
-        expansions: &Expansions,
-    ) -> Result<(), TransitionRefusal> {
-        required(
-            expansions,
-            self.engine
-                .registry()
-                .cast(cast)
-                .into_iter()
-                .flat_map(|registered| registered.resolution.reads(prior)),
-        )
-    }
-
     fn dispatch_contract(
         &self,
         trajectory: &TrajectoryId,
         dispatch: &DispatchId,
-    ) -> Result<&'a ToolContract, TransitionRefusal> {
+    ) -> Result<std::borrow::Cow<'_, ToolAnnotation>, TransitionRefusal> {
         if dispatch.trajectory() != trajectory {
             return Err(TransitionRefusal::ForeignDispatch);
         }
-        let views = self.projection.view(trajectory);
-        let call = views
-            .dispatch_call(dispatch)
+        let call = self
+            .projection
+            .dispatch_call_of(dispatch)
             .ok_or(TransitionRefusal::UnknownDispatch)?;
         self.engine
             .registry()
-            .keyed_tool(call.tool(), call.contract_id())
+            .annotation_of(call)
             .ok_or_else(|| TransitionRefusal::UnknownTool(call.tool().as_str().to_string()))
     }
 
@@ -3052,7 +2844,7 @@ impl<'a> Sequence<'a> {
         &self,
         trajectory: &TrajectoryId,
         dispatch: &DispatchId,
-    ) -> Result<&'a ToolContract, TransitionRefusal> {
+    ) -> Result<std::borrow::Cow<'_, ToolAnnotation>, TransitionRefusal> {
         let contract = self.dispatch_contract(trajectory, dispatch)?;
         if !self.projection.view(trajectory).is_open(dispatch) {
             return Err(TransitionRefusal::DispatchNotOpen);
@@ -3070,12 +2862,10 @@ impl<'a> Sequence<'a> {
         resolutions: &[GroupResolution],
     ) -> Result<(), TransitionRefusal> {
         let expansions = self.recorded_expansions(resolutions)?;
-        let (sanitizer, transition) = match via {
-            DerivedVia::Sanitizer { name, transition } => (name, transition),
-            DerivedVia::Cast { name } => {
-                return self.cast_candidate(trajectory, subject, name, derived, lineage, &expansions);
-            }
-        };
+        let DerivedVia {
+            name: sanitizer,
+            transition,
+        } = via;
         let registered = self
             .engine
             .registry()
@@ -3180,7 +2970,7 @@ impl<'a> Sequence<'a> {
             Some(_) => return Err(TransitionRefusal::ObservationMismatch),
         }
         let from_label = match &predecessor {
-            None => self.output_label(trajectory, dispatch, contract),
+            None => self.output_label(trajectory, dispatch, &contract),
             Some((body, _)) => body.label.clone(),
         };
         let label = registered
@@ -3202,57 +2992,6 @@ impl<'a> Sequence<'a> {
             self.derived.insert(dispatch.clone(), Derived::Sanitized(value.clone()));
         }
         Ok(())
-    }
-
-    fn cast_candidate(
-        &mut self,
-        trajectory: &TrajectoryId,
-        subject: &crate::basis::SubjectKey,
-        cast: &crate::names::CastName,
-        derived: &DerivedCandidate,
-        lineage: &SanitizerLineage,
-        expansions: &Expansions,
-    ) -> Result<(), TransitionRefusal> {
-        let DerivedCandidate::Result {
-            dispatch,
-            source,
-            from,
-            value,
-            residual,
-        } = derived
-        else {
-            return Err(TransitionRefusal::ForgedLabel);
-        };
-        if subject != &crate::basis::SubjectKey::ConfinedResult(dispatch.clone()) {
-            return Err(TransitionRefusal::ForgedLabel);
-        }
-        // A resolution is no hop: nothing precedes it, and no sanitizer is spent beside it.
-        if from != &ConfinedFrom::Bound || !lineage.names().is_empty() {
-            return Err(TransitionRefusal::ForgedLabel);
-        }
-        let contract = self.dispatch_contract(trajectory, dispatch)?;
-        let views = self.projection.view(trajectory);
-        if views.candidate(subject).is_some() {
-            return Err(TransitionRefusal::InadmissibleResolution);
-        }
-        self.deriving(trajectory, dispatch, false)?;
-        self.observed_as(trajectory, dispatch, source)?;
-        if source != &RawResultDigest::of(value.body.as_str().as_bytes()) {
-            return Err(TransitionRefusal::ObservationMismatch);
-        }
-        let Some(resolved) = crate::label::EstablishedLabel::from_label(&value.label) else {
-            return Err(TransitionRefusal::ForgedLabel);
-        };
-        let raw = self.output_label(trajectory, dispatch, contract);
-        self.cast_reads(cast, &raw, expansions)?;
-        crate::admit::validate_pending_cast(self.engine.registry(), contract, &raw, cast, &resolved, expansions)
-            .map_err(|_| TransitionRefusal::InadmissibleResolution)?;
-        let views = self.projection.view(trajectory);
-        let baseline = crate::admit::cast_baseline(&views, dispatch).ok_or(TransitionRefusal::UnknownDispatch)?;
-        match crate::admit::confined_residual(&baseline, &value.label) {
-            derived_residual @ Some(_) if residual == &derived_residual => Ok(()),
-            _ => Err(TransitionRefusal::AcceptanceMismatch),
-        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3287,9 +3026,6 @@ impl<'a> Sequence<'a> {
             .ok_or(TransitionRefusal::NotForked)?
             .clone();
         let fold = views.branch_label(child);
-        if !fold.is_established(registered.transition.dimension()) {
-            return Err(TransitionRefusal::ForgedLabel);
-        }
         let (from_label, from_body) = match from {
             ConfinedFrom::Bound => {
                 match &policy {
@@ -3302,7 +3038,7 @@ impl<'a> Sequence<'a> {
                 if source != &pending_digest {
                     return Err(TransitionRefusal::ObservationMismatch);
                 }
-                (fold.bound().clone().into_label(), pending_body)
+                (fold.clone(), pending_body)
             }
             ConfinedFrom::Offer(offer) => {
                 let recorded = taken_offer(&views, offer)?;
@@ -3328,7 +3064,7 @@ impl<'a> Sequence<'a> {
                         if source != &pending_digest {
                             return Err(TransitionRefusal::ObservationMismatch);
                         }
-                        (fold.bound().clone().into_label(), pending_body)
+                        (fold.clone(), pending_body)
                     }
                 }
             }
@@ -3405,7 +3141,7 @@ impl<'a> Sequence<'a> {
         // persisted ordinal is checked against a fresh selection, never taken on the record's word.
         let registry = self.engine.registry();
         let before_contract = registry
-            .contract(predecessor)
+            .annotation_of(predecessor)
             .ok_or_else(|| TransitionRefusal::UnknownTool(predecessor.tool().as_str().to_string()))?;
         // A sanitizer rewrites arguments; the tool is never replaced.
         if call.tool() != predecessor.tool() {
@@ -3414,8 +3150,16 @@ impl<'a> Sequence<'a> {
         if !registry.selection_matches(call) {
             return Err(TransitionRefusal::SanitizerUnapplicable);
         }
+        let declaration = registry
+            .declaration(call)
+            .ok_or_else(|| TransitionRefusal::UnknownTool(call.tool().as_str().to_string()))?;
+        // Annotation evidence binds the exact canonical call: whatever declaration the rewrite
+        // selects, the pin the record carries is judged afresh against it.
+        if crate::check::validate_annotation(registry, declaration, call).is_err() {
+            return Err(TransitionRefusal::ForgedResolution);
+        }
         let contract = registry
-            .contract(call)
+            .annotation_of(call)
             .ok_or_else(|| TransitionRefusal::UnknownTool(call.tool().as_str().to_string()))?;
         contract
             .parameters
@@ -3426,40 +3170,25 @@ impl<'a> Sequence<'a> {
         if !registered.applies_to(&contract.tags) {
             return Err(TransitionRefusal::SanitizerUnapplicable);
         }
-        if call.contract_id() == predecessor.contract_id() {
-            // A rewrite that stays in its contract carries its predecessor's answers exactly; the
-            // comparison binds *which* answers, and the consulted call on the record binds what
-            // they may be about.
-            if call != &predecessor.substituting(call.canonical_arguments().clone()) {
+        if call.declaration_id() == predecessor.declaration_id() {
+            // A rewrite that stays in its declaration carries its predecessor's membership
+            // answers exactly where the arguments they read are unchanged; annotation evidence
+            // never rides along, so the comparison sets the record's own pin aside.
+            let carried = predecessor
+                .substituting(call.canonical_arguments().clone())
+                .with_annotation(call.annotation().cloned());
+            if call != &carried {
                 return Err(TransitionRefusal::ForgedLabel);
             }
-            let consulted = views.consulted_call(subject).ok_or(TransitionRefusal::UnbackedOffer)?;
-            if crate::check::validate_tool_resolutions(
-                registry,
-                contract,
-                call,
-                crate::check::AnsweredFor::Consulted(consulted),
-            )
-            .is_err()
-            {
-                return Err(TransitionRefusal::SanitizerUnapplicable);
-            }
         } else {
-            // A rewrite that selects another contract is a new call under it: its answers are
-            // about its own arguments, and every group its placeholders spell is pinned, exactly
-            // as a proposal's are.
-            if crate::check::validate_tool_resolutions(registry, contract, call, crate::check::AnsweredFor::ThisCall)
-                .is_err()
-            {
-                return Err(TransitionRefusal::ForgedResolution);
-            }
-            if crate::check::validate_memberships(contract, call).is_err()
-                || crate::check::pins_agree(contract, call, expansions).is_err()
+            // A rewrite that selects another declaration is a new call under it: every group its
+            // placeholders spell is pinned, exactly as a proposal's are.
+            if crate::check::validate_memberships(&contract, call).is_err()
+                || crate::check::pins_agree(&contract, call, expansions).is_err()
             {
                 return Err(TransitionRefusal::ForgedMembership);
             }
         }
-
         let stage = views.call_stage(subject);
         let derived = registered
             .derive_input(
@@ -3475,17 +3204,14 @@ impl<'a> Sequence<'a> {
         required(expansions, before_contract.groups())?;
         required(expansions, contract.groups())?;
         let CheckOutcome::Block(before) =
-            crate::check::evaluate(before_contract, &views, predecessor, &stage, expansions)
+            crate::check::evaluate(&before_contract, &views, predecessor, &stage, expansions)
         else {
             return Err(TransitionRefusal::UnbackedOffer);
         };
-        if !before.unestablished.is_empty() {
-            return Err(TransitionRefusal::UnreleasedDispatch);
-        }
         let next = CallStage::substituting(derived, lineage.clone());
         if !crate::plan::substitution_helps(
             &before,
-            &crate::check::evaluate(contract, &views, call, &next, expansions),
+            &crate::check::evaluate(&contract, &views, call, &next, expansions),
         ) {
             return Err(TransitionRefusal::SanitizerUnapplicable);
         }
@@ -3558,12 +3284,8 @@ impl<'a> Sequence<'a> {
         Ok(())
     }
 
-    fn output_label(&self, trajectory: &TrajectoryId, dispatch: &DispatchId, contract: &ToolContract) -> Label {
-        let views = self.projection.view(trajectory);
-        contract.output_label_for_resolutions(
-            views.tool_resolutions(dispatch).unwrap_or_default(),
-            &self.dispatch_expansions(trajectory, dispatch),
-        )
+    fn output_label(&self, trajectory: &TrajectoryId, dispatch: &DispatchId, contract: &ToolAnnotation) -> Label {
+        contract.output_label(&self.dispatch_expansions(trajectory, dispatch))
     }
 
     fn dispatch_expansions(&self, trajectory: &TrajectoryId, dispatch: &DispatchId) -> Expansions {
@@ -3640,9 +3362,7 @@ fn belongs_to(sequence: &Sequence<'_>, act: &crate::basis::DecidedAct, fact: &Fa
         ) => true,
         (
             DecidedAct::Outcome(act),
-            Fact::DispatchSucceeded { dispatch, .. }
-            | Fact::DispatchClosed { dispatch, .. }
-            | Fact::OutputCastApplied { dispatch, .. },
+            Fact::DispatchSucceeded { dispatch, .. } | Fact::DispatchClosed { dispatch, .. },
         ) => dispatch == act,
         // A confined hop belongs to the act that reported the outcome it derives from.
         (
@@ -3684,7 +3404,6 @@ fn belongs_to(sequence: &Sequence<'_>, act: &crate::basis::DecidedAct, fact: &Fa
                 ..
             },
         ) => id == act,
-        (DecidedAct::ChildReturn(_) | DecidedAct::Proposals(_), Fact::CastApplied { .. }) => true,
         (
             DecidedAct::Offer(act),
             Fact::ChildReturn { id, .. }
@@ -3724,7 +3443,6 @@ fn belongs_to(sequence: &Sequence<'_>, act: &crate::basis::DecidedAct, fact: &Fa
         (
             DecidedAct::Offer(act),
             Fact::DispatchClosed { dispatch, .. }
-            | Fact::OutputCastApplied { dispatch, .. }
             | Fact::ValueAdmitted {
                 provenance: crate::value::Provenance::ToolResult { dispatch },
                 ..
@@ -3738,7 +3456,7 @@ fn belongs_to(sequence: &Sequence<'_>, act: &crate::basis::DecidedAct, fact: &Fa
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::label::{Audience, Dim, PartialLabel, Trust};
+    use crate::label::{Audience, Trust};
     use crate::profile::PolicyFileKey;
     use crate::value::{LabeledValue, OfferNonce, ToolName, ValueBody, ValueId};
 
@@ -3746,13 +3464,12 @@ mod tests {
         TrajectoryId::new("t")
     }
 
-    fn note_tool() -> ToolContract {
-        ToolContract {
+    fn note_tool() -> ToolAnnotation {
+        ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("note"),
             tags: vec![],
-            delta: Some(crate::contract::Delta::NONE),
+            delta: crate::contract::Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: crate::contract::Requires::default(),
@@ -3762,10 +3479,10 @@ mod tests {
     fn engine() -> Engine {
         let config = crate::registry::RegistryConfig {
             trust_chain: crate::registry::TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![note_tool()],
+            tools: vec![crate::contract::ToolDeclaration::Declared(note_tool())],
+            annotators: vec![],
             authorities: vec![],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
         };
         let profile = crate::profile::covering_declaration(&config);
@@ -3779,8 +3496,8 @@ mod tests {
         .expect("the test policy opens")
     }
 
-    fn starting() -> PartialLabel {
-        PartialLabel::established(EstablishedLabel::new(Trust::new(1), Audience::Public))
+    fn starting() -> Label {
+        Label::new(Trust::new(1), Audience::Public)
     }
 
     fn opening(engine: &Engine, family: &TrajectoryId) -> Fact {
@@ -3814,7 +3531,7 @@ mod tests {
                     proposals: vec![ProposedCall {
                         tool: call.tool().clone(),
                         arguments: call.canonical_arguments().canonical_bytes().to_vec(),
-                        tool_resolutions: Vec::new(),
+                        annotation: None,
                         memberships: Vec::new(),
                     }],
                     spawn: None,
@@ -3885,9 +3602,9 @@ mod tests {
                 &crate::registry::RegistryConfig {
                     trust_chain: crate::registry::TrustChain::new(vec!["suspicious".into()]),
                     tools: vec![],
+                    annotators: vec![],
                     authorities: vec![],
                     sanitizers: vec![],
-                    casts: vec![],
                     membership: None,
                 },
                 &ReturnPolicy::Raw,
@@ -3913,10 +3630,7 @@ mod tests {
         let stranger = TrajectoryId::new("stranger");
         let on_stranger = Fact::ValueAdmitted {
             trajectory: stranger.clone(),
-            value: LabeledValue::new(
-                ValueBody::new("body"),
-                Label::new(Dim::Known(Trust::new(1)), Dim::Known(Audience::Public)),
-            ),
+            value: LabeledValue::new(ValueBody::new("body"), Label::new(Trust::new(1), Audience::Public)),
             provenance: Provenance::ChildReturn {
                 child: TrajectoryId::new("kid"),
                 id: crate::value::ChildReturnId::new(TrajectoryId::new("kid"), 0),

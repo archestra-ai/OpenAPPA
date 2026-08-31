@@ -111,7 +111,9 @@ pub enum ArgumentError {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToolParameters {
-    root: ObjectSchema,
+    /// Shared: a released record materializes its annotation per replay pass, so a clone
+    /// bumps a reference instead of copying the compiled tree.
+    root: std::sync::Arc<ObjectSchema>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -181,12 +183,12 @@ impl ToolParameters {
     /// the v1 global input limits, leaving the tool's argument shape untyped.
     pub fn open() -> Self {
         ToolParameters {
-            root: ObjectSchema {
+            root: std::sync::Arc::new(ObjectSchema {
                 description: None,
                 properties: BTreeMap::new(),
                 required: Vec::new(),
                 additional: true,
-            },
+            }),
         }
     }
 
@@ -196,7 +198,9 @@ impl ToolParameters {
             SchemaNode::Object(root) => root,
             _ => return Err(ParamsError::RootNotObject),
         };
-        Ok(ToolParameters { root })
+        Ok(ToolParameters {
+            root: std::sync::Arc::new(root),
+        })
     }
 
     /// The normalized schema rendering: what the contract serializes, policy identity
@@ -223,11 +227,11 @@ impl ToolParameters {
         }
     }
 
-    /// Whether `name` is a required top-level property of any type — the shape a resolver input
-    /// mapped from `$tool_call.arguments.<name>` must point at. The resolver receives whatever
-    /// JSON value the argument holds, so only presence has to be guaranteed before the call is
-    /// resolved. Nesting does not count: only the root object's own properties are read.
-    pub(crate) fn required_property(&self, name: &str) -> Result<(), PropertyFault> {
+    /// Whether `name` is a required top-level property of any type — the shape an Annotator
+    /// input mapped from `$tool_call.arguments.<name>` must point at. The Annotator receives
+    /// whatever JSON value the argument holds, so only presence has to be guaranteed before the
+    /// call is annotated. Nesting does not count: only the root object's own properties are read.
+    pub fn required_property(&self, name: &str) -> Result<(), PropertyFault> {
         match self.root.properties.contains_key(name) {
             false => Err(PropertyFault::Undeclared),
             true => match self.root.required.iter().any(|required| required == name) {

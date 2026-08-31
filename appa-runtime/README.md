@@ -70,15 +70,15 @@ max_body_bytes = 65536
 
 Implementation bindings live in `[externals]`: one
 `[externals.<kind>.<name>]` entry per registered authority, sanitizer,
-cast, or membership resolver, and per dynamic resolver that names no
-`builtin` on its declaration — bound to a `url` or a `command`, or, for
-authorities and sanitizers, a `builtin` (stock, a model transport, or a
-module from `--modules-dir`); a cast's `builtin` is a model transport
-only. A dynamic resolver names a model transport on its own
-`[[dynamic_resolver]]` declaration with `builtin = "claude-code"` or
-`builtin = "llm"`. An authority may stay unbound and then returns no
-answer; every other registered name needs its entry, and an entry no
-declaration registers refuses to start.
+or membership resolver, and per annotator that names no `builtin` on
+its declaration — bound to a `url` or a `command`, or, for authorities
+and sanitizers, a `builtin` (stock, a model transport, or a module from
+`--modules-dir`). An annotator names a model transport on its own
+`[[policy.annotator]]` declaration with `builtin = "claude-code"` or
+`builtin = "llm"`; a bound entry for a builtin annotator refuses to
+start. An authority may stay unbound and then returns no answer; every
+other registered name needs its entry, and an entry no declaration
+registers refuses to start.
 
 `integrations/claude-code/examples/claude-code.appa.toml` is a
 complete starting point: it releases every built-in Claude Code tool

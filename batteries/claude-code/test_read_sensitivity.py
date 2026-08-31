@@ -54,12 +54,14 @@ class ReadSensitivityTests(unittest.TestCase):
     def test_protocol_returns_private_audience(self):
         request = {
             "version": 1,
-            "kind": "dynamic",
+            "kind": "annotation",
             "name": "claude-code.read-sensitivity",
             "declaration": {
-                "returns": ["delta.audience"],
+                "inputs": [],
                 "trust_ranks": ["suspicious", "trusted"],
+                "audiences": ["private"],
                 "attention_marks": [],
+                "effects": [],
             },
             "artifact": {
                 "args": {
@@ -79,7 +81,14 @@ class ReadSensitivityTests(unittest.TestCase):
 
         self.assertEqual(
             json.loads(result.stdout),
-            {"version": 1, "answer": {"delta.audience": ["private"]}},
+            {
+                "version": 1,
+                "answer": {
+                    "delta": {"audience": ["private"]},
+                    "requires": {"history": [], "attention": []},
+                    "emits": [],
+                },
+            },
         )
 
 

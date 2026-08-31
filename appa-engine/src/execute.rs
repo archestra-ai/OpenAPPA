@@ -3,9 +3,8 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::check::{Gap, UnestablishedFact};
+use crate::check::Gap;
 use crate::groups::Expansions;
-use crate::label::PartialLabel;
 use crate::names::AuthorityName;
 use crate::plan::covers_gap;
 use crate::registry::Registry;
@@ -22,13 +21,11 @@ pub struct AuthorityEvidence {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthorityReview {
     pub tool: crate::value::ToolName,
-    pub trajectory_label: PartialLabel,
+    pub trajectory_label: crate::label::Label,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PlanError {
-    #[error("the call has an unestablished dimension — a fact clears it, never a plan")]
-    Unestablished(Vec<UnestablishedFact>),
     #[error("no authority registered as {0}")]
     UnknownAuthority(String),
     #[error("a ruling claims a gap the current block does not carry")]
@@ -51,7 +48,7 @@ pub enum PlanError {
 /// persisted release is held to is the one the live path enforced.
 pub(crate) fn rulings_cover<'a>(
     registry: &Registry,
-    contract: &crate::contract::ToolContract,
+    contract: &crate::contract::ToolAnnotation,
     block: &crate::check::RawBlock,
     rulings: impl Iterator<Item = (&'a AuthorityName, &'a [Gap])> + Clone,
     expansions: &Expansions,
@@ -83,7 +80,7 @@ pub(crate) fn rulings_cover<'a>(
 mod tests {
     use super::*;
     use crate::authority::{Authority, Mandate, Scope};
-    use crate::contract::{Delta, LabelRequirements, Requires, ToolContract};
+    use crate::contract::{Delta, LabelRequirements, Requires, ToolAnnotation};
     use crate::fact::EffectSet;
     use crate::label::Trust;
     use crate::names::MarkName;
@@ -103,13 +100,12 @@ mod tests {
         }
     }
 
-    fn wire() -> ToolContract {
-        ToolContract {
+    fn wire() -> ToolAnnotation {
+        ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("wire"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
@@ -143,10 +139,10 @@ mod tests {
         };
         Registry::build_covered(crate::registry::RegistryConfig {
             trust_chain: chain(),
-            tools: vec![wire()],
+            tools: vec![crate::contract::ToolDeclaration::Declared(wire())],
+            annotators: vec![],
             authorities: vec![officer, attester],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
         })
         .unwrap()
@@ -156,7 +152,6 @@ mod tests {
         crate::check::RawBlock {
             requirement_gaps: gaps,
             narrowing: None,
-            unestablished: vec![],
         }
     }
 
@@ -165,7 +160,7 @@ mod tests {
         let name = AuthorityName::new(authority);
         rulings_cover(
             &registry,
-            registry.tool(&ToolName::new("wire")).unwrap(),
+            registry.tool(&ToolName::new("wire")).unwrap().declared().unwrap(),
             block,
             [(&name, covers)].into_iter(),
             &Expansions::default(),
@@ -182,7 +177,7 @@ mod tests {
         let registry = registry();
         let refused = rulings_cover(
             &registry,
-            registry.tool(&ToolName::new("wire")).unwrap(),
+            registry.tool(&ToolName::new("wire")).unwrap().declared().unwrap(),
             &block(vec![floor_gap()]),
             std::iter::empty(),
             &Expansions::default(),

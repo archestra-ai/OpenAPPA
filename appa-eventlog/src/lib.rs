@@ -149,7 +149,7 @@ impl LogStore {
     /// Open the log. A fresh database gets the schema and its version stamp; an existing one is
     /// checked for damage and for a version this build understands, and refused otherwise.
     pub fn open(backend: Backend) -> Result<LogStore, OpenError> {
-        let (connection, path) = match &backend {
+        let (mut connection, path) = match &backend {
             Backend::Sqlite { path } => (Connection::open(path)?, path.display().to_string()),
             Backend::Memory => (Connection::open_in_memory()?, ":memory:".to_string()),
         };
@@ -168,9 +168,7 @@ impl LogStore {
                 return Err(OpenError::Damaged { path, detail: check });
             }
         }
-        connection.pragma_update(None, "foreign_keys", "ON")?;
 
-        let mut connection = connection;
         {
             let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let version: i64 = transaction.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -192,11 +190,16 @@ impl LogStore {
                      );",
                 )?;
                 transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-            } else if version != SCHEMA_VERSION || !has_schema(&transaction)? {
+            } else if version != SCHEMA_VERSION {
                 return Err(OpenError::ForeignSchema {
                     path,
                     found: version,
                     expected: SCHEMA_VERSION,
+                });
+            } else if !has_schema(&transaction)? {
+                return Err(OpenError::Damaged {
+                    path,
+                    detail: "stamped at this build's schema version, but its tables are missing".to_string(),
                 });
             }
             transaction.commit()?;
@@ -283,7 +286,7 @@ impl LogStore {
             // second process would. It takes the position and records nothing, so this caller's
             // append conflicts on position and replays, and an assertion reads whose write landed
             // from the position rather than from records a later read would have to accept.
-            let foreign = encode(&foreign_batch());
+            let foreign = encode(&[]);
             let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let at = position(&transaction, &based_on.root)?;
             transaction.execute(
@@ -374,14 +377,6 @@ impl LogStore {
             .lock()
             .expect("the log store mutex is never poisoned: no panics under the lock")
     }
-}
-
-/// What a raced append's foreign writer records: nothing. A batch takes a log position whether or
-/// not it holds facts, so the race is won — the caller's append conflicts and replays — without
-/// minting a record every later read would then have to accept.
-#[cfg(feature = "fault-injection")]
-fn foreign_batch() -> Vec<Fact> {
-    Vec::new()
 }
 
 #[cfg(feature = "fault-injection")]
@@ -721,6 +716,21 @@ mod tests {
     }
 
     #[test]
+    fn a_stamped_database_without_its_tables_is_damaged() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let path = dir.path().join("appa.db");
+        Connection::open(&path)
+            .expect("the file opens")
+            .pragma_update(None, "user_version", SCHEMA_VERSION)
+            .expect("the stamp lands");
+
+        match LogStore::open(Backend::Sqlite { path }).err() {
+            Some(OpenError::Damaged { .. }) => {}
+            other => panic!("expected a damage refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn an_unstamped_database_that_already_holds_tables_is_refused() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let path = dir.path().join("appa.db");
@@ -751,7 +761,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let path = dir.path().join("appa.db");
         std::fs::write(&path, b"not a sqlite database at all").expect("the file writes");
-        assert!(LogStore::open(Backend::Sqlite { path }).is_err());
+        match LogStore::open(Backend::Sqlite { path }).err() {
+            Some(OpenError::Damaged { .. }) => {}
+            other => panic!("expected a damage refusal, got {other:?}"),
+        }
     }
 
     #[test]

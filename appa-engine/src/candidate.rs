@@ -4,19 +4,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::check::Narrowing;
 use crate::label::Label;
-use crate::names::{CastName, SanitizerName};
+use crate::names::SanitizerName;
 use crate::value::{DispatchId, LabeledValue, OfferId, RawResultDigest, ResolvedCall};
 
-/// The transformer whose application one candidate record audits.
+/// The transformer whose application one candidate record audits: the sanitizer that derived
+/// the value, and the resolved transition it applied.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DerivedVia {
-    Sanitizer {
-        name: SanitizerName,
-        transition: crate::authority::Transition,
-    },
-    Cast {
-        name: CastName,
-    },
+pub struct DerivedVia {
+    pub name: SanitizerName,
+    pub transition: crate::authority::Transition,
 }
 
 /// The sanitizers a candidate's chain has already spent, in application order.
@@ -108,10 +104,10 @@ impl CallStage {
     /// The label the bytes this call would release carry now — the source an input sanitizer's
     /// declared `from` is measured against. Model-authored arguments carry the
     /// trajectory's own established bound; a substitution carries its derivation's label instead.
-    pub(crate) fn released(&self, current: &crate::label::PartialLabel) -> Label {
+    pub(crate) fn released(&self, current: &Label) -> Label {
         match &self.substituted {
             Some(label) => label.clone(),
-            None => current.bound().clone().into_label(),
+            None => current.clone(),
         }
     }
 

@@ -9,9 +9,9 @@
 //! a narration the service invented.
 //!
 //! The mapping is lossy on purpose: audit detail the chat does not render
-//! (cast records, per-value provenance) stays in the log.
+//! (per-value provenance) stays in the log.
 
-use appa_engine::label::{Audience, Dim, Label};
+use appa_engine::label::{Audience, Label};
 use appa_engine::registry::TrustChain;
 use appa_example_agent::{Record, Recorded};
 use appa_runtime::api::{AuditEntry, AuditEvent, AuditLabel, DispatchOutcome};
@@ -48,8 +48,6 @@ pub enum WireEvent {
         trajectory: String,
         trust: String,
         audience: String,
-        unresolved_trust: Vec<u64>,
-        unresolved_audience: Vec<u64>,
     },
     Remedy {
         trajectory: String,
@@ -99,19 +97,15 @@ impl LabelText {
     /// already.
     pub fn of(label: &Label, chain: &TrustChain) -> LabelText {
         LabelText {
-            trust: match &label.trust {
-                Dim::Known(trust) => chain.name_of(*trust).unwrap_or("?").to_string(),
-                Dim::Unknown => "unknown".to_string(),
-            },
+            trust: chain.name_of(label.trust).unwrap_or("?").to_string(),
             audience: match &label.audience {
-                Dim::Known(Audience::Public) => "public".to_string(),
-                Dim::Known(Audience::Restricted(readers)) if readers.is_empty() => "nobody".to_string(),
-                Dim::Known(Audience::Restricted(readers)) => readers
+                Audience::Public => "public".to_string(),
+                Audience::Restricted(readers) if readers.is_empty() => "nobody".to_string(),
+                Audience::Restricted(readers) => readers
                     .iter()
                     .map(|reader| reader.as_str())
                     .collect::<Vec<_>>()
                     .join(", "),
-                Dim::Unknown => "unknown".to_string(),
             },
         }
     }
@@ -230,7 +224,7 @@ impl AuditReader {
                 events
             }
             // Algebraically detailed records the chat does not render.
-            AuditEvent::Cast { .. } | AuditEvent::SanitizerBound { .. } | AuditEvent::VoidReturn => Vec::new(),
+            AuditEvent::SanitizerBound { .. } | AuditEvent::VoidReturn => Vec::new(),
         }
     }
 }
@@ -240,7 +234,5 @@ fn label_event(trajectory: String, label: AuditLabel) -> WireEvent {
         trajectory,
         trust: label.trust,
         audience: label.audience,
-        unresolved_trust: label.unresolved_trust,
-        unresolved_audience: label.unresolved_audience,
     }
 }

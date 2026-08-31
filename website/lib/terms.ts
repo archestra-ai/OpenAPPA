@@ -24,12 +24,16 @@ const TERMS = {
     "A registered component (such as a PII scrubber or schema validator) that derives cleaner outputs to restore lost reach or raise trust.",
   sanitizers:
     "Registered components that derive cleaner outputs to restore lost reach or raise trust.",
-  cast:
-    "A registered component that resolves one whole Unknown value to one complete label, atomically, under pre-configured ceilings.",
-  casts:
-    "Registered components that resolve whole Unknown values to complete labels, atomically, under pre-configured ceilings.",
-  "[[cast]]":
-    "The registered resolution of an Unknown value: one complete label for the whole source, atomically. A resolver-backed cast may carry a hint and binds under [externals.casts.<name>].",
+  annotator:
+    "A registered component that produces a tool call's complete contract — delta, requires, and effects — per call, inside its declared mandate. A tool routes through it with annotator = \"<name>\"; the wildcard tool routes the long tail through one.",
+  annotators:
+    "Registered components that produce complete per-call tool contracts inside their declared mandates.",
+  annotation:
+    "The complete concrete contract one released tool call carries: its delta, its requires, and the effects it emits. Written statically in the [[tool]] entry, or answered per call by an annotator; pinned to the exact call, so a rewrite is annotated afresh and replay never consults again.",
+  "[[annotator]]":
+    "A named producer of per-call tool contracts. Its opaque non-empty name can contain dots. It declares the inputs it reads from a proposed call and its mandate — the vocabulary its answers may use — and may name a stock model transport with builtin = \"claude-code\" or \"llm\"; otherwise the deployment binds it under [externals.annotators.<name>].",
+  mandate:
+    "The closed vocabulary an annotator's answers may use: ranks, audiences, marks, and effects. An omitted bound admits the whole policy vocabulary; public is always an admissible audience. Every transport's answer passes the same mandate validation.",
   remedy:
     "An actionable path returned on a policy refusal explaining how to unblock execution safely.",
   remedies:
@@ -58,24 +62,24 @@ const TERMS = {
     "A group: a directory-held reader set, resolved to literal reader IDs by the membership resolver when the engine reads it.",
   "[membership]":
     "The one registration every @name group resolves through. A group mention without it is a load error. Its name binds under [externals.membership.<name>] to an endpoint or a command; no builtin serves a directory.",
-  "[[dynamic_resolver]]":
-    "A named external that classifies proposed tool calls. Its opaque non-empty name can contain dots. It declares the inputs a tool must supply and the contract destinations it owns through returns, and may name a stock model transport with builtin = \"claude-code\" or \"llm\"; otherwise the deployment binds it under [externals.dynamic.<name>]. It is distinct from @group membership resolution.",
   inputs:
-    "The values a resolver reads. A tool maps each one from $tool_call. Without an explicit mapping, the resolver reads the complete tool call: name, description when declared, and arguments.",
-  uses:
-    "A tool's dynamic resolvers. Each entry names a registered resolver and maps every input that resolver declares. Omit it when the tool uses none.",
-  returns:
-    "The contract destinations an attached resolver owns and always answers with: delta.trust, delta.audience, requires.trust, requires.audience, requires.attention. Static values and other resolvers cannot own the same destinations. Trust values select from the policy trust chain; attention values select from marks authorities name under permits.attention.",
+    "The values an annotator reads, each mapped from $tool_call on its declaration. Without an explicit mapping, the annotator reads the complete tool call: name, description when declared, and arguments.",
+  ranks:
+    "In an annotator's mandate: the trust ranks its answers may write in delta.trust and requires.trust. Omitted, every rank in the trust chain.",
+  audiences:
+    "In an annotator's mandate: the literal readers a restricted audience answer may name. public is always admissible and is never listed as a reader; a group is never admissible. Omitted, every reader the policy writes.",
+  marks:
+    "In an annotator's mandate: the attention marks its answers may require. Omitted, every mark an authority names under permits.attention.",
   "$tool_call":
-    "The only source a resolver input reads. Its five forms are the complete call (name, description when declared, arguments), its name, its description, its arguments, and one top-level argument. Only $tool_call.description requires a declared description.",
-  "[externals.dynamic.<name>]":
-    "The deployment binding for one dynamic resolver that does not carry a builtin on its declaration: an HTTP endpoint or a local command. Every implementation receives the same consult and answers under the same validation. Unsupported platforms reject command bindings when loading the configuration.",
+    "The only source an annotator input reads. Its five forms are the complete call (name, description when declared, arguments), its name, its description, its arguments, and one top-level argument. Only $tool_call.description requires a declared description.",
+  "[externals.annotators.<name>]":
+    "The deployment binding for one annotator that does not carry a builtin on its declaration: an HTTP endpoint or a local command. Every implementation receives the same consult and answers under the same mandate validation. Unsupported platforms reject command bindings when loading the configuration.",
   "[externals.<kind>.<name>]":
-    "One deployment binding: a registered authority, sanitizer, or cast bound to exactly one of url, command, or builtin; a membership resolver, or a dynamic resolver without a declared builtin, bound to url or command. A binding without a registration refuses the deployment, and so does an unbound sanitizer, cast, or resolver; an unbound authority returns no answer.",
+    "One deployment binding: a registered authority or sanitizer bound to exactly one of url, command, or builtin; a membership resolver, or an annotator without a declared builtin, bound to url or command. A binding without a registration refuses the deployment, and so does an unbound sanitizer, annotator, or membership resolver; an unbound authority returns no answer.",
   declaration:
-    "The policy-authored half of a consult: the component's hint, its permits or may_cast, or its declared results and vocabulary. The agent never writes it.",
+    "The policy-authored half of a consult: the component's hint and permits, or an annotator's mandate vocabulary. The agent never writes it.",
   artifact:
-    "The judged half of a consult: the call and its unmet requirements, the body to rewrite or label, a resolver's args, or a group name. Never the trajectory.",
+    "The judged half of a consult: the call and its unmet requirements, the body to rewrite, an annotator's args, or a group name. Never the trajectory.",
   internal:
     "An example reader for restricted internal data. Reading internal data closes off public destinations.",
   "{public, trusted}":
@@ -94,12 +98,12 @@ const TERMS = {
     "Under requires.audience: the current audience must be a subset of these readers. A tool_input rewrite cannot clear it.",
   excludes:
     "Under requires.effects: the effect is neither recorded in the trajectory nor reserved by an unsettled dispatch.",
-  tags: "Routing names with no algebraic life. On a tool, the names that select it. On an authority, sanitizer, or cast, the tools it answers or the values it acts on; omitted, every tool. Attention routing ignores tags.",
+  tags: "Routing names with no algebraic life. On a tool, the names that select it. On an authority or sanitizer, the tools it answers or the values it acts on; omitted, every tool. Attention routing ignores tags.",
 
   /* Authorities */
   permits:
     "What a registered component may do, declared in its own table. For an authority: which unmet requirements its rulings can clear, and how far. For a sanitizer: the one transition, on one dimension, its derivation can claim.",
-  hint: "The deployer's own account of what an authority, sanitizer, or cast is for. Carried into every remedy plan naming it, so the agent chooses on stated purpose, and into the component's consult, so a model implementation reads its charter. Advisory: it grants nothing.",
+  hint: "The deployer's own account of what an authority or sanitizer is for. Carried into every remedy plan naming it, so the agent chooses on stated purpose, and into the component's consult, so a model implementation reads its charter. Advisory: it grants nothing.",
   trust_below:
     "In an authority's permits: it can rule for a call whose trust requirement is unmet, for requirements up to this rank.",
   audience_missing:
@@ -109,31 +113,28 @@ const TERMS = {
   attention:
     "In a tool's requires: named marks that demand a fresh ruling on every call; history never satisfies them. In an authority's permits: the marks its rulings satisfy. A mark routes to every authority that names it, whatever its tags.",
   "permits.attention":
-    "In an authority's permits: the marks its rulings satisfy. The marks every authority lists form the set a resolver's attention answer selects from.",
+    "In an authority's permits: the marks its rulings satisfy. The marks every authority lists form the set an annotation's attention answer selects from.",
   'builtin = "hitl"':
     "The built-in human-in-the-loop authority: elicitation hosted by the harness rather than a remote resolver.",
   'builtin = "approve"':
     "The stock in-process authority that approves every consult within what it permits. An open gate the deployer chose deliberately — legitimate and visible in review.",
   'builtin = "claude-code"':
-    "The stock model transport on a Claude subscription: one isolated claude -p process per consult, given the component's declaration and the judged value, never the trajectory. An authority, sanitizer, or cast binds it under [externals]; a dynamic resolver names it on its declaration. The same caps apply as to any implementation.",
+    "The stock model transport on a Claude subscription: one isolated claude -p process per consult, given the component's declaration and the judged value, never the trajectory. An authority or sanitizer binds it under [externals]; an annotator names it on its declaration. The same caps apply as to any implementation.",
   'builtin = "llm"':
     "The stock model transport on an API key, through the deployment's [externals.llm] profile. Same consult rendering, same placement, and same per-kind caps as claude-code.",
   "[externals.llm]":
     "The deployment's one API-key model profile — provider (anthropic, openai, gemini, or ollama), model, optional url, token_env (required except for ollama), timeout, and concurrency — that every builtin = \"llm\" binding or declaration consults. A deployment without it refuses to open a policy that declares one.",
 
-  /* Sanitizers and Casts */
+  /* Sanitizers */
   on: "Where a sanitizer may apply: tool_output at an admission the host can withhold — a child return, or a tool result at a confined application point; tool_input as whole-argument substitution at dispatch.",
   tool_input:
-    "A sanitizer application point: the sanitizer derives a replacement for one call's arguments, and the harness dispatches exactly those bytes. A rewrite that stays in its contract keeps the resolver answers of the call last consulted and does not consult again; one that selects another ordered contract is judged as a new call under it, with that contract's resolvers consulted for the rewritten arguments.",
+    "A sanitizer application point: the sanitizer derives a replacement for one call's arguments, and the harness dispatches exactly those bytes. The rewrite is judged by the ordered contract its arguments select; an annotation binds the exact call, so a rewrite of an annotator-backed tool is annotated afresh, whichever contract it selects.",
   tool_output:
     "A sanitizer application point: an admission the host can withhold — the child-return crossing, or a tool result at an application point the deployment confines. The derivation is admitted; the raw value is withheld.",
   from: "In a sanitizer's permits: for audience, the readers the source audience must contain; for trust, the rank the source must meet or exceed.",
   to: "In a sanitizer's permits: the exact audience, or the exact trust rank, the derivation carries.",
-  constant: "In a cast: every covered Unknown value resolves to one declared complete label.",
   resolver:
-    "The dynamic implementation of a registered external: authority rulings, cast decisions, sanitizer derivations, membership answers, or tool-contract fields.",
-  may_cast:
-    "The complete ceiling on a cast resolver's answer: the trust ranks it must choose from, and the readers its audience must stay within. Only a ceiling of [\"public\"] admits a public answer.",
+    "The implementation answering for one registered external: the directory behind [membership], or the endpoint, command, builtin, or model behind an authority, sanitizer, or annotator binding.",
   "[child]": "Run configuration for child sub-executions.",
   return_sanitizer: "Configured default sanitizer for all child sub-execution returns.",
   "attest-schema":
@@ -147,12 +148,8 @@ const TERMS = {
     "The loss of reach a proposed flow would commit. A raw path requires acceptance. An output-sanitizer path withholds the raw result; its derivation then admits, remains confined for another helpful sanitizer, or awaits acceptance of its exact residual.",
   remedy_plans:
     "Returned on a refusal: exact valid paths forward to unblock execution.",
-  unestablished:
-    "Returned on a refusal: each source, by value, whose needed dimension no registered cast reaches, with its unresolved dimensions. A registered cast that gives no answer decides nothing and lists nothing here.",
-  Unknown:
-    "Unestablished label state on an unannotated or pending-cast value. Not a rank: it is ordered against no rank. Fails closed at every consumer of the dimension — label requirements, sanitizer applicability and permits checks, pending-cast admission — until a cast resolves the value.",
   confined_results:
-    "The deployment's list of result points the host withholds from the model. A pending-cast delta and output sanitization at a tool result both need the tool listed here.",
+    "The deployment's list of result points the host withholds from the model. Output sanitization at a tool result needs the tool listed here; a provider-run tool cannot be listed, because its result reaches the model inside the inference call.",
   trajectory: "One agent run: its security label plus its append-only event log.",
 } as const satisfies Record<string, string>;
 

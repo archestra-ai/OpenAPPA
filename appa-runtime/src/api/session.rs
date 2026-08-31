@@ -4,16 +4,13 @@
 use std::sync::Arc;
 
 use crate::elicit::Elicitation;
-use appa_engine::value::ValueBody;
 
 use crate::consult::{
-    CastAnswer, CastArtifact, CastDeclaration, Consult, ConsultBody, DynamicAnswer, DynamicArtifact,
-    MembershipArtifact, ReadersAnswer, SanitizerAnswer,
+    AnnotationAnswer, AnnotationArtifact, Consult, ConsultBody, MembershipArtifact, ReadersAnswer, SanitizerAnswer,
 };
 use crate::engine::{
-    AuthorityVerdict, CandidateResolution, CastAsk, CastLabel, CastVerdict, EngineDecision, EngineEvent, EngineView,
-    ExternalEvidence, ExternalRequest, Feedback, ForkStatus, Liveness, Next, OfferNonce, OpenDispatch, Presentation,
-    engine_id,
+    AuthorityVerdict, EngineDecision, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Feedback, ForkStatus,
+    Liveness, Next, OfferNonce, OpenDispatch, Presentation, engine_id,
 };
 use crate::external::ConsultOutcome;
 
@@ -279,10 +276,6 @@ impl Session {
                     tracing::debug!(trajectory = %self.trajectory.0, "call blocked");
                     Ok(ToolCallDecision::Deny {
                         feedback: join_feedback(feedback),
-                        unestablished: feedback
-                            .iter()
-                            .flat_map(|entry| entry.unestablished.iter().cloned())
-                            .collect(),
                     })
                 }
                 _ => Err(EventError::UnexpectedDecision),
@@ -652,12 +645,12 @@ impl Session {
         let opened = self.inner.log(&self.root)?;
         let policy = self.inner.resolve_policy(&self.deployment, &opened)?;
         let mut opened = Some(opened);
-        // Resolver answers carry the label context they were classified under, and the
-        // engine matches them only while the call's current context is that one — a moved
-        // trajectory consults again by construction, so this loop carries evidence blindly.
-        // Every round either decides or gathers an answer the engine did not hold: a missing
-        // resolver answer, or the cast behind a refused one. Both are finite, so a round that
-        // changes nothing is the only way this loop fails to converge.
+        // External answers carry the exact call or group they answered for, and the
+        // engine matches them only while that is still the one in front of it — a
+        // rewritten call is annotated afresh by construction, so this loop carries
+        // evidence blindly. Every round either decides or gathers an answer the engine
+        // did not hold. Rounds are finite, so a round that changes nothing is the only
+        // way this loop fails to converge.
         let mut evidence: Vec<ExternalEvidence> = Vec::new();
         loop {
             let carried = evidence.clone();
@@ -667,24 +660,24 @@ impl Session {
             })?;
             match decision.then {
                 // The engine batches every missing answer into one request set, and evidence
-                // is matched by resolver name, never by position. Without a reviewer the
-                // consults run concurrently — a tool-resolution consult can take a model call's
+                // is matched by name, never by position. Without a reviewer the
+                // consults run concurrently — an annotation consult can take a model call's
                 // seconds, and the batch should cost its slowest member, not their sum. With a
                 // reviewer they stay serial: one staged review on screen at a time.
                 Next::ResolveExternal(requests) => match elicitation {
                     None => {
                         // Batch-terminal: join_all settles every sibling first; any
-                        // resolver no-answer then aborts the invocation, discarding the
+                        // no-answer then aborts the invocation, discarding the
                         // siblings' answers, before another engine round or any append.
                         let consults = requests.into_iter().map(|request| self.consult(request, None));
                         for answered in futures_util::future::join_all(consults).await {
-                            supersede(&mut evidence, answered?);
+                            evidence.push(answered?);
                         }
                     }
                     Some(_) => {
                         for request in requests {
                             let answered = self.consult(request, elicitation).await?;
-                            supersede(&mut evidence, answered);
+                            evidence.push(answered);
                         }
                     }
                 },
@@ -754,8 +747,8 @@ impl Session {
         Err(EventError::Contended { attempts: REPLAY_LIMIT })
     }
 
-    /// One external consult. Only a tool-resolution failure is an error: the check cannot
-    /// complete without the answer, no fact may be appended, and the refusal is operational
+    /// One external consult. Only an annotation failure is an error: the call cannot be
+    /// judged without its annotation, no fact may be appended, and the refusal is operational
     /// — never a policy denial. Every other external keeps its no-answer evidence shape.
     async fn consult(
         &self,
@@ -809,58 +802,54 @@ impl Session {
                     derived,
                 }
             }
-            ExternalRequest::ToolResolution {
-                uses,
-                args,
+            ExternalRequest::Annotation {
+                annotator,
+                call,
                 declaration,
+                args,
             } => {
-                let resolver = uses.resolver.as_str();
                 let consult = Consult {
-                    name: resolver.to_string(),
-                    body: ConsultBody::Dynamic {
+                    name: annotator.clone(),
+                    body: ConsultBody::Annotation {
                         declaration: declaration.clone(),
-                        artifact: DynamicArtifact { args: args.clone() },
+                        artifact: AnnotationArtifact { args: args.clone() },
                     },
                 };
                 let answer = match self.deployment.externals.consult(&consult, None).await {
                     ConsultOutcome::Answer(answer) => {
-                        DynamicAnswer::from_wire(&answer, declaration).ok_or(crate::external::NoAnswerReason::Malformed)
+                        AnnotationAnswer::from_wire(&answer, declaration).ok_or_else(|| {
+                            crate::external::NoAnswerReason::MalformedAnswer(
+                                "detail=invalid_fields_or_value_types".to_string(),
+                            )
+                        })
                     }
                     ConsultOutcome::NoAnswer(reason) => Err(reason),
                 };
+                // Annotation failure is an operational refusal, never model feedback: the
+                // call is not judged, nothing is appended, and the harness fails closed.
                 let answer = match answer {
                     Ok(answer) => answer,
                     Err(reason) => {
                         match reason {
                             crate::external::NoAnswerReason::Unreachable | crate::external::NoAnswerReason::Timeout => {
-                                tracing::warn!(resolver, ?reason, "a tool-resolution consult produced no answer")
+                                tracing::warn!(annotator, ?reason, "an annotation consult produced no answer")
                             }
-                            _ => tracing::debug!(resolver, ?reason, "a tool-resolution consult produced no answer"),
+                            _ => tracing::debug!(annotator, ?reason, "an annotation consult produced no answer"),
                         }
-                        return Err(EventError::ResolverUnavailable {
-                            resolver: resolver.to_string(),
-                            reason: format!("{reason:?}"),
+                        return Err(EventError::AnnotationRefused {
+                            annotator: annotator.clone(),
+                            reason: reason.diagnostic(),
                         });
                     }
                 };
-                ExternalEvidence::ToolResolution {
-                    resolver: resolver.to_string(),
-                    // The evidence names the exact value it answered for, so a sibling call with
-                    // other arguments cannot consume it.
-                    args: appa_engine::contract::ResolverArgsDigest::of(&appa_engine::params::canonical_bytes(args)),
+                ExternalEvidence::Annotation {
+                    annotator: annotator.clone(),
+                    // The evidence names the exact call it answered for: a rewritten call
+                    // never consumes a stale annotation.
+                    call: *call,
                     answer,
                 }
             }
-            ExternalRequest::PendingCast { source, ask } => ExternalEvidence::PendingCast {
-                source: *source,
-                verdict: self.cascade(ask).await,
-                ask: ask.clone(),
-            },
-            ExternalRequest::Cast { value, ask } => ExternalEvidence::Cast {
-                value: *value,
-                verdict: self.cascade(ask).await,
-                ask: ask.clone(),
-            },
             ExternalRequest::Membership { resolver, group } => {
                 let consult = Consult {
                     name: resolver.clone(),
@@ -879,48 +868,6 @@ impl Session {
                 }
             }
         })
-    }
-
-    /// Every cast the ask still carries, in registration order, until one answers. A constant
-    /// arrives already resolved and answers without a call; a resolver is consulted. A cast
-    /// that gives no answer is skipped so a constant registered last serves as the declared
-    /// fallback. The first answer obtained is the one submitted, and the engine alone judges
-    /// it: an answer it refuses comes back as the same ask continued past that cast.
-    async fn cascade(&self, ask: &CastAsk) -> Option<CastVerdict> {
-        for cast in &ask.casts {
-            let label = match &cast.resolution {
-                CandidateResolution::Constant(constant) => CastLabel::Declared(constant.clone()),
-                CandidateResolution::Resolver(declaration) => {
-                    match self.classify(&cast.name, declaration, &ask.body).await {
-                        Some(answer) => CastLabel::Classified(answer),
-                        None => continue,
-                    }
-                }
-            };
-            return Some(CastVerdict {
-                cast: cast.name.clone(),
-                label,
-            });
-        }
-        None
-    }
-
-    /// One classifier consult. Every failure — unbound, unreachable, malformed, over the
-    /// body cap — is the same no-answer: a classifier that cannot speak grants nothing.
-    async fn classify(&self, cast: &str, declaration: &CastDeclaration, body: &ValueBody) -> Option<CastAnswer> {
-        let consult = Consult {
-            name: cast.to_string(),
-            body: ConsultBody::Cast {
-                declaration: declaration.clone(),
-                artifact: CastArtifact {
-                    body: body.as_str().to_string(),
-                },
-            },
-        };
-        match self.deployment.externals.consult(&consult, None).await {
-            ConsultOutcome::Answer(answer) => CastAnswer::from_wire(&answer),
-            ConsultOutcome::NoAnswer(_) => None,
-        }
     }
 }
 
@@ -972,13 +919,6 @@ impl Decided<'_> {
     }
 }
 
-/// Keep `answered` and drop the earlier answer to the same cast ask, if any: the cascade
-/// continued past a cast the engine refused, and the later answer is the one that stands.
-fn supersede(evidence: &mut Vec<ExternalEvidence>, answered: ExternalEvidence) {
-    evidence.retain(|held| !answered.answers_same_ask(held));
-    evidence.push(answered);
-}
-
 fn join_feedback(feedback: &[Feedback]) -> String {
     feedback
         .iter()
@@ -1000,10 +940,7 @@ pub(crate) fn raw(value: serde_json::Value) -> Box<serde_json::value::RawValue> 
 mod real_engine_tests {
     use super::super::{OpenError, OutcomeBody, Runtime};
     use super::*;
-    use crate::api::{
-        LabelDimension, RemedyDecision, SpawnBinding, ToolCallDecision, ToolOutcome, ToolResultDecision,
-        UnestablishedValue,
-    };
+    use crate::api::{RemedyDecision, SpawnBinding, ToolCallDecision, ToolOutcome, ToolResultDecision};
     use crate::config::Config;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1030,9 +967,18 @@ mod real_engine_tests {
     const FETCH_AND_SEND: &str = r#"
 version = 1
 
+# A neutral fetch: its result folds at the trajectory's own label, so the
+# lifecycle tests release it freely. `taint` brings outside content in at the
+# low rank; releasing it takes the narrowing acceptance its block offers.
 [[policy.tool]]
 name = "fetch"
 parameters = { type = "object", properties = { b = { type = "integer" }, a = { type = "integer" } } }
+delta = {}
+
+[[policy.tool]]
+name = "taint"
+parameters = { type = "object", properties = { a = { type = "integer" } } }
+delta = { trust = "suspicious" }
 
 [[policy.tool]]
 name = "send"
@@ -1046,6 +992,13 @@ context_control = true
 
     fn root() -> TrajectoryId {
         TrajectoryId("cc:root".to_string())
+    }
+
+    fn taint(spelling: serde_json::Value) -> ProposedCall {
+        ProposedCall {
+            tool: "taint".to_string(),
+            arguments: raw(spelling),
+        }
     }
 
     fn fetch(spelling: serde_json::Value) -> ProposedCall {
@@ -1115,9 +1068,8 @@ builtin = "approve"
 "#;
         assert!(matches!(
             Runtime::open(config_with(policy, None), dir.path().join("appa.db"), None),
-            Err(OpenError::Policy(
-                appa_policy::ConfigError::ForbiddenInlineBinding { .. }
-            )),
+            Err(OpenError::Policy(error))
+                if matches!(*error, appa_policy::ConfigError::ForbiddenInlineBinding { .. }),
         ));
     }
 
@@ -1132,49 +1084,6 @@ name = "approver"
 attention = ["irreversible"]
 "#;
         assert!(Runtime::open(config_with(policy, None), dir.path().join("appa.db"), None).is_ok());
-    }
-
-    #[test]
-    fn a_pending_cast_contract_opens_with_a_registered_cast() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let policy = r#"
-version = 1
-[[policy.tool]]
-name = "fetch"
-delta = { trust = "unknown" }
-[[policy.cast]]
-name = "paranoid"
-constant = { trust = "suspicious", audience = ["public"] }
-[policy.deployment]
-confined_results = ["fetch"]
-"#;
-        assert!(
-            Runtime::open(config_with(policy, None), dir.path().join("appa.db"), None).is_ok(),
-            "a pending-cast delta is served, not refused"
-        );
-    }
-
-    #[test]
-    fn a_resolver_cast_must_be_bound_at_the_deployment() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let policy = r#"
-version = 1
-[[policy.tool]]
-name = "fetch"
-delta = { trust = "unknown" }
-[[policy.cast]]
-name = "classifier"
-resolver = { may_cast = { trust = ["suspicious"], audience = ["public"] } }
-[policy.deployment]
-confined_results = ["fetch"]
-"#;
-        assert!(
-            matches!(
-                Runtime::open(config_with(policy, None), dir.path().join("appa.db"), None),
-                Err(OpenError::UnboundExternal { kind: "cast", .. }),
-            ),
-            "a classifier with no endpoint cannot answer, so the deployment does not open"
-        );
     }
 
     #[test]
@@ -1209,52 +1118,6 @@ starting_label = { trust = "suspicious" }
             runtime.live(&root(), &TrajectoryId("cc:never-bound".to_string())),
             Err(EventError::UnknownTrajectory),
         ));
-    }
-
-    #[test]
-    fn a_constant_cast_declaration_binds_nothing_and_opens() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let policy = r#"
-version = 1
-[[policy.tool]]
-name = "fetch"
-[[policy.cast]]
-name = "channel-class"
-constant = { trust = "trusted", audience = ["public"] }
-"#;
-        assert!(
-            Runtime::open(config_with(policy, None), dir.path().join("appa.db"), None).is_ok(),
-            "a constant is answered from the policy, so it needs no [externals] entry"
-        );
-    }
-
-    #[test]
-    fn a_constant_cast_bound_to_an_endpoint_refuses_open() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let text = r#"
-[policy]
-version = 1
-[[policy.tool]]
-name = "fetch"
-[[policy.cast]]
-name = "channel-class"
-constant = { trust = "trusted", audience = ["public"] }
-[externals]
-timeout_ms = 2000
-max_body_bytes = 65536
-[externals.casts.channel-class]
-url = "https://classify.example/label"
-"#;
-        let path = dir.path().join("appa.toml");
-        std::fs::write(&path, text).expect("the fixture writes");
-        let config = Config::load(&path).expect("the fixture validates");
-        assert!(
-            matches!(
-                Runtime::open(config, dir.path().join("appa.db"), None),
-                Err(OpenError::BoundConstantCast(_)),
-            ),
-            "an endpoint the engine would never call leaves the deployment believing a classifier runs"
-        );
     }
 
     #[test]
@@ -1496,12 +1359,12 @@ name = "execute_remedy_plan"
     }
 
     #[tokio::test]
-    async fn an_unknown_tool_call_returns_deny_feedback() {
+    async fn a_tool_nothing_covers_is_refused_typed_before_it_runs() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
         let session = runtime.create_session(root()).expect("a fresh id opens");
-        let decision = session
+        let refused = session
             .on_tool_call(
                 ProposedCall {
                     tool: "wrench".to_string(),
@@ -1509,9 +1372,12 @@ name = "execute_remedy_plan"
                 },
                 false,
             )
-            .await
-            .expect("the refusal is delivered as feedback");
-        assert!(matches!(decision, ToolCallDecision::Deny { .. }));
+            .await;
+        assert!(matches!(
+            refused,
+            Err(EventError::UndeclaredTool { tool }) if tool == "wrench"
+        ));
+        assert!(only_the_opening(&runtime), "the refusal appends nothing");
     }
 
     fn latest_offer(runtime: &Runtime) -> OfferId {
@@ -1569,12 +1435,9 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
         let new = runtime
             .create_session(TrajectoryId("cc:new".to_string()))
             .expect("a fresh id opens");
-        let denied = new
-            .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
-            .await
-            .expect("the new root decides");
+        let refused = new.on_tool_call(fetch(serde_json::json!({"a": 1})), false).await;
         assert!(
-            matches!(denied, ToolCallDecision::Deny { .. }),
+            matches!(refused, Err(EventError::UndeclaredTool { tool }) if tool == "fetch"),
             "fetch is gone for new roots"
         );
         let allowed = new
@@ -1852,24 +1715,12 @@ delta = { audience = ["@team"] }
     }
 
     #[tokio::test]
-    async fn an_unestablished_block_is_terminal_feedback() {
+    async fn a_suspicious_result_blocks_a_trusted_floor_sink() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let session = runtime.create_session(root()).expect("a fresh id opens");
-        session
-            .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
-            .await
-            .expect("the fetch is decided");
-        session
-            .on_tool_result(
-                fetch(serde_json::json!({"a": 1})),
-                ToolOutcome::Success {
-                    body: OutcomeBody::Available("untrusted data".to_string()),
-                },
-            )
-            .await
-            .expect("the result is admitted at Unknown");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        admit_success(&runtime, &mut session, taint(serde_json::json!({"a": 1}))).await;
 
         let decision = session
             .on_tool_call(
@@ -1881,17 +1732,9 @@ delta = { audience = ["@team"] }
             )
             .await
             .expect("the block is delivered");
-        let ToolCallDecision::Deny { unestablished, .. } = decision else {
-            panic!("a consumed Unknown dimension must block the sink");
-        };
-        assert_eq!(
-            unestablished,
-            vec![UnestablishedValue {
-                value: 0,
-                tool: Some("fetch".to_string()),
-                dimensions: vec![LabelDimension::Trust, LabelDimension::Audience],
-            }],
-            "the block names the source by value, its producing tool, and every dimension still unresolved on it"
+        assert!(
+            matches!(decision, ToolCallDecision::Deny { .. }),
+            "a narrowed trajectory must block the trusted-floor sink, got {decision:?}"
         );
         assert!(runtime.open_dispatches(&root(), &root()).pop().is_none());
     }
@@ -2025,7 +1868,7 @@ context_control = false
     }
 
     #[tokio::test]
-    async fn a_child_return_with_unknown_fold_crosses_and_charges_the_parent() {
+    async fn a_child_returns_crossing_narrows_the_parent_and_charges_its_sink() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
@@ -2036,29 +1879,31 @@ context_control = false
             TrajectoryId("cc:child".to_string()),
         )
         .await;
-        child
-            .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
-            .await
-            .expect("the child's fetch is decided");
-        child
-            .on_tool_result(
-                fetch(serde_json::json!({"a": 1})),
-                ToolOutcome::Success {
-                    body: OutcomeBody::Available("untrusted".to_string()),
-                },
-            )
-            .await
-            .expect("the child's result is admitted at Unknown");
+        let mut child = child;
+        admit_success(&runtime, &mut child, taint(serde_json::json!({"a": 1}))).await;
 
-        let returned = child
+        // The raw return narrows the parent, so the crossing is staged behind the
+        // parent's own acceptance instead of merging silently.
+        let staged = child
             .on_child_end(Some("summary of untrusted data".to_string()))
             .await
-            .expect("the crossing merges");
+            .expect("the staged return is delivered");
+        assert!(
+            matches!(staged, crate::api::ChildReturnDecision::Blocked { .. }),
+            "a narrowing return is staged, not crossed: {staged:?}"
+        );
+        let quoted = runtime
+            .minted_offers(&root(), &root())
+            .first()
+            .expect("the stage surfaced the parent's acceptance")
+            .clone();
+        let offer = runtime.resolve_in(&root(), &quoted).expect("the quoted id resolves").0;
         assert_eq!(
-            returned,
-            crate::api::ChildReturnDecision::Returned {
+            session.on_remedy(offer, None).await.expect("the acceptance executes"),
+            RemedyDecision::Returned {
                 value: "summary of untrusted data".to_string()
             },
+            "accepting the narrowing crosses the staged return"
         );
         assert!(matches!(
             runtime.live(&root(), &TrajectoryId("cc:child".to_string())),
@@ -2075,6 +1920,11 @@ context_control = false
             .await
             .expect("the spawn dispatch closes");
 
+        assert_eq!(
+            runtime.status(&root()).expect("the root answers").trust,
+            "suspicious",
+            "the merged crossing narrowed the parent"
+        );
         let decision = session
             .on_tool_call(
                 ProposedCall {
@@ -2085,16 +1935,9 @@ context_control = false
             )
             .await
             .expect("the block is delivered");
-        let ToolCallDecision::Deny { feedback, .. } = decision else {
-            panic!("the crossed unresolved identity must charge the parent's send, got {decision:?}");
-        };
         assert!(
-            !feedback.contains("fetch"),
-            "a parent-facing block must not name the child's tool: {feedback}"
-        );
-        assert!(
-            feedback.contains("value ValueId(0)"),
-            "the charged value is named by its id: {feedback}"
+            matches!(decision, ToolCallDecision::Deny { .. }),
+            "the crossed narrowing must charge the parent's send, got {decision:?}"
         );
     }
 
@@ -3322,9 +3165,11 @@ confined_child_return = true
     const MARKED: &str = r#"
 version = 1
 
+# A neutral second tool: its result folds at the trajectory's own label.
 [[policy.tool]]
 name = "fetch"
 parameters = { type = "object", properties = { b = { type = "integer" }, a = { type = "integer" } } }
+delta = {}
 
 [[policy.tool]]
 name = "mark"
@@ -3415,28 +3260,6 @@ context_control = true
         let status = runtime.status(&root()).expect("the root answers");
         assert_eq!(status.trust, "suspicious", "the fold never widens");
         assert_eq!(status.audience, "public", "a neutral admission resolves cleanly");
-    }
-
-    #[tokio::test]
-    async fn an_unresolved_dimension_keeps_its_bound_and_names_its_sources() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime =
-            Runtime::open(config_with(MARKED, None), dir.path().join("appa.db"), None).expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
-        admit_success(&runtime, &mut session, mark()).await;
-        admit_success(&runtime, &mut session, fetch(serde_json::json!({"a": 1}))).await;
-        let status = runtime.status(&root()).expect("the root answers");
-        assert_eq!(
-            status.trust, "suspicious",
-            "the restriction already known is not hidden"
-        );
-        assert_eq!(status.audience, "public");
-        assert_eq!(
-            status.unresolved_trust,
-            vec![1],
-            "the unannotated result is the unresolved source"
-        );
-        assert_eq!(status.unresolved_audience, vec![1]);
     }
 
     #[tokio::test]
@@ -4475,9 +4298,8 @@ context_control = true
         assert!(matches!(
             session
                 .on_tool_call(control_call("mcp__evil__execute_remedy_plan"), false)
-                .await
-                .expect("the lookalike is decided"),
-            ToolCallDecision::Deny { .. },
+                .await,
+            Err(EventError::UndeclaredTool { tool }) if tool == "mcp__evil__execute_remedy_plan",
         ));
     }
 

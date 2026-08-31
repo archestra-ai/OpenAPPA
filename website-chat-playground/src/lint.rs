@@ -15,7 +15,7 @@ pub enum PolicyError {
     #[error("{0}")]
     Inject(#[from] InjectError),
     #[error("{0}")]
-    Load(#[from] ConfigError),
+    Load(Box<ConfigError>),
     #[error(
         "sanitizer {name:?} declares no `hint`: in this playground every derivation is produced by \
          running your model, and the hint is the instruction it runs under — without one this \
@@ -23,10 +23,16 @@ pub enum PolicyError {
     )]
     SanitizerWithoutHint { name: String },
     #[error(
-        "dynamic resolver {name:?} declares a builtin: this playground answers every resolver \
+        "annotator {name:?} declares a builtin: this playground answers every annotator \
          through its own hosted directory, and a builtin would run on the demo host itself"
     )]
-    BuiltinResolver { name: String },
+    BuiltinAnnotator { name: String },
+}
+
+impl From<ConfigError> for PolicyError {
+    fn from(error: ConfigError) -> Self {
+        PolicyError::Load(Box::new(error))
+    }
 }
 
 #[derive(Debug)]
@@ -54,10 +60,10 @@ pub fn check_policy(policy: &str, enabled: &BTreeSet<System>) -> Result<CheckedP
         }
     }
 
-    // A visitor's policy never selects an implementation on this host: a builtin resolver
+    // A visitor's policy never selects an implementation on this host: a builtin annotator
     // would start a claude process under the demo service's own account.
-    if let Some((name, _)) = config.dynamic_resolvers().find(|(_, builtin)| builtin.is_some()) {
-        return Err(PolicyError::BuiltinResolver {
+    if let Some((name, _)) = config.annotators().find(|(_, binding)| binding.builtin.is_some()) {
+        return Err(PolicyError::BuiltinAnnotator {
             name: name.as_str().to_string(),
         });
     }
@@ -77,7 +83,6 @@ mod tests {
     use super::*;
 
     use appa_engine::authority::DeclaredTransition;
-    use appa_engine::contract::AudienceDelta;
     use appa_engine::groups::DeclaredAudience;
     use appa_engine::label::ReaderId;
     use appa_engine::value::ToolName;
@@ -101,14 +106,16 @@ mod tests {
             .variants(&ToolName::new("list_invoices"))
             .next()
             .expect("the finance system provides list_invoices");
-        assert!(matches!(
-            invoices.delta.as_ref().and_then(|delta| delta.audience.as_ref()),
-            Some(AudienceDelta::Static(audience))
-                if *audience == DeclaredAudience::restricted([
-                    ReaderId::new("cfo@corp.example"),
-                    ReaderId::new("ap-lead@corp.example"),
-                ])
-        ));
+        let appa_engine::contract::ToolDeclaration::Declared(invoices) = invoices else {
+            panic!("list_invoices is a declared contract");
+        };
+        assert_eq!(
+            invoices.delta.audience.as_ref(),
+            Some(&DeclaredAudience::restricted([
+                ReaderId::new("cfo@corp.example"),
+                ReaderId::new("ap-lead@corp.example"),
+            ]))
+        );
         let email = checked
             .config
             .registry()
@@ -116,11 +123,9 @@ mod tests {
             .next()
             .expect("the email system provides send_email");
         assert!(matches!(
-            email.uses.as_slice(),
-            [uses]
-                if uses.resolver.as_str() == "email-recipient-readers"
-                    && uses.inputs.get("to")
-                        == Some(&appa_engine::contract::ToolCallSource::argument("to").expect("a plain name is a source"))
+            email,
+            appa_engine::contract::ToolDeclaration::Annotated { annotator, .. }
+                if annotator.as_str() == "email-recipient-readers"
         ));
         let sanitizers = &checked.config.registry_config().sanitizers;
         assert_eq!(sanitizers.len(), 2);
@@ -138,25 +143,24 @@ mod tests {
     }
 
     #[test]
-    fn a_builtin_resolver_declaration_is_refused() {
-        for builtin in appa_policy::DynamicBuiltin::ALL {
+    fn a_builtin_annotator_declaration_is_refused() {
+        for builtin in appa_policy::AnnotatorBuiltin::ALL {
             let policy = format!(
                 r#"
 version = 1
-[[dynamic_resolver]]
+[[annotator]]
 name = "classify"
 builtin = "{}"
-returns = ["delta.trust"]
 [[tool]]
 name = "list_customers"
 description = "Lists the customer records."
-uses = [{{ resolver = "classify" }}]
+annotator = "classify"
 "#,
                 builtin.wire_name()
             );
             assert!(matches!(
                 check_policy(&policy, &systems("crm")),
-                Err(PolicyError::BuiltinResolver { name }) if name == "classify"
+                Err(PolicyError::BuiltinAnnotator { name }) if name == "classify"
             ));
         }
     }
@@ -221,20 +225,18 @@ implementation = { resolver = { url = "http://10.0.0.1/exfil" } }
                 systems("github"),
             ),
             (
-                "dynamic resolver",
+                "annotator",
                 r#"
 version = 1
 
-[[dynamic_resolver]]
+[[annotator]]
 name = "directory"
-resolver = { url = "http://169.254.169.254/readers" }
-inputs = ["to"]
-returns = ["requires.audience"]
+implementation = { resolver = { url = "http://169.254.169.254/readers" } }
+inputs = { to = "$tool_call.arguments.to" }
 
 [[tool]]
 name = "send_email"
-uses = [{ resolver = "directory", inputs = { to = "$tool_call.arguments.to" } }]
-delta = {}
+annotator = "directory"
 "#,
                 systems("email"),
             ),

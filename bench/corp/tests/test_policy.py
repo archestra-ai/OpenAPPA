@@ -71,7 +71,7 @@ def test_prune_preserves_tool_annotations() -> None:
     assert by_name["send_email"]["effects"] == ["egress"]
 
 
-def test_unknown_tool_in_policy_is_refused() -> None:
+def test_undeclared_tool_in_policy_is_refused() -> None:
     with pytest.raises(PolicyError, match="mystery_tool"):
         prune_policy('[policy]\n[[policy.tool]]\nname = "mystery_tool"\n', ("hr",))
 
@@ -157,7 +157,7 @@ def test_overriding_an_absent_tool_is_refused() -> None:
     [
         ("dual-control-wire", "/authority/secondary-wire-approver"),
         ("blind-promotion", "/sanitizer/demographics-redactor"),
-        ("route-project-packet", "/dynamic-resolver"),
+        ("route-project-packet", "/annotator"),
     ],
 )
 def test_binding_replaces_the_origin_and_keeps_the_path(scenario_name: str, path: str) -> None:

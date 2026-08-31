@@ -1,4 +1,4 @@
-// Website-owned content for the /landing2 chat playground.
+// Website-owned content for the /playground chat.
 //
 // What is *not* here: the starting policy, the systems, their tools, and the
 // boundary label. Those are facts about the running service — it ships the

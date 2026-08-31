@@ -86,7 +86,7 @@ def main():
 
     if request.get("version") != 1:
         raise ValueError("unsupported request version")
-    if request.get("kind") != "dynamic":
+    if request.get("kind") != "annotation":
         raise ValueError("unexpected consult kind")
     if request.get("name") != "claude-code.read-sensitivity":
         raise ValueError("unexpected resolver name")
@@ -101,10 +101,12 @@ def main():
         raise ValueError("args.arguments.file_path must be a non-empty string")
 
     audience = ["private"] if is_sensitive(file_path) else "public"
-    json.dump(
-        {"version": 1, "answer": {"delta.audience": audience}},
-        sys.stdout,
-    )
+    annotation = {
+        "delta": {"audience": audience},
+        "requires": {"history": [], "attention": []},
+        "emits": [],
+    }
+    json.dump({"version": 1, "answer": annotation}, sys.stdout)
     sys.stdout.write("\n")
 
 

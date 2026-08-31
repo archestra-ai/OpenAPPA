@@ -403,9 +403,9 @@ def test_scenario_policies_are_staged_before_launch(tmp_path: Path) -> None:
         assert command[command.index("--profile") + 1] == str(artifact)
 
 
-def test_episode_serves_and_records_dynamic_resolver_answers(tmp_path: Path) -> None:
+def test_episode_serves_and_records_annotator_answers(tmp_path: Path) -> None:
     scenario = load_scenario(cli.SCENARIOS_DIR / "route-project-packet")
-    script = tmp_path / "resolver-client.py"
+    script = tmp_path / "annotator-client.py"
     script.write_text(
         '''#!/usr/bin/env python3
 import json
@@ -417,29 +417,44 @@ from pathlib import Path
 policy_path = Path(sys.argv[sys.argv.index("--policy") + 1])
 policy = tomllib.loads(policy_path.read_text())
 readers = ["cfo@northwind.example", "legal-lead@northwind.example"]
+declaration = {"inputs": ["subject"], "trust_ranks": [], "audiences": [], "attention_marks": [], "effects": []}
 for request, expected in [
     (
         {
             "version": 1,
-            "kind": "dynamic",
+            "kind": "annotation",
             "name": "document-acl",
-            "declaration": {"returns": ["delta.audience"], "trust_ranks": [], "attention_marks": []},
+            "declaration": declaration,
             "artifact": {"args": {"subject": "project-onyx-packet.md"}},
         },
-        {"version": 1, "answer": {"delta.audience": readers}},
+        {
+            "version": 1,
+            "answer": {
+                "delta": {"audience": readers},
+                "requires": {"history": [], "attention": []},
+                "emits": [],
+            },
+        },
     ),
     (
         {
             "version": 1,
-            "kind": "dynamic",
+            "kind": "annotation",
             "name": "distribution-list-members",
-            "declaration": {"returns": ["requires.audience"], "trust_ranks": [], "attention_marks": []},
+            "declaration": declaration,
             "artifact": {"args": {"subject": "onyx-steering@northwind.example"}},
         },
-        {"version": 1, "answer": {"requires.audience": {"contains": readers}}},
+        {
+            "version": 1,
+            "answer": {
+                "delta": {},
+                "requires": {"audience": {"contains": readers}, "history": [], "attention": []},
+                "emits": ["egress"],
+            },
+        },
     ),
 ]:
-    url = policy["externals"]["dynamic"][request["name"]]["url"]
+    url = policy["externals"]["annotators"][request["name"]]["url"]
     wire = urllib.request.Request(url, data=json.dumps(request).encode(), headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(wire) as response:
         assert json.load(response) == expected
@@ -447,24 +462,24 @@ for request, expected in [
     )
     script.chmod(0o755)
     agent = Agent(
-        "resolver-stub",
+        "annotator-stub",
         script,
         PolicyTarget.APPA_GUARDED,
         policy_file=AGENTS["appa"].policy_file,
     )
-    episode_dir = tmp_path / "resolver-episode"
+    episode_dir = tmp_path / "annotator-episode"
 
     result = runner.run_episode(agent, scenario, 1, model="stub", episode_dir=episode_dir, timeout_s=30)
 
     assert result.error is None
     staged = tomllib.loads((episode_dir / "policy.toml").read_text())
     assert all(
-        endpoint["url"].endswith("/dynamic-resolver")
-        for endpoint in staged["externals"]["dynamic"].values()
+        endpoint["url"].endswith("/annotator")
+        for endpoint in staged["externals"]["annotators"].values()
     )
     requests = [json.loads(line) for line in (episode_dir / "external-requests.jsonl").read_text().splitlines()]
     assert len(requests) == 2
-    assert all(record["kind"] == "dynamic_resolver" for record in requests)
+    assert all(record["kind"] == "annotation" for record in requests)
     assert all(record["status"] == 200 for record in requests)
 
 

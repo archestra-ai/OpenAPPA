@@ -2,22 +2,22 @@
 
 use thiserror::Error;
 
-use crate::admit::{self, AdmitError, CastAnswer, ResultAdmission};
+use crate::admit::{self, AdmitError, ResultAdmission};
 use crate::branch::{self, BranchError};
 use crate::candidate::{CallStage, ConfinedFrom, DerivedCandidate, DerivedVia, SanitizerLineage};
 use crate::check::{self, CheckOutcome, Narrowing, RawBlock};
-use crate::contract::ToolContract;
+use crate::contract::ToolAnnotation;
 use crate::execute::{self, PlanError};
 use crate::fact::{Fact, ObservedResult, ReturnDerivation, ReturnPolicy, ReturnRejection};
 use crate::groups::{Expansions, GroupExpansion, GroupResolution};
-use crate::label::{EstablishedLabel, Label, PartialLabel};
+use crate::label::Label;
 use crate::names::{AuthorityName, SanitizerName};
 use crate::params::{ArgumentError, CanonicalArguments};
 use crate::plan::{self, BlockedCall, PlannedBlock};
 use crate::profile::{self, DeploymentPolicy, DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyIdentityV1};
 use crate::projection::Projection;
 use crate::projection::Views;
-use crate::registry::{LoadError, Registry};
+use crate::registry::{LoadError, Registry, ToolKind};
 use crate::transition::{
     Blocked, ChildFollowUp, ChildReport, ChildSubmission, Confined, EngineDecision, EngineEvent, EngineView, Evidence,
     EvidenceRequest, FollowUp, ForkBinding, OfferExecution, OfferFollowUp, OfferOutcome, OutcomeBody, OutcomeFollowUp,
@@ -81,7 +81,6 @@ struct Opening<'a> {
 /// label and body the stage stands on, and the sanitizer lineage that reached it.
 struct ReturnStageInput<'a> {
     child: &'a TrajectoryId,
-    fold: &'a PartialLabel,
     label: &'a Label,
     body: &'a ValueBody,
     residual: &'a Narrowing,
@@ -135,7 +134,7 @@ impl Engine {
         let tools = self
             .registry
             .tool_names()
-            .chain(self.registry.provider_run_contracts().map(|tool| &tool.name));
+            .chain(self.registry.provider_run_annotations().map(|tool| &tool.name));
         profile::derive_open_vectors(self.profile(), tools)
     }
 
@@ -542,7 +541,8 @@ impl Engine {
             },
         };
         let fork = report.fork.clone();
-        let (working, cast_facts) = self.applied_casts(projection, child, &report.evidence, expansions)?;
+        let working = std::borrow::Cow::Borrowed(projection);
+        let cast_facts: Vec<Fact> = Vec::new();
         let views = working.view(&parent);
         let id = ChildReturnId::new(child.clone(), 0);
         let policy = views.return_policy_of(child).ok_or(TransitionError::NotForked)?.clone();
@@ -574,61 +574,6 @@ impl Engine {
         }
     }
 
-    /// Land the cast answers a report carried, acting as the child — the
-    /// branch that holds the sources a return's planning consumes. Returns the
-    /// projection with each answer folded, beside the facts that carry it; an answer for a
-    /// source already established is skipped, even where it disagrees with the landed one —
-    /// the first admitted answer stands, and a redriven consult of a nondeterministic
-    /// resolver may legitimately answer differently, so rejecting the conflict would wedge
-    /// crash-redrive on an already-settled source.
-    ///
-    /// Deliberately not narrowed to the request the current stage owes: cast evidence binds to
-    /// the cast and source identity alone — unlike membership evidence, it names no
-    /// consuming operation for it — because a resolution is source-level and shared.
-    /// `admit_cast` holds each answer to the basis, scope, first-answer, and ceiling rules, so
-    /// an unrequested valid answer lands exactly as it would through the act that requested it.
-    fn applied_casts<'p>(
-        &self,
-        projection: &'p Projection,
-        child: &TrajectoryId,
-        evidence: &[Evidence],
-        expansions: &Expansions,
-    ) -> Result<(std::borrow::Cow<'p, Projection>, Vec<Fact>), TransitionError> {
-        let mut working = std::borrow::Cow::Borrowed(projection);
-        let mut facts = Vec::new();
-        for item in evidence {
-            let Evidence::Cast { cast, value, resolved } = item else {
-                continue;
-            };
-            let batch = {
-                let views = working.view(child);
-                let prior = views.value_label(*value);
-                if prior.is_some_and(|prior| EstablishedLabel::from_label(prior).is_some()) {
-                    continue;
-                }
-                if let (Some(registered), Some(prior)) = (self.registry.cast(cast), prior) {
-                    expansions.require(registered.resolution.reads(prior))?;
-                }
-                admit::admit_cast(
-                    &self.registry,
-                    &views,
-                    *value,
-                    CastAnswer {
-                        cast: cast.clone(),
-                        resolved: resolved.clone(),
-                    },
-                    expansions,
-                )
-                .map_err(TransitionError::Resolution)?
-            };
-            for fact in &batch {
-                working.to_mut().fold(fact);
-            }
-            facts.extend(batch);
-        }
-        Ok((working, facts))
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn raw_return(
         &self,
@@ -652,13 +597,12 @@ impl Engine {
             }
             branch::RawCrossing::Narrows(narrowing) => {
                 let fold = views.branch_label(child);
-                let candidate = fold.bound().clone().into_label();
+                let candidate = fold.clone();
                 let lineage = SanitizerLineage::default();
                 let menu = self.return_menu(
                     views,
                     ReturnStageInput {
                         child,
-                        fold: &fold,
                         label: &candidate,
                         body: &body,
                         residual: &narrowing,
@@ -666,12 +610,7 @@ impl Engine {
                     },
                     expansions,
                 )?;
-                let stage = match menu {
-                    plan::ReturnStagePlan::Resolve { value, .. } => {
-                        return self.resolving(view, views, return_act(child), facts, value, expansions);
-                    }
-                    plan::ReturnStagePlan::Stage(plans) => plans,
-                };
+                let stage = menu;
                 facts.push(Fact::ReturnSubmitted {
                     trajectory: child.clone(),
                     id: id.clone(),
@@ -737,37 +676,9 @@ impl Engine {
                 expansions,
             );
         }
-        if !fold.is_established(registered.transition.dimension()) {
-            expansions.require(&plan::cast_selection_groups(&self.registry))?;
-            return match plan::resolvable_source(
-                &self.registry,
-                views,
-                &fold,
-                registered.transition.dimension(),
-                expansions,
-            ) {
-                Some(value) => self.resolving(view, views, return_act(child), facts, value, expansions),
-                None => self.rejecting(
-                    view,
-                    child,
-                    id,
-                    fork,
-                    digest,
-                    ReturnRejection::ConsumedDimensionUnresolvable(check::unestablished_facts(
-                        &fold,
-                        &[registered.transition.dimension()],
-                    )),
-                    facts,
-                    expansions,
-                ),
-            };
-        }
         // The mandate's own reads, required before applicability is judged.
         expansions.require(registered.groups())?;
-        if registered
-            .derive_output(&fold.bound().clone().into_label(), &[], expansions)
-            .is_none()
-        {
+        if registered.derive_output(&fold, &[], expansions).is_none() {
             return self.rejecting(
                 view,
                 child,
@@ -792,7 +703,7 @@ impl Engine {
             resolutions: self.registry.resolutions(expansions),
         });
         if name.is_attest_schema() {
-            let receiving = views.current_label().bound().clone();
+            let receiving = views.current_label().clone();
             return self.mandatory_derivation(
                 view, views, id, fork, name, &fold, receiving, digest, body, facts, nonce, expansions,
             );
@@ -816,7 +727,7 @@ impl Engine {
             });
         };
         // The receiving bound the submission pins at this same fold step.
-        let receiving = views.current_label().bound().clone();
+        let receiving = views.current_label().clone();
         self.mandatory_derivation(
             view, views, id, fork, name, &fold, receiving, digest, derived, facts, nonce, expansions,
         )
@@ -830,8 +741,8 @@ impl Engine {
         id: &ChildReturnId,
         fork: &ForkId,
         name: &SanitizerName,
-        fold: &PartialLabel,
-        receiving: EstablishedLabel,
+        fold: &Label,
+        receiving: Label,
         digest: RawResultDigest,
         derived: ValueBody,
         mut facts: Vec<Fact>,
@@ -845,7 +756,7 @@ impl Engine {
             .ok_or(TransitionError::SanitizerUnapplicable)?;
         expansions.require(registered.groups())?;
         let label = registered
-            .derive_output(&fold.bound().clone().into_label(), &[], expansions)
+            .derive_output(&fold.clone(), &[], expansions)
             .ok_or(TransitionError::SanitizerUnapplicable)?;
         let residual = admit::confined_residual(&receiving, &label);
         let lineage = SanitizerLineage::default()
@@ -854,7 +765,7 @@ impl Engine {
         facts.push(Fact::CandidateDerived {
             trajectory: views.trajectory().clone(),
             subject: crate::basis::SubjectKey::Return(id.clone()),
-            via: DerivedVia::Sanitizer {
+            via: DerivedVia {
                 name: name.clone(),
                 transition: registered.transition.resolve(expansions),
             },
@@ -890,7 +801,6 @@ impl Engine {
             views,
             ReturnStageInput {
                 child,
-                fold,
                 label: &label,
                 body: &derived,
                 residual: &residual,
@@ -898,12 +808,7 @@ impl Engine {
             },
             expansions,
         )?;
-        let stage = match menu {
-            plan::ReturnStagePlan::Stage(plans) => plans,
-            plan::ReturnStagePlan::Resolve { value, .. } => {
-                return self.resolving(view, views, return_act(child), facts, value, expansions);
-            }
-        };
+        let stage = menu;
         let (batch, staged) = self.pending_stage(
             view,
             views,
@@ -946,31 +851,6 @@ impl Engine {
         Ok(EngineDecision {
             append: Some(self.decided(view, return_act(child), facts)?),
             follow_up: FollowUp::Child(ChildFollowUp::Rejected { reason }),
-        })
-    }
-
-    fn resolving(
-        &self,
-        view: &EngineView,
-        views: &Views,
-        act: crate::basis::DecidedAct,
-        facts: Vec<Fact>,
-        value: crate::value::ValueId,
-        expansions: &Expansions,
-    ) -> Result<EngineDecision, TransitionError> {
-        // Required here rather than at each caller: the ask carries every applicable cast, and a
-        // constant is read whole to reach the runtime already resolved. Only the constants whose
-        // scope reaches this value are read, so an unrelated one raises no consult.
-        expansions.require(&plan::constant_groups_reaching(&self.registry, views, value))?;
-        let (casts, body) = plan::castable_sources(&self.registry, views, value, expansions)
-            .expect("a resolvable source retains its bytes and the cast the caller selected");
-        let append = match facts.is_empty() {
-            true => None,
-            false => Some(self.decided(view, act, facts)?),
-        };
-        Ok(EngineDecision {
-            append,
-            follow_up: FollowUp::Child(ChildFollowUp::Resolve(EvidenceRequest::Cast { casts, value, body })),
         })
     }
 
@@ -1099,8 +979,8 @@ impl Engine {
         expansions: &Expansions,
     ) -> Result<EngineDecision, TransitionError> {
         let child = &report.child;
-        // Cast answers land first here too.
-        let (working, cast_facts) = self.applied_casts(view.projection(), child, &report.evidence, expansions)?;
+        let working = std::borrow::Cow::Borrowed(view.projection());
+        let cast_facts: Vec<Fact> = Vec::new();
         let pending = working
             .view(child)
             .pending_return(id)
@@ -1173,8 +1053,8 @@ impl Engine {
             (_, Some(_)) => unreachable!("a settled return candidate crossed in its own batch"),
             // The submitted fold itself is the raw candidate.
             (ReturnPolicy::Raw, None) => {
-                let label = fold.bound().clone().into_label();
-                let to = pending.receiving.combine(&label.established_part());
+                let label = fold.clone();
+                let to = pending.receiving.combine(&label);
                 // Custody transferred only for a narrowing submission, and a fold only narrows.
                 let residual = Narrowing {
                     from: pending.receiving.clone(),
@@ -1224,13 +1104,11 @@ impl Engine {
                 }))),
             });
         }
-        let fold = views.branch_label(id.child());
         let lineage = views.lineage(&subject);
         let menu = self.return_menu(
             views,
             ReturnStageInput {
                 child: id.child(),
-                fold: &fold,
                 label: &label,
                 body: &body,
                 residual: &residual,
@@ -1238,12 +1116,7 @@ impl Engine {
             },
             expansions,
         )?;
-        let stage = match menu {
-            plan::ReturnStagePlan::Stage(plans) => plans,
-            plan::ReturnStagePlan::Resolve { value, .. } => {
-                return self.resolving(view, views, return_act(id.child()), facts, value, expansions);
-            }
-        };
+        let stage = menu;
         let (batch, staged) = self.pending_stage(
             view,
             views,
@@ -1335,12 +1208,7 @@ impl Engine {
                 };
                 match views.bound_sanitizer(dispatch) {
                     None => {
-                        let contract = self.validated_contract(&call)?;
-                        if contract.pending_cast_dim().is_some() {
-                            return self.resolving_cast(
-                                view, &views, dispatch, &call, contract, raw, raw_digest, report, expansions,
-                            );
-                        }
+                        self.validated_contract(&call)?;
                         ResultAdmission::SuccessRaw { body: raw.clone() }
                     }
                     Some(sanitizer) => {
@@ -1351,10 +1219,7 @@ impl Engine {
                                 source,
                                 derived,
                             } if named == &sanitizer && source == &raw_digest => Some(derived.clone()),
-                            Evidence::Sanitizer { .. }
-                            | Evidence::Rewrite { .. }
-                            | Evidence::Cast { .. }
-                            | Evidence::PendingCast { .. } => None,
+                            Evidence::Sanitizer { .. } | Evidence::Rewrite { .. } => None,
                         });
                         let Some(derived) = derived else {
                             let append = self.checkpoint_batch(view, &views, dispatch, &call, raw_digest)?;
@@ -1379,7 +1244,7 @@ impl Engine {
                             &self.registry,
                             &views,
                             dispatch,
-                            contract,
+                            &contract,
                             &sanitizer,
                             raw_digest,
                             derived.clone(),
@@ -1414,7 +1279,7 @@ impl Engine {
                             Fact::CandidateDerived {
                                 trajectory: views.trajectory().clone(),
                                 subject: crate::basis::SubjectKey::ConfinedResult(dispatch.clone()),
-                                via: DerivedVia::Sanitizer {
+                                via: DerivedVia {
                                     name: sanitizer,
                                     transition,
                                 },
@@ -1429,113 +1294,6 @@ impl Engine {
             }
         };
         self.admitting_outcome(view, &views, dispatch, &call, admission, expansions)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn resolving_cast(
-        &self,
-        view: &EngineView,
-        views: &Views,
-        dispatch: &DispatchId,
-        call: &ResolvedCall,
-        contract: &crate::contract::ToolContract,
-        raw: &ValueBody,
-        raw_digest: RawResultDigest,
-        report: &ToolReport,
-        expansions: &Expansions,
-    ) -> Result<EngineDecision, TransitionError> {
-        let resolution = report.evidence.iter().find_map(|evidence| match evidence {
-            Evidence::PendingCast { cast, source, resolved } if source == &raw_digest => {
-                Some((cast.clone(), resolved.clone()))
-            }
-            _ => None,
-        });
-        let Some((cast, resolved)) = resolution else {
-            // Resolve the applicable constants before anything appends: a constant whose audience
-            // names a group needs that membership, and raising it here puts the consult one drive
-            // ahead of the cast consult rather than leaving the runtime holding a label it cannot
-            // build.
-            let applicable: Vec<&crate::authority::Cast> = self
-                .registry
-                .casts()
-                .iter()
-                .filter(|registered| registered.scope.covers(&contract.tags))
-                .collect();
-            expansions.require(
-                applicable
-                    .iter()
-                    .filter_map(|registered| match &registered.resolution {
-                        crate::authority::CastResolution::Constant(constant) => Some(constant.audience.groups()),
-                        crate::authority::CastResolution::Resolver { .. } => None,
-                    })
-                    .flatten(),
-            )?;
-            let casts = applicable
-                .iter()
-                .map(|registered| crate::transition::ApplicableCast {
-                    name: registered.name.clone(),
-                    constant: match &registered.resolution {
-                        crate::authority::CastResolution::Constant(constant) => Some(constant.resolve(expansions)),
-                        crate::authority::CastResolution::Resolver { .. } => None,
-                    },
-                })
-                .collect();
-            let append = self.checkpoint_batch(view, views, dispatch, call, raw_digest)?;
-            return Ok(EngineDecision {
-                append,
-                follow_up: FollowUp::Outcome(OutcomeFollowUp::Resolve(EvidenceRequest::PendingCast {
-                    casts,
-                    source: raw_digest,
-                    body: raw.clone(),
-                })),
-            });
-        };
-        if let Some(registered) = self.registry.cast(&cast) {
-            let prior =
-                contract.output_label_for_resolutions(views.tool_resolutions(dispatch).unwrap_or_default(), expansions);
-            expansions.require(registered.resolution.reads(&prior))?;
-        }
-        let candidate = crate::admit::cast_candidate(
-            &self.registry,
-            views,
-            dispatch,
-            contract,
-            &cast,
-            raw.clone(),
-            &resolved,
-            expansions,
-        )
-        .map_err(|_| TransitionError::InadmissibleResolution)?;
-        let DerivedCandidate::Result { residual: Some(_), .. } = &candidate else {
-            return self.admitting_outcome(
-                view,
-                views,
-                dispatch,
-                call,
-                ResultAdmission::SuccessCast {
-                    body: raw.clone(),
-                    cast,
-                    resolved,
-                },
-                expansions,
-            );
-        };
-        self.stage_candidate(
-            view,
-            views,
-            dispatch,
-            call,
-            report.offer_nonce,
-            Fact::CandidateDerived {
-                trajectory: views.trajectory().clone(),
-                subject: crate::basis::SubjectKey::ConfinedResult(dispatch.clone()),
-                via: crate::candidate::DerivedVia::Cast { name: cast },
-                derived: candidate,
-                lineage: SanitizerLineage::default(),
-                resolutions: self.registry.resolutions(expansions),
-            },
-            expansions,
-        )
     }
 
     fn admitting_outcome(
@@ -1574,13 +1332,12 @@ impl Engine {
         views: &Views,
         stage: ReturnStageInput<'_>,
         expansions: &Expansions,
-    ) -> Result<plan::ReturnStagePlan, TransitionError> {
+    ) -> Result<Vec<plan::ExecutableRemedyPlan>, TransitionError> {
         expansions.require(&plan::return_stage_groups(&self.registry, stage.lineage))?;
         Ok(plan::return_stage(
             &self.registry,
             views,
             stage.child,
-            stage.fold,
             stage.label,
             stage.body,
             stage.residual,
@@ -1593,8 +1350,8 @@ impl Engine {
     /// the menu reads anything.
     fn confined_menu(
         &self,
-        contract: &ToolContract,
-        receiving: &EstablishedLabel,
+        contract: &ToolAnnotation,
+        receiving: &Label,
         label: &Label,
         residual: &Narrowing,
         lineage: &SanitizerLineage,
@@ -1613,9 +1370,8 @@ impl Engine {
     }
 
     /// The success checkpoint a still-open dispatch owes before any external step runs: its
-    /// declared effects commit now, while value finalization — an output sanitizer derivation, a
-    /// pending-cast resolution — is still in flight. Empty where the log already records the
-    /// observation.
+    /// declared effects commit now, while value finalization — an output sanitizer derivation —
+    /// is still in flight. Empty where the log already records the observation.
     fn observed_checkpoint(
         &self,
         views: &Views,
@@ -1717,7 +1473,7 @@ impl Engine {
             .ok_or(TransitionError::UnknownDispatch)?
             .clone();
         let contract = self.dispatch_contract(views, dispatch)?;
-        let stage = self.confined_menu(contract, &receiving, &value.label, &residual, &lineage, expansions)?;
+        let stage = self.confined_menu(&contract, &receiving, &value.label, &residual, &lineage, expansions)?;
         let advance = Sequence::advance_of(self, view, &facts);
         let (_, offers, opened) = self.open_offers(
             views,
@@ -1778,7 +1534,7 @@ impl Engine {
             .clone();
         let lineage = views.lineage(&subject);
         let contract = self.dispatch_contract(views, dispatch)?;
-        let stage = self.confined_menu(contract, &receiving, &value.label, &residual, &lineage, expansions)?;
+        let stage = self.confined_menu(&contract, &receiving, &value.label, &residual, &lineage, expansions)?;
         let act = crate::basis::DecidedAct::Outcome(dispatch.clone());
         let advance = crate::basis::BasisAdvance::default();
         let (_, offers, opened) = self.open_offers(
@@ -1840,10 +1596,10 @@ impl Engine {
             return Err(TransitionError::BatchIdentityConflict);
         }
         for result in &batch.provider_results {
-            if self.registry.provider_run_contract(&result.tool).is_none() {
-                return Err(TransitionError::Call(match self.registry.tool(&result.tool) {
-                    Some(_) => EngineError::NotProviderRun(result.tool.as_str().to_string()),
-                    None => EngineError::UnknownTool(result.tool.as_str().to_string()),
+            if self.registry.provider_run_annotation(&result.tool).is_none() {
+                return Err(TransitionError::Call(match self.registry.declared(&result.tool) {
+                    true => EngineError::NotProviderRun(result.tool.as_str().to_string()),
+                    false => EngineError::UnknownTool(result.tool.as_str().to_string()),
                 }));
             }
         }
@@ -1852,8 +1608,8 @@ impl Engine {
                 batch
                     .provider_results
                     .iter()
-                    .filter_map(|result| self.registry.provider_run_contract(&result.tool))
-                    .flat_map(ToolContract::groups),
+                    .filter_map(|result| self.registry.provider_run_annotation(&result.tool))
+                    .flat_map(ToolAnnotation::groups),
             )?;
         }
         Ok(admitted)
@@ -1896,16 +1652,16 @@ impl Engine {
         let mut needed = Vec::new();
         let mut unresolved = Vec::new();
         for call in proposals {
-            let contract = self
+            let declaration = self
                 .registry
-                .contract(call)
+                .declaration(call)
                 .expect("a resolved call names a checkable tool");
-            let (groups, resolvers) = unanswered(&self.registry, contract, call)?;
+            let (groups, annotator) = unanswered(&self.registry, declaration, call)?;
             needed.extend(groups);
-            for resolver in resolvers {
-                if !unresolved.contains(&resolver) {
-                    unresolved.push(resolver);
-                }
+            if let Some(annotator) = annotator
+                && !unresolved.contains(&annotator)
+            {
+                unresolved.push(annotator);
             }
         }
         if !needed.is_empty() {
@@ -1914,7 +1670,7 @@ impl Engine {
             return Err(TransitionError::MembershipNeeded { needed });
         }
         if !unresolved.is_empty() {
-            return Err(TransitionError::ToolResolutionNeeded { resolvers: unresolved });
+            return Err(TransitionError::AnnotationNeeded { annotators: unresolved });
         }
         Ok(())
     }
@@ -1931,10 +1687,7 @@ impl Engine {
             return Ok(answer);
         }
 
-        // The answers to a previous drive's ask, landed before anything reads a label: the
-        // batch then composes against the resolved picture rather than the unresolved one.
-        let (_, cast_facts) = self.applied_casts(view.projection(), &batch.trajectory, &batch.evidence, expansions)?;
-        let mut facts: Vec<Fact> = cast_facts;
+        let mut facts: Vec<Fact> = Vec::new();
         facts.extend(match admitted {
             0 => batch
                 .provider_results
@@ -1943,7 +1696,7 @@ impl Engine {
                 .map(|(position, result)| {
                     let contract = self
                         .registry
-                        .provider_run_contract(&result.tool)
+                        .provider_run_annotation(&result.tool)
                         .expect("every exposed result was classified above");
                     Fact::ValueAdmitted {
                         trajectory: batch.trajectory.clone(),
@@ -1971,22 +1724,6 @@ impl Engine {
             }
         };
         self.answered_proposals(&proposals)?;
-
-        // A call blocked only for want of a fact asks for the fact before anything is composed.
-        // What appends here is what the batch already established: its provider-run admissions
-        // and any cast the carried evidence already resolved. The value the ask names may be one
-        // of those admissions, so the retry can only resolve it against a log that holds it.
-        // Releases and offers do not append: a resolution advances the family basis, so any
-        // stamped ahead of it would carry a basis the answer immediately stales.
-        if !self.registry.casts().is_empty() {
-            let requests = self.cast_requests(view, &batch.trajectory, &facts, &proposals, expansions)?;
-            if !requests.is_empty() {
-                return Ok(EngineDecision {
-                    append: self.seal_admissions(view, &batch.id, facts)?,
-                    follow_up: FollowUp::ProposalsResolve(requests),
-                });
-            }
-        }
 
         let mut working = std::borrow::Cow::Borrowed(view.projection());
         for fact in &facts {
@@ -2047,16 +1784,16 @@ impl Engine {
         // moves nothing, so the two agree by construction.
         let advance = Sequence::advance_of(self, view, &facts);
         let final_views = working.view(&batch.trajectory);
-        let mut refused: Vec<(usize, &ResolvedCall, &ToolContract, RawBlock, plan::CallRole)> = Vec::new();
+        let mut refused: Vec<(usize, &ResolvedCall, ToolAnnotation, RawBlock, plan::CallRole)> = Vec::new();
         for (position, call) in composed
             .iter()
             .enumerate()
             .filter(|(_, release)| release.is_none())
             .map(|(position, _)| (position, &proposals[position]))
         {
-            let contract = self.validated_contract(call)?;
+            let contract = self.validated_contract(call)?.into_owned();
             let CheckOutcome::Block(raw) =
-                check::evaluate(contract, &final_views, call, &CallStage::default(), expansions)
+                check::evaluate(&contract, &final_views, call, &CallStage::default(), expansions)
             else {
                 unreachable!("an in-batch release only ever adds gaps to a refused sibling's block")
             };
@@ -2088,7 +1825,7 @@ impl Engine {
                 },
                 BlockedCall {
                     call,
-                    contract,
+                    contract: &contract,
                     raw: &raw,
                     stage: &CallStage::default(),
                     role,
@@ -2119,7 +1856,7 @@ impl Engine {
             .map(|(position, proposed)| {
                 self.resolve_call(proposed.tool.clone(), &proposed.arguments)
                     .map(|call| {
-                        call.with_tool_resolutions(proposed.tool_resolutions.clone())
+                        call.with_annotation(proposed.annotation.clone())
                             .with_memberships(proposed.memberships.clone())
                     })
                     .map_err(|error| (position, error))
@@ -2131,52 +1868,6 @@ impl Engine {
             marked_return_shape(call).map_err(|error| (mark.index(), error))?;
         }
         Ok(proposals)
-    }
-
-    /// Every value this batch's blocked calls consume that no fact has established yet, paired
-    /// with the cast that could establish it. Read-only: the check runs again once the answers
-    /// land and the batch is composed against them.
-    fn cast_requests(
-        &self,
-        view: &EngineView,
-        trajectory: &TrajectoryId,
-        facts: &[Fact],
-        proposals: &[ResolvedCall],
-        expansions: &Expansions,
-    ) -> Result<Vec<EvidenceRequest>, TransitionError> {
-        let mut working = std::borrow::Cow::Borrowed(view.projection());
-        for fact in facts {
-            working.to_mut().fold(fact);
-        }
-        let views = working.view(trajectory);
-        let mut unestablished: Vec<crate::value::ValueId> = Vec::new();
-        for call in proposals {
-            let contract = self
-                .registry
-                .contract(call)
-                .expect("a resolved call names a checkable tool");
-            let check::CheckOutcome::Block(raw) =
-                check::evaluate(contract, &views, call, &CallStage::default(), expansions)
-            else {
-                continue;
-            };
-            for fact in &raw.unestablished {
-                if !unestablished.contains(&fact.value) {
-                    unestablished.push(fact.value);
-                }
-            }
-        }
-        if unestablished.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut requests = Vec::new();
-        for value in unestablished {
-            expansions.require(&plan::constant_groups_reaching(&self.registry, &views, value))?;
-            if let Some((casts, body)) = plan::castable_sources(&self.registry, &views, value, expansions) {
-                requests.push(EvidenceRequest::Cast { casts, value, body });
-            }
-        }
-        Ok(requests)
     }
 
     fn seal_admissions(
@@ -2322,7 +2013,12 @@ impl Engine {
             })
             .collect();
         for (call, expansions) in &standing {
-            expansions.require(self.registry.contract(call).into_iter().flat_map(ToolContract::groups))?;
+            let reads: Vec<crate::names::GroupName> = self
+                .registry
+                .annotation_of(call)
+                .map(|annotation| annotation.groups().cloned().collect())
+                .unwrap_or_default();
+            expansions.require(&reads)?;
         }
         let mut released = Vec::new();
         let mut blocked = Vec::new();
@@ -2354,10 +2050,10 @@ impl Engine {
                     let candidate = (*candidate).clone();
                     let contract = self.validated_contract(&candidate)?;
                     let stage = views.call_stage(&subject);
-                    match check::evaluate(contract, views, &candidate, &stage, expansions) {
+                    match check::evaluate(&contract, views, &candidate, &stage, expansions) {
                         CheckOutcome::Block(raw) => {
                             let role = views.call_role(&subject);
-                            expansions.require(&plan::block_groups(&self.registry, contract, &raw, role))?;
+                            expansions.require(&plan::block_groups(&self.registry, &contract, &raw, role))?;
                             let (block_id, offers) = views.pending_block(&subject).unwrap_or_else(|| {
                                 let block_id = crate::value::BlockId::of_proposal(
                                     &batch.offer_nonce,
@@ -2374,7 +2070,7 @@ impl Engine {
                                     views,
                                     BlockedCall {
                                         call: &candidate,
-                                        contract,
+                                        contract: &contract,
                                         raw: &raw,
                                         stage: &stage,
                                         role,
@@ -2446,16 +2142,16 @@ impl Engine {
         let stage = views.call_stage(&recorded.subject);
         let role = views.call_role(&recorded.subject);
         expansions.require(contract.groups())?;
-        let live = match check::evaluate(contract, &views, &call, &stage, expansions) {
+        let live = match check::evaluate(&contract, &views, &call, &stage, expansions) {
             CheckOutcome::Block(raw) => {
-                expansions.require(&plan::block_groups(&self.registry, contract, &raw, role))?;
-                expansions.require(&plan::plan_groups(&self.registry, contract, &recorded.plan))?;
+                expansions.require(&plan::block_groups(&self.registry, &contract, &raw, role))?;
+                expansions.require(&plan::plan_groups(&self.registry, &contract, &recorded.plan))?;
                 plan::plan(
                     &self.registry,
                     &views,
                     BlockedCall {
                         call: &call,
-                        contract,
+                        contract: &contract,
                         raw: &raw,
                         stage: &stage,
                         role,
@@ -2476,13 +2172,13 @@ impl Engine {
         };
         match (&execution.outcome, recorded.plan.hop()) {
             (OfferOutcome::Derived(evidence), Some(sanitizer)) => self.hop_call(
-                view, &views, execution, &recorded, contract, &raw, &call, &stage, sanitizer, evidence, expansions,
+                view, &views, execution, &recorded, &contract, &raw, &call, &stage, sanitizer, evidence, expansions,
             ),
             (OfferOutcome::Approved(evidence), None) => self.approve_offer(
-                view, &views, execution, &recorded, contract, &raw, &call, evidence, expansions,
+                view, &views, execution, &recorded, &contract, &raw, &call, evidence, expansions,
             ),
             (OfferOutcome::Denied { authority }, None) => self.deny_offer(
-                view, &views, execution, &recorded, contract, &call, &raw, &stage, authority, expansions,
+                view, &views, execution, &recorded, &contract, &call, &raw, &stage, authority, expansions,
             ),
             _ => Err(TransitionError::PlanOutcomeMismatch),
         }
@@ -2532,7 +2228,7 @@ impl Engine {
         };
         let lineage = views.lineage(&subject);
         let contract = self.dispatch_contract(views, dispatch)?;
-        let stage = self.confined_menu(contract, &receiving, &value.label, &residual, &lineage, expansions)?;
+        let stage = self.confined_menu(&contract, &receiving, &value.label, &residual, &lineage, expansions)?;
         if !stage.contains(&recorded.plan) {
             return self.invalidated(view, execution, recorded);
         }
@@ -2594,7 +2290,7 @@ impl Engine {
         execution: &OfferExecution,
         dispatch: &DispatchId,
         call: &ResolvedCall,
-        receiving: &EstablishedLabel,
+        receiving: &Label,
         predecessor: &crate::value::LabeledValue,
         lineage: &SanitizerLineage,
         sanitizer: &SanitizerName,
@@ -2632,7 +2328,7 @@ impl Engine {
         facts.push(Fact::CandidateDerived {
             trajectory: views.trajectory().clone(),
             subject: crate::basis::SubjectKey::ConfinedResult(dispatch.clone()),
-            via: crate::candidate::DerivedVia::Sanitizer {
+            via: crate::candidate::DerivedVia {
                 name: sanitizer.clone(),
                 transition: registered.transition.resolve(expansions),
             },
@@ -2713,11 +2409,11 @@ impl Engine {
         let (label, body, residual) = match &standing {
             Some((value, residual)) => (value.label.clone(), value.body.clone(), residual.clone()),
             None => (
-                fold.bound().clone().into_label(),
+                fold.clone(),
                 pending.body().clone(),
                 Narrowing {
                     from: pending.receiving.clone(),
-                    to: pending.receiving.combine(fold.bound()),
+                    to: pending.receiving.combine(&fold),
                 },
             ),
         };
@@ -2725,7 +2421,6 @@ impl Engine {
             views,
             ReturnStageInput {
                 child: id.child(),
-                fold: &fold,
                 label: &label,
                 body: &body,
                 residual: &residual,
@@ -2733,10 +2428,7 @@ impl Engine {
             },
             expansions,
         )?;
-        let stage = match menu {
-            plan::ReturnStagePlan::Stage(plans) => plans,
-            plan::ReturnStagePlan::Resolve { .. } => return self.invalidated(view, execution, recorded),
-        };
+        let stage = menu;
         if !stage.contains(&recorded.plan) {
             return self.invalidated(view, execution, recorded);
         }
@@ -2812,7 +2504,7 @@ impl Engine {
         id: &ChildReturnId,
         pending: &crate::projection::SubmittedReturn,
         candidate: Option<crate::value::LabeledValue>,
-        fold: &PartialLabel,
+        fold: &Label,
         lineage: &SanitizerLineage,
         residual: Narrowing,
         mut facts: Vec<Fact>,
@@ -2826,8 +2518,7 @@ impl Engine {
                     .expect("a return candidate's lineage names the sanitizer that derived it")
                     .clone();
                 let subject = crate::basis::SubjectKey::Return(id.clone());
-                let Some(crate::candidate::DerivedVia::Sanitizer { transition, .. }) = views.candidate_via(&subject)
-                else {
+                let Some(crate::candidate::DerivedVia { transition, .. }) = views.candidate_via(&subject) else {
                     return Err(TransitionError::SanitizerUnapplicable);
                 };
                 (
@@ -2840,7 +2531,7 @@ impl Engine {
                 )
             }
             None => (
-                crate::value::LabeledValue::new(pending.body().clone(), fold.bound().clone().into_label()),
+                crate::value::LabeledValue::new(pending.body().clone(), fold.clone()),
                 ReturnDerivation::Raw,
             ),
         };
@@ -2868,7 +2559,7 @@ impl Engine {
         id: &ChildReturnId,
         pending: &crate::projection::SubmittedReturn,
         predecessor: Option<&crate::value::LabeledValue>,
-        fold: &PartialLabel,
+        fold: &Label,
         lineage: &SanitizerLineage,
         sanitizer: &SanitizerName,
         evidence: &Evidence,
@@ -2885,7 +2576,7 @@ impl Engine {
         };
         let (from_label, source_digest) = match predecessor {
             Some(value) => (value.label.clone(), RawResultDigest::of(value.body.as_str().as_bytes())),
-            None => (fold.bound().clone().into_label(), pending.digest),
+            None => (fold.clone(), pending.digest),
         };
         if named != sanitizer || source != &source_digest {
             return Err(TransitionError::EvidenceMismatch);
@@ -2911,7 +2602,7 @@ impl Engine {
         facts.push(Fact::CandidateDerived {
             trajectory: views.trajectory().clone(),
             subject: crate::basis::SubjectKey::Return(id.clone()),
-            via: DerivedVia::Sanitizer {
+            via: DerivedVia {
                 name: sanitizer.clone(),
                 transition: registered.transition.resolve(expansions),
             },
@@ -2943,15 +2634,12 @@ impl Engine {
                 follow_up: FollowUp::Offer(OfferFollowUp::Admitted { value: body.clone() }),
             });
         };
-        // The stage the successor leaves. A hop lands only while its offer's basis is current, so
-        // a consumed dimension resolvable now was resolvable when this stage's predecessor
-        // opened; a fresh `Resolve` has no live path, and the empty stage it would leave
-        // re-plans on the child's next report.
+        // The stage the successor leaves. A hop lands only while its offer's basis is current,
+        // so the stage is re-planned from the candidate standing now.
         let menu = self.return_menu(
             views,
             ReturnStageInput {
                 child: id.child(),
-                fold,
                 label: &label,
                 body,
                 residual: &residual,
@@ -2959,10 +2647,7 @@ impl Engine {
             },
             expansions,
         )?;
-        let stage = match menu {
-            plan::ReturnStagePlan::Stage(plans) => plans,
-            plan::ReturnStagePlan::Resolve { .. } => Vec::new(),
-        };
+        let stage = menu;
         let (batch, staged) = self.pending_stage(
             view,
             views,
@@ -3005,7 +2690,7 @@ impl Engine {
         views: &Views,
         execution: &OfferExecution,
         recorded: &crate::projection::RecordedOffer,
-        contract: &ToolContract,
+        contract: &ToolAnnotation,
         raw: &crate::check::RawBlock,
         call: &ResolvedCall,
         stage: &CallStage,
@@ -3013,14 +2698,11 @@ impl Engine {
         evidence: &Evidence,
         expansions: &Expansions,
     ) -> Result<EngineDecision, TransitionError> {
-        if !raw.unestablished.is_empty() {
-            return Err(PlanError::Unestablished(raw.unestablished.clone()).into());
-        }
         let Evidence::Rewrite {
             sanitizer: named,
             source,
             derived: body,
-            tool_resolutions,
+            annotation,
             memberships,
         } = evidence
         else {
@@ -3040,15 +2722,11 @@ impl Engine {
             .lineage()
             .extend(sanitizer.clone())
             .ok_or(TransitionError::SanitizerUnapplicable)?;
-        let (substituted, contract) = substituted_call(
-            &self.registry,
-            views,
-            &recorded.subject,
-            call,
-            body,
-            tool_resolutions,
-            memberships,
-        )?;
+        let substituted = substituted_call(&self.registry, call, body, annotation.as_ref(), memberships)?;
+        let contract = self
+            .registry
+            .annotation_of(&substituted)
+            .expect("a validated call resolves its annotation");
         // The sanitizer's jurisdiction reaches the contract the rewrite selects as well as the
         // one the offer was planned on: a rewrite is no way past a tag that keeps sanitizers off
         // a contract.
@@ -3058,7 +2736,7 @@ impl Engine {
         expansions.require(contract.groups())?;
 
         let next = CallStage::substituting(label.clone(), lineage.clone());
-        let after = check::evaluate(contract, views, &substituted, &next, expansions);
+        let after = check::evaluate(&contract, views, &substituted, &next, expansions);
         if !plan::substitution_helps(raw, &after) {
             return Err(TransitionError::SanitizerUnapplicable);
         }
@@ -3082,7 +2760,7 @@ impl Engine {
         facts.push(Fact::CandidateDerived {
             trajectory: trajectory.clone(),
             subject: recorded.subject.clone(),
-            via: DerivedVia::Sanitizer {
+            via: DerivedVia {
                 name: sanitizer.clone(),
                 transition: registered.transition.resolve(expansions),
             },
@@ -3096,7 +2774,7 @@ impl Engine {
             CheckOutcome::Allow => {
                 let (dispatch, opening) = opened_dispatch(
                     &self.registry,
-                    contract,
+                    &contract,
                     views,
                     &substituted,
                     recorded.subject.clone(),
@@ -3111,7 +2789,7 @@ impl Engine {
             }
             CheckOutcome::Block(raw) => {
                 let role = views.call_role(&recorded.subject);
-                expansions.require(&plan::block_groups(&self.registry, contract, &raw, role))?;
+                expansions.require(&plan::block_groups(&self.registry, &contract, &raw, role))?;
                 let (block, opened) = self.surface_call_block(
                     views,
                     Opening {
@@ -3122,7 +2800,7 @@ impl Engine {
                     },
                     BlockedCall {
                         call: &substituted,
-                        contract,
+                        contract: &contract,
                         raw: &raw,
                         stage: &next,
                         role,
@@ -3271,11 +2949,13 @@ impl Engine {
         }
         let follow_up = match (end, &execution.outcome) {
             (OfferEnd::Accepted, OfferOutcome::Approved(_)) => OfferFollowUp::Approved {
-                call: views
-                    .approval(&execution.offer)
-                    .ok_or(TransitionRefusal::UndischargedAcceptance)?
-                    .call
-                    .clone(),
+                call: Box::new(
+                    views
+                        .approval(&execution.offer)
+                        .ok_or(TransitionRefusal::UndischargedAcceptance)?
+                        .call
+                        .clone(),
+                ),
             },
             (OfferEnd::Denied(recorded_authority), OfferOutcome::Denied { authority })
                 if recorded_authority == authority =>
@@ -3361,11 +3041,11 @@ impl Engine {
         let contract = self.validated_contract(&call)?;
         let stage = views.call_stage(&recorded.subject);
         expansions.require(contract.groups())?;
-        let CheckOutcome::Block(raw) = check::evaluate(contract, views, &call, &stage, expansions) else {
+        let CheckOutcome::Block(raw) = check::evaluate(&contract, views, &call, &stage, expansions) else {
             return Ok(None);
         };
         let role = views.call_role(&recorded.subject);
-        expansions.require(&plan::block_groups(&self.registry, contract, &raw, role))?;
+        expansions.require(&plan::block_groups(&self.registry, &contract, &raw, role))?;
         let (block_id, offers) = views
             .pending_block(&recorded.subject)
             .unwrap_or((offer_block(recorded, execution, &call), Vec::new()));
@@ -3375,7 +3055,7 @@ impl Engine {
                 views,
                 BlockedCall {
                     call: &call,
-                    contract,
+                    contract: &contract,
                     raw: &raw,
                     stage: &stage,
                     role,
@@ -3395,7 +3075,7 @@ impl Engine {
         views: &Views,
         execution: &OfferExecution,
         recorded: &crate::projection::RecordedOffer,
-        contract: &ToolContract,
+        contract: &ToolAnnotation,
         raw: &crate::check::RawBlock,
         call: &ResolvedCall,
         evidence: &[execute::AuthorityEvidence],
@@ -3413,9 +3093,6 @@ impl Engine {
                 return Err(PlanError::RulingAssignmentMismatch.into());
             }
         }
-        if !raw.unestablished.is_empty() {
-            return Err(PlanError::Unestablished(raw.unestablished.clone()).into());
-        }
         execute::rulings_cover(
             &self.registry,
             contract,
@@ -3430,7 +3107,7 @@ impl Engine {
         let live = views.current_label();
         if evidence
             .iter()
-            .any(|given| given.reviewed.tool != contract.name || given.reviewed.trajectory_label != live)
+            .any(|given| given.reviewed.tool != *call.tool() || given.reviewed.trajectory_label != live)
         {
             return Err(PlanError::ReviewMismatch.into());
         }
@@ -3478,7 +3155,9 @@ impl Engine {
         let batch = self.declaring(crate::basis::DecidedAct::Offer(execution.offer), advance, facts);
         Ok(EngineDecision {
             append: Some(self.seal(view, batch)?),
-            follow_up: FollowUp::Offer(OfferFollowUp::Approved { call: call.clone() }),
+            follow_up: FollowUp::Offer(OfferFollowUp::Approved {
+                call: Box::new(call.clone()),
+            }),
         })
     }
 
@@ -3489,7 +3168,7 @@ impl Engine {
         views: &Views,
         execution: &OfferExecution,
         recorded: &crate::projection::RecordedOffer,
-        contract: &ToolContract,
+        contract: &ToolAnnotation,
         call: &ResolvedCall,
         raw: &crate::check::RawBlock,
         stage: &CallStage,
@@ -3575,8 +3254,8 @@ impl Engine {
     /// engine. Tool lookup, strict JSON scanning, schema validation, and RFC 8785 rendering
     /// happen together, so outer runtimes cannot construct a call under a different schema.
     pub fn resolve_call(&self, tool: ToolName, raw_arguments: &[u8]) -> Result<ResolvedCall, EngineError> {
-        if !self.registry.contains_tool(&tool) {
-            return Err(contract_for(&self.registry, &tool).unwrap_err());
+        if self.registry.classify(&tool) == Some(ToolKind::ProviderRun) {
+            return Err(EngineError::ProviderRunTool(tool.as_str().to_string()));
         }
         select_call(&self.registry, tool, raw_arguments).map(|(call, _)| call)
     }
@@ -3589,7 +3268,7 @@ impl Engine {
     pub(crate) fn check(&self, views: &Views, call: &ResolvedCall) -> Result<CheckOutcome, EngineError> {
         let contract = self.validated_contract(call)?;
         Ok(check::evaluate(
-            contract,
+            &contract,
             views,
             call,
             &CallStage::default(),
@@ -3608,7 +3287,7 @@ impl Engine {
             views,
             BlockedCall {
                 call,
-                contract,
+                contract: &contract,
                 raw,
                 stage: &CallStage::default(),
                 role: plan::CallRole::Ordinary,
@@ -3631,18 +3310,25 @@ impl Engine {
         branch::submit_child_return(&self.registry, parent, child, &body, &Expansions::default())
     }
 
-    fn dispatch_contract(&self, views: &Views, dispatch: &DispatchId) -> Result<&ToolContract, TransitionError> {
+    fn dispatch_contract<'c>(
+        &'c self,
+        views: &'c Views<'c>,
+        dispatch: &DispatchId,
+    ) -> Result<std::borrow::Cow<'c, ToolAnnotation>, TransitionError> {
         let call = views.dispatch_call(dispatch).ok_or(TransitionError::UnknownDispatch)?;
         self.validated_contract(call).map_err(TransitionError::Call)
     }
 
-    fn validated_contract(&self, call: &ResolvedCall) -> Result<&ToolContract, EngineError> {
-        if self.registry.provider_run_contract(call.tool()).is_some() {
+    fn validated_contract<'c>(
+        &'c self,
+        call: &'c ResolvedCall,
+    ) -> Result<std::borrow::Cow<'c, ToolAnnotation>, EngineError> {
+        if self.registry.provider_run_annotation(call.tool()).is_some() {
             return Err(EngineError::ProviderRunTool(call.tool().as_str().to_string()));
         }
         let contract = self
             .registry
-            .keyed_tool(call.tool(), call.contract_id())
+            .annotation_of(call)
             .ok_or_else(|| EngineError::UnknownTool(call.tool().as_str().to_string()))?;
         contract
             .parameters
@@ -3669,104 +3355,114 @@ fn select_call<'a>(
     registry: &'a Registry,
     tool: ToolName,
     raw_arguments: &[u8],
-) -> Result<(ResolvedCall, &'a ToolContract), EngineError> {
+) -> Result<(ResolvedCall, &'a crate::contract::ToolDeclaration), EngineError> {
     let parsed = CanonicalArguments::parse(raw_arguments).map_err(EngineError::InvalidCall)?;
-    let (id, contract) = registry
-        .select_tool(&tool, parsed.value())
-        .ok_or(EngineError::InvalidCall(ArgumentError::NoMatchingContract))?;
-    contract
-        .parameters
+    let (id, declaration) = registry.select_tool(&tool, parsed.value()).ok_or_else(|| {
+        // A name no declaration and no wildcard covers has no contract at all; a declared
+        // name whose arguments select no ordered variant is a malformed call under it.
+        match registry.classify(&tool) {
+            None => EngineError::UnknownTool(tool.as_str().to_string()),
+            Some(_) => EngineError::InvalidCall(ArgumentError::NoMatchingContract),
+        }
+    })?;
+    declaration
+        .parameters()
         .validate(parsed.value())
         .map_err(EngineError::InvalidCall)?;
-    Ok((ResolvedCall::new_keyed(tool, id, parsed), contract))
+    Ok((ResolvedCall::new_keyed(tool, id, parsed), declaration))
 }
 
-/// The call a sanitizer's replacement renders, under the ordered contract its arguments select.
+/// The call a sanitizer's replacement renders, under the ordered declaration its arguments select.
 ///
-/// A rewrite that stays in its contract carries the answers the call it replaces carries, given
-/// about the call last consulted on the record; the runtime consulted nothing and hands nothing
-/// in. A rewrite that selects another contract is a new call under it: nothing rides along, and
-/// the answers the runtime consulted about the rewritten arguments are judged as a proposal's are.
-fn substituted_call<'a>(
-    registry: &'a Registry,
-    views: &Views,
-    subject: &crate::basis::SubjectKey,
+/// Annotation evidence binds the exact canonical call, so a rewrite of an Annotator-declared
+/// tool carries the fresh annotation the runtime obtained for the rewritten call, whatever
+/// declaration it selects. Membership answers survive a same-declaration rewrite only where the
+/// arguments they read are unchanged; a rewrite that selects another declaration is a new call
+/// under it, its membership answers judged as a proposal's are.
+fn substituted_call(
+    registry: &Registry,
     call: &ResolvedCall,
     body: &ValueBody,
-    tool_resolutions: &[crate::contract::PinnedToolResolution],
+    annotation: Option<&crate::contract::PinnedAnnotation>,
     memberships: &[crate::contract::PinnedMembership],
-) -> Result<(ResolvedCall, &'a ToolContract), TransitionError> {
-    let (rewritten, contract) =
+) -> Result<ResolvedCall, TransitionError> {
+    let (rewritten, declaration) =
         select_call(registry, call.tool().clone(), body.as_str().as_bytes()).map_err(TransitionError::Call)?;
-    if rewritten.contract_id() == call.contract_id() {
-        if !tool_resolutions.is_empty() || !memberships.is_empty() {
-            return Err(TransitionError::EvidenceMismatch);
+    let same = rewritten.declaration_id() == call.declaration_id();
+    if same && !memberships.is_empty() {
+        return Err(TransitionError::EvidenceMismatch);
+    }
+    let substituted = if same {
+        call.substituting(rewritten.into_canonical_arguments())
+            .with_annotation(annotation.cloned())
+    } else {
+        rewritten
+            .with_annotation(annotation.cloned())
+            .with_memberships(memberships.to_vec())
+    };
+    match check::validate_annotation(registry, declaration, &substituted) {
+        Ok(()) => {}
+        Err(check::AnnotationRefusal::Needed(annotator)) => {
+            return Err(TransitionError::AnnotationNeeded {
+                annotators: vec![annotator],
+            });
         }
-        let substituted = call.substituting(rewritten.into_canonical_arguments());
-        let consulted = views
-            .consulted_call(subject)
-            .ok_or(TransitionError::SanitizerUnapplicable)?;
-        if check::validate_tool_resolutions(
-            registry,
-            contract,
-            &substituted,
-            check::AnsweredFor::Consulted(consulted),
-        )
-        .is_err()
-        {
-            return Err(TransitionError::SanitizerUnapplicable);
+        Err(_) => return Err(TransitionError::SanitizerUnapplicable),
+    }
+    {
+        let checked = registry
+            .annotation_of(&substituted)
+            .expect("a validated call resolves its annotation");
+        if !same {
+            let mut needed = match check::validate_memberships(&checked, &substituted) {
+                Ok(()) => Vec::new(),
+                Err(check::MembershipRefusal::Needed(reads)) => {
+                    reads.into_iter().map(|read| read.group).collect::<Vec<_>>()
+                }
+                Err(check::MembershipRefusal::Foreign(argument)) => {
+                    return Err(TransitionError::ForeignMembership { argument });
+                }
+            };
+            if !needed.is_empty() {
+                needed.sort();
+                needed.dedup();
+                return Err(TransitionError::MembershipNeeded { needed });
+            }
         }
-        return Ok((substituted, contract));
     }
-    let substituted = rewritten
-        .with_tool_resolutions(tool_resolutions.to_vec())
-        .with_memberships(memberships.to_vec());
-    let (mut needed, resolvers) = unanswered(registry, contract, &substituted)?;
-    if !needed.is_empty() {
-        needed.sort();
-        needed.dedup();
-        return Err(TransitionError::MembershipNeeded { needed });
-    }
-    if !resolvers.is_empty() {
-        return Err(TransitionError::ToolResolutionNeeded { resolvers });
-    }
-    Ok((substituted, contract))
+    Ok(substituted)
 }
 
-/// What a call's contract declares that the call does not yet carry: the groups its placeholders
-/// name and the resolvers it uses, each once. A foreign or out-of-policy answer is a refusal.
+/// What a call's declaration requires that the call does not yet carry: the groups its
+/// placeholders name, and the Annotator whose annotation it still owes. A foreign or
+/// out-of-policy answer is a refusal. A call still owing its annotation has no requirements to
+/// read yet, so the annotation ask comes back alone and the rest is judged once it lands.
 fn unanswered(
     registry: &Registry,
-    contract: &ToolContract,
+    declaration: &crate::contract::ToolDeclaration,
     call: &ResolvedCall,
-) -> Result<(Vec<crate::names::GroupName>, Vec<String>), TransitionError> {
-    let groups = match check::validate_memberships(contract, call) {
+) -> Result<(Vec<crate::names::GroupName>, Option<crate::names::AnnotatorName>), TransitionError> {
+    match check::validate_annotation(registry, declaration, call) {
+        Ok(()) => {}
+        Err(check::AnnotationRefusal::Needed(annotator)) => return Ok((Vec::new(), Some(annotator))),
+        Err(check::AnnotationRefusal::Foreign(reason)) => {
+            return Err(TransitionError::ForeignAnnotation { reason });
+        }
+        Err(check::AnnotationRefusal::OutsidePolicy(reason)) => {
+            return Err(TransitionError::InvalidAnnotation { reason });
+        }
+    }
+    let checked = registry
+        .annotation_of(call)
+        .expect("a validated call resolves its annotation");
+    let groups = match check::validate_memberships(&checked, call) {
         Ok(()) => Vec::new(),
         Err(check::MembershipRefusal::Needed(reads)) => reads.into_iter().map(|read| read.group).collect(),
         Err(check::MembershipRefusal::Foreign(argument)) => {
             return Err(TransitionError::ForeignMembership { argument });
         }
     };
-    let resolvers = match check::validate_tool_resolutions(registry, contract, call, check::AnsweredFor::ThisCall) {
-        Ok(()) => Vec::new(),
-        Err(check::ToolResolutionRefusal::Needed(bindings)) => {
-            let mut resolvers: Vec<String> = Vec::new();
-            for binding in bindings {
-                let resolver = binding.resolver.as_str().to_string();
-                if !resolvers.contains(&resolver) {
-                    resolvers.push(resolver);
-                }
-            }
-            resolvers
-        }
-        Err(check::ToolResolutionRefusal::Foreign(resolver)) => {
-            return Err(TransitionError::ForeignToolResolution { resolver });
-        }
-        Err(check::ToolResolutionRefusal::OutsidePolicy(resolver)) => {
-            return Err(TransitionError::InvalidToolResolution { resolver });
-        }
-    };
-    Ok((groups, resolvers))
+    Ok((groups, None))
 }
 
 fn invalidated_siblings(
@@ -3800,8 +3496,7 @@ fn settled_outcome(views: &Views, dispatch: &DispatchId) -> SettledOutcome {
 
 fn approved_release(
     registry: &Registry,
-    contract: &ToolContract,
-    call: &ResolvedCall,
+    contract: &ToolAnnotation,
     trajectory: &TrajectoryId,
     dispatch: &DispatchId,
     approval: &crate::projection::PreparedApproval,
@@ -3831,7 +3526,7 @@ fn approved_release(
             dispatch: dispatch.clone(),
             plan: approval.plan,
             sanitizer: sanitizer.clone(),
-            contribution: crate::plan::bound_contribution(registry, contract, call, sanitizer, expansions)
+            contribution: crate::plan::bound_contribution(registry, contract, sanitizer, expansions)
                 .expect("a prepared approval binds an output sanitizer enumeration found applicable"),
             resolutions: registry.resolutions(expansions),
         });
@@ -3851,7 +3546,7 @@ fn replay_outcome(recorded: &crate::projection::RecordedOffer, end: &crate::proj
                     sanitizer: sanitizer.clone(),
                     source: RawResultDigest::of(&[]),
                     derived: ValueBody::new(""),
-                    tool_resolutions: Vec::new(),
+                    annotation: None,
                     memberships: Vec::new(),
                 })
             }
@@ -3930,7 +3625,7 @@ fn branch_refusal(error: BranchError) -> TransitionError {
 /// whose decision released it.
 pub(crate) fn opened_dispatch(
     registry: &Registry,
-    contract: &ToolContract,
+    contract: &ToolAnnotation,
     views: &Views,
     call: &ResolvedCall,
     subject: crate::basis::SubjectKey,
@@ -3944,19 +3639,12 @@ pub(crate) fn opened_dispatch(
         trajectory: views.trajectory().clone(),
         dispatch: dispatch.clone(),
         tool: call.tool().clone(),
-        contract: call.contract_id(),
+        declaration: call.declaration_id(),
         arguments: call.canonical_arguments().clone(),
-        proposed_label: check::committed_label_for_call(
-            contract,
-            &current,
-            check::CallReads::Resolved(call),
-            expansions,
-        )
-        .bound()
-        .clone(),
-        receiving: current.bound().clone(),
+        proposed_label: check::committed_label(contract, &current, expansions).clone(),
+        receiving: current.clone(),
         proposed_effects: contract.emits.clone(),
-        tool_resolutions: call.tool_resolutions().to_vec(),
+        annotation: call.annotation().cloned(),
         memberships: call.memberships().to_vec(),
         resolutions: registry.resolutions(expansions),
         subject,
@@ -4051,7 +3739,7 @@ pub(crate) fn compose_batch<'a>(
                 Some(inherited) => std::borrow::Cow::Owned(expansions.clone().inheriting(inherited)),
                 None => std::borrow::Cow::Borrowed(expansions),
             };
-            if let Err(check::MembershipRefusal::Foreign(argument)) = check::pins_agree(contract, call, &under) {
+            if let Err(check::MembershipRefusal::Foreign(argument)) = check::pins_agree(&contract, call, &under) {
                 return Err(ComposeRefusal::ForeignMembership { argument });
             }
             let mut reads: Vec<crate::names::GroupName> = contract.groups().cloned().collect();
@@ -4084,7 +3772,7 @@ pub(crate) fn compose_batch<'a>(
                 .parameters
                 .validate(call.arguments())
                 .map_err(|error| malformed(EngineError::InvalidCall(error)))?;
-            let consumes = match check::evaluate(contract, &views, call, &CallStage::default(), under) {
+            let consumes = match check::evaluate(&contract, &views, call, &CallStage::default(), under) {
                 CheckOutcome::Allow => None,
                 CheckOutcome::Block(_) => match spends {
                     Some(offer) => Some(*offer),
@@ -4096,7 +3784,7 @@ pub(crate) fn compose_batch<'a>(
                 },
             };
             let subject = batch.subject(position);
-            let (dispatch, opening) = opened_dispatch(registry, contract, &views, call, subject, under);
+            let (dispatch, opening) = opened_dispatch(registry, &contract, &views, call, subject, under);
             let mut facts = Vec::new();
             if let Some(offer) = consumes {
                 let prepared = views
@@ -4109,7 +3797,7 @@ pub(crate) fn compose_batch<'a>(
                     dispatch: dispatch.clone(),
                 });
                 facts.extend(approved_release(
-                    registry, contract, call, trajectory, &dispatch, &prepared, under,
+                    registry, &contract, trajectory, &dispatch, &prepared, under,
                 ));
             }
             facts.push(opening);
@@ -4145,19 +3833,12 @@ pub(crate) fn compose_batch<'a>(
     Ok(composed)
 }
 
-fn contract_for<'a>(registry: &'a Registry, tool: &ToolName) -> Result<&'a ToolContract, EngineError> {
-    registry.tool(tool).ok_or_else(|| {
-        if registry.provider_run_contract(tool).is_some() {
-            EngineError::ProviderRunTool(tool.as_str().to_string())
-        } else {
-            EngineError::UnknownTool(tool.as_str().to_string())
-        }
-    })
-}
-
-fn contract_for_call<'a>(registry: &'a Registry, call: &ResolvedCall) -> Result<&'a ToolContract, EngineError> {
-    registry.contract(call).ok_or_else(|| {
-        if registry.provider_run_contract(call.tool()).is_some() {
+fn contract_for_call<'a>(
+    registry: &'a Registry,
+    call: &'a ResolvedCall,
+) -> Result<std::borrow::Cow<'a, ToolAnnotation>, EngineError> {
+    registry.annotation_of(call).ok_or_else(|| {
+        if registry.provider_run_annotation(call.tool()).is_some() {
             EngineError::ProviderRunTool(call.tool().as_str().to_string())
         } else {
             EngineError::UnknownTool(call.tool().as_str().to_string())
@@ -4167,22 +3848,20 @@ fn contract_for_call<'a>(registry: &'a Registry, call: &ResolvedCall) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use crate::authority::DeclaredLabel;
     use crate::groups::DeclaredAudience;
     use std::collections::BTreeSet;
 
     use super::*;
     use crate::check::Gap;
     use crate::contract::{
-        AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, RecipientSpec, Requires, ToolContract,
+        AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, RecipientSpec, Requires, ToolAnnotation,
     };
     use crate::fact::{EffectKind, EffectSet, Fact};
-    use crate::label::PartialLabel;
-    use crate::label::{Audience, Dim, Dimension, Label, ReaderId, Trust};
+    use crate::label::{Audience, Label, ReaderId, Trust};
     use crate::names::MarkName;
     use crate::projection::Projection;
     use crate::registry::{RegistryConfig, TrustChain};
-    use crate::value::{LabeledValue, Provenance, ToolName, TrajectoryId, ValueBody, ValueId};
+    use crate::value::{LabeledValue, Provenance, ToolName, TrajectoryId, ValueBody};
     use serde_json::json;
 
     const SUSPICIOUS: Trust = Trust::new(0);
@@ -4196,21 +3875,86 @@ mod tests {
         TrajectoryId::new("t")
     }
 
-    fn engine(tools: Vec<ToolContract>) -> Engine {
+    fn engine(tools: Vec<ToolAnnotation>) -> Engine {
         open_engine(test_config(tools))
     }
 
-    fn engine_at(tools: Vec<ToolContract>, starting: Label) -> Engine {
+    fn engine_at(tools: Vec<ToolAnnotation>, starting: Label) -> Engine {
         open_engine_at(test_config(tools), starting)
     }
 
-    fn test_config(tools: Vec<ToolContract>) -> RegistryConfig {
+    fn declared(tools: Vec<ToolAnnotation>) -> Vec<crate::contract::ToolDeclaration> {
+        tools
+            .into_iter()
+            .map(crate::contract::ToolDeclaration::Declared)
+            .collect()
+    }
+
+    /// A complete annotation as `annotator` produced it for `bound_to`'s exact canonical call.
+    fn pinned_for(
+        produced: ToolAnnotation,
+        annotator: &str,
+        bound_to: &ResolvedCall,
+    ) -> crate::contract::PinnedAnnotation {
+        crate::contract::PinnedAnnotation::new(
+            crate::names::AnnotatorName::new(annotator),
+            bound_to.digest(),
+            crate::contract::ProducedAnnotation {
+                delta: produced.delta,
+                emits: produced.emits,
+                requires: produced.requires,
+            },
+        )
+    }
+
+    /// An Annotated declaration carrying `tool`'s operational metadata, routed through `annotator`.
+    fn annotated(tool: ToolAnnotation, annotator: &str) -> crate::contract::ToolDeclaration {
+        crate::contract::ToolDeclaration::Annotated {
+            name: tool.name,
+            tags: tool.tags,
+            description: tool.description,
+            parameters: tool.parameters,
+            annotator: crate::names::AnnotatorName::new(annotator),
+        }
+    }
+
+    /// The policy's wildcard: `name = "*"`, no metadata, routed through `by`.
+    fn wildcard(by: &str) -> crate::contract::ToolDeclaration {
+        crate::contract::ToolDeclaration::Annotated {
+            name: ToolName::new(crate::registry::WILDCARD_TOOL_NAME),
+            tags: vec![],
+            description: None,
+            parameters: crate::params::ToolParameters::open(),
+            annotator: crate::names::AnnotatorName::new(by),
+        }
+    }
+
+    /// An Annotator registration with no bounds: every omitted bound resolves to the whole policy
+    /// vocabulary at load.
+    fn annotator(name: &str) -> crate::registry::AnnotatorDeclaration {
+        crate::registry::AnnotatorDeclaration {
+            name: crate::names::AnnotatorName::new(name),
+            trust: None,
+            audiences: None,
+            marks: None,
+            effects: None,
+        }
+    }
+
+    fn annotator_with_readers(name: &str, readers: &[&str]) -> crate::registry::AnnotatorDeclaration {
+        crate::registry::AnnotatorDeclaration {
+            audiences: Some(readers.iter().map(|reader| ReaderId::new(*reader)).collect()),
+            ..annotator(name)
+        }
+    }
+
+    fn test_config(tools: Vec<ToolAnnotation>) -> RegistryConfig {
         RegistryConfig {
+            annotators: vec![],
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools,
+            tools: declared(tools),
             authorities: vec![],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
         }
     }
@@ -4226,10 +3970,9 @@ mod tests {
             .remove(0)
     }
 
-    fn read_tool(name: &str, delta: Option<Delta>) -> ToolContract {
-        ToolContract {
+    fn read_tool(name: &str, delta: Delta) -> ToolAnnotation {
+        ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new(name),
             tags: vec![],
             delta,
@@ -4239,23 +3982,25 @@ mod tests {
         }
     }
 
-    fn suspicious_read() -> ToolContract {
+    fn suspicious_read() -> ToolAnnotation {
         read_tool(
             "read_suspicious",
-            Some(Delta {
-                trust: Some(Dim::Known(SUSPICIOUS)),
+            Delta {
+                trust: Some(SUSPICIOUS),
                 audience: None,
-            }),
+            },
         )
     }
 
-    fn internal_read() -> ToolContract {
+    fn internal_read() -> ToolAnnotation {
         read_tool(
             "read_internal",
-            Some(Delta {
+            Delta {
                 trust: None,
-                audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")])).into()),
-            }),
+                audience: Some(DeclaredAudience::literal(Audience::restricted([ReaderId::new(
+                    "internal",
+                )]))),
+            },
         )
     }
 
@@ -4269,32 +4014,16 @@ mod tests {
         }
     }
 
-    fn suspicious_internal_read() -> ToolContract {
+    fn suspicious_internal_read() -> ToolAnnotation {
         read_tool(
             "read_suspicious_internal",
-            Some(Delta {
-                trust: Some(Dim::Known(SUSPICIOUS)),
-                audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")])).into()),
-            }),
-        )
-    }
-
-    fn unknown_read() -> ToolContract {
-        read_tool("read_unknown", None)
-    }
-
-    fn admitted_with_unknown_audience(log: &mut Vec<Fact>, trust: Trust) {
-        log.push(Fact::ValueAdmitted {
-            trajectory: traj(),
-            value: LabeledValue::new(
-                ValueBody::new("what it said"),
-                Label::new(Dim::Known(trust), Dim::Unknown),
-            ),
-            provenance: Provenance::ChildReturn {
-                child: TrajectoryId::new("child"),
-                id: crate::value::ChildReturnId::new(traj(), 0),
+            Delta {
+                trust: Some(SUSPICIOUS),
+                audience: Some(DeclaredAudience::literal(Audience::restricted([ReaderId::new(
+                    "internal",
+                )]))),
             },
-        });
+        )
     }
 
     fn reads(e: &Engine, log: &mut Vec<Fact>, trajectory: &TrajectoryId, tool: &str) -> crate::value::DispatchId {
@@ -4456,8 +4185,9 @@ mod tests {
     }
 
     fn open_engine_returning_at(mut cfg: RegistryConfig, child_return: ReturnPolicy, starting: Label) -> Engine {
-        if !cfg.tools.iter().any(|tool| tool.name.as_str() == "spawn") {
-            cfg.tools.push(plain_tool("spawn"));
+        if !cfg.tools.iter().any(|tool| tool.name().as_str() == "spawn") {
+            cfg.tools
+                .push(crate::contract::ToolDeclaration::Declared(plain_tool("spawn")));
         }
         let profile = crate::profile::ProfileDeclaration {
             starting_label: starting,
@@ -4474,15 +4204,15 @@ mod tests {
     }
 
     fn known(trust: Trust, audience: Audience) -> Label {
-        Label::new(Dim::Known(trust), Dim::Known(audience))
+        Label::new(trust, audience)
     }
 
-    fn established(trust: Trust, audience: Audience) -> EstablishedLabel {
-        EstablishedLabel::new(trust, audience)
+    fn established(trust: Trust, audience: Audience) -> Label {
+        Label::new(trust, audience)
     }
 
-    fn partial(trust: Trust, audience: Audience) -> PartialLabel {
-        PartialLabel::established(EstablishedLabel::new(trust, audience))
+    fn partial(trust: Trust, audience: Audience) -> Label {
+        Label::new(trust, audience)
     }
 
     fn call(tool: &str, args: serde_json::Value) -> ResolvedCall {
@@ -4493,7 +4223,7 @@ mod tests {
         crate::transition::ProposedCall {
             tool: call.tool().clone(),
             arguments: call.canonical_arguments().canonical_bytes().to_vec(),
-            tool_resolutions: call.tool_resolutions().to_vec(),
+            annotation: call.annotation().cloned(),
             memberships: call.memberships().to_vec(),
         }
     }
@@ -4504,16 +4234,17 @@ mod tests {
         engine.check(&p.view(&t), call).unwrap()
     }
 
-    fn crm_tool() -> ToolContract {
-        ToolContract {
+    fn crm_tool() -> ToolAnnotation {
+        ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("get_ticket"),
             tags: vec![],
-            delta: Some(Delta {
+            delta: Delta {
                 trust: None,
-                audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")])).into()),
-            }),
+                audience: Some(DeclaredAudience::literal(Audience::restricted([ReaderId::new(
+                    "internal",
+                )]))),
+            },
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
@@ -4528,17 +4259,16 @@ mod tests {
 
     #[test]
     fn permuted_effect_declarations_produce_byte_identical_dispatch_facts() {
-        let pay = |emits: [&str; 2]| ToolContract {
+        let pay = |emits: [&str; 2]| ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("pay"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new(emits.map(EffectKind::new)).unwrap(),
             requires: Requires::default(),
         };
-        let release = |contract: ToolContract| {
+        let release = |contract: ToolAnnotation| {
             let e = engine(vec![contract]);
             let mut log = vec![opened(&e)];
             let decision = e
@@ -4779,12 +4509,12 @@ mod tests {
                 trajectory: traj(),
                 dispatch,
                 tool: call.tool().clone(),
-                contract: call.contract_id(),
+                declaration: call.declaration_id(),
                 arguments: call.canonical_arguments().clone(),
-                proposed_label: EstablishedLabel::new(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
-                receiving: EstablishedLabel::new(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
+                proposed_label: Label::new(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
+                receiving: Label::new(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
                 proposed_effects: crate::fact::EffectSet::default(),
-                tool_resolutions: Vec::new(),
+                annotation: None,
                 memberships: Vec::new(),
                 subject: crate::basis::fixture_subject(&traj()),
                 resolutions: vec![],
@@ -4893,113 +4623,16 @@ mod tests {
     }
 
     #[test]
-    fn pending_cast_output_dispatches_before_resolution() {
-        let scan = ToolContract {
-            description: Some("A test tool.".to_string()),
-            uses: vec![],
-            name: ToolName::new("scan_inbox"),
-            tags: vec![],
-            delta: Some(Delta {
-                trust: Some(Dim::Unknown),
-                audience: None,
-            }),
-            parameters: crate::params::ToolParameters::open(),
-            emits: EffectSet::default(),
-            requires: Requires::default(),
-        };
-        let e = engine(vec![scan]);
-        let log = vec![opened(&e)];
-        assert_eq!(check(&e, &log, &call("scan_inbox", json!({}))), CheckOutcome::Allow);
-    }
-
-    #[test]
-    fn trust_floor_gap_when_suspicious() {
-        let internal = Audience::restricted([ReaderId::new("internal")]);
-        let e = engine_at(vec![crm_tool()], known(SUSPICIOUS, internal));
-        let log = vec![opened(&e)];
-        match check(&e, &log, &call("get_ticket", json!({}))) {
-            CheckOutcome::Block(b) => assert!(b.requirement_gaps.contains(&Gap::TrustFloor {
-                required: TRUSTED,
-                actual: SUSPICIOUS,
-            })),
-            other => panic!("expected trust gap, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn includes_placeholder_resolves_from_arguments() {
-        let send = ToolContract {
-            description: Some("A test tool.".to_string()),
-            uses: vec![],
-            name: ToolName::new("send_email"),
-            tags: vec![],
-            delta: Some(Delta::NONE),
-            parameters: crate::params::test_string_argument_schema("to"),
-            emits: EffectSet::new([EffectKind::new("egress")]).unwrap(),
-            requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: None,
-                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Placeholder("to".into()))],
-                },
-                ..Requires::default()
-            },
-        };
-        let internal = Audience::restricted([ReaderId::new("auditor")]);
-        let e = engine_at(vec![send], known(TRUSTED, internal));
-        let log = vec![opened(&e)];
-        assert_eq!(
-            check(&e, &log, &call("send_email", json!({ "to": "auditor" }))),
-            CheckOutcome::Allow
-        );
-        match check(&e, &log, &call("send_email", json!({ "to": "stranger" }))) {
-            CheckOutcome::Block(b) => assert!(matches!(
-                b.requirement_gaps.as_slice(),
-                [crate::check::Gap::Includes { .. }]
-            )),
-            other => panic!("expected includes gap, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn history_prior_and_no_prior() {
-        let del = ToolContract {
-            description: Some("A test tool.".to_string()),
-            uses: vec![],
-            name: ToolName::new("delete_db"),
-            tags: vec![],
-            delta: Some(Delta::NONE),
-            parameters: crate::params::ToolParameters::open(),
-            emits: EffectSet::default(),
-            requires: Requires {
-                history: vec![
-                    HistoryRequirement::Prior(EffectKind::new("backup.done")),
-                    HistoryRequirement::NoPrior(EffectKind::new("db.deleted")),
-                ],
-                ..Requires::default()
-            },
-        };
-        let e = engine(vec![del]);
-        let log = vec![opened(&e)];
-        match check(&e, &log, &call("delete_db", json!({}))) {
-            CheckOutcome::Block(b) => {
-                assert!(b.requirement_gaps.contains(&Gap::Prior(EffectKind::new("backup.done"))))
-            }
-            other => panic!("expected prior gap, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn an_includes_requirement_reads_the_committed_label() {
         let b_reader = Audience::restricted([ReaderId::new("b")]);
-        let share = ToolContract {
+        let share = ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("share"),
             tags: vec![],
-            delta: Some(Delta {
+            delta: Delta {
                 trust: None,
-                audience: Some(Dim::Known(Audience::restricted([ReaderId::new("a")])).into()),
-            }),
+                audience: Some(DeclaredAudience::literal(Audience::restricted([ReaderId::new("a")]))),
+            },
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
@@ -5025,7 +4658,6 @@ mod tests {
                         to: established(TRUSTED, Audience::restricted([ReaderId::new("a")])),
                     })
                 );
-                assert!(block.unestablished.is_empty());
             }
             other => panic!("expected the committed-label includes gap, got {other:?}"),
         }
@@ -5033,15 +4665,14 @@ mod tests {
 
     #[test]
     fn a_trust_floor_reads_the_committed_label() {
-        let risky = ToolContract {
+        let risky = ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("risky"),
             tags: vec![],
-            delta: Some(Delta {
-                trust: Some(Dim::Known(SUSPICIOUS)),
+            delta: Delta {
+                trust: Some(SUSPICIOUS),
                 audience: None,
-            }),
+            },
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
@@ -5072,15 +4703,14 @@ mod tests {
     #[test]
     fn a_read_that_narrows_into_the_cap_passes_the_cap() {
         let a_reader = Audience::restricted([ReaderId::new("a")]);
-        let scoped = ToolContract {
+        let scoped = ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("scoped"),
             tags: vec![],
-            delta: Some(Delta {
+            delta: Delta {
                 trust: None,
-                audience: Some(Dim::Known(a_reader.clone()).into()),
-            }),
+                audience: Some(DeclaredAudience::literal(a_reader.clone())),
+            },
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
@@ -5103,26 +4733,24 @@ mod tests {
         }
     }
 
-    fn emitting(name: &str, kind: &str) -> ToolContract {
-        ToolContract {
+    fn emitting(name: &str, kind: &str) -> ToolAnnotation {
+        ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new(name),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new(kind)]).unwrap(),
             requires: Requires::default(),
         }
     }
 
-    fn history_guarded(name: &str, requirement: HistoryRequirement) -> ToolContract {
-        ToolContract {
+    fn history_guarded(name: &str, requirement: HistoryRequirement) -> ToolAnnotation {
+        ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new(name),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
@@ -5443,25 +5071,24 @@ mod tests {
             scope: crate::authority::Scope::default(),
             hint: None,
         };
-        let fetch = ToolContract {
+        let fetch = ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("fetch"),
             tags: vec![],
-            delta: Some(Delta {
-                trust: Some(Dim::Known(SUSPICIOUS)),
+            delta: Delta {
+                trust: Some(SUSPICIOUS),
                 audience: None,
-            }),
+            },
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("web.read")]).unwrap(),
             requires: Requires::default(),
         };
         let e = open_engine(RegistryConfig {
+            annotators: vec![],
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![fetch],
+            tools: declared(vec![fetch]),
             authorities: vec![],
             sanitizers: vec![redactor],
-            casts: vec![],
             membership: None,
         });
         let call = call("fetch", json!({}));
@@ -5640,29 +5267,34 @@ mod tests {
             hint: None,
         };
         open_engine(RegistryConfig {
+            annotators: vec![],
             trust_chain: TrustChain::new(vec!["secret".into(), "suspicious".into(), "trusted".into()]),
-            tools: vec![
-                ToolContract {
+            tools: declared(vec![
+                ToolAnnotation {
                     description: Some("A test tool.".to_string()),
-                    uses: vec![],
                     name: ToolName::new("fetch"),
                     tags: vec![],
-                    delta: Some(Delta {
-                        trust: Some(Dim::Known(Trust::new(0))),
+                    delta: Delta {
+                        trust: Some(Trust::new(0)),
                         audience: None,
-                    }),
+                    },
                     parameters: crate::params::ToolParameters::open(),
                     emits: EffectSet::new([EffectKind::new("web.read")]).unwrap(),
                     requires: Requires::default(),
                 },
-                open_tool("ping"),
-            ],
+                ToolAnnotation {
+                    delta: Delta {
+                        trust: Some(Trust::new(2)),
+                        audience: None,
+                    },
+                    ..open_tool("ping")
+                },
+            ]),
             authorities: vec![],
             sanitizers: vec![
                 sanitizer("redactor", Trust::new(0), Trust::new(1)),
                 sanitizer("scrubber", Trust::new(1), Trust::new(2)),
             ],
-            casts: vec![],
             membership: None,
         })
     }
@@ -5913,7 +5545,7 @@ mod tests {
                 sanitizer: crate::names::SanitizerName::new("redact"),
                 source: crate::value::RawResultDigest::of(&[]),
                 derived: ValueBody::new(""),
-                tool_resolutions: vec![],
+                annotation: None,
                 memberships: vec![],
             }))),
         );
@@ -6000,8 +5632,8 @@ mod tests {
             .view(&traj(), [log.clone(), hopped].concat(), (log.len() + 8) as u64)
             .expect("the hop's batch replays");
         assert_eq!(
-            after.projection().view(&traj()).current_label().bound(),
-            &established(Trust::new(2), Audience::Public),
+            after.projection().view(&traj()).current_label(),
+            established(Trust::new(2), Audience::Public),
             "a candidate that narrows nothing costs the trajectory nothing"
         );
         assert!(
@@ -6032,8 +5664,8 @@ mod tests {
             )
             .expect("the acceptance's batch replays");
         assert_eq!(
-            after.projection().view(&traj()).current_label().bound(),
-            &established(Trust::new(1), Audience::Public)
+            after.projection().view(&traj()).current_label(),
+            established(Trust::new(1), Audience::Public)
         );
         assert!(
             after
@@ -6141,68 +5773,23 @@ mod tests {
 
     fn substituting_engine(trust: Trust) -> Engine {
         let partner = Audience::restricted([ReaderId::new("partner")]);
-        let post = |name: &str, tags: Vec<crate::names::TagName>| ToolContract {
-            description: Some("A test tool.".to_string()),
-            uses: vec![],
-            name: ToolName::new(name),
-            tags,
-            delta: Some(Delta::NONE),
-            parameters: crate::params::ToolParameters::compile(&json!({
-                "type": "object",
-                "properties": { "body": { "type": "string" } },
-                "required": ["body"],
-            }))
-            .unwrap(),
-            emits: EffectSet::new([EffectKind::new("outbound.post")]).unwrap(),
-            requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
-                        DeclaredAudience::literal(partner.clone()),
-                    ))],
-                },
-                ..Requires::default()
-            },
-        };
-        let post_to = ToolContract {
-            name: ToolName::new("post_to"),
-            parameters: crate::params::ToolParameters::compile(&json!({
-                "type": "object",
-                "properties": { "body": { "type": "string" }, "who": { "type": "string" } },
-                "required": ["body", "who"],
-            }))
-            .unwrap(),
-            delta: Some(Delta {
-                trust: None,
-                audience: None,
-            }),
-            description: Some("A test tool.".to_string()),
-            uses: vec![dynamic_who()],
-            ..post("post_to", vec![crate::names::TagName::new("outbound")])
-        };
-        // Its resolver declares no inputs, so it reads the complete call: every rewrite changes
-        // what it was shown. The recipients it requires are the answer's, not the policy's.
-        let post_call = ToolContract {
-            uses: vec![dynamic_call()],
-            requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![],
-                },
-                ..Requires::default()
-            },
-            ..post("post_call", vec![crate::names::TagName::new("outbound")])
-        };
+        let post = post_tool;
         open_engine_at(
             RegistryConfig {
+                annotators: vec![annotator("acl")],
                 trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-                tools: vec![
-                    post("post", vec![crate::names::TagName::new("outbound")]),
-                    post("post_untagged", vec![]),
-                    post_to,
-                    post_call,
-                    open_tool("ping"),
-                ],
+                tools: {
+                    let mut tools = declared(vec![
+                        post("post", vec![crate::names::TagName::new("outbound")]),
+                        post("post_untagged", vec![]),
+                        restrictable_tool("ping"),
+                    ]);
+                    tools.push(annotated(
+                        post("post_dyn", vec![crate::names::TagName::new("outbound")]),
+                        "acl",
+                    ));
+                    tools
+                },
                 authorities: vec![crate::authority::Authority {
                     name: AuthorityName::new("officer"),
                     mandate: crate::authority::Mandate {
@@ -6231,7 +5818,6 @@ mod tests {
                     },
                     hint: None,
                 }],
-                casts: vec![],
                 membership: None,
             },
             known(trust, Audience::restricted([ReaderId::new("internal")])),
@@ -6242,72 +5828,41 @@ mod tests {
         vec![opened(e)]
     }
 
-    fn dynamic_who() -> crate::contract::ToolResolverUse {
-        crate::contract::ToolResolverUse {
-            resolver: crate::names::DynamicResolverName::new("acl"),
-            inputs: std::collections::BTreeMap::from([(
-                "who".to_string(),
-                crate::contract::ToolCallSource::argument("who").expect("a plain name is a source"),
-            )]),
-            returns: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
+    fn post_tool(name: &str, tags: Vec<crate::names::TagName>) -> ToolAnnotation {
+        ToolAnnotation {
+            description: Some("A test tool.".to_string()),
+            name: ToolName::new(name),
+            tags,
+            delta: Delta::NONE,
+            parameters: crate::params::ToolParameters::compile(&json!({
+                "type": "object",
+                "properties": { "body": { "type": "string" } },
+                "required": ["body"],
+            }))
+            .unwrap(),
+            emits: EffectSet::new([EffectKind::new("outbound.post")]).unwrap(),
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: Some(TRUSTED),
+                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                        DeclaredAudience::literal(Audience::restricted([ReaderId::new("partner")])),
+                    ))],
+                },
+                ..Requires::default()
+            },
         }
     }
 
-    fn dynamic_call() -> crate::contract::ToolResolverUse {
-        crate::contract::ToolResolverUse {
-            resolver: crate::names::DynamicResolverName::new("classify"),
-            inputs: std::collections::BTreeMap::new(),
-            returns: [crate::contract::ResolverReturn::RequiredAudience]
-                .into_iter()
-                .collect(),
-        }
-    }
-
-    /// A pin for the call on `post_call` whose `body` argument holds `body`. Its args are all the
-    /// tool arguments, so any rewrite of `body` changes them.
-    fn call_pin_for(body: &str) -> crate::contract::PinnedToolResolution {
-        call_pin_for_reader(body, "partner")
-    }
-
-    fn call_pin_for_reader(body: &str, reader: &str) -> crate::contract::PinnedToolResolution {
-        let uses = dynamic_call();
-        let contract = crate::contract::ToolContract {
-            uses: vec![uses.clone()],
-            ..plain_tool("post_call")
-        };
-        crate::contract::PinnedToolResolution::from_answer(
-            uses.clone(),
-            contract.resolver_args_digest(&uses, &json!({ "body": body })),
-            None,
-            None,
-            None,
-            Some(crate::contract::RequiredAudience {
-                includes: Some(Audience::restricted([ReaderId::new(reader)])),
-                cap: None,
-            }),
-            None,
-        )
-        .expect("a literal required audience pins")
-    }
-
-    /// A pin for a call on `post` whose `who` argument holds `who`. The args it stores are the
-    /// ones that tool would have sent, so the pin binds to that call and no other.
-    fn who_pin_for(who: &str, reader: &str) -> crate::contract::PinnedToolResolution {
-        let uses = dynamic_who();
-        let contract = crate::contract::ToolContract {
-            uses: vec![uses.clone()],
-            ..plain_tool("post_to")
-        };
-        crate::contract::PinnedToolResolution::from_answer(
-            uses.clone(),
-            contract.resolver_args_digest(&uses, &json!({ "who": who })),
-            None,
-            Some(Audience::restricted([ReaderId::new(reader)])),
-            None,
-            None,
-            None,
-        )
-        .expect("a literal reader set pins")
+    /// The complete annotation `acl` produces for a `post_dyn` call: the declaration's
+    /// operational metadata with the recipients the answer requires.
+    fn post_dyn_annotation(readers: &[&str]) -> ToolAnnotation {
+        let mut produced = post_tool("post_dyn", vec![crate::names::TagName::new("outbound")]);
+        produced.requires.label.audience = vec![AudienceRequirement::Includes(RecipientSpec::Static(
+            DeclaredAudience::literal(Audience::restricted(
+                readers.iter().map(|reader| ReaderId::new(*reader)),
+            )),
+        ))];
+        produced
     }
 
     fn substitution(call: &ResolvedCall, replacement: &str) -> OfferOutcome {
@@ -6315,7 +5870,7 @@ mod tests {
             sanitizer: crate::names::SanitizerName::new("redact"),
             source: crate::value::RawResultDigest::of(call.canonical_arguments().canonical_bytes()),
             derived: ValueBody::new(replacement),
-            tool_resolutions: Vec::new(),
+            annotation: None,
             memberships: Vec::new(),
         })
     }
@@ -6498,25 +6053,7 @@ mod tests {
         let log = [log, facts].concat();
         assert_eq!(e.validate_replay(&log), Ok(()));
 
-        let answer = || {
-            crate::contract::PinnedToolResolution::from_answer(
-                crate::contract::ToolResolverUse {
-                    resolver: crate::names::DynamicResolverName::new("acl"),
-                    inputs: std::collections::BTreeMap::from([(
-                        "body".to_string(),
-                        crate::contract::ToolCallSource::argument("body").expect("a plain name is a source"),
-                    )]),
-                    returns: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
-                },
-                crate::contract::ResolverArgsDigest::of(b""),
-                None,
-                Some(Audience::restricted([ReaderId::new("partner")])),
-                None,
-                None,
-                None,
-            )
-            .expect("a literal reader set pins")
-        };
+        let answer = || pinned_for(plain_tool("post"), "ghost", &proposal);
 
         let mut forged = log.clone();
         let candidate = forged.len() - 2;
@@ -6527,25 +6064,24 @@ mod tests {
         else {
             panic!("the hop's batch records its candidate before the opening")
         };
-        *call = call.clone().with_tool_resolutions(vec![answer()]);
+        *call = call.clone().with_annotation(Some(answer()));
         assert_eq!(
             e.validate_replay(&forged),
-            Err(crate::transition::TransitionRefusal::ForgedLabel),
-            "the candidate is the call the predecessor's own substitution renders, answers included"
+            Err(crate::transition::TransitionRefusal::ForgedResolution),
+            "a static declaration is its own annotation: a pinned candidate under it is forged"
         );
 
         let mut forged = log.clone();
-        let Fact::DispatchOpened { tool_resolutions, .. } =
+        let Fact::DispatchOpened { annotation, .. } =
             forged.last_mut().expect("the opening is the batch's last record")
         else {
             panic!("the hop's batch ends with its opening")
         };
-        *tool_resolutions = vec![answer()];
+        *annotation = Some(answer());
         assert_eq!(
             e.validate_replay(&forged),
             Err(crate::transition::TransitionRefusal::UnbackedDecision),
-            "the release a candidate earned is that exact call; an opening of any other claims a \
-             subject this decision never released"
+            "a static dispatch record carrying a pin diverges from the decision that released it"
         );
     }
 
@@ -6687,7 +6223,7 @@ mod tests {
         assert_eq!(
             offer_answer(&approved),
             &OfferFollowUp::Approved {
-                call: block.call.clone()
+                call: Box::new(block.call.clone())
             }
         );
         let log = [log, appended_facts(approved)].concat();
@@ -6757,169 +6293,51 @@ mod tests {
     }
 
     #[test]
-    fn a_proposal_missing_a_dynamic_answer_refuses_the_event_and_appends_nothing() {
+    fn a_proposal_missing_its_annotation_refuses_the_event_and_appends_nothing() {
         let e = substituting_engine(TRUSTED);
         let log = internal_log(&e);
-        let unpinned = call("post_to", json!({ "body": "ssn 123", "who": "desk" }));
+        let unpinned = call("post_dyn", json!({ "body": "ssn 123" }));
         assert_eq!(
             e.handle(
                 &viewing(&e, &log),
                 batch_on(&traj(), "b1", Vec::new(), vec![raw(&unpinned), raw(&unpinned)], None)
             ),
-            Err(TransitionError::ToolResolutionNeeded {
-                resolvers: vec!["acl".to_string()]
+            Err(TransitionError::AnnotationNeeded {
+                annotators: vec![crate::names::AnnotatorName::new("acl")]
             })
         );
-        let foreign =
-            call("post", json!({ "body": "ssn 123" })).with_tool_resolutions(vec![who_pin_for("desk", "partner")]);
-        assert_eq!(
-            e.handle(
-                &viewing(&e, &log),
-                batch_on(&traj(), "b2", Vec::new(), vec![raw(&foreign)], None)
-            ),
-            Err(TransitionError::ForeignToolResolution {
-                resolver: "acl".to_string()
-            })
-        );
-        let conflicting = call("post_to", json!({ "body": "ssn 123", "who": "desk" }))
-            .with_tool_resolutions(vec![who_pin_for("desk", "partner"), who_pin_for("desk", "internal")]);
-        assert_eq!(
-            e.handle(
-                &viewing(&e, &log),
-                batch_on(&traj(), "b3", Vec::new(), vec![raw(&conflicting)], None)
-            ),
-            Err(TransitionError::ForeignToolResolution {
-                resolver: "acl".to_string()
-            })
-        );
-    }
-
-    #[test]
-    fn a_substitution_that_rewrites_a_dynamically_read_argument_keeps_its_answer() {
-        let e = substituting_engine(TRUSTED);
-        let proposal = call("post_to", json!({ "body": "ssn 123", "who": "desk" }))
-            .with_tool_resolutions(vec![who_pin_for("desk", "partner")]);
-        let log = internal_log(&e);
-        let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
-        let hop = opened_offers(&facts)[0].0;
-        let log = [log, facts].concat();
-
-        // `who` is exactly what the resolver read, and the rewrite replaces it. The answer was
-        // given about the proposal this rewrite lands on, so it still stands.
-        let hopped = execute_offer(
-            &e,
-            &log,
-            hop,
-            substitution(&proposal, r#"{"body":"[redacted]","who":"someone else"}"#),
-        )
-        .expect("the hop runs over the argument its resolver read");
-        match offer_answer(&hopped) {
-            OfferFollowUp::Substituted { block } => {
-                assert_eq!(
-                    block.call.canonical_arguments().canonical_text(),
-                    r#"{"body":"[redacted]","who":"someone else"}"#
-                );
-                assert_eq!(
-                    block.call.tool_resolutions(),
-                    proposal.tool_resolutions(),
-                    "the answer rides through the rewrite; the resolver is not asked again"
-                );
-                assert!(
-                    block.block.raw.requirement_gaps.is_empty(),
-                    "the rewrite cleared the includes gap; only the answer's own narrowing remains"
-                );
-            }
-            other => panic!("the substitution re-plans over the derived call, got {other:?}"),
-        }
-        let log = [log, appended_facts(hopped)].concat();
-        assert_eq!(e.validate_replay(&log), Ok(()));
-    }
-
-    #[test]
-    fn an_all_arguments_answer_keeps_its_hop_and_rides_through_the_substitution() {
-        let e = substituting_engine(TRUSTED);
-        let proposal =
-            call("post_call", json!({ "body": "ssn 123" })).with_tool_resolutions(vec![call_pin_for("ssn 123")]);
-        let log = internal_log(&e);
-        let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
-        let offers = opened_offers(&facts);
-        assert_eq!(
-            offers[0].1.hop(),
-            Some(&crate::names::SanitizerName::new("redact")),
-            "a resolver that reads the complete call is offered the input hop"
-        );
-        let log = [log, facts].concat();
-
-        let hopped = execute_offer(&e, &log, offers[0].0, substitution(&proposal, REDACTED)).expect("the hop runs");
-        let released = match offer_answer(&hopped) {
-            OfferFollowUp::Released(released) => (**released).clone(),
-            other => panic!("the substitution clears the last gap and dispatches, got {other:?}"),
-        };
-        assert_eq!(released.call.canonical_arguments().canonical_text(), REDACTED);
-        assert_eq!(
-            released.call.tool_resolutions(),
-            proposal.tool_resolutions(),
-            "the answer rides through the rewrite; the resolver is not asked again"
-        );
-        let facts = appended_facts(hopped);
+        let unpinned_post = call("post", json!({ "body": "ssn 123" }));
+        let foreign = unpinned_post.clone().with_annotation(Some(pinned_for(
+            post_dyn_annotation(&["partner"]),
+            "acl",
+            &unpinned_post,
+        )));
         assert!(
             matches!(
-                facts.as_slice(),
-                [
-                    Fact::BasisAdvanced { .. },
-                    Fact::OfferAccepted { .. },
-                    Fact::OfferInvalidated { .. },
-                    Fact::CandidateDerived {
-                        derived: DerivedCandidate::Call { call, .. },
-                        ..
-                    },
-                    Fact::DispatchOpened { tool_resolutions, .. },
-                ] if call == &released.call && tool_resolutions == proposal.tool_resolutions()
+                e.handle(
+                    &viewing(&e, &log),
+                    batch_on(&traj(), "b2", Vec::new(), vec![raw(&foreign)], None)
+                ),
+                Err(TransitionError::ForeignAnnotation { .. })
             ),
-            "the derived candidate and the opening both carry the answers: {facts:?}"
+            "a static declaration is its own annotation; an annotator's pin on it is foreign"
         );
-        let log = [log, facts].concat();
-        assert_eq!(e.validate_replay(&log), Ok(()));
-    }
-
-    #[test]
-    fn a_carried_answer_may_not_be_restated_on_the_record() {
-        let e = substituting_engine(TRUSTED);
-        let proposal =
-            call("post_call", json!({ "body": "ssn 123" })).with_tool_resolutions(vec![call_pin_for("ssn 123")]);
-        let log = internal_log(&e);
-        let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
-        let offer = opened_offers(&facts)[0].0;
-        let log = [log, facts].concat();
-        let hopped =
-            appended_facts(execute_offer(&e, &log, offer, substitution(&proposal, REDACTED)).expect("the hop runs"));
-        assert_eq!(e.validate_replay(&[log.clone(), hopped.clone()].concat()), Ok(()));
-
-        // The rewrite carries the proposal's answer. Restating it with a wider audience keeps the
-        // resolver, the declared use and the `args` digest the proposal's — only what the answer
-        // says moves. The record refuses it: the digest binds what an answer is about, and the
-        // complete-call comparison binds what it says.
-        for (position, refusal) in [
-            (3usize, TransitionRefusal::ForgedLabel),
-            (4, TransitionRefusal::UnbackedDecision),
-        ] {
-            let mut forged = hopped.clone();
-            match &mut forged[position] {
-                Fact::CandidateDerived {
-                    derived: DerivedCandidate::Call { call, .. },
-                    ..
-                } => {
-                    *call = call
-                        .clone()
-                        .with_tool_resolutions(vec![call_pin_for_reader("ssn 123", "public-desk")])
-                }
-                Fact::DispatchOpened { tool_resolutions, .. } => {
-                    *tool_resolutions = vec![call_pin_for_reader("ssn 123", "public-desk")]
-                }
-                other => panic!("the hop's batch derives then opens, got {other:?}"),
-            }
-            assert_eq!(e.validate_replay(&[log.clone(), forged].concat()), Err(refusal));
-        }
+        let sibling = call("post_dyn", json!({ "body": "other" }));
+        let restated = call("post_dyn", json!({ "body": "ssn 123" })).with_annotation(Some(pinned_for(
+            post_dyn_annotation(&["partner"]),
+            "acl",
+            &sibling,
+        )));
+        assert!(
+            matches!(
+                e.handle(
+                    &viewing(&e, &log),
+                    batch_on(&traj(), "b3", Vec::new(), vec![raw(&restated)], None)
+                ),
+                Err(TransitionError::ForeignAnnotation { .. })
+            ),
+            "annotation evidence binds the exact call it judged: a sibling call cannot reuse it"
+        );
     }
 
     #[test]
@@ -7272,11 +6690,11 @@ mod tests {
     #[test]
     fn a_spawn_mark_takes_declared_context_control() {
         let config = RegistryConfig {
+            annotators: vec![],
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![plain_tool("spawn")],
+            tools: declared(vec![plain_tool("spawn")]),
             authorities: vec![],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
         };
         let mut declaration = crate::profile::covering_declaration(&config);
@@ -7569,23 +6987,21 @@ mod tests {
         );
     }
 
-    fn neutral_tool() -> ToolContract {
-        ToolContract {
+    fn neutral_tool() -> ToolAnnotation {
+        ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("read_note"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires::default(),
         }
     }
 
-    fn emitting_tool() -> ToolContract {
-        ToolContract {
+    fn emitting_tool() -> ToolAnnotation {
+        ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("send_note"),
             emits: EffectSet::new([EffectKind::new("email.sent")]).unwrap(),
             ..neutral_tool()
@@ -7783,13 +7199,13 @@ mod tests {
             hint: None,
         };
         let cfg = RegistryConfig {
+            annotators: vec![],
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![ToolContract {
+            tools: declared(vec![ToolAnnotation {
                 description: Some("A test tool.".to_string()),
-                uses: vec![],
                 name: ToolName::new("wire"),
                 tags: vec![],
-                delta: Some(Delta::NONE),
+                delta: Delta::NONE,
                 parameters: crate::params::ToolParameters::open(),
                 emits: EffectSet::default(),
                 requires: Requires {
@@ -7799,10 +7215,9 @@ mod tests {
                     },
                     ..Requires::default()
                 },
-            }],
+            }]),
             authorities: vec![officer("officer-a"), officer("officer-b")],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
         };
         open_engine_at(cfg, known(SUSPICIOUS, Audience::Public))
@@ -7822,7 +7237,7 @@ mod tests {
         offer: crate::value::OfferId,
         plan: &plan::ExecutableRemedyPlan,
         tool: &str,
-        fold: PartialLabel,
+        fold: Label,
     ) -> Vec<crate::execute::AuthorityEvidence> {
         plan.required
             .iter()
@@ -7866,13 +7281,24 @@ mod tests {
         }
     }
 
-    fn open_tool(name: &str) -> ToolContract {
-        ToolContract {
+    /// A tool that releases freely at the trajectory's own trust yet declares a delta, so its
+    /// result can restrict the trajectory and its release moves the flow basis.
+    fn restrictable_tool(name: &str) -> ToolAnnotation {
+        ToolAnnotation {
+            delta: Delta {
+                trust: Some(TRUSTED),
+                audience: None,
+            },
+            ..open_tool(name)
+        }
+    }
+
+    fn open_tool(name: &str) -> ToolAnnotation {
+        ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new(name),
             tags: vec![],
-            delta: None,
+            delta: crate::contract::Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires::default(),
@@ -7969,11 +7395,11 @@ mod tests {
             hint: None,
         };
         let e = open_engine(RegistryConfig {
+            annotators: vec![],
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![crm_tool()],
+            tools: declared(vec![crm_tool()]),
             authorities: vec![],
             sanitizers: vec![declassify],
-            casts: vec![],
             membership: None,
         });
         let log = vec![opened(&e)];
@@ -8443,13 +7869,72 @@ mod tests {
         );
         assert!(releases(&e, &[log, elsewhere].concat(), "b3"), "a block stales nothing");
 
-        let e = engine(vec![crm_tool(), open_tool("note")]);
+        let e = engine(vec![crm_tool(), restrictable_tool("note")]);
         let log = prepared(&e, vec![opened(&e)]);
         let restricting =
             appended_facts(proposed(&e, &log, "b2", nonce(), call("note", json!({}))).expect("the note releases"));
         assert!(
             !releases(&e, &[log, restricting].concat(), "b3"),
             "a release that can restrict the trajectory stales the approval it did not belong to"
+        );
+    }
+
+    /// A neutral delta under an Annotator is not neutral: the produced annotation owns the
+    /// output, so the release moves the basis an approval was taken on.
+    #[test]
+    fn an_annotated_release_stales_an_approval() {
+        let classified = ToolAnnotation {
+            name: ToolName::new("read_note"),
+            ..neutral_tool()
+        };
+        let pin = pinned_for(
+            {
+                let mut produced = classified.clone();
+                produced.delta = Delta {
+                    trust: None,
+                    audience: Some(DeclaredAudience::literal(Audience::Public)),
+                };
+                produced
+            },
+            "classify",
+            &call("read_note", json!({})),
+        );
+
+        let mut cfg = test_config(vec![crm_tool()]);
+        cfg.tools.push(annotated(classified, "classify"));
+        cfg.annotators.push(annotator("classify"));
+        let e = open_engine(cfg);
+        let log = vec![opened(&e)];
+        let blocked = appended_facts(blocked_batch(&e, &log, "b1", nonce()));
+        let offer = opened_offers(&blocked)[0].0;
+        let log = [log, blocked].concat();
+        let approved = appended_facts(
+            execute_offer(&e, &log, offer, OfferOutcome::Approved(Vec::new())).expect("the offer executes"),
+        );
+        let log = [log, approved].concat();
+        let note = proposed(
+            &e,
+            &log,
+            "b2",
+            nonce(),
+            call("read_note", json!({})).with_annotation(Some(pin)),
+        )
+        .expect("the classified note decides");
+        assert!(
+            matches!(&note.follow_up, FollowUp::Proposals { released, .. } if !released.is_empty()),
+            "a public answer narrows nothing, so the note releases: {:?}",
+            note.follow_up
+        );
+        let log = [log, appended_facts(note)].concat();
+
+        let decision = proposed(&e, &log, "b3", nonce(), call("get_ticket", json!({}))).expect("the batch decides");
+        let released = match &decision.follow_up {
+            FollowUp::Proposals { released, .. } => released.clone(),
+            other => panic!("a proposal batch answers with proposals, not {other:?}"),
+        };
+        assert!(
+            released.is_empty(),
+            "the approval was taken on a basis the pinned release moved"
         );
     }
 
@@ -8536,7 +8021,7 @@ mod tests {
 
         let done = execute_offer(&e, &log, offer, OfferOutcome::Approved(Vec::new())).expect("the offer executes");
         let proposal = match offer_answer(&done) {
-            OfferFollowUp::Approved { call } => call.clone(),
+            OfferFollowUp::Approved { call } => (**call).clone(),
             other => panic!("a full approval prepares a call, not {other:?}"),
         };
         assert_eq!(proposal, call("get_ticket", json!({})));
@@ -8635,7 +8120,7 @@ mod tests {
 
     #[test]
     fn an_offer_whose_basis_moved_is_refused() {
-        let e = engine(vec![crm_tool(), open_tool("note")]);
+        let e = engine(vec![crm_tool(), restrictable_tool("note")]);
         let log = vec![opened(&e)];
         let decision = blocked_batch(&e, &log, "b1", nonce());
         let opened = appended_facts(decision);
@@ -9145,8 +8630,14 @@ mod tests {
         };
         assert_eq!(
             tampered(&|fact| {
-                if let Fact::DispatchOpened { tool_resolutions, .. } = fact {
-                    tool_resolutions.push(who_pin_for("desk", "anyone"));
+                if let Fact::DispatchOpened { annotation, .. } = fact {
+                    // A pin on a statically declared dispatch record cannot restate the
+                    // decision that released it: the decided call carries none.
+                    let ghost = ResolvedCall::new(
+                        crate::value::ToolName::new("forged"),
+                        crate::params::test_arguments(&json!({})),
+                    );
+                    *annotation = Some(pinned_for(plain_tool("forged"), "ghost", &ghost));
                 }
             }),
             Err(TransitionRefusal::UnbackedDecision)
@@ -9162,7 +8653,7 @@ mod tests {
         assert_eq!(
             tampered(&|fact| {
                 if let Fact::DispatchOpened { proposed_label, .. } = fact {
-                    *proposed_label = EstablishedLabel::top();
+                    *proposed_label = Label::top();
                 }
             }),
             Err(TransitionRefusal::ForgedLabel)
@@ -9214,6 +8705,8 @@ mod tests {
                 e.registry()
                     .tool(call.tool())
                     .unwrap()
+                    .declared()
+                    .expect("a static declaration")
                     .output_label(&Expansions::default()),
             ),
             provenance: Provenance::ToolResult {
@@ -9286,12 +8779,12 @@ mod tests {
                 trajectory: child.clone(),
                 dispatch: DispatchId::new(child.clone(), call.digest(), 0),
                 tool: call.tool().clone(),
-                contract: call.contract_id(),
+                declaration: call.declaration_id(),
                 arguments: call.canonical_arguments().clone(),
-                proposed_label: EstablishedLabel::new(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
-                receiving: EstablishedLabel::new(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
+                proposed_label: Label::new(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
+                receiving: Label::new(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
                 proposed_effects: EffectSet::default(),
-                tool_resolutions: Vec::new(),
+                annotation: None,
                 memberships: Vec::new(),
                 subject: crate::basis::fixture_subject(&child),
                 resolutions: vec![],
@@ -9364,11 +8857,11 @@ mod tests {
             hint: None,
         };
         let config = RegistryConfig {
+            annotators: vec![],
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![crm_tool()],
+            tools: declared(vec![crm_tool()]),
             authorities: vec![],
             sanitizers: vec![declassify],
-            casts: vec![],
             membership: None,
         };
         let call = call("get_ticket", json!({}));
@@ -9394,925 +8887,7 @@ mod tests {
         );
     }
 
-    fn pending_cast_tool(name: &str, tag: &str) -> ToolContract {
-        ToolContract {
-            description: Some("A test tool.".to_string()),
-            uses: vec![],
-            name: ToolName::new(name),
-            tags: vec![crate::names::TagName::new(tag)],
-            delta: Some(Delta {
-                trust: Some(Dim::Unknown),
-                audience: None,
-            }),
-            parameters: crate::params::ToolParameters::open(),
-            emits: EffectSet::new([EffectKind::new(format!("{tag}.read").as_str())]).unwrap(),
-            requires: Requires::default(),
-        }
-    }
-
-    fn resolver_cast(name: &str, trust: Vec<Trust>, tags: Vec<crate::names::TagName>) -> crate::authority::Cast {
-        crate::authority::Cast {
-            name: crate::names::CastName::new(name),
-            resolution: crate::authority::CastResolution::Resolver {
-                may_cast: crate::authority::CastCeiling {
-                    trust,
-                    audience: DeclaredAudience::literal(Audience::Public),
-                },
-            },
-            scope: crate::authority::Scope { tags },
-            hint: None,
-        }
-    }
-
-    fn cast_engine() -> Engine {
-        open_engine(RegistryConfig {
-            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![
-                pending_cast_tool("scan_inbox", "mail"),
-                pending_cast_tool("browse", "web"),
-                open_tool("ping"),
-                suspicious_read(),
-            ],
-            authorities: vec![],
-            sanitizers: vec![crate::authority::Sanitizer {
-                name: crate::names::SanitizerName::new("launder"),
-                on: crate::authority::SanitizerPoints {
-                    input: false,
-                    output: true,
-                },
-                transition: crate::authority::DeclaredTransition::Trust {
-                    from_floor: SUSPICIOUS,
-                    to: TRUSTED,
-                },
-                scope: crate::authority::Scope::default(),
-                hint: None,
-            }],
-            casts: vec![
-                resolver_cast("paranoid", vec![SUSPICIOUS, TRUSTED], vec![]),
-                resolver_cast("stingy", vec![TRUSTED], vec![]),
-                resolver_cast(
-                    "elsewhere",
-                    vec![SUSPICIOUS, TRUSTED],
-                    vec![crate::names::TagName::new("web")],
-                ),
-            ],
-            membership: None,
-        })
-    }
-
-    fn cast_report(
-        dispatch: &crate::value::DispatchId,
-        raw: &ValueBody,
-        evidence: Vec<crate::transition::Evidence>,
-    ) -> ToolReport {
-        ToolReport {
-            dispatch: dispatch.clone(),
-            outcome: ToolOutcome::Success {
-                body: OutcomeBody::Available(raw.clone()),
-            },
-            evidence,
-            offer_nonce: nonce(),
-            expansions: vec![],
-        }
-    }
-
-    fn replayed(e: &Engine, log: &[Fact]) -> EngineView {
-        e.view(&traj(), log.to_vec(), log.len() as u64)
-            .expect("the log replays")
-    }
-
-    fn resolving_dispatch(
-        e: &Engine,
-    ) -> (
-        Vec<Fact>,
-        crate::value::DispatchId,
-        ValueBody,
-        crate::value::RawResultDigest,
-    ) {
-        let call = call("scan_inbox", json!({}));
-        let mut log = vec![opened(e)];
-        let released = proposed(e, &log, "b1", nonce(), call).expect("the open call releases");
-        let dispatch = match &released.follow_up {
-            FollowUp::Proposals { released, .. } => released[0].dispatch.clone(),
-            other => panic!("the proposal releases, got {other:?}"),
-        };
-        log = [log, appended_facts(released)].concat();
-        let raw = ValueBody::new("inbox bytes");
-        let source = crate::value::RawResultDigest::of(raw.as_str().as_bytes());
-        let asked = e
-            .handle(
-                &replayed(e, &log),
-                EngineEvent::Outcome(cast_report(&dispatch, &raw, Vec::new())),
-            )
-            .expect("the confined result asks for its resolution");
-        log = [log, appended_facts(asked)].concat();
-        (log, dispatch, raw, source)
-    }
-
-    #[test]
-    fn a_pending_cast_report_asks_for_the_applicable_casts_and_stays_repeatable() {
-        let e = cast_engine();
-        let call = call("scan_inbox", json!({}));
-        let mut log = vec![opened(&e)];
-        let released = proposed(&e, &log, "b1", nonce(), call).expect("the open call releases");
-        let dispatch = match &released.follow_up {
-            FollowUp::Proposals { released, .. } => released[0].dispatch.clone(),
-            other => panic!("the proposal releases, got {other:?}"),
-        };
-        log = [log, appended_facts(released)].concat();
-        let raw = ValueBody::new("inbox bytes");
-        let source = crate::value::RawResultDigest::of(raw.as_str().as_bytes());
-        let asked = e
-            .handle(
-                &replayed(&e, &log),
-                EngineEvent::Outcome(cast_report(&dispatch, &raw, Vec::new())),
-            )
-            .expect("the confined result asks for its resolution");
-        assert_eq!(
-            asked.follow_up,
-            FollowUp::Outcome(OutcomeFollowUp::Resolve(
-                crate::transition::EvidenceRequest::PendingCast {
-                    casts: vec![
-                        crate::transition::ApplicableCast {
-                            name: crate::names::CastName::new("paranoid"),
-                            constant: None,
-                        },
-                        crate::transition::ApplicableCast {
-                            name: crate::names::CastName::new("stingy"),
-                            constant: None,
-                        },
-                    ],
-                    source,
-                    body: raw.clone(),
-                }
-            )),
-            "the ask names the casts whose scope covers the tool, in registration order"
-        );
-        let log = [log, appended_facts(asked.clone())].concat();
-        let view = replayed(&e, &log);
-        let trajectory = traj();
-        let views = view.projection().view(&trajectory);
-        assert!(
-            views.has_effect(&EffectKind::new("mail.read")),
-            "the effects commit at the checkpoint, before the external step"
-        );
-        assert!(
-            views.is_open(&dispatch),
-            "the dispatch stays open awaiting its resolution"
-        );
-        let again = e
-            .handle(&view, EngineEvent::Outcome(cast_report(&dispatch, &raw, Vec::new())))
-            .expect("the report stays repeatable");
-        assert_eq!(again.append, None);
-        assert_eq!(again.follow_up, asked.follow_up);
-
-        let alone = open_engine(RegistryConfig {
-            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![
-                pending_cast_tool("scan_inbox", "mail"),
-                pending_cast_tool("browse", "web"),
-            ],
-            authorities: vec![],
-            sanitizers: vec![],
-            casts: vec![resolver_cast(
-                "elsewhere",
-                vec![SUSPICIOUS, TRUSTED],
-                vec![crate::names::TagName::new("web")],
-            )],
-            membership: None,
-        });
-        let (log, dispatch, raw, _) = resolving_dispatch(&alone);
-        let again = alone
-            .handle(
-                &replayed(&alone, &log),
-                EngineEvent::Outcome(cast_report(&dispatch, &raw, Vec::new())),
-            )
-            .expect("the unresolvable result stays pending");
-        assert!(matches!(
-            again.follow_up,
-            FollowUp::Outcome(OutcomeFollowUp::Resolve(crate::transition::EvidenceRequest::PendingCast { casts, .. }))
-                if casts.is_empty()
-        ));
-    }
-
-    #[test]
-    fn a_non_narrowing_resolution_admits_directly_with_its_cast_record() {
-        let e = cast_engine();
-        let (log, dispatch, raw, source) = resolving_dispatch(&e);
-        let resolved = established(TRUSTED, Audience::Public);
-        let crossed = e
-            .handle(
-                &replayed(&e, &log),
-                EngineEvent::Outcome(cast_report(
-                    &dispatch,
-                    &raw,
-                    vec![crate::transition::Evidence::PendingCast {
-                        cast: crate::names::CastName::new("paranoid"),
-                        source,
-                        resolved: resolved.clone(),
-                    }],
-                )),
-            )
-            .expect("the non-narrowing resolution admits");
-        assert_eq!(
-            crossed.follow_up,
-            FollowUp::Outcome(OutcomeFollowUp::Closed {
-                admitted: Some(raw.clone())
-            })
-        );
-        let facts = crossed.append.expect("the admission appends").facts().to_vec();
-        assert!(
-            matches!(
-                facts.as_slice(),
-                [
-                    Fact::DispatchClosed {
-                        outcome: crate::fact::CloseOutcome::Success { effects },
-                        ..
-                    },
-                    Fact::OutputCastApplied {
-                        cast,
-                        resolved: restated,
-                        raw_digest,
-                        ..
-                    },
-                    Fact::ValueAdmitted { .. },
-                ] if effects.is_empty() && cast.as_str() == "paranoid" && restated == &resolved && raw_digest == &source
-            ),
-            "close (no duplicate effects), the cast record, and the admitted value share one batch: {facts:?}"
-        );
-        let whole = [log, facts].concat();
-        assert_eq!(e.validate_replay(&whole), Ok(()));
-        assert_eq!(
-            e.validate_replay(&whole[..whole.len() - 1]),
-            Err(crate::transition::TransitionRefusal::UnadmittedDerivation)
-        );
-    }
-
-    #[test]
-    fn a_narrowing_resolution_stages_an_acceptance_only_candidate() {
-        let e = cast_engine();
-        let (log, dispatch, raw, source) = resolving_dispatch(&e);
-        let resolved = established(SUSPICIOUS, Audience::Public);
-        let staged = e
-            .handle(
-                &replayed(&e, &log),
-                EngineEvent::Outcome(cast_report(
-                    &dispatch,
-                    &raw,
-                    vec![crate::transition::Evidence::PendingCast {
-                        cast: crate::names::CastName::new("paranoid"),
-                        source,
-                        resolved: resolved.clone(),
-                    }],
-                )),
-            )
-            .expect("the narrowing resolution stages");
-        let confined = confined_of(&staged.follow_up);
-        assert_eq!(confined.dispatch, dispatch);
-        assert_eq!(
-            confined.candidate.body, raw,
-            "the candidate is the raw itself, confined"
-        );
-        assert_eq!(
-            confined.residual,
-            crate::check::Narrowing {
-                from: established(TRUSTED, Audience::Public),
-                to: established(SUSPICIOUS, Audience::Public),
-            }
-        );
-        let facts = appended_facts(staged.clone());
-        assert!(
-            !facts
-                .iter()
-                .any(|fact| matches!(fact, Fact::ValueAdmitted { .. } | Fact::DispatchClosed { .. })),
-            "a staged candidate admits nothing and closes nothing: {facts:?}"
-        );
-        assert!(facts.iter().any(|fact| matches!(
-            fact,
-            Fact::CandidateDerived {
-                via: DerivedVia::Cast { name },
-                ..
-            } if name.as_str() == "paranoid"
-        )));
-        let stage: Vec<_> = opened_offers(&facts).into_iter().map(|(_, plan)| plan).collect();
-        assert_eq!(
-            stage.iter().filter_map(plan::ExecutableRemedyPlan::hop).count(),
-            0,
-            "no sanitizer hop is offered on a pending-cast stage, applicable or not"
-        );
-        assert_eq!(
-            stage
-                .iter()
-                .filter_map(plan::ExecutableRemedyPlan::narrowing)
-                .collect::<Vec<_>>(),
-            vec![&confined.residual],
-            "acceptance of exactly the pinned residual"
-        );
-        assert_eq!(stage.len(), 1, "the stage is the acceptance alone");
-        let log = [log, facts].concat();
-        assert_eq!(e.validate_replay(&log), Ok(()));
-
-        let again = e
-            .handle(
-                &replayed(&e, &log),
-                EngineEvent::Outcome(cast_report(
-                    &dispatch,
-                    &raw,
-                    vec![crate::transition::Evidence::PendingCast {
-                        cast: crate::names::CastName::new("paranoid"),
-                        source,
-                        resolved: established(TRUSTED, Audience::Public),
-                    }],
-                )),
-            )
-            .expect("the repeat hears the stage");
-        assert_eq!(again.append, None);
-        assert_eq!(confined_of(&again.follow_up), confined);
-    }
-
-    #[test]
-    fn an_accepted_cast_candidate_crosses_atomically_and_survives_replay() {
-        let e = cast_engine();
-        let (log, dispatch, raw, source) = resolving_dispatch(&e);
-        let resolved = established(SUSPICIOUS, Audience::Public);
-        let staged = e
-            .handle(
-                &replayed(&e, &log),
-                EngineEvent::Outcome(cast_report(
-                    &dispatch,
-                    &raw,
-                    vec![crate::transition::Evidence::PendingCast {
-                        cast: crate::names::CastName::new("paranoid"),
-                        source,
-                        resolved: resolved.clone(),
-                    }],
-                )),
-            )
-            .expect("the narrowing resolution stages");
-        let confined = confined_of(&staged.follow_up).clone();
-        let log = [log, appended_facts(staged)].concat();
-        let accept = confined.offers[0].0;
-        let accepted =
-            execute_offer(&e, &log, accept, OfferOutcome::Approved(Vec::new())).expect("the acceptance runs");
-        assert_eq!(offer_answer(&accepted), &OfferFollowUp::Admitted { value: raw.clone() });
-        let facts = appended_facts(accepted);
-        assert!(
-            matches!(
-                facts.as_slice(),
-                [
-                    Fact::BasisAdvanced { .. },
-                    Fact::OfferAccepted { .. },
-                    Fact::CandidateAccepted { narrowing, .. },
-                    Fact::DispatchClosed {
-                        outcome: crate::fact::CloseOutcome::Success { effects },
-                        ..
-                    },
-                    Fact::OutputCastApplied {
-                        cast,
-                        resolved: restated,
-                        raw_digest,
-                        ..
-                    },
-                    Fact::ValueAdmitted { .. },
-                ] if narrowing == &confined.residual
-                    && effects.is_empty()
-                    && cast.as_str() == "paranoid"
-                    && restated == &resolved
-                    && raw_digest == &source
-            ),
-            "one atomic commit: acceptance, close, cast record, admitted value: {facts:?}"
-        );
-        let whole = [log, facts].concat();
-        let after = replayed(&e, &whole);
-        assert_eq!(
-            after.projection().view(&traj()).current_label().bound(),
-            &established(SUSPICIOUS, Audience::Public),
-            "the accepted narrowing is the admission's whole fold move"
-        );
-        assert!(
-            after
-                .projection()
-                .view(&traj())
-                .candidate(&crate::basis::SubjectKey::ConfinedResult(dispatch.clone()))
-                .is_none(),
-            "the crossing ends the stage"
-        );
-        assert_eq!(
-            e.validate_replay(&whole[..whole.len() - 1]),
-            Err(crate::transition::TransitionRefusal::UnadmittedDerivation)
-        );
-        assert_eq!(
-            offer_answer(
-                &execute_offer(&e, &whole, accept, OfferOutcome::Approved(Vec::new())).expect("the repeat answers")
-            ),
-            &OfferFollowUp::Admitted { value: raw }
-        );
-    }
-
-    #[test]
-    fn a_cast_stage_goes_stale_with_its_basis_and_the_durable_candidate_is_planned_again() {
-        let e = cast_engine();
-        let (log, dispatch, raw, source) = resolving_dispatch(&e);
-        let staged = e
-            .handle(
-                &replayed(&e, &log),
-                EngineEvent::Outcome(cast_report(
-                    &dispatch,
-                    &raw,
-                    vec![crate::transition::Evidence::PendingCast {
-                        cast: crate::names::CastName::new("paranoid"),
-                        source,
-                        resolved: established(SUSPICIOUS, Audience::Public),
-                    }],
-                )),
-            )
-            .expect("the narrowing resolution stages");
-        let confined = confined_of(&staged.follow_up).clone();
-        let log = [log, appended_facts(staged)].concat();
-        let log = [
-            log.clone(),
-            appended_facts(proposed(&e, &log, "b2", nonce(), call("ping", json!({}))).expect("the open call releases")),
-        ]
-        .concat();
-        assert_eq!(
-            execute_offer(&e, &log, confined.offers[0].0, OfferOutcome::Approved(Vec::new())),
-            Err(TransitionError::StaleOffer)
-        );
-
-        let replanned = e
-            .handle(
-                &replayed(&e, &log),
-                EngineEvent::Outcome(ToolReport {
-                    dispatch,
-                    outcome: ToolOutcome::Success {
-                        body: OutcomeBody::Available(raw.clone()),
-                    },
-                    evidence: Vec::new(),
-                    offer_nonce: crate::value::OfferNonce::new([13u8; 32]),
-                    expansions: vec![],
-                }),
-            )
-            .expect("the candidate is planned again");
-        let fresh = confined_of(&replanned.follow_up);
-        assert_eq!(fresh.candidate, confined.candidate, "the candidate itself is durable");
-        assert_eq!(fresh.residual, confined.residual);
-        assert!(
-            fresh
-                .offers
-                .iter()
-                .all(|(offer, _)| !confined.offers.iter().any(|(stale, _)| stale == offer)),
-            "a stale offer never revives: the new stage carries identities of its own"
-        );
-        assert_eq!(
-            fresh.offers.len(),
-            1,
-            "the replanned stage is still the acceptance alone"
-        );
-        let fresh = fresh.offers[0].0;
-        let log = [log, appended_facts(replanned)].concat();
-        assert_eq!(
-            offer_answer(
-                &execute_offer(&e, &log, fresh, OfferOutcome::Approved(Vec::new())).expect("the fresh offer runs")
-            ),
-            &OfferFollowUp::Admitted { value: raw }
-        );
-    }
-
-    #[test]
-    fn a_resolution_is_measured_against_the_pinned_bound_not_the_live_fold() {
-        let e = cast_engine();
-        let (log, dispatch, raw, source) = resolving_dispatch(&e);
-        let mut log = log;
-        reads(&e, &mut log, &traj(), "read_suspicious");
-        let crossed = e
-            .handle(
-                &replayed(&e, &log),
-                EngineEvent::Outcome(cast_report(
-                    &dispatch,
-                    &raw,
-                    vec![crate::transition::Evidence::PendingCast {
-                        cast: crate::names::CastName::new("paranoid"),
-                        source,
-                        resolved: established(TRUSTED, Audience::Public),
-                    }],
-                )),
-            )
-            .expect("the pinned bound, not the live fold, measures the resolution");
-        assert_eq!(
-            crossed.follow_up,
-            FollowUp::Outcome(OutcomeFollowUp::Closed { admitted: Some(raw) })
-        );
-        let whole = [log, crossed.append.expect("the admission appends").facts().to_vec()].concat();
-        assert_eq!(e.validate_replay(&whole), Ok(()));
-    }
-
-    #[test]
-    fn a_forged_cast_record_is_refused_on_replay() {
-        let e = cast_engine();
-        let (log, dispatch, raw, source) = resolving_dispatch(&e);
-        let staged = e
-            .handle(
-                &replayed(&e, &log),
-                EngineEvent::Outcome(cast_report(
-                    &dispatch,
-                    &raw,
-                    vec![crate::transition::Evidence::PendingCast {
-                        cast: crate::names::CastName::new("paranoid"),
-                        source,
-                        resolved: established(SUSPICIOUS, Audience::Public),
-                    }],
-                )),
-            )
-            .expect("the narrowing resolution stages");
-        let confined = confined_of(&staged.follow_up).clone();
-        let mut forged = appended_facts(staged.clone());
-        for fact in &mut forged {
-            if let Fact::CandidateDerived {
-                via: DerivedVia::Cast { name },
-                ..
-            } = fact
-            {
-                *name = crate::names::CastName::new("bogus");
-            }
-        }
-        assert_eq!(
-            e.validate_replay(&[log.clone(), forged].concat()),
-            Err(crate::transition::TransitionRefusal::InadmissibleResolution),
-            "a candidate claiming an unregistered cast is refused"
-        );
-
-        let log = [log, appended_facts(staged)].concat();
-        let closed_past_the_stage = vec![Fact::DispatchClosed {
-            trajectory: traj(),
-            dispatch: dispatch.clone(),
-            outcome: crate::fact::CloseOutcome::Success {
-                effects: EffectSet::default(),
-            },
-        }];
-        assert_eq!(
-            e.validate_replay(&[log.clone(), closed_past_the_stage].concat()),
-            Err(crate::transition::TransitionRefusal::StagedClose),
-            "a staged confined result's dispatch closes only with its settlement"
-        );
-        let accepted = execute_offer(&e, &log, confined.offers[0].0, OfferOutcome::Approved(Vec::new()))
-            .expect("the acceptance runs");
-        let crossing = appended_facts(accepted);
-        let mut forged = crossing.clone();
-        for fact in &mut forged {
-            if let Fact::OutputCastApplied { resolved, .. } = fact {
-                *resolved = established(TRUSTED, Audience::Public);
-            }
-        }
-        assert_eq!(
-            e.validate_replay(&[log.clone(), forged].concat()),
-            Err(crate::transition::TransitionRefusal::InadmissibleResolution),
-            "the atomic commit's cast record must restate exactly the candidate's resolution"
-        );
-        let unaccepted: Vec<Fact> = crossing
-            .iter()
-            .filter(|fact| !matches!(fact, Fact::CandidateAccepted { .. }))
-            .cloned()
-            .collect();
-        assert_eq!(
-            e.validate_replay(&[log.clone(), unaccepted].concat()),
-            Err(crate::transition::TransitionRefusal::UndischargedAcceptance),
-            "a crossing without its acceptance never closes the stage"
-        );
-        let dropped: Vec<Fact> = crossing
-            .iter()
-            .filter(|fact| !matches!(fact, Fact::OutputCastApplied { .. }))
-            .cloned()
-            .collect();
-        assert_eq!(
-            e.validate_replay(&[log.clone(), dropped].concat()),
-            Err(crate::transition::TransitionRefusal::ForgedLabel),
-            "a cast candidate crosses only beside its cast record"
-        );
-        let mut doubled = crossing.clone();
-        let record = crossing
-            .iter()
-            .find(|fact| matches!(fact, Fact::OutputCastApplied { .. }))
-            .expect("the crossing carries its cast record")
-            .clone();
-        let admission = doubled.len() - 1;
-        doubled.insert(admission, record);
-        assert_eq!(
-            e.validate_replay(&[log, doubled].concat()),
-            Err(crate::transition::TransitionRefusal::RepeatAdmission),
-            "one crossing restates its resolution once"
-        );
-    }
-
-    #[test]
-    fn an_out_of_scope_or_out_of_ceiling_resolution_is_refused() {
-        let e = cast_engine();
-        let (log, dispatch, raw, source) = resolving_dispatch(&e);
-        let view = replayed(&e, &log);
-        assert_eq!(
-            e.handle(
-                &view,
-                EngineEvent::Outcome(cast_report(
-                    &dispatch,
-                    &raw,
-                    vec![crate::transition::Evidence::PendingCast {
-                        cast: crate::names::CastName::new("elsewhere"),
-                        source,
-                        resolved: established(TRUSTED, Audience::Public),
-                    }],
-                )),
-            ),
-            Err(TransitionError::InadmissibleResolution)
-        );
-        assert_eq!(
-            e.handle(
-                &view,
-                EngineEvent::Outcome(cast_report(
-                    &dispatch,
-                    &raw,
-                    vec![crate::transition::Evidence::PendingCast {
-                        cast: crate::names::CastName::new("stingy"),
-                        source,
-                        resolved: established(SUSPICIOUS, Audience::Public),
-                    }],
-                )),
-            ),
-            Err(TransitionError::InadmissibleResolution)
-        );
-        assert!(matches!(
-            e.handle(&view, EngineEvent::Outcome(cast_report(&dispatch, &raw, Vec::new())))
-                .expect("the ask stands")
-                .follow_up,
-            FollowUp::Outcome(OutcomeFollowUp::Resolve(_))
-        ));
-    }
-
-    /// A pending-cast tool whose delta also narrows the audience statically: the narrowing is
-    /// accepted at the check, and the cast resolves trust at admission.
-    fn narrowing_pending_cast_tool(name: &str, tag: &str) -> ToolContract {
-        ToolContract {
-            delta: Some(Delta {
-                trust: Some(Dim::Unknown),
-                audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")])).into()),
-            }),
-            ..pending_cast_tool(name, tag)
-        }
-    }
-
-    fn narrowing_cast_engine() -> Engine {
-        open_engine(RegistryConfig {
-            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![
-                narrowing_pending_cast_tool("scan_internal", "mail"),
-                pending_cast_tool("scan_inbox", "mail"),
-            ],
-            authorities: vec![],
-            sanitizers: vec![],
-            casts: vec![resolver_cast("paranoid", vec![SUSPICIOUS, TRUSTED], vec![])],
-            membership: None,
-        })
-    }
-
-    /// Accept `scan_internal`'s audience narrowing at its check, release it under that
-    /// acceptance, and report its raw result so the dispatch awaits its resolution.
-    fn accepted_resolving_dispatch(
-        e: &Engine,
-    ) -> (
-        Vec<Fact>,
-        crate::value::DispatchId,
-        ValueBody,
-        crate::value::RawResultDigest,
-    ) {
-        let call = call("scan_internal", json!({}));
-        let log = vec![opened(e)];
-        let blocked = appended_facts(proposed(e, &log, "b1", nonce(), call.clone()).expect("the narrowing blocks"));
-        let (offer, plan) = opened_offers(&blocked)
-            .into_iter()
-            .find(|(_, plan)| plan.narrowing().is_some() && plan.sanitizer().is_none())
-            .expect("the block offers acceptance");
-        assert_eq!(
-            plan.narrowing(),
-            Some(&crate::check::Narrowing {
-                from: established(TRUSTED, Audience::Public),
-                to: established(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
-            })
-        );
-        let log = [log, blocked].concat();
-        let approved =
-            appended_facts(execute_offer(e, &log, offer, OfferOutcome::Approved(Vec::new())).expect("accepted"));
-        let log = [log, approved].concat();
-        let released = proposed(e, &log, "b2", nonce(), call).expect("the approval releases");
-        let dispatch = match &released.follow_up {
-            FollowUp::Proposals { released, .. } => released[0].dispatch.clone(),
-            other => panic!("the approved call releases, got {other:?}"),
-        };
-        let release = appended_facts(released);
-        assert!(
-            release
-                .iter()
-                .any(|fact| matches!(fact, Fact::Acceptance { dispatch: accepted, .. } if accepted == &dispatch)),
-            "the release records the acceptance on its dispatch"
-        );
-        let log = [log, release].concat();
-        let raw = ValueBody::new("internal mail");
-        let source = crate::value::RawResultDigest::of(raw.as_str().as_bytes());
-        let asked = e
-            .handle(
-                &replayed(e, &log),
-                EngineEvent::Outcome(cast_report(&dispatch, &raw, Vec::new())),
-            )
-            .expect("the confined result asks for its resolution");
-        let log = [log, appended_facts(asked)].concat();
-        (log, dispatch, raw, source)
-    }
-
-    fn internal() -> Audience {
-        Audience::restricted([ReaderId::new("internal")])
-    }
-
-    #[test]
-    fn a_resolution_within_the_accepted_narrowing_admits_directly() {
-        let e = narrowing_cast_engine();
-        let (log, dispatch, raw, source) = accepted_resolving_dispatch(&e);
-        let resolved = established(TRUSTED, internal());
-        let crossed = e
-            .handle(
-                &replayed(&e, &log),
-                EngineEvent::Outcome(cast_report(
-                    &dispatch,
-                    &raw,
-                    vec![crate::transition::Evidence::PendingCast {
-                        cast: crate::names::CastName::new("paranoid"),
-                        source,
-                        resolved: resolved.clone(),
-                    }],
-                )),
-            )
-            .expect("the accepted narrowing is not owed twice");
-        assert_eq!(
-            crossed.follow_up,
-            FollowUp::Outcome(OutcomeFollowUp::Closed {
-                admitted: Some(raw.clone())
-            })
-        );
-        let facts = appended_facts(crossed);
-        assert!(facts.iter().any(|fact| matches!(
-            fact,
-            Fact::OutputCastApplied { resolved: restated, .. } if restated == &resolved
-        )));
-        assert!(facts.iter().any(|fact| matches!(fact, Fact::ValueAdmitted { .. })));
-        assert!(
-            !facts.iter().any(|fact| matches!(fact, Fact::CandidateDerived { .. })),
-            "nothing is staged: {facts:?}"
-        );
-        let whole = [log, facts].concat();
-        assert_eq!(e.validate_replay(&whole), Ok(()));
-        assert_eq!(
-            replayed(&e, &whole).projection().view(&traj()).current_label().bound(),
-            &established(TRUSTED, internal())
-        );
-    }
-
-    #[test]
-    fn a_resolution_narrowing_past_the_acceptance_stages_only_the_residual() {
-        let e = narrowing_cast_engine();
-        let (log, dispatch, raw, source) = accepted_resolving_dispatch(&e);
-        // A cast moves only the pending dimension — an established one must match exactly — so
-        // the resolution narrows past the acceptance on trust, the dimension it resolves.
-        let staged = e
-            .handle(
-                &replayed(&e, &log),
-                EngineEvent::Outcome(cast_report(
-                    &dispatch,
-                    &raw,
-                    vec![crate::transition::Evidence::PendingCast {
-                        cast: crate::names::CastName::new("paranoid"),
-                        source,
-                        resolved: established(SUSPICIOUS, internal()),
-                    }],
-                )),
-            )
-            .expect("the further narrowing stages");
-        let confined = confined_of(&staged.follow_up).clone();
-        assert_eq!(
-            confined.residual,
-            crate::check::Narrowing {
-                from: established(TRUSTED, internal()),
-                to: established(SUSPICIOUS, internal()),
-            },
-            "the residual is measured from the accepted bound, not the pre-delta one"
-        );
-        assert_eq!(
-            confined.offers.len(),
-            1,
-            "the stage is the acceptance of the residual alone"
-        );
-        let facts = appended_facts(staged);
-        assert!(
-            !facts
-                .iter()
-                .any(|fact| matches!(fact, Fact::ValueAdmitted { .. } | Fact::DispatchClosed { .. }))
-        );
-        let log = [log, facts].concat();
-        assert_eq!(e.validate_replay(&log), Ok(()));
-        let accepted = execute_offer(&e, &log, confined.offers[0].0, OfferOutcome::Approved(Vec::new()))
-            .expect("the residual acceptance admits");
-        assert_eq!(offer_answer(&accepted), &OfferFollowUp::Admitted { value: raw });
-        let whole = [log, appended_facts(accepted)].concat();
-        assert_eq!(e.validate_replay(&whole), Ok(()));
-        assert_eq!(
-            replayed(&e, &whole).projection().view(&traj()).current_label().bound(),
-            &established(SUSPICIOUS, internal())
-        );
-    }
-
-    #[test]
-    fn a_direct_admission_under_a_narrowing_no_acceptance_covers_is_refused_on_replay() {
-        let e = narrowing_cast_engine();
-        let (log, dispatch, raw, source) = resolving_dispatch(&e);
-        let crossed = e
-            .handle(
-                &replayed(&e, &log),
-                EngineEvent::Outcome(cast_report(
-                    &dispatch,
-                    &raw,
-                    vec![crate::transition::Evidence::PendingCast {
-                        cast: crate::names::CastName::new("paranoid"),
-                        source,
-                        resolved: established(TRUSTED, Audience::Public),
-                    }],
-                )),
-            )
-            .expect("the non-narrowing resolution admits");
-        let mut forged = appended_facts(crossed);
-        for fact in &mut forged {
-            match fact {
-                Fact::OutputCastApplied { resolved, .. } => *resolved = established(SUSPICIOUS, Audience::Public),
-                Fact::ValueAdmitted { value, .. } => value.label = known(SUSPICIOUS, Audience::Public),
-                _ => {}
-            }
-        }
-        assert_eq!(
-            e.validate_replay(&[log, forged].concat()),
-            Err(crate::transition::TransitionRefusal::AcceptanceMismatch),
-            "the dispatch recorded no acceptance, so the narrowing the record claims is unaccepted"
-        );
-    }
-
-    #[test]
-    fn a_pending_cast_tool_with_a_static_narrowing_offers_acceptance_and_no_output_sanitizer() {
-        let scrub = crate::authority::Sanitizer {
-            name: crate::names::SanitizerName::new("scrub"),
-            on: crate::authority::SanitizerPoints {
-                input: false,
-                output: true,
-            },
-            transition: crate::authority::DeclaredTransition::Audience {
-                from_includes: DeclaredAudience::literal(internal()),
-                to: DeclaredAudience::literal(Audience::Public),
-            },
-            scope: crate::authority::Scope::default(),
-            hint: None,
-        };
-        let e = open_engine(RegistryConfig {
-            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![
-                narrowing_pending_cast_tool("scan_internal", "mail"),
-                ToolContract {
-                    delta: Some(Delta {
-                        trust: Some(Dim::Known(TRUSTED)),
-                        audience: Some(Dim::Known(internal()).into()),
-                    }),
-                    ..pending_cast_tool("scan_static", "mail")
-                },
-            ],
-            authorities: vec![],
-            sanitizers: vec![scrub],
-            casts: vec![resolver_cast("paranoid", vec![SUSPICIOUS, TRUSTED], vec![])],
-            membership: None,
-        });
-        let log = vec![opened(&e)];
-        let plans_for = |tool: &str| {
-            let blocked = appended_facts(proposed(&e, &log, tool, nonce(), call(tool, json!({}))).expect("blocks"));
-            opened_offers(&blocked)
-                .into_iter()
-                .map(|(_, plan)| plan)
-                .collect::<Vec<_>>()
-        };
-
-        let static_plans = plans_for("scan_static");
-        assert!(
-            static_plans.iter().any(|plan| plan.sanitizer().is_some()),
-            "the same narrowing without a pending cast offers the sanitizer path: {static_plans:?}"
-        );
-
-        let pending_plans = plans_for("scan_internal");
-        assert_eq!(pending_plans.len(), 1, "{pending_plans:?}");
-        assert!(pending_plans[0].narrowing().is_some());
-        assert!(pending_plans[0].sanitizer().is_none());
-        assert!(pending_plans[0].required.is_empty());
-    }
-
-    fn reservation_tools() -> Vec<ToolContract> {
+    fn reservation_tools() -> Vec<ToolAnnotation> {
         vec![
             emitting("send", "email.sent"),
             history_guarded("guard", HistoryRequirement::NoPrior(EffectKind::new("email.sent"))),
@@ -10423,12 +8998,11 @@ mod tests {
 
     #[test]
     fn a_calls_own_emits_never_fail_its_own_check() {
-        let selfguard = ToolContract {
+        let selfguard = ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("selfguard"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("email.sent")]).unwrap(),
             requires: Requires {
@@ -10451,15 +9025,11 @@ mod tests {
 
     #[test]
     fn a_success_checkpoint_settles_while_the_dispatch_stays_open() {
-        let scan = ToolContract {
+        let scan = ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("scan"),
             tags: vec![],
-            delta: Some(Delta {
-                trust: Some(Dim::Unknown),
-                audience: None,
-            }),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
             requires: Requires::default(),
@@ -10502,12 +9072,11 @@ mod tests {
 
     #[test]
     fn attention_is_always_a_gap() {
-        let tool = ToolContract {
+        let tool = ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("wire"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
@@ -10525,444 +9094,17 @@ mod tests {
         }
     }
 
-    fn trusted_sink() -> ToolContract {
-        ToolContract {
-            description: Some("A test tool.".to_string()),
-            uses: vec![],
-            name: ToolName::new("send"),
-            tags: vec![],
-            delta: Some(Delta::NONE),
-            parameters: crate::params::ToolParameters::open(),
-            emits: EffectSet::default(),
-            requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![],
-                },
-                ..Requires::default()
-            },
-        }
-    }
-
-    fn classifying_engine() -> Engine {
-        let mut cfg = test_config(vec![trusted_sink(), unknown_read()]);
-        cfg.casts = vec![resolver_cast("classifier", vec![SUSPICIOUS, TRUSTED], vec![])];
-        open_engine(cfg)
-    }
-
-    fn proposing_send(e: &Engine, log: &[Fact], id: &str, evidence: Vec<Evidence>) -> EngineEvent {
-        let _ = e;
-        EngineEvent::Proposals(ProposalBatch {
-            id: crate::transition::ProposalBatchId::new(id),
-            trajectory: traj(),
-            provider_results: Vec::new(),
-            proposals: vec![raw(&call("send", json!({})))],
-            spawn: None,
-            offer_nonce: nonce(),
-            evidence,
-            expansions: {
-                let _ = log;
-                Vec::new()
-            },
-        })
-    }
-
-    #[test]
-    fn a_call_blocked_only_on_an_unresolved_source_asks_for_its_cast() {
-        let e = classifying_engine();
-        let mut log = vec![opened(&e)];
-        reads(&e, &mut log, &traj(), "read_unknown");
-
-        let asked = e
-            .handle(&viewing(&e, &log), proposing_send(&e, &log, "b-ask", Vec::new()))
-            .expect("a block turning on a fact asks for the fact");
-        assert_eq!(
-            asked.append, None,
-            "nothing is decided or appended: a resolution moves the family basis"
-        );
-        let value = match &asked.follow_up {
-            FollowUp::ProposalsResolve(requests) => match requests.as_slice() {
-                [EvidenceRequest::Cast { casts, value, body }] => {
-                    assert_eq!(
-                        casts.iter().map(|cast| cast.name.as_str()).collect::<Vec<_>>(),
-                        ["classifier"],
-                        "the ask carries every applicable cast, in registration order"
-                    );
-                    assert_eq!(body.as_str(), "read", "the ask carries the bytes the classifier reads");
-                    *value
-                }
-                other => panic!("expected one cast request, got {other:?}"),
-            },
-            other => panic!("expected a resolution ask, got {other:?}"),
-        };
-
-        // Repeating the ask changes nothing: the request is not an act.
-        assert_eq!(
-            e.handle(&viewing(&e, &log), proposing_send(&e, &log, "b-ask", Vec::new()))
-                .expect("the ask repeats")
-                .append,
-            None
-        );
-
-        let answered = e
-            .handle(
-                &viewing(&e, &log),
-                proposing_send(
-                    &e,
-                    &log,
-                    "b-ask",
-                    vec![Evidence::Cast {
-                        cast: crate::names::CastName::new("classifier"),
-                        value,
-                        resolved: established(TRUSTED, Audience::Public),
-                    }],
-                ),
-            )
-            .expect("the answered batch decides");
-        let facts = appended_facts(answered.clone());
-        assert!(
-            facts.iter().any(|fact| matches!(fact, Fact::CastApplied { .. })),
-            "the resolution lands as a fact under the proposal act: {facts:?}"
-        );
-        assert!(
-            matches!(&answered.follow_up, FollowUp::Proposals { released, .. } if released.len() == 1),
-            "a trusted source clears the floor and the call releases: {:?}",
-            answered.follow_up
-        );
-        assert_eq!(e.validate_replay(&[log, facts].concat()), Ok(()));
-    }
-
-    #[test]
-    fn a_resolution_below_the_floor_blocks_the_call_it_was_asked_for() {
-        let e = classifying_engine();
-        let mut log = vec![opened(&e)];
-        reads(&e, &mut log, &traj(), "read_unknown");
-        let value = match &e
-            .handle(&viewing(&e, &log), proposing_send(&e, &log, "b-low", Vec::new()))
-            .expect("the block asks")
-            .follow_up
-        {
-            FollowUp::ProposalsResolve(requests) => match requests.as_slice() {
-                [EvidenceRequest::Cast { value, .. }] => *value,
-                other => panic!("expected one cast request, got {other:?}"),
-            },
-            other => panic!("expected a resolution ask, got {other:?}"),
-        };
-
-        let decided = e
-            .handle(
-                &viewing(&e, &log),
-                proposing_send(
-                    &e,
-                    &log,
-                    "b-low",
-                    vec![Evidence::Cast {
-                        cast: crate::names::CastName::new("classifier"),
-                        value,
-                        resolved: established(SUSPICIOUS, Audience::Public),
-                    }],
-                ),
-            )
-            .expect("the answered batch decides");
-        let facts = appended_facts(decided.clone());
-        assert!(facts.iter().any(|fact| matches!(fact, Fact::CastApplied { .. })));
-        match &decided.follow_up {
-            FollowUp::Proposals { released, blocked, .. } => {
-                assert!(
-                    released.is_empty(),
-                    "a suspicious source does not clear a trusted floor"
-                );
-                assert_eq!(blocked.len(), 1);
-            }
-            other => panic!("expected a decided batch, got {other:?}"),
-        }
-        assert_eq!(e.validate_replay(&[log, facts].concat()), Ok(()));
-    }
-
-    #[test]
-    fn unknown_label_is_unestablished_not_a_gap() {
-        let e = engine(vec![crm_tool(), unknown_read()]);
-        let mut log = vec![opened(&e)];
-        reads(&e, &mut log, &traj(), "read_unknown");
-        match check(&e, &log, &call("get_ticket", json!({}))) {
-            CheckOutcome::Block(b) => {
-                assert!(b.requirement_gaps.is_empty());
-                assert!(b.narrowing.is_some(), "the audience narrowing reports alongside");
-                assert_eq!(b.unestablished.len(), 1);
-                assert_eq!(
-                    b.unestablished[0].dimensions,
-                    BTreeSet::from([Dimension::Trust, Dimension::Audience])
-                );
-            }
-            other => panic!("expected an unestablished block, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn all_three_block_slots_coexist() {
-        let vault = ToolContract {
-            description: Some("A test tool.".to_string()),
-            uses: vec![],
-            name: ToolName::new("vault"),
-            tags: vec![],
-            delta: Some(Delta {
-                trust: None,
-                audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")])).into()),
-            }),
-            parameters: crate::params::ToolParameters::open(),
-            emits: EffectSet::default(),
-            requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![],
-                },
-                attention: vec![MarkName::new("signoff")],
-                ..Requires::default()
-            },
-        };
-        let e = engine(vec![vault, unknown_read()]);
-        let mut log = vec![opened(&e)];
-        reads(&e, &mut log, &traj(), "read_unknown");
-        match check(&e, &log, &call("vault", json!({}))) {
-            CheckOutcome::Block(b) => {
-                assert_eq!(b.requirement_gaps, vec![Gap::Attention(MarkName::new("signoff"))]);
-                assert!(b.narrowing.is_some());
-                assert_eq!(b.unestablished.len(), 1);
-                assert_eq!(
-                    b.unestablished[0].dimensions,
-                    BTreeSet::from([Dimension::Trust, Dimension::Audience])
-                );
-            }
-            other => panic!("expected a three-slot block, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn an_offer_is_stale_once_its_call_acquires_an_unestablished_source() {
-        let e = engine(vec![crm_tool(), unknown_read()]);
-        let log = vec![opened(&e)];
-        let opened = appended_facts(blocked_batch(&e, &log, "b1", nonce()));
-        let (offer, _) = opened_offers(&opened)[0].clone();
-        let mut log = [log, opened].concat();
-        reads(&e, &mut log, &traj(), "read_unknown");
-
-        assert_eq!(
-            execute_offer(&e, &log, offer, OfferOutcome::Approved(Vec::new())),
-            Err(TransitionError::StaleOffer),
-            "the admission that brought the unresolved source advanced the basis the offer was stamped with"
-        );
-
-        let decided = proposed(&e, &log, "b2", nonce(), call("get_ticket", json!({}))).expect("the call decides");
-        match &decided.follow_up {
-            FollowUp::Proposals { blocked, .. } => {
-                assert_eq!(blocked.len(), 1);
-                assert!(
-                    blocked[0].block.plans.is_empty(),
-                    "no plan while a source is unestablished"
-                );
-                assert!(
-                    blocked[0].block.raw.narrowing.is_some(),
-                    "the narrowing is still reported"
-                );
-                assert_eq!(blocked[0].block.raw.unestablished.len(), 1);
-            }
-            other => panic!("expected a blocked call, got {other:?}"),
-        }
-        assert!(
-            !appended_facts(decided)
-                .iter()
-                .any(|fact| matches!(fact, Fact::OfferOpened { .. })),
-            "a plan-free block opens no offer"
-        );
-    }
-
-    #[test]
-    fn a_gap_and_an_unestablished_source_split_by_dimension() {
-        let vault = ToolContract {
-            description: Some("A test tool.".to_string()),
-            uses: vec![],
-            name: ToolName::new("vault"),
-            tags: vec![],
-            delta: Some(Delta {
-                trust: None,
-                audience: None,
-            }),
-            parameters: crate::params::ToolParameters::open(),
-            emits: EffectSet::default(),
-            requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![crate::contract::AudienceRequirement::Cap(DeclaredAudience::literal(
-                        Audience::restricted([ReaderId::new("internal")]),
-                    ))],
-                },
-                ..Requires::default()
-            },
-        };
-        let e = engine(vec![vault]);
-        let mut log = vec![opened(&e)];
-        admitted_with_unknown_audience(&mut log, SUSPICIOUS);
-        match check(&e, &log, &call("vault", json!({}))) {
-            CheckOutcome::Block(b) => {
-                assert_eq!(
-                    b.requirement_gaps,
-                    vec![Gap::TrustFloor {
-                        required: TRUSTED,
-                        actual: SUSPICIOUS,
-                    }]
-                );
-                assert_eq!(b.unestablished.len(), 1);
-                assert_eq!(b.unestablished[0].dimensions, BTreeSet::from([Dimension::Audience]));
-            }
-            other => panic!("expected a gap+unestablished block, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn replay_refuses_malformed_cast_history() {
-        let classifier = crate::authority::Cast {
-            name: crate::names::CastName::new("classifier"),
-            resolution: crate::authority::CastResolution::Resolver {
-                may_cast: crate::authority::CastCeiling {
-                    trust: vec![SUSPICIOUS],
-                    audience: DeclaredAudience::literal(Audience::Public),
-                },
-            },
-            scope: crate::authority::Scope::default(),
-            hint: None,
-        };
-        let cfg = RegistryConfig {
-            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![unknown_read(), plain_tool("note")],
-            authorities: vec![],
-            sanitizers: vec![],
-            casts: vec![classifier],
-            membership: None,
-        };
-        let e = open_engine(cfg);
-        let cast_fact = |value: u64, resolved: EstablishedLabel, cast: &str| Fact::CastApplied {
-            trajectory: traj(),
-            value: crate::value::ValueId::new(value),
-            resolved,
-            cast: crate::names::CastName::new(cast),
-            resolutions: vec![],
-        };
-        let mut unknown_source = vec![opened(&e)];
-        reads(&e, &mut unknown_source, &traj(), "read_unknown");
-        let good = cast_fact(0, established(SUSPICIOUS, Audience::Public), "classifier");
-
-        assert_eq!(
-            e.validate_replay(&[unknown_source.clone(), vec![good.clone()]].concat()),
-            Ok(())
-        );
-        assert_eq!(
-            e.validate_replay(&[opened(&e), good.clone()]),
-            Err(TransitionRefusal::CastBeforeSource)
-        );
-        assert_eq!(
-            e.validate_replay(&[unknown_source.clone(), vec![good.clone(), good.clone()]].concat()),
-            Err(TransitionRefusal::RepeatResolution)
-        );
-        let mut established_source = vec![opened(&e)];
-        reads(&e, &mut established_source, &traj(), "note");
-        assert_eq!(
-            e.validate_replay(&[established_source, vec![good.clone()]].concat()),
-            Err(TransitionRefusal::RepeatResolution)
-        );
-        assert!(matches!(
-            e.validate_replay(
-                &[
-                    unknown_source.clone(),
-                    vec![cast_fact(0, established(SUSPICIOUS, Audience::Public), "bogus")]
-                ]
-                .concat()
-            ),
-            Err(TransitionRefusal::UnknownCast(name)) if name == "bogus"
-        ));
-        let sibling = TrajectoryId::new("sibling");
-        let mut sibling_resolves = vec![opened(&e)];
-        sibling_resolves.extend(forked_child(&e, &sibling_resolves.clone(), &sibling));
-        reads(&e, &mut sibling_resolves, &traj(), "read_unknown");
-        sibling_resolves.push(Fact::CastApplied {
-            trajectory: sibling.clone(),
-            value: crate::value::ValueId::new(0),
-            resolved: established(SUSPICIOUS, Audience::Public),
-            cast: crate::names::CastName::new("classifier"),
-            resolutions: vec![],
-        });
-        assert_eq!(
-            e.validate_replay(&sibling_resolves),
-            Err(TransitionRefusal::ForeignResolution)
-        );
-        assert_eq!(
-            e.validate_replay(
-                &[
-                    unknown_source.clone(),
-                    vec![Fact::CastApplied {
-                        trajectory: TrajectoryId::new("stranger"),
-                        value: crate::value::ValueId::new(0),
-                        resolved: established(SUSPICIOUS, Audience::Public),
-                        cast: crate::names::CastName::new("classifier"),
-                        resolutions: vec![],
-                    }]
-                ]
-                .concat()
-            ),
-            Err(TransitionRefusal::ForeignTrajectory)
-        );
-        assert_eq!(
-            e.validate_replay(
-                &[
-                    unknown_source,
-                    vec![cast_fact(0, established(TRUSTED, Audience::Public), "classifier")]
-                ]
-                .concat()
-            ),
-            Err(TransitionRefusal::InadmissibleResolution)
-        );
-    }
-
     #[test]
     fn replay_holds_a_fork_to_its_parents_frozen_basis() {
-        let classifier = crate::authority::Cast {
-            name: crate::names::CastName::new("classifier"),
-            resolution: crate::authority::CastResolution::Resolver {
-                may_cast: crate::authority::CastCeiling {
-                    trust: vec![SUSPICIOUS],
-                    audience: DeclaredAudience::literal(Audience::Public),
-                },
-            },
-            scope: crate::authority::Scope::default(),
-            hint: None,
-        };
-        let e = open_engine(RegistryConfig {
-            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![plain_tool("spawn"), unknown_read()],
-            authorities: vec![],
-            sanitizers: vec![],
-            casts: vec![classifier],
-            membership: None,
-        });
+        let e = engine(vec![plain_tool("spawn"), suspicious_read()]);
         let child = TrajectoryId::new("child");
         let mut base = vec![opened(&e)];
-        reads(&e, &mut base, &traj(), "read_unknown");
+        reads(&e, &mut base, &traj(), "read_suspicious");
         let basis_after = |log: &[Fact]| Projection::build(log, log.len() as u64).view(&traj()).freeze_basis();
-        let resolve = |trajectory: TrajectoryId, value: u64| Fact::CastApplied {
-            trajectory,
-            value: crate::value::ValueId::new(value),
-            resolved: established(SUSPICIOUS, Audience::Public),
-            cast: crate::names::CastName::new("classifier"),
-            resolutions: vec![],
-        };
 
         let seeded = forked_child(&e, &base, &child);
         let log = [base.clone(), seeded.clone()].concat();
         assert_eq!(e.validate_replay(&log), Ok(()));
-
-        assert_eq!(
-            e.validate_replay(&[log.clone(), vec![resolve(child.clone(), 0)]].concat()),
-            Ok(())
-        );
 
         let mut dropped = log.clone();
         let snapshot = dropped
@@ -11004,132 +9146,11 @@ mod tests {
     }
 
     #[test]
-    fn replay_holds_a_later_fork_to_the_absorbed_basis() {
-        let e = engine(vec![plain_tool("spawn"), unknown_read()]);
-        let child = TrajectoryId::new("child");
-        let mut log = vec![opened(&e)];
-        log.extend(forked_child(&e, &log.clone(), &child));
-        reads(&e, &mut log, &child, "read_unknown");
-        let crossing = e
-            .submit_child_return(
-                &Projection::build(&log, log.len() as u64).view(&traj()),
-                &child,
-                ValueBody::new("found"),
-            )
-            .expect("an unresolved-identity crossing merges");
-        let crossing = merged_crossing(crossing);
-        log.extend(crossing);
-        assert_eq!(e.validate_replay(&log), Ok(()));
-
-        let sibling = TrajectoryId::new("sibling");
-        log.extend(forked_child(&e, &log.clone(), &sibling));
-        assert_eq!(e.validate_replay(&log), Ok(()));
-        let honest = log
-            .iter()
-            .rev()
-            .find_map(|fact| match fact {
-                Fact::ForkPrepared { snapshot, .. } => Some(snapshot.clone()),
-                _ => None,
-            })
-            .expect("the sibling fork was just prepared");
-        assert!(
-            !honest.seed().is_established(crate::label::Dimension::Trust),
-            "the seed pin carries the absorbed unresolved identity"
-        );
-
-        let sources = [(crate::value::ValueId::new(1), known(TRUSTED, Audience::Public))];
-        let snapshot = log
-            .iter_mut()
-            .rev()
-            .find_map(|fact| match fact {
-                Fact::ForkPrepared { snapshot, .. } => Some(snapshot),
-                _ => None,
-            })
-            .expect("the sibling fork preparation position");
-        *snapshot = crate::fact::ForkSnapshot::freeze(
-            established(TRUSTED, Audience::Public),
-            sources.iter().map(|(id, label)| (*id, label)),
-            std::iter::empty(),
-        );
-        assert_eq!(e.validate_replay(&log), Err(TransitionRefusal::ForkBasisMismatch));
-    }
-
-    #[test]
-    fn replay_refuses_an_out_of_scope_resolution() {
-        let fetch = crate::contract::ToolContract {
-            description: Some("A test tool.".to_string()),
-            uses: vec![],
-            name: ToolName::new("fetch"),
-            tags: vec![crate::names::TagName::new("web")],
-            delta: Some(crate::contract::Delta {
-                trust: Some(Dim::Unknown),
-                audience: Some(Dim::Known(Audience::Public).into()),
-            }),
-            parameters: crate::params::ToolParameters::open(),
-            emits: crate::fact::EffectSet::default(),
-            requires: Default::default(),
-        };
-        let webby = crate::authority::Cast {
-            name: crate::names::CastName::new("webby"),
-            resolution: crate::authority::CastResolution::Constant(DeclaredLabel::literal(established(
-                SUSPICIOUS,
-                Audience::Public,
-            ))),
-            scope: crate::authority::Scope {
-                tags: vec![crate::names::TagName::new("web")],
-            },
-            hint: None,
-        };
-        let cfg = RegistryConfig {
-            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![fetch, unknown_read()],
-            authorities: vec![],
-            sanitizers: vec![],
-            casts: vec![webby],
-            membership: None,
-        };
-        let e = open_engine(cfg);
-        let mut uncovered = vec![opened(&e)];
-        reads(&e, &mut uncovered, &traj(), "read_unknown");
-        uncovered.push(Fact::CastApplied {
-            trajectory: traj(),
-            value: crate::value::ValueId::new(0),
-            resolved: established(SUSPICIOUS, Audience::Public),
-            cast: crate::names::CastName::new("webby"),
-            resolutions: vec![],
-        });
-        assert_eq!(
-            e.validate_replay(&uncovered),
-            Err(TransitionRefusal::OutOfScopeResolution)
-        );
-        let fetch_call = crate::value::ResolvedCall::new(
-            ToolName::new("fetch"),
+    fn a_value_admitted_under_an_unopened_dispatch_is_refused_on_replay() {
+        let e = engine(vec![suspicious_read()]);
+        let read_call = crate::value::ResolvedCall::new(
+            ToolName::new("read_suspicious"),
             crate::params::test_arguments(&serde_json::json!({})),
-        );
-        let sibling = TrajectoryId::new("sibling");
-        let mut foreign_dispatch = vec![opened(&e)];
-        foreign_dispatch.extend(forked_child(&e, &[opened(&e)], &sibling));
-        let dispatch = open(&e, &mut foreign_dispatch, &fetch_call);
-        foreign_dispatch.extend([
-            Fact::ValueAdmitted {
-                trajectory: sibling.clone(),
-                value: crate::value::LabeledValue::new(
-                    crate::value::ValueBody::new("page"),
-                    Label::new(Dim::Unknown, Dim::Known(Audience::Public)),
-                ),
-                provenance: crate::value::Provenance::ToolResult { dispatch },
-            },
-            Fact::CastApplied {
-                trajectory: sibling,
-                value: crate::value::ValueId::new(0),
-                resolved: established(SUSPICIOUS, Audience::Public),
-                cast: crate::names::CastName::new("webby"),
-                resolutions: vec![],
-            },
-        ]);
-        assert_eq!(
-            e.validate_replay(&foreign_dispatch),
-            Err(TransitionRefusal::ForeignDispatch)
         );
         assert_eq!(
             e.validate_replay(&[
@@ -11138,10 +9159,10 @@ mod tests {
                     trajectory: traj(),
                     value: crate::value::LabeledValue::new(
                         crate::value::ValueBody::new("page"),
-                        Label::new(Dim::Unknown, Dim::Known(Audience::Public)),
+                        Label::new(SUSPICIOUS, Audience::Public),
                     ),
                     provenance: crate::value::Provenance::ToolResult {
-                        dispatch: DispatchId::new(traj(), fetch_call.digest(), 7),
+                        dispatch: DispatchId::new(traj(), read_call.digest(), 7),
                     },
                 }
             ]),
@@ -11149,90 +9170,37 @@ mod tests {
         );
     }
 
-    fn unannotated_tool(name: &str) -> ToolContract {
-        ToolContract {
-            description: Some("A test tool.".to_string()),
-            uses: vec![],
-            name: ToolName::new(name),
-            tags: vec![],
-            delta: None,
-            parameters: crate::params::ToolParameters::open(),
-            emits: EffectSet::default(),
-            requires: Requires::default(),
-        }
-    }
-
+    /// Two-tier selection on the proposal path: a name the policy writes decides under its
+    /// exact declaration and never falls to the wildcard; only a name it does not write owes
+    /// the wildcard annotator's annotation.
     #[test]
-    fn an_unannotated_tool_dispatches_and_its_result_admits_unknown() {
-        let e = engine(vec![unannotated_tool("probe")]);
-        let mut log = vec![opened(&e)];
-        let proposed = call("probe", json!({}));
-        assert_eq!(check(&e, &log, &proposed), CheckOutcome::Allow);
-
-        let t = traj();
-        let dispatch = open(&e, &mut log, &proposed);
-        let p = Projection::build(&log, log.len() as u64);
-        let batch = admit::admit_result(
-            &e.registry,
-            &p.view(&t),
-            &dispatch,
-            &proposed,
-            ResultAdmission::SuccessRaw {
-                body: ValueBody::new("raw"),
-            },
-            &Expansions::default(),
-        )
-        .unwrap();
-        log.extend(batch);
-        let p = Projection::build(&log, log.len() as u64);
-        let current = p.view(&t).current_label();
-        assert_eq!(current.bound(), &EstablishedLabel::new(TRUSTED, Audience::Public));
-        assert!(!current.is_established(Dimension::Trust));
-        assert!(!current.is_established(Dimension::Audience));
-        assert!(current.unresolved(Dimension::Trust).any(|id| id == ValueId::new(0)));
-        assert!(current.unresolved(Dimension::Audience).any(|id| id == ValueId::new(0)));
-    }
-
-    #[test]
-    fn an_unknown_trajectory_blocks_only_requirement_consuming_calls() {
-        let e = engine(vec![unannotated_tool("noop"), crm_tool()]);
-        let mut log = vec![opened(&e)];
-        reads(&e, &mut log, &traj(), "noop");
-        assert_eq!(check(&e, &log, &call("noop", json!({}))), CheckOutcome::Allow);
-        match check(&e, &log, &call("get_ticket", json!({}))) {
-            CheckOutcome::Block(b) => {
-                assert!(b.requirement_gaps.is_empty());
-                assert_eq!(
-                    b.unestablished,
-                    vec![crate::check::UnestablishedFact {
-                        value: ValueId::new(0),
-                        dimensions: BTreeSet::from([Dimension::Trust, Dimension::Audience]),
-                    }]
-                );
-            }
-            other => panic!("expected an unestablished block, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn unknown_tool_errors() {
-        let e = engine(vec![]);
-        let p = Projection::build(&[opened(&e)], 1);
-        let t = traj();
-        assert!(matches!(
-            e.check(&p.view(&t), &call("ghost", json!({}))),
-            Err(EngineError::UnknownTool(name)) if name == "ghost"
-        ));
+    fn an_exact_declaration_beats_the_wildcard_on_a_proposal() {
+        let mut cfg = test_config(vec![plain_tool("read")]);
+        cfg.tools.push(wildcard("any"));
+        cfg.annotators.push(annotator("any"));
+        let e = open_engine(cfg);
+        let log = vec![opened(&e)];
+        let exact = proposed(&e, &log, "b1", nonce(), call("read", json!({}))).expect("the static declaration decides");
+        assert!(
+            matches!(&exact.follow_up, FollowUp::Proposals { released, .. } if !released.is_empty()),
+            "the exact declaration releases without an annotation consult: {:?}",
+            exact.follow_up
+        );
+        assert_eq!(
+            proposed(&e, &log, "b2", nonce(), call("ghost", json!({}))).err(),
+            Some(TransitionError::AnnotationNeeded {
+                annotators: vec![crate::names::AnnotatorName::new("any")]
+            })
+        );
     }
 
     #[test]
     fn includes_missing_placeholder_is_an_invalid_call_and_still_fails_closed_underneath() {
-        let send = ToolContract {
+        let send = ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("send_email"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::test_string_argument_schema("to"),
             emits: EffectSet::default(),
             requires: Requires {
@@ -11252,7 +9220,12 @@ mod tests {
             Err(EngineError::InvalidCall(_))
         ));
 
-        let contract = e.registry.tool(&ToolName::new("send_email")).unwrap();
+        let contract = e
+            .registry
+            .tool(&ToolName::new("send_email"))
+            .unwrap()
+            .declared()
+            .expect("a static declaration");
         let evaluate = |log: &[Fact]| {
             let p = Projection::build(log, log.len() as u64);
             crate::check::evaluate(
@@ -11267,16 +9240,6 @@ mod tests {
             CheckOutcome::Block(b) => assert!(matches!(b.requirement_gaps.as_slice(), [Gap::Includes { .. }])),
             other => panic!("expected includes gap on a malformed call, got {other:?}"),
         }
-        let mut log = log;
-        admitted_with_unknown_audience(&mut log, TRUSTED);
-        match evaluate(&log) {
-            CheckOutcome::Block(b) => {
-                assert!(b.requirement_gaps.is_empty(), "the sentinel gap must be masked");
-                assert_eq!(b.unestablished.len(), 1);
-                assert_eq!(b.unestablished[0].dimensions, BTreeSet::from([Dimension::Audience]));
-            }
-            other => panic!("expected an unestablished block on an Unknown audience, got {other:?}"),
-        }
     }
 
     #[test]
@@ -11284,12 +9247,11 @@ mod tests {
         use crate::authority::{Authority, Mandate};
         use crate::names::AuthorityName;
 
-        let wire = ToolContract {
+        let wire = ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new("wire"),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
@@ -11310,11 +9272,11 @@ mod tests {
             hint: None,
         };
         let cfg = RegistryConfig {
+            annotators: vec![],
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![wire],
+            tools: declared(vec![wire]),
             authorities: vec![officer],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
         };
         let e = open_engine_at(cfg, known(SUSPICIOUS, Audience::Public));
@@ -11340,10 +9302,9 @@ mod tests {
         );
     }
 
-    fn strict_tool(name: &str) -> ToolContract {
-        ToolContract {
+    fn strict_tool(name: &str) -> ToolAnnotation {
+        ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new(name),
             tags: vec![],
             parameters: crate::params::ToolParameters::compile(&json!({
@@ -11352,7 +9313,7 @@ mod tests {
                 "required": ["to"],
             }))
             .unwrap(),
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             emits: EffectSet::default(),
             requires: Requires::default(),
         }
@@ -11370,7 +9331,6 @@ mod tests {
         let raw = crate::check::RawBlock {
             requirement_gaps: vec![],
             narrowing: None,
-            unestablished: vec![],
         };
         assert!(matches!(e.plan(&views, &bogus, &raw), Err(EngineError::InvalidCall(_))));
         assert_eq!(
@@ -11396,10 +9356,20 @@ mod tests {
             e.resolve_call(ToolName::new("send"), br#"{"bogus":true}"#),
             Err(EngineError::InvalidCall(ArgumentError::Schema(_)))
         ));
-        assert_eq!(
+        // A name no declaration and no wildcard covers has no contract: the refusal is typed.
+        assert!(matches!(
             e.resolve_call(ToolName::new("ghost"), br#"{}"#),
-            Err(EngineError::UnknownTool("ghost".to_string()))
-        );
+            Err(EngineError::UnknownTool(name)) if name == "ghost"
+        ));
+        // With a wildcard, the same name resolves onto it at ordinal zero.
+        let mut cfg = test_config(vec![strict_tool("send")]);
+        cfg.tools.push(wildcard("any"));
+        cfg.annotators.push(annotator("any"));
+        let covered = open_engine(cfg);
+        let ghost = covered
+            .resolve_call(ToolName::new("ghost"), br#"{}"#)
+            .expect("the wildcard covers the name");
+        assert_eq!(ghost.declaration_id(), crate::value::ToolDeclarationId::default());
     }
 
     #[test]
@@ -11419,7 +9389,10 @@ mod tests {
         let selected = e
             .resolve_call(ToolName::new("read"), br#"{"path":"secret.txt","token":"ok"}"#)
             .unwrap();
-        assert_eq!(selected.contract_id(), crate::value::ToolContractId::new(0).unwrap());
+        assert_eq!(
+            selected.declaration_id(),
+            crate::value::ToolDeclarationId::new(0).unwrap()
+        );
         assert!(
             matches!(
                 e.resolve_call(ToolName::new("read"), br#"{"path":"secret.txt"}"#),
@@ -11428,9 +9401,15 @@ mod tests {
             "the first match's schema failure must not fall through"
         );
         let overlap = e.resolve_call(ToolName::new("read"), br#"{"path":"public"}"#).unwrap();
-        assert_eq!(overlap.contract_id(), crate::value::ToolContractId::new(1).unwrap());
+        assert_eq!(
+            overlap.declaration_id(),
+            crate::value::ToolDeclarationId::new(1).unwrap()
+        );
         let fallback = e.resolve_call(ToolName::new("read"), br#"{}"#).unwrap();
-        assert_eq!(fallback.contract_id(), crate::value::ToolContractId::new(2).unwrap());
+        assert_eq!(
+            fallback.declaration_id(),
+            crate::value::ToolDeclarationId::new(2).unwrap()
+        );
         let no_fallback = engine(vec![plain_tool("read(path:secret*)")]);
         assert!(matches!(
             no_fallback.resolve_call(ToolName::new("read"), br#"{}"#),
@@ -11471,52 +9450,34 @@ mod tests {
         let selected = e
             .resolve_call(ToolName::new("read"), br#"{"path":"private.txt"}"#)
             .unwrap();
-        assert_eq!(selected.contract_id(), crate::value::ToolContractId::new(1).unwrap());
-        let opening = vec![opened(&e)];
-        let facts = appended_facts(proposed(&e, &opening, "b1", nonce(), selected.clone()).expect("the call releases"));
-        let log = [opening, facts].concat();
-        let projection = crate::projection::Projection::build(&log, log.len() as u64);
-        let trajectory = traj();
-        let views = projection.view(&trajectory);
-        let subject = crate::basis::SubjectKey::Call {
-            trajectory: traj(),
-            batch: crate::transition::ProposalBatchId::new("b1"),
-            position: 0,
-        };
-        let rewrite = |body: &str, pins: &[crate::contract::PinnedToolResolution]| {
-            substituted_call(
-                &e.registry,
-                &views,
-                &subject,
-                &selected,
-                &ValueBody::new(body),
-                pins,
-                &[],
-            )
+        assert_eq!(
+            selected.declaration_id(),
+            crate::value::ToolDeclarationId::new(1).unwrap()
+        );
+        let rewrite = |body: &str, memberships: &[crate::contract::PinnedMembership]| {
+            substituted_call(&e.registry, &selected, &ValueBody::new(body), None, memberships)
         };
 
-        // Arguments that select another contract render a new call under it: the selected
+        // Arguments that select another declaration render a new call under it: the selected
         // ordinal, nothing carried.
-        let (fresh, contract) = rewrite(r#"{"path":"safe.txt"}"#, &[]).expect("a new call under contract 0");
-        assert_eq!(fresh.contract_id(), crate::value::ToolContractId::new(0).unwrap());
-        assert!(std::ptr::eq(contract, e.registry.contract(&fresh).unwrap()));
-        assert!(fresh.tool_resolutions().is_empty());
+        let fresh = rewrite(r#"{"path":"safe.txt"}"#, &[]).expect("a new call under declaration 0");
+        assert_eq!(fresh.declaration_id(), crate::value::ToolDeclarationId::new(0).unwrap());
+        assert!(fresh.annotation().is_none());
         assert!(
             !e.registry
                 .selection_matches(&selected.substituting(fresh.canonical_arguments().clone()))
         );
 
-        // Arguments that stay in the contract render the substitution: the call's own answers
-        // ride along, and nothing may be handed in beside them.
-        let (kept, contract) = rewrite(r#"{"path":"other-private.txt"}"#, &[]).expect("the substitution");
+        // Arguments that stay in the declaration render the substitution, and membership
+        // evidence may not be handed in beside it.
+        let kept = rewrite(r#"{"path":"other-private.txt"}"#, &[]).expect("the substitution");
         assert_eq!(kept, selected.substituting(kept.canonical_arguments().clone()));
-        assert!(std::ptr::eq(contract, e.registry.contract(&selected).unwrap()));
         assert!(matches!(
-            rewrite(r#"{"path":"other-private.txt"}"#, &[call_pin_for("ssn 123")]),
+            rewrite(r#"{"path":"other-private.txt"}"#, &[expansion("to", &["partner"])]),
             Err(TransitionError::EvidenceMismatch)
         ));
 
-        // Arguments no contract selects, or that fail the selected schema, mint nothing.
+        // Arguments no declaration selects, or that fail the selected schema, mint nothing.
         assert!(matches!(
             rewrite(r#"{"path":7}"#, &[]),
             Err(TransitionError::Call(EngineError::InvalidCall(
@@ -11526,7 +9487,7 @@ mod tests {
     }
 
     /// One harness tool under two ordered contracts, both in the input sanitizers' scope.
-    /// `read(path:public/*)` at 0 uses a resolver that reads the complete call and owns the
+    /// `read(path:public/*)` at 0 uses an annotator that reads the complete call and owns the
     /// recipients it requires; `read(path:private/*)` at 1 records a classified read and
     /// requires `partner` and every desk in `desks` statically. `redact` widens the audience
     /// from internal to internal+partner, `widen` from partner to partner+auditor.
@@ -11537,38 +9498,14 @@ mod tests {
     /// [`ordered_read_engine`] with the private contract carrying `private_tag` instead of
     /// `outbound`.
     fn ordered_read_engine_tagged(desks: &[&str], private_tag: &str) -> Engine {
-        let read = |name: &str| ToolContract {
-            description: Some("A test tool.".to_string()),
-            uses: vec![],
-            name: ToolName::new(name),
-            tags: vec![crate::names::TagName::new("outbound")],
-            delta: Some(Delta::NONE),
-            parameters: crate::params::ToolParameters::compile(&json!({
-                "type": "object",
-                "properties": { "path": { "type": "string" } },
-                "required": ["path"],
-                "additionalProperties": false,
-            }))
-            .unwrap(),
-            emits: EffectSet::default(),
-            requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![],
-                },
-                ..Requires::default()
-            },
-        };
+        let read = ordered_read;
         let includes = |reader: &str| {
             AudienceRequirement::Includes(RecipientSpec::Static(DeclaredAudience::literal(Audience::restricted(
                 [ReaderId::new(reader)],
             ))))
         };
-        let public = ToolContract {
-            uses: vec![read_call()],
-            ..read("read(path:public/*)")
-        };
-        let private = ToolContract {
+        let public = annotated(read("read(path:public/*)"), "classify");
+        let private = ToolAnnotation {
             emits: classified_read(),
             tags: vec![crate::names::TagName::new(private_tag)],
             requires: Requires {
@@ -11585,14 +9522,21 @@ mod tests {
         };
         open_engine_at(
             RegistryConfig {
+                annotators: vec![annotator_with_readers(
+                    "classify",
+                    &["internal", "partner", "auditor", "legal", "press"],
+                )],
                 trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-                tools: vec![public, private, plain_tool("note")],
+                tools: {
+                    let mut tools = vec![public];
+                    tools.extend(declared(vec![private, plain_tool("note")]));
+                    tools
+                },
                 authorities: vec![],
                 sanitizers: vec![
                     input_sanitizer("redact", &["internal"], &["internal", "partner"]),
                     input_sanitizer("widen", &["partner"], &["internal", "partner", "auditor"]),
                 ],
-                casts: vec![],
                 membership: None,
             },
             known(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
@@ -11626,39 +9570,44 @@ mod tests {
         }
     }
 
-    fn read_call() -> crate::contract::ToolResolverUse {
-        crate::contract::ToolResolverUse {
-            resolver: crate::names::DynamicResolverName::new("classify"),
-            inputs: std::collections::BTreeMap::new(),
-            returns: [crate::contract::ResolverReturn::RequiredAudience]
-                .into_iter()
-                .collect(),
+    fn ordered_read(name: &str) -> ToolAnnotation {
+        ToolAnnotation {
+            description: Some("A test tool.".to_string()),
+            name: ToolName::new(name),
+            tags: vec![crate::names::TagName::new("outbound")],
+            delta: Delta::NONE,
+            parameters: crate::params::ToolParameters::compile(&json!({
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "required": ["path"],
+                "additionalProperties": false,
+            }))
+            .unwrap(),
+            emits: EffectSet::default(),
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: Some(TRUSTED),
+                    audience: vec![],
+                },
+                ..Requires::default()
+            },
         }
     }
 
-    /// The `classify` answer about `read` of `path` under the public contract: the readers the
-    /// call then requires. Its args are the complete call, so any rewrite of `path` changes them.
-    fn read_pin_for(e: &Engine, path: &str, readers: &[&str]) -> crate::contract::PinnedToolResolution {
-        let uses = read_call();
-        let contract = e
-            .registry
-            .keyed_tool(&ToolName::new("read"), crate::value::ToolContractId::new(0).unwrap())
-            .expect("the public contract is first");
-        crate::contract::PinnedToolResolution::from_answer(
-            uses.clone(),
-            contract.resolver_args_digest(&uses, &json!({ "path": path })),
-            None,
-            None,
-            None,
-            Some(crate::contract::RequiredAudience {
-                includes: Some(Audience::restricted(
-                    readers.iter().map(|reader| ReaderId::new(*reader)),
-                )),
-                cap: None,
-            }),
-            None,
-        )
-        .expect("a literal required audience pins")
+    /// The complete annotation `classify` produces for a `read` call under the public
+    /// declaration: the declaration's operational metadata with the readers the call requires.
+    /// It is evidence for exactly one canonical call: a rewrite is annotated afresh or not at all.
+    fn read_pin(bound_to: &ResolvedCall, readers: &[&str]) -> crate::contract::PinnedAnnotation {
+        let mut produced = ordered_read("read");
+        produced.requires.label.audience = readers
+            .iter()
+            .map(|reader| {
+                AudienceRequirement::Includes(RecipientSpec::Static(DeclaredAudience::literal(Audience::restricted(
+                    [ReaderId::new(*reader)],
+                ))))
+            })
+            .collect();
+        pinned_for(produced, "classify", bound_to)
     }
 
     fn read_of(e: &Engine, path: &str) -> ResolvedCall {
@@ -11670,14 +9619,14 @@ mod tests {
         call: &ResolvedCall,
         sanitizer: &str,
         replacement: &str,
-        tool_resolutions: Vec<crate::contract::PinnedToolResolution>,
+        annotation: Option<crate::contract::PinnedAnnotation>,
         memberships: Vec<crate::contract::PinnedMembership>,
     ) -> OfferOutcome {
         OfferOutcome::Derived(crate::transition::Evidence::Rewrite {
             sanitizer: crate::names::SanitizerName::new(sanitizer),
             source: crate::value::RawResultDigest::of(call.canonical_arguments().canonical_bytes()),
             derived: ValueBody::new(replacement),
-            tool_resolutions,
+            annotation,
             memberships,
         })
     }
@@ -11700,19 +9649,19 @@ mod tests {
     fn opened_contract_of(
         facts: &[Fact],
     ) -> (
-        crate::value::ToolContractId,
+        crate::value::ToolDeclarationId,
         EffectSet,
-        Vec<crate::contract::PinnedToolResolution>,
+        Option<crate::contract::PinnedAnnotation>,
     ) {
         facts
             .iter()
             .find_map(|fact| match fact {
                 Fact::DispatchOpened {
-                    contract,
+                    declaration,
                     proposed_effects,
-                    tool_resolutions,
+                    annotation,
                     ..
-                } => Some((*contract, proposed_effects.clone(), tool_resolutions.clone())),
+                } => Some((*declaration, proposed_effects.clone(), annotation.clone())),
                 _ => None,
             })
             .expect("the rewrite dispatches")
@@ -11728,70 +9677,54 @@ mod tests {
     fn a_rewrite_that_selects_another_contract_is_judged_under_it_with_the_answers_consulted_for_it() {
         let e = ordered_read_engine(&["auditor", "legal"]);
         let proposal = read_of(&e, "private/q3.md");
-        assert_eq!(proposal.contract_id(), crate::value::ToolContractId::new(1).unwrap());
+        assert_eq!(
+            proposal.declaration_id(),
+            crate::value::ToolDeclarationId::new(1).unwrap()
+        );
         let log = vec![opened(&e)];
         let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
         let hop = hop_named(&facts, "redact");
         let log = [log, facts].concat();
         let public = r#"{"path":"public/q3.md"}"#;
 
-        // The rewritten arguments select the public contract, whose resolver was never asked:
-        // the rewrite is a new call under it, and that contract's answers are owed first.
+        // The rewritten arguments select the public declaration, whose annotator was never
+        // asked: the rewrite is a new call under it, and its annotation is owed first.
         assert_eq!(
-            execute_offer(&e, &log, hop, rewrite(&proposal, "redact", public, vec![], vec![])).err(),
-            Some(TransitionError::ToolResolutionNeeded {
-                resolvers: vec!["classify".to_string()]
+            execute_offer(&e, &log, hop, rewrite(&proposal, "redact", public, None, vec![])).err(),
+            Some(TransitionError::AnnotationNeeded {
+                annotators: vec![crate::names::AnnotatorName::new("classify")]
             })
         );
-        // An answer about the proposal is not evidence for the rewrite.
-        assert_eq!(
-            execute_offer(
-                &e,
-                &log,
-                hop,
-                rewrite(
-                    &proposal,
-                    "redact",
-                    public,
-                    vec![read_pin_for(&e, "private/q3.md", &["partner"])],
-                    vec![]
-                ),
-            )
-            .err(),
-            Some(TransitionError::ForeignToolResolution {
-                resolver: "classify".to_string()
-            })
-        );
-        let answer = read_pin_for(&e, "public/q3.md", &["partner"]);
+        let answer = read_pin(&read_of(&e, "public/q3.md"), &["partner"]);
         let hopped = execute_offer(
             &e,
             &log,
             hop,
-            rewrite(&proposal, "redact", public, vec![answer.clone()], vec![]),
+            rewrite(&proposal, "redact", public, Some(answer.clone()), vec![]),
         )
         .expect("the hop runs");
         let released = released_by(&hopped);
         assert_eq!(
-            released.call.contract_id(),
-            crate::value::ToolContractId::new(0).unwrap()
+            released.call.declaration_id(),
+            crate::value::ToolDeclarationId::new(0).unwrap()
         );
-        assert_eq!(released.call.tool_resolutions(), &[answer]);
+        assert_eq!(released.call.annotation(), Some(&answer));
         let facts = appended_facts(hopped);
         assert_eq!(
             opened_contract_of(&facts),
             (
-                crate::value::ToolContractId::new(0).unwrap(),
+                crate::value::ToolDeclarationId::new(0).unwrap(),
                 EffectSet::default(),
-                released.call.tool_resolutions().to_vec()
+                released.call.annotation().cloned()
             ),
-            "the opening records the public contract: its effects, not the classified read's, and its answers"
+            "the opening records the public declaration: its effects, not the classified read's, and its annotation"
         );
         let log = [log, facts].concat();
         assert_eq!(e.validate_replay(&log), Ok(()));
 
-        // Replay holds the record to the same rule: the pinned answer is about the rewritten call
-        // and nothing else, the persisted contract is the one the arguments select, and the tool
-        // is the one the sanitizer rewrote — another tool's open contract is no place to land.
+        // Replay holds the record to the same rule: the persisted declaration is the one the
+        // arguments select, and the tool is the one the sanitizer rewrote — another tool's open
+        // declaration is no place to land.
         let derived_at = log
             .iter()
             .position(|fact| matches!(fact, Fact::CandidateDerived { .. }))
@@ -11800,22 +9733,15 @@ mod tests {
             (
                 ResolvedCall::new_keyed(
                     ToolName::new("note"),
-                    crate::value::ToolContractId::new(0).unwrap(),
+                    crate::value::ToolDeclarationId::new(0).unwrap(),
                     released.call.canonical_arguments().clone(),
                 ),
                 TransitionRefusal::ForgedLabel,
             ),
             (
-                released
-                    .call
-                    .clone()
-                    .with_tool_resolutions(vec![read_pin_for(&e, "private/q3.md", &["partner"])]),
-                TransitionRefusal::ForgedResolution,
-            ),
-            (
                 ResolvedCall::new_keyed(
                     ToolName::new("read"),
-                    crate::value::ToolContractId::new(1).unwrap(),
+                    crate::value::ToolDeclarationId::new(1).unwrap(),
                     released.call.canonical_arguments().clone(),
                 ),
                 TransitionRefusal::SanitizerUnapplicable,
@@ -11835,11 +9761,16 @@ mod tests {
     }
 
     #[test]
-    fn a_rewrite_into_the_classified_contract_records_its_effect_and_carries_no_answer() {
+    fn a_rewrite_into_the_classified_declaration_records_its_effect_and_carries_no_annotation() {
         let e = ordered_read_engine(&[]);
-        let proposal =
-            read_of(&e, "public/q3.md").with_tool_resolutions(vec![read_pin_for(&e, "public/q3.md", &["partner"])]);
-        assert_eq!(proposal.contract_id(), crate::value::ToolContractId::new(0).unwrap());
+        let unpinned = read_of(&e, "public/q3.md");
+        let proposal = unpinned
+            .clone()
+            .with_annotation(Some(read_pin(&unpinned, &["partner"])));
+        assert_eq!(
+            proposal.declaration_id(),
+            crate::value::ToolDeclarationId::new(0).unwrap()
+        );
         let log = vec![opened(&e)];
         let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
         let hop = hop_named(&facts, "redact");
@@ -11849,57 +9780,63 @@ mod tests {
             &e,
             &log,
             hop,
-            rewrite(&proposal, "redact", r#"{"path":"private/q3.md"}"#, vec![], vec![]),
+            rewrite(&proposal, "redact", r#"{"path":"private/q3.md"}"#, None, vec![]),
         )
         .expect("the hop runs");
         let released = released_by(&hopped);
         assert_eq!(
-            released.call.contract_id(),
-            crate::value::ToolContractId::new(1).unwrap()
+            released.call.declaration_id(),
+            crate::value::ToolDeclarationId::new(1).unwrap()
         );
         assert!(
-            released.call.tool_resolutions().is_empty(),
-            "the classified contract uses no resolver; the public contract's answer does not ride along"
+            released.call.annotation().is_none(),
+            "the classified declaration is statically declared; the public annotation does not ride along"
         );
         let facts = appended_facts(hopped);
         assert_eq!(
             opened_contract_of(&facts),
-            (crate::value::ToolContractId::new(1).unwrap(), classified_read(), vec![]),
-            "the opening records the classified read the selected contract emits"
+            (
+                crate::value::ToolDeclarationId::new(1).unwrap(),
+                classified_read(),
+                None
+            ),
+            "the opening records the classified read the selected declaration emits"
         );
         assert_eq!(e.validate_replay(&[log.clone(), facts].concat()), Ok(()));
 
-        // A rewrite that stays in the public contract keeps the proposal's answer and takes none
-        // beside it.
+        // A rewrite that stays in the annotated declaration is annotated afresh or not at all:
+        // the proposal's annotation never rides through, and none means the rewrite still owes one.
         let public = r#"{"path":"public/q4.md"}"#;
         assert_eq!(
-            execute_offer(
+            execute_offer(&e, &log, hop, rewrite(&proposal, "redact", public, None, vec![])).err(),
+            Some(TransitionError::AnnotationNeeded {
+                annotators: vec![crate::names::AnnotatorName::new("classify")]
+            })
+        );
+        let fresh = read_pin(&read_of(&e, "public/q4.md"), &["partner"]);
+        let kept = released_by(
+            &execute_offer(
                 &e,
                 &log,
                 hop,
-                rewrite(
-                    &proposal,
-                    "redact",
-                    public,
-                    vec![read_pin_for(&e, "public/q4.md", &["partner"])],
-                    vec![]
-                ),
+                rewrite(&proposal, "redact", public, Some(fresh.clone()), vec![]),
             )
-            .err(),
-            Some(TransitionError::EvidenceMismatch)
+            .expect("the hop runs"),
         );
-        let kept = released_by(
-            &execute_offer(&e, &log, hop, rewrite(&proposal, "redact", public, vec![], vec![])).expect("the hop runs"),
+        assert_eq!(
+            kept.call.declaration_id(),
+            crate::value::ToolDeclarationId::new(0).unwrap()
         );
-        assert_eq!(kept.call.contract_id(), crate::value::ToolContractId::new(0).unwrap());
-        assert_eq!(kept.call.tool_resolutions(), proposal.tool_resolutions());
+        assert_eq!(kept.call.annotation(), Some(&fresh));
     }
 
     #[test]
     fn a_rewrite_into_a_contract_the_sanitizer_does_not_reach_is_refused() {
         let e = ordered_read_engine_tagged(&[], "classified");
-        let proposal =
-            read_of(&e, "public/q3.md").with_tool_resolutions(vec![read_pin_for(&e, "public/q3.md", &["partner"])]);
+        let unpinned = read_of(&e, "public/q3.md");
+        let proposal = unpinned
+            .clone()
+            .with_annotation(Some(read_pin(&unpinned, &["partner"])));
         let log = vec![opened(&e)];
         let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
         let hop = hop_named(&facts, "redact");
@@ -11913,7 +9850,7 @@ mod tests {
                 &e,
                 &log,
                 hop,
-                rewrite(&proposal, "redact", r#"{"path":"private/q3.md"}"#, vec![], vec![]),
+                rewrite(&proposal, "redact", r#"{"path":"private/q3.md"}"#, None, vec![]),
             )
             .err(),
             Some(TransitionError::SanitizerUnapplicable)
@@ -11922,7 +9859,7 @@ mod tests {
     }
 
     #[test]
-    fn a_rewrite_within_the_contract_carries_the_answers_of_the_call_last_consulted() {
+    fn a_rewrite_within_the_declaration_is_annotated_afresh() {
         let e = ordered_read_engine(&["auditor", "legal"]);
         let proposal = read_of(&e, "private/q3.md");
         let log = vec![opened(&e)];
@@ -11930,10 +9867,10 @@ mod tests {
         let redact = hop_named(&facts, "redact");
         let log = [log, facts].concat();
 
-        // The first hop selects the public contract; its answer requires the auditor, which the
-        // redaction does not reach, so the rewritten call blocks on that one gap — the public
-        // contract's, not the classified read's partner, auditor and legal desks.
-        let answer = read_pin_for(&e, "public/q3.md", &["auditor"]);
+        // The first hop selects the public declaration; its annotation requires the auditor,
+        // which the redaction does not reach, so the rewritten call blocks on that one gap — the
+        // public declaration's, not the classified read's partner, auditor and legal desks.
+        let answer = read_pin(&read_of(&e, "public/q3.md"), &["auditor"]);
         let hopped = execute_offer(
             &e,
             &log,
@@ -11942,7 +9879,7 @@ mod tests {
                 &proposal,
                 "redact",
                 r#"{"path":"public/q3.md"}"#,
-                vec![answer.clone()],
+                Some(answer.clone()),
                 vec![],
             ),
         )
@@ -11951,8 +9888,11 @@ mod tests {
             OfferFollowUp::Substituted { block } => (**block).clone(),
             other => panic!("the substitution re-plans over the derived call, got {other:?}"),
         };
-        assert_eq!(block.call.contract_id(), crate::value::ToolContractId::new(0).unwrap());
-        assert_eq!(block.call.tool_resolutions(), std::slice::from_ref(&answer));
+        assert_eq!(
+            block.call.declaration_id(),
+            crate::value::ToolDeclarationId::new(0).unwrap()
+        );
+        assert_eq!(block.call.annotation(), Some(&answer));
         assert_eq!(block.block.raw.requirement_gaps, vec![includes_gap("auditor")]);
         let facts = appended_facts(hopped);
         let widen = hop_named(&facts, "widen");
@@ -11970,21 +9910,28 @@ mod tests {
             other => panic!("a repeated batch answers as proposals, got {other:?}"),
         }
 
-        // The second hop stays in the public contract: it carries the answer the first hop was
-        // consulted for — about that hop's arguments, not the proposal's — and consults nothing.
+        // The second hop stays in the public declaration: annotation evidence binds the exact
+        // canonical call, so the rewrite carries the fresh annotation obtained for it.
+        let widened = read_pin(&read_of(&e, "public/q3-v2.md"), &["auditor"]);
         let hopped = execute_offer(
             &e,
             &log,
             widen,
-            rewrite(&block.call, "widen", r#"{"path":"public/q3-v2.md"}"#, vec![], vec![]),
+            rewrite(
+                &block.call,
+                "widen",
+                r#"{"path":"public/q3-v2.md"}"#,
+                Some(widened.clone()),
+                vec![],
+            ),
         )
         .expect("the hop runs");
         let released = released_by(&hopped);
         assert_eq!(
-            released.call.contract_id(),
-            crate::value::ToolContractId::new(0).unwrap()
+            released.call.declaration_id(),
+            crate::value::ToolDeclarationId::new(0).unwrap()
         );
-        assert_eq!(released.call.tool_resolutions(), &[answer]);
+        assert_eq!(released.call.annotation(), Some(&widened));
         let log = [log, appended_facts(hopped)].concat();
         assert_eq!(e.validate_replay(&log), Ok(()));
     }
@@ -12003,13 +9950,13 @@ mod tests {
         // auditor and legal desks together, is blocked on something this block never was: the hop
         // improves nothing, lands no record, and the offer stands.
         for readers in [&["press"][..], &["auditor", "legal"][..]] {
-            let answer = read_pin_for(&e, "public/q3.md", readers);
+            let answer = read_pin(&read_of(&e, "public/q3.md"), readers);
             assert_eq!(
                 execute_offer(
                     &e,
                     &log,
                     hop,
-                    rewrite(&proposal, "redact", public, vec![answer], vec![])
+                    rewrite(&proposal, "redact", public, Some(answer), vec![])
                 )
                 .err(),
                 Some(TransitionError::SanitizerUnapplicable)
@@ -12025,7 +9972,7 @@ mod tests {
                     &proposal,
                     "redact",
                     r#"{"path":"public/q3.md","extra":1}"#,
-                    vec![],
+                    None,
                     vec![]
                 ),
             ),
@@ -12036,7 +9983,7 @@ mod tests {
 
     #[test]
     fn a_rewrite_into_a_contract_reading_a_group_pins_that_group_afresh() {
-        let send = |name: &str, audience: AudienceRequirement| ToolContract {
+        let send = |name: &str, audience: AudienceRequirement| ToolAnnotation {
             parameters: crate::params::test_string_argument_schema("to"),
             tags: vec![crate::names::TagName::new("outbound")],
             requires: Requires {
@@ -12050,8 +9997,9 @@ mod tests {
         };
         let e = open_engine_at(
             RegistryConfig {
+                annotators: vec![],
                 trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-                tools: vec![
+                tools: declared(vec![
                     send(
                         "send(to:@*)",
                         AudienceRequirement::Includes(RecipientSpec::Placeholder("to".into())),
@@ -12062,10 +10010,9 @@ mod tests {
                             Audience::restricted([ReaderId::new("partner")]),
                         ))),
                     ),
-                ],
+                ]),
                 authorities: vec![],
                 sanitizers: vec![input_sanitizer("redact", &["internal"], &["internal", "partner"])],
-                casts: vec![],
                 membership: Some(crate::names::MembershipResolverName::new("directory")),
             },
             known(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
@@ -12073,7 +10020,10 @@ mod tests {
         let proposal = e
             .resolve_call(ToolName::new("send"), br#"{"to":"partner-desk"}"#)
             .expect("the call resolves");
-        assert_eq!(proposal.contract_id(), crate::value::ToolContractId::new(1).unwrap());
+        assert_eq!(
+            proposal.declaration_id(),
+            crate::value::ToolDeclarationId::new(1).unwrap()
+        );
         let log = vec![opened(&e)];
         let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
         let hop = hop_named(&facts, "redact");
@@ -12083,7 +10033,7 @@ mod tests {
         // The rewritten argument names a group under the first contract: its membership is owed,
         // and a membership pinned for another argument is not it.
         assert_eq!(
-            execute_offer(&e, &log, hop, rewrite(&proposal, "redact", group, vec![], vec![])).err(),
+            execute_offer(&e, &log, hop, rewrite(&proposal, "redact", group, None, vec![])).err(),
             Some(TransitionError::MembershipNeeded {
                 needed: vec![crate::names::GroupName::new("team")]
             })
@@ -12093,7 +10043,7 @@ mod tests {
                 &e,
                 &log,
                 hop,
-                rewrite(&proposal, "redact", group, vec![], vec![expansion("cc", &["partner"])]),
+                rewrite(&proposal, "redact", group, None, vec![expansion("cc", &["partner"])]),
             )
             .err(),
             Some(TransitionError::ForeignMembership {
@@ -12104,13 +10054,13 @@ mod tests {
             &e,
             &log,
             hop,
-            rewrite(&proposal, "redact", group, vec![], vec![expansion("to", &["partner"])]),
+            rewrite(&proposal, "redact", group, None, vec![expansion("to", &["partner"])]),
         )
         .expect("the hop runs");
         let released = released_by(&hopped);
         assert_eq!(
-            released.call.contract_id(),
-            crate::value::ToolContractId::new(0).unwrap()
+            released.call.declaration_id(),
+            crate::value::ToolDeclarationId::new(0).unwrap()
         );
         assert_eq!(released.call.memberships(), &[expansion("to", &["partner"])]);
         let facts = appended_facts(hopped);
@@ -12131,17 +10081,16 @@ mod tests {
         let mut facts = appended_facts(proposed(&e, &opening, "b1", nonce(), call).expect("the call releases"));
         assert_eq!(e.validate_replay(&[opening.clone(), facts.clone()].concat()), Ok(()));
 
-        let later = crate::value::ToolContractId::new(1).unwrap();
+        let later = crate::value::ToolDeclarationId::new(1).unwrap();
         for fact in &mut facts {
             match fact {
                 Fact::ProposalBatchDecided { proposals, .. } => {
                     let original = &proposals[0];
                     proposals[0] =
                         ResolvedCall::new_keyed(original.tool().clone(), later, original.canonical_arguments().clone())
-                            .with_tool_resolutions(original.tool_resolutions().to_vec())
                             .with_memberships(original.memberships().to_vec());
                 }
-                Fact::DispatchOpened { contract, .. } => *contract = later,
+                Fact::DispatchOpened { declaration, .. } => *declaration = later,
                 _ => {}
             }
         }
@@ -12166,23 +10115,30 @@ mod tests {
                     trajectory: traj(),
                     dispatch: DispatchId::new(traj(), minted_from.digest(), 0),
                     tool: ToolName::new(tool),
-                    contract: Default::default(),
+                    declaration: Default::default(),
                     arguments: crate::params::test_arguments(&payload),
                     proposed_label: established(TRUSTED, Audience::Public),
                     receiving: established(TRUSTED, Audience::Public),
                     proposed_effects: EffectSet::default(),
-                    tool_resolutions: vec![],
+                    annotation: None,
                     memberships: Vec::new(),
                     subject: crate::basis::fixture_subject(&traj()),
                     resolutions: vec![],
                 },
             ]
         };
+        // A record naming a tool nothing covers is refused by name, before any backing check.
         let ghost_call = call("ghost", json!({}));
-        assert!(matches!(
+        assert_eq!(
             e.validate_replay(&dispatched("ghost", json!({}), &ghost_call)),
-            Err(TransitionRefusal::UnknownTool(name)) if name == "ghost"
-        ));
+            Err(TransitionRefusal::UnknownTool("ghost".to_string()))
+        );
+        // A dispatch no decision backs is refused as such.
+        let undecided = call("send", json!({ "to": "hr" }));
+        assert_eq!(
+            e.validate_replay(&dispatched("send", json!({ "to": "hr" }), &undecided)),
+            Err(TransitionRefusal::UnbackedDecision)
+        );
         let smuggled = call("send", json!({ "bogus": 1 }));
         assert!(matches!(
             e.validate_replay(&dispatched("send", json!({ "bogus": 1 }), &smuggled)),
@@ -12193,10 +10149,10 @@ mod tests {
             Err(TransitionRefusal::DigestMismatch)
         ));
         let mut forged_contract = dispatched("send", json!({ "to": "hr" }), &good);
-        let Fact::DispatchOpened { contract, .. } = &mut forged_contract[1] else {
+        let Fact::DispatchOpened { declaration, .. } = &mut forged_contract[1] else {
             unreachable!("the fixture opens one dispatch")
         };
-        *contract = crate::value::ToolContractId::new(99).unwrap();
+        *declaration = crate::value::ToolDeclarationId::new(99).unwrap();
         assert!(matches!(
             e.validate_replay(&forged_contract),
             Err(TransitionRefusal::UnknownTool(name)) if name == "send"
@@ -12219,11 +10175,11 @@ mod tests {
             hint: None,
         };
         let cfg = RegistryConfig {
+            annotators: vec![],
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![wire],
+            tools: declared(vec![wire]),
             authorities: vec![officer],
             sanitizers: vec![],
-            casts: vec![],
             membership: None,
         };
         let e = open_engine_at(cfg, known(SUSPICIOUS, Audience::Public));
@@ -12280,27 +10236,26 @@ mod tests {
         }
     }
 
-    fn plain_tool(name: &str) -> ToolContract {
-        ToolContract {
+    fn plain_tool(name: &str) -> ToolAnnotation {
+        ToolAnnotation {
             description: Some("A test tool.".to_string()),
-            uses: vec![],
             name: ToolName::new(name),
             tags: vec![],
-            delta: Some(Delta::NONE),
+            delta: Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires::default(),
         }
     }
 
-    fn engine_with_provider_run(tools: Vec<ToolContract>, provider_run: &[&str]) -> Engine {
+    fn engine_with_provider_run(tools: Vec<ToolAnnotation>, provider_run: &[&str]) -> Engine {
         provider_run_engine(
             RegistryConfig {
+                annotators: vec![],
                 trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-                tools,
+                tools: declared(tools),
                 authorities: vec![],
                 sanitizers: vec![],
-                casts: vec![],
                 membership: None,
             },
             provider_run,
@@ -12340,7 +10295,6 @@ mod tests {
         let raw = crate::check::RawBlock {
             requirement_gaps: vec![],
             narrowing: None,
-            unestablished: vec![],
         };
         assert!(matches!(
             e.plan(&views, &proposed, &raw),
@@ -12350,6 +10304,95 @@ mod tests {
             e.resolve_call(ToolName::new("search"), b"{}"),
             Err(EngineError::ProviderRunTool(_))
         ));
+        // A provider-run name has no checkable contract at all, so a persisted batch naming it at
+        // ordinal zero is not an undeclared tool's batch: replay refuses the name itself.
+        let forged = vec![
+            opened(&e),
+            Fact::ProposalBatchDecided {
+                trajectory: traj(),
+                batch: crate::transition::ProposalBatchId::new("b1"),
+                proposals: vec![proposed],
+                spawn: None,
+                released: vec![],
+                resolutions: vec![],
+            },
+        ];
+        assert!(matches!(
+            e.validate_replay(&forged),
+            Err(TransitionRefusal::UnknownTool(name)) if name == "search"
+        ));
+    }
+
+    /// A released tool nothing covers is refused by name on replay. Under a wildcard the name
+    /// is covered, but the wildcard prescribes its annotator's mandate: a record carrying a
+    /// static pin for it is forged, and so is a record naming any other ordinal.
+    #[test]
+    fn replay_refuses_a_released_tool_nothing_covers_and_a_forged_wildcard_record() {
+        let e = engine(vec![crm_tool()]);
+        let ghost = call("ghost", json!({}));
+        let forged = |proposal: ResolvedCall| {
+            let dispatch = DispatchId::new(traj(), proposal.digest(), 0);
+            vec![
+                opened(&e),
+                Fact::ProposalBatchDecided {
+                    trajectory: traj(),
+                    batch: crate::transition::ProposalBatchId::new("b1"),
+                    proposals: vec![proposal.clone()],
+                    spawn: None,
+                    released: vec![dispatch.clone()],
+                    resolutions: vec![],
+                },
+                Fact::DispatchOpened {
+                    trajectory: traj(),
+                    dispatch,
+                    tool: proposal.tool().clone(),
+                    declaration: proposal.declaration_id(),
+                    arguments: proposal.canonical_arguments().clone(),
+                    proposed_label: established(TRUSTED, Audience::Public),
+                    receiving: established(TRUSTED, Audience::Public),
+                    proposed_effects: EffectSet::default(),
+                    annotation: None,
+                    memberships: Vec::new(),
+                    subject: crate::basis::fixture_subject(&traj()),
+                    resolutions: vec![],
+                },
+            ]
+        };
+        // No wildcard: the name has no contract at all, and replay refuses it as such.
+        assert_eq!(
+            e.validate_replay(&forged(ghost.clone())),
+            Err(TransitionRefusal::UnknownTool("ghost".to_string()))
+        );
+
+        // A wildcard covers the name, but the record's static pin is not its annotator's.
+        let mut cfg = test_config(vec![crm_tool()]);
+        cfg.tools.push(wildcard("any"));
+        cfg.annotators.push(annotator("any"));
+        let covered = open_engine(cfg);
+        let forged_static = {
+            let mut log = forged(ghost.clone());
+            log[0] = opened(&covered);
+            log
+        };
+        assert_eq!(
+            covered.validate_replay(&forged_static),
+            Err(TransitionRefusal::ForgedResolution)
+        );
+        let second = ResolvedCall::new_keyed(
+            ghost.tool().clone(),
+            crate::value::ToolDeclarationId::new(1).unwrap(),
+            ghost.canonical_arguments().clone(),
+        );
+        // A covered name has exactly one ordinal: a fresh selection contradicts the record.
+        let forged_ordinal = {
+            let mut log = forged(second);
+            log[0] = opened(&covered);
+            log
+        };
+        assert_eq!(
+            covered.validate_replay(&forged_ordinal),
+            Err(TransitionRefusal::MisdecidedBatch)
+        );
     }
 
     #[test]
@@ -12499,8 +10542,9 @@ mod tests {
     #[test]
     fn a_fork_carries_the_deployments_child_return_binding() {
         let cfg = RegistryConfig {
+            annotators: vec![],
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![plain_tool("spawn")],
+            tools: declared(vec![plain_tool("spawn")]),
             authorities: vec![],
             sanitizers: vec![crate::authority::Sanitizer {
                 name: crate::names::SanitizerName::new("redactor"),
@@ -12515,7 +10559,6 @@ mod tests {
                 scope: crate::authority::Scope::default(),
                 hint: None,
             }],
-            casts: vec![],
             membership: None,
         };
         let bound = ReturnPolicy::Sanitized(crate::names::SanitizerName::new("redactor"));
@@ -12608,10 +10651,10 @@ mod tests {
         let after = viewing(&e, &log);
         let views = after.views(&t).expect("the root is opened");
         assert_eq!(
-            views.value_label(ValueId::new(0)),
-            Some(&known(Trust::new(u8::MAX), Audience::Public))
+            views.current_label(),
+            starting,
+            "a neutral result leaves the fold in place"
         );
-        assert_eq!(views.current_label(), starting);
     }
 
     #[test]
@@ -12641,7 +10684,7 @@ mod tests {
         crate::transition::ProposedCall {
             tool: ToolName::new(tool),
             arguments: arguments.to_vec(),
-            tool_resolutions: Vec::new(),
+            annotation: None,
             memberships: Vec::new(),
         }
     }
@@ -12809,10 +10852,12 @@ mod tests {
     fn a_malformed_sibling_mediates_none_of_them_and_the_admissions_stand() {
         let e = batch_engine();
         let log = opening_log(&e);
+        // A sibling nothing covers is one of the malformed shapes: no contract, no decision,
+        // and the provider-run admissions stand.
         for (position, malformed) in [
-            (1, raw_call("nowhere", b"{}")),
             (1, raw_call("seen", b"{}")),
             (1, raw_call("quiet", b"not json")),
+            (1, raw_call("nowhere", b"{}")),
         ] {
             let decision = e
                 .handle(
@@ -12878,149 +10923,6 @@ mod tests {
             "the results were admitted by the first attempt: {facts:?}"
         );
         assert_eq!(e.validate_replay(&[log, facts].concat()), Ok(()));
-    }
-
-    /// An unannotated provider-run tool beside a trusted sink, with a resolver cast that
-    /// can settle the provider result's unknown trust.
-    fn casting_provider_run_engine() -> Engine {
-        let mut seen = plain_tool("seen");
-        seen.delta = None;
-        let mut cfg = test_config(vec![seen, trusted_sink()]);
-        cfg.casts = vec![resolver_cast("classifier", vec![SUSPICIOUS, TRUSTED], vec![])];
-        provider_run_engine(cfg, &["seen"])
-    }
-
-    fn provider_result_ask(evidence: Vec<Evidence>) -> EngineEvent {
-        EngineEvent::Proposals(ProposalBatch {
-            id: crate::transition::ProposalBatchId::new("b1"),
-            trajectory: traj(),
-            provider_results: vec![exposed("seen", "the provider ran it")],
-            proposals: vec![raw(&call("send", json!({})))],
-            spawn: None,
-            offer_nonce: nonce(),
-            evidence,
-            expansions: vec![],
-        })
-    }
-
-    fn provider_admissions_for<'f>(facts: &'f [Fact], batch: &str) -> Vec<&'f Fact> {
-        facts
-            .iter()
-            .filter(|fact| {
-                matches!(
-                    fact,
-                    Fact::ValueAdmitted {
-                        provenance: Provenance::ProviderRun { batch: admitted, .. },
-                        ..
-                    } if admitted.as_str() == batch
-                )
-            })
-            .collect()
-    }
-
-    /// Drives one batch through its ask and its answered retry; returns the whole log.
-    fn asked_then_answered(e: &Engine) -> (Vec<Fact>, EngineDecision, EngineDecision) {
-        let log = opening_log(e);
-        let asked = e
-            .handle(&viewing(e, &log), provider_result_ask(Vec::new()))
-            .expect("the batch asks for the cast");
-        let log = [log, appended_facts(asked.clone())].concat();
-        let value = match &asked.follow_up {
-            FollowUp::ProposalsResolve(requests) => match requests.as_slice() {
-                [EvidenceRequest::Cast { value, .. }] => *value,
-                other => panic!("expected one cast request, got {other:?}"),
-            },
-            other => panic!("expected a resolution ask, got {other:?}"),
-        };
-        let answered = e
-            .handle(
-                &viewing(e, &log),
-                provider_result_ask(vec![Evidence::Cast {
-                    cast: crate::names::CastName::new("classifier"),
-                    value,
-                    resolved: established(TRUSTED, Audience::Public),
-                }]),
-            )
-            .expect("the answered batch decides");
-        let log = [log, appended_facts(answered.clone())].concat();
-        (log, asked, answered)
-    }
-
-    #[test]
-    fn a_provider_result_admitted_in_the_batch_is_castable_on_the_retry() {
-        let e = casting_provider_run_engine();
-        let (_, asked, retry) = asked_then_answered(&e);
-
-        match &asked.follow_up {
-            FollowUp::ProposalsResolve(requests) => match requests.as_slice() {
-                [EvidenceRequest::Cast { casts, body, .. }] => {
-                    assert_eq!(
-                        casts.iter().map(|cast| cast.name.as_str()).collect::<Vec<_>>(),
-                        ["classifier"]
-                    );
-                    assert_eq!(
-                        body.as_str(),
-                        "the provider ran it",
-                        "the ask names the provider result"
-                    );
-                }
-                other => panic!("expected one cast request, got {other:?}"),
-            },
-            other => panic!("expected a resolution ask, got {other:?}"),
-        }
-        let ask_facts = appended_facts(asked);
-        match provider_admissions_for(&ask_facts, "b1").as_slice() {
-            [Fact::ValueAdmitted { value, .. }] => {
-                assert_eq!(value.body, ValueBody::new("the provider ran it"));
-                assert_eq!(value.label, Label::new(Dim::Unknown, Dim::Unknown));
-            }
-            other => panic!("the ask seals the batch's admission, not {other:?}"),
-        }
-        assert!(
-            !ask_facts
-                .iter()
-                .any(|fact| matches!(fact, Fact::ProposalBatchDecided { .. } | Fact::DispatchOpened { .. })),
-            "an ask decides and releases nothing: {ask_facts:?}"
-        );
-
-        let (released, blocked) = answered(&retry);
-        assert_eq!(
-            tool_names(released),
-            ["send"],
-            "the cast clears the floor the sink requires"
-        );
-        assert!(blocked.is_empty());
-        let retry_facts = appended_facts(retry);
-        assert!(
-            retry_facts.iter().any(|fact| matches!(fact, Fact::CastApplied { .. })),
-            "the answer lands as a cast under the batch's act: {retry_facts:?}"
-        );
-        assert!(
-            provider_admissions_for(&retry_facts, "b1").is_empty(),
-            "the result was admitted by the ask: {retry_facts:?}"
-        );
-    }
-
-    #[test]
-    fn the_log_of_an_asked_then_answered_provider_batch_replays() {
-        let e = casting_provider_run_engine();
-        let (log, _, _) = asked_then_answered(&e);
-
-        assert_eq!(provider_admissions_for(&log, "b1").len(), 1);
-        assert_eq!(
-            log.iter()
-                .filter(|fact| matches!(fact, Fact::CastApplied { .. }))
-                .count(),
-            1
-        );
-        assert_eq!(
-            log.iter()
-                .filter(|fact| matches!(fact, Fact::ProposalBatchDecided { .. }))
-                .count(),
-            1
-        );
-        let revision = log.len() as u64;
-        assert!(e.view(&traj(), log, revision).is_ok());
     }
 
     #[test]
@@ -13130,10 +11032,12 @@ mod tests {
                 },
                 {
                     let mut narrowing = plain_tool("internal");
-                    narrowing.delta = Some(Delta {
+                    narrowing.delta = Delta {
                         trust: None,
-                        audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")])).into()),
-                    });
+                        audience: Some(DeclaredAudience::literal(Audience::restricted([ReaderId::new(
+                            "internal",
+                        )]))),
+                    };
                     narrowing
                 },
             ],
@@ -13179,20 +11083,22 @@ mod tests {
         /// projection's own unit test.
         const TOOLS: [&str; 3] = ["identity", "suspicious", "internal"];
 
-        fn labeled_tool(name: &str) -> ToolContract {
+        fn labeled_tool(name: &str) -> ToolAnnotation {
             let mut tool = plain_tool(name);
-            tool.delta = Some(match name {
+            tool.delta = match name {
                 "identity" => Delta::NONE,
                 "suspicious" => Delta {
-                    trust: Some(Dim::Known(Trust::new(0))),
+                    trust: Some(Trust::new(0)),
                     audience: None,
                 },
                 "internal" => Delta {
                     trust: None,
-                    audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")])).into()),
+                    audience: Some(DeclaredAudience::literal(Audience::restricted([ReaderId::new(
+                        "internal",
+                    )]))),
                 },
                 other => panic!("no labeled tool named {other}"),
-            });
+            };
             tool
         }
 
@@ -13541,45 +11447,26 @@ mod tests {
     }
 
     #[test]
-    fn a_repeat_matches_each_sibling_to_the_dispatch_its_own_answers_opened() {
-        let binding = crate::contract::ToolResolverUse {
-            resolver: crate::names::DynamicResolverName::new("acl"),
-            inputs: std::collections::BTreeMap::from([(
-                "room".to_string(),
-                crate::contract::ToolCallSource::argument("room").expect("a plain name is a source"),
-            )]),
-            returns: [crate::contract::ResolverReturn::RequiredAudience]
-                .into_iter()
-                .collect(),
-        };
+    fn a_repeat_matches_each_sibling_to_the_dispatch_its_own_annotation_opened() {
         let mut notify = plain_tool("notify");
         notify.parameters = crate::params::test_string_argument_schema("room");
-        notify.uses = vec![binding.clone()];
         let internal = Audience::restricted([ReaderId::new("internal")]);
-        let e = engine_at(vec![notify], known(TRUSTED, internal.clone()));
+        let mut cfg = test_config(vec![]);
+        cfg.tools.push(annotated(notify.clone(), "acl"));
+        cfg.annotators
+            .push(annotator_with_readers("acl", &["internal", "outsider"]));
+        let e = open_engine_at(cfg, known(TRUSTED, internal.clone()));
         let log = vec![opened(&e)];
         let arguments = json!({ "room": "lobby" });
-        let args = e
-            .registry()
-            .tool(&ToolName::new("notify"))
-            .expect("notify is registered")
-            .resolver_args_digest(&binding, &arguments);
         let pinned = |audience: &Audience| {
-            raw(&call("notify", arguments.clone()).with_tool_resolutions(vec![
-                crate::contract::PinnedToolResolution::from_answer(
-                    binding.clone(),
-                    args,
-                    None,
-                    None,
-                    None,
-                    Some(crate::contract::RequiredAudience {
-                        includes: Some(audience.clone()),
-                        cap: None,
-                    }),
-                    None,
-                )
-                .expect("a literal reader set pins"),
-            ]))
+            let mut produced = notify.clone();
+            produced.requires.label.audience = vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                DeclaredAudience::literal(audience.clone()),
+            ))];
+            let unpinned = call("notify", arguments.clone());
+            raw(&unpinned
+                .clone()
+                .with_annotation(Some(pinned_for(produced, "acl", &unpinned))))
         };
         let outsider = Audience::restricted([ReaderId::new("outsider")]);
         let proposals = || vec![pinned(&outsider), pinned(&internal)];
@@ -13591,12 +11478,21 @@ mod tests {
         assert_eq!(released.len(), 1);
         assert_eq!(blocked.len(), 1);
         let ran = released[0].dispatch.clone();
-        let required_includes = |call: &ResolvedCall| {
-            call.tool_resolutions()[0]
-                .required_audience()
-                .and_then(|required| required.includes.clone())
+        let required_includes = |call: &ResolvedCall| match call
+            .annotation()
+            .expect("an annotated proposal carries its pin")
+            .produced()
+            .requires
+            .label
+            .audience
+            .as_slice()
+        {
+            [AudienceRequirement::Includes(RecipientSpec::Static(recipients))] => {
+                recipients.resolve(&Expansions::default())
+            }
+            other => panic!("one produced includes requirement, got {other:?}"),
         };
-        assert_eq!(required_includes(&released[0].call), Some(internal.clone()));
+        assert_eq!(required_includes(&released[0].call), internal.clone());
         let log = [log, appended_facts(first)].concat();
 
         let repeat = e
@@ -13608,11 +11504,11 @@ mod tests {
         assert_eq!(released[0].dispatch, ran);
         assert_eq!(
             required_includes(&released[0].call),
-            Some(internal.clone()),
+            internal.clone(),
             "the repeat names the sibling that actually ran"
         );
         assert_eq!(blocked.len(), 1);
-        assert_eq!(required_includes(&blocked[0].call), Some(outsider.clone()));
+        assert_eq!(required_includes(&blocked[0].call), outsider.clone());
     }
 
     fn membership_engine(authorities: Vec<crate::authority::Authority>, starting: Label) -> Engine {
@@ -13627,11 +11523,11 @@ mod tests {
         };
         open_engine_at(
             RegistryConfig {
+                annotators: vec![],
                 trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-                tools: vec![send],
+                tools: declared(vec![send]),
                 authorities,
                 sanitizers: vec![],
-                casts: vec![],
                 membership: Some(crate::names::MembershipResolverName::new("directory")),
             },
             starting,
@@ -14155,7 +12051,7 @@ mod tests {
         assert_eq!(
             rewritten(&|fact| {
                 if let Fact::ValueAdmitted { value, .. } = fact {
-                    value.label = Label::new(Dim::Known(TRUSTED), Dim::Unknown);
+                    value.label = Label::new(TRUSTED, Audience::restricted([ReaderId::new("forged")]));
                 }
             }),
             Err(TransitionRefusal::ForgedLabel)
@@ -14267,22 +12163,19 @@ mod tests {
         );
     }
 
-    fn returning_registry(
-        sanitizers: Vec<crate::authority::Sanitizer>,
-        casts: Vec<crate::authority::Cast>,
-    ) -> RegistryConfig {
+    fn returning_registry(sanitizers: Vec<crate::authority::Sanitizer>) -> RegistryConfig {
         RegistryConfig {
+            annotators: vec![],
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![
+            tools: declared(vec![
                 plain_tool("spawn"),
                 open_tool("fetch"),
                 suspicious_read(),
                 internal_read(),
                 suspicious_internal_read(),
-            ],
+            ]),
             authorities: vec![],
             sanitizers,
-            casts,
             membership: None,
         }
     }
@@ -14303,20 +12196,6 @@ mod tests {
         }
     }
 
-    fn classifier_cast() -> crate::authority::Cast {
-        crate::authority::Cast {
-            name: crate::names::CastName::new("classifier"),
-            resolution: crate::authority::CastResolution::Resolver {
-                may_cast: crate::authority::CastCeiling {
-                    trust: vec![SUSPICIOUS],
-                    audience: DeclaredAudience::literal(Audience::Public),
-                },
-            },
-            scope: crate::authority::Scope::default(),
-            hint: None,
-        }
-    }
-
     fn pending_stage_of(decision: &EngineDecision) -> &PendingReturnStage {
         match &decision.follow_up {
             FollowUp::Child(ChildFollowUp::Pending(stage)) => stage,
@@ -14324,7 +12203,7 @@ mod tests {
         }
     }
 
-    fn with_unresolved_fetch(e: &Engine, log: Vec<Fact>, child: &TrajectoryId) -> Vec<Fact> {
+    fn with_fetched_page(e: &Engine, log: Vec<Fact>, child: &TrajectoryId) -> Vec<Fact> {
         let fetch = call("fetch", json!({}));
         let released = e
             .handle(
@@ -14356,7 +12235,7 @@ mod tests {
                     expansions: vec![],
                 }),
             )
-            .expect("the unannotated result admits at unknown");
+            .expect("the open result admits");
         [opened, appended_facts(admitted)].concat()
     }
 
@@ -14387,7 +12266,7 @@ mod tests {
             covers: Vec::new(),
             reviewed: crate::execute::AuthorityReview {
                 tool: ToolName::new("anything"),
-                trajectory_label: PartialLabel::established(established(Trust::new(0), Audience::Public)),
+                trajectory_label: established(Trust::new(0), Audience::Public),
             },
         }
     }
@@ -14481,7 +12360,7 @@ mod tests {
         let views = after.view(&parent);
         assert!(views.has_ended(&child));
         assert!(views.child_return(&ChildReturnId::new(child.clone(), 0)).is_none());
-        assert_eq!(views.current_label().bound(), &established(TRUSTED, Audience::Public));
+        assert_eq!(views.current_label(), established(TRUSTED, Audience::Public));
 
         let again = e
             .handle(
@@ -14554,10 +12433,7 @@ mod tests {
         let merged = [ended, crossing].concat();
         assert_eq!(e.validate_replay(&merged), Ok(()));
         let views = Projection::build(&merged, merged.len() as u64);
-        assert_eq!(
-            views.view(&traj()).current_label().bound(),
-            &established(SUSPICIOUS, internal)
-        );
+        assert_eq!(views.view(&traj()).current_label(), established(SUSPICIOUS, internal));
 
         let repeat = execute_offer(&e, &merged, accept, OfferOutcome::Approved(vec![])).expect("the repeat answers");
         assert_eq!(repeat.append, None);
@@ -14631,10 +12507,11 @@ mod tests {
             scope: crate::authority::Scope::default(),
             hint: None,
         };
-        let e = open_engine(returning_registry(
-            vec![lifting_sanitizer("redactor"), input_only, sideways],
-            vec![],
-        ));
+        let e = open_engine(returning_registry(vec![
+            lifting_sanitizer("redactor"),
+            input_only,
+            sideways,
+        ]));
         let child = TrajectoryId::new("child");
         let mut log = spawn_family(&e, None, &child);
         reads(&e, &mut log, &child, "read_suspicious_internal");
@@ -14663,7 +12540,7 @@ mod tests {
 
     #[test]
     fn an_unconfined_child_return_stages_acceptance_alone() {
-        let cfg = returning_registry(vec![lifting_sanitizer("redactor")], vec![]);
+        let cfg = returning_registry(vec![lifting_sanitizer("redactor")]);
         let mut declaration = crate::profile::covering_declaration(&cfg);
         declaration.confined_child_return = false;
         let e = Engine::open(DeploymentPolicy {
@@ -14734,30 +12611,30 @@ mod tests {
         scoped.scope = crate::authority::Scope {
             tags: vec![crate::names::TagName::new("web")],
         };
-        let mut cfg = returning_registry(vec![scoped], vec![classifier_cast()]);
+        let mut cfg = returning_registry(vec![scoped]);
         // A tool the sanitizer's scope reaches, so the sanitizer is one a result could
         // meet. A child return originates from no tool, which is what leaves it unreached.
-        cfg.tools.push(ToolContract {
-            tags: vec![crate::names::TagName::new("web")],
-            ..open_tool("browse")
-        });
+        cfg.tools
+            .push(crate::contract::ToolDeclaration::Declared(ToolAnnotation {
+                tags: vec![crate::names::TagName::new("web")],
+                ..open_tool("browse")
+            }));
         let e = open_engine(cfg);
         let child = TrajectoryId::new("child");
         let mut log = spawn_family(&e, None, &child);
         reads(&e, &mut log, &child, "read_suspicious_internal");
-        let log = with_unresolved_fetch(&e, log, &child);
+        let log = with_fetched_page(&e, log, &child);
         let body = ValueBody::new("what I found");
         let decision = e
             .handle(
                 &viewing(&e, &log),
                 child_report(&log, &child, ChildSubmission::Value { body: body.clone() }),
             )
-            .expect("the submission transfers custody without cast IO");
+            .expect("the submission transfers custody");
         let stage = pending_stage_of(&decision);
         assert_eq!(stage.offers.len(), 1, "acceptance alone — no hop, no resolution");
         let appended = appended_facts(decision);
         assert!(appended.iter().any(|fact| matches!(fact, Fact::ReturnSubmitted { .. })));
-        assert!(!appended.iter().any(|fact| matches!(fact, Fact::CastApplied { .. })));
         assert_eq!(e.validate_replay(&[log, appended].concat()), Ok(()));
     }
 
@@ -14776,18 +12653,18 @@ mod tests {
             scope: crate::authority::Scope::default(),
             hint: None,
         };
-        let e = open_engine(returning_registry(vec![unreachable_from], vec![classifier_cast()]));
+        let e = open_engine(returning_registry(vec![unreachable_from]));
         let child = TrajectoryId::new("child");
         let mut log = spawn_family(&e, None, &child);
         reads(&e, &mut log, &child, "read_suspicious_internal");
-        let log = with_unresolved_fetch(&e, log, &child);
+        let log = with_fetched_page(&e, log, &child);
         let body = ValueBody::new("what I found");
         let decision = e
             .handle(
                 &viewing(&e, &log),
                 child_report(&log, &child, ChildSubmission::Value { body: body.clone() }),
             )
-            .expect("the submission transfers custody without cast IO");
+            .expect("the submission transfers custody");
         let stage = pending_stage_of(&decision);
         assert_eq!(
             stage.offers.len(),
@@ -14849,78 +12726,12 @@ mod tests {
         let merged = [ended, crossing].concat();
         assert_eq!(e.validate_replay(&merged), Ok(()));
         let views = Projection::build(&merged, merged.len() as u64);
-        assert_eq!(
-            views.view(&traj()).current_label().bound(),
-            &established(SUSPICIOUS, internal)
-        );
-    }
-
-    #[test]
-    fn a_resolution_stales_a_return_stage_and_the_redrive_replans_it() {
-        let e = open_engine(returning_registry(vec![], vec![classifier_cast()]));
-        let child = TrajectoryId::new("child");
-        let mut log = spawn_family(&e, None, &child);
-        reads(&e, &mut log, &child, "read_suspicious_internal");
-        let log = with_unresolved_fetch(&e, log, &child);
-        let body = ValueBody::new("what I found");
-        let decision = e
-            .handle(
-                &viewing(&e, &log),
-                child_report(&log, &child, ChildSubmission::Value { body: body.clone() }),
-            )
-            .expect("the submission transfers custody");
-        let ended = [log, appended_facts(decision)].concat();
-        let stale = return_offer(&ended, false);
-
-        let redriven = e
-            .handle(
-                &viewing(&e, &ended),
-                EngineEvent::ChildReturn(ChildReport {
-                    child: child.clone(),
-                    fork: fork_in(&ended, &child),
-                    submission: ChildSubmission::Value { body: body.clone() },
-                    evidence: vec![Evidence::Cast {
-                        cast: crate::names::CastName::new("classifier"),
-                        value: ValueId::new(1),
-                        resolved: established(SUSPICIOUS, Audience::Public),
-                    }],
-                    offer_nonce: crate::value::OfferNonce::new([9u8; 32]),
-                    expansions: vec![],
-                }),
-            )
-            .expect("the re-drive lands the resolution and re-plans the stage");
-        let restage = pending_stage_of(&redriven).clone();
-        let replanned = [ended, appended_facts(redriven)].concat();
-        assert_eq!(e.validate_replay(&replanned), Ok(()));
-        assert!(replanned.iter().any(|fact| matches!(fact, Fact::CastApplied { .. })));
-        assert_eq!(
-            execute_offer(&e, &replanned, stale, OfferOutcome::Approved(vec![])),
-            Err(TransitionError::StaleOffer)
-        );
-        assert_eq!(
-            replanned
-                .iter()
-                .filter(|fact| matches!(fact, Fact::ReturnSubmitted { .. }))
-                .count(),
-            1
-        );
-        assert_ne!(restage.offers[0].0, stale);
-
-        let crossed = execute_offer(&e, &replanned, restage.offers[0].0, OfferOutcome::Approved(vec![]))
-            .expect("the fresh acceptance crosses");
-        assert!(matches!(
-            offer_answer(&crossed),
-            OfferFollowUp::Admitted { value } if value == &body
-        ));
-        assert_eq!(
-            e.validate_replay(&[replanned, appended_facts(crossed)].concat()),
-            Ok(())
-        );
+        assert_eq!(views.view(&traj()).current_label(), established(SUSPICIOUS, internal));
     }
 
     #[test]
     fn a_staged_sanitizer_hop_replaces_the_candidate_and_replans() {
-        let e = open_engine(returning_registry(vec![lifting_sanitizer("redactor")], vec![]));
+        let e = open_engine(returning_registry(vec![lifting_sanitizer("redactor")]));
         let child = TrajectoryId::new("child");
         let internal = Audience::restricted([ReaderId::new("internal")]);
         let mut log = spawn_family(&e, None, &child);
@@ -15014,15 +12825,14 @@ mod tests {
         assert_eq!(
             Projection::build(&merged, merged.len() as u64)
                 .view(&traj())
-                .current_label()
-                .bound(),
-            &established(TRUSTED, internal)
+                .current_label(),
+            established(TRUSTED, internal)
         );
     }
 
     #[test]
     fn a_hop_that_settles_the_residual_crosses_in_its_own_batch() {
-        let e = open_engine(returning_registry(vec![lifting_sanitizer("redactor")], vec![]));
+        let e = open_engine(returning_registry(vec![lifting_sanitizer("redactor")]));
         let child = TrajectoryId::new("child");
         let mut log = spawn_family(&e, None, &child);
         reads(&e, &mut log, &child, "read_suspicious");
@@ -15070,10 +12880,7 @@ mod tests {
     #[test]
     fn a_mandatory_binding_holds_custody_and_its_first_derivation_crosses() {
         let quarantine = ReturnPolicy::Sanitized(SanitizerName::new("quarantine"));
-        let e = open_engine_returning(
-            returning_registry(vec![lifting_sanitizer("quarantine")], vec![]),
-            quarantine,
-        );
+        let e = open_engine_returning(returning_registry(vec![lifting_sanitizer("quarantine")]), quarantine);
         let child = TrajectoryId::new("child");
         let mut log = spawn_family(&e, None, &child);
         reads(&e, &mut log, &child, "read_suspicious");
@@ -15166,7 +12973,7 @@ mod tests {
     #[test]
     fn a_narrowing_mandatory_derivation_enters_the_staged_pipeline() {
         let e = open_engine_returning(
-            returning_registry(vec![lifting_sanitizer("quarantine")], vec![]),
+            returning_registry(vec![lifting_sanitizer("quarantine")]),
             ReturnPolicy::Sanitized(SanitizerName::new("quarantine")),
         );
         let child = TrajectoryId::new("child");
@@ -15215,9 +13022,8 @@ mod tests {
         assert_eq!(
             Projection::build(&merged, merged.len() as u64)
                 .view(&traj())
-                .current_label()
-                .bound(),
-            &established(TRUSTED, internal)
+                .current_label(),
+            established(TRUSTED, internal)
         );
     }
 
@@ -15237,7 +13043,7 @@ mod tests {
             hint: None,
         };
         let e = open_engine_returning(
-            returning_registry(vec![picky], vec![]),
+            returning_registry(vec![picky]),
             ReturnPolicy::Sanitized(SanitizerName::new("picky")),
         );
         let child = TrajectoryId::new("child");
@@ -15278,8 +13084,8 @@ mod tests {
         let views = Projection::build(&ended, ended.len() as u64);
         assert!(views.view(&traj()).has_ended(&child));
         assert_eq!(
-            views.view(&traj()).current_label().bound(),
-            &established(TRUSTED, Audience::Public)
+            views.view(&traj()).current_label(),
+            established(TRUSTED, Audience::Public)
         );
 
         let repeat = e
@@ -15312,135 +13118,13 @@ mod tests {
         let mut flipped = ended;
         for fact in &mut flipped {
             if let Fact::ReturnRejected { reason, .. } = fact {
-                *reason = ReturnRejection::ConsumedDimensionUnresolvable(Vec::new());
+                *reason = ReturnRejection::PreconditionUnmet;
             }
         }
         assert_eq!(
             e.validate_replay(&flipped),
             Err(TransitionRefusal::ReturnRecordMismatch)
         );
-    }
-
-    #[test]
-    fn a_consumed_dimension_resolves_first_or_rejects_or_excludes() {
-        let e = open_engine_returning(
-            returning_registry(vec![lifting_sanitizer("quarantine")], vec![classifier_cast()]),
-            ReturnPolicy::Sanitized(SanitizerName::new("quarantine")),
-        );
-        let child = TrajectoryId::new("child");
-        let log = with_unresolved_fetch(&e, spawn_family(&e, None, &child), &child);
-        let body = ValueBody::new("what I found");
-        let asked = e
-            .handle(
-                &viewing(&e, &log),
-                child_report(&log, &child, ChildSubmission::Value { body: body.clone() }),
-            )
-            .expect("the unresolved dimension asks for its cast");
-        assert_eq!(asked.append, None);
-        assert_eq!(
-            asked.follow_up,
-            FollowUp::Child(ChildFollowUp::Resolve(EvidenceRequest::Cast {
-                casts: vec![crate::transition::ApplicableCast {
-                    name: crate::names::CastName::new("classifier"),
-                    constant: None,
-                }],
-                value: ValueId::new(0),
-                body: ValueBody::new("page"),
-            }))
-        );
-
-        let answer = Evidence::Cast {
-            cast: crate::names::CastName::new("classifier"),
-            value: ValueId::new(0),
-            resolved: established(SUSPICIOUS, Audience::Public),
-        };
-        let resolved = e
-            .handle(
-                &viewing(&e, &log),
-                evidenced_report(&log, &child, &body, vec![answer.clone()]),
-            )
-            .expect("the resolved dimension lets custody transfer");
-        assert!(matches!(
-            resolved.follow_up,
-            FollowUp::Child(ChildFollowUp::Resolve(EvidenceRequest::Sanitizer { .. }))
-        ));
-        let appended = appended_facts(resolved);
-        assert!(appended.iter().any(|fact| matches!(fact, Fact::CastApplied { .. })));
-        assert!(appended.iter().any(|fact| matches!(fact, Fact::ReturnSubmitted { .. })));
-        let ended = [log, appended].concat();
-        assert_eq!(e.validate_replay(&ended), Ok(()));
-
-        let repeat = e
-            .handle(
-                &viewing(&e, &ended),
-                evidenced_report(&ended, &child, &body, vec![answer]),
-            )
-            .expect("the landed resolution repeats cleanly");
-        assert_eq!(repeat.append, None);
-        assert!(matches!(
-            repeat.follow_up,
-            FollowUp::Child(ChildFollowUp::Resolve(EvidenceRequest::Sanitizer { .. }))
-        ));
-
-        let e = open_engine_returning(
-            returning_registry(vec![lifting_sanitizer("quarantine")], vec![]),
-            ReturnPolicy::Sanitized(SanitizerName::new("quarantine")),
-        );
-        let mut log = spawn_family(&e, None, &child);
-        reads(&e, &mut log, &child, "fetch");
-        let fetched = ValueId::new(
-            log.iter()
-                .filter(|fact| matches!(fact, Fact::ValueAdmitted { .. }))
-                .count() as u64
-                - 1,
-        );
-        let rejected = e
-            .handle(
-                &viewing(&e, &log),
-                child_report(&log, &child, ChildSubmission::Value { body: body.clone() }),
-            )
-            .expect("the unresolvable dimension rejects terminally");
-        let named = ReturnRejection::ConsumedDimensionUnresolvable(vec![crate::check::UnestablishedFact {
-            value: fetched,
-            dimensions: BTreeSet::from([Dimension::Trust, Dimension::Audience]),
-        }]);
-        assert_eq!(
-            rejected.follow_up,
-            FollowUp::Child(ChildFollowUp::Rejected { reason: named.clone() }),
-            "the rejection names the unannotated fetch by value with both unresolved dimensions"
-        );
-        let appended = appended_facts(rejected);
-        assert!(
-            appended
-                .iter()
-                .any(|fact| matches!(fact, Fact::ReturnRejected { reason, .. } if reason == &named))
-        );
-        let ended = [log, appended].concat();
-        assert_eq!(e.validate_replay(&ended), Ok(()));
-        let mut unnamed = ended.clone();
-        for fact in &mut unnamed {
-            if let Fact::ReturnRejected { reason, .. } = fact {
-                *reason = ReturnRejection::ConsumedDimensionUnresolvable(Vec::new());
-            }
-        }
-        assert_eq!(
-            e.validate_replay(&unnamed),
-            Err(TransitionRefusal::ReturnRecordMismatch),
-            "a record that names no source is not the rejection the fold derives"
-        );
-
-        let e = open_engine(returning_registry(vec![lifting_sanitizer("redactor")], vec![]));
-        let mut log = spawn_family(&e, None, &child);
-        reads(&e, &mut log, &child, "fetch");
-        reads(&e, &mut log, &child, "read_internal");
-        let staged = e
-            .handle(
-                &viewing(&e, &log),
-                child_report(&log, &child, ChildSubmission::Value { body: body.clone() }),
-            )
-            .expect("the narrowing submission stages");
-        assert_eq!(pending_stage_of(&staged).offers.len(), 1);
-        assert_eq!(e.validate_replay(&[log, appended_facts(staged)].concat()), Ok(()));
     }
 
     #[test]
@@ -15527,7 +13211,7 @@ mod tests {
     #[test]
     fn the_first_mandatory_derivation_is_never_an_offer() {
         let e = open_engine_returning(
-            returning_registry(vec![lifting_sanitizer("quarantine")], vec![]),
+            returning_registry(vec![lifting_sanitizer("quarantine")]),
             ReturnPolicy::Sanitized(SanitizerName::new("quarantine")),
         );
         let child = TrajectoryId::new("child");
@@ -15618,15 +13302,14 @@ mod tests {
         assert_eq!(
             Projection::build(&merged, merged.len() as u64)
                 .view(&traj())
-                .current_label()
-                .bound(),
-            &established(SUSPICIOUS, Audience::Public)
+                .current_label(),
+            established(SUSPICIOUS, Audience::Public)
         );
     }
 
     #[test]
     fn an_unshaped_fork_offers_no_attest_hop() {
-        let e = open_engine(returning_registry(vec![lifting_sanitizer("attest-schema")], vec![]));
+        let e = open_engine(returning_registry(vec![lifting_sanitizer("attest-schema")]));
         let child = TrajectoryId::new("child");
         let mut log = spawn_family(&e, None, &child);
         reads(&e, &mut log, &child, "read_suspicious");
@@ -15647,7 +13330,7 @@ mod tests {
 
     #[test]
     fn a_shaped_fork_without_attest_follows_the_ordinary_lifecycle() {
-        let e = open_engine(returning_registry(vec![lifting_sanitizer("redactor")], vec![]));
+        let e = open_engine(returning_registry(vec![lifting_sanitizer("redactor")]));
         let child = TrajectoryId::new("child");
         let mut log = spawn_family(&e, Some(&verdict_schema()), &child);
         reads(&e, &mut log, &child, "read_suspicious_internal");
@@ -15668,7 +13351,7 @@ mod tests {
 
     #[test]
     fn an_attest_hop_derives_the_bytes_unchanged_in_engine() {
-        let e = open_engine(returning_registry(vec![lifting_sanitizer("attest-schema")], vec![]));
+        let e = open_engine(returning_registry(vec![lifting_sanitizer("attest-schema")]));
         let child = TrajectoryId::new("child");
         let internal = Audience::restricted([ReaderId::new("internal")]);
         let mut log = spawn_family(&e, Some(&verdict_schema()), &child);
@@ -15760,9 +13443,8 @@ mod tests {
         assert_eq!(
             Projection::build(&merged, merged.len() as u64)
                 .view(&traj())
-                .current_label()
-                .bound(),
-            &established(TRUSTED, internal)
+                .current_label(),
+            established(TRUSTED, internal)
         );
 
         let mut forged = merged;
@@ -15781,23 +13463,22 @@ mod tests {
     #[test]
     fn a_tool_output_block_never_offers_the_reserved_attest_schema() {
         let e = open_engine(RegistryConfig {
+            annotators: vec![],
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![ToolContract {
+            tools: declared(vec![ToolAnnotation {
                 description: Some("A test tool.".to_string()),
-                uses: vec![],
                 name: ToolName::new("fetch"),
                 tags: vec![],
-                delta: Some(Delta {
-                    trust: Some(Dim::Known(SUSPICIOUS)),
+                delta: Delta {
+                    trust: Some(SUSPICIOUS),
                     audience: None,
-                }),
+                },
                 parameters: crate::params::ToolParameters::open(),
                 emits: EffectSet::new([EffectKind::new("web.read")]).unwrap(),
                 requires: Requires::default(),
-            }],
+            }]),
             authorities: vec![],
             sanitizers: vec![lifting_sanitizer("redactor"), lifting_sanitizer("attest-schema")],
-            casts: vec![],
             membership: None,
         });
         let log = vec![opened(&e)];
@@ -15827,11 +13508,11 @@ mod tests {
         };
         let e = open_engine_at(
             RegistryConfig {
+                annotators: vec![],
                 trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into(), "gold".into()]),
-                tools: vec![plain_tool("spawn"), suspicious_read()],
+                tools: declared(vec![plain_tool("spawn"), suspicious_read()]),
                 authorities: vec![],
                 sanitizers: vec![attest],
-                casts: vec![],
                 membership: None,
             },
             known(TRUSTED, Audience::Public),
@@ -15857,7 +13538,7 @@ mod tests {
     #[test]
     fn a_child_attest_binding_crosses_the_conforming_return_in_engine() {
         let e = open_engine_returning(
-            returning_registry(vec![lifting_sanitizer("attest-schema")], vec![]),
+            returning_registry(vec![lifting_sanitizer("attest-schema")]),
             ReturnPolicy::Sanitized(SanitizerName::new("attest-schema")),
         );
         let child = TrajectoryId::new("child");
@@ -15879,8 +13560,8 @@ mod tests {
         let views = Projection::build(&merged, merged.len() as u64);
         assert!(views.view(&traj()).has_ended(&child));
         assert_eq!(
-            views.view(&traj()).current_label().bound(),
-            &established(TRUSTED, Audience::Public)
+            views.view(&traj()).current_label(),
+            established(TRUSTED, Audience::Public)
         );
         let repeat = e
             .handle(
@@ -15898,7 +13579,7 @@ mod tests {
     #[test]
     fn a_shape_mismatch_under_a_child_attest_binding_rejects_terminally() {
         let e = open_engine_returning(
-            returning_registry(vec![lifting_sanitizer("attest-schema")], vec![]),
+            returning_registry(vec![lifting_sanitizer("attest-schema")]),
             ReturnPolicy::Sanitized(SanitizerName::new("attest-schema")),
         );
         let child = TrajectoryId::new("child");
@@ -15970,49 +13651,9 @@ mod tests {
     }
 
     #[test]
-    fn selection_skips_a_cast_that_cannot_establish_the_consumed_dimension() {
-        let deaf = crate::authority::Cast {
-            name: crate::names::CastName::new("deaf"),
-            resolution: crate::authority::CastResolution::Resolver {
-                may_cast: crate::authority::CastCeiling {
-                    trust: vec![],
-                    audience: DeclaredAudience::literal(Audience::Public),
-                },
-            },
-            scope: crate::authority::Scope::default(),
-            hint: None,
-        };
-        let e = open_engine_returning(
-            returning_registry(vec![lifting_sanitizer("quarantine")], vec![deaf, classifier_cast()]),
-            ReturnPolicy::Sanitized(SanitizerName::new("quarantine")),
-        );
-        let child = TrajectoryId::new("child");
-        let mut log = spawn_family(&e, None, &child);
-        reads(&e, &mut log, &child, "read_suspicious");
-        let log = with_unresolved_fetch(&e, log, &child);
-        let asked = e
-            .handle(
-                &viewing(&e, &log),
-                child_report(
-                    &log,
-                    &child,
-                    ChildSubmission::Value {
-                        body: ValueBody::new("what I found"),
-                    },
-                ),
-            )
-            .expect("the unresolved dimension asks for its capable cast");
-        assert!(matches!(
-            &asked.follow_up,
-            FollowUp::Child(ChildFollowUp::Resolve(EvidenceRequest::Cast { casts, body, .. }))
-                if casts.iter().any(|cast| cast.name.as_str() == "classifier") && body.as_str() == "page"
-        ));
-    }
-
-    #[test]
     fn an_unshaped_fork_under_a_child_attest_binding_rejects_the_return() {
         let e = open_engine_returning(
-            returning_registry(vec![lifting_sanitizer("attest-schema")], vec![]),
+            returning_registry(vec![lifting_sanitizer("attest-schema")]),
             ReturnPolicy::Sanitized(SanitizerName::new("attest-schema")),
         );
         let child = TrajectoryId::new("child");
@@ -16143,7 +13784,7 @@ mod tests {
 
         #[test]
         fn a_route_reads_the_ordered_contract_the_standing_call_selected() {
-            let private = ToolContract {
+            let private = ToolAnnotation {
                 requires: Requires {
                     label: LabelRequirements {
                         trust_floor: None,
@@ -16176,7 +13817,6 @@ mod tests {
 
     mod configured_groups {
         use super::*;
-        use crate::contract::AudienceDelta;
         use crate::groups::{ExpansionRefusal, GroupExpansion};
         use crate::names::GroupName;
 
@@ -16204,16 +13844,16 @@ mod tests {
             Audience::restricted(names.iter().map(|name| ReaderId::new(*name)))
         }
 
-        fn team_delta(name: &str) -> ToolContract {
+        fn team_delta(name: &str) -> ToolAnnotation {
             let mut tool = plain_tool(name);
-            tool.delta = Some(Delta {
+            tool.delta = Delta {
                 trust: None,
-                audience: Some(AudienceDelta::Static(grouped(&[], &["team"]))),
-            });
+                audience: Some(grouped(&[], &["team"])),
+            };
             tool
         }
 
-        fn capped_send() -> ToolContract {
+        fn capped_send() -> ToolAnnotation {
             let mut send = plain_tool("send");
             send.requires = Requires {
                 label: LabelRequirements {
@@ -16225,13 +13865,13 @@ mod tests {
             send
         }
 
-        fn config(tools: Vec<ToolContract>, authorities: Vec<crate::authority::Authority>) -> RegistryConfig {
+        fn config(tools: Vec<ToolAnnotation>, authorities: Vec<crate::authority::Authority>) -> RegistryConfig {
             RegistryConfig {
+                annotators: vec![],
                 trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-                tools,
+                tools: declared(tools),
                 authorities,
                 sanitizers: vec![],
-                casts: vec![],
                 membership: Some(crate::names::MembershipResolverName::new("directory")),
             }
         }
@@ -16286,10 +13926,10 @@ mod tests {
 
             let mut backup = plain_tool("backup");
             backup.emits = EffectSet::new([EffectKind::new("backup")]).unwrap();
-            backup.delta = Some(Delta {
+            backup.delta = Delta {
                 trust: None,
-                audience: Some(Dim::Known(readers(&["internal"])).into()),
-            });
+                audience: Some(DeclaredAudience::literal(readers(&["internal"]))),
+            };
             let mut wire = plain_tool("wire");
             wire.requires = Requires {
                 label: LabelRequirements {
@@ -16356,10 +13996,10 @@ mod tests {
             use crate::route::{RouteDepth, RouteOutcome, RouteStep};
 
             let mut seen = plain_tool("seen");
-            seen.delta = Some(Delta {
+            seen.delta = Delta {
                 trust: None,
-                audience: Some(AudienceDelta::Static(grouped(&[], &["board"]))),
-            });
+                audience: Some(grouped(&[], &["board"])),
+            };
             let e = grouped_engine(
                 config(vec![capped_send(), seen], vec![]),
                 &[],
@@ -16450,142 +14090,6 @@ mod tests {
             serde_json::from_value(json)
         }
 
-        /// Selection routes by scope, and scope needs no directory. A constant scoped away from
-        /// this value is not read, so its group never becomes a question the blocked call has to
-        /// answer before its own cast can be asked for.
-        #[test]
-        fn a_constant_scoped_elsewhere_raises_no_membership_for_the_call_it_cannot_reach() {
-            let mut read = plain_tool("read_web");
-            read.tags = vec![crate::names::TagName::new("web")];
-            read.delta = None;
-            let mut elsewhere_read = plain_tool("read_files");
-            elsewhere_read.tags = vec![crate::names::TagName::new("files")];
-            elsewhere_read.delta = None;
-            let mut send = plain_tool("send");
-            send.requires = Requires {
-                label: LabelRequirements {
-                    trust_floor: Some(TRUSTED),
-                    audience: vec![],
-                },
-                ..Requires::default()
-            };
-            let mut cfg = config(vec![read, elsewhere_read, send], vec![]);
-            cfg.casts = vec![
-                resolver_cast(
-                    "web-classifier",
-                    vec![SUSPICIOUS, TRUSTED],
-                    vec![crate::names::TagName::new("web")],
-                ),
-                crate::authority::Cast {
-                    name: crate::names::CastName::new("elsewhere"),
-                    resolution: crate::authority::CastResolution::Constant(crate::authority::DeclaredLabel {
-                        trust: SUSPICIOUS,
-                        audience: grouped(&[], &["team"]),
-                    }),
-                    scope: crate::authority::Scope {
-                        tags: vec![crate::names::TagName::new("files")],
-                    },
-                    hint: None,
-                },
-            ];
-            let e = grouped_engine(cfg, &[], known(TRUSTED, Audience::Public));
-            let mut log = vec![opened(&e)];
-            reads(&e, &mut log, &traj(), "read_web");
-
-            let asked = e
-                .handle(
-                    &viewing(&e, &log),
-                    batch_with("b-scoped", vec![], vec![raw(&call("send", json!({})))], vec![]),
-                )
-                .expect("no membership stands between the block and the cast that clears it");
-            assert!(
-                matches!(
-                    &asked.follow_up,
-                    FollowUp::ProposalsResolve(requests)
-                        if requests.len() == 1
-                            && matches!(&requests[0], EvidenceRequest::Cast { casts, .. }
-                                if casts.iter().map(|cast| cast.name.as_str()).eq(["web-classifier"]))
-                ),
-                "only the cast whose scope reaches the value is asked: {:?}",
-                asked.follow_up
-            );
-        }
-
-        #[test]
-        fn a_group_writing_constant_reaches_the_pending_ask_already_resolved() {
-            let mut scan = plain_tool("scan");
-            scan.delta = Some(Delta {
-                trust: Some(Dim::Unknown),
-                audience: None,
-            });
-            let mut cfg = config(vec![scan], vec![]);
-            cfg.casts = vec![crate::authority::Cast {
-                name: crate::names::CastName::new("paranoid"),
-                resolution: crate::authority::CastResolution::Constant(crate::authority::DeclaredLabel {
-                    trust: SUSPICIOUS,
-                    audience: grouped(&[], &["team"]),
-                }),
-                scope: crate::authority::Scope::default(),
-                hint: None,
-            }];
-            let e = grouped_engine(cfg, &[], known(TRUSTED, Audience::Public));
-            let log = vec![opened(&e)];
-            let released = proposed(&e, &log, "b1", nonce(), call("scan", json!({}))).expect("the open call releases");
-            let dispatch = match &released.follow_up {
-                FollowUp::Proposals { released, .. } => released[0].dispatch.clone(),
-                other => panic!("the proposal releases, got {other:?}"),
-            };
-            let log = [log, appended_facts(released)].concat();
-            let raw = ValueBody::new("inbox bytes");
-            let report = |expansions: Vec<GroupExpansion>| {
-                EngineEvent::Outcome(ToolReport {
-                    dispatch: dispatch.clone(),
-                    outcome: ToolOutcome::Success {
-                        body: OutcomeBody::Available(raw.clone()),
-                    },
-                    evidence: vec![],
-                    offer_nonce: nonce(),
-                    expansions,
-                })
-            };
-
-            assert_eq!(
-                e.handle(&viewing(&e, &log), report(vec![])),
-                Err(TransitionError::MembershipNeeded { needed: vec![team()] }),
-                "the constant's group is needed to build the ask, one drive before the cast consult"
-            );
-
-            let asked = e
-                .handle(&viewing(&e, &log), report(vec![expansion("team", &["alice"])]))
-                .expect("the pending result asks for its resolution");
-            assert_eq!(
-                asked.follow_up,
-                FollowUp::Outcome(OutcomeFollowUp::Resolve(EvidenceRequest::PendingCast {
-                    casts: vec![crate::transition::ApplicableCast {
-                        name: crate::names::CastName::new("paranoid"),
-                        constant: Some(established(SUSPICIOUS, readers(&["alice"]))),
-                    }],
-                    source: RawResultDigest::of(raw.as_str().as_bytes()),
-                    body: raw.clone(),
-                })),
-                "a constant arrives resolved to literal readers: the runtime never expands a group"
-            );
-
-            // The membership refusal above discarded an unappended checkpoint. It lands on the
-            // drive that carries the expansion, and the report stays repeatable after it.
-            let facts = appended_facts(asked);
-            assert!(
-                facts.iter().any(|fact| matches!(fact, Fact::DispatchSucceeded { .. })),
-                "the checkpoint lands once the group is expanded: {facts:?}"
-            );
-            let log = [log, facts].concat();
-            let again = e
-                .handle(&viewing(&e, &log), report(vec![expansion("team", &["alice"])]))
-                .expect("the report repeats");
-            assert_eq!(again.append, None, "a repeated report commits nothing twice");
-            assert_eq!(e.validate_replay(&log), Ok(()));
-        }
-
         #[test]
         fn a_provider_run_delta_writing_a_group_admits_the_operations_literal_readers() {
             let e = grouped_engine(
@@ -16614,7 +14118,7 @@ mod tests {
             }) else {
                 panic!("the exposed result admits, got {facts:?}");
             };
-            assert_eq!(label.audience, Dim::Known(readers(&["alice"])));
+            assert_eq!(label.audience, readers(&["alice"]));
             let Provenance::ProviderRun { resolutions, .. } = &provenance else {
                 panic!("a provider-run admission, got {provenance:?}");
             };
@@ -16633,7 +14137,7 @@ mod tests {
             let facts = appended_facts(moved);
             assert!(facts.iter().any(|fact| matches!(
                 fact,
-                Fact::ValueAdmitted { value, .. } if value.label.audience == Dim::Known(readers(&["bob"]))
+                Fact::ValueAdmitted { value, .. } if value.label.audience == readers(&["bob"])
             )));
             let repeat = e
                 .handle(&viewing(&e, &log), batch_with("b1", seen(), vec![], vec![]))
@@ -16794,7 +14298,7 @@ mod tests {
             let facts = appended_facts(decided);
             assert!(facts.iter().any(|fact| matches!(
                 fact,
-                Fact::ValueAdmitted { value, .. } if value.label.audience == Dim::Known(readers(&["alice"]))
+                Fact::ValueAdmitted { value, .. } if value.label.audience == readers(&["alice"])
             )));
             assert_no_group_names(&facts);
             assert_eq!(e.validate_replay(&[log, facts].concat()), Ok(()));
@@ -16998,10 +14502,13 @@ mod tests {
             let forward = config(vec![capped_send(), team_delta("read")], vec![]);
             let backward = config(vec![team_delta("read"), capped_send()], vec![]);
             let mut renamed = config(vec![capped_send(), team_delta("read")], vec![]);
-            renamed.tools[1].delta = Some(Delta {
+            let crate::contract::ToolDeclaration::Declared(renamed_read) = &mut renamed.tools[1] else {
+                panic!("the fixture declares its tools")
+            };
+            renamed_read.delta = Delta {
                 trust: None,
-                audience: Some(AudienceDelta::Static(grouped(&[], &["board"]))),
-            });
+                audience: Some(grouped(&[], &["board"])),
+            };
             let table = |cfg: RegistryConfig| {
                 grouped_engine(cfg, &[], known(TRUSTED, Audience::Public))
                     .registry()
@@ -17032,13 +14539,11 @@ mod tests {
             })
         }
 
-        fn returning_with_directory(
-            sanitizers: Vec<crate::authority::Sanitizer>,
-            casts: Vec<crate::authority::Cast>,
-        ) -> RegistryConfig {
+        fn returning_with_directory(sanitizers: Vec<crate::authority::Sanitizer>) -> RegistryConfig {
             RegistryConfig {
+                annotators: vec![],
                 membership: Some(crate::names::MembershipResolverName::new("directory")),
-                ..returning_registry(sanitizers, casts)
+                ..returning_registry(sanitizers)
             }
         }
 
@@ -17058,7 +14563,7 @@ mod tests {
                 hint: None,
             };
             let e = open_engine_returning(
-                returning_with_directory(vec![declassify], vec![]),
+                returning_with_directory(vec![declassify]),
                 ReturnPolicy::Sanitized(SanitizerName::new("declassify")),
             );
             let child = TrajectoryId::new("child");
@@ -17112,7 +14617,7 @@ mod tests {
                 )
                 .expect("the derivation stands as the candidate");
             let stage = pending_stage_of(&derived);
-            assert_eq!(stage.label.audience, Dim::Known(readers(&["bob"])));
+            assert_eq!(stage.label.audience, readers(&["bob"]));
             let acceptance = stage.offers[0].0;
             let facts = appended_facts(derived);
             let candidate_at = facts
@@ -17124,7 +14629,7 @@ mod tests {
             };
             assert_eq!(
                 via,
-                &DerivedVia::Sanitizer {
+                &DerivedVia {
                     name: SanitizerName::new("declassify"),
                     transition: crate::authority::Transition::Audience {
                         from_includes: Audience::restricted([]),
@@ -17157,7 +14662,7 @@ mod tests {
             let facts = appended_facts(accepted);
             assert!(facts.iter().any(|fact| matches!(
                 fact,
-                Fact::ChildReturn { value, .. } if value.label.audience == Dim::Known(readers(&["bob"]))
+                Fact::ChildReturn { value, .. } if value.label.audience == readers(&["bob"])
             )));
             assert_no_group_names(&facts);
             let log = [log, facts].concat();
@@ -17172,160 +14677,6 @@ mod tests {
             assert_eq!(
                 refused(serde_json::json!([{ "group": 0, "readers": ["mallory"] }])),
                 Err(TransitionRefusal::SanitizerUnapplicable)
-            );
-        }
-
-        #[test]
-        fn a_resolver_ceiling_writing_a_group_is_read_only_for_an_unresolved_audience() {
-            let classifier = crate::authority::Cast {
-                name: crate::names::CastName::new("classifier"),
-                resolution: crate::authority::CastResolution::Resolver {
-                    may_cast: crate::authority::CastCeiling {
-                        trust: vec![SUSPICIOUS],
-                        audience: grouped(&[], &["team"]),
-                    },
-                },
-                scope: crate::authority::Scope::default(),
-                hint: None,
-            };
-            let mut cfg = returning_with_directory(vec![], vec![classifier]);
-            let fetch = cfg
-                .tools
-                .iter_mut()
-                .find(|tool| tool.name.as_str() == "fetch")
-                .expect("the returning registry fetches");
-            fetch.delta = Some(Delta {
-                trust: Some(Dim::Unknown),
-                audience: Some(Dim::Known(readers(&["internal"])).into()),
-            });
-            let e = open_engine_returning_at(cfg, ReturnPolicy::Raw, known(TRUSTED, readers(&["internal"])));
-            let child = TrajectoryId::new("child");
-            let log = with_unresolved_fetch(&e, spawn_family(&e, None, &child), &child);
-            let dispatch = log
-                .iter()
-                .find_map(|fact| match fact {
-                    Fact::DispatchOpened {
-                        trajectory, dispatch, ..
-                    } if trajectory == &child => Some(dispatch.clone()),
-                    _ => None,
-                })
-                .expect("the fetch opened");
-            let raw = ValueBody::new("page");
-            let report = |evidence: Vec<Evidence>| {
-                EngineEvent::Outcome(ToolReport {
-                    dispatch: dispatch.clone(),
-                    outcome: ToolOutcome::Success {
-                        body: OutcomeBody::Available(raw.clone()),
-                    },
-                    evidence,
-                    offer_nonce: nonce(),
-                    expansions: vec![],
-                })
-            };
-            let resolved = e
-                .handle(
-                    &viewing(&e, &log),
-                    report(vec![Evidence::PendingCast {
-                        cast: crate::names::CastName::new("classifier"),
-                        source: RawResultDigest::of(raw.as_str().as_bytes()),
-                        resolved: established(SUSPICIOUS, readers(&["internal"])),
-                    }]),
-                )
-                .expect("the answer applies without the ceiling's group");
-            let facts = appended_facts(resolved);
-            assert!(facts.iter().any(|fact| matches!(
-                fact,
-                Fact::CandidateDerived {
-                    via: crate::candidate::DerivedVia::Cast { .. },
-                    resolutions,
-                    ..
-                } if resolutions.is_empty()
-            )));
-            let log = [log, facts].concat();
-            assert_eq!(e.validate_replay(&log), Ok(()));
-        }
-
-        #[test]
-        fn a_constant_cast_writing_a_group_is_read_at_selection_and_validates_the_answer() {
-            let paranoid = crate::authority::Cast {
-                name: crate::names::CastName::new("paranoid"),
-                resolution: crate::authority::CastResolution::Constant(crate::authority::DeclaredLabel {
-                    trust: SUSPICIOUS,
-                    audience: grouped(&[], &["team"]),
-                }),
-                scope: crate::authority::Scope::default(),
-                hint: None,
-            };
-            let e = open_engine_returning(
-                returning_with_directory(vec![lifting_sanitizer("quarantine")], vec![paranoid]),
-                ReturnPolicy::Sanitized(SanitizerName::new("quarantine")),
-            );
-            let child = TrajectoryId::new("child");
-            let log = with_unresolved_fetch(&e, spawn_family(&e, None, &child), &child);
-            let body = ValueBody::new("what I found");
-
-            assert_eq!(
-                e.handle(
-                    &viewing(&e, &log),
-                    child_report_with(&log, &child, &body, vec![], vec![])
-                ),
-                Err(TransitionError::MembershipNeeded { needed: vec![team()] })
-            );
-            let asked = e
-                .handle(
-                    &viewing(&e, &log),
-                    child_report_with(&log, &child, &body, vec![], vec![expansion("team", &["alice"])]),
-                )
-                .expect("the unresolved dimension asks for its cast");
-            assert_eq!(asked.append, None);
-            assert!(matches!(
-                asked.follow_up,
-                FollowUp::Child(ChildFollowUp::Resolve(EvidenceRequest::Cast { .. }))
-            ));
-
-            let answer = || {
-                vec![Evidence::Cast {
-                    cast: crate::names::CastName::new("paranoid"),
-                    value: ValueId::new(0),
-                    resolved: established(SUSPICIOUS, readers(&["alice"])),
-                }]
-            };
-            assert!(matches!(
-                e.handle(
-                    &viewing(&e, &log),
-                    child_report_with(&log, &child, &body, answer(), vec![expansion("team", &["bob"])])
-                ),
-                Err(TransitionError::Resolution(_))
-            ));
-            let resolved = e
-                .handle(
-                    &viewing(&e, &log),
-                    child_report_with(&log, &child, &body, answer(), vec![expansion("team", &["alice"])]),
-                )
-                .expect("the constant's own answer applies");
-            let facts = appended_facts(resolved);
-            let cast_at = facts
-                .iter()
-                .position(|fact| matches!(fact, Fact::CastApplied { .. }))
-                .expect("the answer lands");
-            let Fact::CastApplied { resolutions, .. } = &facts[cast_at] else {
-                unreachable!()
-            };
-            assert_eq!(resolutions[0].readers(), &BTreeSet::from([ReaderId::new("alice")]));
-            assert_no_group_names(&facts);
-            let at = log.len() + cast_at;
-            let log = [log, facts].concat();
-            assert_eq!(e.validate_replay(&log), Ok(()));
-
-            let refused = |resolutions: serde_json::Value| {
-                let mut tampered = log.clone();
-                tampered[at] = with_resolutions(&log[at], resolutions).expect("well-formed wire");
-                e.validate_replay(&tampered)
-            };
-            assert_eq!(refused(serde_json::json!([])), Err(TransitionRefusal::ForgedResolution));
-            assert_eq!(
-                refused(serde_json::json!([{ "group": 0, "readers": ["bob"] }])),
-                Err(TransitionRefusal::InadmissibleResolution)
             );
         }
     }

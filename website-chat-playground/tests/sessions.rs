@@ -66,49 +66,55 @@ permits = { attention = ["release-review"] }
 async fn a_policy_this_deployment_cannot_run_is_refused_at_creation() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let sessions = sessions(&dir, Duration::from_secs(600));
+    // The playground routes every named annotator to its own handler, and a
+    // builtin annotator takes no such binding — so a policy naming one cannot
+    // run here and is refused when the session is created.
     let policy = r#"
 version = 1
 trust_chain = ["suspicious", "trusted"]
 
+[[annotator]]
+name = "classify"
+builtin = "llm"
+
 [[tool]]
 name = "list_customers"
-delta = { audience = "unknown" }
-
-[[cast]]
-name = "classifier"
-resolver = { may_cast = { trust = ["suspicious"], audience = ["public"] } }
+annotator = "classify"
 "#;
 
     let Err(error) = sessions
         .create(policy, &[System::Crm].into_iter().collect(), MODEL)
         .await
     else {
-        panic!("the playground serves no classifier route, so a resolver-backed cast must be refused");
+        panic!("a builtin annotator would run on the demo host itself, so the policy must be refused");
     };
-    assert!(matches!(error, CreateError::Open(_)), "got: {error}");
+    assert!(matches!(error, CreateError::Policy(_)), "got: {error}");
 }
 
 #[tokio::test]
-async fn a_pending_cast_delta_runs_under_a_constant_cast() {
+async fn an_annotator_the_playground_does_not_implement_refuses_at_create() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let sessions = sessions(&dir, Duration::from_secs(600));
     let policy = r#"
 version = 1
 trust_chain = ["suspicious", "trusted"]
 
+[[annotator]]
+name = "classify"
+
 [[tool]]
 name = "list_customers"
-delta = { audience = "unknown" }
-
-[[cast]]
-name = "paranoid"
-constant = { trust = "suspicious", audience = ["public"] }
+annotator = "classify"
 "#;
 
-    sessions
+    let Err(refusal) = sessions
         .create(policy, &[System::Crm].into_iter().collect(), MODEL)
         .await
-        .expect("a constant cast is answered from the policy, so the deployment runs it");
+    else {
+        panic!("the playground implements no annotator named classify, so the open refuses");
+    };
+    let text = format!("{refusal}");
+    assert!(text.contains("classify"), "the refusal names the annotator: {text}");
 }
 
 #[tokio::test]

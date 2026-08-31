@@ -22,9 +22,7 @@ pub enum DeclaredAudience {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-#[error(
-    "{reader:?} is not a literal reader ID — `public` and `unknown` are label states, and the `@` mark is reserved for groups"
-)]
+#[error("{reader:?} is not a literal reader ID — `public` is a label state, and the `@` mark is reserved for groups")]
 pub struct NonLiteralReader {
     pub reader: String,
 }
@@ -341,7 +339,7 @@ mod tests {
 
     #[test]
     fn a_membership_answer_never_holds_a_reserved_spelling() {
-        for reserved in ["public", "unknown", "@nested"] {
+        for reserved in ["public", "@nested"] {
             assert!(matches!(
                 GroupExpansion::new(group("auditors"), [reader("finance"), reader(reserved)]),
                 Err(MalformedExpansion { reader: found, .. }) if found == reserved

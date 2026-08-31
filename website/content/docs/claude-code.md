@@ -47,7 +47,7 @@ The command does not guess at session-only tools or connector accounts; the
 skill merges those from the active Claude session and asks when an identity or
 boundary is unavailable.
 
-Before it writes anything, the skill shows the full proposal for approval. The result is deterministic policy config: exact tool contracts, audience rules, and any resolver definitions the setup needs. The model helps draft the file; the OpenAPPA runtime enforces the file.
+Before it writes anything, the skill shows the full proposal for approval. The result is deterministic policy config: exact tool contracts, audience rules, and any annotator definitions the setup needs. The model helps draft the file; the OpenAPPA runtime enforces the file.
 
 ## 2. Try a flow that should be blocked
 
@@ -75,20 +75,19 @@ Installing the plugin does not force every Claude Code session through OpenAPPA.
 
 :::claude-session-choice:::
 
-## Use Claude Code as a dynamic classifier
+## Use Claude Code as an annotator
 
-OpenAPPA can also call the installed Claude Code CLI as a model builtin: an authority, a sanitizer, or a cast binds `builtin = "claude-code"` under `[externals]`, and a tool-level dynamic resolver names it on its own declaration; `builtin = "llm"` serves the same four kinds through an API-key profile in `[externals.llm]`. This example declares a dynamic resolver. When a tool attaches the resolver with `uses`, the resolver directly owns every `delta` and `requires` destination in its `returns` declaration. The tool does not reference those results in its fields.
+OpenAPPA can also call the installed Claude Code CLI as a model builtin: an authority or a sanitizer binds `builtin = "claude-code"` under `[externals]`, and an annotator names it on its own declaration; `builtin = "llm"` serves the same three kinds through an API-key profile in `[externals.llm]`. This example declares an annotator. A tool that names an annotator carries no static semantics: the annotator produces the call's complete contract — its `delta`, `requires`, and `emits` — fresh for every released call.
 
 ```toml
-[[dynamic_resolver]]
+[[annotator]]
 name    = "classify-customer"
 builtin = "claude-code"
-returns = ["delta.trust", "delta.audience", "requires.trust", "requires.audience", "requires.attention"]
 
 [[tool]]
 name        = "get_customer"
 description = "Reads one customer record."
-uses        = [{ resolver = "classify-customer" }]
+annotator   = "classify-customer"
 
 [[authority]]
 name = "operator"
@@ -110,17 +109,16 @@ timeout_ms = 60000                  # the consult's own budget — a model call 
 builtin = "hitl"
 ```
 
-The runtime uses the current user's Claude Code authentication. It starts one fresh safe-mode process per consult with no tools, hooks, project settings, or persisted session, in a temporary working directory, with every `APPA_*` environment variable removed. The system prompt carries the resolver's declaration — its `returns`, the policy trust chain, and the attention marks that authorities name under `permits.attention`; the only user turn is the artifact: what the tool's `uses` entry selected — the complete call (name, description when declared, arguments), or one value per declared input. Nothing about the trajectory is sent: no current label, no history. The classifier answers every result its resolver declares, so it may establish the output label and demand a call-time constraint in one consult. Requirements support a trust floor, an audience `contains` list and `within` list, and a fresh attention mark selected from that policy-provided list; history remains static. If no authority names any mark, the only valid dynamic attention answer is an empty list. At most four Claude consults run at once.
+The runtime uses the current user's Claude Code authentication. It starts one fresh safe-mode process per consult with no tools, hooks, project settings, or persisted session, in a temporary working directory, with every `APPA_*` environment variable removed. The system prompt carries the annotator's declaration — its mandate vocabulary: the trust ranks, literal readers, attention marks, and effect kinds an answer may use; the only user turn is the artifact: what the annotator's `inputs` mapping selected — the complete call (name, description when declared, arguments) when it maps no inputs, or one value per mapped input. Nothing about the trajectory is sent: no current label, no history. The annotator answers one complete annotation, so it establishes the output label, the call's requirements, and its emitted effects in one consult. Requirements support a trust floor, an audience `contains` list and `within` cap, history entries over the mandate's effect kinds, and attention marks from the mandate. At most four Claude consults run at once.
 
-A model dynamic resolver is a trusted classifier rather than a sandboxed policy authority: there is no additional ceiling on its answer, and argument-level prompt-injection resistance is best-effort. Bound as an authority, sanitizer, or cast, the same model rules only within that component's `permits` or `may_cast`, like any other implementation. Process errors, timeouts, invalid fields, and trust or attention values outside policy produce no answer: the call is not checked, nothing is recorded, and the failure surfaces operationally — never as a policy denial.
+A model annotator is a trusted classifier rather than a sandboxed policy authority: it rules the whole contract of every call it covers, bounded only by its declared mandate, and argument-level prompt-injection resistance is best-effort. Bound as an authority or sanitizer, the same model rules only within that component's `permits`, like any other implementation. Process errors, timeouts, invalid fields, and values outside the mandate produce no answer: the call is not judged, nothing is recorded, and the failure surfaces operationally — never as a policy denial.
 
-To serve the same resolver from an API key instead of the subscription, declare `builtin = "llm"` and add one profile per deployment:
+To serve the same annotator from an API key instead of the subscription, declare `builtin = "llm"` and add one profile per deployment:
 
 ```toml
-[[dynamic_resolver]]
+[[annotator]]
 name    = "classify-customer"
 builtin = "llm"
-returns = ["delta.trust", "delta.audience", "requires.trust", "requires.audience", "requires.attention"]
 
 [externals.llm]
 provider       = "anthropic"        # anthropic | openai | gemini | ollama

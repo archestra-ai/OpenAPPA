@@ -128,40 +128,42 @@ When an action cannot proceed as proposed, OpenAPPA returns a typed refusal list
 { outcome: "block",
   requirement_gaps: [...],  // unmet entries from `requires`
   narrowing: {...},         // present when the call's own delta narrows
-  unestablished: [...],     // sources whose unresolved dimensions no registered cast reaches
   remedy_plans: [...] }     // valid remedy plans executable by id or tool call
 ```
 
 A non-empty remedy list indicates that candidate paths exist, though external components may still decline a requested ruling. When an authority denies a request, that denial is appended to the log to prevent repeating the request for that specific call.
 
-## Declarative contracts and dynamic resolvers
+## Declarative contracts and annotators
 
 Tool contracts are strictly declarative TOML. Instead of writing imperative access checks across code, developers declare tool requirements (`requires`), label restrictions (`delta`), and side effects (`effects`).
 
-Where policy needs dynamic runtime context (such as evaluating document ACLs, recipient memberships, or tool-argument classifications), tools attach **dynamic resolvers**:
+Every released tool call carries one complete annotation — its `delta`, its `requires`, and the effects it emits, with every dimension concrete. The policy produces that annotation in one of two ways:
 
-- **Input mapping**: A resolver receives declared arguments from the proposed call (e.g. `subject = "document.pdf"`).
-- **Contract fields**: The resolver supplies specific fields of the tool contract (`delta.audience`, `requires.trust`, etc.).
-- **Pinned verification**: A resolver's validated answer is permanently pinned to the exact inputs it evaluated, and a later proposal under the same contract with the same inputs reuses it instead of consulting again while an offer or approval prepared for the pinned call stands, guaranteeing deterministic execution logs and immutable audit replay.
+- **Static declaration**: The `[[tool]]` entry writes the whole contract, and every call to the tool carries it.
+- **Annotator**: Where the right contract depends on the call itself (a document path, a recipient, a command line), the `[[tool]]` entry names a registered **annotator** instead. The annotator reads the proposed call and answers the complete contract for that one call, inside the vocabulary its declaration bounds — its **mandate**.
 
-*(For complete syntax on ordered contracts, argument matching, and resolver schemas, see the [Policy reference](/contracts).)*
+An annotation is pinned to the exact call it was produced for. A sanitizer rewrite that changes the arguments is annotated afresh, so no call ever runs under another call's annotation, and replay reconstructs every decision without consulting an annotator again.
 
-## Unknown labels propagate until a consumer checks them
+An annotator that gives no valid answer — no route to it, a timeout, a malformed or out-of-mandate answer — stops the call before it runs. That refusal is operational, not a policy denial: the call was never judged, and nothing is appended to the log.
 
-Real-world systems rarely annotate every tool up front. Similar to gradual typing in TypeScript or Python, OpenAPPA supports partial annotation.
+*(For complete syntax on ordered contracts, argument matching, and annotator declarations, see the [Policy reference](/contracts).)*
 
-Unannotated tools return data with an **Unknown** label state, representing unverified classification rather than a specific trust rank. A tool is unannotated when its contract has no `delta` key and no resolver establishes an output dimension; `delta = {}` is the opposite, declaring that the result carries no restriction. Unknown labels propagate through operations per dimension: the trajectory keeps every known restriction, and each dimension the value left unresolved stays Unknown for that source until a cast establishes it. Unregistered tool calls are refused directly before execution.
+## A wildcard annotator covers the tools the policy never names
 
-| Execution Context | Impact of Unknown State |
+Real-world systems rarely annotate every tool up front. OpenAPPA supports partial coverage without a partial label: incompleteness lives at the policy boundary, never inside the algebra, so every admitted value carries one concrete label and every check has a two-valued answer.
+
+A policy covers a proposed call in exactly one of these ways:
+
+| Proposed call | What decides it |
 |---|---|
-| **Unannotated Tool Dispatch** | Succeeds and assigns **Unknown** label state to its output. |
-| **Unregistered Tool Dispatch** | Refused directly by the engine before execution. |
-| **Requirement Check (`requires`)** | Drives the casts registered for the value, then checks the label the first admitted answer establishes. When no registered cast reaches the value, the call is blocked and the block names the source under `unestablished`. When a registered cast gives no answer, nothing is decided or recorded, and the call can be tried again. |
-| **Child Merge Boundary** | Unknown child returns merge like any read: unresolved identities cross while every known restriction holds. Registered casts resolve them where the return policy consumes the dimension. |
+| **Declared tool** | The first matching `[[tool]]` contract, written in full in the policy. |
+| **Annotator-backed tool** | The annotator the matching `[[tool]]` entry names, answering the complete contract for this call. |
+| **Any other tool, with a wildcard** | The wildcard entry `name = "*"` routes the call to its annotator, and the call is annotated like any other. |
+| **Any other tool, without a wildcard** | The call is refused before it runs: the tool is not declared and no wildcard covers it. The refusal is typed and operational, not a policy denial. |
 
-An Unknown label state does not halt execution on its own: an unannotated result is admitted, and the trajectory keeps working, until a consumer of that dimension reads it — a tool contract's `requires` clause, a sanitizer's applicability or `permits` check, or a pending-cast admission. Each of those fails closed. When a `requires` clause checks the value, OpenAPPA triggers the registered **cast** for that value—resolving the label using a fixed rule or an external classifier—and validates the result against the cast's declared ceiling. If no cast reaches the value, it remains Unknown: the dependent call is blocked, and the block names the source under `unestablished`. If a registered cast gives no answer, nothing is decided or recorded, and the call can be tried again. This allows teams to annotate high-risk tools first and expand policy coverage incrementally.
+The wildcard entry carries no static contract and no metadata: it exists only to name the annotator that answers for the long tail. An exact declaration always wins over it. This lets teams annotate high-risk tools first and expand coverage incrementally — five declared tools and one wildcard annotator cover a deployment whose remaining tools the policy never names.
 
-To inspect data before the LLM sees it, a tool contract can declare a pending dimension with `delta = { trust = "unknown" }`. When configured in `confined_results`, the runtime withholds the raw result while the cast evaluates the value. If the cast resolves to a non-restricting label, the data is delivered directly; if it restricts the label, OpenAPPA offers the agent a narrowing choice before delivery.
+To inspect data before the LLM sees it, the deployment can list a tool in `confined_results`: the host then withholds the raw result, and a `tool_output` sanitizer's derivation can be admitted in its place. If the admitted label restricts the trajectory, OpenAPPA offers the agent the narrowing choice before delivery.
 
 ## Deployment: Where OpenAPPA fits in your stack
 
@@ -190,13 +192,12 @@ You don't need to throw away existing security controls. OpenAPPA unifies them a
 |---|---|
 | Human review / HITL prompts | `builtin = "hitl"` Authority |
 | Custom approval webhooks / LLM evaluators | Authority (`url`, `command`, or model builtin) |
-| Content scanners & trust classifiers | Cast (`url`, `command`, or model builtin) under a `may_cast` ceiling |
-| Argument-aware trust, audience, and review classification | Dynamic Resolver (endpoint, command, or model builtin) |
-| PII redactors & sanitizers | Sanitizer (`builtin = "redact-email"` or custom resolver) |
+| Content scanners & argument-aware trust, audience, and review classifiers | Annotator (endpoint, command, or model builtin) inside its declared mandate |
+| PII redactors & sanitizers | Sanitizer (`builtin = "redact-email"`, endpoint, command, or model builtin) |
 | Directory / IAM group lookups | Membership Resolver |
 | Imperative `if/else` access checks | Tool Contracts (`delta` & `requires`) |
 
-Crucially, an authority or sanitizer can do only what its `permits` declares, and a cast only what its `may_cast` ceiling allows. Even if a third-party scanner or classifier makes a mistake, it cannot grant permissions beyond its pre-configured ceiling.
+Crucially, an authority or sanitizer can do only what its `permits` declares, and an annotator can answer only inside its declared mandate. Even if a third-party scanner or classifier makes a mistake, it cannot grant permissions beyond its pre-configured bounds.
 
 ## Next steps
 

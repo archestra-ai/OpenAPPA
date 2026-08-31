@@ -117,8 +117,10 @@ fn allowed(decision: &HookDecision) -> bool {
     matches!(decision, HookDecision::AllowCall { .. })
 }
 
-fn denied(decision: &HookDecision) -> bool {
-    matches!(decision, HookDecision::DenyCall { .. })
+/// After a swap removes the declaration, nothing covers `notes`: the refusal is
+/// typed and names the tool.
+fn refused_undeclared(decision: &HookDecision) -> bool {
+    matches!(decision, HookDecision::Refuse { detail } if detail.contains("notes"))
 }
 
 #[tokio::test]
@@ -141,7 +143,7 @@ async fn a_running_root_keeps_its_opening_policy_and_a_new_root_binds_the_new_fi
     let after = TrajectoryId("reload:after".to_string());
     start(&deployment.runtime, &after).await;
     assert!(
-        denied(&propose_notes(&deployment.runtime, &after).await),
+        refused_undeclared(&propose_notes(&deployment.runtime, &after).await),
         "a root opened after the swap binds the new file"
     );
 }
@@ -183,11 +185,11 @@ async fn a_refused_edit_changes_nothing_and_the_gate_keeps_deciding() {
     }
 }
 
-/// The `notes` tool beside one dynamic resolver that names `builtin` on its declaration,
+/// The `notes` tool beside one annotator that names `builtin` on its declaration,
 /// over the given `[externals]` entries.
 fn declaring(builtin: &str, externals: &str) -> String {
     policy_with(&format!(
-        "[[policy.tool]]\nname = \"notes\"\n[[policy.dynamic_resolver]]\nname = \"classify\"\nbuiltin = \"{builtin}\"\nreturns = [\"delta.trust\"]\n"
+        "[[policy.tool]]\nname = \"notes\"\n[[policy.annotator]]\nname = \"classify\"\nbuiltin = \"{builtin}\"\n"
     )) + externals
 }
 
@@ -196,29 +198,29 @@ fn declaring(builtin: &str, externals: &str) -> String {
 #[tokio::test]
 async fn a_declared_builtin_the_deployment_cannot_serve_refuses_open_and_reload() {
     let bound: fn(&OpenError) -> bool =
-        |error| matches!(error, OpenError::BoundBuiltinResolver(name) if name == "classify");
+        |error| matches!(error, OpenError::BoundBuiltinAnnotator(name) if name == "classify");
     let no_profile: fn(&OpenError) -> bool =
         |error| matches!(error, OpenError::LlmNotConfigured(name) if name == "classify");
     let no_platform: fn(&OpenError) -> bool =
         |error| matches!(error, OpenError::UnsupportedClaudeCodePlatform(name) if name == "classify");
     let mut cases = vec![
         (
-            "a builtin resolver that is also bound",
+            "a builtin annotator that is also bound",
             declaring(
                 "claude-code",
-                "[externals.dynamic.classify]\nurl = \"https://classify.internal\"\n",
+                "[externals.annotators.classify]\nurl = \"https://classify.internal\"\n",
             ),
             bound,
         ),
         (
-            "an llm resolver with no [externals.llm]",
+            "an llm annotator with no [externals.llm]",
             declaring("llm", ""),
             no_profile,
         ),
     ];
     if !cfg!(unix) {
         cases.push((
-            "a claude-code resolver off Unix",
+            "a claude-code annotator off Unix",
             declaring("claude-code", ""),
             no_platform,
         ));
@@ -285,7 +287,7 @@ async fn reload_rereads_includes_and_a_broken_include_refuses() {
     let after = TrajectoryId("reload:included-edit".to_string());
     start(&runtime, &after).await;
     assert!(
-        denied(&propose_notes(&runtime, &after).await),
+        refused_undeclared(&propose_notes(&runtime, &after).await),
         "a fresh root sees the edited include"
     );
 }

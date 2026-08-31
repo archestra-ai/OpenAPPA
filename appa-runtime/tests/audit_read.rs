@@ -174,8 +174,6 @@ fn label(trust: &str, audience: &str) -> AuditLabel {
     AuditLabel {
         trust: trust.to_string(),
         audience: audience.to_string(),
-        unresolved_trust: Vec::new(),
-        unresolved_audience: Vec::new(),
     }
 }
 

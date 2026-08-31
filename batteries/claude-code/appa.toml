@@ -3,29 +3,47 @@
 [policy]
 version = 1
 
-# Classify each command before dispatch: both the labels on its output and the
-# trust and audience the command may receive.
-[[policy.dynamic_resolver]]
+# The stock model annotator produces Bash's complete contract before dispatch:
+# the labels on its output and the trust, audience, and review marks the
+# command requires. `audiences` closes the mandate: "private" is the one
+# literal reader a produced annotation may name.
+[[policy.annotator]]
 name = "claude-code.bash-requirements"
 builtin = "claude-code"
-returns = ["delta.trust", "delta.audience", "requires.trust", "requires.audience", "requires.attention"]
+audiences = ["private"]
 
 [[policy.tool]]
 name = "Bash"
 description = "Runs one shell command and returns its output."
-uses = [{ resolver = "claude-code.bash-requirements" }]
+annotator = "claude-code.bash-requirements"
 
-# Classify only who may receive the returned file content. Read adds no trust
-# restriction and the resolver does not block the read itself.
-[[policy.dynamic_resolver]]
+# This annotator only decides who may receive the returned file content: its
+# answers leave trust alone and never block the read itself.
+[[policy.annotator]]
 name = "claude-code.read-sensitivity"
-returns = ["delta.audience"]
+audiences = ["private"]
 
 [[policy.tool]]
 name = "Read"
 description = "Reads a file and returns its contents."
-uses = [{ resolver = "claude-code.read-sensitivity" }]
-delta = {}
+annotator = "claude-code.read-sensitivity"
 
-[externals.dynamic."claude-code.read-sensitivity"]
+# The wildcard covers every tool this policy does not name — an MCP server's
+# tool, for one. Each covered call is annotated by the stock model before it
+# runs: the mandate admits both trust ranks, and "private" is the one literal
+# reader an annotation may name ("public" is always admissible), so it can
+# hold an unknown tool's output to suspicious trust and a private audience,
+# or clear one it recognizes. Name a tool exactly, or add a root rule, when
+# it needs its own contract.
+[[policy.annotator]]
+name = "claude-code.undeclared-tool"
+builtin = "claude-code"
+ranks = ["suspicious", "trusted"]
+audiences = ["private"]
+
+[[policy.tool]]
+name = "*"
+annotator = "claude-code.undeclared-tool"
+
+[externals.annotators."claude-code.read-sensitivity"]
 command = ["python3", "./read-sensitivity.py"]

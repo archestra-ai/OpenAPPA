@@ -1,7 +1,7 @@
 # Complete battery composition example
 
 This is a self-contained example of matcher rows, complete-configuration
-includes, and per-resolver `command` bindings.
+includes, and per-annotator `command` bindings.
 
 The example is one deployment that includes the two batteries shipped in
 the repository's top-level `batteries/` directory:
@@ -31,24 +31,23 @@ The root demonstrates two customizations. It bypasses the shipped Bash model
 classifier for `cargo test` and requires fresh `hitl` attention. It also
 replaces the shipped `Read` default with `local.read-sensitivity`, implemented
 by the script in `local/`.
-The local resolver keeps `.env.example` Public, restricts other dot-prefixed
+The local annotator keeps `.env.example` Public, restricts other dot-prefixed
 paths, and additionally restricts `clients/`.
 
 This command-based example requires a Unix system.
 
 The Claude Code battery sends every Bash command to the Claude Code model
-builtin. The model classifies the command's output label and its required trust
-and audience before dispatch.
+builtin. The model annotates the command before dispatch: its output label and
+its required trust and audience.
 
 The `Read` rule invokes `read-sensitivity.py` for one call. OpenAPPA writes
-one JSON request to standard input, reads one JSON answer from standard
-output, and waits for the command to exit. A resolver receives the complete
-tool call in `args` — `name`, `description` when the tool declares one, and
-`arguments` — unless the binding selects a specific argument. Its declared
-`returns` apply directly to the tool contract. No schema, input mapping, or
-result expression is needed for this default.
+one JSON consult to standard input, reads one JSON answer from standard
+output, and waits for the command to exit. An annotator that maps no `inputs`
+receives the complete tool call in `args` — `name`, `description` when the
+tool declares one, and `arguments`. Its answer is the call's complete
+contract: `delta`, `requires`, and `emits`.
 
-The Bash resolver controls declared information flows. It is not a shell or
+The Bash annotator controls declared information flows. It is not a shell or
 network sandbox. A Claude Code deployment must use an OS sandbox to deny
 network access and protect credentials and OpenAPPA files. Network ingress
 should use `WebFetch` instead of Bash `curl`.
@@ -62,21 +61,21 @@ The Slack battery needs no script. Every message needs trusted data and fresh
 `hitl` attention. A deployment lets a channel through by adding a rule for it
 in the root config. Channel-history results are private.
 
-Run the Read resolver directly:
+Run the Read annotator directly:
 
 ```sh
 cd examples/claude-code-battery
-printf '%s\n' '{"version":1,"kind":"dynamic","name":"claude-code.read-sensitivity","declaration":{"returns":["delta.audience"],"trust_ranks":["suspicious","trusted"],"attention_marks":["hitl"]},"artifact":{"args":{"name":"Read","description":"Reads a file and returns its contents.","arguments":{"file_path":".env"}}}}' \
+printf '%s\n' '{"version":1,"kind":"annotation","name":"claude-code.read-sensitivity","declaration":{"inputs":[],"trust_ranks":["suspicious","trusted"],"audiences":["private"],"attention_marks":["hitl"],"effects":[]},"artifact":{"args":{"name":"Read","description":"Reads a file and returns its contents.","arguments":{"file_path":".env"}}}}' \
   | python3 ../../batteries/claude-code/read-sensitivity.py
 ```
 
 The result restricts `.env` to `private`. Replace `.env` with
 `README.md` to get a Public audience.
 
-Run the local replacement resolver directly:
+Run the local replacement annotator directly:
 
 ```sh
-printf '%s\n' '{"version":1,"kind":"dynamic","name":"local.read-sensitivity","declaration":{"returns":["delta.audience"],"trust_ranks":["suspicious","trusted"],"attention_marks":["hitl"]},"artifact":{"args":{"name":"Read","description":"Reads a file and returns its contents.","arguments":{"file_path":"clients/acme.txt"}}}}' \
+printf '%s\n' '{"version":1,"kind":"annotation","name":"local.read-sensitivity","declaration":{"inputs":[],"trust_ranks":["suspicious","trusted"],"audiences":["private"],"attention_marks":["hitl"],"effects":[]},"artifact":{"args":{"name":"Read","description":"Reads a file and returns its contents.","arguments":{"file_path":"clients/acme.txt"}}}}' \
   | python3 ./local/read-sensitivity.py
 ```
 

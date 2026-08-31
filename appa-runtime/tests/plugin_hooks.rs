@@ -107,6 +107,43 @@ fn both_shipped_hook_maps_gate_the_same_events() {
     }
 }
 
+/// Both shipped maps inject the same session context, and nothing else reaches
+/// the second SessionStart entry: a rename or a drift on one platform would
+/// leave that platform's sessions without the context the other one gets. The
+/// assertions read paths and wiring, never the file's wording.
+#[test]
+fn both_shipped_hook_maps_inject_the_same_session_context() {
+    const CONTEXT: &str = "session-context.md";
+    let hooks_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../integrations/claude-code/plugin/hooks");
+    assert!(hooks_dir.join(CONTEXT).is_file(), "the shipped {CONTEXT} is missing");
+
+    let posix = shipped("hooks.json");
+    let printed = posix["hooks"]["SessionStart"][0]["hooks"][1]["command"]
+        .as_str()
+        .expect("the POSIX SessionStart group carries a second, context-printing hook");
+    assert!(
+        printed.contains(CONTEXT),
+        "the POSIX SessionStart hook no longer prints {CONTEXT}",
+    );
+
+    let windows = shipped("hooks.windows.json");
+    let args: Vec<&str> = windows["hooks"]["SessionStart"][0]["hooks"][1]["args"]
+        .as_array()
+        .expect("the Windows SessionStart group carries a second, context-printing hook")
+        .iter()
+        .map(|arg| arg.as_str().expect("every argument is a string"))
+        .collect();
+    assert!(
+        args.contains(&"-SessionContext"),
+        "the Windows SessionStart hook no longer asks hook.ps1 for the session context",
+    );
+    let script = std::fs::read_to_string(hooks_dir.join("hook.ps1")).expect("the shipped hook.ps1 is readable");
+    assert!(
+        script.contains(CONTEXT),
+        "hook.ps1 no longer reads {CONTEXT}, so the two platforms inject different context",
+    );
+}
+
 fn shipped_command() -> String {
     let hooks = shipped("hooks.json");
     let command = hooks["hooks"]["PreToolUse"][0]["hooks"][0]["command"]

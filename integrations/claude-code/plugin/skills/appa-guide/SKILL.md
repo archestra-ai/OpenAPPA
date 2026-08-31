@@ -36,10 +36,9 @@ OpenAPPA to do differently.
   unless the user explicitly asks for technical details. Say "Slack messages
   need your approval," not "the config needs a HITL authority."
 - Every proposal must name the OpenAPPA primitives it uses: battery, tool
-  contract, dynamic resolver, membership resolver, authority, sanitizer, or
-  cast. When a command or service implements a primitive, state which one. For
-  example: "OpenAPPA pieces: tool contract and a dynamic resolver backed by
-  `gh`."
+  contract, annotator, membership resolver, authority, or sanitizer. When a
+  command or service implements a primitive, state which one. For example:
+  "OpenAPPA pieces: tool contract and an annotator backed by `gh`."
 - Use ordinary descriptions, not invented category names. Never say "stale
   root rules." If relevant, say: "These tools are in your config but were not
   detected in this session: <names>. I'll leave them unchanged."
@@ -83,7 +82,7 @@ spaces. This is the installed deployment path and follows `APPA_CONFIG` and
 Then run:
 
 ```sh
-ps ax -o command | grep appa-runtime | grep -v grep
+ps ax -o command | grep '[a]ppa runtime'
 ```
 
 If a running process visibly names a different `--config` path, stop and ask
@@ -205,7 +204,8 @@ Group the proposal by server. Show:
 - batteries to add, each with its one-sentence explanation;
 - existing behavior that stays unchanged, but only when it affects the result;
 - how the remaining installed tools will behave;
-- installed tools that will remain blocked;
+- installed tools the proposal leaves undeclared: annotated call by call by a
+  wildcard tool rule (`name = "*"`) when the config has one, refused otherwise;
 - every configured MCP server whose tools could not be detected.
 
 Add one short **OpenAPPA pieces** line that names every primitive the proposal
