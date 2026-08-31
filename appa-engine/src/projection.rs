@@ -1423,7 +1423,7 @@ mod tests {
         assert_eq!(
             views.proposed_call(&SubjectKey::Call {
                 trajectory: traj("a"),
-                batch: crate::transition::ProposalBatchId::new("unknown"),
+                batch: crate::transition::ProposalBatchId::new("absent"),
                 position: 0,
             }),
             None

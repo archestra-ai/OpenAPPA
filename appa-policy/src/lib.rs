@@ -750,7 +750,8 @@ struct RawRequires {
     attention: Option<Vec<String>>,
 }
 
-/// Static `requires.audience`; an attached resolver owns this destination through `returns`.
+/// The `requires` table as the policy writes it; a tool an Annotator covers receives its
+/// `requires` in the per-call annotation instead.
 impl RawRequires {
     fn convert(self, chain: &TrustChain, ctx: &str) -> Result<Requires, ConfigError> {
         let mut audience = Vec::new();

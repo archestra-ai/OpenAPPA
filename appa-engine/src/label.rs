@@ -99,8 +99,8 @@ impl Audience {
 }
 
 /// The one label: both dimensions concrete, always. Every admitted value carries exactly one of
-/// these, every trajectory fold is one, and every check reads one — no unestablished state is
-/// representable.
+/// these, every trajectory fold is one, and every check reads one — no partial or pending
+/// state is representable.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Label {
     pub trust: Trust,

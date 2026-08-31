@@ -9467,7 +9467,7 @@ mod tests {
     }
 
     /// One harness tool under two ordered contracts, both in the input sanitizers' scope.
-    /// `read(path:public/*)` at 0 uses a resolver that reads the complete call and owns the
+    /// `read(path:public/*)` at 0 uses an annotator that reads the complete call and owns the
     /// recipients it requires; `read(path:private/*)` at 1 records a classified read and
     /// requires `partner` and every desk in `desks` statically. `redact` widens the audience
     /// from internal to internal+partner, `widen` from partner to partner+auditor.

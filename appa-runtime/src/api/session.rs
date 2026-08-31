@@ -645,12 +645,12 @@ impl Session {
         let opened = self.inner.log(&self.root)?;
         let policy = self.inner.resolve_policy(&self.deployment, &opened)?;
         let mut opened = Some(opened);
-        // Resolver answers carry the label context they were classified under, and the
-        // engine matches them only while the call's current context is that one — a moved
-        // trajectory consults again by construction, so this loop carries evidence blindly.
-        // Every round either decides or gathers an answer the engine did not hold: a
-        // missing resolver answer. Rounds are finite, so a round that changes nothing is
-        // the only way this loop fails to converge.
+        // External answers carry the exact call or group they answered for, and the
+        // engine matches them only while that is still the one in front of it — a
+        // rewritten call is annotated afresh by construction, so this loop carries
+        // evidence blindly. Every round either decides or gathers an answer the engine
+        // did not hold. Rounds are finite, so a round that changes nothing is the only
+        // way this loop fails to converge.
         let mut evidence: Vec<ExternalEvidence> = Vec::new();
         loop {
             let carried = evidence.clone();
@@ -660,14 +660,14 @@ impl Session {
             })?;
             match decision.then {
                 // The engine batches every missing answer into one request set, and evidence
-                // is matched by resolver name, never by position. Without a reviewer the
-                // consults run concurrently — a tool-resolution consult can take a model call's
+                // is matched by name, never by position. Without a reviewer the
+                // consults run concurrently — an annotation consult can take a model call's
                 // seconds, and the batch should cost its slowest member, not their sum. With a
                 // reviewer they stay serial: one staged review on screen at a time.
                 Next::ResolveExternal(requests) => match elicitation {
                     None => {
                         // Batch-terminal: join_all settles every sibling first; any
-                        // resolver no-answer then aborts the invocation, discarding the
+                        // no-answer then aborts the invocation, discarding the
                         // siblings' answers, before another engine round or any append.
                         let consults = requests.into_iter().map(|request| self.consult(request, None));
                         for answered in futures_util::future::join_all(consults).await {
@@ -747,8 +747,8 @@ impl Session {
         Err(EventError::Contended { attempts: REPLAY_LIMIT })
     }
 
-    /// One external consult. Only a tool-resolution failure is an error: the check cannot
-    /// complete without the answer, no fact may be appended, and the refusal is operational
+    /// One external consult. Only an annotation failure is an error: the call cannot be
+    /// judged without its annotation, no fact may be appended, and the refusal is operational
     /// — never a policy denial. Every other external keeps its no-answer evidence shape.
     async fn consult(
         &self,

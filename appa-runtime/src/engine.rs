@@ -23,7 +23,8 @@
 //! policy, which the engine deliberately does not enforce.
 //!
 //! External evidence is typed before it reaches an engine input:
-//! an authority verdict, a sanitizer derivation, or a dynamic-resolver answer.
+//! an authority verdict, a sanitizer derivation, an annotation answer, or a
+//! membership answer.
 //! A missing or malformed answer stays runtime-side and fails closed
 //! — no no-answer variant ever enters an engine operation.
 //!

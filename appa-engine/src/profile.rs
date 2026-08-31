@@ -1153,7 +1153,7 @@ mod tests {
         let profile = DeploymentProfile::declare(declaration).unwrap();
         let wire = serde_json::to_string(&profile).unwrap();
         assert_eq!(serde_json::from_str::<DeploymentProfile>(&wire).unwrap(), profile);
-        let corrupt = wire.replace(r#""trust":1"#, r#""trust":"unknown""#);
+        let corrupt = wire.replace(r#""trust":1"#, r#""trust":"bogus""#);
         assert!(serde_json::from_str::<DeploymentProfile>(&corrupt).is_err());
     }
 

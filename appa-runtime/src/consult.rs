@@ -171,11 +171,11 @@ impl Serialize for WireAudience {
     }
 }
 
-/// Is `reader` an id a resolver may name? `public` is the unrestricted audience and
-/// `unknown` the unresolved state, neither a reader; an `@` mark is a group only a
-/// membership resolver expands; an empty id names no one.
+/// Is `reader` an id a resolver may name? `public` is the unrestricted audience,
+/// not a reader; an `@` mark is a group only a membership resolver expands; an
+/// empty id names no one.
 pub(crate) fn is_literal_reader(reader: &str) -> bool {
-    !reader.is_empty() && reader != "public" && reader != "unknown" && !reader.starts_with('@')
+    !reader.is_empty() && reader != "public" && !reader.starts_with('@')
 }
 
 fn rank_name(chain: &TrustChain, trust: Trust) -> String {
@@ -776,7 +776,7 @@ mod tests {
             WireAudience::from_wire(&serde_json::json!("public")),
             Some(WireAudience::Public)
         );
-        for reserved in ["public", "unknown", "@admins", ""] {
+        for reserved in ["public", "@admins", ""] {
             assert_eq!(
                 WireAudience::from_wire(&serde_json::json!(["alice", reserved])),
                 None,

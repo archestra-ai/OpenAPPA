@@ -147,9 +147,9 @@ pub enum OfferConsult {
         required: Vec<crate::plan::RequiredRuling>,
     },
     /// An input-substitution hop: the sanitizer rewrites the arguments of the call this offer
-    /// stands on. The runtime derives the sanitizer's input from the call, and — where the
-    /// rewritten arguments select another ordered contract — consults that contract's resolvers
-    /// about the rewritten call before executing.
+    /// stands on. The runtime derives the sanitizer's input from the call, and annotates the
+    /// rewritten call afresh — under the ordered contract its rewritten arguments select —
+    /// before executing.
     Rewrite {
         sanitizer: SanitizerName,
         call: ResolvedCall,

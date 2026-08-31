@@ -12,7 +12,7 @@
 //! call's narrowing, an input hop, a denial — bind the exact rendered call (`RUL-3`, `RMD-16`),
 //! so they are planned for the blocked call only. A tool run first ([`RouteStep::Precede`]) has
 //! no call yet: it contributes only what its registered contract fixes before any call exists —
-//! [`StaticAnnotation`]: no resolver answers, no placeholder recipients, a declared and established
+//! [`StaticAnnotation`]: no annotator answers, no placeholder recipients, a declared and established
 //! delta — evaluated in the success branch, where its `emits` are committed effects and its
 //! declared narrowing has folded. Anything less determined ends the route as a
 //! [`RouteOutcome::Prefix`] naming what must land before planning resumes ([`Resume`]).
@@ -152,7 +152,7 @@ pub enum Resume {
 /// Why a route stops at a tool it cannot plan across.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Halt {
-    /// Its check reads the call's arguments (a resolver answer or a placeholder recipient).
+    /// Its check reads the call's arguments (an annotator answer or a placeholder recipient).
     Arguments,
     /// Its own block carries call-bound gaps; its rulings or hops are planned at that block.
     Block(Vec<Gap>),
