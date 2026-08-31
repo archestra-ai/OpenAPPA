@@ -338,7 +338,7 @@ async fn a_policy_that_does_not_load_is_a_finding_not_a_failure() {
     let (status, checked) = service
         .post(
             "/policy/check",
-            serde_json::json!({ "policy": "version = 1\n[[tool]]\nname =", "systems": ["crm"] }),
+            serde_json::json!({ "policy": "version = 2\n[[tool]]\nname =", "systems": ["crm"] }),
         )
         .await;
     assert_eq!(status, StatusCode::OK);
@@ -354,7 +354,7 @@ async fn a_check_reports_what_the_enabled_systems_did_to_the_policy() {
         .post(
             "/policy/check",
             serde_json::json!({
-                "policy": "version = 1\n[[tool]]\nname = \"list_issues\"\ndelta = {}\n",
+                "policy": "version = 2\n[[tool]]\nname = \"list_issues\"\ndelta = {}\n",
                 "systems": ["crm"],
             }),
         )
@@ -405,7 +405,7 @@ async fn a_system_this_build_does_not_have_is_refused() {
     let (status, error) = service
         .post(
             "/policy/check",
-            serde_json::json!({ "policy": "version = 1\n", "systems": ["payroll"] }),
+            serde_json::json!({ "policy": "version = 2\n", "systems": ["payroll"] }),
         )
         .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);

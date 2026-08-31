@@ -11,7 +11,7 @@ use crate::contract::{ToolAnnotation, ToolDeclaration};
 use crate::fact::ReturnPolicy;
 use crate::label::{Label, Trust};
 use crate::names::SurfaceName;
-use crate::registry::{LoadError, PlannerCap, Registry, RegistryConfig, TrustChain, check_rank, check_readers};
+use crate::registry::{LoadError, PlannerCap, Registry, RegistryConfig, TrustChain, check_rank, check_routable};
 use crate::value::ToolName;
 
 /// How a tool executes relative to the engine's release: a component consumes the
@@ -228,7 +228,7 @@ impl<'de> Deserialize<'de> for DeploymentProfile {
 /// rank of the trust chain.
 pub fn neutral_starting_label(chain: &TrustChain) -> Label {
     let top = Trust::new(chain.len().saturating_sub(1) as u8);
-    Label::new(top, crate::label::Audience::Public)
+    Label::new(top, crate::label::Audience::public())
 }
 
 /// The version of the policy configuration dialect a policy file was written in, carried on the
@@ -364,7 +364,7 @@ fn identity_document_from_registry(registry: &Registry, child_return: &ReturnPol
             annotators: Vec::new(),
             authorities: registry.authorities().to_vec(),
             sanitizers: registry.sanitizers().cloned().collect(),
-            membership: registry.membership().cloned(),
+            audience: registry.audience_config().clone(),
         },
         child_return,
         registry.profile(),
@@ -446,8 +446,9 @@ fn identity_document(
         "trust_chain": registry.trust_chain,
         "authorities": authorities,
         "sanitizers": sanitizers,
-        // Which directory expands a group is part of what the policy means.
-        "membership": registry.membership,
+        // Which sources feed each audience and who resolves identity are part of what the
+        // policy means.
+        "audience": registry.audience,
         "child_return": child_return,
         "deployment": profile,
     })
@@ -493,9 +494,11 @@ pub(crate) fn validate_coverage(
     check_rank(chain, Some(profile.starting_label.trust), || {
         "deployment starting label".to_string()
     })?;
-    check_readers(&profile.starting_label.audience, || {
-        "deployment starting label".to_string()
-    })?;
+    check_routable(
+        registry.audience(),
+        profile.starting_label.audience.symbolic_atoms(),
+        || "deployment starting label".to_string(),
+    )?;
 
     // Without a wildcard, a deployment declaration naming an unwritten tool is a typo.
     // With one, every name is a runnable annotated call, so coverage accepts it.
@@ -594,7 +597,7 @@ pub(crate) fn opening_at(trajectory: crate::value::TrajectoryId, starting_label:
         annotators: Vec::new(),
         authorities: Vec::new(),
         sanitizers: Vec::new(),
-        membership: None,
+        audience: crate::audience::AudienceConfig::default(),
     };
     let profile = DeploymentProfile::declare(ProfileDeclaration {
         starting_label,
@@ -640,7 +643,7 @@ mod tests {
     use crate::contract::{Delta, LabelRequirements, Requires};
     use crate::engine::Engine;
     use crate::fact::EffectSet;
-    use crate::groups::DeclaredAudience;
+    use crate::label::DeclaredAudience;
     use crate::label::{Audience, ReaderId};
     use crate::names::{AnnotatorName, AuthorityName, SanitizerName, TagName};
 
@@ -667,7 +670,7 @@ mod tests {
             annotators: vec![],
             authorities: vec![],
             sanitizers: vec![],
-            membership: None,
+            audience: crate::audience::AudienceConfig::default(),
         }
     }
 
@@ -902,7 +905,7 @@ mod tests {
     fn the_starting_label_must_be_in_the_deployment_vocabulary() {
         let cfg = config(vec![tool("fetch")]);
         let mut declaration = covering_declaration(&cfg);
-        declaration.starting_label = Label::new(Trust::new(9), Audience::Public);
+        declaration.starting_label = Label::new(Trust::new(9), Audience::public());
         assert!(matches!(
             open(cfg.clone(), declaration, ReturnPolicy::Raw),
             Err(LoadError::RankOutOfChain { rank: 9, .. })
@@ -992,9 +995,7 @@ mod tests {
         let mut leak = tool("leak");
         leak.delta = Delta {
             trust: None,
-            audience: Some(DeclaredAudience::literal(Audience::restricted([ReaderId::new(
-                "internal",
-            )]))),
+            audience: Some(DeclaredAudience::restricted([ReaderId::new("insider")])),
         };
         let mut cfg = config(vec![leak]);
         cfg.sanitizers = vec![Sanitizer {
@@ -1004,8 +1005,8 @@ mod tests {
                 output: true,
             },
             transition: DeclaredTransition::Audience {
-                from_includes: DeclaredAudience::literal(Audience::restricted([ReaderId::new("internal")])),
-                to: DeclaredAudience::literal(Audience::Public),
+                from_includes: DeclaredAudience::restricted([ReaderId::new("insider")]),
+                to: DeclaredAudience::literal(Audience::public()),
             },
             scope: Scope::default(),
             hint: None,
@@ -1016,7 +1017,7 @@ mod tests {
     fn public_trajectory_log() -> Vec<crate::fact::Fact> {
         vec![opening_at(
             crate::value::TrajectoryId::new("t"),
-            Label::new(Trust::new(1), Audience::Public),
+            Label::new(Trust::new(1), Audience::public()),
         )]
     }
 

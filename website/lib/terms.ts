@@ -57,17 +57,26 @@ const TERMS = {
   public:
     "The reserved unrestricted audience state, not a reader ID: no audience restriction applies. An agent with public reach can send data to any outbound destination. As a placeholder argument it names the Public audience, which only a Public trajectory includes. Never a group member.",
   "@name":
-    "A group: a directory-held reader set. The membership resolver turns the name into literal reader IDs when the engine reads it; the algebra never stores the name.",
-  "@auditors":
-    "A group: a directory-held reader set, resolved to literal reader IDs by the membership resolver when the engine reads it.",
-  "[membership]":
-    "The one registration every @name group resolves through. A group mention without it is a load error. Its name binds under [externals.membership.<name>] to an endpoint or a command; no builtin serves a directory.",
+    "A mention of a symbolic audience: @finance names a configured [[audience.group]], and @provider:selector reads a source collection directly. The mention stays symbolic in labels and the log; membership is read from the configured sources per act and pinned.",
+  "@finance":
+    "A mention of a configured named audience. It stays symbolic in labels and the log; its membership is read from the audience sources per act and pinned.",
+  "[[audience.group]]":
+    "One configured named audience: its bare name (mentioned as @name), an optional within assertion into a built-in audience, and the from selectors that supply its members. Multiple sources are unioned.",
+  "[audience.self]":
+    "The mapping of the built-in self audience: the viewer selectors of the configured sources. self is the deployment's operating human.",
+  "[audience.internal]":
+    "The mapping of the built-in internal audience: full-membership collections, and for GitHub only explicitly selected organizations. Multiple sources are unioned.",
+  self: "The innermost built-in audience: the deployment's operating human, extensionally the union of the configured viewer sources.",
+  "[identity]":
+    "The deployment's one identity implementation, canonicalizing each provider-reported member to one principal before exact reader comparison. The shipped verified-email is deterministic and network-free; a custom name binds under [externals.identity.<name>].",
+  "verified-email":
+    "The shipped identity implementation: a member with a verified email becomes email:<address> under conservative normalization (domain case only); a member without one keeps its provider-qualified ID. Deterministic and network-free.",
   inputs:
     "The values an annotator reads, each mapped from $tool_call on its declaration. Without an explicit mapping, the annotator reads the complete tool call: name, description when declared, and arguments.",
   ranks:
     "In an annotator's mandate: the trust ranks its answers may write in delta.trust and requires.trust. Omitted, every rank in the trust chain.",
   audiences:
-    "In an annotator's mandate: the literal readers a restricted audience answer may name. public is always admissible and is never listed as a reader; a group is never admissible. Omitted, every reader the policy writes.",
+    "In an annotator's mandate: the literal readers a restricted audience answer may name. public is always admissible and is never listed as a reader; a symbolic audience is never admissible. Omitted, every reader the policy writes.",
   marks:
     "In an annotator's mandate: the attention marks its answers may require. Omitted, every mark an authority names under permits.attention.",
   "$tool_call":
@@ -75,13 +84,13 @@ const TERMS = {
   "[externals.annotators.<name>]":
     "The deployment binding for one annotator that does not carry a builtin on its declaration: an HTTP endpoint or a local command. Every implementation receives the same consult and answers under the same mandate validation. Unsupported platforms reject command bindings when loading the configuration.",
   "[externals.<kind>.<name>]":
-    "One deployment binding: a registered authority or sanitizer bound to exactly one of url, command, or builtin; a membership resolver, or an annotator without a declared builtin, bound to url or command. A binding without a registration refuses the deployment, and so does an unbound sanitizer, annotator, or membership resolver; an unbound authority returns no answer.",
+    "One deployment binding: a registered authority or sanitizer bound to exactly one of url, command, or builtin; an annotator without a declared builtin, an audience source, or a custom identity implementation, bound to url or command. A binding without a registration refuses the deployment, and so does an unbound sanitizer, annotator, referenced audience source, or custom identity implementation; an unbound authority returns no answer.",
   declaration:
     "The policy-authored half of a consult: the component's hint and permits, or an annotator's mandate vocabulary. The agent never writes it.",
   artifact:
     "The judged half of a consult: the call and its unmet requirements, the body to rewrite, an annotator's args, or a group name. Never the trajectory.",
   internal:
-    "An example reader for restricted internal data. Reading internal data closes off public destinations.",
+    "The built-in organization audience, between self and public in the shipped chain. Symbolic in labels and the log; extensionally the union of the configured internal sources, the members of self, and every group declared within either. Reading internal data closes off public destinations.",
   "{public, trusted}":
     "The neutral starting label before reading any data: unrestricted outbound reach and the trust chain's top rank — trusted under the default chain.",
   egress:
@@ -95,7 +104,7 @@ const TERMS = {
   contains:
     "Under requires.audience: the current audience must include these readers; a $arg placeholder is allowed only here. Under requires.effects: the trajectory already recorded this effect.",
   within:
-    "Under requires.audience: the current audience must be a subset of these readers. A tool_input rewrite cannot clear it.",
+    "Under requires.audience: the current audience must sit within this audience; a tool_input rewrite cannot clear it. On an [[audience.group]]: the trusted policy assertion that the group sits within a built-in audience (self or internal).",
   excludes:
     "Under requires.effects: the effect is neither recorded in the trajectory nor reserved by an unsettled dispatch.",
   tags: "Routing names with no algebraic life. On a tool, the names that select it. On an authority or sanitizer, the tools it answers or the values it acts on; omitted, every tool. Attention routing ignores tags.",
@@ -134,7 +143,7 @@ const TERMS = {
   from: "In a sanitizer's permits: for audience, the readers the source audience must contain; for trust, the rank the source must meet or exceed.",
   to: "In a sanitizer's permits: the exact audience, or the exact trust rank, the derivation carries.",
   resolver:
-    "The implementation answering for one registered external: the directory behind [membership], or the endpoint, command, builtin, or model behind an authority, sanitizer, or annotator binding.",
+    "The implementation answering for one registered external: the endpoint, command, builtin, or model behind an authority, sanitizer, annotator, audience source, or identity binding.",
   "[child]": "Run configuration for child sub-executions.",
   return_sanitizer: "Configured default sanitizer for all child sub-execution returns.",
   "attest-schema":

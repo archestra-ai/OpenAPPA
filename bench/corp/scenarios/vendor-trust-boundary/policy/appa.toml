@@ -1,5 +1,5 @@
 [policy]
-version = 1
+version = 2
 trust_chain = ["suspicious", "vendor", "internal"]
 
 [policy.boundary]

@@ -50,7 +50,8 @@ pub struct ExternalBindings {
     pub authorities: BTreeMap<String, Binding>,
     pub sanitizers: BTreeMap<String, Binding>,
     pub annotators: BTreeMap<String, Binding>,
-    pub membership: BTreeMap<String, Binding>,
+    pub audience: BTreeMap<String, Binding>,
+    pub identity: BTreeMap<String, Binding>,
     pub claude_code: ClaudeCode,
     pub llm: Option<LlmBinding>,
 }
@@ -66,7 +67,8 @@ impl ExternalBindings {
             authorities: BTreeMap::new(),
             sanitizers: BTreeMap::new(),
             annotators: BTreeMap::new(),
-            membership: BTreeMap::new(),
+            audience: BTreeMap::new(),
+            identity: BTreeMap::new(),
             claude_code: ClaudeCode::default(),
             llm: None,
         }
@@ -145,8 +147,12 @@ pub struct Externals {
     /// One implementation per policy-declared `[[annotator]]` that names no `builtin` on
     /// its declaration. An Annotator that carries a stock builtin takes no entry here.
     pub annotators: BTreeMap<String, AnnotatorImplementation>,
-    /// The one resolver the policy's `[membership]` registers, under its name.
-    pub membership: BTreeMap<String, Implementation>,
+    /// One implementation per audience source provider the policy's `[audience.*]` tables
+    /// reference, under the provider's name.
+    pub audience: BTreeMap<String, Implementation>,
+    /// The one custom identity implementation the policy's `[identity]` selects, under its
+    /// name. The shipped `verified-email` implementation is deterministic and takes no entry.
+    pub identity: BTreeMap<String, Implementation>,
     /// Deployment knobs for the stock `claude-code` builtin.
     pub claude_code: ClaudeCode,
     /// The profile the stock `llm` builtin consults, where the deployment declares one.
@@ -383,22 +389,26 @@ pub enum ConfigError {
     UnrepresentableEmbeddedSetting { field: &'static str },
 }
 
-/// The four sections a component binds under. Every section takes the same three
-/// transports; which builtin names a section accepts is the one difference.
+/// The five sections a component binds under. Every section takes the same transports;
+/// which builtin names a section accepts is the one difference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Section {
     Authorities,
     Sanitizers,
     Annotators,
-    Membership,
+    /// One audience source per provider: `[externals.audience.<provider>]`.
+    Audience,
+    /// The one custom identity implementation: `[externals.identity.<name>]`.
+    Identity,
 }
 
 impl Section {
-    pub(crate) const ALL: [Section; 4] = [
+    pub(crate) const ALL: [Section; 5] = [
         Section::Authorities,
         Section::Sanitizers,
         Section::Annotators,
-        Section::Membership,
+        Section::Audience,
+        Section::Identity,
     ];
 
     pub(crate) fn name(self) -> &'static str {
@@ -406,7 +416,8 @@ impl Section {
             Section::Authorities => "authorities",
             Section::Sanitizers => "sanitizers",
             Section::Annotators => "annotators",
-            Section::Membership => "membership",
+            Section::Audience => "audience",
+            Section::Identity => "identity",
         }
     }
 
@@ -422,10 +433,11 @@ impl Section {
     /// Whether `builtin` is a name this section may bind. Authorities and sanitizers take
     /// the stock names, the model builtins, and any module-grammar name (the module's
     /// presence is checked when the deployment opens); an Annotator names a stock builtin
-    /// on its policy declaration instead, and a membership resolver is never a builtin.
+    /// on its policy declaration instead, and an audience source or a custom identity
+    /// implementation is never a builtin.
     fn check_builtin(self, name: &str, builtin: &str) -> Result<(), ConfigError> {
         let allowed = match self {
-            Section::Annotators | Section::Membership => {
+            Section::Annotators | Section::Audience | Section::Identity => {
                 return Err(ConfigError::BuiltinNotAllowed {
                     section: self.name(),
                     name: name.to_string(),
@@ -483,7 +495,9 @@ struct RawExternals {
     #[serde(default)]
     annotators: BTreeMap<String, RawBinding>,
     #[serde(default)]
-    membership: BTreeMap<String, RawBinding>,
+    audience: BTreeMap<String, RawBinding>,
+    #[serde(default)]
+    identity: BTreeMap<String, RawBinding>,
     claude_code: Option<RawClaudeCode>,
     llm: Option<RawLlm>,
 }
@@ -494,7 +508,8 @@ impl RawExternals {
             Section::Authorities => &self.authorities,
             Section::Sanitizers => &self.sanitizers,
             Section::Annotators => &self.annotators,
-            Section::Membership => &self.membership,
+            Section::Audience => &self.audience,
+            Section::Identity => &self.identity,
         }
     }
 
@@ -657,7 +672,8 @@ impl Config {
             authorities,
             sanitizers,
             annotators,
-            membership,
+            audience,
+            identity,
             claude_code,
             llm,
         } = raw.externals;
@@ -686,7 +702,8 @@ impl Config {
                     .into_iter()
                     .map(|(name, implementation)| (name, annotator_implementation(implementation)))
                     .collect(),
-                membership: resolve(Section::Membership, membership)?,
+                audience: resolve(Section::Audience, audience)?,
+                identity: resolve(Section::Identity, identity)?,
                 claude_code: resolve_claude_code(claude_code)?,
                 llm,
             },
@@ -718,7 +735,8 @@ fn embedded_document(policy: toml::Value, bindings: &ExternalBindings) -> Result
         (Section::Authorities, &bindings.authorities),
         (Section::Sanitizers, &bindings.sanitizers),
         (Section::Annotators, &bindings.annotators),
-        (Section::Membership, &bindings.membership),
+        (Section::Audience, &bindings.audience),
+        (Section::Identity, &bindings.identity),
     ] {
         if entries.is_empty() {
             continue;
@@ -1287,7 +1305,8 @@ mod tests {
         let table = match section {
             Section::Authorities => &config.externals.authorities,
             Section::Sanitizers => &config.externals.sanitizers,
-            Section::Membership => &config.externals.membership,
+            Section::Audience => &config.externals.audience,
+            Section::Identity => &config.externals.identity,
             Section::Annotators => {
                 return config
                     .externals
@@ -1471,7 +1490,7 @@ mod tests {
             }
         }
         // An Annotator names a stock builtin on its policy declaration, never here.
-        for section in [Section::Annotators, Section::Membership] {
+        for section in [Section::Annotators, Section::Audience, Section::Identity] {
             for builtin in ["hitl", "approve", "redact-email", "claude-code", "llm", "some-module"] {
                 assert!(
                     matches!(cell(section, builtin), Err(ConfigError::BuiltinNotAllowed { .. })),
@@ -1576,10 +1595,10 @@ mod tests {
             Err(ConfigError::ImplementationChoice { .. })
         ));
 
-        let singleton_membership = format!("{MINIMAL}\n[externals.membership]\nurl = \"https://directory.internal\"\n");
+        let singleton_audience = format!("{MINIMAL}\n[externals.audience]\nurl = \"https://directory.internal\"\n");
         assert!(
-            toml::from_str::<RawConfig>(&singleton_membership).is_err(),
-            "membership binds by name like every other section"
+            toml::from_str::<RawConfig>(&singleton_audience).is_err(),
+            "an audience source binds by provider name like every other section"
         );
     }
 
@@ -1623,7 +1642,7 @@ mod tests {
                 include = ["first.toml", "second.toml"]
 
                 [policy]
-                version = 1
+                version = 2
 
                 [[policy.tool]]
                 name = "root"
@@ -1641,7 +1660,7 @@ mod tests {
                 format!(
                     r#"
                         [policy]
-                        version = 1
+                        version = 2
 
                         [[policy.tool]]
                         name = "{name}"
@@ -1675,7 +1694,7 @@ mod tests {
             r#"
                 include = ["battery/claude.toml"]
                 [policy]
-                version = 1
+                version = 2
                 [externals]
                 timeout_ms = 5000
                 max_body_bytes = 65536
@@ -1690,13 +1709,15 @@ mod tests {
             dir.path().join("battery/claude.toml"),
             r#"
                 [policy]
-                version = 1
+                version = 2
                 [externals.annotators.battery]
                 command = ["python3", "resolver.py"]
                 [externals.sanitizers.scrub]
                 command = ["python3", "scrub.py"]
-                [externals.membership.directory]
-                command = ["python3", "directory.py"]
+                [externals.audience.slack]
+                command = ["python3", "slack-audience.py"]
+                [externals.identity.corp-identity]
+                command = ["python3", "identity.py"]
             "#,
         )
         .expect("write included config");
@@ -1713,7 +1734,8 @@ mod tests {
         for (section, name) in [
             (Section::Annotators, "battery"),
             (Section::Sanitizers, "scrub"),
-            (Section::Membership, "directory"),
+            (Section::Audience, "slack"),
+            (Section::Identity, "corp-identity"),
         ] {
             assert_eq!(
                 command_cwd(section, name),
@@ -1762,7 +1784,7 @@ mod tests {
     }
 
     fn embedded(bindings: ExternalBindings) -> Result<Config, ConfigError> {
-        Config::embedded("version = 1".to_string(), bindings)
+        Config::embedded("version = 2".to_string(), bindings)
     }
 
     #[cfg(unix)]
@@ -1863,7 +1885,7 @@ mod tests {
         std::fs::write(
             &path,
             format!(
-                "[policy]\nversion = 1\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n\
+                "[policy]\nversion = 2\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n\
                  [externals.authorities.desk]\nurl = \"https://desk.internal\"\ntoken_env = \"{VAR}\"\n\
                  [externals.llm]\nprovider = \"anthropic\"\nmodel = \"claude-sonnet-4-5\"\ntoken_env = \"{VAR}\"\ntimeout_ms = 30000\nmax_concurrent = 2\n"
             ),
@@ -1883,7 +1905,7 @@ mod tests {
             std::fs::write(
                 &root,
                 format!(
-                    "include = [{include}]\n[policy]\nversion = 1\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n"
+                    "include = [{include}]\n[policy]\nversion = 2\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n"
                 ),
             )
             .expect("write root config");
@@ -1893,18 +1915,18 @@ mod tests {
         assert!(matches!(Config::load(&root), Err(ConfigError::AbsoluteInclude { .. })));
 
         write_root("\"battery.toml\", \"./battery.toml\"");
-        std::fs::write(dir.path().join("battery.toml"), "[policy]\nversion = 1\n").expect("write included config");
+        std::fs::write(dir.path().join("battery.toml"), "[policy]\nversion = 2\n").expect("write included config");
         assert!(matches!(Config::load(&root), Err(ConfigError::DuplicateInclude { .. })));
 
         write_root("\"battery.toml\"");
         std::fs::write(
             dir.path().join("battery.toml"),
-            "include = [\"nested.toml\"]\n[policy]\nversion = 1\n",
+            "include = [\"nested.toml\"]\n[policy]\nversion = 2\n",
         )
         .expect("write nested include");
         assert!(matches!(Config::load(&root), Err(ConfigError::IncludedTopLevel { .. })));
 
-        std::fs::write(dir.path().join("battery.toml"), "[policy]\nversion = 2\n").expect("write version mismatch");
+        std::fs::write(dir.path().join("battery.toml"), "[policy]\nversion = 1\n").expect("write version mismatch");
         assert!(matches!(Config::load(&root), Err(ConfigError::IncludedVersion { .. })));
     }
 
@@ -1919,7 +1941,7 @@ mod tests {
             std::fs::write(
                 &root,
                 format!(
-                    "include = [{includes}]\n[policy]\nversion = 1\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n\
+                    "include = [{includes}]\n[policy]\nversion = 2\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n\
                      [externals.annotators.classifier]\nurl = \"https://classifier.internal\"\n\
                      [externals.authorities.desk]\nurl = \"https://desk.internal\"\n"
                 ),
@@ -1929,7 +1951,7 @@ mod tests {
         let battery = dir.path().join("battery.toml");
         write_root("\"battery.toml\"");
 
-        std::fs::write(&battery, "[policy]\nversion = 1\nlimits = {}\n").expect("write singleton override");
+        std::fs::write(&battery, "[policy]\nversion = 2\nlimits = {}\n").expect("write singleton override");
         assert!(matches!(
             Config::load(&root),
             Err(ConfigError::IncludedPolicyField { .. })
@@ -1939,7 +1961,7 @@ mod tests {
             std::fs::write(
                 &battery,
                 format!(
-                    "[policy]\nversion = 1\n[externals.{}.fresh]\nurl = \"https://fresh.internal\"\n",
+                    "[policy]\nversion = 2\n[externals.{}.fresh]\nurl = \"https://fresh.internal\"\n",
                     section.name()
                 ),
             )
@@ -1951,7 +1973,7 @@ mod tests {
         for (section, name) in [("annotators", "classifier"), ("authorities", "desk")] {
             std::fs::write(
                 &battery,
-                format!("[policy]\nversion = 1\n[externals.{section}.{name}]\nurl = \"https://other.internal\"\n"),
+                format!("[policy]\nversion = 2\n[externals.{section}.{name}]\nurl = \"https://other.internal\"\n"),
             )
             .expect("write duplicate external");
             assert!(
@@ -1967,7 +1989,7 @@ mod tests {
         for file in ["battery.toml", "other.toml"] {
             std::fs::write(
                 dir.path().join(file),
-                "[policy]\nversion = 1\n[externals.sanitizers.scrub]\nurl = \"https://scrub.internal\"\n",
+                "[policy]\nversion = 2\n[externals.sanitizers.scrub]\nurl = \"https://scrub.internal\"\n",
             )
             .expect("write twin fragments");
         }
@@ -1984,7 +2006,7 @@ mod tests {
             "claude_code = { model = \"other\" }",
             "llm = { provider = \"openai\", model = \"m\" }",
         ] {
-            std::fs::write(&battery, format!("[policy]\nversion = 1\n[externals]\n{field}\n"))
+            std::fs::write(&battery, format!("[policy]\nversion = 2\n[externals]\n{field}\n"))
                 .expect("write external singleton");
             assert!(
                 matches!(Config::load(&root), Err(ConfigError::IncludedExternalsField { .. })),
@@ -2000,12 +2022,12 @@ mod tests {
         let second = dir.path().join("second.toml");
         std::fs::write(
             &first,
-            "# comment\n[policy]\nversion=1\n[externals]\ntimeout_ms=5000\nmax_body_bytes=65536\n",
+            "# comment\n[policy]\nversion=2\n[externals]\ntimeout_ms=5000\nmax_body_bytes=65536\n",
         )
         .expect("write first config");
         std::fs::write(
             &second,
-            "[policy]\nversion = 1 # another comment\n\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n",
+            "[policy]\nversion = 2 # another comment\n\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n",
         )
         .expect("write second config");
         let first = Config::load(&first).expect("first config loads");
@@ -2021,7 +2043,7 @@ mod tests {
             std::fs::write(
                 &path,
                 format!(
-                    "[policy]\nversion = 1\n[[policy.tool]]\nname = {:?}\n[[policy.tool]]\nname = {:?}\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n",
+                    "[policy]\nversion = 2\n[[policy.tool]]\nname = {:?}\n[[policy.tool]]\nname = {:?}\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n",
                     names[0], names[1]
                 ),
             )

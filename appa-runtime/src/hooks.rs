@@ -256,7 +256,7 @@ mod tests {
     fn config() -> Config {
         let text = r#"
             [policy]
-            version = 1
+            version = 2
 
             [[policy.tool]]
             name = "Bash"

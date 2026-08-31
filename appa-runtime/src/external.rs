@@ -106,7 +106,8 @@ fn kind_of(section: Section) -> ConsultKind {
         Section::Authorities => ConsultKind::Authority,
         Section::Sanitizers => ConsultKind::Sanitizer,
         Section::Annotators => ConsultKind::Annotation,
-        Section::Membership => ConsultKind::Membership,
+        Section::Audience => ConsultKind::AudienceSource,
+        Section::Identity => ConsultKind::Identity,
     }
 }
 
@@ -222,7 +223,8 @@ impl ExternalServices {
         let tables = [
             (Section::Authorities, config.authorities),
             (Section::Sanitizers, config.sanitizers),
-            (Section::Membership, config.membership),
+            (Section::Audience, config.audience),
+            (Section::Identity, config.identity),
         ];
         let mut backends: BTreeMap<ConsultKind, BTreeMap<String, Backend>> = BTreeMap::new();
         for (section, table) in tables {
@@ -460,7 +462,7 @@ fn builtin_backend(
     let module = match section {
         Section::Authorities => registry.authority(&builtin),
         Section::Sanitizers => registry.sanitizer(&builtin),
-        Section::Annotators | Section::Membership => None,
+        Section::Annotators | Section::Audience | Section::Identity => None,
     };
     let backend = match (section, builtin.as_str()) {
         (Section::Authorities, HITL) => Some(Backend::Hitl),
@@ -797,10 +799,11 @@ mod tests {
     use crate::builtins::run_claude_code;
     use crate::config::Token;
     use crate::consult::{
-        AnnotationArtifact, AnnotationDeclaration, AuthorityArtifact, AuthorityDeclaration, DeclaredPermits,
-        DeclaredSanitizerTransition, MembershipArtifact, ReadersAnswer, SanitizerArtifact, SanitizerDeclaration,
-        SanitizerPoint, WireAudience,
+        AnnotationArtifact, AnnotationDeclaration, AudienceSourceArtifact, AudienceSourceDeclaration,
+        AuthorityArtifact, AuthorityDeclaration, DeclaredPermits, DeclaredSanitizerTransition, MembersAnswer,
+        SanitizerArtifact, SanitizerDeclaration, SanitizerPoint, WireAudience,
     };
+    use appa_engine::audience::MemberClaims;
 
     async fn raw_stub(response: &'static [u8], hold_open: bool) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -835,8 +838,8 @@ mod tests {
         Implementation::Resolver(Endpoint::new(url.to_string(), None))
     }
 
-    /// Bindings with `classifier` and `review` annotators and the `directory`
-    /// membership resolver all served by `url`, when one is given.
+    /// Bindings with `classifier` and `review` annotators and the `slack` audience
+    /// source all served by `url`, when one is given.
     fn externals(url: Option<String>, timeout_ms: u64, cap: usize) -> Externals {
         let annotators = url
             .iter()
@@ -847,7 +850,7 @@ mod tests {
                 })
             })
             .collect();
-        let membership = url.iter().map(|url| ("directory".to_string(), endpoint(url))).collect();
+        let audience = url.iter().map(|url| ("slack".to_string(), endpoint(url))).collect();
         Externals {
             timeout: Duration::from_millis(timeout_ms),
             review_timeout: Duration::from_millis(timeout_ms),
@@ -855,7 +858,8 @@ mod tests {
             authorities: BTreeMap::new(),
             sanitizers: BTreeMap::new(),
             annotators,
-            membership,
+            audience,
+            identity: BTreeMap::new(),
             claude_code: Default::default(),
             llm: None,
         }
@@ -943,19 +947,24 @@ mod tests {
         }
     }
 
-    fn membership_consult(name: &str, group: &str) -> Consult {
+    fn audience_consult(name: &str, selector: &str) -> Consult {
         Consult {
             name: name.to_string(),
-            body: ConsultBody::Membership {
-                artifact: MembershipArtifact {
-                    group: group.to_string(),
+            body: ConsultBody::AudienceSource {
+                declaration: AudienceSourceDeclaration {
+                    templates: vec!["user-group/<handle>".to_string()],
+                },
+                artifact: AudienceSourceArtifact::Selector {
+                    selector: selector.to_string(),
                 },
             },
         }
     }
 
     async fn resolve(services: &ExternalServices) -> ConsultOutcome {
-        services.consult(&membership_consult("directory", "@eng"), None).await
+        services
+            .consult(&audience_consult("slack", "user-group/eng"), None)
+            .await
     }
 
     /// A fake `claude` executable: a shell script the backend's `command` override runs.
@@ -1013,10 +1022,13 @@ mod tests {
                         );
                         r#"{"version":1,"answer":{"delta":{"trust":"suspicious"},"requires":{"history":[],"attention":["review"]},"emits":[]}}"#
                     }
-                    "membership" => {
-                        assert_eq!(request["declaration"], serde_json::json!({}));
-                        assert_eq!(request["artifact"]["group"], "@eng");
-                        r#"{"version":1,"answer":{"readers":["alice","bob"]}}"#
+                    "audience" => {
+                        assert_eq!(
+                            request["declaration"],
+                            serde_json::json!({"templates": ["user-group/<handle>"]})
+                        );
+                        assert_eq!(request["artifact"]["selector"], "user-group/eng");
+                        r#"{"version":1,"answer":{"members":[{"id":"slack:U1","verified_email":"alice@corp.com"},{"id":"slack:U2"}]}}"#
                     }
                     other => panic!("unexpected kind {other}"),
                 }
@@ -1054,12 +1066,21 @@ mod tests {
         );
         match resolve(&services).await {
             ConsultOutcome::Answer(answer) => assert_eq!(
-                ReadersAnswer::from_wire(&answer),
-                Some(ReadersAnswer {
-                    readers: vec!["alice".to_string(), "bob".to_string()]
+                MembersAnswer::from_wire(&answer),
+                Some(MembersAnswer {
+                    members: vec![
+                        MemberClaims {
+                            id: "slack:U1".to_string(),
+                            verified_email: Some("alice@corp.com".to_string()),
+                        },
+                        MemberClaims {
+                            id: "slack:U2".to_string(),
+                            verified_email: None,
+                        },
+                    ]
                 })
             ),
-            other => panic!("the directory answers, got {other:?}"),
+            other => panic!("the source answers, got {other:?}"),
         }
     }
 
@@ -1546,7 +1567,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn the_claude_builtin_serves_every_kind_but_membership() {
+    async fn the_claude_builtin_serves_every_kind_but_audience() {
         let dir = tempfile::tempdir().expect("a fixture directory is created");
         let command = fake_claude(
             dir.path(),
@@ -1579,7 +1600,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         ));
 
         let mut config = externals(None, 2000, 65_536);
-        config.membership.insert(
+        config.audience.insert(
             "judge".to_string(),
             Implementation::Builtin(CLAUDE_CODE_BUILTIN.to_string()),
         );
@@ -1591,14 +1612,14 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
                 ConsultGates::of(4, 8)
             ),
             Err(ModulesError::UnknownBuiltin {
-                section: "membership",
+                section: "audience",
                 ..
             })
         ));
     }
 
     #[tokio::test]
-    async fn the_llm_builtin_serves_every_kind_but_membership() {
+    async fn the_llm_builtin_serves_every_kind_but_identity() {
         let url = stub(Router::new().route(
             "/v1/messages",
             post(|| async {
@@ -1646,7 +1667,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         let mut config = externals(None, 2000, 65_536);
         config.llm = Some(profile);
         config
-            .membership
+            .identity
             .insert("judge".to_string(), Implementation::Builtin(LLM_BUILTIN.to_string()));
         assert!(matches!(
             ExternalServices::new(
@@ -1656,7 +1677,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
                 ConsultGates::of(4, 8)
             ),
             Err(ModulesError::UnknownBuiltin {
-                section: "membership",
+                section: "identity",
                 ..
             })
         ));

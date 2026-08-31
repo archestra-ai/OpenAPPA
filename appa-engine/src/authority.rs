@@ -4,9 +4,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::fact::EffectKind;
-use crate::groups::{DeclaredAudience, Expansions};
-use crate::label::{Audience, Label, Trust};
-use crate::names::{AuthorityName, GroupName, MarkName, SanitizerName, TagName};
+use crate::label::{
+    Audience, DeclaredAudience, Evaluation, Label, MembershipContext, MembershipNeeded, SymbolicAtom, Trust,
+};
+use crate::names::{AuthorityName, MarkName, SanitizerName, TagName};
 
 /// Operator prose on a registered authority or sanitizer: why this entry exists, in the
 /// deployer's own words. It travels with every remedy plan naming the entity, so an agent chooses
@@ -31,8 +32,9 @@ impl Hint {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Mandate {
     pub trust_ceiling: Option<Trust>,
-    /// Cover an unmet `includes` by vouching readers up to this set. A group written here
-    /// resolves at the operation that validates the mandate.
+    /// Cover an unmet `includes` by vouching readers up to this set. A symbolic audience
+    /// written here stays symbolic; the operation that validates the mandate resolves what
+    /// the comparison needs.
     pub reader_ceiling: Option<DeclaredAudience>,
     pub waivers: Vec<EffectKind>,
     pub attends: Vec<MarkName>,
@@ -46,16 +48,25 @@ impl Mandate {
             && self.attends.is_empty()
     }
 
-    pub fn groups(&self) -> impl Iterator<Item = &GroupName> {
-        self.reader_ceiling.iter().flat_map(DeclaredAudience::groups)
+    pub(crate) fn needed_atoms<'a>(
+        &'a self,
+        providers: &'a std::collections::BTreeSet<String>,
+    ) -> impl Iterator<Item = SymbolicAtom> + 'a {
+        self.reader_ceiling
+            .iter()
+            .flat_map(move |ceiling| ceiling.needed_atoms(providers))
     }
 
-    /// The groups a ruling covering `gaps` under this mandate reads: the
+    /// The atoms a ruling covering `gaps` under this mandate reads: the
     /// reader ceiling's, only where an `includes` gap is among them — no other gap consults it.
-    pub(crate) fn reads<'a>(&'a self, gaps: &[crate::check::Gap]) -> impl Iterator<Item = &'a GroupName> {
+    pub(crate) fn reads<'a>(
+        &'a self,
+        gaps: &[crate::check::Gap],
+        providers: &'a std::collections::BTreeSet<String>,
+    ) -> impl Iterator<Item = SymbolicAtom> + 'a {
         gaps.iter()
             .any(|gap| matches!(gap, crate::check::Gap::Includes { .. }))
-            .then(|| self.groups())
+            .then(|| self.needed_atoms(providers))
             .into_iter()
             .flatten()
     }
@@ -120,24 +131,31 @@ pub enum DeclaredTransition {
 }
 
 impl DeclaredTransition {
-    /// The groups this mandate writes: the application that reads it requires them
+    /// The atoms this mandate writes: the application that reads it evaluates them
     /// together, because `from` and `to` are one declaration.
-    pub fn groups(&self) -> impl Iterator<Item = &GroupName> {
+    pub(crate) fn needed_atoms<'a>(
+        &'a self,
+        providers: &'a std::collections::BTreeSet<String>,
+    ) -> impl Iterator<Item = SymbolicAtom> + 'a {
         match self {
-            DeclaredTransition::Audience { from_includes, to } => Some(from_includes.groups().chain(to.groups())),
+            DeclaredTransition::Audience { from_includes, to } => {
+                Some(from_includes.needed_atoms(providers).chain(to.needed_atoms(providers)))
+            }
             DeclaredTransition::Trust { .. } => None,
         }
         .into_iter()
         .flatten()
     }
 
-    /// The transition as the operation reads it: every written group replaced by the operation's
-    /// answer. This literal form is what a derivation record persists.
-    pub(crate) fn resolve(&self, expansions: &Expansions) -> Transition {
+    /// The transition as an application reads and a derivation record persists it: the
+    /// declared `from` comparison as written, the `to` as the whole [`Audience`] the derived
+    /// label carries. Nothing expands here — symbolic atoms survive into the derived label
+    /// and the durable record.
+    pub(crate) fn applied(&self) -> Transition {
         match self {
             DeclaredTransition::Audience { from_includes, to } => Transition::Audience {
-                from_includes: from_includes.resolve(expansions),
-                to: to.resolve(expansions),
+                from_includes: from_includes.clone(),
+                to: Audience::of_declared(to),
             },
             DeclaredTransition::Trust { from_floor, to } => Transition::Trust {
                 from_floor: *from_floor,
@@ -146,39 +164,46 @@ impl DeclaredTransition {
         }
     }
 
-    /// Does some group answer make the declaration admit `raw`? Where it names no group this is
-    /// the exact `from` test; where it does, an answer only adds readers `raw` must include, so
-    /// the empty answer is the widest admission: `raw` must cover the literal readers alone. Load
-    /// lints that size the planner read this; no decision does.
-    pub(crate) fn may_admit(&self, raw: &Label) -> bool {
+    /// Could some directory answer make the declaration admit `raw`? Where the `from` names no
+    /// symbolic audience this is the exact test; a symbolic audience may answer empty, so the
+    /// widest admission requires `raw` to cover the literal readers alone, and an undecided
+    /// comparison stays admitting. Load lints that size the planner read this; no decision does.
+    pub(crate) fn may_admit(&self, raw: &Label, context: &MembershipContext<'_>) -> bool {
         match self {
             DeclaredTransition::Audience { from_includes, .. } => {
                 let widest = match from_includes {
-                    DeclaredAudience::Public => Audience::Public,
-                    DeclaredAudience::Restricted { readers, .. } => Audience::restricted(readers.iter().cloned()),
+                    DeclaredAudience::Public => DeclaredAudience::Public,
+                    DeclaredAudience::Union(clause) => DeclaredAudience::restricted(clause.readers().iter().cloned()),
                 };
-                raw.covers(&widest)
+                !matches!(raw.covers(&widest, context), Evaluation::Fails)
             }
             DeclaredTransition::Trust { from_floor, .. } => raw.meets_floor(*from_floor),
         }
     }
 }
 
-/// A sanitizer's transition as an operation applied it: the declared transition with
-/// every written group resolved to the operation's answer. Derivation records persist
-/// this literal form, so replay reads what was applied and never the directory.
+/// A sanitizer's transition as an operation applied it: the declared transition's audiences
+/// as whole symbolic [`Audience`] values. Derivation records persist this form; whatever a
+/// comparison needed extensionally is pinned as primitive evidence beside it, so replay reads
+/// what was applied and never the directory.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Transition {
-    Audience { from_includes: Audience, to: Audience },
-    Trust { from_floor: Trust, to: Trust },
+    Audience {
+        from_includes: DeclaredAudience,
+        to: Audience,
+    },
+    Trust {
+        from_floor: Trust,
+        to: Trust,
+    },
 }
 
 impl Transition {
     /// Does the raw value satisfy the `from` precondition?
-    pub fn admits(&self, raw: &Label) -> bool {
+    pub(crate) fn admits(&self, raw: &Label, context: &MembershipContext<'_>) -> Evaluation {
         match self {
-            Transition::Audience { from_includes, .. } => raw.covers(from_includes),
-            Transition::Trust { from_floor, .. } => raw.meets_floor(*from_floor),
+            Transition::Audience { from_includes, .. } => raw.covers(from_includes, context),
+            Transition::Trust { from_floor, .. } => Evaluation::of_exact(raw.meets_floor(*from_floor)),
         }
     }
 
@@ -218,10 +243,12 @@ impl Sanitizer {
         &self,
         raw: &crate::label::Label,
         tags: &[TagName],
-        expansions: &Expansions,
-    ) -> Option<crate::label::Label> {
-        (self.on.output && self.applies_to(tags)).then_some(())?;
-        self.derives(raw, expansions)
+        context: &MembershipContext<'_>,
+    ) -> Result<Option<crate::label::Label>, MembershipNeeded> {
+        if !(self.on.output && self.applies_to(tags)) {
+            return Ok(None);
+        }
+        self.derives(raw, context)
     }
 
     /// The label this sanitizer's derivation of the call's argument bytes would carry, or `None`
@@ -231,10 +258,12 @@ impl Sanitizer {
         &self,
         raw: &crate::label::Label,
         tags: &[TagName],
-        expansions: &Expansions,
-    ) -> Option<crate::label::Label> {
-        (self.on.input && self.applies_to(tags)).then_some(())?;
-        self.derives(raw, expansions)
+        context: &MembershipContext<'_>,
+    ) -> Result<Option<crate::label::Label>, MembershipNeeded> {
+        if !(self.on.input && self.applies_to(tags)) {
+            return Ok(None);
+        }
+        self.derives(raw, context)
     }
 
     /// Does this sanitizer's jurisdiction reach a value originating from a contract carrying
@@ -243,34 +272,55 @@ impl Sanitizer {
         self.scope.covers(tags)
     }
 
-    fn derives(&self, raw: &crate::label::Label, expansions: &Expansions) -> Option<crate::label::Label> {
-        let transition = self.transition.resolve(expansions);
-        transition.admits(raw).then(|| transition.derive(raw))
+    fn derives(
+        &self,
+        raw: &crate::label::Label,
+        context: &MembershipContext<'_>,
+    ) -> Result<Option<crate::label::Label>, MembershipNeeded> {
+        let transition = self.transition.applied();
+        match transition.admits(raw, context) {
+            Evaluation::Holds => Ok(Some(transition.derive(raw))),
+            Evaluation::Fails => Ok(None),
+            Evaluation::Needs(needed) => Err(needed),
+        }
     }
 
-    pub fn groups(&self) -> impl Iterator<Item = &GroupName> {
-        self.transition.groups()
+    pub(crate) fn needed_atoms<'a>(
+        &'a self,
+        providers: &'a std::collections::BTreeSet<String>,
+    ) -> impl Iterator<Item = SymbolicAtom> + 'a {
+        self.transition.needed_atoms(providers)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::label::ReaderId;
+    use crate::label::{Clause, Expansions, GroupRef, ReaderId, WithinAssertions};
 
     fn readers(ids: &[&str]) -> Audience {
         Audience::restricted(ids.iter().copied().map(ReaderId::new))
     }
 
     #[test]
-    fn a_grouped_from_may_admit_only_a_raw_covering_its_literal_readers() {
+    fn a_symbolic_from_may_admit_only_a_raw_covering_its_literal_readers() {
         let transition = DeclaredTransition::Audience {
-            from_includes: DeclaredAudience::declared([ReaderId::new("alice")], [crate::names::GroupName::new("team")])
+            from_includes: DeclaredAudience::Union(
+                Clause::new(
+                    [],
+                    [GroupRef::Named(crate::names::GroupName::new("team"))],
+                    [ReaderId::new("alice")],
+                )
                 .expect("a literal reader and a group"),
-            to: DeclaredAudience::literal(Audience::Public),
+            ),
+            to: DeclaredAudience::Public,
         };
+        let within = WithinAssertions::default();
+        let providers = std::collections::BTreeSet::new();
+        let expansions = Expansions::default();
+        let context = MembershipContext::new(&within, &providers, &expansions);
         let raw = |audience: Audience| Label::new(Trust::new(1), audience);
-        assert!(transition.may_admit(&raw(readers(&["alice", "carol"]))));
-        assert!(!transition.may_admit(&raw(readers(&["bob"]))));
+        assert!(transition.may_admit(&raw(readers(&["alice", "carol"])), &context));
+        assert!(!transition.may_admit(&raw(readers(&["bob"])), &context));
     }
 }

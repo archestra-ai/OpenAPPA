@@ -9,7 +9,7 @@ use appa_runtime_api::{Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall
 
 const POLICY: &str = r#"
 [policy]
-version = 1
+version = 2
 
 [[policy.tool]]
 name = "read_hr"

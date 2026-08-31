@@ -9,7 +9,7 @@
 # `hitl` authority.
 
 [policy]
-version = 1
+version = 2
 
 # --- meeting content: private to Grain readers ---
 

@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::approvals::Approvals;
 use crate::derive::Derivations;
-use crate::world::{ANNOTATOR_PATH, AUTHORITY_PATH, MEMBERSHIP_PATH, SANITIZER_PATH, TOOLS_PATH};
+use crate::world::{ANNOTATOR_PATH, AUTHORITY_PATH, SANITIZER_PATH, TOOLS_PATH};
 
 use crate::systems::{
     CreateCustomerArgs, CreateError, CreateIssueArgs, SendEmailArgs, System, TransferArgs, Verb, create, list,
@@ -50,7 +50,6 @@ pub async fn serve(world: World) -> std::io::Result<SocketAddr> {
         .route(&format!("{AUTHORITY_PATH}/{{name}}"), post(authority))
         .route(&format!("{SANITIZER_PATH}/{{name}}"), post(sanitize))
         .route(ANNOTATOR_PATH, post(annotator))
-        .route(MEMBERSHIP_PATH, post(membership))
         .with_state(Arc::new(world));
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
@@ -193,25 +192,6 @@ async fn annotator(
         }
     });
     (StatusCode::OK, axum::Json(answer))
-}
-
-#[derive(Debug, Deserialize)]
-struct MembershipArtifact {
-    group: String,
-}
-
-async fn membership(
-    axum::Json(request): axum::Json<Consult<MembershipArtifact>>,
-) -> (StatusCode, axum::Json<serde_json::Value>) {
-    let readers = match (request.version, request.artifact.group.as_str()) {
-        (1, "finance") => vec!["cfo@corp.example", "ap-lead@corp.example"],
-        (1, "acme") => vec!["ceo@acme.com", "staff@acme.com"],
-        _ => return (StatusCode::NOT_FOUND, axum::Json(serde_json::json!({}))),
-    };
-    (
-        StatusCode::OK,
-        axum::Json(serde_json::json!({ "version": 1, "answer": { "readers": readers } })),
-    )
 }
 
 pub fn dispatch(world: &World, call: &Dispatch) -> (StatusCode, String) {

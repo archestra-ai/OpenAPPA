@@ -83,7 +83,7 @@ mod tests {
     use super::*;
 
     use appa_engine::authority::DeclaredTransition;
-    use appa_engine::groups::DeclaredAudience;
+    use appa_engine::label::DeclaredAudience;
     use appa_engine::label::ReaderId;
     use appa_engine::value::ToolName;
 
@@ -147,7 +147,7 @@ mod tests {
         for builtin in appa_policy::AnnotatorBuiltin::ALL {
             let policy = format!(
                 r#"
-version = 1
+version = 2
 [[annotator]]
 name = "classify"
 builtin = "{}"
@@ -168,7 +168,7 @@ annotator = "classify"
     #[test]
     fn a_sanitizer_without_a_hint_is_refused() {
         let policy = r#"
-version = 1
+version = 2
 
 [[sanitizer]]
 name = "digest"
@@ -198,7 +198,7 @@ permits.trust = { from = "suspicious", to = "trusted" }
             (
                 "tool",
                 r#"
-version = 1
+version = 2
 
 [[tool]]
 name = "list_customers"
@@ -210,7 +210,7 @@ implementation = { http = { url = "http://169.254.169.254/latest/meta-data" } }
             (
                 "authority",
                 r#"
-version = 1
+version = 2
 
 [[tool]]
 name = "create_issue"
@@ -227,7 +227,7 @@ implementation = { resolver = { url = "http://10.0.0.1/exfil" } }
             (
                 "annotator",
                 r#"
-version = 1
+version = 2
 
 [[annotator]]
 name = "directory"
@@ -243,7 +243,7 @@ annotator = "directory"
             (
                 "sanitizer",
                 r#"
-version = 1
+version = 2
 
 [[tool]]
 name = "list_customers"
@@ -271,7 +271,7 @@ permits = { audience = { from = ["crm"], to = ["public"] } }
     fn contracts_for_a_foreign_world_are_all_dropped() {
         let checked = check_policy(
             r#"
-version = 1
+version = 2
 
 [[tool]]
 name = "read_hr"
@@ -290,7 +290,7 @@ delta = {}
 
     #[test]
     fn loader_errors_pass_through_verbatim() {
-        let error = check_policy("version = 1\ntrust_chain = [\"a\", \"a\"]\n", &systems("crm")).unwrap_err();
+        let error = check_policy("version = 2\ntrust_chain = [\"a\", \"a\"]\n", &systems("crm")).unwrap_err();
         assert!(matches!(error, PolicyError::Load(_)));
     }
 }

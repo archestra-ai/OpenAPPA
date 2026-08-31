@@ -2,13 +2,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::audience::AudienceEvidence;
 use crate::basis::SubjectKey;
 use crate::candidate::{DerivedCandidate, SanitizerLineage};
 use crate::contract::PinnedAnnotation;
 use crate::fact::{
     BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ForkSnapshot, ObservedResult, ReturnPolicy,
 };
-use crate::groups::GroupResolution;
 use crate::label::Label;
 use crate::names::{AuthorityName, SanitizerName};
 use crate::value::{
@@ -33,7 +33,7 @@ pub(crate) struct PreparedFork {
     denials: BTreeMap<CanonicalDigest, BTreeSet<AuthorityName>>,
 }
 
-static MISSING_SOURCE: Label = Label::bottom();
+static MISSING_SOURCE: std::sync::LazyLock<Label> = std::sync::LazyLock::new(Label::bottom);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CloseKind {
@@ -56,7 +56,7 @@ pub(crate) struct DecidedBatch {
     /// position: a marked call's block is planned differently on every later read of it.
     pub(crate) spawn: Option<crate::transition::SpawnMark>,
     pub(crate) released: Vec<DispatchId>,
-    pub(crate) resolutions: Vec<GroupResolution>,
+    pub(crate) evidence: AudienceEvidence,
 }
 
 /// One offer the log has opened. Whether it is still *pending* is not stored: that is
@@ -72,9 +72,9 @@ pub(crate) struct RecordedOffer {
     pub(crate) subject: crate::basis::SubjectKey,
     pub(crate) plan: crate::plan::ExecutableRemedyPlan,
     pub(crate) basis: crate::basis::PolicyBasis,
-    /// The group resolutions the act that surfaced this offer consumed: its execution
-    /// starts from them.
-    pub(crate) resolutions: Vec<GroupResolution>,
+    /// The pinned audience evidence the act that surfaced this offer consumed: its
+    /// execution starts from it.
+    pub(crate) evidence: AudienceEvidence,
     pub(crate) end: Option<OfferEnd>,
 }
 
@@ -85,9 +85,9 @@ pub(crate) struct RecordedCandidate {
     pub(crate) via: crate::candidate::DerivedVia,
     pub(crate) derived: DerivedCandidate,
     pub(crate) lineage: SanitizerLineage,
-    /// The group resolutions the hop that derived this candidate consumed: what a later read of
-    /// the candidate under its own contract inherits, as it inherits an offer's.
-    pub(crate) resolutions: Vec<GroupResolution>,
+    /// The pinned audience evidence the hop that derived this candidate consumed: what a
+    /// later read of the candidate under its own contract inherits, as it inherits an offer's.
+    pub(crate) evidence: AudienceEvidence,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -109,9 +109,9 @@ pub(crate) struct PreparedApproval {
     pub(crate) rulings: Vec<crate::execute::AuthorityEvidence>,
     pub(crate) sanitizer: Option<crate::names::SanitizerName>,
     pub(crate) basis: crate::basis::PolicyBasis,
-    /// The group resolutions the approval was prepared under: its consumption releases
-    /// under them.
-    pub(crate) resolutions: Vec<GroupResolution>,
+    /// The pinned audience evidence the approval was prepared under: its consumption
+    /// releases under it.
+    pub(crate) evidence: AudienceEvidence,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -164,7 +164,7 @@ pub struct Projection {
     receiving_bounds: BTreeMap<DispatchId, Label>,
     /// The narrowing accepted at the check of each dispatch released under an acceptance.
     accepted_narrowings: BTreeMap<DispatchId, crate::check::Narrowing>,
-    dispatch_resolutions: BTreeMap<DispatchId, Vec<GroupResolution>>,
+    dispatch_evidence: BTreeMap<DispatchId, AudienceEvidence>,
     subject_dispatches: BTreeMap<crate::basis::SubjectKey, DispatchId>,
     observations: BTreeMap<DispatchId, ObservedResult>,
     prepared: BTreeMap<ForkId, PreparedFork>,
@@ -231,7 +231,7 @@ impl Projection {
             dispatch_calls: BTreeMap::new(),
             receiving_bounds: BTreeMap::new(),
             accepted_narrowings: BTreeMap::new(),
-            dispatch_resolutions: BTreeMap::new(),
+            dispatch_evidence: BTreeMap::new(),
             subject_dispatches: BTreeMap::new(),
             observations: BTreeMap::new(),
             prepared: BTreeMap::new(),
@@ -286,7 +286,7 @@ impl Projection {
             dispatch_calls,
             receiving_bounds,
             accepted_narrowings,
-            dispatch_resolutions,
+            dispatch_evidence,
             subject_dispatches,
             observations,
             prepared,
@@ -327,7 +327,7 @@ impl Projection {
                     subject,
                     plan,
                     basis,
-                    resolutions,
+                    evidence,
                     ..
                 } => {
                     offers.insert(
@@ -339,7 +339,7 @@ impl Projection {
                             subject: subject.clone(),
                             plan: plan.clone(),
                             basis: *basis,
-                            resolutions: resolutions.clone(),
+                            evidence: evidence.clone(),
                             end: None,
                         },
                     );
@@ -369,7 +369,7 @@ impl Projection {
                     rulings,
                     sanitizer,
                     basis,
-                    resolutions,
+                    evidence,
                 } => {
                     approvals.insert(
                         *offer,
@@ -381,7 +381,7 @@ impl Projection {
                             rulings: rulings.clone(),
                             sanitizer: sanitizer.clone(),
                             basis: *basis,
-                            resolutions: resolutions.clone(),
+                            evidence: evidence.clone(),
                         },
                     );
                 }
@@ -391,7 +391,7 @@ impl Projection {
                     proposals,
                     spawn,
                     released,
-                    resolutions,
+                    evidence,
                 } => {
                     decided.insert(
                         batch.clone(),
@@ -401,7 +401,7 @@ impl Projection {
                             proposals: proposals.clone(),
                             spawn: *spawn,
                             released: released.clone(),
-                            resolutions: resolutions.clone(),
+                            evidence: evidence.clone(),
                         },
                     );
                 }
@@ -443,19 +443,17 @@ impl Projection {
                     receiving,
                     proposed_effects,
                     annotation,
-                    memberships,
                     subject,
-                    resolutions,
+                    evidence,
                     proposed_label: _,
                 } => {
                     dispatch_calls.insert(
                         dispatch.clone(),
                         ResolvedCall::new_keyed(tool.clone(), *declaration, arguments.clone())
-                            .with_annotation(annotation.clone())
-                            .with_memberships(memberships.clone()),
+                            .with_annotation(annotation.clone()),
                     );
                     receiving_bounds.insert(dispatch.clone(), receiving.clone());
-                    dispatch_resolutions.insert(dispatch.clone(), resolutions.clone());
+                    dispatch_evidence.insert(dispatch.clone(), evidence.clone());
                     subject_dispatches.insert(subject.clone(), dispatch.clone());
                     open.insert(dispatch.clone());
                     reservations.insert(dispatch.clone(), proposed_effects.clone());
@@ -520,7 +518,7 @@ impl Projection {
                     via,
                     derived,
                     lineage,
-                    resolutions,
+                    evidence,
                     ..
                 } => {
                     candidates.insert(
@@ -529,9 +527,11 @@ impl Projection {
                             via: via.clone(),
                             derived: derived.clone(),
                             lineage: lineage.clone(),
-                            resolutions: match derived {
-                                DerivedCandidate::Call { .. } => resolutions.clone(),
-                                DerivedCandidate::Result { .. } | DerivedCandidate::Return { .. } => Vec::new(),
+                            evidence: match derived {
+                                DerivedCandidate::Call { .. } => evidence.clone(),
+                                DerivedCandidate::Result { .. } | DerivedCandidate::Return { .. } => {
+                                    AudienceEvidence::default()
+                                }
                             },
                         },
                     );
@@ -1236,13 +1236,13 @@ impl Views<'_> {
         proposal_of(&self.projection.decided, subject)
     }
 
-    /// The group resolutions the hop that derived this subject's candidate consumed; empty for a
-    /// subject no hop has touched.
-    pub(crate) fn candidate_resolutions(&self, subject: &SubjectKey) -> &[GroupResolution] {
+    /// The pinned audience evidence the hop that derived this subject's candidate consumed;
+    /// empty for a subject no hop has touched.
+    pub(crate) fn candidate_evidence(&self, subject: &SubjectKey) -> AudienceEvidence {
         self.projection
             .candidates
             .get(subject)
-            .map(|held| held.resolutions.as_slice())
+            .map(|held| held.evidence.clone())
             .unwrap_or_default()
     }
 
@@ -1270,8 +1270,8 @@ impl Views<'_> {
         self.projection.receiving_bounds.get(dispatch)
     }
 
-    pub(crate) fn dispatch_resolutions(&self, dispatch: &DispatchId) -> Option<&[GroupResolution]> {
-        self.projection.dispatch_resolutions.get(dispatch).map(Vec::as_slice)
+    pub(crate) fn dispatch_evidence(&self, dispatch: &DispatchId) -> Option<&AudienceEvidence> {
+        self.projection.dispatch_evidence.get(dispatch)
     }
 
     /// The dispatch this subject's decision released, if one did. A repeat answers with
@@ -1306,7 +1306,7 @@ mod tests {
     }
 
     fn base() -> Label {
-        Label::new(Trust::new(3), Audience::Public)
+        Label::new(Trust::new(3), Audience::public())
     }
 
     fn opened(t: &str) -> Fact {
@@ -1330,10 +1330,10 @@ mod tests {
             !projection.admission_moves_label(&traj("a"), &identity().label),
             "a value at the trajectory's own label folds to the same label"
         );
-        assert!(projection.admission_moves_label(&traj("a"), &labeled(1, Audience::Public).label));
+        assert!(projection.admission_moves_label(&traj("a"), &labeled(1, Audience::public()).label));
         assert!(projection.admission_moves_label(
             &traj("a"),
-            &labeled(3, Audience::restricted([ReaderId::new("internal")])).label
+            &labeled(3, Audience::restricted([ReaderId::new("insider")])).label
         ));
     }
 
@@ -1360,7 +1360,7 @@ mod tests {
                 proposals: vec![call.clone().with_annotation(Some(pin))],
                 spawn: None,
                 released: vec![],
-                resolutions: vec![],
+                evidence: crate::audience::AudienceEvidence::default(),
             },
         ];
         assert_eq!(
@@ -1387,7 +1387,7 @@ mod tests {
             proposals: vec![proposal("first"), proposal("second")],
             spawn: None,
             released: vec![],
-            resolutions: vec![],
+            evidence: crate::audience::AudienceEvidence::default(),
         });
         let projection = build(&log);
         let subject = |trajectory: &str, position: u32| SubjectKey::Call {
@@ -1469,12 +1469,12 @@ mod tests {
         let mut log = vec![opened("a")];
         log.extend(fork_pair("a", "b", ForkSnapshot::freeze(base(), [])));
         log.push(admit("a", labeled(1, internal.clone())));
-        log.push(admit("b", labeled(3, Audience::Public)));
+        log.push(admit("b", labeled(3, Audience::public())));
         let p = build(&log);
         assert_eq!(p.view(&traj("a")).current_label(), Label::new(Trust::new(1), internal));
         assert_eq!(
             p.view(&traj("b")).current_label(),
-            Label::new(Trust::new(3), Audience::Public)
+            Label::new(Trust::new(3), Audience::public())
         );
         assert!(!p.is_opened(&traj("c")));
     }
@@ -1493,9 +1493,8 @@ mod tests {
                 receiving: Label::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
                 annotation: None,
-                memberships: Vec::new(),
                 subject: crate::basis::fixture_subject(&traj("a")),
-                resolutions: vec![],
+                evidence: crate::audience::AudienceEvidence::default(),
             },
             Fact::DispatchClosed {
                 trajectory: traj("a"),
@@ -1524,9 +1523,8 @@ mod tests {
                 receiving: Label::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
                 annotation: None,
-                memberships: Vec::new(),
                 subject: crate::basis::fixture_subject(&traj("a")),
-                resolutions: vec![],
+                evidence: crate::audience::AudienceEvidence::default(),
             },
             Fact::DispatchClosed {
                 trajectory: traj("a"),
@@ -1554,9 +1552,8 @@ mod tests {
                 receiving: Label::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
                 annotation: None,
-                memberships: Vec::new(),
                 subject: crate::basis::fixture_subject(&traj("a")),
-                resolutions: vec![],
+                evidence: crate::audience::AudienceEvidence::default(),
             },
             Fact::DispatchClosed {
                 trajectory: traj("a"),
@@ -1640,7 +1637,7 @@ mod tests {
     fn a_cold_replay_reports_the_ended_trajectory() {
         let log = vec![
             opened("a"),
-            admit("a", labeled(2, Audience::Public)),
+            admit("a", labeled(2, Audience::public())),
             Fact::Boundary {
                 trajectory: traj("a"),
                 kind: BoundaryKind::VoidReturn,
@@ -1663,20 +1660,19 @@ mod tests {
                 receiving: Label::top(),
                 proposed_effects: EffectSet::new([]).unwrap(),
                 annotation: None,
-                memberships: Vec::new(),
                 subject: crate::basis::fixture_subject(&traj("a")),
-                resolutions: vec![],
+                evidence: crate::audience::AudienceEvidence::default(),
             },
             Fact::ValueAdmitted {
                 trajectory: traj("a"),
-                value: labeled(1, Audience::Public),
+                value: labeled(1, Audience::public()),
                 provenance: Provenance::ToolResult {
                     dispatch: dispatch("a"),
                 },
             },
             Fact::ValueAdmitted {
                 trajectory: traj("a"),
-                value: labeled(1, Audience::Public),
+                value: labeled(1, Audience::public()),
                 provenance: Provenance::ChildReturn {
                     child: traj("kid"),
                     id: ChildReturnId::new(traj("kid"), 0),
@@ -1703,7 +1699,7 @@ mod tests {
     #[test]
     fn a_dangling_basis_source_folds_fail_closed_to_bottom() {
         let mut log = vec![opened("a")];
-        let ghost = labeled(2, Audience::Public);
+        let ghost = labeled(2, Audience::public());
         log.extend(fork_pair(
             "a",
             "b",
@@ -1711,14 +1707,24 @@ mod tests {
         ));
         let fold = build(&log).view(&traj("b")).current_label();
         assert_eq!(fold, Label::new(Trust::new(0), Audience::restricted([])));
-        assert!(!fold.covers(&Audience::restricted([ReaderId::new("anyone")])));
+        let within = crate::label::WithinAssertions::default();
+        let providers = std::collections::BTreeSet::new();
+        let expansions = crate::label::Expansions::default();
+        let context = crate::label::MembershipContext::new(&within, &providers, &expansions);
+        assert_eq!(
+            fold.covers(
+                &crate::label::DeclaredAudience::restricted([ReaderId::new("anyone")]),
+                &context,
+            ),
+            crate::label::Evaluation::Fails,
+        );
     }
 
     #[test]
     fn value_ids_index_in_log_order() {
         let log = vec![
-            admit("a", labeled(3, Audience::Public)),
-            admit("a", labeled(1, Audience::Public)),
+            admit("a", labeled(3, Audience::public())),
+            admit("a", labeled(1, Audience::public())),
         ];
         let p = build(&log);
         assert_eq!(p.value_label(ValueId::new(0)).unwrap().trust, Trust::new(3));

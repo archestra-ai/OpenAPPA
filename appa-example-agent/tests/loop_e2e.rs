@@ -11,7 +11,7 @@ use appa_runtime::api::TrajectoryId;
 use harness::{Decisions, Provider, ToolHost, runtime, tool};
 
 const NEUTRAL: &str = r#"
-version = 1
+version = 2
 
 [[policy.tool]]
 name = "read_hr"
@@ -105,7 +105,7 @@ async fn the_agent_owns_the_transcript_it_shows_the_model() {
 async fn a_denied_call_never_runs_and_its_feedback_reaches_the_model() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let policy = r#"
-version = 1
+version = 2
 
 [[policy.tool]]
 name = "read_hr"
@@ -147,7 +147,7 @@ delta = {}
 async fn a_denied_call_is_recorded_for_the_host_in_the_engines_own_words() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let policy = r#"
-version = 1
+version = 2
 
 [[policy.tool]]
 name = "read_hr"
@@ -215,7 +215,7 @@ async fn a_duplicate_key_proposal_is_refused_before_the_host_sees_it() {
 async fn a_narrowing_read_is_blocked_before_it_runs_and_the_options_reach_the_model() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let policy = r#"
-version = 1
+version = 2
 
 [[policy.tool]]
 name = "read_hr"
@@ -272,7 +272,7 @@ async fn an_uncarried_output_crosses_as_the_engine_s_account_of_it() {
 }
 
 const FORKING: &str = r#"
-version = 1
+version = 2
 
 [[policy.tool]]
 name = "delegate"
@@ -395,7 +395,7 @@ async fn an_empty_string_child_return_is_not_a_void_acknowledgement() {
 async fn a_child_is_not_offered_another_spawn_or_told_to_delegate_again() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let policy = r#"
-version = 1
+version = 2
 
 [[policy.tool]]
 name = "delegate"
@@ -514,7 +514,7 @@ async fn the_fork_depth_ceiling_refuses_a_spawn_below_it() {
 async fn a_sanitized_child_return_reaches_the_parent_redacted() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let policy = r#"
-version = 1
+version = 2
 
 [[policy.tool]]
 name = "delegate"
@@ -572,7 +572,7 @@ confined_child_return = true
 async fn a_blocked_child_return_warns_that_child_effects_are_not_rolled_back() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let policy = r#"
-version = 1
+version = 2
 
 [[policy.tool]]
 name = "delegate"
@@ -634,7 +634,7 @@ async fn a_child_return_over_the_output_cap_still_crosses_whole() {
 }
 
 const APPROVED_WIRE: &str = r#"
-version = 1
+version = 2
 
 [[policy.tool]]
 name = "wire"
@@ -680,7 +680,7 @@ async fn pursuing_a_surfaced_offer_authorizes_the_exact_call() {
 }
 
 const NARROWING: &str = r#"
-version = 1
+version = 2
 
 [[policy.tool]]
 name = "read_hr"
@@ -693,7 +693,7 @@ delta = {}
 "#;
 
 const SUBSTITUTING: &str = r#"
-version = 1
+version = 2
 
 [[policy.tool]]
 name = "read_hr"
@@ -762,7 +762,7 @@ async fn pursuing_an_input_sanitizer_offer_runs_the_replaced_call() {
 }
 
 const SUBSTITUTING_SPAWN: &str = r#"
-version = 1
+version = 2
 
 [[policy.tool]]
 name = "read_hr"

@@ -11,7 +11,7 @@
 //! The mapping is lossy on purpose: audit detail the chat does not render
 //! (per-value provenance) stays in the log.
 
-use appa_engine::label::{Audience, Label};
+use appa_engine::label::Label;
 use appa_engine::registry::TrustChain;
 use appa_example_agent::{Record, Recorded};
 use appa_runtime::api::{AuditEntry, AuditEvent, AuditLabel, DispatchOutcome};
@@ -98,14 +98,28 @@ impl LabelText {
     pub fn of(label: &Label, chain: &TrustChain) -> LabelText {
         LabelText {
             trust: chain.name_of(label.trust).unwrap_or("?").to_string(),
-            audience: match &label.audience {
-                Audience::Public => "public".to_string(),
-                Audience::Restricted(readers) if readers.is_empty() => "nobody".to_string(),
-                Audience::Restricted(readers) => readers
-                    .iter()
-                    .map(|reader| reader.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", "),
+            audience: if label.audience.is_public() {
+                "public".to_string()
+            } else {
+                let clauses: Vec<String> = label
+                    .audience
+                    .clauses()
+                    .map(|clause| {
+                        let entries: Vec<String> = clause
+                            .chain()
+                            .map(|chain| chain.as_str().to_string())
+                            .into_iter()
+                            .chain(clause.groups().map(|group| group.to_string()))
+                            .chain(clause.readers().iter().map(|reader| reader.as_str().to_string()))
+                            .collect();
+                        if entries.is_empty() {
+                            "nobody".to_string()
+                        } else {
+                            entries.join(", ")
+                        }
+                    })
+                    .collect();
+                clauses.join(" ∩ ")
             },
         }
     }

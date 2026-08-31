@@ -6,6 +6,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Deserialize;
 use thiserror::Error;
 
+use appa_engine::audience::{
+    AudienceConfig, IdentityImplementation, NamedAudience, SelectorSpec, SelectorTemplate, SourceRegistration,
+};
 use appa_engine::authority::{Authority, DeclaredTransition, Hint, Mandate, Sanitizer, SanitizerPoints, Scope};
 use appa_engine::contract::{
     AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, RecipientSpec, Requires, ToolAnnotation,
@@ -14,10 +17,9 @@ use appa_engine::contract::{
 use appa_engine::engine::Engine;
 use appa_engine::fact::ReturnPolicy;
 use appa_engine::fact::{EffectKind, EffectSet};
-use appa_engine::groups::DeclaredAudience;
-use appa_engine::label::{Audience, Label, ReaderId, Trust};
+use appa_engine::label::{Audience, ChainAudience, Clause, DeclaredAudience, GroupRef, Label, ReaderId, Trust};
 use appa_engine::names::{
-    AnnotatorName, AuthorityName, GroupName, MarkName, MembershipResolverName, SanitizerName, SurfaceName, TagName,
+    AnnotatorName, AuthorityName, GroupName, IdentityImplementationName, MarkName, SanitizerName, SurfaceName, TagName,
 };
 use appa_engine::params::ToolParameters;
 use appa_engine::profile::{
@@ -27,7 +29,7 @@ use appa_engine::profile::{
 use appa_engine::registry::{AnnotatorDeclaration, LoadError, PlannerCap, Registry, RegistryConfig, TrustChain};
 use appa_engine::value::ToolName;
 
-const SUPPORTED_VERSION: u32 = 1;
+const SUPPORTED_VERSION: u32 = 2;
 const DEFAULT_TRUST_CHAIN: [&str; 2] = ["suspicious", "trusted"];
 
 /// Why a policy file failed to load. Structural failures (unknown key, missing field, wrong type,
@@ -105,8 +107,62 @@ pub enum ConfigError {
     },
     #[error("[deployment] names tool {tool} in both assumed_tools and provider_run_tools")]
     ConflictingExecutorException { tool: String },
+    #[error("bad audience source in {context}: {selector:?} {reason}")]
+    BadAudienceSource {
+        context: String,
+        selector: String,
+        reason: String,
+    },
+    #[error("bad named audience {name:?}: {reason}")]
+    BadNamedAudience { name: String, reason: String },
+    #[error("[identity] implementation {name:?}: {reason}")]
+    BadIdentity { name: String, reason: String },
     #[error("registry rejected: {0}")]
     Registry(#[from] LoadError),
+}
+
+/// The audience-source catalog the stock batteries register: one provider per battery, its
+/// selector templates fixed by this build. A policy's `from` selectors pick collections out
+/// of it, and only providers the policy references enter its identity. `viewer` names the
+/// requesting principal and feeds `self`; the members collections can feed `internal`; the
+/// named collections (and members collections) can feed `[[audience.group]]`.
+pub fn stock_audience_sources() -> Vec<SourceRegistration> {
+    let source = |provider: &str, templates: &[&str]| SourceRegistration {
+        provider: provider.to_string(),
+        templates: templates
+            .iter()
+            .map(|template| SelectorTemplate::new(*template))
+            .collect(),
+    };
+    vec![
+        source("google-workspace", &["viewer", "full-members", "group/<group-address>"]),
+        source("slack", &["viewer", "full-members", "user-group/<handle>"]),
+        source("github", &["viewer", "org/<org>/members", "org/<org>/team/<team>"]),
+    ]
+}
+
+/// What one catalog collection may feed: `self` (the requesting principal), `internal`
+/// (a provider's full membership, or one explicitly selected GitHub organization), or a
+/// named audience.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CollectionRole {
+    Viewer,
+    Members,
+    Named,
+}
+
+fn collection_role(spec: &SelectorSpec) -> Option<CollectionRole> {
+    let template = stock_audience_sources()
+        .into_iter()
+        .find(|source| source.provider == spec.provider)?
+        .templates
+        .into_iter()
+        .find(|template| template.matches(&spec.selector))?;
+    Some(match template.as_str() {
+        "viewer" => CollectionRole::Viewer,
+        "full-members" | "org/<org>/members" => CollectionRole::Members,
+        _ => CollectionRole::Named,
+    })
 }
 
 /// The stock model transports an `[[annotator]]` may name on its declaration with `builtin`.
@@ -286,18 +342,7 @@ impl Config {
             });
             annotators.insert(name, AnnotatorBinding { builtin, inputs });
         }
-        let membership = match raw.membership {
-            Some(membership) => {
-                if membership.url.is_some() || membership.builtin.is_some() {
-                    return Err(ConfigError::ForbiddenInlineBinding {
-                        kind: "membership resolver",
-                        name: membership.name,
-                    });
-                }
-                Some(MembershipResolverName::new(membership.name))
-            }
-            None => None,
-        };
+        let audience = convert_audience(raw.audience, raw.identity)?;
         let mut tools = Vec::new();
         for t in raw.tool {
             tools.push(t.convert(&trust_chain)?);
@@ -399,7 +444,7 @@ impl Config {
             annotators: annotator_declarations,
             authorities,
             sanitizers,
-            membership,
+            audience,
         };
         let engine = Engine::open(DeploymentPolicy {
             registry: registry_config.clone(),
@@ -408,6 +453,16 @@ impl Config {
             child_return,
             profile,
         })?;
+
+        let boundary_atoms: Vec<_> = boundary_label.audience.symbolic_atoms().into_iter().collect();
+        engine
+            .registry()
+            .audience()
+            .needed_primitives(&boundary_atoms)
+            .map_err(|fault| ConfigError::BadAudience {
+                context: "boundary audience".to_string(),
+                reason: fault.to_string(),
+            })?;
 
         Ok(Config {
             engine,
@@ -464,7 +519,8 @@ struct RawConfig {
     sanitizer: Vec<RawSanitizer>,
     #[serde(default)]
     annotator: Vec<RawAnnotator>,
-    membership: Option<RawMembership>,
+    audience: Option<RawAudience>,
+    identity: Option<RawIdentity>,
     child: Option<RawChild>,
     limits: Option<RawLimits>,
     deployment: Option<RawDeployment>,
@@ -512,8 +568,8 @@ impl RawDeployment {
                     None => neutral.trust,
                 };
                 let audience = match label.audience {
-                    None => Audience::Public,
-                    Some(RawStartingAudience::Token(token)) if token == "public" => Audience::Public,
+                    None => Audience::public(),
+                    Some(RawStartingAudience::Token(token)) if token == "public" => Audience::public(),
                     Some(RawStartingAudience::Token(token)) => {
                         return Err(ConfigError::BadDeploymentToken {
                             field: "starting_label audience",
@@ -593,10 +649,146 @@ struct RawAnnotator {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawMembership {
+struct RawAudience {
+    #[serde(rename = "self")]
+    self_from: Option<RawAudienceLevel>,
+    internal: Option<RawAudienceLevel>,
+    #[serde(default)]
+    group: Vec<RawAudienceGroup>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAudienceLevel {
+    from: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAudienceGroup {
     name: String,
+    within: Option<String>,
+    from: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawIdentity {
+    implementation: String,
     url: Option<toml::Value>,
-    builtin: Option<toml::Value>,
+    command: Option<toml::Value>,
+}
+
+/// Compile `[audience.*]` and `[identity]` into the engine's audience configuration. Each
+/// `from` selector must name a stock collection whose role fits its level; a provider enters
+/// the registered sources — and so the policy identity — exactly when some selector picks
+/// from it.
+fn convert_audience(
+    audience: Option<RawAudience>,
+    identity: Option<RawIdentity>,
+) -> Result<AudienceConfig, ConfigError> {
+    let mut config = AudienceConfig::default();
+    let mut providers: Vec<String> = Vec::new();
+    let mut selectors = |list: &[String],
+                         context: &str,
+                         admits: &dyn Fn(CollectionRole) -> bool,
+                         expected: &str|
+     -> Result<Vec<SelectorSpec>, ConfigError> {
+        let refused = |selector: &str, reason: String| ConfigError::BadAudienceSource {
+            context: context.to_string(),
+            selector: selector.to_string(),
+            reason,
+        };
+        let mut specs = Vec::new();
+        for entry in list {
+            let spec = SelectorSpec::parse(entry)
+                .ok_or_else(|| refused(entry, "is not a `<provider>:<selector>` source".to_string()))?;
+            let role = collection_role(&spec)
+                .ok_or_else(|| refused(entry, "names no collection a stock battery registers".to_string()))?;
+            if !admits(role) {
+                return Err(refused(entry, format!("cannot feed this audience — {expected}")));
+            }
+            if !providers.contains(&spec.provider) {
+                providers.push(spec.provider.clone());
+            }
+            specs.push(spec);
+        }
+        Ok(specs)
+    };
+    if let Some(audience) = audience {
+        if let Some(level) = audience.self_from {
+            config.self_from = selectors(
+                &level.from,
+                "[audience.self]",
+                &|role| role == CollectionRole::Viewer,
+                "`self` reads only each provider's `viewer`",
+            )?;
+        }
+        if let Some(level) = audience.internal {
+            config.internal_from = selectors(
+                &level.from,
+                "[audience.internal]",
+                &|role| role == CollectionRole::Members,
+                "`internal` reads only full-membership collections and explicitly selected GitHub organizations",
+            )?;
+        }
+        for group in audience.group {
+            let bad = |reason: &str| ConfigError::BadNamedAudience {
+                name: group.name.clone(),
+                reason: reason.to_string(),
+            };
+            if group.name.is_empty() {
+                return Err(bad("a named audience needs a name"));
+            }
+            if group.name.starts_with('@') {
+                return Err(bad("the name is written bare here; `@` marks a mention"));
+            }
+            if !ReaderId::new(group.name.clone()).is_literal() || SelectorSpec::parse(&group.name).is_some() {
+                return Err(bad("this spelling is reserved"));
+            }
+            let within =
+                match &group.within {
+                    None => None,
+                    Some(target) => Some(ChainAudience::parse(target).ok_or_else(|| {
+                        bad("`within` asserts containment in a built-in audience: `self` or `internal`")
+                    })?),
+                };
+            let from = selectors(
+                &group.from,
+                &format!("[[audience.group]] {}", group.name),
+                &|role| role != CollectionRole::Viewer,
+                "a named audience reads collections, and `viewer` names the requesting principal",
+            )?;
+            config.groups.push(NamedAudience {
+                name: GroupName::new(group.name),
+                within,
+                from,
+            });
+        }
+    }
+    if let Some(identity) = identity {
+        if identity.url.is_some() || identity.command.is_some() {
+            return Err(ConfigError::ForbiddenInlineBinding {
+                kind: "identity implementation",
+                name: identity.implementation,
+            });
+        }
+        config.identity = Some(match identity.implementation.as_str() {
+            IdentityImplementation::VERIFIED_EMAIL => IdentityImplementation::VerifiedEmail,
+            "" => {
+                return Err(ConfigError::BadIdentity {
+                    name: identity.implementation,
+                    reason: "names no implementation".to_string(),
+                });
+            }
+            custom => IdentityImplementation::Custom(IdentityImplementationName::new(custom)),
+        });
+    }
+    config.sources = stock_audience_sources()
+        .into_iter()
+        .filter(|source| providers.contains(&source.provider))
+        .collect();
+    Ok(config)
 }
 
 #[derive(Deserialize)]
@@ -620,14 +812,14 @@ impl RawBoundary {
         };
         let audience = match self.audience {
             Some(a) => parse_audience(&a, "boundary audience")?,
-            None => Audience::Public,
+            None => Audience::public(),
         };
         Ok(Label::new(trust, audience))
     }
 }
 
 fn default_boundary_label(chain: &TrustChain) -> Label {
-    Label::new(top_trust(chain), Audience::Public)
+    Label::new(top_trust(chain), Audience::public())
 }
 
 fn top_trust(chain: &TrustChain) -> Trust {
@@ -964,61 +1156,59 @@ fn parse_trust(name: &str, chain: &TrustChain, context: &str) -> Result<Trust, C
 }
 
 fn parse_audience(list: &[String], context: &str) -> Result<Audience, ConfigError> {
-    match parse_declared_audience(list, context)? {
-        DeclaredAudience::Public => Ok(Audience::Public),
-        DeclaredAudience::Restricted { readers, groups } => match groups.into_iter().next() {
-            None => Ok(Audience::Restricted(readers)),
-            Some(group) => Err(ConfigError::BadAudience {
-                context: context.to_string(),
-                reason: format!(
-                    "{group} is a group mention: a label the algebra holds directly names literal readers only"
-                ),
-            }),
-        },
-    }
+    Ok(Audience::of_declared(&parse_declared_audience(list, context)?))
 }
 
+/// One written audience list: the union of its entries. `public` stands alone; `self` and
+/// `internal` are the built-in symbolic audiences (at most one — the union of two chain
+/// levels is the outer one, so writing both is a mistake); `@name` mentions a configured
+/// named audience and `@provider:selector` a source collection directly; everything else is
+/// a literal reader.
 fn parse_declared_audience(list: &[String], context: &str) -> Result<DeclaredAudience, ConfigError> {
+    let refused = |reason: String| ConfigError::BadAudience {
+        context: context.to_string(),
+        reason,
+    };
     if list.iter().any(|r| r == "public") {
         return if list.len() == 1 {
             Ok(DeclaredAudience::Public)
         } else {
-            Err(ConfigError::BadAudience {
-                context: context.to_string(),
-                reason: "`public` is the whole universe and cannot be combined with named readers".to_string(),
-            })
+            Err(refused(
+                "`public` is the whole universe and cannot be combined with other entries".to_string(),
+            ))
         };
     }
     if list.is_empty() {
-        return Err(ConfigError::BadAudience {
-            context: context.to_string(),
-            reason: "empty reader set".to_string(),
-        });
+        return Err(refused("empty reader set".to_string()));
     }
     if let Some(ph) = list.iter().find(|r| r.starts_with('$')) {
-        return Err(ConfigError::BadAudience {
-            context: context.to_string(),
-            reason: format!("argument placeholder {ph:?} is only valid in a `contains`"),
-        });
+        return Err(refused(format!(
+            "argument placeholder {ph:?} is only valid in a `contains`"
+        )));
     }
-    let mut readers = Vec::new();
+    let mut chain = None;
     let mut groups = Vec::new();
+    let mut readers = Vec::new();
     for entry in list {
-        match entry.strip_prefix('@') {
-            Some("") => {
-                return Err(ConfigError::BadAudience {
-                    context: context.to_string(),
-                    reason: "`@` names no group".to_string(),
-                });
+        if let Some(level) = ChainAudience::parse(entry) {
+            if chain.replace(level).is_some() {
+                return Err(refused(
+                    "two built-in audiences in one union: the outer one already contains the inner".to_string(),
+                ));
             }
-            Some(group) => groups.push(GroupName::new(group)),
+            continue;
+        }
+        match entry.strip_prefix('@') {
+            Some(mention) => match GroupRef::parse(mention) {
+                Some(group) => groups.push(group),
+                None => return Err(refused(format!("`@{mention}` names no audience"))),
+            },
             None => readers.push(ReaderId::new(entry)),
         }
     }
-    DeclaredAudience::declared(readers, groups).map_err(|error| ConfigError::BadAudience {
-        context: context.to_string(),
-        reason: error.to_string(),
-    })
+    Clause::new(chain, groups, readers)
+        .map(DeclaredAudience::Union)
+        .map_err(|error| refused(error.to_string()))
 }
 
 /// The literal readers an `[[annotator]]` mandate's `audiences` may name. An annotation is
@@ -1037,13 +1227,15 @@ fn parse_annotator_readers(list: &[String], context: &str) -> Result<BTreeSet<Re
             context: context.to_string(),
             reason: "`public` is always an admissible annotation audience and is never listed as a reader".to_string(),
         }),
-        DeclaredAudience::Restricted { readers, groups } => match groups.into_iter().next() {
-            None => Ok(readers.into_iter().collect()),
-            Some(group) => Err(ConfigError::BadAudience {
-                context: context.to_string(),
-                reason: format!("{group} is a group mention: an annotation names literal readers only"),
-            }),
-        },
+        DeclaredAudience::Union(clause) => {
+            if clause.chain().is_some() || clause.groups().next().is_some() {
+                return Err(ConfigError::BadAudience {
+                    context: context.to_string(),
+                    reason: "an annotation names literal readers only — no symbolic audience".to_string(),
+                });
+            }
+            Ok(clause.readers().clone())
+        }
     }
 }
 
@@ -1088,12 +1280,12 @@ mod tests {
     use super::*;
 
     const DECLARATIONS: &str = r#"
-version = 1
+version = 2
 
 [[annotator]]
 name = "crm-acl"
 inputs = { customer_id = "$tool_call.arguments.customer_id" }
-audiences = ["finance", "internal"]
+audiences = ["finance", "insider"]
 
 [[tool]]
 name = "lookup"
@@ -1114,7 +1306,7 @@ trust_below = "trusted"
 name = "pii"
 on = ["tool_output"]
 [sanitizer.permits]
-audience = { from = ["internal"], to = ["public"] }
+audience = { from = ["insider"], to = ["public"] }
 
 [deployment]
 dispatch = "enforced"
@@ -1136,23 +1328,23 @@ confined_results = ["lookup"]
         let cases = [
             (
                 "tool",
-                "version = 1\n[[tool]]\nname = \"t\"\nimplementation = { http = { url = \"https://tool.invalid\" } }\n",
+                "version = 2\n[[tool]]\nname = \"t\"\nimplementation = { http = { url = \"https://tool.invalid\" } }\n",
             ),
             (
                 "authority",
-                "version = 1\n[[authority]]\nname = \"a\"\nimplementation = { builtin = \"approve\" }\n[authority.permits]\ntrust_below = \"trusted\"\n",
+                "version = 2\n[[authority]]\nname = \"a\"\nimplementation = { builtin = \"approve\" }\n[authority.permits]\ntrust_below = \"trusted\"\n",
             ),
             (
                 "sanitizer",
-                "version = 1\n[[sanitizer]]\nname = \"s\"\non = [\"tool_output\"]\nimplementation = { builtin = \"hosted\" }\n[sanitizer.permits]\ntrust = { from = \"suspicious\", to = \"trusted\" }\n",
+                "version = 2\n[[sanitizer]]\nname = \"s\"\non = [\"tool_output\"]\nimplementation = { builtin = \"hosted\" }\n[sanitizer.permits]\ntrust = { from = \"suspicious\", to = \"trusted\" }\n",
             ),
             (
                 "annotator",
-                "version = 1\n[[annotator]]\nname = \"d\"\nimplementation = { url = \"https://annotator.invalid\" }\n",
+                "version = 2\n[[annotator]]\nname = \"d\"\nimplementation = { url = \"https://annotator.invalid\" }\n",
             ),
             (
-                "membership resolver",
-                "version = 1\n[membership]\nname = \"directory\"\nurl = \"https://directory.invalid\"\n",
+                "identity implementation",
+                "version = 2\n[identity]\nimplementation = \"corp-identity\"\nurl = \"https://identity.invalid\"\n",
             ),
         ];
         for (kind, policy) in cases {
@@ -1168,7 +1360,7 @@ confined_results = ["lookup"]
 
     #[test]
     fn an_inline_binding_on_the_reserved_attest_schema_is_refused() {
-        let policy = "version = 1\n\
+        let policy = "version = 2\n\
              [[sanitizer]]\nname = \"attest-schema\"\non = [\"tool_output\"]\n\
              implementation = { url = \"https://attest.invalid\" }\n\
              [sanitizer.permits]\ntrust = { from = \"suspicious\", to = \"trusted\" }\n";
@@ -1182,14 +1374,14 @@ confined_results = ["lookup"]
     fn an_input_sanitizer_registers_with_its_scope_and_refuses_a_trust_mandate() {
         let policy = |mandate: &str| {
             format!(
-                "version = 1\n\
+                "version = 2\n\
                  [[tool]]\nname = \"post\"\ntags = [\"outbound\"]\ndelta = {{}}\n\
                  [[sanitizer]]\nname = \"redact\"\non = [\"tool_input\"]\n\
                  tags = [\"outbound\"]\n\
                  [sanitizer.permits]\n{mandate}\n"
             )
         };
-        let config = Config::from_toml_str(&policy("audience = { from = [\"internal\"], to = [\"partner\"] }"))
+        let config = Config::from_toml_str(&policy("audience = { from = [\"insider\"], to = [\"partner\"] }"))
             .expect("an input substitution compiles");
         let sanitizer = config
             .registry()
@@ -1205,7 +1397,7 @@ confined_results = ["lookup"]
         ));
         assert!(matches!(
             Config::from_toml_str(
-                &policy("audience = { from = [\"internal\"], to = [\"partner\"] }")
+                &policy("audience = { from = [\"insider\"], to = [\"partner\"] }")
                     .replace("on = [\"tool_input\"]", "on = []")
             ),
             Err(ConfigError::NoSanitizerPoint { name }) if name == "redact"
@@ -1213,21 +1405,118 @@ confined_results = ["lookup"]
     }
 
     #[test]
-    fn a_membership_table_registers_the_resolver_by_name() {
-        let with = Config::from_toml_str("version = 1\n[membership]\nname = \"directory\"\n").unwrap();
+    fn the_audience_tables_compile_into_the_registered_configuration() {
+        let policy = "version = 2\n\
+             [audience.self]\nfrom = [\"slack:viewer\"]\n\
+             [audience.internal]\nfrom = [\"slack:full-members\", \"github:org/corp/members\"]\n\
+             [[audience.group]]\nname = \"finance\"\nwithin = \"internal\"\n\
+             from = [\"google-workspace:group/finance@corp.com\"]\n\
+             [identity]\nimplementation = \"verified-email\"\n";
+        let config = Config::from_toml_str(policy).expect("the audience tables load");
+        let audience = &config.registry_config().audience;
+        let spec = |spelled: &str| SelectorSpec::parse(spelled).expect("a stock selector parses");
         assert_eq!(
-            with.registry_config().membership,
-            Some(MembershipResolverName::new("directory"))
+            audience.sources.iter().map(|s| s.provider.as_str()).collect::<Vec<_>>(),
+            ["google-workspace", "slack", "github"],
+            "exactly the referenced providers register, in catalog order"
         );
-        let without = Config::from_toml_str("version = 1\n").unwrap();
-        assert_eq!(without.registry_config().membership, None);
+        assert_eq!(audience.self_from, [spec("slack:viewer")]);
+        assert_eq!(
+            audience.internal_from,
+            [spec("slack:full-members"), spec("github:org/corp/members")]
+        );
+        assert_eq!(
+            audience.groups,
+            [NamedAudience {
+                name: GroupName::new("finance"),
+                within: Some(ChainAudience::Internal),
+                from: vec![spec("google-workspace:group/finance@corp.com")],
+            }]
+        );
+        assert_eq!(audience.identity, Some(IdentityImplementation::VerifiedEmail));
+
+        let custom = Config::from_toml_str("version = 2\n[identity]\nimplementation = \"corp-identity\"\n")
+            .expect("a custom identity name loads without an inline binding");
+        assert_eq!(
+            custom.registry_config().audience.identity,
+            Some(IdentityImplementation::Custom(IdentityImplementationName::new(
+                "corp-identity"
+            )))
+        );
+
+        let bare = Config::from_toml_str("version = 2\n").unwrap();
+        assert_eq!(bare.registry_config().audience, AudienceConfig::default());
+    }
+
+    #[test]
+    fn an_audience_source_selector_must_fit_its_level() {
+        for (case, table, expected) in [
+            (
+                "self reads only viewers",
+                "[audience.self]\nfrom = [\"slack:full-members\"]\n",
+                "source",
+            ),
+            (
+                "internal reads only full memberships",
+                "[audience.internal]\nfrom = [\"slack:viewer\"]\n",
+                "source",
+            ),
+            (
+                "a team is not a full membership",
+                "[audience.internal]\nfrom = [\"github:org/corp/team/x\"]\n",
+                "source",
+            ),
+            (
+                "a group never reads a viewer",
+                "[[audience.group]]\nname = \"g\"\nfrom = [\"slack:viewer\"]\n",
+                "source",
+            ),
+            (
+                "an uncatalogued collection",
+                "[audience.self]\nfrom = [\"slack:banana\"]\n",
+                "source",
+            ),
+            (
+                "a bare word is no selector",
+                "[audience.self]\nfrom = [\"banana\"]\n",
+                "source",
+            ),
+            (
+                "a group name never carries the @ mark",
+                "[[audience.group]]\nname = \"@g\"\nfrom = [\"slack:user-group/g\"]\n",
+                "group",
+            ),
+            (
+                "a reserved spelling is no group name",
+                "[[audience.group]]\nname = \"internal\"\nfrom = [\"slack:user-group/g\"]\n",
+                "group",
+            ),
+            (
+                "within targets the built-in chain only",
+                "[[audience.group]]\nname = \"g\"\nwithin = \"public\"\nfrom = [\"slack:user-group/g\"]\n",
+                "group",
+            ),
+            (
+                "identity names an implementation",
+                "[identity]\nimplementation = \"\"\n",
+                "identity",
+            ),
+        ] {
+            let refusal = Config::from_toml_str(&format!("version = 2\n{table}")).expect_err(case);
+            let fits = match expected {
+                "source" => matches!(refusal, ConfigError::BadAudienceSource { .. }),
+                "group" => matches!(refusal, ConfigError::BadNamedAudience { .. }),
+                _ => matches!(refusal, ConfigError::BadIdentity { .. }),
+            };
+            assert!(fits, "{case}: got {refusal:?}");
+        }
     }
 
     #[test]
     fn an_annotator_carries_the_stock_builtin_on_its_declaration() {
         let policy = |builtin: &str| {
             format!(
-                "version = 1\n[[annotator]]\nname = \"classify\"\nbuiltin = \"{builtin}\"\n\
+                "version = 2\n[[annotator]]\nname = \"classify\"\nbuiltin = \"{builtin}\"\n\
                  [[annotator]]\nname = \"bound\"\n"
             )
         };
@@ -1253,7 +1542,7 @@ confined_results = ["lookup"]
     #[test]
     fn a_tool_requires_a_registered_annotator() {
         assert!(matches!(
-            Config::from_toml_str("version = 1\n[[tool]]\nname = \"lookup\"\nannotator = \"classifier\"\n"),
+            Config::from_toml_str("version = 2\n[[tool]]\nname = \"lookup\"\nannotator = \"classifier\"\n"),
             Err(ConfigError::Registry(LoadError::UnknownAnnotator { tool, annotator }))
                 if tool == "lookup" && annotator == "classifier"
         ));
@@ -1262,7 +1551,7 @@ confined_results = ["lookup"]
     #[test]
     fn a_duplicate_annotator_is_refused() {
         assert!(matches!(
-            Config::from_toml_str("version = 1\n[[annotator]]\nname = \"a\"\n[[annotator]]\nname = \"a\"\n"),
+            Config::from_toml_str("version = 2\n[[annotator]]\nname = \"a\"\n[[annotator]]\nname = \"a\"\n"),
             Err(ConfigError::Registry(LoadError::DuplicateAnnotator(name))) if name == "a"
         ));
     }
@@ -1271,7 +1560,7 @@ confined_results = ["lookup"]
     fn a_tool_names_an_annotator_or_declares_static_semantics_never_both() {
         let with = |statics: &str| {
             format!(
-                "version = 1\n[[annotator]]\nname = \"acl\"\n\
+                "version = 2\n[[annotator]]\nname = \"acl\"\n\
                  [[tool]]\nname = \"send\"\nannotator = \"acl\"\n{statics}\n"
             )
         };
@@ -1296,7 +1585,7 @@ confined_results = ["lookup"]
 
     #[test]
     fn the_wildcard_tool_loads_with_an_annotator_and_nothing_else() {
-        let policy = "version = 1\n[[annotator]]\nname = \"any\"\n\
+        let policy = "version = 2\n[[annotator]]\nname = \"any\"\n\
                       [[tool]]\nname = \"*\"\nannotator = \"any\"\n";
         let config = Config::from_toml_str(policy).expect("the wildcard loads");
         assert_eq!(
@@ -1307,7 +1596,7 @@ confined_results = ["lookup"]
 
     #[test]
     fn a_second_wildcard_tool_is_refused() {
-        let policy = "version = 1\n[[annotator]]\nname = \"any\"\n\
+        let policy = "version = 2\n[[annotator]]\nname = \"any\"\n\
                       [[tool]]\nname = \"*\"\nannotator = \"any\"\n\
                       [[tool]]\nname = \"*\"\nannotator = \"any\"\n";
         assert!(matches!(
@@ -1319,7 +1608,7 @@ confined_results = ["lookup"]
     #[test]
     fn a_wildcard_tool_with_static_semantics_is_refused() {
         for statics in ["", "delta = {}"] {
-            let policy = format!("version = 1\n[[tool]]\nname = \"*\"\n{statics}\n");
+            let policy = format!("version = 2\n[[tool]]\nname = \"*\"\n{statics}\n");
             assert!(
                 matches!(
                     Config::from_toml_str(&policy),
@@ -1338,7 +1627,7 @@ confined_results = ["lookup"]
             "parameters = { type = \"object\", properties = { path = { type = \"string\" } } }",
         ] {
             let policy = format!(
-                "version = 1\n[[annotator]]\nname = \"any\"\n\
+                "version = 2\n[[annotator]]\nname = \"any\"\n\
                  [[tool]]\nname = \"*\"\nannotator = \"any\"\n{metadata}\n"
             );
             assert!(
@@ -1354,7 +1643,7 @@ confined_results = ["lookup"]
     #[test]
     fn an_annotator_mandate_resolves_omitted_bounds_to_the_whole_vocabulary() {
         let policy = r#"
-version = 1
+version = 2
 
 [[annotator]]
 name = "bounded"
@@ -1422,7 +1711,7 @@ attention = ["operator-signoff", "legal-review"]
         );
 
         assert!(matches!(
-            Config::from_toml_str("version = 1\n[[annotator]]\nname = \"a\"\nranks = [\"nope\"]\n"),
+            Config::from_toml_str("version = 2\n[[annotator]]\nname = \"a\"\nranks = [\"nope\"]\n"),
             Err(ConfigError::UnknownTrustRank { .. })
         ));
     }
@@ -1430,7 +1719,7 @@ attention = ["operator-signoff", "legal-review"]
     #[test]
     fn an_empty_annotator_audience_mandate_closes_it_to_public_answers() {
         let policy = r#"
-version = 1
+version = 2
 
 [[annotator]]
 name = "acl"
@@ -1455,7 +1744,7 @@ annotator = "acl"
     #[test]
     fn a_wildcard_covers_a_confined_result_the_policy_never_names() {
         let policy = r#"
-version = 1
+version = 2
 
 [deployment]
 dispatch = "enforced"
@@ -1473,7 +1762,7 @@ annotator = "acl"
 
     #[test]
     fn an_annotator_audience_bound_names_literal_readers_only() {
-        let with = |audiences: &str| format!("version = 1\n[[annotator]]\nname = \"acl\"\naudiences = {audiences}\n");
+        let with = |audiences: &str| format!("version = 2\n[[annotator]]\nname = \"acl\"\naudiences = {audiences}\n");
         assert!(Config::from_toml_str(&with("[\"alice\", \"bob\"]")).is_ok());
         for (case, audiences) in [("`public`", "[\"public\"]"), ("a group mention", "[\"@team\"]")] {
             assert!(
@@ -1490,7 +1779,7 @@ annotator = "acl"
     fn an_input_reads_one_of_the_five_tool_call_values() {
         let policy = |spelling: &str| {
             format!(
-                "version = 1\n[[annotator]]\nname = \"r\"\ninputs = {{ subject = \"{spelling}\" }}\n\
+                "version = 2\n[[annotator]]\nname = \"r\"\ninputs = {{ subject = \"{spelling}\" }}\n\
                  [[tool]]\nname = \"lookup\"\ndescription = \"d\"\n\
                  parameters = {{ type = \"object\", properties = {{ id = {{ type = \"string\" }} }}, required = [\"id\"] }}\n\
                  annotator = \"r\"\n"
@@ -1530,7 +1819,7 @@ annotator = "acl"
     fn a_mapped_argument_input_needs_a_required_top_level_property() {
         let policy = |parameters: &str| {
             format!(
-                "version = 1\n[[annotator]]\nname = \"acl\"\ninputs = {{ subject = \"$tool_call.arguments.id\" }}\n\
+                "version = 2\n[[annotator]]\nname = \"acl\"\ninputs = {{ subject = \"$tool_call.arguments.id\" }}\n\
                  [[tool]]\nname = \"lookup\"\nannotator = \"acl\"\n{parameters}\n"
             )
         };
@@ -1566,7 +1855,7 @@ annotator = "acl"
     fn a_description_input_needs_a_declared_description() {
         let policy = |description: &str| {
             format!(
-                "version = 1\n[[annotator]]\nname = \"acl\"\ninputs = {{ what = \"$tool_call.description\" }}\n\
+                "version = 2\n[[annotator]]\nname = \"acl\"\ninputs = {{ what = \"$tool_call.description\" }}\n\
                  [[tool]]\nname = \"lookup\"\nannotator = \"acl\"\n{description}\n"
             )
         };
@@ -1579,11 +1868,11 @@ annotator = "acl"
 
     #[test]
     fn an_annotator_name_is_an_opaque_non_empty_string() {
-        let policy = "version = 1\n[[annotator]]\nname = \"a.b\"\n\
+        let policy = "version = 2\n[[annotator]]\nname = \"a.b\"\n\
             [[tool]]\nname = \"lookup\"\ndescription = \"Looks up a value.\"\nannotator = \"a.b\"\n";
         assert!(Config::from_toml_str(policy).is_ok());
         assert!(matches!(
-            Config::from_toml_str("version = 1\n[[annotator]]\nname = \"\"\n"),
+            Config::from_toml_str("version = 2\n[[annotator]]\nname = \"\"\n"),
             Err(ConfigError::BadAnnotatorName(name)) if name.is_empty()
         ));
     }
@@ -1619,7 +1908,7 @@ annotator = "acl"
             ),
         ];
         let policy = |binding: &str, parameters: &str| {
-            format!("version = 1\n[[tool]]\nname = \"send\"\n{parameters}\n{binding}\n")
+            format!("version = 2\n[[tool]]\nname = \"send\"\n{parameters}\n{binding}\n")
         };
         for binding in bindings {
             for (parameters, expected) in parameters {
@@ -1631,7 +1920,7 @@ annotator = "acl"
             );
             assert!(Config::from_toml_str(&ok).is_ok(), "must load:\n{ok}");
         }
-        let static_recipients = "version = 1\n[[tool]]\nname = \"send\"\nrequires = { audience = { contains = [\"finance\"] } }\ndelta = {}\n";
+        let static_recipients = "version = 2\n[[tool]]\nname = \"send\"\nrequires = { audience = { contains = [\"finance\"] } }\ndelta = {}\n";
         assert!(Config::from_toml_str(static_recipients).is_ok());
     }
 
@@ -1655,7 +1944,7 @@ annotator = "acl"
 
     #[test]
     fn an_absent_deployment_table_is_the_no_coverage_default_and_refuses_covered_constructs() {
-        let plain = Config::from_toml_str("version = 1\n[[tool]]\nname = \"t\"\ndelta = {}\n").expect("loads");
+        let plain = Config::from_toml_str("version = 2\n[[tool]]\nname = \"t\"\ndelta = {}\n").expect("loads");
         assert_eq!(
             plain.engine().profile().executor_class(&ToolName::new("t")),
             ExecutorClass::Assumed
@@ -1673,7 +1962,7 @@ annotator = "acl"
 
     #[test]
     fn deployment_tokens_and_exception_conflicts_are_load_errors() {
-        let base = "version = 1\n[[tool]]\nname = \"t\"\ndelta = {}\n";
+        let base = "version = 2\n[[tool]]\nname = \"t\"\ndelta = {}\n";
         let with = |table: &str| format!("{base}\n[deployment]\n{table}\n");
         for bad_token in [
             "dispatch = \"trusted\"",
@@ -1705,7 +1994,7 @@ annotator = "acl"
     #[test]
     fn the_wildcard_is_part_of_the_policy_identity() {
         let identity = |source: &str| Config::from_toml_str(source).expect("loads").engine().identity();
-        let base = "version = 1\n\n[[annotator]]\nname = \"acl\"\n\n[[annotator]]\nname = \"other\"\n\n[[tool]]\nname = \"post\"\ndelta = {}\n";
+        let base = "version = 2\n\n[[annotator]]\nname = \"acl\"\n\n[[annotator]]\nname = \"other\"\n\n[[tool]]\nname = \"post\"\ndelta = {}\n";
         let with_wildcard = format!("{base}\n[[tool]]\nname = \"*\"\nannotator = \"acl\"\n");
         let with_other = format!("{base}\n[[tool]]\nname = \"*\"\nannotator = \"other\"\n");
         assert_ne!(
@@ -1738,7 +2027,7 @@ annotator = "acl"
     #[test]
     fn compiled_tool_parameters_are_normalized_in_policy_identity() {
         let config = Config::from_toml_str(
-            "version = 1\n[[tool]]\nname = \"t\"\nparameters = { type = \"object\", properties = { value = { type = \"string\" } } }\n",
+            "version = 2\n[[tool]]\nname = \"t\"\nparameters = { type = \"object\", properties = { value = { type = \"string\" } } }\n",
         )
         .expect("the schema compiles");
         let tool = config
@@ -1758,12 +2047,25 @@ annotator = "acl"
     }
 
     #[test]
-    fn a_group_written_in_a_declaration_registers_and_labels_refuse_it() {
+    fn a_declared_group_mention_loads_when_routed_and_refuses_at_load_when_not() {
         let policy = r#"
-version = 1
+version = 2
 
-[membership]
-name = "directory"
+[audience.internal]
+from = ["slack:full-members"]
+
+[[audience.group]]
+name = "team"
+within = "internal"
+from = ["slack:user-group/team"]
+
+[[audience.group]]
+name = "board"
+from = ["slack:user-group/board"]
+
+[[audience.group]]
+name = "officers"
+from = ["slack:user-group/officers"]
 
 [[tool]]
 name = "read"
@@ -1789,15 +2091,25 @@ audience = { from = ["internal"], to = ["@team"] }
 dispatch = "enforced"
 confined_results = ["read", "send"]
 "#;
-        let config = Config::from_toml_str(policy).expect("group-writing declarations load");
+        let mention = |name: &str, readers: &[&str]| {
+            DeclaredAudience::Union(
+                Clause::new(
+                    [],
+                    [GroupRef::Named(GroupName::new(name))],
+                    readers.iter().map(|reader| ReaderId::new(*reader)),
+                )
+                .expect("the fixture readers are literal"),
+            )
+        };
+        let config = Config::from_toml_str(policy).expect("routed group mentions load");
         let registry = config.registry();
         assert_eq!(
-            registry.groups(),
-            [
-                GroupName::new("board"),
-                GroupName::new("officers"),
-                GroupName::new("team")
-            ]
+            registry
+                .audience()
+                .groups()
+                .map(|group| group.name.as_str())
+                .collect::<Vec<_>>(),
+            ["board", "officers", "team"]
         );
         let read = registry
             .variants(&ToolName::new("read"))
@@ -1805,26 +2117,33 @@ confined_results = ["read", "send"]
             .expect("read registers")
             .declared()
             .expect("read is declared");
-        assert_eq!(
-            read.delta.audience.as_ref(),
-            Some(&DeclaredAudience::declared([ReaderId::new("auditor")], [GroupName::new("team")]).unwrap())
-        );
+        assert_eq!(read.delta.audience.as_ref(), Some(&mention("team", &["auditor"])));
         let officer = registry
             .authority(&AuthorityName::new("officer"))
             .expect("officer registers");
-        assert_eq!(
-            officer.mandate.reader_ceiling,
-            Some(DeclaredAudience::declared([], [GroupName::new("officers")]).unwrap())
+        assert_eq!(officer.mandate.reader_ceiling, Some(mention("officers", &[])));
+        match &registry
+            .sanitizer(&SanitizerName::new("declassify"))
+            .expect("declassify registers")
+            .transition
+        {
+            DeclaredTransition::Audience { from_includes, to } => {
+                assert_eq!(
+                    from_includes,
+                    &DeclaredAudience::Union(Clause::new([ChainAudience::Internal], [], []).expect("a chain clause"))
+                );
+                assert_eq!(to, &mention("team", &[]));
+            }
+            other => panic!("expected an audience transition, got {other:?}"),
+        }
+
+        let unrouted = policy.replace(
+            "[[audience.group]]\nname = \"board\"\nfrom = [\"slack:user-group/board\"]\n",
+            "",
         );
         assert!(matches!(
-            &registry.sanitizer(&SanitizerName::new("declassify")).expect("declassify registers").transition,
-            DeclaredTransition::Audience { to, .. } if to.groups().count() == 1
-        ));
-
-        let unregistered = policy.replace("[membership]\nname = \"directory\"\n", "");
-        assert!(matches!(
-            Config::from_toml_str(&unregistered),
-            Err(ConfigError::Registry(LoadError::GroupWithoutResolver { .. }))
+            Config::from_toml_str(&unrouted),
+            Err(ConfigError::Registry(LoadError::UnroutableAudience { .. }))
         ));
 
         for (case, replacement) in [
@@ -1838,23 +2157,34 @@ confined_results = ["read", "send"]
             );
         }
 
-        let base = "version = 1\n[membership]\nname = \"directory\"\n[[tool]]\nname = \"t\"\ndelta = {}\n";
-        for site in [
-            "[deployment]\nstarting_label = { audience = [\"@team\"] }\n",
-            "[boundary]\naudience = [\"@team\"]\n",
-        ] {
-            assert!(
-                matches!(
-                    Config::from_toml_str(&format!("{base}{site}")),
-                    Err(ConfigError::BadAudience { .. })
-                ),
-                "{site} loads"
-            );
-        }
+        let routed = "version = 2\n\
+             [[audience.group]]\nname = \"team\"\nfrom = [\"slack:user-group/team\"]\n\
+             [[tool]]\nname = \"t\"\ndelta = {}\n";
+        let bare = "version = 2\n[[tool]]\nname = \"t\"\ndelta = {}\n";
+        let symbolic = Config::from_toml_str(&format!(
+            "{routed}[deployment]\nstarting_label = {{ audience = [\"@team\"] }}\n"
+        ))
+        .expect("a routed symbolic starting label loads");
+        assert_eq!(
+            symbolic.engine().profile().starting_label().audience,
+            Audience::of_declared(&mention("team", &[]))
+        );
+        Config::from_toml_str(&format!("{routed}[boundary]\naudience = [\"@team\"]\n"))
+            .expect("a routed symbolic boundary label loads");
+        assert!(matches!(
+            Config::from_toml_str(&format!(
+                "{bare}[deployment]\nstarting_label = {{ audience = [\"@team\"] }}\n"
+            )),
+            Err(ConfigError::Registry(LoadError::UnroutableAudience { .. }))
+        ));
+        assert!(matches!(
+            Config::from_toml_str(&format!("{bare}[boundary]\naudience = [\"@team\"]\n")),
+            Err(ConfigError::BadAudience { .. })
+        ));
     }
     #[test]
     fn a_string_token_and_a_reader_list_are_different_audience_shapes() {
-        let base = "version = 1\n[[tool]]\nname = \"t\"\ndelta = {}\n";
+        let base = "version = 2\n[[tool]]\nname = \"t\"\ndelta = {}\n";
         let starting = |audience: &str| {
             let policy = format!("{base}[deployment]\nstarting_label = {{ audience = {audience} }}\n");
             Config::from_toml_str(&policy)
@@ -1868,7 +2198,7 @@ confined_results = ["read", "send"]
 
         let delta = |audience: &str| {
             let policy = format!(
-                "version = 1\n[[tool]]\nname = \"t\"\ndelta = {{ audience = {audience} }}\n\
+                "version = 2\n[[tool]]\nname = \"t\"\ndelta = {{ audience = {audience} }}\n\
                  [deployment]\ndispatch = \"enforced\"\nconfined_results = [\"t\"]\n"
             );
             Config::from_toml_str(&policy)
@@ -1882,8 +2212,9 @@ confined_results = ["read", "send"]
 
     #[test]
     fn a_sanitizer_transition_and_a_component_tag_list_keep_every_member() {
-        let policy = "version = 1\n\
-             [membership]\nname = \"directory\"\n\
+        let policy = "version = 2\n\
+             [[audience.group]]\nname = \"auditors\"\nfrom = [\"slack:user-group/auditors\"]\n\
+             [[audience.group]]\nname = \"reviewers\"\nfrom = [\"slack:user-group/reviewers\"]\n\
              [[tool]]\nname = \"read\"\ntags = [\"hr\", \"crm\"]\ndelta = { audience = [\"alice\", \"bob\"] }\n\
              [[sanitizer]]\nname = \"redact\"\non = [\"tool_output\"]\ntags = [\"hr\", \"crm\"]\n\
              [sanitizer.permits]\naudience = { from = [\"alice\", \"@auditors\"], to = [\"alice\", \"@reviewers\"] }\n\
@@ -1899,7 +2230,9 @@ confined_results = ["read", "send"]
         match &redact.transition {
             DeclaredTransition::Audience { from_includes, to } => {
                 let expected = |group: &str| {
-                    DeclaredAudience::declared([ReaderId::new("alice")], [GroupName::new(group)]).unwrap()
+                    DeclaredAudience::Union(
+                        Clause::new([], [GroupRef::Named(GroupName::new(group))], [ReaderId::new("alice")]).unwrap(),
+                    )
                 };
                 assert_eq!(from_includes, &expected("auditors"));
                 assert_eq!(to, &expected("reviewers"));

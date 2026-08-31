@@ -5,14 +5,14 @@
 use serde::{Deserialize, Serialize};
 
 use crate::fact::{EffectKind, EffectSet};
-use crate::groups::{DeclaredAudience, Expansions};
-use crate::label::{Audience, Label, ReaderId, Trust};
+use crate::label::{Audience, DeclaredAudience, Label, SymbolicAtom, Trust};
 use crate::names::{AnnotatorName, MarkName, TagName};
 use crate::value::ToolName;
 
 /// A **declared** restrictive label contribution: what a successful call folds into the trajectory.
 /// Every delta only ever narrows — minimum trust, intersect audience — so a permissive delta is
-/// unrepresentable.
+/// unrepresentable. A symbolic audience folds symbolically: the label keeps the clause, and
+/// no membership answer is consulted to apply a delta.
 ///
 /// An omitted dimension is neutral: annotating the call is what says the deployment
 /// knows it, and a dimension the annotation does not describe restricts nothing ([`Delta::NONE`],
@@ -23,62 +23,6 @@ pub struct Delta {
     pub audience: Option<DeclaredAudience>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct PinnedMembership {
-    argument: String,
-    readers: std::collections::BTreeSet<ReaderId>,
-}
-
-/// A membership answer that is not evidence: it named the reserved `public` state or an
-/// unexpanded group as a reader.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("membership answer for argument {argument} names a non-literal reader {reader:?}")]
-pub struct MalformedMembership {
-    pub argument: String,
-    pub reader: String,
-}
-
-impl PinnedMembership {
-    pub fn new(
-        argument: impl Into<String>,
-        readers: impl IntoIterator<Item = ReaderId>,
-    ) -> Result<Self, MalformedMembership> {
-        let argument = argument.into();
-        let readers: std::collections::BTreeSet<ReaderId> = readers.into_iter().collect();
-        match readers.iter().find(|reader| !reader.is_literal()) {
-            Some(reader) => Err(MalformedMembership {
-                argument,
-                reader: reader.as_str().to_string(),
-            }),
-            None => Ok(PinnedMembership { argument, readers }),
-        }
-    }
-
-    pub fn argument(&self) -> &str {
-        &self.argument
-    }
-
-    pub fn readers(&self) -> &std::collections::BTreeSet<ReaderId> {
-        &self.readers
-    }
-}
-
-impl<'de> Deserialize<'de> for PinnedMembership {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct Wire {
-            argument: String,
-            readers: std::collections::BTreeSet<ReaderId>,
-        }
-
-        let wire = Wire::deserialize(deserializer)?;
-        PinnedMembership::new(wire.argument, wire.readers).map_err(serde::de::Error::custom)
-    }
-}
-
 impl Delta {
     pub const NONE: Delta = Delta {
         trust: None,
@@ -87,14 +31,14 @@ impl Delta {
 
     /// The delta as a label — the output label a raw result carries, and the meet operand a
     /// successful call narrows the trajectory by. Absent dimensions fill with the fold identity,
-    /// so they neither narrow the trajectory nor lower the value's own label. A written group
-    /// reads as the operation resolved it.
-    pub fn output_label(&self, expansions: &Expansions) -> Label {
+    /// so they neither narrow the trajectory nor lower the value's own label. A symbolic
+    /// audience enters the label as its clause, unresolved.
+    pub fn output_label(&self) -> Label {
         Label::new(
             self.trust.unwrap_or(Trust::new(u8::MAX)),
             match &self.audience {
-                Some(audience) => audience.resolve(expansions),
-                None => Audience::Public,
+                Some(audience) => Audience::of_declared(audience),
+                None => Audience::public(),
             },
         )
     }
@@ -103,38 +47,32 @@ impl Delta {
         self.trust.is_none() && self.audience.is_none()
     }
 
-    pub fn groups(&self) -> impl Iterator<Item = &crate::names::GroupName> {
-        self.audience
-            .as_ref()
-            .map(DeclaredAudience::groups)
-            .into_iter()
-            .flatten()
+    /// The symbolic atoms this delta writes into the label.
+    pub fn symbolic_atoms(&self) -> Box<dyn Iterator<Item = SymbolicAtom> + '_> {
+        match &self.audience {
+            Some(audience) => audience.symbolic_atoms(),
+            None => Box::new(std::iter::empty()),
+        }
     }
 }
 
-/// An annotation the check can evaluate with no call at hand: nothing it reads comes from a call —
-/// no placeholder recipients, every group it names already expanded. This is the only shape a
-/// recovery route plans a preceding tool over (RMD-20): its check and its successor state are
-/// argument-independent facts of the registry. An Annotator-produced annotation never qualifies:
-/// it exists only per call.
+/// An annotation the check can evaluate with no call at hand: nothing it reads comes from a
+/// call — no placeholder recipients. This is the only shape a recovery route plans a
+/// preceding tool over (RMD-20): its check and its successor state are argument-independent
+/// facts of the registry (symbolic audiences included — they ride the label and resolve at
+/// the check, not before it). An Annotator-produced annotation never qualifies: it exists
+/// only per call.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct StaticAnnotation<'a>(&'a ToolAnnotation);
 
-/// Why an annotation is not [`StaticAnnotation`]: what a call under it would first have to supply.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum NotStatic {
-    /// A placeholder recipient reads the call's arguments, or the annotation itself is produced
-    /// per call by an Annotator.
-    Arguments,
-    /// Groups the annotation names that these expansions do not answer.
-    Membership(Vec<crate::names::GroupName>),
-}
+/// Why an annotation is not [`StaticAnnotation`]: a placeholder recipient reads the call's
+/// arguments, or the annotation itself is produced per call by an Annotator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("the annotation reads its call's arguments")]
+pub(crate) struct NotStatic;
 
 impl<'a> StaticAnnotation<'a> {
-    pub(crate) fn of(
-        annotation: &'a ToolAnnotation,
-        expansions: &Expansions,
-    ) -> Result<StaticAnnotation<'a>, NotStatic> {
+    pub(crate) fn of(annotation: &'a ToolAnnotation) -> Result<StaticAnnotation<'a>, NotStatic> {
         let placeholder = annotation.requires.audience_requirements().iter().any(|requirement| {
             matches!(
                 requirement,
@@ -142,11 +80,8 @@ impl<'a> StaticAnnotation<'a> {
             )
         });
         if placeholder {
-            return Err(NotStatic::Arguments);
+            return Err(NotStatic);
         }
-        expansions
-            .require(annotation.groups())
-            .map_err(|needed| NotStatic::Membership(needed.needed))?;
         Ok(StaticAnnotation(annotation))
     }
 
@@ -170,16 +105,14 @@ pub enum AudienceRequirement {
 }
 
 impl AudienceRequirement {
-    /// The groups this requirement writes: a static recipient set's and a cap's. A
-    /// placeholder's group is the call's, pinned to it.
-    pub fn groups(&self) -> impl Iterator<Item = &crate::names::GroupName> {
+    /// The symbolic atoms this requirement writes: a static recipient set's and a cap's. A
+    /// placeholder's atoms are the call's, read when its argument is.
+    pub fn symbolic_atoms(&self) -> Box<dyn Iterator<Item = SymbolicAtom> + '_> {
         match self {
-            AudienceRequirement::Includes(RecipientSpec::Static(recipients)) => Some(recipients.groups()),
-            AudienceRequirement::Cap(cap) => Some(cap.groups()),
-            AudienceRequirement::Includes(RecipientSpec::Placeholder(_)) => None,
+            AudienceRequirement::Includes(RecipientSpec::Static(recipients)) => recipients.symbolic_atoms(),
+            AudienceRequirement::Cap(cap) => cap.symbolic_atoms(),
+            AudienceRequirement::Includes(RecipientSpec::Placeholder(_)) => Box::new(std::iter::empty()),
         }
-        .into_iter()
-        .flatten()
     }
 }
 
@@ -246,28 +179,52 @@ pub struct ToolAnnotation {
 impl ToolAnnotation {
     /// The output shape this annotation gives a raw result: exactly what the annotation
     /// describes, with omitted dimensions at the fold identity.
-    pub fn output_label(&self, expansions: &Expansions) -> Label {
-        self.delta.output_label(expansions)
+    pub fn output_label(&self) -> Label {
+        self.delta.output_label()
     }
 
-    /// The groups this annotation's check reads: its delta's, its static recipients' and
-    /// its cap's. Required before the check runs; a placeholder's group rides the call instead.
-    pub fn groups(&self) -> impl Iterator<Item = &crate::names::GroupName> {
-        annotation_groups(&self.delta, &self.requires)
+    /// The symbolic atoms this annotation writes: its delta's, its static recipients' and
+    /// its cap's. Load validation routes each one; a placeholder's atoms ride the call.
+    pub fn symbolic_atoms(&self) -> impl Iterator<Item = SymbolicAtom> + '_ {
+        annotation_atoms(&self.delta, &self.requires)
+    }
+
+    /// Every atom evaluating this annotation may ask for beyond a placeholder's: the atoms of
+    /// its audience requirements, and — only where a requirement compares the committed label
+    /// extensionally — its delta's, plus each written reader whose provider prefix names a
+    /// registered source (see [`crate::label::Clause::needed_atoms`]). A delta with no
+    /// `requires` over it narrows symbolically and reads no membership, so its atoms are not
+    /// demanded. Operation gathering reads this.
+    pub(crate) fn needed_atoms<'a>(
+        &'a self,
+        providers: &'a std::collections::BTreeSet<String>,
+    ) -> impl Iterator<Item = SymbolicAtom> + 'a {
+        let requirements = self.requires.audience_requirements();
+        let delta = (!requirements.is_empty())
+            .then(|| {
+                self.delta
+                    .audience
+                    .iter()
+                    .flat_map(move |audience| audience.needed_atoms(providers))
+            })
+            .into_iter()
+            .flatten();
+        delta.chain(requirements.iter().flat_map(move |requirement| match requirement {
+            AudienceRequirement::Includes(RecipientSpec::Static(recipients)) => recipients.needed_atoms(providers),
+            AudienceRequirement::Cap(cap) => cap.needed_atoms(providers),
+            AudienceRequirement::Includes(RecipientSpec::Placeholder(_)) => Box::new(std::iter::empty()),
+        }))
     }
 }
 
-/// The groups a delta and its requirements name — what an annotation's check reads
-/// before it runs, whether the annotation is a compiled declaration or a produced answer.
-fn annotation_groups<'a>(
-    delta: &'a Delta,
-    requires: &'a Requires,
-) -> impl Iterator<Item = &'a crate::names::GroupName> {
-    delta.groups().chain(
+/// The symbolic atoms a delta and its requirements name, whether the annotation is a
+/// compiled declaration or a produced answer.
+fn annotation_atoms<'a>(delta: &'a Delta, requires: &'a Requires) -> impl Iterator<Item = SymbolicAtom> + 'a {
+    delta.symbolic_atoms().chain(
         requires
             .audience_requirements()
             .iter()
-            .flat_map(AudienceRequirement::groups),
+            .flat_map(AudienceRequirement::symbolic_atoms),
     )
 }
 
@@ -285,10 +242,10 @@ pub struct ProducedAnnotation {
 }
 
 impl ProducedAnnotation {
-    /// The groups this produced annotation names. A valid produced annotation is literal
-    /// and names none; the validator asks to enforce exactly that.
-    pub(crate) fn groups(&self) -> impl Iterator<Item = &crate::names::GroupName> {
-        annotation_groups(&self.delta, &self.requires)
+    /// The symbolic atoms this produced annotation names. A valid produced annotation is
+    /// literal and names none; the validator asks to enforce exactly that.
+    pub(crate) fn symbolic_atoms(&self) -> impl Iterator<Item = SymbolicAtom> + '_ {
+        annotation_atoms(&self.delta, &self.requires)
     }
 }
 
@@ -426,7 +383,6 @@ impl ToolDeclaration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::label::Audience;
 
     fn annotation(name: &str) -> ToolAnnotation {
         ToolAnnotation {
@@ -494,25 +450,6 @@ mod tests {
     }
 
     #[test]
-    fn a_membership_answer_pins_only_literal_reader_sets() {
-        let pin = |readers: &[&str]| PinnedMembership::new("to", readers.iter().map(|reader| ReaderId::new(*reader)));
-        assert!(pin(&["public"]).is_err());
-        assert!(pin(&["@hr"]).is_err());
-        assert!(
-            pin(&["finance", "@hr"]).is_err(),
-            "one group member spoils the whole answer"
-        );
-        assert!(pin(&[]).unwrap().readers().is_empty(), "no readers is a valid answer");
-        assert_eq!(
-            pin(&["ap@corp.example"]).unwrap().readers().len(),
-            1,
-            "`@` mid-ID is a reader"
-        );
-        let wire = serde_json::json!({ "argument": "to", "readers": ["public"] });
-        assert!(serde_json::from_value::<PinnedMembership>(wire).is_err());
-    }
-
-    #[test]
     fn a_pinned_annotation_round_trips_and_binds_its_call() {
         let digest = crate::value::CanonicalDigest::of_call(
             &ToolName::new("Bash"),
@@ -524,7 +461,7 @@ mod tests {
             ProducedAnnotation {
                 delta: Delta {
                     trust: Some(Trust::new(1)),
-                    audience: Some(crate::groups::DeclaredAudience::literal(Audience::Public)),
+                    audience: Some(DeclaredAudience::Public),
                 },
                 emits: EffectSet::default(),
                 requires: Requires::default(),

@@ -12,14 +12,19 @@ use axum::routing::post;
 
 const POLICY: &str = r#"
 [policy]
-version = 1
+version = 2
 
-[policy.membership]
-name = "directory"
+[[policy.audience.group]]
+name = "team"
+from = ["slack:user-group/team"]
+
+[[policy.audience.group]]
+name = "nobody"
+from = ["slack:user-group/nobody"]
 
 [[policy.tool]]
 name = "read_hr"
-delta = { audience = ["alice", "bob"] }
+delta = { audience = ["email:alice@corp.example", "email:bob@corp.example"] }
 
 [[policy.tool]]
 name = "send"
@@ -30,7 +35,7 @@ delta = {}
 
 [[policy.tool]]
 name = "send_capped"
-requires = { audience = { within = ["alice", "@team"] } }
+requires = { audience = { within = ["email:alice@corp.example", "@team"] } }
 effects = ["egress"]
 delta = {}
 
@@ -38,23 +43,23 @@ delta = {}
 timeout_ms = 1000
 max_body_bytes = 4096
 
-[externals.membership.directory]
-url = "MEMBERSHIP_URL"
+[externals.audience.slack]
+url = "AUDIENCE_URL"
 "#;
 
 #[derive(Clone)]
 enum Answer {
-    Readers(Vec<&'static str>),
+    Members(Vec<(&'static str, Option<&'static str>)>),
     Down,
 }
 
 #[derive(Clone)]
-struct Directory {
+struct Source {
     answer: Arc<Mutex<Answer>>,
     requests: Arc<Mutex<Vec<serde_json::Value>>>,
 }
 
-impl Directory {
+impl Source {
     fn set(&self, answer: Answer) {
         *self.answer.lock().unwrap() = answer;
     }
@@ -64,32 +69,41 @@ impl Directory {
     }
 }
 
-async fn serve_directory() -> (String, Directory) {
-    let directory = Directory {
-        answer: Arc::new(Mutex::new(Answer::Readers(vec![]))),
+async fn serve_source() -> (String, Source) {
+    let source = Source {
+        answer: Arc::new(Mutex::new(Answer::Members(vec![]))),
         requests: Arc::new(Mutex::new(Vec::new())),
     };
     let router = Router::new()
         .route(
-            "/membership",
-            post(|State(directory): State<Directory>, body: String| async move {
+            "/audience",
+            post(|State(source): State<Source>, body: String| async move {
                 let request: serde_json::Value = serde_json::from_str(&body).expect("the request is JSON");
-                directory.requests.lock().unwrap().push(request);
-                match directory.answer.lock().unwrap().clone() {
-                    Answer::Readers(readers) => (
-                        axum::http::StatusCode::OK,
-                        serde_json::json!({ "version": 1, "answer": { "readers": readers } }).to_string(),
-                    ),
+                source.requests.lock().unwrap().push(request);
+                match source.answer.lock().unwrap().clone() {
+                    Answer::Members(members) => {
+                        let members: Vec<serde_json::Value> = members
+                            .into_iter()
+                            .map(|(id, email)| match email {
+                                Some(email) => serde_json::json!({ "id": id, "verified_email": email }),
+                                None => serde_json::json!({ "id": id }),
+                            })
+                            .collect();
+                        (
+                            axum::http::StatusCode::OK,
+                            serde_json::json!({ "version": 1, "answer": { "members": members } }).to_string(),
+                        )
+                    }
                     Answer::Down => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom".to_string()),
                 }
             }),
         )
-        .with_state(directory.clone());
-    (format!("{}/membership", serve(router).await), directory)
+        .with_state(source.clone());
+    (format!("{}/audience", serve(router).await), source)
 }
 
 fn root() -> TrajectoryId {
-    TrajectoryId("membership-test".to_string())
+    TrajectoryId("audience-test".to_string())
 }
 
 fn actor() -> Actor {
@@ -149,9 +163,9 @@ fn last_offer(feedback: &str) -> appa_runtime::api::OfferId {
         .unwrap_or_else(|| panic!("no offer id in feedback: {feedback}"))
 }
 
-async fn narrowed(dir: &tempfile::TempDir, membership_url: &str) -> Arc<Runtime> {
+async fn narrowed(dir: &tempfile::TempDir, audience_url: &str) -> Arc<Runtime> {
     let path = dir.path().join("appa.toml");
-    std::fs::write(&path, POLICY.replace("MEMBERSHIP_URL", membership_url)).expect("the fixture writes");
+    std::fs::write(&path, POLICY.replace("AUDIENCE_URL", audience_url)).expect("the fixture writes");
     let config = Config::load(&path).expect("the fixture validates");
     let runtime = Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens"));
     assert_eq!(
@@ -179,55 +193,72 @@ fn audit_len(runtime: &Runtime) -> usize {
 }
 
 #[tokio::test]
-async fn a_group_argument_is_checked_against_the_directorys_answer() {
+async fn a_group_argument_is_checked_against_the_sources_answer() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
-    let (url, directory) = serve_directory().await;
+    let (url, source) = serve_source().await;
     let runtime = narrowed(&dir, &url).await;
 
-    directory.set(Answer::Readers(vec!["alice"]));
+    // Slack Alice's verified email canonicalizes to the same principal the delta wrote.
+    source.set(Answer::Members(vec![("slack:U-alice", Some("alice@corp.example"))]));
     assert_eq!(
         propose(&runtime, send("@team")).await,
         HookDecision::AllowCall { spawn: None }
     );
     ran(&runtime, send("@team")).await;
-    let requests = directory.requests();
+    let requests = source.requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0]["version"], 1);
-    assert_eq!(requests[0]["kind"], "membership");
-    assert_eq!(requests[0]["name"], "directory");
-    assert_eq!(requests[0]["artifact"], serde_json::json!({ "group": "team" }));
+    assert_eq!(requests[0]["kind"], "audience");
+    assert_eq!(requests[0]["name"], "slack");
+    assert_eq!(
+        requests[0]["declaration"]["templates"],
+        serde_json::json!(["viewer", "full-members", "user-group/<handle>"])
+    );
+    assert_eq!(
+        requests[0]["artifact"],
+        serde_json::json!({ "selector": "user-group/team" })
+    );
 
-    directory.set(Answer::Readers(vec!["alice", "carol"]));
+    // A member without a verified email keeps its qualified identity, which the
+    // narrowed audience does not hold.
+    source.set(Answer::Members(vec![
+        ("slack:U-alice", Some("alice@corp.example")),
+        ("slack:U-carol", None),
+    ]));
     assert!(matches!(
         propose(&runtime, send("@team")).await,
         HookDecision::DenyCall { .. }
     ));
-    assert_eq!(directory.requests().len(), 2);
+    assert_eq!(source.requests().len(), 2);
 
-    directory.set(Answer::Readers(vec![]));
+    // An empty member list is a complete answer.
+    source.set(Answer::Members(vec![]));
     assert_eq!(
         propose(&runtime, send("@nobody")).await,
         HookDecision::AllowCall { spawn: None }
     );
     ran(&runtime, send("@nobody")).await;
-    assert_eq!(directory.requests()[2]["artifact"]["group"], "nobody");
+    assert_eq!(
+        source.requests()[2]["artifact"],
+        serde_json::json!({ "selector": "user-group/nobody" })
+    );
 }
 
 #[tokio::test]
 async fn no_answer_leaves_the_call_unchecked_and_the_log_unchanged() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
-    let (url, directory) = serve_directory().await;
+    let (url, source) = serve_source().await;
     let runtime = narrowed(&dir, &url).await;
     let before = audit_len(&runtime);
 
-    directory.set(Answer::Down);
+    source.set(Answer::Down);
     assert!(matches!(
         propose(&runtime, send("@team")).await,
         HookDecision::DenyCall { .. }
     ));
     assert_eq!(audit_len(&runtime), before, "no answer is no engine act");
 
-    directory.set(Answer::Readers(vec!["bob"]));
+    source.set(Answer::Members(vec![("slack:U-bob", Some("bob@corp.example"))]));
     assert_eq!(
         propose(&runtime, send("@team")).await,
         HookDecision::AllowCall { spawn: None }
@@ -237,9 +268,26 @@ async fn no_answer_leaves_the_call_unchecked_and_the_log_unchanged() {
 }
 
 #[tokio::test]
-async fn public_and_literal_arguments_never_consult_the_directory() {
+async fn an_unconfigured_group_argument_fails_operationally() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
-    let (url, directory) = serve_directory().await;
+    let (url, source) = serve_source().await;
+    let runtime = narrowed(&dir, &url).await;
+    let before = audit_len(&runtime);
+
+    // `@offsite` is supplied dynamically and configured nowhere: an operational
+    // refusal that consults nothing and decides nothing.
+    assert!(matches!(
+        propose(&runtime, send("@offsite")).await,
+        HookDecision::DenyCall { .. }
+    ));
+    assert!(source.requests().is_empty());
+    assert_eq!(audit_len(&runtime), before);
+}
+
+#[tokio::test]
+async fn public_and_literal_arguments_never_consult_the_source() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, source) = serve_source().await;
     let runtime = narrowed(&dir, &url).await;
 
     assert!(matches!(
@@ -247,22 +295,22 @@ async fn public_and_literal_arguments_never_consult_the_directory() {
         HookDecision::DenyCall { .. }
     ));
     assert_eq!(
-        propose(&runtime, send("alice")).await,
+        propose(&runtime, send("email:alice@corp.example")).await,
         HookDecision::AllowCall { spawn: None }
     );
-    ran(&runtime, send("alice")).await;
+    ran(&runtime, send("email:alice@corp.example")).await;
     assert!(matches!(
         propose(&runtime, send("mallory")).await,
         HookDecision::DenyCall { .. }
     ));
-    assert!(directory.requests().is_empty(), "neither spelling names a group");
+    assert!(source.requests().is_empty(), "no spelling here names a group");
 }
 
 #[test]
-fn a_registered_membership_resolver_must_be_bound() {
+fn a_referenced_audience_source_must_be_bound() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let path = dir.path().join("appa.toml");
-    let unbound = POLICY.replace("[externals.membership.directory]\nurl = \"MEMBERSHIP_URL\"\n", "");
+    let unbound = POLICY.replace("[externals.audience.slack]\nurl = \"AUDIENCE_URL\"\n", "");
     std::fs::write(&path, unbound).expect("the fixture writes");
     let config = Config::load(&path).expect("the file validates");
     assert!(matches!(
@@ -279,23 +327,26 @@ fn send_capped() -> ProposedCall {
 }
 
 #[tokio::test]
-async fn a_cap_written_with_a_group_is_read_per_act_from_the_directory() {
+async fn a_cap_written_with_a_group_is_read_per_act_from_the_source() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
-    let (url, directory) = serve_directory().await;
+    let (url, source) = serve_source().await;
     let runtime = narrowed(&dir, &url).await;
     let before = audit_len(&runtime);
 
-    directory.set(Answer::Readers(vec!["bob"]));
+    source.set(Answer::Members(vec![("slack:U-bob", Some("bob@corp.example"))]));
     assert_eq!(
         propose(&runtime, send_capped()).await,
         HookDecision::AllowCall { spawn: None }
     );
-    let requests = directory.requests();
-    assert_eq!(requests.len(), 1, "one act, one consult per group");
-    assert_eq!(requests[0]["artifact"]["group"], "team");
+    let requests = source.requests();
+    assert_eq!(requests.len(), 1, "one act, one consult per selector");
+    assert_eq!(
+        requests[0]["artifact"],
+        serde_json::json!({ "selector": "user-group/team" })
+    );
     ran(&runtime, send_capped()).await;
 
-    directory.set(Answer::Readers(vec!["carol"]));
+    source.set(Answer::Members(vec![("slack:U-carol", Some("carol@corp.example"))]));
     let HookDecision::DenyCall { feedback, .. } = propose(&runtime, send_capped()).await else {
         panic!("the moved cap blocks");
     };
@@ -303,10 +354,10 @@ async fn a_cap_written_with_a_group_is_read_per_act_from_the_directory() {
         !feedback.contains("carol"),
         "the model hears a directory member: {feedback}"
     );
-    assert_eq!(directory.requests().len(), 2);
+    assert_eq!(source.requests().len(), 2);
 
     let undecided = audit_len(&runtime);
-    directory.set(Answer::Down);
+    source.set(Answer::Down);
     assert!(matches!(
         propose(&runtime, send_capped()).await,
         HookDecision::DenyCall { .. }
@@ -315,15 +366,17 @@ async fn a_cap_written_with_a_group_is_read_per_act_from_the_directory() {
     assert!(audit_len(&runtime) > before);
 
     let audit = serde_json::to_string(&runtime.audit(&root()).expect("the audit reads")).expect("the audit serializes");
-    assert!(!audit.contains("\"@"), "the audit names a group: {audit}");
+    assert!(!audit.contains("carol"), "the audit leaks a directory member: {audit}");
     drop(runtime);
 
+    // The reopened deployment replays the log — its pinned answers included — without
+    // consulting the source; only the fresh act reads it again.
     let config = Config::load(&dir.path().join("appa.toml")).expect("the fixture validates");
     let reopened = Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment reopens"));
-    directory.set(Answer::Readers(vec!["alice", "bob"]));
+    source.set(Answer::Members(vec![("slack:U-bob", Some("bob@corp.example"))]));
     assert_eq!(
         propose(&reopened, send_capped()).await,
         HookDecision::AllowCall { spawn: None }
     );
-    assert_eq!(directory.requests().len(), 4);
+    assert_eq!(source.requests().len(), 4);
 }

@@ -7,7 +7,7 @@
 # differs.
 
 [policy]
-version = 1
+version = 2
 trust_chain = ["suspicious", "vendor", "internal"]
 
 # Branching is an ordinary registered tool: the runtime checks this call like

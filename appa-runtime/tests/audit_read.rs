@@ -11,7 +11,7 @@ use appa_runtime_api::{
 
 const POLICY: &str = r#"
 [policy]
-version = 1
+version = 2
 trust_chain = ["suspicious", "internal"]
 
 [[policy.tool]]
@@ -325,7 +325,7 @@ async fn a_branch_records_its_seed_its_own_flows_and_how_its_return_crossed() {
 
 const ATTEST_POLICY: &str = r#"
 [policy]
-version = 1
+version = 2
 
 [[policy.tool]]
 name = "spawn"

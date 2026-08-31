@@ -5,7 +5,7 @@ use std::time::Duration;
 
 const CONFIG: &str = r#"
 [policy]
-version = 1
+version = 2
 
 [[policy.tool]]
 name = "Bash"
@@ -295,7 +295,7 @@ fn the_reload_route_installs_an_edited_policy_without_a_restart() {
     )
     .expect("PostToolUse answers");
 
-    write_config(dir.path(), &CONFIG.replace("version = 1", "version = 1\nbogus_key = 1"));
+    write_config(dir.path(), &CONFIG.replace("version = 2", "version = 2\nbogus_key = 1"));
     assert!(
         http(&reload, "POST", None).is_none(),
         "a file the dialect refuses must not install",

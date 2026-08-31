@@ -7,7 +7,7 @@ use appa_runtime::config::Config;
 
 const CONFIG: &str = r#"
 [policy]
-version = 1
+version = 2
 
 [[policy.tool]]
 name = "Bash"

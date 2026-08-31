@@ -153,9 +153,12 @@ struct ExternalsConfig {
     max_body_bytes: Option<usize>,
     #[serde(default)]
     annotators: BTreeMap<String, EndpointConfig>,
-    /// The directory endpoint of the policy's membership resolver, by resolver name.
+    /// The endpoint of each registered audience source, by provider name.
     #[serde(default)]
-    membership: BTreeMap<String, EndpointConfig>,
+    audience: BTreeMap<String, EndpointConfig>,
+    /// The endpoint of the policy's custom identity implementation, by its name.
+    #[serde(default)]
+    identity: BTreeMap<String, EndpointConfig>,
 }
 
 #[derive(serde::Deserialize)]
@@ -207,7 +210,8 @@ impl SessionInner {
                     .collect()
             };
             bindings.annotators = bound(parsed.annotators);
-            bindings.membership = bound(parsed.membership);
+            bindings.audience = bound(parsed.audience);
+            bindings.identity = bound(parsed.identity);
             bindings
         } else {
             let mut bindings = ExternalBindings::new(CONSULT_TIMEOUT, MAX_BODY_BYTES);
@@ -1051,7 +1055,7 @@ mod tests {
     use super::*;
 
     const POLICY: &str = r#"
-version = 1
+version = 2
 trust_chain = ["suspicious", "trusted"]
 
 [[tool]]
@@ -1221,7 +1225,7 @@ delta    = {}
     }
 
     const CHILD_POLICY: &str = r#"
-version = 1
+version = 2
 trust_chain = ["suspicious", "trusted"]
 
 [[tool]]

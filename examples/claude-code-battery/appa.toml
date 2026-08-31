@@ -6,7 +6,7 @@ include = [
 ]
 
 [policy]
-version = 1
+version = 2
 
 [policy.deployment]
 dispatch = "enforced"

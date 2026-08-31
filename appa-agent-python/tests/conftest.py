@@ -5,7 +5,7 @@ import pytest
 from appa_agent_python import Session
 
 POLICY = """
-version = 1
+version = 2
 trust_chain = ["suspicious", "trusted"]
 
 [[tool]]
@@ -42,7 +42,7 @@ TOOLS = ["delegate", "read_ticket", "memory_write", "deliver_result"]
 # The same deployment without the quarantine exit: nothing here needs a
 # confined application point, so it loads whether or not children are declared.
 PLAIN_POLICY = """
-version = 1
+version = 2
 trust_chain = ["suspicious", "trusted"]
 
 [[tool]]

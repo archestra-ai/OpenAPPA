@@ -26,7 +26,7 @@
 # To cover a whole organisation instead, match `owner:my-org`.
 
 [policy]
-version = 1
+version = 2
 
 # --- who am I: no outside content, nothing sent ---
 

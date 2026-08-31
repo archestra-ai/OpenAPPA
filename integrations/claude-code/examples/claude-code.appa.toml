@@ -15,7 +15,7 @@
 # list from a live session when it drifts.
 
 [policy]
-version = 1
+version = 2
 
 # --- tools whose results stay inside the session's trust boundary ---
 
