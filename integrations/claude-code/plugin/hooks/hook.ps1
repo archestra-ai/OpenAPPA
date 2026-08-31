@@ -10,11 +10,11 @@ param(
 # Installing the runtime is `appa init claude-code`'s job.
 $protected = $env:APPA_GATE -eq "1"
 
-$dataDir = if ($env:APPA_DATA_DIR) { $env:APPA_DATA_DIR } else { Join-Path $env:LOCALAPPDATA "appa" }
-$configDir = if ($env:APPA_CONFIG_DIR) { $env:APPA_CONFIG_DIR } else { Join-Path $env:APPDATA "appa" }
-$installDir = if ($env:APPA_INSTALL_DIR) { $env:APPA_INSTALL_DIR } else { Join-Path $dataDir "bin" }
-$binary = Join-Path $installDir "appa.exe"
-$legacyBinary = Join-Path $installDir "appa-runtime.exe"
+# appa init claude-code renders these into the deployment: the absolute binary,
+# config and data paths it resolved, and the endpoint every consumer shares.
+# Nothing here consults PATH or APPA_INSTALL_DIR.
+. (Join-Path $PSScriptRoot "appa-paths.ps1")
+$binary = $AppaBin
 
 if ($SessionContext) {
     if (-not $protected) {
@@ -24,10 +24,12 @@ if ($SessionContext) {
     exit 0
 }
 
+# APPA_RUNTIME_URL keeps both of its jobs: the URL a client talks to, and the
+# signal that the runtime answering it is the user's own to restart.
 $runtimeUrl = if ($env:APPA_RUNTIME_URL) {
     $env:APPA_RUNTIME_URL.TrimEnd("/")
 } else {
-    "http://127.0.0.1:8787"
+    $AppaEndpoint
 }
 
 function Get-HealthAnswer {
@@ -54,8 +56,7 @@ function Test-RuntimeHealthy {
 # makes the install take effect, at the cost of the protected sessions
 # already open, whose hooks fail closed until the start answers. The pid
 # arrives in an HTTP body from whoever holds the port, so only a process
-# named appa is ever stopped. The retired appa-runtime name is accepted
-# so init can replace pre-0.5 installs. Returns $true once the port refuses
+# named appa is ever stopped. Returns $true once the port refuses
 # or another starter has already replaced the runtime, $false when the
 # stale runtime cannot be stopped.
 function Stop-StaleRuntime {
@@ -68,13 +69,7 @@ function Stop-StaleRuntime {
     # the wait below sees the port refuse or that starter's replacement.
     $process = Get-Process -Id $stalePid -ErrorAction SilentlyContinue
     if ($null -ne $process) {
-        $expectedPath = if ($process.ProcessName -eq "appa") {
-            $binary
-        } elseif ($process.ProcessName -eq "appa-runtime") {
-            $legacyBinary
-        } else {
-            $null
-        }
+        $expectedPath = if ($process.ProcessName -eq "appa") { $binary } else { $null }
         if ($null -eq $expectedPath -or -not [String]::Equals(
             $process.Path,
             $expectedPath,
@@ -122,15 +117,15 @@ function Start-RuntimeIfDown {
     # The runtime writes the default policy on its first start and refuses
     # to start when it cannot. The policy and the database live in two
     # different directories on Windows, so both must exist first.
-    New-Item -ItemType Directory -Path $configDir -Force | Out-Null
-    New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
+    New-Item -ItemType Directory -Path (Split-Path -Parent $AppaConfig) -Force | Out-Null
+    New-Item -ItemType Directory -Path $AppaDataDir -Force | Out-Null
     # Start-Process joins ArgumentList into one Windows command line. Quote the
     # path tokens explicitly so the standard user directories may contain spaces.
-    $configPath = Join-Path $configDir "appa.toml"
-    $databasePath = Join-Path $dataDir "appa.db"
+    $databasePath = Join-Path $AppaDataDir "appa.db"
     Start-Process -FilePath $binary -WindowStyle Hidden -ArgumentList @(
         "runtime",
-        "--config", "`"$configPath`"",
+        "--listen", $AppaListen,
+        "--config", "`"$AppaConfig`"",
         "--db", "`"$databasePath`""
     ) | Out-Null
     # A wall-clock budget, not a count of probes: one probe is instant

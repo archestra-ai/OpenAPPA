@@ -8,7 +8,8 @@
 # runtime answers; any other exit makes the chained protection hook block,
 # and tells the install that it has nothing to report as running.
 # Installing the binary is not this script's job: `appa init claude-code`
-# installs it before registering this plugin.
+# installs it before registering this plugin, and renders its absolute path
+# into appa-paths.sh beside this file. Nothing here consults PATH.
 #
 # Concurrent starts need no lock. The runtime binds the loopback port, so
 # the first process to bind serves and every later one exits at once with
@@ -18,7 +19,12 @@
 # every start after it.
 set -u
 
-runtime_url=${APPA_RUNTIME_URL:-http://127.0.0.1:8787}
+# shellcheck source=integrations/claude-code/plugin/hooks/appa-paths.sh
+. "$(dirname "$0")/appa-paths.sh"
+
+# APPA_RUNTIME_URL keeps both of its jobs: the URL a client talks to, and the
+# signal that the runtime answering it is the user's own to restart.
+runtime_url=${APPA_RUNTIME_URL:-$APPA_ENDPOINT}
 
 # One cheap probe. A dead loopback port refuses at once on most systems but
 # hangs under some network stacks (WSL2 mirrored networking), where the
@@ -99,34 +105,19 @@ case $answer in
   stale\ *) stop_stale_runtime "${answer#stale }" || exit 1 ;;
 esac
 
-case "$(uname -s)" in
-  Darwin)
-    config_dir=${APPA_CONFIG_DIR:-"$HOME/Library/Application Support/appa"}
-    data_dir=${APPA_DATA_DIR:-"$HOME/Library/Application Support/appa"}
-    ;;
-  *)
-    config_dir=${APPA_CONFIG_DIR:-"${XDG_CONFIG_HOME:-$HOME/.config}/appa"}
-    data_dir=${APPA_DATA_DIR:-"${XDG_DATA_HOME:-$HOME/.local/share}/appa"}
-    ;;
-esac
-
-expected_binary=${APPA_INSTALL_DIR:-"$HOME/.local/bin"}/appa
-binary=$expected_binary
-if [ ! -x "$binary" ]; then
-  binary=$(command -v appa 2>/dev/null) || {
-    printf 'appa protection: appa is not installed; expected at %s. Run in a plain terminal: appa init claude-code\n' \
-      "$expected_binary" >&2
-    exit 1
-  }
+if [ ! -x "$APPA_BIN" ]; then
+  printf 'appa protection: appa is not installed at %s. Run in a plain terminal: appa init claude-code\n' \
+    "$APPA_BIN" >&2
+  exit 1
 fi
 
 # The runtime writes the default policy on its first start and refuses to
-# start when it cannot. Both directories must exist first: they are one
-# path on macOS and two different paths everywhere else.
-mkdir -p "$config_dir" "$data_dir"
+# start when it cannot.
+mkdir -p "$(dirname "$APPA_CONFIG")" "$APPA_DATA_DIR"
 
-nohup "$binary" runtime --config "$config_dir/appa.toml" --db "$data_dir/appa.db" \
-  >>"$data_dir/runtime.stdout.log" 2>>"$data_dir/runtime.stderr.log" \
+nohup "$APPA_BIN" runtime --listen "$APPA_LISTEN" \
+  --config "$APPA_CONFIG" --db "$APPA_DATA_DIR/appa.db" \
+  >>"$APPA_DATA_DIR/runtime.stdout.log" 2>>"$APPA_DATA_DIR/runtime.stderr.log" \
   </dev/null &
 
 # The whole start must finish inside the timeout hooks.json declares for
@@ -141,5 +132,5 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   sleep 1
 done
 printf 'appa protection: runtime did not become healthy at %s. Its own error is the last line of %s\n' \
-  "$runtime_url" "$data_dir/runtime.stderr.log" >&2
+  "$runtime_url" "$APPA_DATA_DIR/runtime.stderr.log" >&2
 exit 1
