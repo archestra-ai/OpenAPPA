@@ -11,7 +11,10 @@ if [ -z "${APPA_BIN:-}" ]; then
   if [ -n "${APPA_INSTALL_DIR:-}" ]; then
     APPA_BIN="$APPA_INSTALL_DIR/appa"
   else
-    APPA_BIN=appa
+    # Resolved to a path, not left as a bare name: the starter tests
+    # `[ -x "$APPA_BIN" ]`, which no command name satisfies. When nothing is on
+    # PATH the name stays, and the starter reports it as not installed.
+    APPA_BIN=$(command -v appa 2>/dev/null || echo appa)
   fi
 fi
 : "${APPA_ENDPOINT:=http://127.0.0.1:8787}"

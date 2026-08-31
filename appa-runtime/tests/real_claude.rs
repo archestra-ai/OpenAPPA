@@ -15,17 +15,8 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-fn stage_bundle(into: &Path) -> std::path::PathBuf {
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-    let staged = into.join("plugin-source");
-    let status = Command::new("sh")
-        .arg(repository.join("scripts/appa-stage-plugin-bundle.sh"))
-        .arg(&staged)
-        .status()
-        .expect("the staging script runs");
-    assert!(status.success(), "the staging script failed");
-    staged
-}
+mod common;
+use common::stage_bundle;
 
 fn claude(config: &Path, arguments: &[&str]) -> std::process::Output {
     Command::new("claude")

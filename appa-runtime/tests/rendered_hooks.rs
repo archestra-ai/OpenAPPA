@@ -20,23 +20,13 @@ use std::sync::mpsc;
 
 use appa_runtime::plugin_bundle::{Endpoint, Population, materialize};
 
+mod common;
+use common::stage_bundle;
+
 fn executable(path: &Path) {
     let mut permissions = fs::metadata(path).expect("fixture metadata").permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(path, permissions).expect("the fixture is executable");
-}
-
-/// A marketplace root staged by the same script the release runs.
-fn stage_bundle(into: &Path) -> std::path::PathBuf {
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-    let staged = into.join("plugin-source");
-    let status = Command::new("sh")
-        .arg(repository.join("scripts/appa-stage-plugin-bundle.sh"))
-        .arg(&staged)
-        .status()
-        .expect("the staging script runs");
-    assert!(status.success(), "the staging script failed");
-    staged
 }
 
 /// A runtime stand-in on a free loopback port. Records the paths it is asked

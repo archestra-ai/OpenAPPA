@@ -175,7 +175,7 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
     // 7. Launcher, statusline, runtime, and the fingerprint backstop.
     let plugin_root = installed_plugin_root(&paths.claude_dir)?;
     install_clappa(launcher_dir)?;
-    install_statusline(&plugin_root, &paths, &endpoint)?;
+    install_statusline(&plugin_root, &paths)?;
     start_runtime(&plugin_root, &deployed_appa, &endpoint)?;
     cleanup_plugin_recoveries(&paths.data_dir);
 
@@ -1096,7 +1096,7 @@ fn install_disabled_clappa(install_dir: &Path) -> Result<(), InitError> {
     Ok(())
 }
 
-fn install_statusline(plugin_root: &Path, paths: &DeploymentPaths, endpoint: &Endpoint) -> Result<(), InitError> {
+fn install_statusline(plugin_root: &Path, paths: &DeploymentPaths) -> Result<(), InitError> {
     #[cfg(windows)]
     let (source, target) = (
         plugin_root.join("statusline.ps1"),
@@ -1111,8 +1111,6 @@ fn install_statusline(plugin_root: &Path, paths: &DeploymentPaths, endpoint: &En
         return Err(InitError::MissingPluginFile(source));
     }
 
-    // The copy lives outside the deployment tree, so the endpoint is rendered
-    // into it here rather than during materialization.
     let settings_path = paths.claude_dir.join("settings.json");
     let mut settings = if settings_path.exists() {
         let bytes = fs::read(&settings_path).map_err(|source| InitError::WriteFile {
@@ -1138,9 +1136,6 @@ fn install_statusline(plugin_root: &Path, paths: &DeploymentPaths, endpoint: &En
         path: target.clone(),
         source,
     })?;
-    // The copy lands outside the deployment tree, so materialization never sees
-    // it and the endpoint is rendered into it here.
-    plugin_bundle::render_endpoint_in_file(&target, endpoint)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

@@ -22,6 +22,19 @@ pub fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
+/// The marketplace root a developer passes to `--plugin-source`, staged into
+/// `into` by the same script the release runs.
+pub fn stage_bundle(into: &Path) -> PathBuf {
+    let staged = into.join("plugin-source");
+    let status = std::process::Command::new("sh")
+        .arg(repo_root().join("scripts/appa-stage-plugin-bundle.sh"))
+        .arg(&staged)
+        .status()
+        .expect("the staging script runs");
+    assert!(status.success(), "the staging script failed");
+    staged
+}
+
 /// Every offer a feedback body names, in the order the feedback lists
 /// them. Which end a suite takes is its own assertion: a remedy plan
 /// that stages several offers surfaces one line each.

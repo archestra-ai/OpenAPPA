@@ -19,7 +19,7 @@ use thiserror::Error;
 /// Files and directories every plugin source must carry, in the marketplace-root
 /// shape `scripts/appa-stage-plugin-bundle.sh` produces. One validator serves
 /// both source resolution and the reuse check on an existing deployment.
-const REQUIRED_FILES: [&str; 6] = [
+const REQUIRED_FILES: [&str; 8] = [
     ".claude-plugin/marketplace.json",
     "plugin/.claude-plugin/plugin.json",
     "plugin/hooks/hooks.json",
@@ -28,6 +28,12 @@ const REQUIRED_FILES: [&str; 6] = [
     // Materialization keeps both scripts; only the inactive map is removed.
     "plugin/hooks/hook.sh",
     "plugin/hooks/hook.ps1",
+    // Both statuslines, for the same reason and one more: init copies the one
+    // for its platform after the plugin has already been replaced, and Windows
+    // reaches that step without having touched the file at all. Missing here is
+    // a refusal before anything is mutated; missing there is a half-upgrade.
+    "plugin/statusline.sh",
+    "plugin/statusline.ps1",
     "website/content/docs/contracts.md",
 ];
 const REQUIRED_DIRS: [&str; 2] = ["plugin", "batteries"];
@@ -880,25 +886,6 @@ fn render_endpoint(root: &Path, endpoint_url: &str) -> Result<(), PluginBundleEr
     Ok(())
 }
 
-/// Substitute the endpoint into one file outside the deployment tree, such as an
-/// installed statusline copy.
-pub fn render_endpoint_in_file(path: &Path, endpoint: &Endpoint) -> Result<(), PluginBundleError> {
-    if endpoint.url() == DEFAULT_ENDPOINT_URL {
-        return Ok(());
-    }
-    let bytes = fs::read(path).map_err(|source| PluginBundleError::ReadSource {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    let Ok(text) = String::from_utf8(bytes) else {
-        return Ok(());
-    };
-    if !text.contains(DEFAULT_ENDPOINT_URL) {
-        return Ok(());
-    }
-    write_file(path, text.replace(DEFAULT_ENDPOINT_URL, endpoint.url()).as_bytes())
-}
-
 fn write_file(path: &Path, bytes: &[u8]) -> Result<(), PluginBundleError> {
     fs::write(path, bytes).map_err(|source| PluginBundleError::WriteDeployment {
         path: path.to_path_buf(),
@@ -1503,6 +1490,28 @@ mod tests {
         // The platform selection removes the map this platform does not use.
         assert!(!deployment.root.join(WINDOWS_HOOKS).is_file());
         fs::remove_file(&archive).unwrap();
+    }
+
+    /// Every required file, refused at validation rather than partway through an
+    /// install. The ones init reaches only after the Claude plugin has already
+    /// been replaced -- the platform statuslines -- are the reason this covers
+    /// the whole list instead of the file some earlier failure happens to reach
+    /// first: on Windows nothing touches `statusline.ps1` until that point, and
+    /// a refusal there would leave a half-upgraded installation.
+    #[test]
+    fn a_source_missing_any_required_file_is_refused() {
+        for missing in REQUIRED_FILES {
+            let source = tempfile::tempdir().unwrap();
+            sample_tree(source.path());
+            fs::remove_file(source.path().join(missing)).unwrap();
+
+            let refused = validate_tree(source.path(), TreeShape::Source);
+
+            assert!(
+                matches!(refused, Err(PluginBundleError::InvalidSource { .. })),
+                "a source without {missing} was accepted",
+            );
+        }
     }
 
     #[test]
