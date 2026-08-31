@@ -37,30 +37,33 @@ receives it, in the `Agent` tool's result.
 
 ## Install
 
-This flow needs Cargo, the `claude` command, and `curl`. Install the native CLI
-and let it initialize Claude Code:
-
-```sh
-cargo install --path appa-runtime --force
-appa init claude-code
-```
-
-Init installs `clappa` beside `appa` so the short command works in later examples.
+This flow needs the `claude` command, `curl`, and Cargo when building from a checkout.
 
 `appa init` installs one bundle: the plugin belonging to the running binary's
 own release, and that binary. Each build knows the SHA-256 of its release's
 plugin artifact and accepts no other bytes, so version X can never install
-version Y's plugin. The artifact is downloaded once, verified against that
-digest before anything outside a temporary file changes, and cached, so a later
-init needs no network. The result does not depend on the working directory.
+version Y's plugin. The result does not depend on the working directory.
 
-A build from a checkout has no baked-in digest. It refuses to download and asks
-for an explicit source:
+From a release binary, that digest is baked in. The artifact is downloaded once,
+verified against the digest before anything outside a temporary file changes,
+and cached, so a later init needs no network:
 
 ```sh
-sh scripts/appa-stage-plugin-bundle.sh /tmp/appa-plugin
-appa init claude-code --plugin-source /tmp/appa-plugin
+appa init claude-code
 ```
+
+A build from a checkout has no baked-in digest, because the digest exists only
+once a release has published the artifact. Such a build refuses to download and
+requires an explicit source: stage the bundle from the same checkout and name it.
+
+```sh
+cargo install --path appa-runtime --force
+plugin=$(mktemp -d)/bundle
+sh scripts/appa-stage-plugin-bundle.sh "$plugin"
+appa init claude-code --plugin-source "$plugin"
+```
+
+Init installs `clappa` beside `appa` so the short command works in later examples.
 
 Init uninstalls an existing user-scoped APPA plugin and replaces its marketplace
 before installing, so branch tests never stack two APPA hook sets.

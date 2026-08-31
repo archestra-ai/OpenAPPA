@@ -16,29 +16,35 @@ fi
 outdir=$1
 repo=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 
-if [ -e "$outdir" ] && [ -n "$(ls -A -- "$outdir" 2>/dev/null)" ]; then
-  echo "appa-stage-plugin-bundle: $outdir exists and is not empty" >&2
+# The output directory must not exist: a single `mkdir` both reserves it and
+# proves it is ours. Checking emptiness and then creating would leave a window
+# in which anything under an attacker-writable parent such as /tmp could be
+# swapped for a symlink, and every copy and chmod below would follow it.
+if ! mkdir -- "$outdir" 2>/dev/null; then
+  echo "appa-stage-plugin-bundle: cannot create $outdir: it must not exist yet, and its parent must" >&2
   exit 1
 fi
 
-mkdir -p -- "$outdir"
-outdir=$(CDPATH='' cd -- "$outdir" && pwd)
+# Everything is written through this working directory rather than through the
+# pathname, so the destination stays the directory just created even if the name
+# is replaced afterwards.
+CDPATH='' cd -- "$outdir" || exit 1
 
-cp -R -- "$repo/integrations/claude-code/.claude-plugin" "$outdir/.claude-plugin"
-cp -R -- "$repo/integrations/claude-code/plugin" "$outdir/plugin"
-cp -R -- "$repo/integrations/claude-code/examples" "$outdir/examples"
-cp -R -- "$repo/batteries" "$outdir/batteries"
-cp -- "$repo/integrations/claude-code/README.md" "$outdir/README.md"
-cp -- "$repo/integrations/claude-code/live-gate-check.py" "$outdir/live-gate-check.py"
+cp -R -- "$repo/integrations/claude-code/.claude-plugin" ./.claude-plugin
+cp -R -- "$repo/integrations/claude-code/plugin" ./plugin
+cp -R -- "$repo/integrations/claude-code/examples" ./examples
+cp -R -- "$repo/batteries" ./batteries
+cp -- "$repo/integrations/claude-code/README.md" ./README.md
+cp -- "$repo/integrations/claude-code/live-gate-check.py" ./live-gate-check.py
 
-mkdir -p -- "$outdir/website/content/docs"
-cp -- "$repo/website/content/docs/contracts.md" "$outdir/website/content/docs/contracts.md"
+mkdir -p -- ./website/content/docs
+cp -- "$repo/website/content/docs/contracts.md" ./website/content/docs/contracts.md
 
 # Modes are applied by init when it materializes a deployment; these are for
 # anyone who unpacks the archive by hand.
-find "$outdir" -type d -exec chmod 755 {} +
-find "$outdir" -type f -exec chmod 644 {} +
-chmod 755 "$outdir/plugin/statusline.sh" "$outdir/plugin/hooks/ensure-runtime.sh"
+find . -type d -exec chmod 755 {} +
+find . -type f -exec chmod 644 {} +
+chmod 755 ./plugin/statusline.sh ./plugin/hooks/ensure-runtime.sh
 
 for required in \
   .claude-plugin/marketplace.json \
@@ -48,7 +54,7 @@ for required in \
   batteries/README.md \
   website/content/docs/contracts.md
 do
-  if [ ! -f "$outdir/$required" ]; then
+  if [ ! -f "./$required" ]; then
     echo "appa-stage-plugin-bundle: staged tree is missing $required" >&2
     exit 1
   fi

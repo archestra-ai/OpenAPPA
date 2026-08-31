@@ -24,6 +24,14 @@ on:
         required: true
         default: main
         type: string
+      plugin_sha256:
+        description: >-
+          SHA-256 of the plugin artifact these binaries must accept. Leave empty
+          to build binaries that can only initialize from an explicit
+          --plugin-source; the release workflow always supplies it.
+        required: false
+        default: ""
+        type: string
 
 permissions: {}
 

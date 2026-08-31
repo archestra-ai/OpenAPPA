@@ -626,16 +626,20 @@ pub fn materialize(
 
 /// Whether an existing deployment can be reused as-is.
 ///
-/// Structural validation plus a byte comparison of the one generated file. This
-/// is deliberately not a content hash of every file: a tree whose `batteries/`
+/// Structural validation plus a byte comparison of both generated files. Both
+/// are checked on every platform, not just the one whose hooks are active here:
+/// a deployment is a single artifact, and a stale PowerShell paths file would
+/// otherwise survive every rerun performed from a POSIX host. This is
+/// deliberately not a content hash of every file: a tree whose `batteries/`
 /// contents were edited in place is not detected, and init's convergence claim
 /// is scoped to match.
 fn reusable(published: &Path, plan: &DeploymentPlan) -> Result<(), String> {
     validate_tree(published, TreeShape::Deployment).map_err(|error| error.to_string())?;
-    let rendered = published.join(PATHS_SH);
-    let current = fs::read(&rendered).map_err(|error| format!("{PATHS_SH} is unreadable: {error}"))?;
-    if current != paths_sh(plan).into_bytes() {
-        return Err(format!("{PATHS_SH} is stale"));
+    for (name, expected) in [(PATHS_SH, paths_sh(plan)), (PATHS_PS1, paths_ps1(plan))] {
+        let current = fs::read(published.join(name)).map_err(|error| format!("{name} is unreadable: {error}"))?;
+        if current != expected.into_bytes() {
+            return Err(format!("{name} is stale"));
+        }
     }
     Ok(())
 }
@@ -1320,22 +1324,29 @@ mod tests {
         assert!(quarantined[0].path().join("tree").is_dir());
     }
 
+    /// Either generated paths file, whichever platform's hooks are active on the
+    /// host running init. A deployment is one artifact: a PowerShell paths file
+    /// left stale would otherwise survive every rerun performed from POSIX.
     #[test]
     fn a_stale_paths_file_is_repaired_on_rerun() {
-        let source = tempfile::tempdir().unwrap();
-        let deployments = tempfile::tempdir().unwrap();
-        sample_tree(source.path());
+        for (name, damaged, restored) in [
+            (PATHS_SH, "APPA_BIN='/tmp/hostile'\n", "APPA_BIN='/data/bin/appa'"),
+            (PATHS_PS1, "$AppaBin = '/tmp/hostile'\n", "$AppaBin = '/data/bin/appa'"),
+        ] {
+            let source = tempfile::tempdir().unwrap();
+            let deployments = tempfile::tempdir().unwrap();
+            sample_tree(source.path());
 
-        let first = deploy(source.path(), deployments.path(), DEFAULT_ENDPOINT_URL);
-        fs::write(first.root.join(PATHS_SH), "APPA_BIN='/tmp/hostile'\n").unwrap();
+            let first = deploy(source.path(), deployments.path(), DEFAULT_ENDPOINT_URL);
+            fs::write(first.root.join(name), damaged).unwrap();
 
-        let repaired = deploy(source.path(), deployments.path(), DEFAULT_ENDPOINT_URL);
-        assert!(!repaired.reused);
-        assert!(
-            fs::read_to_string(repaired.root.join(PATHS_SH))
-                .unwrap()
-                .contains("APPA_BIN='/data/bin/appa'")
-        );
+            let repaired = deploy(source.path(), deployments.path(), DEFAULT_ENDPOINT_URL);
+            assert!(!repaired.reused, "{name} was reused while stale");
+            assert!(
+                fs::read_to_string(repaired.root.join(name)).unwrap().contains(restored),
+                "{name} was not restored",
+            );
+        }
     }
 
     #[test]

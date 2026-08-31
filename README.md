@@ -65,15 +65,19 @@ fastest way to watch a policy make a decision on real work:
 
 ```sh
 cargo install --path appa-runtime --force
-appa init claude-code
+plugin=$(mktemp -d)/bundle
+sh scripts/appa-stage-plugin-bundle.sh "$plugin"
+appa init claude-code --plugin-source "$plugin"
 ```
 
-Initialization installs the `clappa` launcher beside `appa`.
+A release binary carries the digest of its own release's plugin and needs no
+`--plugin-source`; a build from a checkout has no such digest, so it is given
+the bundle staged from that same checkout.
 
-The native `appa` command installs this checkout's Claude Code plugin, the
-runtime deployment, statusline, and `clappa` launcher. It replaces an existing
-APPA plugin instead of stacking a second copy and preserves an existing policy
-or custom statusline. Start `clappa`, then run `/appa-guide init` to bring the
+The native `appa` command installs the plugin, the runtime deployment,
+statusline, and `clappa` launcher. It replaces an existing APPA plugin instead
+of stacking a second copy and preserves an existing policy or custom
+statusline. Start `clappa`, then run `/appa-guide init` to bring the
 session's MCP servers into the policy. Plain `claude` sessions stay untouched.
 
 ![A protected Claude Code session refuses to post content from a private meeting recording to a public GitHub repo, and explains why](website/public/images/claude-code-blocked-flow.png)

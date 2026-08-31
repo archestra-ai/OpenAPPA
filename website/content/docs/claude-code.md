@@ -13,16 +13,20 @@ You need Cargo, Claude Code, and `curl`.
 
 ```sh
 cargo install --path appa-runtime --force
-appa init claude-code
+plugin=$(mktemp -d)/bundle
+sh scripts/appa-stage-plugin-bundle.sh "$plugin"
+appa init claude-code --plugin-source "$plugin"
 ```
 
 Initialization installs `clappa` beside `appa` so the short command works below.
 
 The native `appa` command installs the runtime, the matching Claude Code
-plugin, the statusline, and `clappa`, a protected way to start Claude Code.
-From a checkout it uses that checkout's plugin, replacing an existing APPA
-installation instead of stacking another hook set. It preserves an existing
-policy and custom statusline. It does not replace `claude` or change how
+plugin, the statusline, and `clappa`, a protected way to start Claude Code. Each
+build accepts exactly one plugin artifact: a release binary knows the digest of
+its own release's artifact and downloads it, and a build from a checkout has no
+such digest and is given the bundle staged from that checkout. Init replaces an
+existing APPA installation instead of stacking another hook set. It preserves an
+existing policy and custom statusline. It does not replace `claude` or change how
 ordinary sessions start.
 
 ## 1. Teach OpenAPPA about your tools
