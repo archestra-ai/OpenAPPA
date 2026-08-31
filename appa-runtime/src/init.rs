@@ -431,7 +431,9 @@ fn stop_legacy_runtime_at(target: &Path) -> Result<(), InitError> {
 
 #[cfg(windows)]
 fn stop_legacy_runtime_at(target: &Path) -> Result<(), InitError> {
-    stop_windows_process_at(target, "appa-runtime")
+    // Legacy cleanup removes the file next, and a surviving process surfaces
+    // there as a failed removal.
+    stop_windows_processes_at(target, "appa-runtime").map(drop)
 }
 
 /// Stop any runtime executing the retired install path before anything is
@@ -567,7 +569,23 @@ fn executable_of(_pid: i32) -> Option<PathBuf> {
 
 #[cfg(windows)]
 fn stop_processes_executing(target: &Path) -> Result<Vec<i32>, InitError> {
-    stop_windows_process_at(target, "appa")
+    stop_windows_processes_at(target, "appa")
+}
+
+/// The comparison operand on Windows: the fully resolved path, folded for the
+/// case-insensitive filesystem.
+///
+/// Both sides are canonicalized, rather than trusting `Get-Process.Path` to
+/// return one particular form. `fs::canonicalize` yields the Win32 final path,
+/// whose extended-length prefix is stripped so the two sides can be compared as
+/// written. This is equality of resolved final paths, not file-ID identity, so
+/// two hard links to one file at different paths compare unequal -- a gap named
+/// in the deployment documentation rather than papered over.
+#[cfg(windows)]
+fn windows_identity(path: &Path) -> Option<String> {
+    let canonical = fs::canonicalize(path).ok()?;
+    let text = canonical.to_str()?;
+    Some(text.strip_prefix(r"\\?\").unwrap_or(text).to_lowercase())
 }
 
 /// Whether two paths name the same file, resolving symlinks.
@@ -594,7 +612,7 @@ fn install_runtime(source: &Path, target: &Path) -> Result<(), InitError> {
     }
     #[cfg(windows)]
     if target.exists() {
-        stop_windows_process_at(target, "appa")?;
+        stop_windows_processes_at(target, "appa")?;
         fs::remove_file(target).map_err(|source| InitError::InstallRuntime {
             path: target.to_path_buf(),
             source,
@@ -628,30 +646,100 @@ fn install_runtime(source: &Path, target: &Path) -> Result<(), InitError> {
     Ok(())
 }
 
+/// Terminate every `process_name` process whose resolved executable is
+/// `target`, and answer with those still alive afterwards.
+///
+/// PowerShell only enumerates and stops. The comparison happens here, so
+/// Windows and Unix apply the same rule and neither swallows a discovery or
+/// termination failure the way `-ErrorAction SilentlyContinue` did.
 #[cfg(windows)]
-fn stop_windows_process_at(target: &Path, process_name: &str) -> Result<(), InitError> {
-    let output = Command::new("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            "$target = $env:APPA_RUNTIME_REPLACE_TARGET; $name = $env:APPA_RUNTIME_REPLACE_NAME; Get-Process -Name $name -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $target } | Stop-Process -Force -ErrorAction SilentlyContinue; exit 0",
-        ])
-        .env("APPA_RUNTIME_REPLACE_TARGET", target)
-        .env("APPA_RUNTIME_REPLACE_NAME", process_name)
-        .output()
-        .map_err(|source| InitError::InstallRuntime {
-            path: target.to_path_buf(),
-            source,
-        })?;
-    if output.status.success() {
-        return Ok(());
+fn stop_windows_processes_at(target: &Path, process_name: &str) -> Result<Vec<i32>, InitError> {
+    let Some(identity) = windows_identity(target) else {
+        // A path that will not resolve is reported and skipped, never killed.
+        return Ok(Vec::new());
+    };
+
+    let listed = powershell(
+        "Get-Process -Name $env:APPA_STOP_NAME -ErrorAction SilentlyContinue | \
+         ForEach-Object { \"$($_.Id)`t$($_.Path)\" }",
+        [("APPA_STOP_NAME", process_name.to_owned())],
+    )?;
+
+    let own = std::process::id() as i32;
+    let mut targets = Vec::new();
+    for line in listed.lines() {
+        let Some((pid, path)) = line.trim_end().split_once('\t') else {
+            continue;
+        };
+        let Ok(pid) = pid.trim().parse::<i32>() else {
+            continue;
+        };
+        // init commonly runs from the retired path itself.
+        if pid == own {
+            continue;
+        }
+        // An empty or access-denied path is reported and skipped.
+        if path.is_empty() {
+            tracing::debug!(pid, "skipping a process whose executable path is unreadable");
+            continue;
+        }
+        if windows_identity(Path::new(path)).as_deref() == Some(identity.as_str()) {
+            targets.push(pid);
+        }
     }
-    // Process discovery is a migration convenience. Continue the install and let
-    // runtime identity verification reject a surviving daemon.
-    Ok(())
+    if targets.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let ids = targets
+        .iter()
+        .map(i32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let survivors = powershell(
+        "$ids = $env:APPA_STOP_IDS -split ',' | ForEach-Object { [int]$_ }; \
+         foreach ($id in $ids) { Stop-Process -Id $id -Force -ErrorAction Stop }; \
+         $deadline = (Get-Date).AddSeconds(10); \
+         while ((Get-Date) -lt $deadline) { \
+           $alive = @($ids | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue }); \
+           if ($alive.Count -eq 0) { break }; \
+           Start-Sleep -Milliseconds 200 \
+         }; \
+         $ids | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue }",
+        [("APPA_STOP_IDS", ids)],
+    )?;
+
+    Ok(survivors
+        .lines()
+        .filter_map(|line| line.trim().parse::<i32>().ok())
+        .collect())
+}
+
+/// Run one PowerShell command, surfacing its failure rather than exiting 0.
+#[cfg(windows)]
+fn powershell<const N: usize>(
+    command: &str,
+    environment: [(&str, String); N],
+) -> Result<String, InitError> {
+    let mut process = Command::new("powershell.exe");
+    process.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        command,
+    ]);
+    for (name, value) in environment {
+        process.env(name, value);
+    }
+    let output = process.output().map_err(|error| InitError::Starter(error.to_string()))?;
+    if !output.status.success() {
+        return Err(InitError::Starter(
+            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 fn create_default_config(path: &Path) -> Result<bool, InitError> {
