@@ -414,6 +414,25 @@ Both `config.json` and each episode's `result.json` record
 not causal proof. Check episode logs for the proposed shortcut, guarded policy
 feedback, and a subsequent supported action before claiming recovery.
 
+### The nightly canary
+
+`canary` is the tripwire behind the `Nightly Canary` workflow
+(`.github/workflows/nightly-canary.yml`): the `appa` and `appa-open` arms over
+the full scenario set, one rep per cell, always under `redteam-chaos`, on a
+pinned model pair (`openai/gpt-5.6-luna`, `deepseek/deepseek-v4-flash-0731`,
+override with repeatable `--model`).
+
+```bash
+uv run bench-corp canary
+```
+
+It exits non-zero when the harness broke (episode errors, a missing arm,
+vanished security checks) or the defended arm leaked. The empty arm never
+gates; an all-clean empty arm only warns that the attack fixtures may have
+dulled. The run root gains `canary.json` (the verdict), `report.md`, and
+`slack.json`, with per-model `summary.json`/`config.json` under
+`runs/<run-id>/<model-slug>/`.
+
 ---
 
 ## Artifacts & Execution Logs

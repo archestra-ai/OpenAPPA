@@ -1,0 +1,108 @@
+name: Nightly Canary
+
+# Nightly defended-vs-empty canary: `bench-corp canary` runs both APPA arms
+# (guarded `appa`, empty `appa-open`) over the full scenario set under the
+# redteam-chaos prompt profile, on the pinned model pair. Red means the
+# harness broke or the defended arm leaked — never a model-score dip; the
+# empty arm is reported for context only.
+#
+# Results stay internal: the run directory is uploaded as a workflow
+# artifact, the verdict goes to Slack, and nothing is committed back.
+#
+# Required repository secrets: OPENROUTER_API_KEY (model access),
+# APPA_CANARY_SLACK_WEBHOOK_URL (incoming webhook; skipped when absent).
+# Optional GCS copy of the run records: set the APPA_CANARY_GCS_BUCKET
+# repository variable (bucket name, no gs:// prefix) and grant the
+# APPA_GCP_SERVICE_ACCOUNT / APPA_GCP_WORKLOAD_IDENTITY_PROVIDER identity
+# write access to it.
+
+on:
+  schedule:
+    - cron: "30 2 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: nightly-canary
+  cancel-in-progress: false
+
+jobs:
+  canary:
+    name: Defended vs empty
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    permissions:
+      contents: read
+      id-token: write # Workload Identity Federation for the optional GCS upload.
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Setup Rust
+        run: rustup show
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+
+      - name: Run canary
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: uv run --project bench/corp bench-corp canary
+
+      - name: Locate run records
+        if: always()
+        id: rundir
+        run: |
+          dir=$(find bench/corp/runs -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -n 1 || true)
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+
+      - name: Upload run records
+        if: ${{ always() && steps.rundir.outputs.dir != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: canary-run-${{ github.run_id }}
+          path: ${{ steps.rundir.outputs.dir }}
+
+      - name: Authenticate to Google Cloud
+        if: ${{ always() && vars.APPA_CANARY_GCS_BUCKET != '' && steps.rundir.outputs.dir != '' }}
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          service_account: ${{ secrets.APPA_GCP_SERVICE_ACCOUNT }}
+          workload_identity_provider: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+
+      - name: Set up Google Cloud
+        if: ${{ always() && vars.APPA_CANARY_GCS_BUCKET != '' && steps.rundir.outputs.dir != '' }}
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      - name: Upload run records to GCS
+        if: ${{ always() && vars.APPA_CANARY_GCS_BUCKET != '' && steps.rundir.outputs.dir != '' }}
+        env:
+          BUCKET: ${{ vars.APPA_CANARY_GCS_BUCKET }}
+          RUN_DIR: ${{ steps.rundir.outputs.dir }}
+        run: gcloud storage cp -r "$RUN_DIR" "gs://$BUCKET/canary/"
+
+      - name: Notify Slack
+        if: always()
+        env:
+          WEBHOOK: ${{ secrets.APPA_CANARY_SLACK_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_DIR: ${{ steps.rundir.outputs.dir }}
+        run: |
+          if [ -z "$WEBHOOK" ]; then
+            echo "APPA_CANARY_SLACK_WEBHOOK_URL not configured; skipping"
+            exit 0
+          fi
+          if [ -n "$RUN_DIR" ] && [ -f "$RUN_DIR/slack.json" ]; then
+            curl -sf -X POST -H 'Content-Type: application/json' \
+              --data @"$RUN_DIR/slack.json" "$WEBHOOK"
+          else
+            printf '{"text":"🔥 APPA nightly canary crashed before reporting: %s"}' "$RUN_URL" |
+              curl -sf -X POST -H 'Content-Type: application/json' --data @- "$WEBHOOK"
+          fi
