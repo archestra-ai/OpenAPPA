@@ -497,9 +497,9 @@ pub(crate) fn validate_coverage(
         "deployment starting label".to_string()
     })?;
 
-    // Coverage names declared tools only: the wildcard covers a name at a proposal, but a
-    // deployment declaration naming an unwritten tool is a typo.
-    let registered = |tool: &ToolName| registry.declared(tool) || registry.provider_run_annotation(tool).is_some();
+    // Without a wildcard, a deployment declaration naming an unwritten tool is a typo.
+    // With one, every name is a runnable annotated call, so coverage accepts it.
+    let registered = |tool: &ToolName| registry.classify(tool).is_some();
     for tool in declaration.executor_exceptions.keys() {
         if !registered(tool) {
             return Err(LoadError::UnknownDeploymentTool {

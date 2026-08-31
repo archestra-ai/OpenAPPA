@@ -1025,6 +1025,13 @@ fn parse_declared_audience(list: &[String], context: &str) -> Result<DeclaredAud
 /// literal, so a group mention has no place here, and `public` — always admissible — is never
 /// listed.
 fn parse_annotator_readers(list: &[String], context: &str) -> Result<BTreeSet<ReaderId>, ConfigError> {
+    // `audiences = []` closes the mandate to `public` answers only — the one spelling of
+    // that bound, distinct from an omitted mandate, which admits every reader the policy
+    // names. (An ordinary declared audience still refuses the empty list: a value some
+    // sink reads must name somebody.)
+    if list.is_empty() {
+        return Ok(BTreeSet::new());
+    }
     match parse_declared_audience(list, context)? {
         DeclaredAudience::Public => Err(ConfigError::BadAudience {
             context: context.to_string(),
@@ -1418,6 +1425,50 @@ attention = ["operator-signoff", "legal-review"]
             Config::from_toml_str("version = 1\n[[annotator]]\nname = \"a\"\nranks = [\"nope\"]\n"),
             Err(ConfigError::UnknownTrustRank { .. })
         ));
+    }
+
+    #[test]
+    fn an_empty_annotator_audience_mandate_closes_it_to_public_answers() {
+        let policy = r#"
+version = 1
+
+[[annotator]]
+name = "acl"
+audiences = []
+
+[[tool]]
+name = "post"
+delta = { audience = ["alice"] }
+
+[[tool]]
+name = "fetch"
+annotator = "acl"
+"#;
+        let config = Config::from_toml_str(policy).expect("the public-only mandate loads");
+        let mandate = config
+            .registry()
+            .annotator_mandate(&AnnotatorName::new("acl"))
+            .expect("acl registers");
+        assert_eq!(mandate.audiences().count(), 0, "no named reader is admissible");
+    }
+
+    #[test]
+    fn a_wildcard_covers_a_confined_result_the_policy_never_names() {
+        let policy = r#"
+version = 1
+
+[deployment]
+dispatch = "enforced"
+confined_results = ["unwritten"]
+
+[[annotator]]
+name = "acl"
+
+[[tool]]
+name = "*"
+annotator = "acl"
+"#;
+        Config::from_toml_str(policy).expect("the wildcard covers the confined tool");
     }
 
     #[test]

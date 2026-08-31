@@ -244,22 +244,6 @@ pub struct ToolAnnotation {
 }
 
 impl ToolAnnotation {
-    /// The complete call as a consult artifact — what an Annotator without an input mapping
-    /// reads: the proposed tool name, this annotation's description when the policy declares
-    /// one, and the canonical arguments. A tool without a description sends no `description`
-    /// key. The name is the one the actor proposed, not the annotation's own: a declaration
-    /// selected by pattern answers for many names, and a classifier that saw the pattern would
-    /// be judging a call it cannot identify.
-    pub fn complete_call(&self, called: &ToolName, arguments: &serde_json::Value) -> serde_json::Value {
-        let mut call = serde_json::Map::new();
-        call.insert("name".into(), serde_json::Value::String(called.as_str().to_string()));
-        if let Some(description) = &self.description {
-            call.insert("description".into(), serde_json::Value::String(description.clone()));
-        }
-        call.insert("arguments".into(), arguments.clone());
-        serde_json::Value::Object(call)
-    }
-
     /// The output shape this annotation gives a raw result: exactly what the annotation
     /// describes, with omitted dimensions at the fold identity.
     pub fn output_label(&self, expansions: &Expansions) -> Label {

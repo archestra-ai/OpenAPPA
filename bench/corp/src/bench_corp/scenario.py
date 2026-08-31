@@ -39,13 +39,12 @@ class AnnotatorAnswer:
 
     The consult carries no tool name, so the annotator and the exact `args` it was sent are
     the whole key. `args` is held in its canonical JSON spelling, which is what the fixture
-    compares an arriving consult against; `annotation` is the verbatim wire annotation, held
-    as canonical JSON.
+    compares an arriving consult against; `annotation` is the verbatim wire annotation.
     """
 
     annotator: str
     args: str
-    annotation: str
+    annotation: dict
 
     @property
     def request_key(self) -> tuple[str, str]:
@@ -250,7 +249,7 @@ def _annotator_answers_of(
         answer = AnnotatorAnswer(
             annotator=annotator,
             args=canonical_args(args),
-            annotation=json.dumps(annotation, sort_keys=True, separators=(",", ":")),
+            annotation=annotation,
         )
         if answer.request_key in seen:
             raise ScenarioError(f"{name}: duplicate answer for {answer.request_key!r}")

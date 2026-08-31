@@ -3641,7 +3641,13 @@ pub(crate) fn opened_dispatch(
         proposed_label: check::committed_label(contract, &current, expansions).clone(),
         receiving: current.clone(),
         proposed_effects: contract.emits.clone(),
-        annotation: call.annotation().cloned(),
+        // A pin that restates a static declaration is admissible on a proposal, but the
+        // record derives a static annotation from the registry: only an Annotator's answer
+        // is sealed, so replay's encoding check holds for every record this engine writes.
+        annotation: call
+            .annotation()
+            .filter(|pinned| matches!(pinned.mandate(), crate::contract::AnnotationMandate::Annotator(_)))
+            .cloned(),
         memberships: call.memberships().to_vec(),
         resolutions: registry.resolutions(expansions),
         subject,

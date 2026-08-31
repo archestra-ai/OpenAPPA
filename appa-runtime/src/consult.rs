@@ -42,11 +42,6 @@ impl ConsultKind {
             ConsultKind::Membership => "membership",
         }
     }
-
-    /// The binding table a consult of this kind is served from.
-    pub fn binding(self) -> ConsultKind {
-        self
-    }
 }
 
 /// One consult of one registered component.

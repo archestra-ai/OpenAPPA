@@ -167,7 +167,7 @@ def _serve_external_fixtures(
                 artifact = _consult_artifact(request, "annotation", name)
                 annotation = annotation_by_request.get((name, canonical_args(artifact.get("args")))) if artifact else None
                 if annotation is not None:
-                    response = {"version": 1, "answer": json.loads(annotation)}
+                    response = {"version": 1, "answer": annotation}
             elif isinstance(request, dict) and self.path.startswith("/authority/"):
                 kind = "authority"
                 name = self.path.removeprefix("/authority/")

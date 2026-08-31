@@ -112,7 +112,7 @@ def _args(subject: str) -> str:
 
 def test_route_project_packet_has_annotated_source_and_recipient_answers() -> None:
     scenario = _by_name()["route-project-packet"]
-    answers = {answer.request_key: json.loads(answer.annotation) for answer in scenario.annotator_answers}
+    answers = {answer.request_key: answer.annotation for answer in scenario.annotator_answers}
 
     packet = "project-onyx-packet.md"
     permitted = ["cfo@northwind.example", "legal-lead@northwind.example"]
@@ -129,7 +129,7 @@ def test_route_project_packet_has_annotated_source_and_recipient_answers() -> No
 
 def test_performance_feedback_isolates_each_personal_file() -> None:
     scenario = _by_name()["performance-feedback"]
-    answers = {answer.request_key: json.loads(answer.annotation) for answer in scenario.annotator_answers}
+    answers = {answer.request_key: answer.annotation for answer in scenario.annotator_answers}
     assert answers[("personal-file-readers", _args("elena-morris-performance.md"))]["delta"]["audience"] == [
         "elena.morris@northwind.example"
     ]

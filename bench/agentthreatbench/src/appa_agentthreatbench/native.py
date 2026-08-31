@@ -168,6 +168,8 @@ class NativeSession:
         raise NativeProtocolError("native spawn response has an invalid envelope")
 
     def check(self, tool: str, arguments: dict[str, object]) -> CheckResult:
+        if self._pending:
+            raise NativeProtocolError("a native call is already pending")
         try:
             raw = self._session.check(
                 tool,

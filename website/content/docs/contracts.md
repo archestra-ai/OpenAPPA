@@ -179,7 +179,7 @@ The mandate is the vocabulary an annotator's answers may use. Every bound is opt
 | Key | Bounds | Omitted |
 |---|---|---|
 | `ranks` | The trust ranks an answer may write in `delta.trust` and `requires.trust`. | Every rank in the trust chain. |
-| `audiences` | The literal readers a restricted audience answer may name. `public` is always admissible and is never listed as a reader; a group is never admissible. | Every reader the policy writes. |
+| `audiences` | The literal readers a restricted audience answer may name. `public` is always admissible and is never listed as a reader; a group is never admissible. An empty list closes the mandate to `public` answers only. | Every reader the policy writes. |
 | `marks` | The attention marks an answer may require. | Every mark an authority names under `permits.attention`. |
 | `effects` | The effect kinds an answer may emit or check in history. | Every effect kind the policy declares. |
 
@@ -266,7 +266,7 @@ The `[deployment]` table declares the capabilities of your hosting environmentâ€
 
 During policy load, OpenAPPA validates that all declared constructs are supported by the deployment. If a policy requires a capability the deployment lacks, loading fails with an explicit error:
 - A `tool_output` sanitizer requires an application point the deployment can withhold: a tool listed in `confined_results`, or the child-return crossing (`confined_child_return = true`).
-- A tool listed in `confined_results` requires a deployment that can withhold raw results. A provider-run tool cannot be listed: its result reaches the model inside the inference call, before any host could withhold it.
+- A tool listed in `confined_results` requires a deployment that can withhold raw results. A provider-run tool cannot be listed: its result reaches the model inside the inference call, before any host could withhold it. A coverage entry must name a tool the policy covers; with a wildcard, every name qualifies.
 - A `[child]` section requires child context isolation.
 - Provider-run tools (tools executed directly inside a provider inference call) may declare only a static `delta`: no `requires`, no `annotator`, and no argument selectors.
 

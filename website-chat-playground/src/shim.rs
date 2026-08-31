@@ -158,7 +158,7 @@ struct AnnotatorArgs {
 async fn annotator(
     axum::Json(request): axum::Json<Consult<AnnotatorArtifact>>,
 ) -> (StatusCode, axum::Json<serde_json::Value>) {
-    if request.version != 1 || request.name != "email-recipient-readers" {
+    if request.version != 1 || request.name != crate::world::DIRECTORY_ANNOTATOR {
         return (StatusCode::NOT_FOUND, axum::Json(serde_json::json!({})));
     }
 

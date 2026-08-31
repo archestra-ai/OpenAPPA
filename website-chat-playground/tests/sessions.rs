@@ -92,7 +92,7 @@ annotator = "classify"
 }
 
 #[tokio::test]
-async fn an_annotated_tool_opens_under_the_playgrounds_annotator_route() {
+async fn an_annotator_the_playground_does_not_implement_refuses_at_create() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let sessions = sessions(&dir, Duration::from_secs(600));
     let policy = r#"
@@ -107,10 +107,14 @@ name = "list_customers"
 annotator = "classify"
 "#;
 
-    sessions
+    let Err(refusal) = sessions
         .create(policy, &[System::Crm].into_iter().collect(), MODEL)
         .await
-        .expect("a named annotator binds to the playground's own route, so the deployment runs it");
+    else {
+        panic!("the playground implements no annotator named classify, so the open refuses");
+    };
+    let text = format!("{refusal}");
+    assert!(text.contains("classify"), "the refusal names the annotator: {text}");
 }
 
 #[tokio::test]

@@ -111,6 +111,8 @@ pub const TOOLS_PATH: &str = "/tools";
 pub const AUTHORITY_PATH: &str = "/authority";
 pub const SANITIZER_PATH: &str = "/sanitizer";
 pub const ANNOTATOR_PATH: &str = "/annotator";
+/// The one annotator the playground implements: the email recipient directory.
+pub const DIRECTORY_ANNOTATOR: &str = "email-recipient-readers";
 pub const MEMBERSHIP_PATH: &str = "/membership";
 
 const CONSULT_TIMEOUT: Duration = Duration::from_secs(300);
@@ -159,9 +161,12 @@ pub fn externals_for(policy: &appa_policy::Config, base: &str) -> ExternalBindin
             (name, endpoint(url))
         })
         .collect();
-    // The playground routes every named annotator to the same handler.
+    // The playground implements one annotator. Binding only it lets a visitor policy
+    // that names any other refuse at open — where the message names the annotator —
+    // instead of failing operationally on every call.
     bindings.annotators = policy
         .annotator_names()
+        .filter(|name| name.as_str() == DIRECTORY_ANNOTATOR)
         .map(|name| (name.as_str().to_string(), endpoint(format!("{base}{ANNOTATOR_PATH}"))))
         .collect();
     bindings.membership = registry

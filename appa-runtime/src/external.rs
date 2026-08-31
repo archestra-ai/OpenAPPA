@@ -279,7 +279,7 @@ impl ExternalServices {
     pub async fn consult(&self, consult: &Consult, elicitation: Option<&Elicitation>) -> ConsultOutcome {
         let kind = consult.kind();
         let name = consult.name.as_str();
-        let Some(backend) = self.backends.get(&kind.binding()).and_then(|table| table.get(name)) else {
+        let Some(backend) = self.backends.get(&kind).and_then(|table| table.get(name)) else {
             tracing::debug!(kind = kind.wire_name(), name, "consult of an unregistered external");
             return ConsultOutcome::NoAnswer(NoAnswerReason::Unregistered);
         };
