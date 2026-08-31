@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -16,7 +17,16 @@ from pathlib import Path
 from joblib import Parallel, delayed
 
 from . import AGENT_PROMPT_PROFILES, CHAOS_SCREEN_SCENARIOS
-from .agents import DEFAULT_MODEL, REPO_ROOT, AGENTS, Agent, build_binaries
+from .agents import AGENTS, DEFAULT_MODEL, REPO_ROOT, Agent, build_binaries
+from .canary import (
+    CANARY_AGENTS,
+    CANARY_MODELS,
+    CANARY_PROMPT_PROFILE,
+    ModelSummaries,
+    evaluate,
+    render_markdown,
+    slack_payload,
+)
 from .report import print_scenario_table, print_table, summarize, write_summary
 from .runner import EpisodeResult, run_episode
 from .scenario import Scenario, ScenarioError, discover_scenarios
@@ -112,6 +122,107 @@ def _run_grid(
     )
 
 
+def _allocate_run_dir(runs_dir: Path) -> Path:
+    # Runs launched together start inside the same second, so a timestamp
+    # alone is not a run id: take the first free suffix rather than letting
+    # the losers die on FileExistsError.
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    attempt = 1
+    while True:
+        run_id = stamp if attempt == 1 else f"{stamp}-{attempt}"
+        run_dir = runs_dir / run_id
+        try:
+            run_dir.mkdir(parents=True)
+            return run_dir
+        except FileExistsError:
+            attempt += 1
+
+
+def _run_canary(args: argparse.Namespace) -> int:
+    try:
+        scenarios = discover_scenarios(SCENARIOS_DIR, None)
+    except ScenarioError as error:
+        sys.exit(str(error))
+    agents = [AGENTS[name] for name in CANARY_AGENTS]
+    models = args.model or list(CANARY_MODELS)
+    if not args.skip_build:
+        build_binaries(agents)
+
+    run_dir = _allocate_run_dir(args.runs_dir)
+    run_id = run_dir.name
+    model_runs: list[ModelSummaries] = []
+    for model in models:
+        model_dir = run_dir / model.replace("/", "--")
+        model_dir.mkdir(parents=True)
+        (model_dir / "config.json").write_text(
+            json.dumps(
+                {
+                    "model": model,
+                    "reps": 1,
+                    "timeout_s": args.timeout,
+                    "jobs": args.jobs,
+                    "agents": [agent.name for agent in agents],
+                    "scenarios": [scenario.name for scenario in scenarios],
+                    "agent_prompt_profile": CANARY_PROMPT_PROFILE,
+                    **_git_state(),
+                },
+                indent=2,
+            )
+            + "\n"
+        )
+        results = _run_grid(
+            agents,
+            scenarios,
+            reps=1,
+            model=model,
+            run_dir=model_dir,
+            timeout_s=args.timeout,
+            jobs=args.jobs,
+            agent_prompt_profile=CANARY_PROMPT_PROFILE,
+        )
+        summaries = summarize(results)
+        write_summary(model_dir, summaries, results)
+        print(f"\nmodel {model}\n")
+        print_table(summaries)
+        print_scenario_table(results)
+        model_runs.append(ModelSummaries(model=model, agents=summaries))
+
+    verdict = evaluate(model_runs)
+    report = render_markdown(model_runs, verdict, run_id)
+    (run_dir / "report.md").write_text(report)
+    (run_dir / "canary.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "healthy": verdict.healthy,
+                "failures": verdict.failures,
+                "warnings": verdict.warnings,
+                "agent_prompt_profile": CANARY_PROMPT_PROFILE,
+                "models": {run.model: [s.__dict__ for s in run.agents] for run in model_runs},
+                **_git_state(),
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    (run_dir / "slack.json").write_text(
+        json.dumps(slack_payload(model_runs, verdict, run_id, os.environ.get("RUN_URL"))) + "\n"
+    )
+    step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if step_summary:
+        with open(step_summary, "a", encoding="utf-8") as handle:
+            handle.write(report)
+
+    print(f"\nfull records: {run_dir}")
+    for warning in verdict.warnings:
+        print(f"canary warning: {warning}", file=sys.stderr)
+    if not verdict.healthy:
+        for failure in verdict.failures:
+            print(f"canary tripped: {failure}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def _add_execution_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--reps", type=int, default=1, help="Repetitions per cell (default 1).")
     parser.add_argument("--model", default=DEFAULT_MODEL, help=f"Shared OpenRouter model (default {DEFAULT_MODEL}).")
@@ -148,7 +259,33 @@ def main(argv: list[str] | None = None) -> int:
         help="Run the matched APPA guarded/open mechanism-probe screen.",
     )
     _add_execution_arguments(screen_parser)
+    canary_parser = sub.add_parser(
+        "canary",
+        help="Nightly defended-vs-empty tripwire: full scenario set, redteam-chaos profile, pinned model pair.",
+    )
+    canary_parser.add_argument(
+        "--model",
+        action="append",
+        help=f"Model to run (repeatable). Default: {', '.join(CANARY_MODELS)}.",
+    )
+    canary_parser.add_argument(
+        "--timeout", type=float, default=300.0, help="Per-episode timeout in seconds (default 300)."
+    )
+    canary_parser.add_argument(
+        "-j", "--jobs", type=int, default=-1, help="Concurrent episodes (default -1: all CPUs; 1: sequential)."
+    )
+    canary_parser.add_argument(
+        "--runs-dir", type=Path, default=BENCH_DIR / "runs", help="Where run records land."
+    )
+    canary_parser.add_argument(
+        "--skip-build", action="store_true", help="Skip the up-front cargo builds."
+    )
     args = parser.parse_args(argv)
+
+    if args.command == "canary":
+        if args.jobs == 0:
+            parser.error("--jobs must not be 0")
+        return _run_canary(args)
 
     selected_scenarios = (
         list(CHAOS_SCREEN_SCENARIOS) if args.command == "chaos-screen" else args.scenario
@@ -169,19 +306,8 @@ def main(argv: list[str] | None = None) -> int:
     if not args.skip_build:
         build_binaries(agents)
 
-    # One run per model, launched together, starts inside the same second, so a
-    # timestamp alone is not a run id: take the first free suffix rather than
-    # letting the losers die on FileExistsError.
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    attempt = 1
-    while True:
-        run_id = stamp if attempt == 1 else f"{stamp}-{attempt}"
-        run_dir = args.runs_dir / run_id
-        try:
-            run_dir.mkdir(parents=True)
-            break
-        except FileExistsError:
-            attempt += 1
+    run_dir = _allocate_run_dir(args.runs_dir)
+    run_id = run_dir.name
     (run_dir / "config.json").write_text(
         json.dumps(
             {
