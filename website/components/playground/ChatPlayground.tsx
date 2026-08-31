@@ -250,14 +250,14 @@ function readable(summary: string): string {
 const STORY_TOOLS = new Set(["list_recordings", "list_issues", "create_issue", "list_invoices", "make_transfer", "send_email"]);
 
 /**
- * Sections the short view leaves out. The session's opening label, the resolver
- * behind an address, and how an authority or sanitizer is actually implemented
- * are all real policy — and none of them is what a reader is pointed at from
- * the stream, so the pane does not carry them.
+ * Sections the short view leaves out. The session's opening label, the
+ * annotator behind an address, and how an authority or sanitizer is actually
+ * implemented are all real policy — and none of them is what a reader is
+ * pointed at from the stream, so the pane does not carry them.
  */
 const SHORT_DROP = new Set([
   "[boundary]",
-  "[[dynamic_resolver]]",
+  "[[annotator]]",
   "[authority.permits]",
   "[authority.implementation]",
   "[sanitizer.implementation]",
@@ -368,17 +368,15 @@ function splitRuling(text: string): Ruling {
     if (!narrowing || parsed.requirement_gaps?.length) return { kind: "refusal", summary, detail: pretty, plans };
     const moved = (dim: string) => JSON.stringify(narrowing.from?.[dim]) !== JSON.stringify(narrowing.to?.[dim]);
     const dimension = moved("trust") && moved("audience") ? "both" : moved("audience") ? "audience" : "trust";
-    // A concrete reader set arrives either wrapped — `{"Known": {"Restricted":
-    // [...]}}` — or bare, `{"Restricted": [...]}`, which is what the service
-    // sends today; a trust rank likewise as `{"Known": 0}` or a plain `0`.
-    // Read both: missing either shape is what made these sentences fall back
-    // to "fewer readers" and "less trusted" instead of naming the real thing.
-    const audience = narrowing.to?.audience as { Known?: { Restricted?: unknown }; Restricted?: unknown } | undefined;
-    const restricted = audience?.Known?.Restricted ?? audience?.Restricted;
+    // A concrete reader set arrives as `{"Restricted": [...]}` and a trust rank
+    // as a plain chain index. Any other shape (e.g. `"Public"`) makes these
+    // sentences fall back to "fewer readers" and "less trusted" instead of
+    // naming the real thing.
+    const audience = narrowing.to?.audience as { Restricted?: unknown } | undefined;
+    const restricted = audience?.Restricted;
     const readers = Array.isArray(restricted) ? restricted.map(String) : undefined;
-    const trustValue = narrowing.to?.trust as { Known?: unknown } | number | undefined;
-    const rank = typeof trustValue === "number" ? trustValue : trustValue?.Known;
-    const toTrustRank = typeof rank === "number" ? rank : undefined;
+    const trustValue = narrowing.to?.trust;
+    const toTrustRank = typeof trustValue === "number" ? trustValue : undefined;
     return {
       kind: "narrowing",
       dimension,

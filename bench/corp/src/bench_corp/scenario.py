@@ -34,22 +34,22 @@ class PolicyProfile:
 
 
 @dataclass(frozen=True)
-class DynamicResolverAnswer:
-    """One exact request answered by the scenario's loopback dynamic resolver.
+class AnnotatorAnswer:
+    """One exact annotation consult answered by the scenario's loopback annotator.
 
-    The request carries no tool name, so the resolver and the exact `args` it was sent are
+    The consult carries no tool name, so the annotator and the exact `args` it was sent are
     the whole key. `args` is held in its canonical JSON spelling, which is what the fixture
-    compares an arriving request against.
+    compares an arriving consult against; `annotation` is the verbatim wire annotation, held
+    as canonical JSON.
     """
 
-    resolver: str
+    annotator: str
     args: str
-    result: str
-    readers: tuple[str, ...]
+    annotation: str
 
     @property
     def request_key(self) -> tuple[str, str]:
-        return (self.resolver, self.args)
+        return (self.annotator, self.args)
 
 
 def canonical_args(args: object) -> str:
@@ -81,7 +81,7 @@ class Scenario:
     prompt: str
     systems: tuple[str, ...]
     policy_profile: PolicyProfile | None = None
-    dynamic_resolver_answers: tuple[DynamicResolverAnswer, ...] = field(default=())
+    annotator_answers: tuple[AnnotatorAnswer, ...] = field(default=())
     authority_answers: tuple[AuthorityAnswer, ...] = field(default=())
     sanitizer_answers: tuple[SanitizerAnswer, ...] = field(default=())
     utility: tuple[Check, ...] = field(default=())
@@ -180,12 +180,12 @@ def _policy_requires_of(name: str, table: dict) -> dict[str, dict[str, dict]]:
     return parsed
 
 
-def _declared_resolvers(name: str, policy: Path) -> dict[str, tuple[set[str], str]]:
-    """Each resolver this scenario's APPA policy declares: its input names and its one result.
+def _declared_annotators(name: str, policy: Path) -> dict[str, set[str]]:
+    """Each annotator this scenario's APPA policy declares: the input names its consults carry.
 
     Reading it here keeps the fixture from holding a second copy of the contract. A scenario
-    that renames a resolver, answers for one the policy never declares, or keys an answer on
-    an input the resolver does not read, fails at load instead of at the first request.
+    that renames an annotator, answers for one the policy never declares, or keys an answer on
+    an input the annotator does not map, fails at load instead of at the first consult.
     """
     try:
         document = tomllib.loads(policy.read_text())
@@ -193,66 +193,64 @@ def _declared_resolvers(name: str, policy: Path) -> dict[str, tuple[set[str], st
         raise ScenarioError(f"{name}: cannot read {policy}: {error}") from error
     section = document.get("policy", document)
     declared = {}
-    for declaration in section.get("dynamic_resolver", []):
-        returns = declaration.get("returns", [])
-        if len(returns) != 1:
+    for declaration in section.get("annotator", []):
+        inputs = declaration.get("inputs", {})
+        if not isinstance(inputs, dict) or not inputs:
             raise ScenarioError(
-                f"{name}: resolver {declaration.get('name')!r} declares {len(returns)} results; "
-                "the loopback fixture answers resolvers that declare exactly one"
+                f"{name}: annotator {declaration.get('name')!r} maps no inputs; the loopback "
+                "fixture keys answers on mapped inputs, so every answered annotator maps them"
             )
-        if returns[0] not in _FIXTURE_RESULTS:
-            raise ScenarioError(
-                f"{name}: resolver {declaration.get('name')!r} returns {returns[0]!r}; the loopback "
-                f"fixture answers with reader sets, so it serves {' or '.join(sorted(_FIXTURE_RESULTS))}"
-            )
-        declared[declaration["name"]] = (set(declaration.get("inputs", [])), returns[0])
+        declared[declaration["name"]] = set(inputs)
     return declared
 
 
-#: The results the loopback fixture knows how to build. It answers with reader sets, so an
-#: output audience and a required audience are the two it can spell.
-_FIXTURE_RESULTS = frozenset({"delta.audience", "requires.audience"})
-
-
-def _dynamic_resolver_answers_of(
-    name: str, declarations: object, declared: dict[str, tuple[set[str], str]]
-) -> tuple[DynamicResolverAnswer, ...]:
-    """Parse the exact wire answers served to this scenario's APPA episodes."""
+def _annotator_answers_of(
+    name: str, declarations: object, declared: dict[str, set[str]]
+) -> tuple[AnnotatorAnswer, ...]:
+    """Parse the exact wire annotations served to this scenario's APPA episodes."""
     if not isinstance(declarations, list):
-        raise ScenarioError(f"{name}: 'dynamic_resolver_answer' must be an array of tables")
-    fields = {"resolver", "args", "readers"}
+        raise ScenarioError(f"{name}: 'annotator_answer' must be an array of tables")
+    fields = {"annotator", "args", "annotation"}
     answers = []
     seen = set()
     for index, declaration in enumerate(declarations, start=1):
-        location = f"dynamic_resolver_answer #{index}"
+        location = f"annotator_answer #{index}"
         if not isinstance(declaration, dict):
             raise ScenarioError(f"{name}: {location} must be a table")
         if set(declaration) != fields:
             raise ScenarioError(f"{name}: {location} takes exactly: {', '.join(sorted(fields))}")
-        resolver = declaration["resolver"]
-        if not isinstance(resolver, str) or not resolver:
-            raise ScenarioError(f"{name}: {location}.resolver must be a non-empty string")
+        annotator = declaration["annotator"]
+        if not isinstance(annotator, str) or not annotator:
+            raise ScenarioError(f"{name}: {location}.annotator must be a non-empty string")
         args = declaration["args"]
         if not isinstance(args, dict) or not args:
             raise ScenarioError(f"{name}: {location}.args must be a non-empty table")
-        readers = declaration["readers"]
-        if not isinstance(readers, list) or any(not isinstance(reader, str) for reader in readers):
-            raise ScenarioError(f"{name}: {location}.readers must be a list of strings")
-        if any(reader == "public" or reader.startswith("@") for reader in readers):
-            raise ScenarioError(f"{name}: {location}.readers must contain literal reader IDs")
-        if resolver not in declared:
-            raise ScenarioError(f"{name}: {location}.resolver {resolver!r} is not declared by the scenario's policy")
-        inputs, result = declared[resolver]
+        annotation = declaration["annotation"]
+        if not isinstance(annotation, dict) or set(annotation) != {"delta", "requires", "emits"}:
+            raise ScenarioError(
+                f"{name}: {location}.annotation must be a table with exactly: delta, requires, emits"
+            )
+        requires = annotation["requires"]
+        if (
+            not isinstance(requires, dict)
+            or not isinstance(requires.get("history"), list)
+            or not isinstance(requires.get("attention"), list)
+        ):
+            raise ScenarioError(
+                f"{name}: {location}.annotation.requires must carry history and attention arrays"
+            )
+        if annotator not in declared:
+            raise ScenarioError(f"{name}: {location}.annotator {annotator!r} is not declared by the scenario's policy")
+        inputs = declared[annotator]
         if set(args) != inputs:
             raise ScenarioError(
-                f"{name}: {location}.args keys {sorted(args)} cannot match a request to {resolver!r}, "
-                f"which reads {sorted(inputs)}"
+                f"{name}: {location}.args keys {sorted(args)} cannot match a consult to {annotator!r}, "
+                f"which maps {sorted(inputs)}"
             )
-        answer = DynamicResolverAnswer(
-            resolver=resolver,
+        answer = AnnotatorAnswer(
+            annotator=annotator,
             args=canonical_args(args),
-            result=result,
-            readers=tuple(readers),
+            annotation=json.dumps(annotation, sort_keys=True, separators=(",", ":")),
         )
         if answer.request_key in seen:
             raise ScenarioError(f"{name}: duplicate answer for {answer.request_key!r}")
@@ -339,13 +337,13 @@ def load_scenario(root: Path) -> Scenario:
     if "policy_profile" in data:
         policy_profile = _load_policy_profile(name, root, data["policy_profile"])
 
-    raw_dynamic = data.get("dynamic_resolver_answer", [])
+    raw_annotations = data.get("annotator_answer", [])
     authority_answers = _authority_answers_of(name, data.get("authority_answer", []))
     sanitizer_answers = _sanitizer_answers_of(name, data.get("sanitizer_answer", []))
-    if (raw_dynamic or authority_answers or sanitizer_answers) and policy_profile is None:
+    if (raw_annotations or authority_answers or sanitizer_answers) and policy_profile is None:
         raise ScenarioError(f"{name}: external fixture answers require a policy_profile")
-    declared = _declared_resolvers(name, policy_profile.appa) if policy_profile else {}
-    dynamic_resolver_answers = _dynamic_resolver_answers_of(name, raw_dynamic, declared)
+    declared = _declared_annotators(name, policy_profile.appa) if policy_profile else {}
+    annotator_answers = _annotator_answers_of(name, raw_annotations, declared)
 
     utility = _checks_of(name, "utility", data.get("utility", {}))
     security = _checks_of(name, "security", data.get("security", {}))
@@ -358,7 +356,7 @@ def load_scenario(root: Path) -> Scenario:
         prompt=prompt.strip(),
         systems=tuple(systems),
         policy_profile=policy_profile,
-        dynamic_resolver_answers=dynamic_resolver_answers,
+        annotator_answers=annotator_answers,
         authority_answers=authority_answers,
         sanitizer_answers=sanitizer_answers,
         utility=utility,

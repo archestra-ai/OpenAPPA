@@ -10,7 +10,7 @@ def main():
     if request.get("kind") != "annotation":
         raise ValueError("unexpected consult kind")
     if request.get("name") != "local.read-sensitivity":
-        raise ValueError("unexpected resolver name")
+        raise ValueError("unexpected annotator name")
 
     artifact = request.get("artifact")
     args = artifact.get("args") if isinstance(artifact, dict) else None

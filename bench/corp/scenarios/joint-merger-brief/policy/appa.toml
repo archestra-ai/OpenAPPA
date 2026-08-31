@@ -78,7 +78,7 @@ confined_results = ["search_hr", "read_hr", "create_hr", "search_finance", "read
 
 # --- registered externals ---------------------------------------------------
 #
-# Implementations bind here, never in the policy (`CFG-15`, `IMP-3`). Resolver
+# Implementations bind here, never in the policy. External
 # URLs are loopback placeholders: the bench runner binds its fixture server on
 # an ephemeral port and rewrites them before opening the runtime, since
 # `Config::load` refuses non-loopback http.

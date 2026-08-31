@@ -10,8 +10,8 @@ episode directory.
 
 A bench policy is a deployment file: ``[policy]`` holds the policy proper and
 ``[externals]`` names who implements each registered authority, sanitizer, and
-the dynamic resolver. The two are separate on purpose — the policy says what a
-component may do, ``[externals]`` says who performs it.
+annotator. The two are separate on purpose — the policy says what a component
+may do, ``[externals]`` says who performs it.
 """
 
 from __future__ import annotations
@@ -120,7 +120,7 @@ def bind_external_urls(policy_toml: str, origin: str) -> str:
     externals = data.get("externals", {})
     bound = 0
     endpoints = []
-    for kind in ("authorities", "sanitizers", "dynamic"):
+    for kind in ("authorities", "sanitizers", "annotators"):
         endpoints.extend(externals.get(kind, {}).values())
     for endpoint in endpoints:
         if not isinstance(endpoint, dict):

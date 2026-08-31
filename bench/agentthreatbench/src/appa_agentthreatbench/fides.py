@@ -5,8 +5,8 @@ Microsoft Agent Framework's label tracker and policy enforcer mediate each tool
 call.  Labels are assigned from the tool's role in the benchmark, never from
 attack markers or other answer-key fields.
 
-FIDES has no dynamic audience primitive corresponding to OpenAPPA's per-record
-Data Exfiltration ACL.  Customer records are therefore private and public
+FIDES has no per-call annotation primitive corresponding to OpenAPPA's
+per-record Data Exfiltration ACL.  Customer records are therefore private and public
 delivery sinks use FIDES's coarse ``max_allowed_confidentiality=public`` gate.
 This intentionally blocks authorized and unauthorized post-read delivery and
 makes that expressiveness/utility trade-off visible in the paired controls.

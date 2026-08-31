@@ -40,7 +40,7 @@ ps ax -o command | grep 'appa-runtime --config' | grep -v grep
 If no process is running, ask the user for the `.db` path. Read the
 config file it names: every explanation must be grounded in what the
 policy actually declares for the tools involved (their `[[policy.tool]]`
-entries, `delta`, `requires`, and any casts/authorities/sanitizers).
+entries, `delta`, `requires`, and any annotators/authorities/sanitizers).
 
 If the runtime wrote a log (`-v`), find it too — it records one line per
 decision, in order, and is the quickest released/blocked timeline.
@@ -96,13 +96,15 @@ Rebuild the label state at the moment of the block by folding the
 admitted values in order, then compare against the blocked tool's
 declarations in the policy. Distinguish at least:
 
-- **Undeclared tool** — no policy entry for the name and no cast
-  covering undeclared tools (a `[[policy.cast]]` with no `tags`), so
-  the call was not judged at all; not a label problem. With such a
-  cast, the cast's answer is the tool's `requires` and a block is a
+- **Undeclared tool** — no policy entry for the name and no wildcard
+  tool rule (`name = "*"`) covering it, so the call was refused before
+  it was judged; not a label problem. With a wildcard rule, its
+  annotator produces the call's complete contract and a block is a
   requirement gap like any other.
-- **Unestablished dimension** — a consumed value was never labeled;
-  name the tool that produced it.
+- **Annotation failure** — the tool's annotator produced no admissible
+  annotation (unreachable, malformed, or naming vocabulary outside its
+  mandate), so the runtime failed closed; an operational refusal, not a
+  policy denial.
 - **Requirement gap** — the session's accumulated label cannot satisfy
   the tool's `requires`; name the value that narrowed the mix and the
   policy line that demands more.
@@ -111,7 +113,7 @@ A block can have several reasons at once while the error text surfaces
 only one — check for the others and explain all that hold.
 
 Before stating whether a block is final or liftable, check what the
-current runtime actually supports (casts, authorities, offers):
+current runtime actually supports (annotators, authorities, offers):
 `appa-runtime/CLAUDE.md` records the current state. Do not assert capabilities or gaps from memory.
 
 ## 6. Explain in plain language
@@ -128,10 +130,9 @@ only where it appears verbatim in errors or config the user must touch:
 | trajectory | the session (or "the subagent's run") |
 | fact / fact log | the recorded trail |
 | label, audience | the stamp saying who may see the data |
-| Unknown dimension | unstamped — nobody declared who may see it |
 | fold / bound | the mix: strictest ingredient wins, intersection never widens |
 | dispatch | a released tool call |
-| cast | an examiner that inspects a value and stamps it |
+| annotator | a per-call examiner that produces the tool's complete contract |
 | offer / remedy plan | a proposed narrower alternative |
 | delta | the policy's claim about what a tool's output carries |
 | requires | the condition a tool demands of data flowing into it |

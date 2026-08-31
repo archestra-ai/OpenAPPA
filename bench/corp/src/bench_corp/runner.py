@@ -33,7 +33,7 @@ from . import AGENT_PROMPT_PROFILES
 from .agents import Agent, PolicyTarget, command_for
 from .checks import CheckResult, evaluate_check, parse_emails
 from .policy import apply_tool_requires, bind_external_urls, prune_policy
-from .scenario import AuthorityAnswer, DynamicResolverAnswer, SanitizerAnswer, Scenario, canonical_args
+from .scenario import AnnotatorAnswer, AuthorityAnswer, SanitizerAnswer, Scenario, canonical_args
 
 # Best-effort stderr diagnostics (never score inputs): the APPA hook's
 # mediation log lines, the FIDES audit log's BLOCKED lines, and executed
@@ -125,19 +125,20 @@ def _consult_artifact(request: dict, kind: str, name: str) -> dict:
 
 @contextlib.contextmanager
 def _serve_external_fixtures(
-    dynamic_answers: tuple[DynamicResolverAnswer, ...],
+    annotator_answers: tuple[AnnotatorAnswer, ...],
     authority_answers: tuple[AuthorityAnswer, ...],
     sanitizer_answers: tuple[SanitizerAnswer, ...],
     request_log: Path,
 ) -> Iterator[str | None]:
     """Serve scenario-owned externals on an isolated loopback port."""
-    if not (dynamic_answers or authority_answers or sanitizer_answers):
+    if not (annotator_answers or authority_answers or sanitizer_answers):
         yield None
         return
 
-    # Each answer carries the result its scenario's policy declares for that resolver, read at
-    # scenario load — the fixture keeps no second copy of the contract.
-    dynamic_by_request = {answer.request_key: (answer.result, answer.readers) for answer in dynamic_answers}
+    # Each answer carries the verbatim annotation its scenario declares for that consult,
+    # validated against the policy at scenario load — the fixture keeps no second copy of
+    # the contract.
+    annotation_by_request = {answer.request_key: answer.annotation for answer in annotator_answers}
     authority_by_request = {
         (answer.authority, answer.tool): answer.ruling for answer in authority_answers
     }
@@ -158,18 +159,15 @@ def _serve_external_fixtures(
             except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                 request = None
 
-            if isinstance(request, dict) and self.path == "/dynamic-resolver":
-                kind = "dynamic_resolver"
+            if isinstance(request, dict) and self.path == "/annotator":
+                kind = "annotation"
                 name = str(request.get("name", ""))
-                # The request carries no tool name: the resolver and the exact `args` it was
+                # The consult carries no tool name: the annotator and the exact `args` it was
                 # sent are the whole key.
-                artifact = _consult_artifact(request, "dynamic", name)
-                key = (name, canonical_args(artifact.get("args")))
-                answer = dynamic_by_request.get(key) if artifact else None
-                if answer is not None:
-                    result_name, readers = answer
-                    value: object = list(readers) if result_name == "delta.audience" else {"contains": list(readers)}
-                    response = {"version": 1, "answer": {result_name: value}}
+                artifact = _consult_artifact(request, "annotation", name)
+                annotation = annotation_by_request.get((name, canonical_args(artifact.get("args")))) if artifact else None
+                if annotation is not None:
+                    response = {"version": 1, "answer": json.loads(annotation)}
             elif isinstance(request, dict) and self.path.startswith("/authority/"):
                 kind = "authority"
                 name = self.path.removeprefix("/authority/")
@@ -282,7 +280,7 @@ def run_episode(
     stderr_path = episode_dir / "stderr.txt"
     external_request_log = episode_dir / "external-requests.jsonl"
     with _serve_external_fixtures(
-        scenario.dynamic_resolver_answers,
+        scenario.annotator_answers,
         scenario.authority_answers,
         scenario.sanitizer_answers,
         external_request_log,
