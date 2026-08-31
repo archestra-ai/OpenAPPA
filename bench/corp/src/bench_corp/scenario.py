@@ -231,17 +231,29 @@ def _declared_annotators(name: str, policy: Path) -> dict[str, DeclaredAnnotator
     return declared
 
 
-def _readers_of(value: object, location: str, field: str, name: str) -> list[str]:
-    """The literal readers an annotation field names; `public` is never listed."""
+def _reader_list(value: object, location: str, field: str, name: str) -> list[str]:
+    """One audience value off the wire: `"public"` (no literal readers) or a reader array."""
     match value:
         case "public":
             return []
         case list() as readers if all(isinstance(reader, str) for reader in readers):
-            return readers
-        case dict() as contains if set(contains) == {"contains"} and isinstance(contains["contains"], list):
-            return [reader for reader in contains["contains"] if isinstance(reader, str) and reader != "public"]
+            return [reader for reader in readers if reader != "public"]
         case _:
             raise ScenarioError(f"{name}: {location}.{field} is not a wire audience shape")
+
+
+def _readers_of(value: object, location: str, field: str, name: str) -> list[str]:
+    """Every literal reader an annotation audience field names. A `delta.audience` is a
+    bare value; a `requires.audience` holds a `contains` floor, a `within` cap, or both."""
+    match value:
+        case dict() as bounds if bounds and set(bounds) <= {"contains", "within"}:
+            return [
+                reader
+                for key, bound in bounds.items()
+                for reader in _reader_list(bound, location, f"{field}.{key}", name)
+            ]
+        case _:
+            return _reader_list(value, location, field, name)
 
 
 def _within_mandate(
@@ -270,13 +282,23 @@ def _within_mandate(
     if not isinstance(emits, list):
         raise ScenarioError(f"{name}: {location}.annotation.emits must be an array")
     marks = requires["attention"]
-    history = requires["history"]
-    for field, values in (("requires.history", history), ("requires.attention", marks), ("emits", emits)):
+    for field, values in (("requires.attention", marks), ("emits", emits)):
         if not all(isinstance(value, str) for value in values):
             raise ScenarioError(f"{name}: {location}.annotation.{field} entries must be strings")
+    # A history entry is a one-key selector over the declared effect kinds.
+    history_effects = []
+    for entry in requires["history"]:
+        match entry:
+            case {"contains": str() as effect} | {"excludes": str() as effect} if len(entry) == 1:
+                history_effects.append(effect)
+            case _:
+                raise ScenarioError(
+                    f"{name}: {location}.annotation.requires.history entries are one-key "
+                    "contains/excludes selectors over effect kinds"
+                )
     if spec.marks is not None and not set(marks) <= spec.marks:
         raise ScenarioError(f"{name}: {location}.annotation.requires.attention is outside the mandate")
-    if spec.effects is not None and not (set(emits) | set(history)) <= spec.effects:
+    if spec.effects is not None and not (set(emits) | set(history_effects)) <= spec.effects:
         raise ScenarioError(f"{name}: {location}.annotation effects are outside the mandate")
 
 

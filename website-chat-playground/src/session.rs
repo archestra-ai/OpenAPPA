@@ -159,7 +159,7 @@ impl Sessions {
         let checked = check_policy(policy, enabled)?;
         let chain = &checked.config.registry_config().trust_chain;
         let boundary = LabelText::of(checked.config.boundary_label(), chain);
-        let advertised: Vec<WireTool> = crate::catalogue::advertised(&checked.config);
+        let advertised: Vec<WireTool> = crate::catalogue::advertised(&checked.config, enabled);
 
         let id = session_id();
         let session_dir = self.worlds_root.join(&id);

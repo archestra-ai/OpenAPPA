@@ -14,16 +14,21 @@
 //! would have to be an engine-typed helper on the harness library, which is
 //! the one thing the runtime's API boundary keeps out.
 
+use std::collections::BTreeSet;
+
 use appa_engine::contract::ToolDeclaration;
 use appa_engine::registry::TrustChain;
 use appa_example_agent::wire::WireTool;
 use appa_policy::Config;
 
-pub fn advertised(config: &Config) -> Vec<WireTool> {
+use crate::systems::System;
+
+pub fn advertised(config: &Config, enabled: &BTreeSet<System>) -> Vec<WireTool> {
     let registry = config.registry_config();
-    registry
+    let mut tools: Vec<WireTool> = registry
         .tools
         .iter()
+        .filter(|declaration| declaration.name().as_str() != "*")
         .map(|declaration| {
             WireTool::new(
                 declaration.name().as_str(),
@@ -31,7 +36,35 @@ pub fn advertised(config: &Config) -> Vec<WireTool> {
                 declaration.parameters().normalized(),
             )
         })
-        .collect()
+        .collect();
+    // A wildcard is not a callable function: the model calls the system tools it covers.
+    // Each covered tool is advertised under its own name with the playground's schema and
+    // the wildcard's per-call annotation story.
+    if let Some(wildcard) = registry
+        .tools
+        .iter()
+        .find(|declaration| declaration.name().as_str() == "*")
+    {
+        let base_of = |name: &str| name.split('(').next().unwrap_or(name).to_string();
+        let declared: BTreeSet<String> = registry
+            .tools
+            .iter()
+            .map(|declaration| base_of(declaration.name().as_str()))
+            .collect();
+        for name in crate::world::expected_tools(enabled) {
+            if declared.contains(&name) {
+                continue;
+            }
+            let parameters =
+                crate::params::tool_parameters(&name).unwrap_or_else(|| serde_json::json!({ "type": "object" }));
+            tools.push(WireTool::new(
+                &name,
+                describe(wildcard, &registry.trust_chain),
+                parameters,
+            ));
+        }
+    }
+    tools
 }
 
 fn describe(declaration: &ToolDeclaration, chain: &TrustChain) -> String {
@@ -111,10 +144,25 @@ mod tests {
     use crate::systems::System;
 
     #[test]
+    fn a_wildcard_advertises_the_covered_tools_under_their_own_names() {
+        let crm: BTreeSet<System> = [System::Crm].into_iter().collect();
+        let policy = "version = 1\n[[annotator]]\nname = \"email-recipient-readers\"\n[[tool]]\nname = \"*\"\nannotator = \"email-recipient-readers\"\n";
+        let checked = check_policy(policy, &crm).expect("the wildcard policy loads");
+        let advertised = advertised(&checked.config, &crm);
+        let mut names: Vec<&str> = advertised.iter().map(|tool| tool.function.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            vec!["create_customer_data", "list_customers"],
+            "the model is offered the covered system tools, never a literal `*`"
+        );
+    }
+
+    #[test]
     fn every_tool_is_advertised_with_the_contracts_own_parameters() {
         let all: BTreeSet<System> = System::ALL.into_iter().collect();
         let checked = check_policy(include_str!("../policies/default.toml"), &all).expect("the preset loads");
-        let advertised = advertised(&checked.config);
+        let advertised = advertised(&checked.config, &all);
         assert_eq!(advertised.len(), checked.tool_count);
         let registry = checked.config.registry_config();
         for tool in &advertised {
