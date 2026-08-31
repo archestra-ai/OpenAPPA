@@ -244,16 +244,6 @@ pub(crate) struct Deployment {
     externals: ExternalServices,
 }
 
-/// The runtime-owned consult input mapping per registered `[[annotator]]`.
-fn annotator_inputs(
-    policy: &appa_policy::Config,
-) -> std::collections::BTreeMap<String, std::collections::BTreeMap<String, appa_policy::ToolCallSource>> {
-    policy
-        .annotators()
-        .map(|(name, binding)| (name.as_str().to_string(), binding.inputs.clone()))
-        .collect()
-}
-
 impl Deployment {
     fn load(
         config: Config,
@@ -270,7 +260,7 @@ impl Deployment {
             .map_err(|error| OpenError::Modules(error.to_string()))?;
         Ok(Deployment {
             config,
-            resident: RuntimeEngine::new(policy.engine().clone(), annotator_inputs(&policy)),
+            resident: RuntimeEngine::from_policy(&policy),
             externals,
         })
     }
@@ -368,10 +358,7 @@ impl Inner {
             return Ok(Arc::clone(engine));
         }
         let compiled = compile_stored_policy(bytes).map_err(EventError::PolicyUnavailable)?;
-        let engine = Arc::new(RuntimeEngine::new(
-            compiled.engine().clone(),
-            annotator_inputs(&compiled),
-        ));
+        let engine = Arc::new(RuntimeEngine::from_policy(&compiled));
         Ok(Arc::clone(
             self.retired
                 .lock()

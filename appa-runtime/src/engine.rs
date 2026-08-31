@@ -467,13 +467,16 @@ pub struct RuntimeEngine {
 }
 
 impl RuntimeEngine {
-    pub fn new(
-        engine: Engine,
-        annotator_inputs: BTreeMap<String, BTreeMap<String, appa_policy::ToolCallSource>>,
-    ) -> RuntimeEngine {
+    /// The one constructor: both halves — the decision core and the consult input
+    /// mapping — come from the same compiled policy, so an engine can never carry
+    /// another policy's mapping.
+    pub fn from_policy(policy: &appa_policy::Config) -> RuntimeEngine {
         RuntimeEngine {
-            engine,
-            annotator_inputs,
+            engine: policy.engine().clone(),
+            annotator_inputs: policy
+                .annotators()
+                .map(|(name, binding)| (name.as_str().to_string(), binding.inputs.clone()))
+                .collect(),
         }
     }
 
@@ -2414,7 +2417,7 @@ mod tests {
     use appa_engine::names::{AnnotatorName, MarkName};
     use appa_engine::plan::{ExecutableRemedyPlan, PlanId, PlannedBlock, RemedyPlan, RemedyStep};
     use appa_engine::value::{RawResultDigest, ToolName, ValueBody};
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeSet;
 
     #[test]
     fn a_sanitizer_consult_names_its_point_and_the_tool_the_value_belongs_to() {
@@ -2434,7 +2437,7 @@ mod tests {
             "#,
         )
         .expect("the sanitizer policy compiles");
-        let engine = RuntimeEngine::new(policy.engine().clone(), BTreeMap::new());
+        let engine = RuntimeEngine::from_policy(&policy);
         let scrub = appa_engine::names::SanitizerName::new("scrub");
         let request = |subject: SanitizerSubject<'_>| match engine.sanitizer_request(
             &scrub,
@@ -2498,11 +2501,7 @@ mod tests {
     }
 
     fn annotator_engine(policy: &appa_policy::Config) -> RuntimeEngine {
-        let inputs = policy
-            .annotators()
-            .map(|(name, binding)| (name.as_str().to_string(), binding.inputs.clone()))
-            .collect();
-        RuntimeEngine::new(policy.engine().clone(), inputs)
+        RuntimeEngine::from_policy(policy)
     }
 
     #[test]

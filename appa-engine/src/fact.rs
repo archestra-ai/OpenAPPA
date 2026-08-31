@@ -213,9 +213,11 @@ pub enum Fact {
         /// computed from, and what a confined candidate's residual is measured against.
         receiving: Label,
         proposed_effects: EffectSet,
-        /// The one complete annotation this dispatch was released under, with the mandate that
-        /// authorized it. No default: a record without it is not this engine's record.
-        annotation: crate::contract::PinnedAnnotation,
+        /// The pin an Annotator produced for this exact call. A statically declared
+        /// dispatch stores nothing: its annotation is the declaration itself, derived from
+        /// the registry at replay, which the opening's policy identity already fixes
+        /// byte-for-byte.
+        annotation: Option<crate::contract::PinnedAnnotation>,
         #[serde(default)]
         memberships: Vec<crate::contract::PinnedMembership>,
         #[serde(default)]

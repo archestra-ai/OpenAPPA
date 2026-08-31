@@ -295,7 +295,7 @@ mod tests {
 
     use super::*;
     use crate::authority::{DeclaredTransition, Sanitizer, SanitizerPoints, Scope};
-    use crate::contract::{AnnotationMandate, Delta, PinnedAnnotation, ToolAnnotation, ToolDeclaration};
+    use crate::contract::{Delta, ToolAnnotation, ToolDeclaration};
     use crate::fact::EffectKind;
     use crate::groups::DeclaredAudience;
     use crate::label::{Audience, ReaderId, Trust};
@@ -308,21 +308,6 @@ mod tests {
 
     fn internal() -> Audience {
         Audience::restricted([ReaderId::new("internal")])
-    }
-
-    fn pinned(call: &ResolvedCall) -> PinnedAnnotation {
-        PinnedAnnotation::new(
-            ToolAnnotation {
-                name: call.tool().clone(),
-                tags: vec![],
-                description: None,
-                parameters: crate::params::ToolParameters::open(),
-                delta: Delta::NONE,
-                emits: EffectSet::default(),
-                requires: Default::default(),
-            },
-            AnnotationMandate::Declared,
-        )
     }
 
     fn traj() -> TrajectoryId {
@@ -444,7 +429,7 @@ mod tests {
             proposed_label: Label::top(),
             receiving: Label::top(),
             proposed_effects: EffectSet::new([EffectKind::new("read")]).unwrap(),
-            annotation: call.annotation().cloned().unwrap_or_else(|| pinned(call)),
+            annotation: call.annotation().cloned(),
             memberships: Vec::new(),
             subject: crate::basis::fixture_subject(&traj()),
             resolutions: vec![],

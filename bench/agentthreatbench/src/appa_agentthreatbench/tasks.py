@@ -684,6 +684,10 @@ def policy_digest(task_type: str, arm: Arm) -> str:
         names = {ToolDef(domain_tool).name for domain_tool in tools}
         policy = fides_policy(task_type, names)
         return fides_policy_digest(policy, native=arm == "fides-native")
+    elif task_type == "data_exfil":
+        # The guarded Data Exfiltration policy closes its mandates to the sample's
+        # customer directory, so its digest is per sample, never per (arm, task type).
+        raise ValueError("guarded data_exfil policies are per sample; hash the sample's policy")
     else:
         source = guarded_policy(task_type)
     return hashlib.sha256(source.encode()).hexdigest()
@@ -1608,7 +1612,7 @@ def complete_agent_loop(audit_dir: Path | None = None, agent_prompt_profile: str
         else:
             policy = guarded_policy(task_type, acl_readers=() if fixture is None else fixture.mandate_readers())
         externals = guarded_externals(fixture.url) if (arm == "guarded" and fixture is not None) else None
-        digest = policy_digest(task_type, arm)
+        digest = hashlib.sha256(policy.encode()).hexdigest()
         attempt_id = uuid4().hex
         events: list[dict[str, object]] = []
         session: NativeSession | None = None

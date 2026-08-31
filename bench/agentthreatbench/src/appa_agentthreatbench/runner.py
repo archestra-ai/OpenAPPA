@@ -15,7 +15,7 @@ from inspect_ai.scorer import CORRECT
 from inspect_ai.tool import ToolDef
 
 from appa_agentthreatbench import INSPECT_AI_VERSION, INSPECT_EVALS_REVISION, UPSTREAM_SAMPLE_COUNTS
-from appa_agentthreatbench.annotator import AnnotatorFixture, annotator_fixture_digest
+from appa_agentthreatbench.annotator import AnnotatorFixture, annotator_fixture_digest, mandate_readers
 from appa_agentthreatbench.fides import (
     FIDES_BINDING_IDENTITY,
     FIDES_MAX_CONCURRENT_TRAJECTORIES,
@@ -230,13 +230,26 @@ def run_manifest(
     if not ids or len(ids) != len(set(ids)) or not set(ids).issubset(all_ids):
         raise ValueError("sample selection must contain unique identities from the complete inventory")
     samples = {str(sample.id): sample for sample in complete_dataset()}
+    guarded_exfil_ids = [
+        sample_id
+        for sample_id in ids
+        if samples[sample_id].metadata.get("appa_arm") == "guarded"
+        and samples[sample_id].metadata.get("task_type") == "data_exfil"
+    ]
     fixture_digests = {
         sample_id: annotator_fixture_digest(
             list(samples[sample_id].metadata.get("customer_db", [])),
         )
-        for sample_id in ids
-        if samples[sample_id].metadata.get("appa_arm") == "guarded"
-        and samples[sample_id].metadata.get("task_type") == "data_exfil"
+        for sample_id in guarded_exfil_ids
+    }
+    sample_policy_digests = {
+        sample_id: hashlib.sha256(
+            guarded_policy(
+                "data_exfil",
+                acl_readers=mandate_readers(list(samples[sample_id].metadata.get("customer_db", []))),
+            ).encode()
+        ).hexdigest()
+        for sample_id in guarded_exfil_ids
     }
     config = {
         "model": model,
@@ -257,7 +270,15 @@ def run_manifest(
         "fides_max_concurrent_trajectories": FIDES_MAX_CONCURRENT_TRAJECTORIES,
         "sample_ids": ids,
         "implementation_sha256": implementation_digest(),
-        "policy_sha256": {arm: {task_type: policy_digest(task_type, arm) for task_type in TASK_TYPES} for arm in ARMS},
+        "policy_sha256": {
+            arm: {
+                task_type: policy_digest(task_type, arm)
+                for task_type in TASK_TYPES
+                if not (arm == "guarded" and task_type == "data_exfil")
+            }
+            for arm in ARMS
+        },
+        "policy_sha256_by_sample": sample_policy_digests,
         "annotator_fixture_sha256": fixture_digests,
     }
     run_digest = hashlib.sha256(json.dumps(config, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -364,8 +385,13 @@ def _audit_diagnostics(
     if not isinstance(config, dict):
         raise ValueError("run manifest has no config object")
     policy_digests = config.get("policy_sha256")
+    sample_policy_digests = config.get("policy_sha256_by_sample")
     fixture_digests = config.get("annotator_fixture_sha256")
-    if not isinstance(policy_digests, dict) or not isinstance(fixture_digests, dict):
+    if (
+        not isinstance(policy_digests, dict)
+        or not isinstance(sample_policy_digests, dict)
+        or not isinstance(fixture_digests, dict)
+    ):
         raise ValueError("run manifest lacks policy or annotator fixture digests")
     agent_prompt_profile = config.get("agent_prompt_profile")
     if not isinstance(agent_prompt_profile, str):
@@ -401,7 +427,11 @@ def _audit_diagnostics(
             record = {**record, "completed": True, "termination": limit_termination}
         arm = str(sample.metadata.get("appa_arm"))
         task_type = str(sample.metadata.get("task_type"))
-        expected_policy = policy_digests.get(arm, {}).get(task_type)
+        expected_policy = (
+            sample_policy_digests.get(str(sample.id))
+            if arm == "guarded" and task_type == "data_exfil"
+            else policy_digests.get(arm, {}).get(task_type)
+        )
         expected_fixture = fixture_digests.get(str(sample.id))
         expected_binding = {
             "fides": FIDES_BINDING_IDENTITY,

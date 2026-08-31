@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::basis::SubjectKey;
 use crate::candidate::{DerivedCandidate, SanitizerLineage};
-use crate::contract::{AnnotationMandate, PinnedAnnotation};
+use crate::contract::PinnedAnnotation;
 use crate::fact::{
     BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ForkSnapshot, ObservedResult, ReturnPolicy,
 };
@@ -451,10 +451,7 @@ impl Projection {
                     dispatch_calls.insert(
                         dispatch.clone(),
                         ResolvedCall::new_keyed(tool.clone(), *declaration, arguments.clone())
-                            .with_annotation(match annotation.mandate() {
-                                AnnotationMandate::Declared => None,
-                                AnnotationMandate::Annotator(_) => Some(annotation.clone()),
-                            })
+                            .with_annotation(annotation.clone())
                             .with_memberships(memberships.clone()),
                     );
                     receiving_bounds.insert(dispatch.clone(), receiving.clone());
@@ -1485,21 +1482,6 @@ mod tests {
         assert!(!p.is_opened(&traj("c")));
     }
 
-    fn pinned(tool: &str) -> crate::contract::PinnedAnnotation {
-        crate::contract::PinnedAnnotation::new(
-            crate::contract::ToolAnnotation {
-                name: ToolName::new(tool),
-                tags: vec![],
-                description: None,
-                parameters: crate::params::ToolParameters::open(),
-                delta: crate::contract::Delta::NONE,
-                emits: EffectSet::default(),
-                requires: crate::contract::Requires::default(),
-            },
-            crate::contract::AnnotationMandate::Declared,
-        )
-    }
-
     #[test]
     fn effects_are_family_wide_and_commit_only_on_success() {
         let egress = EffectKind::new("egress");
@@ -1513,7 +1495,7 @@ mod tests {
                 proposed_label: Label::top(),
                 receiving: Label::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
-                annotation: pinned("tool"),
+                annotation: None,
                 memberships: Vec::new(),
                 subject: crate::basis::fixture_subject(&traj("a")),
                 resolutions: vec![],
@@ -1544,7 +1526,7 @@ mod tests {
                 proposed_label: Label::top(),
                 receiving: Label::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
-                annotation: pinned("tool"),
+                annotation: None,
                 memberships: Vec::new(),
                 subject: crate::basis::fixture_subject(&traj("a")),
                 resolutions: vec![],
@@ -1574,7 +1556,7 @@ mod tests {
                 proposed_label: Label::top(),
                 receiving: Label::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
-                annotation: pinned("tool"),
+                annotation: None,
                 memberships: Vec::new(),
                 subject: crate::basis::fixture_subject(&traj("a")),
                 resolutions: vec![],
@@ -1683,7 +1665,7 @@ mod tests {
                 proposed_label: Label::top(),
                 receiving: Label::top(),
                 proposed_effects: EffectSet::new([]).unwrap(),
-                annotation: pinned("fetch_meeting"),
+                annotation: None,
                 memberships: Vec::new(),
                 subject: crate::basis::fixture_subject(&traj("a")),
                 resolutions: vec![],

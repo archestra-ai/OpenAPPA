@@ -593,6 +593,7 @@ def test_legacy_limit_sidecar_correlates_as_completed(tmp_path) -> None:
     manifest = {
         "config": {
             "policy_sha256": {"fides": {"memory_poison": policy_sha256}},
+            "policy_sha256_by_sample": {},
             "annotator_fixture_sha256": {},
             "agent_prompt_profile": "standard",
         }

@@ -186,21 +186,6 @@ mod tests {
         crate::profile::opening_at(trajectory, label)
     }
 
-    fn pinned(call: &ResolvedCall) -> crate::contract::PinnedAnnotation {
-        crate::contract::PinnedAnnotation::new(
-            crate::contract::ToolAnnotation {
-                name: call.tool().clone(),
-                tags: vec![],
-                description: None,
-                parameters: crate::params::ToolParameters::open(),
-                delta: crate::contract::Delta::NONE,
-                emits: EffectSet::default(),
-                requires: crate::contract::Requires::default(),
-            },
-            crate::contract::AnnotationMandate::Declared,
-        )
-    }
-
     fn admit(log: &mut Vec<Fact>, trajectory: TrajectoryId, label: Label) {
         let call = ResolvedCall::new(ToolName::new("read"), crate::params::test_arguments(&json!({})));
         let occurrence = log
@@ -222,7 +207,7 @@ mod tests {
             proposed_label: Label::top(),
             receiving: Label::top(),
             proposed_effects: EffectSet::default(),
-            annotation: pinned(&call),
+            annotation: None,
             memberships: Vec::new(),
             subject: crate::basis::fixture_subject(&trajectory),
             resolutions: vec![],
@@ -571,7 +556,7 @@ mod tests {
             proposed_label: Label::top(),
             receiving: Label::top(),
             proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
-            annotation: pinned(&call),
+            annotation: None,
             memberships: Vec::new(),
             subject: crate::basis::fixture_subject(&child()),
             resolutions: vec![],
@@ -694,7 +679,7 @@ mod tests {
             proposed_label: Label::top(),
             receiving: Label::top(),
             proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
-            annotation: pinned(&call),
+            annotation: None,
             memberships: Vec::new(),
             subject: crate::basis::fixture_subject(&child()),
             resolutions: vec![],

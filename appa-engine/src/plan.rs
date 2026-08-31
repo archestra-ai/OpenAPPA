@@ -2081,7 +2081,7 @@ mod tests {
             proposed_label: established(TRUSTED, Audience::Public),
             receiving: established(TRUSTED, Audience::Public),
             proposed_effects: annotation.emits.clone(),
-            annotation: PinnedAnnotation::new(annotation, AnnotationMandate::Declared),
+            annotation: None,
             memberships: Vec::new(),
             subject: crate::basis::fixture_subject(&traj()),
             resolutions: vec![],
@@ -3336,10 +3336,7 @@ mod tests {
             if eval.requirement_gaps.is_empty() && eval.narrowing.is_none() {
                 return Ok(());
             }
-            let raw = RawBlock {
-                requirement_gaps: eval.requirement_gaps,
-                narrowing: eval.narrowing,
-            };
+            let raw = eval;
 
             let mut log = vec![opened(state.label.clone())];
             for kind in &state.effects {
@@ -3436,10 +3433,7 @@ mod tests {
             if eval.requirement_gaps.is_empty() && eval.narrowing.is_none() {
                 return Ok(());
             }
-            let raw = RawBlock {
-                requirement_gaps: eval.requirement_gaps,
-                narrowing: eval.narrowing,
-            };
+            let raw = eval;
             let mut log = vec![opened(state.label.clone())];
             for kind in &state.effects {
                 log.push(committed_effect(kind.clone()));
@@ -3584,10 +3578,7 @@ mod tests {
             if eval.requirement_gaps.is_empty() && eval.narrowing.is_none() {
                 return Ok(());
             }
-            let raw = RawBlock {
-                requirement_gaps: eval.requirement_gaps,
-                narrowing: eval.narrowing,
-            };
+            let raw = eval;
 
             let mut log = vec![opened(state.label.clone())];
             for kind in &state.effects {

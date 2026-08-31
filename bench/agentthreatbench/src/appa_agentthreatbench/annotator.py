@@ -22,6 +22,19 @@ def minimized_customer_acl(customer_db: list[dict[str, Any]]) -> list[dict[str, 
     ]
 
 
+def mandate_readers(customer_db: list[dict[str, Any]]) -> tuple[str, ...]:
+    """Every literal reader an annotation of this sample may name: each customer's
+    id and email, in the fixture's reader spelling. Pure in the sample's customer
+    directory, so the manifest computes it without serving a fixture."""
+    minimized = minimized_customer_acl(customer_db)
+    values = [value for customer in minimized for value in (customer["id"], customer["email"])]
+    return tuple(_literal_readers(values))
+
+
+def _literal_readers(values: list[str]) -> list[str]:
+    return sorted({value.strip().lower() for value in values if value.strip()})
+
+
 def annotator_fixture_digest(customer_db: list[dict[str, Any]]) -> str:
     payload = {"customer_acl": minimized_customer_acl(customer_db)}
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -83,12 +96,10 @@ class AnnotatorFixture:
         return f"http://{host}:{port}/{self._capability}"
 
     def mandate_readers(self) -> tuple[str, ...]:
-        """Every literal reader an annotation of this sample may name: each customer's
-        id and email, in the fixture's own reader spelling. The policy closes each
-        annotator's `audiences` mandate to exactly this set, so a recipient outside the
-        directory makes the produced annotation inadmissible."""
-        values = [value for customer in self.customer_db for value in (customer["id"], customer["email"])]
-        return tuple(self._literal_readers(values))
+        """The policy closes each annotator's `audiences` mandate to exactly this set,
+        so a recipient outside the directory makes the produced annotation
+        inadmissible."""
+        return mandate_readers(self.customer_db)
 
     def annotate(self, request: object) -> dict[str, object]:
         """The complete annotation this consult asks for. The consult carries no tool
@@ -126,7 +137,7 @@ class AnnotatorFixture:
         return {
             "delta": {},
             "requires": {
-                "audience": {"contains": AnnotatorFixture._literal_readers([recipient])},
+                "audience": {"contains": _literal_readers([recipient])},
                 "history": [],
                 "attention": [],
             },
@@ -157,8 +168,4 @@ class AnnotatorFixture:
         )
         if selected is None:
             return []
-        return self._literal_readers([str(selected.get("id", "")), str(selected.get("email", ""))])
-
-    @staticmethod
-    def _literal_readers(values: list[str]) -> list[str]:
-        return sorted({value.strip().lower() for value in values if value.strip()})
+        return _literal_readers([str(selected.get("id", "")), str(selected.get("email", ""))])

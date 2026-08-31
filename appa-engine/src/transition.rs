@@ -1135,10 +1135,7 @@ impl<'a> Sequence<'a> {
                 resolutions,
             } => {
                 let call = ResolvedCall::new_keyed(tool.clone(), *declaration, arguments.clone())
-                    .with_annotation(match annotation.mandate() {
-                        crate::contract::AnnotationMandate::Declared => None,
-                        crate::contract::AnnotationMandate::Annotator(_) => Some(annotation.clone()),
-                    })
+                    .with_annotation(annotation.clone())
                     .with_memberships(memberships.clone());
                 if call.memberships() != memberships.as_slice() {
                     return Err(TransitionRefusal::ForgedMembership);
@@ -1150,17 +1147,18 @@ impl<'a> Sequence<'a> {
                     .registry()
                     .keyed_tool(tool, *declaration)
                     .ok_or_else(|| TransitionRefusal::UnknownTool(tool.as_str().to_string()))?;
-                // The record's one annotation carries the mandate its declaration prescribes,
-                // and a static declaration's record restates the compiled annotation exactly.
-                if annotation.mandate() != &entry.mandate()
-                    || (entry.declared().is_some() && entry.declared() != Some(annotation.annotation()))
-                {
-                    return Err(TransitionRefusal::ForgedResolution);
-                }
+                // The record stores a pin only where an Annotator produced one; a static
+                // declaration's annotation is the registry's own, so a record that carries
+                // a pin for it — or none for an Annotator-routed tool — is forged. A pin
+                // that also diverges from the decided call already failed its obligation.
+                let checked = match (annotation, entry.declared()) {
+                    (None, Some(compiled)) => compiled,
+                    (Some(pinned), None) if pinned.mandate() == &entry.mandate() => pinned.annotation(),
+                    _ => return Err(TransitionRefusal::ForgedResolution),
+                };
                 if crate::check::validate_annotation(self.engine.registry(), entry, &call).is_err() {
                     return Err(TransitionRefusal::ForgedResolution);
                 }
-                let checked = annotation.annotation();
                 if crate::check::validate_memberships(checked, &call).is_err()
                     || crate::check::pins_agree(checked, &call, &expansions).is_err()
                 {
@@ -2076,10 +2074,7 @@ impl<'a> Sequence<'a> {
                 },
             ) if dispatch == &next.dispatch => {
                 let opened = ResolvedCall::new_keyed(tool.clone(), *declaration, arguments.clone())
-                    .with_annotation(match annotation.mandate() {
-                        crate::contract::AnnotationMandate::Declared => None,
-                        crate::contract::AnnotationMandate::Annotator(_) => Some(annotation.clone()),
-                    })
+                    .with_annotation(annotation.clone())
                     .with_memberships(memberships.clone());
                 if opened != next.call || subject != &next.subject {
                     return Err(TransitionRefusal::UnbackedDecision);

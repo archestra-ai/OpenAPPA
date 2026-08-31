@@ -3632,10 +3632,6 @@ pub(crate) fn opened_dispatch(
     let occurrence = views.dispatch_count(&digest);
     let dispatch = DispatchId::new(views.trajectory().clone(), digest, occurrence);
     let current = views.current_label();
-    let annotation = match call.annotation() {
-        Some(pinned) => pinned.clone(),
-        None => crate::contract::PinnedAnnotation::new(contract.clone(), crate::contract::AnnotationMandate::Declared),
-    };
     let fact = Fact::DispatchOpened {
         trajectory: views.trajectory().clone(),
         dispatch: dispatch.clone(),
@@ -3645,7 +3641,7 @@ pub(crate) fn opened_dispatch(
         proposed_label: check::committed_label(contract, &current, expansions).clone(),
         receiving: current.clone(),
         proposed_effects: contract.emits.clone(),
-        annotation,
+        annotation: call.annotation().cloned(),
         memberships: call.memberships().to_vec(),
         resolutions: registry.resolutions(expansions),
         subject,
@@ -4509,7 +4505,7 @@ mod tests {
                 proposed_label: Label::new(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
                 receiving: Label::new(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
                 proposed_effects: crate::fact::EffectSet::default(),
-                annotation: pinned_static(&crm_tool()),
+                annotation: None,
                 memberships: Vec::new(),
                 subject: crate::basis::fixture_subject(&traj()),
                 resolutions: vec![],
@@ -6072,11 +6068,11 @@ mod tests {
         else {
             panic!("the hop's batch ends with its opening")
         };
-        *annotation = answer();
+        *annotation = Some(answer());
         assert_eq!(
             e.validate_replay(&forged),
-            Err(crate::transition::TransitionRefusal::ForgedResolution),
-            "the record restates another annotation than the compiled declaration's"
+            Err(crate::transition::TransitionRefusal::UnbackedDecision),
+            "a static dispatch record carrying a pin diverges from the decision that released it"
         );
     }
 
@@ -8617,10 +8613,12 @@ mod tests {
         assert_eq!(
             tampered(&|fact| {
                 if let Fact::DispatchOpened { annotation, .. } = fact {
-                    *annotation = pinned_static(&plain_tool("forged"));
+                    // A pin on a statically declared dispatch record cannot restate the
+                    // decision that released it: the decided call carries none.
+                    *annotation = Some(pinned_static(&plain_tool("forged")));
                 }
             }),
-            Err(TransitionRefusal::ForgedResolution)
+            Err(TransitionRefusal::UnbackedDecision)
         );
         assert_eq!(
             tampered(&|fact| {
@@ -8764,7 +8762,7 @@ mod tests {
                 proposed_label: Label::new(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
                 receiving: Label::new(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
                 proposed_effects: EffectSet::default(),
-                annotation: pinned_static(&crm_tool()),
+                annotation: None,
                 memberships: Vec::new(),
                 subject: crate::basis::fixture_subject(&child),
                 resolutions: vec![],
@@ -9641,14 +9639,7 @@ mod tests {
                     proposed_effects,
                     annotation,
                     ..
-                } => Some((
-                    *declaration,
-                    proposed_effects.clone(),
-                    match annotation.mandate() {
-                        crate::contract::AnnotationMandate::Declared => None,
-                        crate::contract::AnnotationMandate::Annotator(_) => Some(annotation.clone()),
-                    },
-                )),
+                } => Some((*declaration, proposed_effects.clone(), annotation.clone())),
                 _ => None,
             })
             .expect("the rewrite dispatches")
@@ -10100,7 +10091,7 @@ mod tests {
                     proposed_label: established(TRUSTED, Audience::Public),
                     receiving: established(TRUSTED, Audience::Public),
                     proposed_effects: EffectSet::default(),
-                    annotation: pinned_static(&plain_tool(tool)),
+                    annotation: None,
                     memberships: Vec::new(),
                     subject: crate::basis::fixture_subject(&traj()),
                     resolutions: vec![],
@@ -10331,7 +10322,7 @@ mod tests {
                     proposed_label: established(TRUSTED, Audience::Public),
                     receiving: established(TRUSTED, Audience::Public),
                     proposed_effects: EffectSet::default(),
-                    annotation: pinned_static(&plain_tool("ghost")),
+                    annotation: None,
                     memberships: Vec::new(),
                     subject: crate::basis::fixture_subject(&traj()),
                     resolutions: vec![],

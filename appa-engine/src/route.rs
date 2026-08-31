@@ -43,7 +43,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::basis::SubjectKey;
 use crate::candidate::CallStage;
-use crate::check::{self, CallReads, CheckOutcome, Gap, Narrowing, RawBlock, StateEval};
+use crate::check::{self, CallReads, CheckOutcome, Gap, Narrowing, RawBlock};
 use crate::contract::{NotStatic, StaticAnnotation, ToolAnnotation};
 use crate::engine::Engine;
 use crate::fact::EffectKind;
@@ -437,16 +437,12 @@ impl Search<'_> {
     fn require_groups(
         &self,
         contract: &ToolAnnotation,
-        eval: &StateEval,
+        block: &RawBlock,
         role: CallRole,
     ) -> Result<(), MembershipNeeded> {
-        let block = RawBlock {
-            requirement_gaps: eval.requirement_gaps.clone(),
-            narrowing: eval.narrowing.clone(),
-        };
         self.context
             .expansions
-            .require(plan::block_groups(self.registry, contract, &block, role).iter())
+            .require(plan::block_groups(self.registry, contract, block, role).iter())
     }
 
     /// The blocked call's stage in `state`: its own plans, then every tool that may run first.
@@ -905,10 +901,6 @@ mod tests {
         }
     }
 
-    fn pinned(call: &ResolvedCall) -> crate::contract::PinnedAnnotation {
-        crate::contract::PinnedAnnotation::new(tool(call.tool().as_str()), crate::contract::AnnotationMandate::Declared)
-    }
-
     fn emitting(name: &str, kinds: &[&str]) -> ToolAnnotation {
         let mut contract = tool(name);
         contract.emits = EffectSet::new(kinds.iter().map(|kind| effect(kind))).unwrap();
@@ -1085,7 +1077,7 @@ mod tests {
             proposed_label: Label::new(TRUSTED, Audience::Public),
             receiving: Label::new(TRUSTED, Audience::Public),
             proposed_effects: EffectSet::new(kinds.iter().map(|kind| effect(kind))).unwrap(),
-            annotation: pinned(&seed),
+            annotation: None,
             memberships: Vec::new(),
             subject: crate::basis::fixture_subject(&traj()),
             resolutions: vec![],

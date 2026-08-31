@@ -45,13 +45,6 @@ pub enum CheckOutcome {
     Block(RawBlock),
 }
 
-/// The state-only evaluation shared by [`evaluate`] and executable-plan enumeration (`plan`):
-/// the gaps and narrowing as the clocks find them.
-pub(crate) struct StateEval {
-    pub(crate) requirement_gaps: Vec<Gap>,
-    pub(crate) narrowing: Option<Narrowing>,
-}
-
 /// The label the trajectory would hold after this call commits, on the check's clock: the
 /// current fold narrowed by the delta.
 pub(crate) fn committed_label(annotation: &ToolAnnotation, current: &Label, expansions: &Expansions) -> Label {
@@ -76,7 +69,7 @@ pub(crate) fn evaluate_static(
     has_committed: &impl Fn(&EffectKind) -> bool,
     has_reserved: &impl Fn(&EffectKind) -> bool,
     expansions: &Expansions,
-) -> StateEval {
+) -> RawBlock {
     evaluate_state(
         annotation.annotation(),
         current,
@@ -110,10 +103,7 @@ pub(crate) fn evaluate(
     if eval.requirement_gaps.is_empty() && eval.narrowing.is_none() {
         return CheckOutcome::Allow;
     }
-    CheckOutcome::Block(RawBlock {
-        requirement_gaps: eval.requirement_gaps,
-        narrowing: eval.narrowing,
-    })
+    CheckOutcome::Block(eval)
 }
 
 /// The gap logic on an abstract `(current label, history predicates)` state — the one place the
@@ -129,7 +119,7 @@ pub(crate) fn evaluate_state(
     reads: CallReads<'_>,
     stage: &CallStage,
     expansions: &Expansions,
-) -> StateEval {
+) -> RawBlock {
     let committed = committed_label(annotation, current, expansions);
 
     let narrowing = (&committed != current).then(|| Narrowing {
@@ -150,7 +140,7 @@ pub(crate) fn evaluate_state(
         }
     }
 
-    StateEval {
+    RawBlock {
         requirement_gaps: seen,
         narrowing,
     }
