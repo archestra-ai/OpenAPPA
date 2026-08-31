@@ -48,12 +48,20 @@ pub fn merge_policy(policy: &str, enabled: &BTreeSet<System>) -> Result<MergedPo
         None => Vec::new(),
     };
 
+    // An ordered contract is spelled `tool(arg:pattern)`; availability is the base tool's.
+    let base_of = |name: &str| name.split('(').next().unwrap_or(name).to_string();
+    let mut wildcard = false;
     tools.retain(|tool| {
         let Some(name) = tool.get("name").and_then(|name| name.as_str()) else {
             return true; // let the loader report a nameless contract
         };
-        if available.contains(name) {
-            declared.insert(name.to_string());
+        if name == "*" {
+            wildcard = true;
+            return true;
+        }
+        let base = base_of(name);
+        if available.contains(&base) {
+            declared.insert(base);
             true
         } else {
             dropped.push(name.to_string());
@@ -61,12 +69,17 @@ pub fn merge_policy(policy: &str, enabled: &BTreeSet<System>) -> Result<MergedPo
         }
     });
 
-    // Tools the systems provide that the policy is silent about: neutral contract.
-    let defaulted: Vec<String> = available
-        .iter()
-        .filter(|name| !declared.contains(*name))
-        .cloned()
-        .collect();
+    // Tools the systems provide that the policy is silent about: neutral contract — unless
+    // the policy writes a wildcard, which covers exactly those calls; a neutral contract
+    // would shadow it (an exact declaration always wins over the wildcard).
+    let defaulted: Vec<String> = match wildcard {
+        true => Vec::new(),
+        false => available
+            .iter()
+            .filter(|name| !declared.contains(*name))
+            .cloned()
+            .collect(),
+    };
     for name in &defaulted {
         let mut contract = toml::value::Table::new();
         contract.insert("name".to_string(), toml::Value::String(name.clone()));
@@ -82,7 +95,12 @@ pub fn merge_policy(policy: &str, enabled: &BTreeSet<System>) -> Result<MergedPo
         let Some(name) = contract.get("name").and_then(|name| name.as_str()) else {
             continue;
         };
-        if let Some(schema) = tool_parameters(name) {
+        // The wildcard carries no metadata by construction; a selector's schema is its base
+        // tool's.
+        if name == "*" {
+            continue;
+        }
+        if let Some(schema) = tool_parameters(&base_of(name)) {
             let schema = toml::Value::try_from(schema).map_err(|error| InjectError::Schema(error.to_string()))?;
             contract.insert("parameters".to_string(), schema);
         }
@@ -90,9 +108,11 @@ pub fn merge_policy(policy: &str, enabled: &BTreeSet<System>) -> Result<MergedPo
 
     let mut deployment = toml::value::Table::new();
     deployment.insert("dispatch".to_string(), toml::Value::String("enforced".to_string()));
+    // Every tool the systems serve is confined — declared, defaulted, or wildcard-covered —
+    // so the host can withhold any raw result a sanitizer derivation stands in for.
     deployment.insert(
         "confined_results".to_string(),
-        toml::Value::Array(tools.iter().filter_map(|tool| tool.get("name").cloned()).collect()),
+        toml::Value::Array(available.iter().cloned().map(toml::Value::String).collect()),
     );
     table.insert("deployment".to_string(), toml::Value::Table(deployment));
 
@@ -213,6 +233,60 @@ mod tests {
         assert!(merged.dropped.is_empty());
         let value: toml::Value = toml::from_str(&merged.toml).unwrap();
         assert_eq!(value["tool"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn an_ordered_contract_counts_for_its_base_tool() {
+        let merged = merge_policy(
+            "version = 1\n[[tool]]\nname = \"list_customers(query:vip-*)\"\ndelta = {}\n",
+            &systems("crm"),
+        )
+        .unwrap();
+        assert!(merged.dropped.is_empty(), "the selector's base tool is available");
+        assert_eq!(
+            merged.defaulted,
+            vec!["create_customer_data"],
+            "the selector declares list_customers; only the other tool defaults"
+        );
+        let value: toml::Value = toml::from_str(&merged.toml).unwrap();
+        let confined: Vec<&str> = value["deployment"]["confined_results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|name| name.as_str())
+            .collect();
+        assert!(
+            confined.contains(&"list_customers") && !confined.iter().any(|name| name.contains('(')),
+            "coverage names the base tool, never the selector spelling: {confined:?}"
+        );
+    }
+
+    #[test]
+    fn a_wildcard_is_retained_and_covers_the_undeclared_tools() {
+        let merged = merge_policy(
+            "version = 1\n[[annotator]]\nname = \"acl\"\n[[tool]]\nname = \"*\"\nannotator = \"acl\"\n",
+            &systems("crm"),
+        )
+        .unwrap();
+        assert!(merged.dropped.is_empty());
+        assert!(
+            merged.defaulted.is_empty(),
+            "a neutral contract would shadow the wildcard for every available tool"
+        );
+        let value: toml::Value = toml::from_str(&merged.toml).unwrap();
+        let tools = value["tool"].as_array().unwrap();
+        assert_eq!(tools.len(), 1, "only the wildcard is declared: {tools:?}");
+        let confined: Vec<&str> = value["deployment"]["confined_results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|name| name.as_str())
+            .collect();
+        assert_eq!(
+            confined,
+            vec!["create_customer_data", "list_customers"],
+            "wildcard-covered tools stay confined; the wildcard itself is never an entry"
+        );
     }
 
     #[test]

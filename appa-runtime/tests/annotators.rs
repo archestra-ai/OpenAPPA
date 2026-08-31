@@ -448,30 +448,10 @@ async fn every_annotation_failure_refuses_the_hook_and_appends_nothing() {
     for failure in [
         Answer::Down,
         Answer::Malformed,
-        // A missing answer, a foreign version, an undeclared rank, a missing mandatory
-        // array, an unknown key, and a null leaf are exactly as unusable as transport
-        // failures: the mandate is closed and the decode is strict.
+        // A missing answer envelope stands in for every parse-invalid body: the strict
+        // decoder's own unit test enumerates the malformed shapes, and each reaches this
+        // same operational refusal.
         Answer::Wire(serde_json::json!({ "version": 1 })),
-        Answer::Wire(serde_json::json!({
-            "version": 7,
-            "answer": { "delta": {}, "requires": { "history": [], "attention": [] }, "emits": [] },
-        })),
-        Answer::Wire(serde_json::json!({
-            "version": 1,
-            "answer": { "delta": { "trust": "invented" }, "requires": { "history": [], "attention": [] }, "emits": [] },
-        })),
-        Answer::Wire(serde_json::json!({
-            "version": 1,
-            "answer": { "delta": {}, "requires": { "attention": [] }, "emits": [] },
-        })),
-        Answer::Wire(serde_json::json!({
-            "version": 1,
-            "answer": { "delta": {}, "requires": { "history": [], "attention": [] }, "emits": [], "context": {} },
-        })),
-        Answer::Wire(serde_json::json!({
-            "version": 1,
-            "answer": { "delta": { "trust": null }, "requires": { "history": [], "attention": [] }, "emits": [] },
-        })),
     ] {
         annotator.set("classifier", failure);
         let decision = propose(&runtime, fetch("https://a.example")).await;

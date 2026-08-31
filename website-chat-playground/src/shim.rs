@@ -162,10 +162,20 @@ async fn annotator(
         return (StatusCode::NOT_FOUND, axum::Json(serde_json::json!({})));
     }
 
+    // The directory is closed over the mandate the default policy declares: every reader
+    // it can produce is admissible. An address it does not know gets no answer, and the
+    // runtime refuses the send operationally instead of shipping an out-of-mandate answer.
     let readers = match request.artifact.args.to.as_str() {
         "ap-review@corp.example" => vec!["cfo@corp.example", "ap-lead@corp.example"],
         "all@acme.com" => vec!["ceo@acme.com", "staff@acme.com"],
-        recipient => vec![recipient],
+        known @ ("cfo@corp.example"
+        | "ap-lead@corp.example"
+        | "person@corp.example"
+        | "ceo@acme.com"
+        | "staff@acme.com") => {
+            vec![known]
+        }
+        _ => return (StatusCode::NOT_FOUND, axum::Json(serde_json::json!({}))),
     };
     // The complete annotation this directory produces: no output-label change, a
     // trusted-source floor, and the resolved readers as required recipients.

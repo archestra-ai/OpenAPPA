@@ -250,7 +250,7 @@ def _within_mandate(
     """Refuse at load what the runtime's mandate check would refuse at the first consult."""
     delta = annotation["delta"]
     requires = annotation["requires"]
-    if not set(delta) <= {"trust", "audience"}:
+    if not isinstance(delta, dict) or not set(delta) <= {"trust", "audience"}:
         raise ScenarioError(f"{name}: {location}.annotation.delta takes only trust and audience")
     if not set(requires) <= {"trust", "audience", "history", "attention"}:
         raise ScenarioError(
@@ -266,13 +266,16 @@ def _within_mandate(
             if spec.audiences is not None and not set(readers) <= spec.audiences:
                 outside = sorted(set(readers) - spec.audiences)
                 raise ScenarioError(f"{name}: {location}.annotation.{field}.audience names {outside} outside the mandate")
-    marks = requires["attention"]
-    if spec.marks is not None and not set(marks) <= spec.marks:
-        raise ScenarioError(f"{name}: {location}.annotation.requires.attention is outside the mandate")
     emits = annotation["emits"]
     if not isinstance(emits, list):
         raise ScenarioError(f"{name}: {location}.annotation.emits must be an array")
-    history = [entry for entry in requires["history"] if isinstance(entry, str)]
+    marks = requires["attention"]
+    history = requires["history"]
+    for field, values in (("requires.history", history), ("requires.attention", marks), ("emits", emits)):
+        if not all(isinstance(value, str) for value in values):
+            raise ScenarioError(f"{name}: {location}.annotation.{field} entries must be strings")
+    if spec.marks is not None and not set(marks) <= spec.marks:
+        raise ScenarioError(f"{name}: {location}.annotation.requires.attention is outside the mandate")
     if spec.effects is not None and not (set(emits) | set(history)) <= spec.effects:
         raise ScenarioError(f"{name}: {location}.annotation effects are outside the mandate")
 

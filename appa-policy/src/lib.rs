@@ -1703,6 +1703,24 @@ annotator = "acl"
     }
 
     #[test]
+    fn the_wildcard_is_part_of_the_policy_identity() {
+        let identity = |source: &str| Config::from_toml_str(source).expect("loads").engine().identity();
+        let base = "version = 1\n\n[[annotator]]\nname = \"acl\"\n\n[[annotator]]\nname = \"other\"\n\n[[tool]]\nname = \"post\"\ndelta = {}\n";
+        let with_wildcard = format!("{base}\n[[tool]]\nname = \"*\"\nannotator = \"acl\"\n");
+        let with_other = format!("{base}\n[[tool]]\nname = \"*\"\nannotator = \"other\"\n");
+        assert_ne!(
+            identity(base),
+            identity(&with_wildcard),
+            "adding the wildcard changes what an unwritten tool call does"
+        );
+        assert_ne!(
+            identity(&with_wildcard),
+            identity(&with_other),
+            "rerouting the wildcard changes who annotates the long tail"
+        );
+    }
+
+    #[test]
     fn hints_and_limits_never_move_the_policy_identity() {
         let identity = |source: &str| Config::from_toml_str(source).expect("loads").engine().identity();
         let base = identity(DECLARATIONS);

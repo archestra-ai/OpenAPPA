@@ -1215,8 +1215,15 @@ impl Registry {
         self.tools.keys()
     }
 
+    /// Every declaration the policy identity hashes over: the ordered contracts and, when
+    /// the policy writes one, the wildcard — its presence and its annotator change what an
+    /// unwritten tool call does, so two policies differing only there are different policies.
     pub(crate) fn semantic_tools(&self) -> impl Iterator<Item = (&ToolMatcher, &ToolDeclaration)> {
-        self.tools.values().flatten().map(|(matcher, d)| (matcher, d))
+        self.tools
+            .values()
+            .flatten()
+            .map(|(matcher, d)| (matcher, d))
+            .chain(self.wildcard.iter().map(|d| (&ToolMatcher::Bare, d)))
     }
 
     /// One registered Annotator's compiled mandate, with every omitted bound already resolved

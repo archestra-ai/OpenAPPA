@@ -111,7 +111,9 @@ pub enum ArgumentError {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToolParameters {
-    root: ObjectSchema,
+    /// Shared: a released record materializes its annotation per replay pass, so a clone
+    /// bumps a reference instead of copying the compiled tree.
+    root: std::sync::Arc<ObjectSchema>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -181,12 +183,12 @@ impl ToolParameters {
     /// the v1 global input limits, leaving the tool's argument shape untyped.
     pub fn open() -> Self {
         ToolParameters {
-            root: ObjectSchema {
+            root: std::sync::Arc::new(ObjectSchema {
                 description: None,
                 properties: BTreeMap::new(),
                 required: Vec::new(),
                 additional: true,
-            },
+            }),
         }
     }
 
@@ -196,7 +198,9 @@ impl ToolParameters {
             SchemaNode::Object(root) => root,
             _ => return Err(ParamsError::RootNotObject),
         };
-        Ok(ToolParameters { root })
+        Ok(ToolParameters {
+            root: std::sync::Arc::new(root),
+        })
     }
 
     /// The normalized schema rendering: what the contract serializes, policy identity
