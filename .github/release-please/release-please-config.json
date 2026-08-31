@@ -65,13 +65,19 @@
   "packages": {
     ".": {
       "component": "OpenAPPA",
-      "release-type": "rust",
+      "release-type": "simple",
+      "version-file": ".github/release-please/version.txt",
       "initial-version": "0.1.0",
       "bump-minor-pre-major": true,
       "include-component-in-tag": false,
       "draft": true,
       "force-tag-creation": true,
       "extra-files": [
+        {
+          "type": "toml",
+          "path": "Cargo.toml",
+          "jsonpath": "$.workspace.package.version"
+        },
         {
           "type": "json",
           "path": "integrations/claude-code/plugin/.claude-plugin/plugin.json",
@@ -80,6 +86,6 @@
       ]
     }
   },
-  "plugins": ["cargo-workspace"],
+  "plugins": [],
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json"
 }
