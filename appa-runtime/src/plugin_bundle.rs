@@ -19,10 +19,15 @@ use thiserror::Error;
 /// Files and directories every plugin source must carry, in the marketplace-root
 /// shape `scripts/appa-stage-plugin-bundle.sh` produces. One validator serves
 /// both source resolution and the reuse check on an existing deployment.
-const REQUIRED_FILES: [&str; 4] = [
+const REQUIRED_FILES: [&str; 6] = [
     ".claude-plugin/marketplace.json",
     "plugin/.claude-plugin/plugin.json",
     "plugin/hooks/hooks.json",
+    // Both hook maps register a wrapper script rather than a command line, so a
+    // tree carrying the map without its script registers hooks that cannot run.
+    // Materialization keeps both scripts; only the inactive map is removed.
+    "plugin/hooks/hook.sh",
+    "plugin/hooks/hook.ps1",
     "website/content/docs/contracts.md",
 ];
 const REQUIRED_DIRS: [&str; 2] = ["plugin", "batteries"];

@@ -14,8 +14,7 @@ on:
         type: string
       plugin_sha256:
         description: SHA-256 of the plugin artifact these binaries must accept
-        required: false
-        default: ""
+        required: true
         type: string
   workflow_dispatch:
     inputs:
@@ -26,11 +25,11 @@ on:
         type: string
       plugin_sha256:
         description: >-
-          SHA-256 of the plugin artifact these binaries must accept. Leave empty
-          to build binaries that can only initialize from an explicit
-          --plugin-source; the release workflow always supplies it.
-        required: false
-        default: ""
+          SHA-256 of the plugin artifact these binaries must accept, as the
+          release workflow's plugin-artifact job computes it. Required: a binary
+          built here without one refuses every init that does not pass an
+          explicit --plugin-source, and the package smoke test rejects it.
+        required: true
         type: string
 
 permissions: {}

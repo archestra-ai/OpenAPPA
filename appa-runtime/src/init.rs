@@ -469,13 +469,27 @@ fn clear_retired_runtime(paths: &DeploymentPaths) -> Result<(), InitError> {
     }
 }
 
-/// Terminate every process whose executable *is* `target`, and return those
-/// still alive afterwards.
+/// The subcommand a managed runtime is started with, by every starter and by
+/// init itself. It is what distinguishes a runtime from any other invocation of
+/// the same binary.
+#[cfg(unix)]
+const RUNTIME_SUBCOMMAND: &str = "runtime";
+
+/// Terminate every managed runtime whose executable *is* `target`, and return
+/// those still alive afterwards.
 ///
-/// Discovery starts from `ps`, whose `command` column is argv and therefore
-/// spoofable, so every candidate is verified against the operating system's own
-/// answer for that pid before it is signalled. A pid whose executable cannot be
-/// read is skipped and reported, never killed on argv alone.
+/// Two conditions, and a candidate needs both. The executable must be the
+/// retired path, verified against the operating system's own answer for that
+/// pid, because `ps` reports argv and argv is spoofable. And argv must name the
+/// `runtime` subcommand, because the retired binary is also what a concurrent
+/// `appa init` or an in-flight `appa hook` is executing, and terminating those
+/// would interrupt work that has nothing to do with the runtime being replaced.
+/// Argv is only ever narrowing here: it can excuse a process from the stop set,
+/// never admit one the executable check rejected.
+///
+/// Windows applies the executable condition alone. Reading another process's
+/// command line there needs a CIM query rather than `Get-Process`, and the same
+/// helper serves legacy cleanup, whose binary had no subcommand at all.
 #[cfg(unix)]
 fn stop_processes_executing(target: &Path) -> Result<Vec<i32>, InitError> {
     let Ok(output) = Command::new("ps").args(["-axo", "pid=,command="]).output() else {
@@ -496,13 +510,19 @@ fn stop_processes_executing(target: &Path) -> Result<Vec<i32>, InitError> {
     let own = std::process::id() as i32;
     let mut signalled = Vec::new();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let Some((pid, _)) = line.trim_start().split_once(char::is_whitespace) else {
+        let Some((pid, arguments)) = line.trim_start().split_once(char::is_whitespace) else {
             continue;
         };
         let Ok(pid) = pid.parse::<i32>() else {
             continue;
         };
         if pid == own {
+            continue;
+        }
+        // A whole token, so a path that merely contains the word does not match.
+        // The starter runs `<binary> runtime --listen <addr>`, and a binary path
+        // carrying spaces splits into tokens that are all still not `runtime`.
+        if !arguments.split_whitespace().any(|token| token == RUNTIME_SUBCOMMAND) {
             continue;
         }
         match executable_of(pid) {
@@ -1247,15 +1267,20 @@ mod tests {
     #[cfg(unix)]
     const STAND_IN: &str = "/usr/bin/perl";
 
-    /// A process whose executable really *is* `at`, so verification finds it
-    /// there rather than taking a spoofable argv on trust.
+    /// What every starter runs: the subcommand plus the endpoint it binds.
+    #[cfg(unix)]
+    const RUNTIME_ARGUMENTS: &[&str] = &["runtime", "--listen", "127.0.0.1:8787"];
+
+    /// A process whose executable really *is* `at`, started with `arguments`, so
+    /// verification finds it there rather than taking a spoofable argv on trust
+    /// and the stop set sees the argv it decides on.
     ///
     /// The stand-in is reaped on its own thread. A dead child that nobody has
     /// waited for is a zombie, and `kill(pid, 0)` still succeeds on one, so
     /// without the reaper these tests could not tell a stopped process from a
     /// running one. In production the retired runtime is never init's child.
     #[cfg(unix)]
-    fn process_executing(at: &Path, ignores_sigterm: bool) -> Option<i32> {
+    fn process_executing(at: &Path, ignores_sigterm: bool, arguments: &[&str]) -> Option<i32> {
         use std::os::unix::fs::PermissionsExt;
 
         if !Path::new(STAND_IN).is_file() {
@@ -1276,6 +1301,7 @@ mod tests {
         let mut child = Command::new(at)
             .args(["-e", &script])
             .arg(&ready)
+            .args(arguments)
             .spawn()
             .expect("the stand-in process starts");
         let pid = child.id() as i32;
@@ -1306,7 +1332,7 @@ mod tests {
     fn a_runtime_at_the_retired_path_is_stopped() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let retired = directory.path().join("bin/appa");
-        let Some(pid) = process_executing(&retired, false) else {
+        let Some(pid) = process_executing(&retired, false, RUNTIME_ARGUMENTS) else {
             return;
         };
 
@@ -1323,7 +1349,7 @@ mod tests {
         // What an init run under a different APPA_INSTALL_DIR or APPA_DATA_DIR
         // leaves behind: a path this environment never computes.
         let elsewhere = directory.path().join("other-install/appa");
-        let Some(pid) = process_executing(&elsewhere, false) else {
+        let Some(pid) = process_executing(&elsewhere, false, RUNTIME_ARGUMENTS) else {
             return;
         };
         let retired = directory.path().join("bin/appa");
@@ -1340,6 +1366,31 @@ mod tests {
         unsafe { libc::kill(pid, libc::SIGKILL) };
     }
 
+    /// What a second `appa init`, or an `appa hook` in flight, looks like: the
+    /// retired executable, doing something that is not serving the endpoint.
+    /// Terminating it would interrupt work unrelated to the runtime being
+    /// replaced -- and killing a concurrent init mid-switch is the worst of
+    /// them, because the Claude plugin replacement it is performing is not
+    /// atomic.
+    #[cfg(unix)]
+    #[test]
+    fn another_invocation_of_the_retired_binary_is_left_alone() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let retired = directory.path().join("bin/appa");
+        let Some(pid) = process_executing(&retired, false, &["init", "claude-code"]) else {
+            return;
+        };
+
+        let survivors = stop_processes_executing(&retired).expect("the stop set runs");
+
+        assert!(survivors.is_empty());
+        assert!(
+            still_running(pid),
+            "the stop set signalled a process that is not a runtime",
+        );
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_verified_runtime_that_refuses_to_die_is_reported() {
@@ -1347,7 +1398,7 @@ mod tests {
         let retired = directory.path().join("bin/appa");
         // Ignores SIGTERM, which is exactly the case that must abort init
         // rather than let a new plugin bind to an old runtime.
-        let Some(pid) = process_executing(&retired, true) else {
+        let Some(pid) = process_executing(&retired, true, RUNTIME_ARGUMENTS) else {
             return;
         };
 
@@ -1365,8 +1416,10 @@ mod tests {
     #[test]
     fn cleanup_stops_an_unlinked_legacy_runtime() {
         let directory = tempfile::tempdir().expect("temporary directory");
+        // The retired daemon was its own binary and took no subcommand; legacy
+        // cleanup matches on the executable path alone.
         let target = directory.path().join("appa-runtime");
-        let Some(pid) = process_executing(&target, false) else {
+        let Some(pid) = process_executing(&target, false, &[]) else {
             return;
         };
         fs::remove_file(target.with_extension("ready")).expect("the readiness marker is removed");
