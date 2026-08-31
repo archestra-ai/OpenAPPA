@@ -47,17 +47,36 @@ appa init claude-code
 
 Init installs `clappa` beside `appa` so the short command works in later examples.
 
-From a checkout, `appa init` finds `integrations/claude-code` and registers that
-exact local marketplace. From an extracted release it uses the marketplace
-shipped beside the binaries. Otherwise it uses `archestra-ai/OpenAPPA`. It
-uninstalls an existing user-scoped APPA plugin and replaces its marketplace
+`appa init` installs one bundle: the plugin belonging to the running binary's
+own release, and that binary. Each build knows the SHA-256 of its release's
+plugin artifact and accepts no other bytes, so version X can never install
+version Y's plugin. The artifact is downloaded once, verified against that
+digest before anything outside a temporary file changes, and cached, so a later
+init needs no network. The result does not depend on the working directory.
+
+A build from a checkout has no baked-in digest. It refuses to download and asks
+for an explicit source:
+
+```sh
+sh scripts/appa-stage-plugin-bundle.sh /tmp/appa-plugin
+appa init claude-code --plugin-source /tmp/appa-plugin
+```
+
+Init uninstalls an existing user-scoped APPA plugin and replaces its marketplace
 before installing, so branch tests never stack two APPA hook sets.
 
-Initialization deploys the same `appa` build for its internal `runtime` command, creates the starting
-policy only when it is missing, installs `clappa`, preserves a custom Claude
-statusline, registers the plugin, and starts the runtime through the same
-starter used at SessionStart. A successful command therefore proves that one
-runtime and one plugin from the selected source are active.
+Initialization deploys the `appa` binary to a private path under the data
+directory and renders that exact path into the hooks, so a hook never resolves
+`appa` through `PATH`. It creates the starting policy only when it is missing,
+installs `clappa`, preserves a custom Claude statusline, registers the plugin,
+and starts the runtime through the same starter used at SessionStart. A
+successful command therefore proves that one runtime and one plugin from the
+selected source are active.
+
+Deployments are content-addressed and immutable: Claude is pointed at a
+directory that cannot change under it, rather than at a checkout or a remote
+marketplace. Re-running init repairs a deployment whose structure or rendered
+paths are wrong and is otherwise a no-op.
 
 Linux binaries require glibc 2.34 or newer. Alpine and other musl-only
 systems are not supported by the release assets.
@@ -69,9 +88,13 @@ the PowerShell adapter on native Windows; WSL uses the POSIX hooks.
 
 | System | Runtime | Policy | Database |
 | --- | --- | --- | --- |
-| Linux | `~/.local/bin/appa runtime` | `~/.config/appa/appa.toml` | `~/.local/share/appa/` |
-| macOS | `~/.local/bin/appa runtime` | `~/Library/Application Support/appa/appa.toml` | `~/Library/Application Support/appa/` |
+| Linux | `~/.local/share/appa/bin/appa runtime` | `~/.config/appa/appa.toml` | `~/.local/share/appa/` |
+| macOS | `~/Library/Application Support/appa/bin/appa runtime` | `~/Library/Application Support/appa/appa.toml` | `~/Library/Application Support/appa/` |
 | Windows | `%LOCALAPPDATA%\appa\bin\appa.exe runtime` | `%APPDATA%\appa\appa.toml` | `%LOCALAPPDATA%\appa\` |
+
+The harness binary is APPA's own, not something you put on `PATH`: hooks name
+that absolute path. `clappa` and the statusline stay where a shell and Claude's
+settings can find them.
 
 The runtime creates the starting policy only when the policy path does
 not exist. It never replaces the policy or database.
@@ -177,9 +200,22 @@ Claude usage, so nothing runs it automatically.
 ## Upgrade
 
 Install the new `appa` package, then rerun `appa init claude-code`. Init replaces
-the deployed runtime and the APPA marketplace together, preserves policy and
-database files, and restarts a runtime that reports its installed binary as
-stale.
+the deployed runtime and the APPA marketplace together, always as one bundle,
+and preserves policy and database files.
+
+**Restart any running `clappa` session after an upgrade.** Claude loads a
+session's hooks at session start, and the hook wire between plugin and runtime
+carries no version, so a session running across an upgrade keeps talking to the
+runtime it started with.
+
+Init stops a runtime that is still executing the path a previous init deployed
+to, and aborts before touching Claude if it cannot, rather than registering a
+new plugin against an old runtime. That covers the paths your current
+environment resolves to. A runtime left by an init run under a different
+`APPA_INSTALL_DIR` or `APPA_DATA_DIR` executes a path this init never computes:
+it is reported so you can stop it yourself, never killed. An `appa` left at the
+old install path is named in the receipt and never deleted; remove it when you
+are ready.
 
 ## Uninstall
 
@@ -187,7 +223,8 @@ stale.
 claude plugin uninstall appa-runtime
 claude plugin marketplace remove appa
 pkill -f 'appa runtime'
-rm ~/.local/bin/appa ~/.cargo/bin/clappa ~/.local/bin/appa-statusline.sh
+rm -rf ~/.local/share/appa/bin ~/.local/share/appa/deployments ~/.local/share/appa/cache
+rm -f ~/.cargo/bin/clappa ~/.local/bin/appa-statusline.sh
 cargo uninstall appa
 
 # drop the statusline entry appa init wrote, and keep one of your own:

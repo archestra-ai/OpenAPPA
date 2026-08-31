@@ -26,12 +26,20 @@ From an extracted release archive on POSIX:
 
 ```sh
 install -m 755 appa ~/.local/bin/
-appa init claude-code --source ./claude-code
+appa init claude-code
 ```
 
-From a checkout, `init` installs that checkout's marketplace. From an extracted
-release it uses the marketplace shipped beside the binaries. Otherwise it uses
-`archestra-ai/OpenAPPA`. It replaces an existing APPA plugin instead of stacking
+Every `appa` build knows the SHA-256 of the plugin artifact belonging to its own
+release and accepts no other bytes. Release builds download that artifact once,
+verify it, and cache it; a build from a checkout has no such digest, refuses to
+download, and asks for `--plugin-source`:
+
+```sh
+sh scripts/appa-stage-plugin-bundle.sh /tmp/appa-plugin
+appa init claude-code --plugin-source /tmp/appa-plugin
+```
+
+The result does not depend on the working directory. It replaces an existing APPA plugin instead of stacking
 another copy, deploys the same `appa` build for its internal `runtime` command, creates `clappa`, installs the
 statusline unless Claude already has a custom one, preserves an existing policy,
 and starts the runtime. The [Claude Code integration guide](../integrations/claude-code/README.md)
