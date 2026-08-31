@@ -218,7 +218,7 @@ def _run_canary(args: argparse.Namespace) -> int:
         print(f"canary warning: {warning}", file=sys.stderr)
     if not verdict.healthy:
         for failure in verdict.failures:
-            print(f"canary tripped: {failure}", file=sys.stderr)
+            print(f"canary failure: {failure}", file=sys.stderr)
         return 1
     return 0
 

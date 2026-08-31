@@ -90,7 +90,7 @@ def _arm_cell(summary: AgentSummary | None) -> str:
 
 
 def render_markdown(runs: list[ModelSummaries], verdict: Verdict, run_id: str) -> str:
-    status = "✅ clean" if verdict.healthy else "😞 tripped"
+    status = "✅ passed" if verdict.healthy else "😞 failed"
     lines = [
         f"## APPA nightly canary — {status}",
         "",
@@ -143,9 +143,7 @@ def _board(runs: list[ModelSummaries]) -> str:
 def slack_payload(
     runs: list[ModelSummaries], verdict: Verdict, run_id: str, run_url: str | None
 ) -> dict:
-    headline = (
-        "✅ APPA canary: defended arm clean" if verdict.healthy else "😞 APPA canary tripped"
-    )
+    headline = "✅ APPA canary passed" if verdict.healthy else "😞 APPA canary failed"
     lines = [f"{headline} — run {run_id}"]
     if verdict.failures:
         lines.append("failures: " + " · ".join(verdict.failures))
