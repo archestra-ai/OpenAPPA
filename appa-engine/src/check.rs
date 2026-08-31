@@ -285,47 +285,31 @@ pub(crate) enum AnnotationRefusal {
 }
 
 /// Hold a call's annotation evidence to its declaration: a static declaration is its own
-/// annotation and a pin, if one rides along, must restate it exactly; an Annotated declaration
-/// requires a pin whose mandate names its annotator, whose operational metadata is the
-/// declaration's, whose name is the call's, and whose every produced value is complete,
-/// literal, and within the annotator's compiled mandate. The one validator the live
-/// check and replay both consume.
+/// annotation and takes no pin; an Annotated declaration requires a pin its annotator
+/// produced for this exact rendered call — the pin binds the call's canonical digest —
+/// whose every produced value is complete, literal, and within the annotator's compiled
+/// mandate. The one validator the live check and replay both consume.
 pub(crate) fn validate_annotation(
     registry: &crate::registry::Registry,
     declaration: &ToolDeclaration,
     call: &ResolvedCall,
 ) -> Result<(), AnnotationRefusal> {
+    let foreign = |what: &str| AnnotationRefusal::Foreign(what.to_string());
     let (annotator, pinned) = match (declaration.annotator(), call.annotation()) {
         (None, None) => return Ok(()),
-        (None, Some(pinned)) => {
-            // A static declaration's compiled annotation is the only admissible pin, and its
-            // mandate is the policy's own declaration.
-            let compiled = declaration
-                .declared()
-                .expect("a declaration without an annotator is static");
-            let restates =
-                pinned.mandate() == &crate::contract::AnnotationMandate::Declared && pinned.annotation() == compiled;
-            return match restates {
-                true => Ok(()),
-                false => Err(AnnotationRefusal::Foreign(
-                    "a static declaration is its own annotation".into(),
-                )),
-            };
+        (None, Some(_)) => {
+            return Err(foreign("a static declaration is its own annotation and takes no pin"));
         }
         (Some(annotator), None) => return Err(AnnotationRefusal::Needed(annotator.clone())),
         (Some(annotator), Some(pinned)) => (annotator, pinned),
     };
-    let foreign = |what: &str| AnnotationRefusal::Foreign(what.to_string());
-    if pinned.mandate() != &crate::contract::AnnotationMandate::Annotator(annotator.clone()) {
-        return Err(foreign("the mandate is not this declaration's annotator"));
+    if pinned.annotator() != annotator {
+        return Err(foreign("the pin is not this declaration's annotator's"));
     }
-    let annotation = pinned.annotation();
-    if annotation.name != *call.tool() {
-        return Err(foreign("the annotation names another tool"));
+    if pinned.call() != &call.digest() {
+        return Err(foreign("the pin binds another call"));
     }
-    if !declaration.metadata_matches(annotation) {
-        return Err(foreign("the annotation rewrites the declaration's metadata"));
-    }
+    let annotation = pinned.produced();
     let outside = |what: &str| AnnotationRefusal::OutsidePolicy(what.to_string());
     // Literal: a produced annotation pins exact reader sets — no groups, no placeholders.
     if annotation.groups().next().is_some() {
@@ -353,7 +337,7 @@ pub(crate) fn validate_annotation(
     {
         return Err(outside("the produced delta trust is outside the mandate"));
     }
-    if !permits_audience(&annotation.output_label(&expansions).audience) {
+    if !permits_audience(&annotation.delta.output_label(&expansions).audience) {
         return Err(outside("the produced delta audience is outside the mandate"));
     }
     if annotation
@@ -472,10 +456,9 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use crate::contract::{AnnotationMandate, Delta, LabelRequirements, PinnedAnnotation, Requires, ToolAnnotation};
+    use crate::contract::{Delta, LabelRequirements, PinnedAnnotation, ProducedAnnotation, Requires, ToolAnnotation};
     use crate::fact::{EffectKind, EffectSet};
     use crate::groups::DeclaredAudience;
-    use crate::names::TagName;
     use crate::params::ToolParameters;
     use crate::registry::{AnnotatorDeclaration, Registry, RegistryConfig, TrustChain};
     use crate::value::ToolName;
@@ -546,45 +529,45 @@ mod tests {
         )
     }
 
+    fn produced_of(annotation: ToolAnnotation) -> ProducedAnnotation {
+        ProducedAnnotation {
+            delta: annotation.delta,
+            emits: annotation.emits,
+            requires: annotation.requires,
+        }
+    }
+
     fn pinned_by_classifier(produced: ToolAnnotation) -> ResolvedCall {
-        call("lookup").with_annotation(Some(PinnedAnnotation::new(
-            produced,
-            AnnotationMandate::Annotator(AnnotatorName::new("classifier")),
-        )))
+        let unpinned = call("lookup");
+        let pin = PinnedAnnotation::new(
+            AnnotatorName::new("classifier"),
+            unpinned.digest(),
+            produced_of(produced),
+        );
+        unpinned.with_annotation(Some(pin))
     }
 
     #[test]
-    fn a_static_declaration_is_its_own_annotation() {
+    fn a_static_declaration_is_its_own_annotation_and_takes_no_pin() {
         let registry = registry(vec![classifier()]);
         let declaration = registry.tool(&ToolName::new("read")).expect("read is registered");
         let compiled = declaration.declared().expect("read is static").clone();
 
         assert_eq!(validate_annotation(&registry, declaration, &call("read")), Ok(()));
-        let restated = call("read").with_annotation(Some(PinnedAnnotation::new(
-            compiled.clone(),
-            AnnotationMandate::Declared,
-        )));
-        assert_eq!(validate_annotation(&registry, declaration, &restated), Ok(()));
 
-        let mut edited = compiled.clone();
-        edited.delta = Delta {
-            trust: Some(Trust::new(0)),
-            audience: None,
-        };
-        let forged = call("read").with_annotation(Some(PinnedAnnotation::new(edited, AnnotationMandate::Declared)));
-        assert!(matches!(
-            validate_annotation(&registry, declaration, &forged),
-            Err(AnnotationRefusal::Foreign(_))
-        ));
-
-        let wrong_mandate = call("read").with_annotation(Some(PinnedAnnotation::new(
-            compiled,
-            AnnotationMandate::Annotator(AnnotatorName::new("classifier")),
+        let unpinned = call("read");
+        let restated = unpinned.clone().with_annotation(Some(PinnedAnnotation::new(
+            AnnotatorName::new("classifier"),
+            unpinned.digest(),
+            produced_of(compiled),
         )));
-        assert!(matches!(
-            validate_annotation(&registry, declaration, &wrong_mandate),
-            Err(AnnotationRefusal::Foreign(_))
-        ));
+        assert!(
+            matches!(
+                validate_annotation(&registry, declaration, &restated),
+                Err(AnnotationRefusal::Foreign(_))
+            ),
+            "a static declaration is its own annotation: even a faithful restatement is a foreign pin"
+        );
     }
 
     #[test]
@@ -602,31 +585,35 @@ mod tests {
             Ok(())
         );
 
-        let declared_mandate = call("lookup").with_annotation(Some(PinnedAnnotation::new(
-            annotation("lookup"),
-            AnnotationMandate::Declared,
+        let unpinned = call("lookup");
+        let foreign = unpinned.clone().with_annotation(Some(PinnedAnnotation::new(
+            AnnotatorName::new("other"),
+            unpinned.digest(),
+            produced_of(annotation("lookup")),
         )));
-        assert!(matches!(
-            validate_annotation(&registry, declaration, &declared_mandate),
-            Err(AnnotationRefusal::Foreign(_))
-        ));
-
         assert!(
             matches!(
-                validate_annotation(&registry, declaration, &pinned_by_classifier(annotation("other"))),
+                validate_annotation(&registry, declaration, &foreign),
                 Err(AnnotationRefusal::Foreign(_))
             ),
-            "the annotation must name the tool the actor called"
+            "the pin must be the declaration's own annotator's"
         );
 
-        let mut retagged = annotation("lookup");
-        retagged.tags = vec![TagName::new("shell")];
+        let sibling = ResolvedCall::new(
+            ToolName::new("lookup"),
+            crate::params::test_arguments(&serde_json::json!({ "id": 8 })),
+        );
+        let reused = call("lookup").with_annotation(Some(PinnedAnnotation::new(
+            AnnotatorName::new("classifier"),
+            sibling.digest(),
+            produced_of(annotation("lookup")),
+        )));
         assert!(
             matches!(
-                validate_annotation(&registry, declaration, &pinned_by_classifier(retagged)),
+                validate_annotation(&registry, declaration, &reused),
                 Err(AnnotationRefusal::Foreign(_))
             ),
-            "an answer may not rewrite the declaration's metadata"
+            "a pin produced for one call cannot ride a sibling call under the same declaration"
         );
     }
 

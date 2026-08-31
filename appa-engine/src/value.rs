@@ -556,7 +556,7 @@ impl ResolvedCall {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contract::{AnnotationMandate, Delta, PinnedAnnotation, Requires, ToolAnnotation};
+    use crate::contract::{Delta, PinnedAnnotation, ProducedAnnotation, Requires};
     use crate::params::ToolParameters;
     use serde_json::json;
 
@@ -568,13 +568,11 @@ mod tests {
         ResolvedCall::new(ToolName::new(tool), args(value))
     }
 
-    fn pinned(tool: &str, annotator: &str) -> PinnedAnnotation {
+    fn pinned(bound_to: &ResolvedCall, annotator: &str) -> PinnedAnnotation {
         PinnedAnnotation::new(
-            ToolAnnotation {
-                name: ToolName::new(tool),
-                tags: vec![],
-                description: None,
-                parameters: ToolParameters::open(),
+            crate::names::AnnotatorName::new(annotator),
+            bound_to.digest(),
+            ProducedAnnotation {
                 delta: Delta {
                     trust: Some(crate::label::Trust::new(0)),
                     audience: None,
@@ -582,14 +580,13 @@ mod tests {
                 emits: Default::default(),
                 requires: Requires::default(),
             },
-            AnnotationMandate::Annotator(crate::names::AnnotatorName::new(annotator)),
         )
     }
 
     #[test]
     fn a_pinned_annotation_is_part_of_the_batch_identity() {
         let bare = call("Bash", json!({ "command": "ls" }));
-        let annotated = |annotator: &str| bare.clone().with_annotation(Some(pinned("Bash", annotator)));
+        let annotated = |annotator: &str| bare.clone().with_annotation(Some(pinned(&bare, annotator)));
         let unpinned = CanonicalDigest::of_batch([&bare], None);
         assert_ne!(unpinned, CanonicalDigest::of_batch([&annotated("a")], None));
         assert_ne!(
@@ -661,7 +658,7 @@ mod tests {
         // Annotation evidence binds the exact canonical call, so a rewrite renders a call
         // that must be annotated afresh — the pin never rides along.
         let base = call("lookup", json!({ "id": 7, "deep": true }));
-        let resolved = base.clone().with_annotation(Some(pinned("lookup", "classifier")));
+        let resolved = base.clone().with_annotation(Some(pinned(&base, "classifier")));
         assert_eq!(
             base.digest(),
             resolved.digest(),
@@ -674,7 +671,8 @@ mod tests {
 
     #[test]
     fn a_pinned_annotation_round_trips_through_the_calls_wire_form() {
-        let annotated = call("Bash", json!({ "command": "ls" })).with_annotation(Some(pinned("Bash", "classifier")));
+        let unpinned = call("Bash", json!({ "command": "ls" }));
+        let annotated = unpinned.clone().with_annotation(Some(pinned(&unpinned, "classifier")));
         let wire = serde_json::to_value(&annotated).expect("a call serializes");
         assert_eq!(
             serde_json::from_value::<ResolvedCall>(wire).expect("the wire form round-trips"),

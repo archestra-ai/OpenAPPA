@@ -1134,16 +1134,23 @@ impl Registry {
         self.keyed_tool(call.tool(), call.declaration_id())
     }
 
-    /// The one annotation this call is judged under: the pin it carries, or its declaration's
-    /// static annotation. `None` when the call names no declaration, or names an Annotated
-    /// declaration while carrying no pin — the caller decides whether that is a missing
-    /// annotation to request or a record to refuse. Whether a carried pin is *admissible* is
+    /// The one annotation this call is judged under: its declaration's static annotation,
+    /// borrowed, or the annotation its pin materializes under the declaration — the
+    /// declaration's operational metadata around the pinned semantic fields. `None` when the
+    /// call names no declaration, or names an Annotated declaration while carrying no pin —
+    /// the caller decides whether that is a missing annotation to request or a record to
+    /// refuse. Whether a carried pin is *admissible* is
     /// [`crate::check::validate_annotation`]'s question, not this lookup's.
-    pub(crate) fn annotation_of<'a>(&'a self, call: &'a crate::value::ResolvedCall) -> Option<&'a ToolAnnotation> {
+    pub(crate) fn annotation_of<'a>(
+        &'a self,
+        call: &'a crate::value::ResolvedCall,
+    ) -> Option<std::borrow::Cow<'a, ToolAnnotation>> {
         let declaration = self.declaration(call)?;
         match call.annotation() {
-            Some(pinned) => Some(pinned.annotation()),
-            None => declaration.declared(),
+            Some(pinned) => Some(std::borrow::Cow::Owned(
+                pinned.tool_annotation(declaration, call.tool()),
+            )),
+            None => declaration.declared().map(std::borrow::Cow::Borrowed),
         }
     }
 

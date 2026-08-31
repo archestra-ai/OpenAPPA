@@ -224,7 +224,10 @@ impl BlockContext {
         let registry = engine.registry();
         let call = views.standing_call(subject).ok_or(RouteError::UnknownSubject)?.clone();
         let decided = views.decided_batch(batch).ok_or(RouteError::UnknownSubject)?;
-        let contract = registry.annotation_of(&call).ok_or(RouteError::UnknownSubject)?.clone();
+        let contract = registry
+            .annotation_of(&call)
+            .ok_or(RouteError::UnknownSubject)?
+            .into_owned();
 
         let mut expansions = registry.expansions_from_event(answers)?;
         if let Some((_, offers)) = views.pending_block(subject) {
@@ -1098,7 +1101,7 @@ mod tests {
 
     fn raw_block(registry: &Registry, views: &Views, call: &ResolvedCall) -> RawBlock {
         let contract = registry.annotation_of(call).unwrap();
-        match check::evaluate(contract, views, call, &CallStage::default(), &Expansions::default()) {
+        match check::evaluate(&contract, views, call, &CallStage::default(), &Expansions::default()) {
             CheckOutcome::Block(raw) => raw,
             other => panic!("expected a block, got {other:?}"),
         }
@@ -1120,7 +1123,7 @@ mod tests {
         let trajectory = traj();
         let views = projection.view(&trajectory);
         let context = BlockContext {
-            contract: registry.annotation_of(call).unwrap().clone(),
+            contract: registry.annotation_of(call).unwrap().into_owned(),
             call: call.clone(),
             stage: CallStage::default(),
             role: CallRole::Ordinary,
@@ -1695,14 +1698,15 @@ mod tests {
             let projection = Projection::build(&log, log.len() as u64);
             let trajectory = traj();
             let views = projection.view(&trajectory);
+            let contract = registry
+                .annotation_of(&proposal)
+                .expect("the fixture registers the tool");
             let planned = plan::plan(
                 &registry,
                 &views,
                 plan::BlockedCall {
                     call: &proposal,
-                    contract: registry
-                        .annotation_of(&proposal)
-                        .expect("the fixture registers the tool"),
+                    contract: &contract,
                     raw: &raw_block(&registry, &views, &proposal),
                     stage: &CallStage::default(),
                     role: CallRole::Ordinary,

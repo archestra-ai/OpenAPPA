@@ -179,18 +179,38 @@ def _policy_requires_of(name: str, table: dict) -> dict[str, dict[str, dict]]:
     return parsed
 
 
-def _declared_annotators(name: str, policy: Path) -> dict[str, set[str]]:
-    """Each annotator this scenario's APPA policy declares: the input names its consults carry.
+@dataclass(frozen=True)
+class DeclaredAnnotator:
+    """One annotator's declaration, as the scenario's policy writes it: the input names its
+    consults carry and each mandate bound, `None` where the policy leaves it unbounded."""
+
+    inputs: frozenset[str]
+    ranks: frozenset[str] | None
+    audiences: frozenset[str] | None
+    marks: frozenset[str] | None
+    effects: frozenset[str] | None
+
+
+def _mandate_bound(declaration: dict, key: str) -> frozenset[str] | None:
+    values = declaration.get(key)
+    return None if values is None else frozenset(values)
+
+
+def _declared_annotators(name: str, policy: Path) -> dict[str, DeclaredAnnotator]:
+    """Each annotator this scenario's APPA policy declares.
 
     Reading it here keeps the fixture from holding a second copy of the contract. A scenario
-    that renames an annotator, answers for one the policy never declares, or keys an answer on
-    an input the annotator does not map, fails at load instead of at the first consult.
+    that renames an annotator, answers for one the policy never declares, keys an answer on
+    an input the annotator does not map, or writes an annotation outside the annotator's
+    mandate, fails at load instead of at the first consult.
     """
     try:
         document = tomllib.loads(policy.read_text())
     except (OSError, tomllib.TOMLDecodeError) as error:
         raise ScenarioError(f"{name}: cannot read {policy}: {error}") from error
     section = document.get("policy", document)
+    chain = section.get("trust_chain") or document.get("trust_chain")
+    ranks = frozenset(chain) if isinstance(chain, list) else None
     declared = {}
     for declaration in section.get("annotator", []):
         inputs = declaration.get("inputs", {})
@@ -199,12 +219,66 @@ def _declared_annotators(name: str, policy: Path) -> dict[str, set[str]]:
                 f"{name}: annotator {declaration.get('name')!r} maps no inputs; the loopback "
                 "fixture keys answers on mapped inputs, so every answered annotator maps them"
             )
-        declared[declaration["name"]] = set(inputs)
+        declared_ranks = _mandate_bound(declaration, "ranks")
+        declared[declaration["name"]] = DeclaredAnnotator(
+            inputs=frozenset(inputs),
+            # An unbounded rank mandate still stays inside the policy's trust chain.
+            ranks=ranks if declared_ranks is None else declared_ranks,
+            audiences=_mandate_bound(declaration, "audiences"),
+            marks=_mandate_bound(declaration, "marks"),
+            effects=_mandate_bound(declaration, "effects"),
+        )
     return declared
 
 
+def _readers_of(value: object, location: str, field: str, name: str) -> list[str]:
+    """The literal readers an annotation field names; `public` is never listed."""
+    match value:
+        case "public":
+            return []
+        case list() as readers if all(isinstance(reader, str) for reader in readers):
+            return readers
+        case dict() as contains if set(contains) == {"contains"} and isinstance(contains["contains"], list):
+            return [reader for reader in contains["contains"] if isinstance(reader, str) and reader != "public"]
+        case _:
+            raise ScenarioError(f"{name}: {location}.{field} is not a wire audience shape")
+
+
+def _within_mandate(
+    name: str, location: str, annotation: dict, spec: DeclaredAnnotator
+) -> None:
+    """Refuse at load what the runtime's mandate check would refuse at the first consult."""
+    delta = annotation["delta"]
+    requires = annotation["requires"]
+    if not set(delta) <= {"trust", "audience"}:
+        raise ScenarioError(f"{name}: {location}.annotation.delta takes only trust and audience")
+    if not set(requires) <= {"trust", "audience", "history", "attention"}:
+        raise ScenarioError(
+            f"{name}: {location}.annotation.requires takes only trust, audience, history, attention"
+        )
+    for field, holder in (("delta", delta), ("requires", requires)):
+        trust = holder.get("trust")
+        if trust is not None and spec.ranks is not None and trust not in spec.ranks:
+            raise ScenarioError(f"{name}: {location}.annotation.{field}.trust {trust!r} is outside the mandate")
+        audience = holder.get("audience")
+        if audience is not None:
+            readers = _readers_of(audience, location, f"annotation.{field}.audience", name)
+            if spec.audiences is not None and not set(readers) <= spec.audiences:
+                outside = sorted(set(readers) - spec.audiences)
+                raise ScenarioError(f"{name}: {location}.annotation.{field}.audience names {outside} outside the mandate")
+    marks = requires["attention"]
+    if spec.marks is not None and not set(marks) <= spec.marks:
+        raise ScenarioError(f"{name}: {location}.annotation.requires.attention is outside the mandate")
+    emits = annotation["emits"]
+    if not isinstance(emits, list):
+        raise ScenarioError(f"{name}: {location}.annotation.emits must be an array")
+    history = [entry for entry in requires["history"] if isinstance(entry, str)]
+    if spec.effects is not None and not (set(emits) | set(history)) <= spec.effects:
+        raise ScenarioError(f"{name}: {location}.annotation effects are outside the mandate")
+
+
 def _annotator_answers_of(
-    name: str, declarations: object, declared: dict[str, set[str]]
+    name: str, declarations: object, declared: dict[str, DeclaredAnnotator]
 ) -> tuple[AnnotatorAnswer, ...]:
     """Parse the exact wire annotations served to this scenario's APPA episodes."""
     if not isinstance(declarations, list):
@@ -240,12 +314,13 @@ def _annotator_answers_of(
             )
         if annotator not in declared:
             raise ScenarioError(f"{name}: {location}.annotator {annotator!r} is not declared by the scenario's policy")
-        inputs = declared[annotator]
-        if set(args) != inputs:
+        spec = declared[annotator]
+        if set(args) != set(spec.inputs):
             raise ScenarioError(
                 f"{name}: {location}.args keys {sorted(args)} cannot match a consult to {annotator!r}, "
-                f"which maps {sorted(inputs)}"
+                f"which maps {sorted(spec.inputs)}"
             )
+        _within_mandate(name, location, annotation, spec)
         answer = AnnotatorAnswer(
             annotator=annotator,
             args=canonical_args(args),

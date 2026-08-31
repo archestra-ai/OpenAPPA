@@ -227,7 +227,7 @@ pub(crate) fn admit_result(
             raw_digest,
         } => {
             let (transition, derived, lineage) = bound_candidate(
-                registry, views, dispatch, contract, &sanitizer, raw_digest, body, expansions,
+                registry, views, dispatch, &contract, &sanitizer, raw_digest, body, expansions,
             )?;
             let DerivedCandidate::Result { value, residual, .. } = &derived else {
                 unreachable!("a bound output sanitizer derives a confined result")
@@ -739,7 +739,7 @@ mod tests {
             sanitizer: crate::names::SanitizerName::new("declassify"),
             contribution: crate::plan::bound_contribution(
                 &reg,
-                reg.annotation_of(&call).expect("the fixture registers the tool"),
+                &reg.annotation_of(&call).expect("the fixture registers the tool"),
                 &crate::names::SanitizerName::new("declassify"),
                 &Expansions::default(),
             )

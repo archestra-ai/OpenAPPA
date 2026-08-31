@@ -671,13 +671,13 @@ impl Session {
                         // siblings' answers, before another engine round or any append.
                         let consults = requests.into_iter().map(|request| self.consult(request, None));
                         for answered in futures_util::future::join_all(consults).await {
-                            supersede(&mut evidence, answered?);
+                            evidence.push(answered?);
                         }
                     }
                     Some(_) => {
                         for request in requests {
                             let answered = self.consult(request, elicitation).await?;
-                            supersede(&mut evidence, answered);
+                            evidence.push(answered);
                         }
                     }
                 },
@@ -917,13 +917,6 @@ impl Decided<'_> {
             _ => Err(EventError::SpawnAmbiguous),
         }
     }
-}
-
-/// Keep `answered` and drop the earlier answer to the same ask, if any: the later answer
-/// is the one that stands.
-fn supersede(evidence: &mut Vec<ExternalEvidence>, answered: ExternalEvidence) {
-    evidence.retain(|held| !answered.answers_same_ask(held));
-    evidence.push(answered);
 }
 
 fn join_feedback(feedback: &[Feedback]) -> String {

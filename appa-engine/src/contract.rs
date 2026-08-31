@@ -253,53 +253,102 @@ impl ToolAnnotation {
     /// The groups this annotation's check reads: its delta's, its static recipients' and
     /// its cap's. Required before the check runs; a placeholder's group rides the call instead.
     pub fn groups(&self) -> impl Iterator<Item = &crate::names::GroupName> {
-        self.delta.groups().chain(
-            self.requires
-                .audience_requirements()
-                .iter()
-                .flat_map(AudienceRequirement::groups),
-        )
+        annotation_groups(&self.delta, &self.requires)
     }
 }
 
-/// The semantic capability an annotation was produced under — what the engine validates the
-/// annotation against and what a dispatch record binds. `Declared` is the policy's own static
-/// declaration: the annotation must equal the compiled one. `Annotator` names the registered
-/// Annotator whose compiled mandate bounds the answer's vocabulary. Backend routing — URL,
-/// command, model, timeout — is the runtime's and never appears here.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AnnotationMandate {
-    Declared,
-    Annotator(AnnotatorName),
+/// The groups a delta and its requirements name — what an annotation's check reads
+/// before it runs, whether the annotation is a compiled declaration or a produced answer.
+fn annotation_groups<'a>(
+    delta: &'a Delta,
+    requires: &'a Requires,
+) -> impl Iterator<Item = &'a crate::names::GroupName> {
+    delta.groups().chain(
+        requires
+            .audience_requirements()
+            .iter()
+            .flat_map(AudienceRequirement::groups),
+    )
 }
 
-/// One complete annotation pinned to the call it was produced for, with the mandate that
-/// authorized it. What a proposal carries for an Annotator-recipe tool, and what a dispatch
-/// record persists for replay: replay validates the same binding and never re-runs an
-/// implementation.
+/// The semantic fields an Annotator produces for one call: the annotation minus the
+/// operational metadata, which is the declaration's to state and is never repeated in an
+/// answer or a record.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProducedAnnotation {
+    /// An omitted `delta` is [`Delta::NONE`]: the call is annotated, so its unwritten
+    /// dimensions restrict nothing.
+    #[serde(default)]
+    pub delta: Delta,
+    pub emits: EffectSet,
+    pub requires: Requires,
+}
+
+impl ProducedAnnotation {
+    /// The groups this produced annotation names. A valid produced annotation is literal
+    /// and names none; the validator asks to enforce exactly that.
+    pub(crate) fn groups(&self) -> impl Iterator<Item = &crate::names::GroupName> {
+        annotation_groups(&self.delta, &self.requires)
+    }
+}
+
+/// An Annotator's produced answer pinned to the exact call it judged: the annotator that
+/// produced it, the canonical digest of the rendered call it saw, and the produced semantic
+/// fields. What a proposal carries for an Annotator-routed tool, and what a dispatch record
+/// persists for replay: replay validates the same binding — annotator, digest, mandate
+/// vocabulary — and never re-runs an implementation. The declaration's operational metadata
+/// is not here: replay reads it from the registry, fixed byte-for-byte by the opening's
+/// policy identity.
 /// The parts live behind one box: a pin rides proposals, evidence, and dispatch records,
-/// and a complete annotation inline would bloat every enum that carries them.
+/// and the parts inline would bloat every enum that carries them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct PinnedAnnotation(Box<PinnedParts>);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct PinnedParts {
-    annotation: ToolAnnotation,
-    mandate: AnnotationMandate,
+    annotator: AnnotatorName,
+    call: crate::value::CanonicalDigest,
+    produced: ProducedAnnotation,
 }
 
 impl PinnedAnnotation {
-    pub fn new(annotation: ToolAnnotation, mandate: AnnotationMandate) -> Self {
-        PinnedAnnotation(Box::new(PinnedParts { annotation, mandate }))
+    pub fn new(annotator: AnnotatorName, call: crate::value::CanonicalDigest, produced: ProducedAnnotation) -> Self {
+        PinnedAnnotation(Box::new(PinnedParts {
+            annotator,
+            call,
+            produced,
+        }))
     }
 
-    pub fn annotation(&self) -> &ToolAnnotation {
-        &self.0.annotation
+    /// The Annotator that produced this pin.
+    pub fn annotator(&self) -> &AnnotatorName {
+        &self.0.annotator
     }
 
-    pub fn mandate(&self) -> &AnnotationMandate {
-        &self.0.mandate
+    /// The canonical digest of the exact rendered call the Annotator judged.
+    pub fn call(&self) -> &crate::value::CanonicalDigest {
+        &self.0.call
+    }
+
+    pub fn produced(&self) -> &ProducedAnnotation {
+        &self.0.produced
+    }
+
+    /// The one complete annotation this pin gives the call under its declaration: the
+    /// declaration's operational metadata, the proposed name, and the produced semantic
+    /// fields. Derived on demand — never stored — so a record cannot disagree with its
+    /// own registry.
+    pub(crate) fn tool_annotation(&self, declaration: &ToolDeclaration, called: &ToolName) -> ToolAnnotation {
+        ToolAnnotation {
+            name: called.clone(),
+            tags: declaration.tags().to_vec(),
+            description: declaration.description().map(str::to_string),
+            parameters: declaration.parameters().clone(),
+            delta: self.0.produced.delta.clone(),
+            emits: self.0.produced.emits.clone(),
+            requires: self.0.produced.requires.clone(),
+        }
     }
 }
 
@@ -372,23 +421,6 @@ impl ToolDeclaration {
             ToolDeclaration::Annotated { .. } => None,
         }
     }
-
-    /// The mandate a call under this declaration is annotated under.
-    pub fn mandate(&self) -> AnnotationMandate {
-        match self {
-            ToolDeclaration::Declared(_) => AnnotationMandate::Declared,
-            ToolDeclaration::Annotated { annotator, .. } => AnnotationMandate::Annotator(annotator.clone()),
-        }
-    }
-
-    /// Whether a pinned annotation's operational metadata is this declaration's: name aside —
-    /// the name is bound to the call — the tags, description, and parameter schema are the
-    /// declaration's to state, and an answer may not rewrite them.
-    pub(crate) fn metadata_matches(&self, annotation: &ToolAnnotation) -> bool {
-        annotation.tags == *self.tags()
-            && annotation.description.as_deref() == self.description()
-            && annotation.parameters == *self.parameters()
-    }
 }
 
 #[cfg(test)]
@@ -411,7 +443,6 @@ mod tests {
     #[test]
     fn a_declaration_dispatches_between_its_static_and_annotated_forms() {
         let declared = ToolDeclaration::Declared(annotation("Read"));
-        assert_eq!(declared.mandate(), AnnotationMandate::Declared);
         assert!(declared.annotator().is_none());
         assert_eq!(declared.declared().map(|a| a.name.as_str()), Some("Read"));
 
@@ -422,35 +453,44 @@ mod tests {
             parameters: crate::params::ToolParameters::open(),
             annotator: AnnotatorName::new("bash-classifier"),
         };
-        assert_eq!(
-            annotated.mandate(),
-            AnnotationMandate::Annotator(AnnotatorName::new("bash-classifier"))
-        );
+        assert_eq!(annotated.annotator().map(|name| name.as_str()), Some("bash-classifier"));
         assert!(annotated.declared().is_none());
         assert_eq!(annotated.name().as_str(), "Bash");
     }
 
     #[test]
-    fn an_answer_may_not_rewrite_the_declarations_metadata() {
+    fn a_pin_materializes_the_declarations_metadata_and_its_own_semantics() {
         let declaration = ToolDeclaration::Annotated {
-            name: ToolName::new("Bash"),
+            name: ToolName::new("*"),
             tags: vec![TagName::new("shell")],
             description: Some("Runs one shell command.".to_string()),
             parameters: crate::params::ToolParameters::open(),
             annotator: AnnotatorName::new("bash-classifier"),
         };
-        let mut produced = ToolAnnotation {
-            name: ToolName::new("Bash"),
-            tags: vec![TagName::new("shell")],
-            description: Some("Runs one shell command.".to_string()),
-            parameters: crate::params::ToolParameters::open(),
-            delta: Delta::NONE,
+        let produced = ProducedAnnotation {
+            delta: Delta {
+                trust: Some(Trust::new(1)),
+                audience: None,
+            },
             emits: EffectSet::default(),
             requires: Requires::default(),
         };
-        assert!(declaration.metadata_matches(&produced));
-        produced.tags = vec![];
-        assert!(!declaration.metadata_matches(&produced));
+        let digest = crate::value::CanonicalDigest::of_call(
+            &ToolName::new("Bash"),
+            &crate::params::test_arguments(&serde_json::json!({ "command": "ls" })),
+        );
+        let pinned = PinnedAnnotation::new(AnnotatorName::new("bash-classifier"), digest, produced.clone());
+        let materialized = pinned.tool_annotation(&declaration, &ToolName::new("Bash"));
+        assert_eq!(
+            materialized.name.as_str(),
+            "Bash",
+            "the name is the call's, not the pattern"
+        );
+        assert_eq!(materialized.tags, declaration.tags());
+        assert_eq!(materialized.description.as_deref(), declaration.description());
+        assert_eq!(materialized.delta, produced.delta);
+        assert_eq!(materialized.emits, produced.emits);
+        assert_eq!(materialized.requires, produced.requires);
     }
 
     #[test]
@@ -473,21 +513,29 @@ mod tests {
     }
 
     #[test]
-    fn a_pinned_annotation_round_trips_and_binds_its_mandate() {
+    fn a_pinned_annotation_round_trips_and_binds_its_call() {
+        let digest = crate::value::CanonicalDigest::of_call(
+            &ToolName::new("Bash"),
+            &crate::params::test_arguments(&serde_json::json!({ "command": "ls" })),
+        );
         let pinned = PinnedAnnotation::new(
-            ToolAnnotation {
+            AnnotatorName::new("bash-classifier"),
+            digest,
+            ProducedAnnotation {
                 delta: Delta {
                     trust: Some(Trust::new(1)),
                     audience: Some(crate::groups::DeclaredAudience::literal(Audience::Public)),
                 },
-                ..annotation("Bash")
+                emits: EffectSet::default(),
+                requires: Requires::default(),
             },
-            AnnotationMandate::Annotator(AnnotatorName::new("bash-classifier")),
         );
         let wire = serde_json::to_value(&pinned).expect("a pinned annotation serializes");
         assert_eq!(
             serde_json::from_value::<PinnedAnnotation>(wire).expect("a pinned annotation reads back"),
             pinned
         );
+        assert_eq!(pinned.call(), &digest);
+        assert_eq!(pinned.annotator().as_str(), "bash-classifier");
     }
 }

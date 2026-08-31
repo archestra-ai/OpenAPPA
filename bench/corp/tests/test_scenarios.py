@@ -204,6 +204,34 @@ annotation = { delta = { audience = ["alice@northwind.example"] }, requires = { 
         load_scenario(_write_scenario(tmp_path / "annotator-without-policy", manifest))
 
 
+def test_an_annotation_outside_the_declared_mandate_refuses_at_load(tmp_path: Path) -> None:
+    manifest = (
+        _with_policy_profile(_MINIMAL)
+        + """
+[[annotator_answer]]
+annotator = "document-acl"
+args = { subject = "alice.md" }
+annotation = { delta = { audience = ["mallory@evil.example"] }, requires = { history = [], attention = [] }, emits = [] }
+"""
+    )
+    root = _write_scenario(tmp_path / "outside-mandate", manifest)
+    profile_root = root / "policy"
+    profile_root.mkdir()
+    (profile_root / "appa.toml").write_text(
+        """version = 1
+
+[[policy.annotator]]
+name = "document-acl"
+inputs = { subject = "$tool_call.arguments.file" }
+audiences = ["alice@northwind.example"]
+"""
+    )
+    (profile_root / "fides.json").write_text("{}\n")
+
+    with pytest.raises(ScenarioError, match="outside the mandate"):
+        load_scenario(root)
+
+
 def _with_policy_profile(toml: str, declaration: str = '"policy"') -> str:
     return toml.replace(
         'systems = ["hr", "email"]\n',

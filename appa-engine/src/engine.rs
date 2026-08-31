@@ -1244,7 +1244,7 @@ impl Engine {
                             &self.registry,
                             &views,
                             dispatch,
-                            contract,
+                            &contract,
                             &sanitizer,
                             raw_digest,
                             derived.clone(),
@@ -1473,7 +1473,7 @@ impl Engine {
             .ok_or(TransitionError::UnknownDispatch)?
             .clone();
         let contract = self.dispatch_contract(views, dispatch)?;
-        let stage = self.confined_menu(contract, &receiving, &value.label, &residual, &lineage, expansions)?;
+        let stage = self.confined_menu(&contract, &receiving, &value.label, &residual, &lineage, expansions)?;
         let advance = Sequence::advance_of(self, view, &facts);
         let (_, offers, opened) = self.open_offers(
             views,
@@ -1534,7 +1534,7 @@ impl Engine {
             .clone();
         let lineage = views.lineage(&subject);
         let contract = self.dispatch_contract(views, dispatch)?;
-        let stage = self.confined_menu(contract, &receiving, &value.label, &residual, &lineage, expansions)?;
+        let stage = self.confined_menu(&contract, &receiving, &value.label, &residual, &lineage, expansions)?;
         let act = crate::basis::DecidedAct::Outcome(dispatch.clone());
         let advance = crate::basis::BasisAdvance::default();
         let (_, offers, opened) = self.open_offers(
@@ -1784,16 +1784,16 @@ impl Engine {
         // moves nothing, so the two agree by construction.
         let advance = Sequence::advance_of(self, view, &facts);
         let final_views = working.view(&batch.trajectory);
-        let mut refused: Vec<(usize, &ResolvedCall, &ToolAnnotation, RawBlock, plan::CallRole)> = Vec::new();
+        let mut refused: Vec<(usize, &ResolvedCall, ToolAnnotation, RawBlock, plan::CallRole)> = Vec::new();
         for (position, call) in composed
             .iter()
             .enumerate()
             .filter(|(_, release)| release.is_none())
             .map(|(position, _)| (position, &proposals[position]))
         {
-            let contract = self.validated_contract(call)?;
+            let contract = self.validated_contract(call)?.into_owned();
             let CheckOutcome::Block(raw) =
-                check::evaluate(contract, &final_views, call, &CallStage::default(), expansions)
+                check::evaluate(&contract, &final_views, call, &CallStage::default(), expansions)
             else {
                 unreachable!("an in-batch release only ever adds gaps to a refused sibling's block")
             };
@@ -1825,7 +1825,7 @@ impl Engine {
                 },
                 BlockedCall {
                     call,
-                    contract,
+                    contract: &contract,
                     raw: &raw,
                     stage: &CallStage::default(),
                     role,
@@ -2013,12 +2013,12 @@ impl Engine {
             })
             .collect();
         for (call, expansions) in &standing {
-            expansions.require(
-                self.registry
-                    .annotation_of(call)
-                    .into_iter()
-                    .flat_map(ToolAnnotation::groups),
-            )?;
+            let reads: Vec<crate::names::GroupName> = self
+                .registry
+                .annotation_of(call)
+                .map(|annotation| annotation.groups().cloned().collect())
+                .unwrap_or_default();
+            expansions.require(&reads)?;
         }
         let mut released = Vec::new();
         let mut blocked = Vec::new();
@@ -2050,10 +2050,10 @@ impl Engine {
                     let candidate = (*candidate).clone();
                     let contract = self.validated_contract(&candidate)?;
                     let stage = views.call_stage(&subject);
-                    match check::evaluate(contract, views, &candidate, &stage, expansions) {
+                    match check::evaluate(&contract, views, &candidate, &stage, expansions) {
                         CheckOutcome::Block(raw) => {
                             let role = views.call_role(&subject);
-                            expansions.require(&plan::block_groups(&self.registry, contract, &raw, role))?;
+                            expansions.require(&plan::block_groups(&self.registry, &contract, &raw, role))?;
                             let (block_id, offers) = views.pending_block(&subject).unwrap_or_else(|| {
                                 let block_id = crate::value::BlockId::of_proposal(
                                     &batch.offer_nonce,
@@ -2070,7 +2070,7 @@ impl Engine {
                                     views,
                                     BlockedCall {
                                         call: &candidate,
-                                        contract,
+                                        contract: &contract,
                                         raw: &raw,
                                         stage: &stage,
                                         role,
@@ -2142,16 +2142,16 @@ impl Engine {
         let stage = views.call_stage(&recorded.subject);
         let role = views.call_role(&recorded.subject);
         expansions.require(contract.groups())?;
-        let live = match check::evaluate(contract, &views, &call, &stage, expansions) {
+        let live = match check::evaluate(&contract, &views, &call, &stage, expansions) {
             CheckOutcome::Block(raw) => {
-                expansions.require(&plan::block_groups(&self.registry, contract, &raw, role))?;
-                expansions.require(&plan::plan_groups(&self.registry, contract, &recorded.plan))?;
+                expansions.require(&plan::block_groups(&self.registry, &contract, &raw, role))?;
+                expansions.require(&plan::plan_groups(&self.registry, &contract, &recorded.plan))?;
                 plan::plan(
                     &self.registry,
                     &views,
                     BlockedCall {
                         call: &call,
-                        contract,
+                        contract: &contract,
                         raw: &raw,
                         stage: &stage,
                         role,
@@ -2172,13 +2172,13 @@ impl Engine {
         };
         match (&execution.outcome, recorded.plan.hop()) {
             (OfferOutcome::Derived(evidence), Some(sanitizer)) => self.hop_call(
-                view, &views, execution, &recorded, contract, &raw, &call, &stage, sanitizer, evidence, expansions,
+                view, &views, execution, &recorded, &contract, &raw, &call, &stage, sanitizer, evidence, expansions,
             ),
             (OfferOutcome::Approved(evidence), None) => self.approve_offer(
-                view, &views, execution, &recorded, contract, &raw, &call, evidence, expansions,
+                view, &views, execution, &recorded, &contract, &raw, &call, evidence, expansions,
             ),
             (OfferOutcome::Denied { authority }, None) => self.deny_offer(
-                view, &views, execution, &recorded, contract, &call, &raw, &stage, authority, expansions,
+                view, &views, execution, &recorded, &contract, &call, &raw, &stage, authority, expansions,
             ),
             _ => Err(TransitionError::PlanOutcomeMismatch),
         }
@@ -2228,7 +2228,7 @@ impl Engine {
         };
         let lineage = views.lineage(&subject);
         let contract = self.dispatch_contract(views, dispatch)?;
-        let stage = self.confined_menu(contract, &receiving, &value.label, &residual, &lineage, expansions)?;
+        let stage = self.confined_menu(&contract, &receiving, &value.label, &residual, &lineage, expansions)?;
         if !stage.contains(&recorded.plan) {
             return self.invalidated(view, execution, recorded);
         }
@@ -2736,7 +2736,7 @@ impl Engine {
         expansions.require(contract.groups())?;
 
         let next = CallStage::substituting(label.clone(), lineage.clone());
-        let after = check::evaluate(contract, views, &substituted, &next, expansions);
+        let after = check::evaluate(&contract, views, &substituted, &next, expansions);
         if !plan::substitution_helps(raw, &after) {
             return Err(TransitionError::SanitizerUnapplicable);
         }
@@ -2774,7 +2774,7 @@ impl Engine {
             CheckOutcome::Allow => {
                 let (dispatch, opening) = opened_dispatch(
                     &self.registry,
-                    contract,
+                    &contract,
                     views,
                     &substituted,
                     recorded.subject.clone(),
@@ -2789,7 +2789,7 @@ impl Engine {
             }
             CheckOutcome::Block(raw) => {
                 let role = views.call_role(&recorded.subject);
-                expansions.require(&plan::block_groups(&self.registry, contract, &raw, role))?;
+                expansions.require(&plan::block_groups(&self.registry, &contract, &raw, role))?;
                 let (block, opened) = self.surface_call_block(
                     views,
                     Opening {
@@ -2800,7 +2800,7 @@ impl Engine {
                     },
                     BlockedCall {
                         call: &substituted,
-                        contract,
+                        contract: &contract,
                         raw: &raw,
                         stage: &next,
                         role,
@@ -3041,11 +3041,11 @@ impl Engine {
         let contract = self.validated_contract(&call)?;
         let stage = views.call_stage(&recorded.subject);
         expansions.require(contract.groups())?;
-        let CheckOutcome::Block(raw) = check::evaluate(contract, views, &call, &stage, expansions) else {
+        let CheckOutcome::Block(raw) = check::evaluate(&contract, views, &call, &stage, expansions) else {
             return Ok(None);
         };
         let role = views.call_role(&recorded.subject);
-        expansions.require(&plan::block_groups(&self.registry, contract, &raw, role))?;
+        expansions.require(&plan::block_groups(&self.registry, &contract, &raw, role))?;
         let (block_id, offers) = views
             .pending_block(&recorded.subject)
             .unwrap_or((offer_block(recorded, execution, &call), Vec::new()));
@@ -3055,7 +3055,7 @@ impl Engine {
                 views,
                 BlockedCall {
                     call: &call,
-                    contract,
+                    contract: &contract,
                     raw: &raw,
                     stage: &stage,
                     role,
@@ -3268,7 +3268,7 @@ impl Engine {
     pub(crate) fn check(&self, views: &Views, call: &ResolvedCall) -> Result<CheckOutcome, EngineError> {
         let contract = self.validated_contract(call)?;
         Ok(check::evaluate(
-            contract,
+            &contract,
             views,
             call,
             &CallStage::default(),
@@ -3287,7 +3287,7 @@ impl Engine {
             views,
             BlockedCall {
                 call,
-                contract,
+                contract: &contract,
                 raw,
                 stage: &CallStage::default(),
                 role: plan::CallRole::Ordinary,
@@ -3314,12 +3314,15 @@ impl Engine {
         &'c self,
         views: &'c Views<'c>,
         dispatch: &DispatchId,
-    ) -> Result<&'c ToolAnnotation, TransitionError> {
+    ) -> Result<std::borrow::Cow<'c, ToolAnnotation>, TransitionError> {
         let call = views.dispatch_call(dispatch).ok_or(TransitionError::UnknownDispatch)?;
         self.validated_contract(call).map_err(TransitionError::Call)
     }
 
-    fn validated_contract<'c>(&'c self, call: &'c ResolvedCall) -> Result<&'c ToolAnnotation, EngineError> {
+    fn validated_contract<'c>(
+        &'c self,
+        call: &'c ResolvedCall,
+    ) -> Result<std::borrow::Cow<'c, ToolAnnotation>, EngineError> {
         if self.registry.provider_run_annotation(call.tool()).is_some() {
             return Err(EngineError::ProviderRunTool(call.tool().as_str().to_string()));
         }
@@ -3411,7 +3414,7 @@ fn substituted_call(
             .annotation_of(&substituted)
             .expect("a validated call resolves its annotation");
         if !same {
-            let mut needed = match check::validate_memberships(checked, &substituted) {
+            let mut needed = match check::validate_memberships(&checked, &substituted) {
                 Ok(()) => Vec::new(),
                 Err(check::MembershipRefusal::Needed(reads)) => {
                     reads.into_iter().map(|read| read.group).collect::<Vec<_>>()
@@ -3452,7 +3455,7 @@ fn unanswered(
     let checked = registry
         .annotation_of(call)
         .expect("a validated call resolves its annotation");
-    let groups = match check::validate_memberships(checked, call) {
+    let groups = match check::validate_memberships(&checked, call) {
         Ok(()) => Vec::new(),
         Err(check::MembershipRefusal::Needed(reads)) => reads.into_iter().map(|read| read.group).collect(),
         Err(check::MembershipRefusal::Foreign(argument)) => {
@@ -3641,13 +3644,7 @@ pub(crate) fn opened_dispatch(
         proposed_label: check::committed_label(contract, &current, expansions).clone(),
         receiving: current.clone(),
         proposed_effects: contract.emits.clone(),
-        // A pin that restates a static declaration is admissible on a proposal, but the
-        // record derives a static annotation from the registry: only an Annotator's answer
-        // is sealed, so replay's encoding check holds for every record this engine writes.
-        annotation: call
-            .annotation()
-            .filter(|pinned| matches!(pinned.mandate(), crate::contract::AnnotationMandate::Annotator(_)))
-            .cloned(),
+        annotation: call.annotation().cloned(),
         memberships: call.memberships().to_vec(),
         resolutions: registry.resolutions(expansions),
         subject,
@@ -3742,7 +3739,7 @@ pub(crate) fn compose_batch<'a>(
                 Some(inherited) => std::borrow::Cow::Owned(expansions.clone().inheriting(inherited)),
                 None => std::borrow::Cow::Borrowed(expansions),
             };
-            if let Err(check::MembershipRefusal::Foreign(argument)) = check::pins_agree(contract, call, &under) {
+            if let Err(check::MembershipRefusal::Foreign(argument)) = check::pins_agree(&contract, call, &under) {
                 return Err(ComposeRefusal::ForeignMembership { argument });
             }
             let mut reads: Vec<crate::names::GroupName> = contract.groups().cloned().collect();
@@ -3775,7 +3772,7 @@ pub(crate) fn compose_batch<'a>(
                 .parameters
                 .validate(call.arguments())
                 .map_err(|error| malformed(EngineError::InvalidCall(error)))?;
-            let consumes = match check::evaluate(contract, &views, call, &CallStage::default(), under) {
+            let consumes = match check::evaluate(&contract, &views, call, &CallStage::default(), under) {
                 CheckOutcome::Allow => None,
                 CheckOutcome::Block(_) => match spends {
                     Some(offer) => Some(*offer),
@@ -3787,7 +3784,7 @@ pub(crate) fn compose_batch<'a>(
                 },
             };
             let subject = batch.subject(position);
-            let (dispatch, opening) = opened_dispatch(registry, contract, &views, call, subject, under);
+            let (dispatch, opening) = opened_dispatch(registry, &contract, &views, call, subject, under);
             let mut facts = Vec::new();
             if let Some(offer) = consumes {
                 let prepared = views
@@ -3800,7 +3797,7 @@ pub(crate) fn compose_batch<'a>(
                     dispatch: dispatch.clone(),
                 });
                 facts.extend(approved_release(
-                    registry, contract, trajectory, &dispatch, &prepared, under,
+                    registry, &contract, trajectory, &dispatch, &prepared, under,
                 ));
             }
             facts.push(opening);
@@ -3836,7 +3833,10 @@ pub(crate) fn compose_batch<'a>(
     Ok(composed)
 }
 
-fn contract_for_call<'a>(registry: &'a Registry, call: &'a ResolvedCall) -> Result<&'a ToolAnnotation, EngineError> {
+fn contract_for_call<'a>(
+    registry: &'a Registry,
+    call: &'a ResolvedCall,
+) -> Result<std::borrow::Cow<'a, ToolAnnotation>, EngineError> {
     registry.annotation_of(call).ok_or_else(|| {
         if registry.provider_run_annotation(call.tool()).is_some() {
             EngineError::ProviderRunTool(call.tool().as_str().to_string())
@@ -3890,17 +3890,20 @@ mod tests {
             .collect()
     }
 
-    /// The pin a statically declared call's dispatch record carries: the declaration is its own
-    /// annotation.
-    fn pinned_static(tool: &ToolAnnotation) -> crate::contract::PinnedAnnotation {
-        crate::contract::PinnedAnnotation::new(tool.clone(), crate::contract::AnnotationMandate::Declared)
-    }
-
-    /// A complete annotation as `annotator` produced it for one call.
-    fn pinned_for(produced: ToolAnnotation, annotator: &str) -> crate::contract::PinnedAnnotation {
+    /// A complete annotation as `annotator` produced it for `bound_to`'s exact canonical call.
+    fn pinned_for(
+        produced: ToolAnnotation,
+        annotator: &str,
+        bound_to: &ResolvedCall,
+    ) -> crate::contract::PinnedAnnotation {
         crate::contract::PinnedAnnotation::new(
-            produced,
-            crate::contract::AnnotationMandate::Annotator(crate::names::AnnotatorName::new(annotator)),
+            crate::names::AnnotatorName::new(annotator),
+            bound_to.digest(),
+            crate::contract::ProducedAnnotation {
+                delta: produced.delta,
+                emits: produced.emits,
+                requires: produced.requires,
+            },
         )
     }
 
@@ -6050,7 +6053,7 @@ mod tests {
         let log = [log, facts].concat();
         assert_eq!(e.validate_replay(&log), Ok(()));
 
-        let answer = || pinned_static(&plain_tool("post"));
+        let answer = || pinned_for(plain_tool("post"), "ghost", &proposal);
 
         let mut forged = log.clone();
         let candidate = forged.len() - 2;
@@ -6065,7 +6068,7 @@ mod tests {
         assert_eq!(
             e.validate_replay(&forged),
             Err(crate::transition::TransitionRefusal::ForgedResolution),
-            "a static declaration is its own annotation: a candidate restating another is forged"
+            "a static declaration is its own annotation: a pinned candidate under it is forged"
         );
 
         let mut forged = log.clone();
@@ -6303,8 +6306,12 @@ mod tests {
                 annotators: vec![crate::names::AnnotatorName::new("acl")]
             })
         );
-        let foreign = call("post", json!({ "body": "ssn 123" }))
-            .with_annotation(Some(pinned_for(post_dyn_annotation(&["partner"]), "acl")));
+        let unpinned_post = call("post", json!({ "body": "ssn 123" }));
+        let foreign = unpinned_post.clone().with_annotation(Some(pinned_for(
+            post_dyn_annotation(&["partner"]),
+            "acl",
+            &unpinned_post,
+        )));
         assert!(
             matches!(
                 e.handle(
@@ -6315,8 +6322,12 @@ mod tests {
             ),
             "a static declaration is its own annotation; an annotator's pin on it is foreign"
         );
-        let restated = call("post_dyn", json!({ "body": "ssn 123" }))
-            .with_annotation(Some(pinned_static(&post_dyn_annotation(&["partner"]))));
+        let sibling = call("post_dyn", json!({ "body": "other" }));
+        let restated = call("post_dyn", json!({ "body": "ssn 123" })).with_annotation(Some(pinned_for(
+            post_dyn_annotation(&["partner"]),
+            "acl",
+            &sibling,
+        )));
         assert!(
             matches!(
                 e.handle(
@@ -6325,7 +6336,7 @@ mod tests {
                 ),
                 Err(TransitionError::ForeignAnnotation { .. })
             ),
-            "an Annotated declaration's pin must carry its annotator's mandate"
+            "annotation evidence binds the exact call it judged: a sibling call cannot reuse it"
         );
     }
 
@@ -7886,6 +7897,7 @@ mod tests {
                 produced
             },
             "classify",
+            &call("read_note", json!({})),
         );
 
         let mut cfg = test_config(vec![crm_tool()]);
@@ -8621,7 +8633,11 @@ mod tests {
                 if let Fact::DispatchOpened { annotation, .. } = fact {
                     // A pin on a statically declared dispatch record cannot restate the
                     // decision that released it: the decided call carries none.
-                    *annotation = Some(pinned_static(&plain_tool("forged")));
+                    let ghost = ResolvedCall::new(
+                        crate::value::ToolName::new("forged"),
+                        crate::params::test_arguments(&json!({})),
+                    );
+                    *annotation = Some(pinned_for(plain_tool("forged"), "ghost", &ghost));
                 }
             }),
             Err(TransitionRefusal::UnbackedDecision)
@@ -9581,7 +9597,7 @@ mod tests {
     /// The complete annotation `classify` produces for a `read` call under the public
     /// declaration: the declaration's operational metadata with the readers the call requires.
     /// It is evidence for exactly one canonical call: a rewrite is annotated afresh or not at all.
-    fn read_pin(readers: &[&str]) -> crate::contract::PinnedAnnotation {
+    fn read_pin(bound_to: &ResolvedCall, readers: &[&str]) -> crate::contract::PinnedAnnotation {
         let mut produced = ordered_read("read");
         produced.requires.label.audience = readers
             .iter()
@@ -9591,7 +9607,7 @@ mod tests {
                 ))))
             })
             .collect();
-        pinned_for(produced, "classify")
+        pinned_for(produced, "classify", bound_to)
     }
 
     fn read_of(e: &Engine, path: &str) -> ResolvedCall {
@@ -9679,7 +9695,7 @@ mod tests {
                 annotators: vec![crate::names::AnnotatorName::new("classify")]
             })
         );
-        let answer = read_pin(&["partner"]);
+        let answer = read_pin(&read_of(&e, "public/q3.md"), &["partner"]);
         let hopped = execute_offer(
             &e,
             &log,
@@ -9747,7 +9763,10 @@ mod tests {
     #[test]
     fn a_rewrite_into_the_classified_declaration_records_its_effect_and_carries_no_annotation() {
         let e = ordered_read_engine(&[]);
-        let proposal = read_of(&e, "public/q3.md").with_annotation(Some(read_pin(&["partner"])));
+        let unpinned = read_of(&e, "public/q3.md");
+        let proposal = unpinned
+            .clone()
+            .with_annotation(Some(read_pin(&unpinned, &["partner"])));
         assert_eq!(
             proposal.declaration_id(),
             crate::value::ToolDeclarationId::new(0).unwrap()
@@ -9794,7 +9813,7 @@ mod tests {
                 annotators: vec![crate::names::AnnotatorName::new("classify")]
             })
         );
-        let fresh = read_pin(&["partner"]);
+        let fresh = read_pin(&read_of(&e, "public/q4.md"), &["partner"]);
         let kept = released_by(
             &execute_offer(
                 &e,
@@ -9814,7 +9833,10 @@ mod tests {
     #[test]
     fn a_rewrite_into_a_contract_the_sanitizer_does_not_reach_is_refused() {
         let e = ordered_read_engine_tagged(&[], "classified");
-        let proposal = read_of(&e, "public/q3.md").with_annotation(Some(read_pin(&["partner"])));
+        let unpinned = read_of(&e, "public/q3.md");
+        let proposal = unpinned
+            .clone()
+            .with_annotation(Some(read_pin(&unpinned, &["partner"])));
         let log = vec![opened(&e)];
         let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
         let hop = hop_named(&facts, "redact");
@@ -9848,7 +9870,7 @@ mod tests {
         // The first hop selects the public declaration; its annotation requires the auditor,
         // which the redaction does not reach, so the rewritten call blocks on that one gap — the
         // public declaration's, not the classified read's partner, auditor and legal desks.
-        let answer = read_pin(&["auditor"]);
+        let answer = read_pin(&read_of(&e, "public/q3.md"), &["auditor"]);
         let hopped = execute_offer(
             &e,
             &log,
@@ -9890,6 +9912,7 @@ mod tests {
 
         // The second hop stays in the public declaration: annotation evidence binds the exact
         // canonical call, so the rewrite carries the fresh annotation obtained for it.
+        let widened = read_pin(&read_of(&e, "public/q3-v2.md"), &["auditor"]);
         let hopped = execute_offer(
             &e,
             &log,
@@ -9898,7 +9921,7 @@ mod tests {
                 &block.call,
                 "widen",
                 r#"{"path":"public/q3-v2.md"}"#,
-                Some(read_pin(&["auditor"])),
+                Some(widened.clone()),
                 vec![],
             ),
         )
@@ -9908,7 +9931,7 @@ mod tests {
             released.call.declaration_id(),
             crate::value::ToolDeclarationId::new(0).unwrap()
         );
-        assert_eq!(released.call.annotation(), Some(&answer));
+        assert_eq!(released.call.annotation(), Some(&widened));
         let log = [log, appended_facts(hopped)].concat();
         assert_eq!(e.validate_replay(&log), Ok(()));
     }
@@ -9927,7 +9950,7 @@ mod tests {
         // auditor and legal desks together, is blocked on something this block never was: the hop
         // improves nothing, lands no record, and the offer stands.
         for readers in [&["press"][..], &["auditor", "legal"][..]] {
-            let answer = read_pin(readers);
+            let answer = read_pin(&read_of(&e, "public/q3.md"), readers);
             assert_eq!(
                 execute_offer(
                     &e,
@@ -11440,7 +11463,10 @@ mod tests {
             produced.requires.label.audience = vec![AudienceRequirement::Includes(RecipientSpec::Static(
                 DeclaredAudience::literal(audience.clone()),
             ))];
-            raw(&call("notify", arguments.clone()).with_annotation(Some(pinned_for(produced, "acl"))))
+            let unpinned = call("notify", arguments.clone());
+            raw(&unpinned
+                .clone()
+                .with_annotation(Some(pinned_for(produced, "acl", &unpinned))))
         };
         let outsider = Audience::restricted([ReaderId::new("outsider")]);
         let proposals = || vec![pinned(&outsider), pinned(&internal)];
@@ -11455,7 +11481,7 @@ mod tests {
         let required_includes = |call: &ResolvedCall| match call
             .annotation()
             .expect("an annotated proposal carries its pin")
-            .annotation()
+            .produced()
             .requires
             .label
             .audience

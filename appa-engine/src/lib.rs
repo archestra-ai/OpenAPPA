@@ -17,10 +17,11 @@
 //!
 //! Every released tool call carries one complete concrete annotation
 //! ([`contract::ToolAnnotation`]): its delta, its requirements, and the effects it emits.
-//! [`contract::AnnotationMandate`] names the annotation's one producer — `Declared`, written
-//! in the [`contract::ToolDeclaration`] itself, or `Annotator`, a registered Annotator
-//! consulted per call whose answer is bounded by its mandate and pinned to the call's
-//! canonical digest, so a rewrite is annotated afresh and replay never consults again. The
+//! The [`contract::ToolDeclaration`] names the annotation's one producer — `Declared`, the
+//! declaration is its own annotation, or `Annotated`, a registered Annotator consulted per
+//! call whose answer is bounded by its mandate and pinned ([`contract::PinnedAnnotation`])
+//! to the producing Annotator and the call's canonical digest, so a rewrite is annotated
+//! afresh and replay never consults again. The
 //! wildcard declaration (`"*"`) routes every call the policy does not name through an
 //! Annotator; a call nothing covers is refused before it runs, and an annotation that fails
 //! to arrive is an operational refusal, never a policy denial.

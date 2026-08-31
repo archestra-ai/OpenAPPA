@@ -37,8 +37,8 @@
 //! basis has moved declines instead of executing.
 
 use appa_engine::contract::{
-    AnnotationMandate, AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, PinnedAnnotation,
-    PinnedMembership, RecipientSpec, Requires, ToolAnnotation, ToolDeclaration,
+    AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, PinnedAnnotation, PinnedMembership,
+    ProducedAnnotation, RecipientSpec, Requires, ToolAnnotation, ToolDeclaration,
 };
 pub(crate) use appa_engine::engine::ForkStatus;
 use appa_engine::engine::{Engine, EngineError};
@@ -157,19 +157,6 @@ pub enum ExternalEvidence {
         group: String,
         readers: Option<Vec<String>>,
     },
-}
-
-impl ExternalEvidence {
-    /// Does this answer the same ask as `other`? A later answer for the same subject
-    /// supersedes the earlier one.
-    pub(crate) fn answers_same_ask(&self, other: &ExternalEvidence) -> bool {
-        match (self, other) {
-            (ExternalEvidence::Annotation { call: mine, .. }, ExternalEvidence::Annotation { call: theirs, .. }) => {
-                mine == theirs
-            }
-            _ => false,
-        }
-    }
 }
 
 /// An authority's wire verdict: `{"ruling": "approve"|"deny"}`; anything
@@ -1502,8 +1489,9 @@ impl RuntimeEngine {
             }]));
         };
         Ok(PinnedAnnotation::new(
-            self.produced_annotation(declaration, resolved, answer),
-            AnnotationMandate::Annotator(annotator.clone()),
+            annotator.clone(),
+            digest,
+            self.produced_annotation(answer),
         ))
     }
 
@@ -1531,16 +1519,10 @@ impl RuntimeEngine {
         }
     }
 
-    /// The complete concrete annotation a decoded answer produces for one call: the
-    /// declaration's own metadata, the answer's semantics. `from_wire` confined every leaf
-    /// to the declared mandate vocabulary, so reading it back against the policy cannot
-    /// fail.
-    fn produced_annotation(
-        &self,
-        declaration: &ToolDeclaration,
-        resolved: &ResolvedCall,
-        answer: &AnnotationAnswer,
-    ) -> ToolAnnotation {
+    /// The produced semantics a decoded answer pins for one call; the declaration's own
+    /// metadata is not restated. `from_wire` confined every leaf to the declared mandate
+    /// vocabulary, so reading it back against the policy cannot fail.
+    fn produced_annotation(&self, answer: &AnnotationAnswer) -> ProducedAnnotation {
         let chain = self.engine.registry().trust_chain();
         let rank = |name: &str| {
             chain
@@ -1560,11 +1542,7 @@ impl RuntimeEngine {
                 requirements.push(AudienceRequirement::Cap(declared(cap)));
             }
         }
-        ToolAnnotation {
-            name: resolved.tool().clone(),
-            tags: declaration.tags().to_vec(),
-            description: declaration.description().map(str::to_string),
-            parameters: declaration.parameters().clone(),
+        ProducedAnnotation {
             delta: Delta {
                 trust: answer.delta_trust.as_deref().map(rank),
                 audience: answer.delta_audience.as_ref().map(declared),
@@ -2410,7 +2388,7 @@ mod tests {
         remedy_lines, terminal_safe,
     };
     use crate::consult::{AnnotationAnswer, HistoryEntry, RequiredAudienceAnswer, SanitizerPoint, WireAudience};
-    use appa_engine::contract::{AnnotationMandate, AudienceRequirement, HistoryRequirement, RecipientSpec};
+    use appa_engine::contract::{AudienceRequirement, HistoryRequirement, RecipientSpec};
     use appa_engine::fact::{EffectKind, EffectSet};
     use appa_engine::groups::DeclaredAudience;
     use appa_engine::label::{Audience, ReaderId, Trust};
@@ -2592,10 +2570,7 @@ mod tests {
         let pin = engine
             .annotation_for(&views, declaration, &resolved, &[])
             .expect("the recorded annotation pins without evidence");
-        assert_eq!(
-            pin.annotation().requires.attention,
-            vec![MarkName::new("privacy-review")]
-        );
+        assert_eq!(pin.produced().requires.attention, vec![MarkName::new("privacy-review")]);
 
         // Evidence for a call the trajectory already annotated is not a second answer: the
         // record outranks it, so the trajectory never pins two answers for one subject.
@@ -2702,13 +2677,9 @@ mod tests {
                 }],
             )
             .expect("a complete answer pins");
-        assert_eq!(
-            pin.mandate(),
-            &AnnotationMandate::Annotator(AnnotatorName::new("classifier"))
-        );
-        let produced = pin.annotation();
-        assert_eq!(produced.name, ToolName::new("lookup"));
-        assert_eq!(produced.description.as_deref(), Some("Looks one record up."));
+        assert_eq!(pin.annotator(), &AnnotatorName::new("classifier"));
+        assert_eq!(pin.call(), &call.digest(), "the pin binds the exact call it answered");
+        let produced = pin.produced();
         assert_eq!(produced.delta.trust, Some(Trust::new(0)));
         assert_eq!(produced.delta.audience, Some(DeclaredAudience::Public));
         assert_eq!(produced.requires.label.trust_floor, Some(Trust::new(1)));

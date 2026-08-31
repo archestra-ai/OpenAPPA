@@ -1059,7 +1059,7 @@ mod tests {
     use crate::authority::{Hint, Mandate, Sanitizer, SanitizerPoints, Scope};
     use crate::check::CheckOutcome;
     use crate::contract::{
-        AnnotationMandate, AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, PinnedAnnotation,
+        AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, PinnedAnnotation, ProducedAnnotation,
         RecipientSpec, Requires, ToolAnnotation, ToolDeclaration,
     };
     use crate::fact::{EffectSet, Fact};
@@ -1114,7 +1114,7 @@ mod tests {
         let contract = registry
             .annotation_of(call)
             .expect("a test call resolves its annotation");
-        let raw = match check::evaluate(contract, &views, call, &CallStage::default(), &Expansions::default()) {
+        let raw = match check::evaluate(&contract, &views, call, &CallStage::default(), &Expansions::default()) {
             CheckOutcome::Block(raw) => raw,
             other => panic!("expected a block, got {other:?}"),
         };
@@ -1123,7 +1123,7 @@ mod tests {
             &views,
             BlockedCall {
                 call,
-                contract,
+                contract: &contract,
                 raw: &raw,
                 stage: &CallStage::default(),
                 role: CallRole::Ordinary,
@@ -1267,9 +1267,15 @@ mod tests {
                 effects: None,
             }],
         });
-        let call = call("wire", json!({ "to": "internal" })).with_annotation(Some(PinnedAnnotation::new(
-            annotation,
-            AnnotationMandate::Annotator(crate::names::AnnotatorName::new("classifier")),
+        let unpinned = call("wire", json!({ "to": "internal" }));
+        let call = unpinned.clone().with_annotation(Some(PinnedAnnotation::new(
+            crate::names::AnnotatorName::new("classifier"),
+            unpinned.digest(),
+            ProducedAnnotation {
+                delta: annotation.delta,
+                emits: annotation.emits,
+                requires: annotation.requires,
+            },
         )));
 
         assert!(
@@ -1434,9 +1440,15 @@ mod tests {
             }],
         });
         let log = vec![opened(known(TRUSTED, Audience::Public))];
-        let call = call("lookup", json!({ "room": "internal" })).with_annotation(Some(PinnedAnnotation::new(
-            pinned,
-            AnnotationMandate::Annotator(crate::names::AnnotatorName::new("directory")),
+        let unpinned = call("lookup", json!({ "room": "internal" }));
+        let call = unpinned.clone().with_annotation(Some(PinnedAnnotation::new(
+            crate::names::AnnotatorName::new("directory"),
+            unpinned.digest(),
+            ProducedAnnotation {
+                delta: pinned.delta,
+                emits: pinned.emits,
+                requires: pinned.requires,
+            },
         )));
 
         let planned = plan_of(&registry, &log, &call);

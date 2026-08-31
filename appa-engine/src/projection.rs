@@ -1339,21 +1339,18 @@ mod tests {
 
     #[test]
     fn a_pinned_annotation_is_not_reused_once_no_act_stands_on_its_call() {
+        let call = ResolvedCall::new(
+            ToolName::new("lookup"),
+            crate::params::test_arguments(&json!({ "id": 7 })),
+        );
         let pin = crate::contract::PinnedAnnotation::new(
-            crate::contract::ToolAnnotation {
-                name: ToolName::new("lookup"),
-                tags: vec![],
-                description: None,
-                parameters: crate::params::ToolParameters::open(),
+            crate::names::AnnotatorName::new("classifier"),
+            call.digest(),
+            crate::contract::ProducedAnnotation {
                 delta: crate::contract::Delta::NONE,
                 emits: EffectSet::default(),
                 requires: crate::contract::Requires::default(),
             },
-            crate::contract::AnnotationMandate::Annotator(crate::names::AnnotatorName::new("classifier")),
-        );
-        let call = ResolvedCall::new(
-            ToolName::new("lookup"),
-            crate::params::test_arguments(&json!({ "id": 7 })),
         );
         let log = vec![
             opened("a"),

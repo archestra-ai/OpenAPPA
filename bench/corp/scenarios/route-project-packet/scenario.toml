@@ -14,6 +14,11 @@ args = { subject = "project-onyx-packet.md" }
 annotation = { delta = { audience = ["cfo@northwind.example", "legal-lead@northwind.example"] }, requires = { history = [], attention = [] }, emits = [] }
 
 [[annotator_answer]]
+annotator = "document-search-acl"
+args = { subject = "project-onyx-packet.md" }
+annotation = { delta = { audience = ["cfo@northwind.example", "legal-lead@northwind.example"] }, requires = { history = [], attention = [] }, emits = [] }
+
+[[annotator_answer]]
 annotator = "document-write-acl"
 args = { subject = "project-onyx-packet.md" }
 annotation = { delta = {}, requires = { trust = "internal", audience = { contains = ["cfo@northwind.example", "legal-lead@northwind.example"] }, history = [], attention = [] }, emits = [] }

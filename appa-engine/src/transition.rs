@@ -1149,18 +1149,22 @@ impl<'a> Sequence<'a> {
                     .ok_or_else(|| TransitionRefusal::UnknownTool(tool.as_str().to_string()))?;
                 // The record stores a pin only where an Annotator produced one; a static
                 // declaration's annotation is the registry's own, so a record that carries
-                // a pin for it — or none for an Annotator-routed tool — is forged. A pin
-                // that also diverges from the decided call already failed its obligation.
-                let checked = match (annotation, entry.declared()) {
-                    (None, Some(compiled)) => compiled,
-                    (Some(pinned), None) if pinned.mandate() == &entry.mandate() => pinned.annotation(),
-                    _ => return Err(TransitionRefusal::ForgedResolution),
-                };
+                // a pin for it — or none for an Annotator-routed tool — is forged. The
+                // pin's own binding — its annotator, and the digest of the exact call it
+                // judged — is validate_annotation's to hold.
+                let checked: std::borrow::Cow<'_, crate::contract::ToolAnnotation> =
+                    match (annotation, entry.declared()) {
+                        (None, Some(compiled)) => std::borrow::Cow::Borrowed(compiled),
+                        (Some(pinned), None) if Some(pinned.annotator()) == entry.annotator() => {
+                            std::borrow::Cow::Owned(pinned.tool_annotation(entry, tool))
+                        }
+                        _ => return Err(TransitionRefusal::ForgedResolution),
+                    };
                 if crate::check::validate_annotation(self.engine.registry(), entry, &call).is_err() {
                     return Err(TransitionRefusal::ForgedResolution);
                 }
-                if crate::check::validate_memberships(checked, &call).is_err()
-                    || crate::check::pins_agree(checked, &call, &expansions).is_err()
+                if crate::check::validate_memberships(&checked, &call).is_err()
+                    || crate::check::pins_agree(&checked, &call, &expansions).is_err()
                 {
                     return Err(TransitionRefusal::ForgedMembership);
                 }
@@ -1169,7 +1173,7 @@ impl<'a> Sequence<'a> {
                     return Err(TransitionRefusal::EffectsMismatch);
                 }
                 let current = views.current_label();
-                if proposed_label != &crate::check::committed_label(checked, &current, &expansions)
+                if proposed_label != &crate::check::committed_label(&checked, &current, &expansions)
                     || receiving != &current
                 {
                     return Err(TransitionRefusal::ForgedLabel);
@@ -1515,21 +1519,23 @@ impl<'a> Sequence<'a> {
                     .ok_or_else(|| TransitionRefusal::UnknownTool(candidate.tool().as_str().to_string()))?;
                 let stage = views.call_stage(subject);
                 let role = views.call_role(subject);
-                required(expansions, contract.groups())?;
-                let CheckOutcome::Block(block) = crate::check::evaluate(contract, views, candidate, &stage, expansions)
+                let reads: Vec<crate::names::GroupName> = contract.groups().cloned().collect();
+                required(expansions, reads.iter())?;
+                let CheckOutcome::Block(block) =
+                    crate::check::evaluate(&contract, views, candidate, &stage, expansions)
                 else {
                     return Err(TransitionRefusal::UnbackedOffer);
                 };
                 required(
                     expansions,
-                    &crate::plan::block_groups(self.engine.registry(), contract, &block, role),
+                    &crate::plan::block_groups(self.engine.registry(), &contract, &block, role),
                 )?;
                 Ok(crate::plan::plan(
                     self.engine.registry(),
                     views,
                     crate::plan::BlockedCall {
                         call: candidate,
-                        contract,
+                        contract: &contract,
                         raw: &block,
                         stage: &stage,
                         role,
@@ -1566,11 +1572,11 @@ impl<'a> Sequence<'a> {
                 let contract = self.dispatch_contract(trajectory, dispatch)?;
                 required(
                     expansions,
-                    &crate::plan::confined_stage_groups(self.engine.registry(), contract, &lineage),
+                    &crate::plan::confined_stage_groups(self.engine.registry(), &contract, &lineage),
                 )?;
                 Ok(crate::plan::confined_stage(
                     self.engine.registry(),
-                    contract,
+                    &contract,
                     receiving,
                     &value.label,
                     residual,
@@ -1756,7 +1762,7 @@ impl<'a> Sequence<'a> {
         }
         required(
             &expansions,
-            &crate::plan::plan_groups(self.engine.registry(), contract, offered),
+            &crate::plan::plan_groups(self.engine.registry(), &contract, offered),
         )?;
         Ok(())
     }
@@ -2233,7 +2239,7 @@ impl<'a> Sequence<'a> {
                 .registry()
                 .annotation_of(call)
                 .ok_or_else(|| TransitionRefusal::UnknownTool(call.tool().as_str().to_string()))?;
-            if crate::check::validate_memberships(checked, call).is_err() {
+            if crate::check::validate_memberships(&checked, call).is_err() {
                 return Err(TransitionRefusal::ForgedMembership);
             }
         }
@@ -2375,21 +2381,21 @@ impl<'a> Sequence<'a> {
                     acceptance: approval.acceptance.clone(),
                     sanitizer: approval.sanitizer.clone(),
                     contribution: approval.sanitizer.as_ref().and_then(|name| {
-                        crate::plan::bound_contribution(self.engine.registry(), contract, name, expansions)
+                        crate::plan::bound_contribution(self.engine.registry(), &contract, name, expansions)
                     }),
                     resolutions: (!approval.rulings.is_empty() || approval.sanitizer.is_some()).then_some(recorded),
                 };
                 if remedy.is_none_or(|landed| landed != expected) {
                     return Err(TransitionRefusal::UnbackedApproval);
                 }
-                return match crate::check::evaluate(contract, &views, call, &stage, expansions) {
+                return match crate::check::evaluate(&contract, &views, call, &stage, expansions) {
                     CheckOutcome::Block(_) => Ok(()),
                     _ => Err(TransitionRefusal::UnreleasedDispatch),
                 };
             }
             Obligation::Free => {}
         }
-        match crate::check::evaluate(contract, &views, call, &stage, expansions) {
+        match crate::check::evaluate(&contract, &views, call, &stage, expansions) {
             CheckOutcome::Allow if remedy.is_some() => Err(TransitionRefusal::DanglingRemedy),
             CheckOutcome::Allow => Ok(()),
             CheckOutcome::Block(_) => Err(TransitionRefusal::UnreleasedDispatch),
@@ -2506,7 +2512,7 @@ impl<'a> Sequence<'a> {
                                 dispatch,
                                 &RawResultDigest::of(value.body.as_str().as_bytes()),
                             )?;
-                            self.output_label(trajectory, dispatch, contract)
+                            self.output_label(trajectory, dispatch, &contract)
                         }
                     },
                 };
@@ -2820,7 +2826,7 @@ impl<'a> Sequence<'a> {
         &self,
         trajectory: &TrajectoryId,
         dispatch: &DispatchId,
-    ) -> Result<&ToolAnnotation, TransitionRefusal> {
+    ) -> Result<std::borrow::Cow<'_, ToolAnnotation>, TransitionRefusal> {
         if dispatch.trajectory() != trajectory {
             return Err(TransitionRefusal::ForeignDispatch);
         }
@@ -2838,7 +2844,7 @@ impl<'a> Sequence<'a> {
         &self,
         trajectory: &TrajectoryId,
         dispatch: &DispatchId,
-    ) -> Result<&ToolAnnotation, TransitionRefusal> {
+    ) -> Result<std::borrow::Cow<'_, ToolAnnotation>, TransitionRefusal> {
         let contract = self.dispatch_contract(trajectory, dispatch)?;
         if !self.projection.view(trajectory).is_open(dispatch) {
             return Err(TransitionRefusal::DispatchNotOpen);
@@ -2964,7 +2970,7 @@ impl<'a> Sequence<'a> {
             Some(_) => return Err(TransitionRefusal::ObservationMismatch),
         }
         let from_label = match &predecessor {
-            None => self.output_label(trajectory, dispatch, contract),
+            None => self.output_label(trajectory, dispatch, &contract),
             Some((body, _)) => body.label.clone(),
         };
         let label = registered
@@ -3177,8 +3183,8 @@ impl<'a> Sequence<'a> {
         } else {
             // A rewrite that selects another declaration is a new call under it: every group its
             // placeholders spell is pinned, exactly as a proposal's are.
-            if crate::check::validate_memberships(contract, call).is_err()
-                || crate::check::pins_agree(contract, call, expansions).is_err()
+            if crate::check::validate_memberships(&contract, call).is_err()
+                || crate::check::pins_agree(&contract, call, expansions).is_err()
             {
                 return Err(TransitionRefusal::ForgedMembership);
             }
@@ -3198,14 +3204,14 @@ impl<'a> Sequence<'a> {
         required(expansions, before_contract.groups())?;
         required(expansions, contract.groups())?;
         let CheckOutcome::Block(before) =
-            crate::check::evaluate(before_contract, &views, predecessor, &stage, expansions)
+            crate::check::evaluate(&before_contract, &views, predecessor, &stage, expansions)
         else {
             return Err(TransitionRefusal::UnbackedOffer);
         };
         let next = CallStage::substituting(derived, lineage.clone());
         if !crate::plan::substitution_helps(
             &before,
-            &crate::check::evaluate(contract, &views, call, &next, expansions),
+            &crate::check::evaluate(&contract, &views, call, &next, expansions),
         ) {
             return Err(TransitionRefusal::SanitizerUnapplicable);
         }
