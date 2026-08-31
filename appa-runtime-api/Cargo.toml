@@ -1,6 +1,6 @@
 [package]
 name = "appa-runtime-api"
-version = "0.0.0"
+version.workspace = true
 edition.workspace = true
 publish = false
 

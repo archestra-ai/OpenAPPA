@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 const CONFIG: &str = r#"
@@ -19,6 +20,14 @@ struct Server {
     url: String,
 }
 
+static SERVER_SCENARIO: Mutex<()> = Mutex::new(());
+
+fn serialize_server_scenarios() -> MutexGuard<'static, ()> {
+    SERVER_SCENARIO
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 impl Drop for Server {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -34,7 +43,8 @@ fn free_port() -> u16 {
 }
 
 fn start(config: &Path, db: &Path, port: u16) -> Server {
-    let child = Command::new(env!("CARGO_BIN_EXE_appa-runtime"))
+    let child = Command::new(env!("CARGO_BIN_EXE_appa"))
+        .arg("runtime")
         .arg("--config")
         .arg(config)
         .arg("--db")
@@ -95,7 +105,8 @@ fn http(url: &str, method: &str, body: Option<&str>) -> Option<String> {
 }
 
 fn expect_startup_refusal(config: &Path, db: &Path, needle: &str) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_appa-runtime"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_appa"))
+        .arg("runtime")
         .arg("--config")
         .arg(config)
         .arg("--db")
@@ -141,6 +152,7 @@ fn write_config(dir: &Path, text: &str) -> PathBuf {
 
 #[test]
 fn committed_state_survives_a_hard_kill_and_the_dispatch_stays_open() {
+    let _scenario = serialize_server_scenarios();
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let config = write_config(dir.path(), CONFIG);
     let db = dir.path().join("appa.db");
@@ -189,6 +201,7 @@ fn committed_state_survives_a_hard_kill_and_the_dispatch_stays_open() {
 
 #[test]
 fn a_changed_policy_keeps_old_roots_on_their_opening_policy() {
+    let _scenario = serialize_server_scenarios();
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let config = write_config(dir.path(), CONFIG);
     let db = dir.path().join("appa.db");
@@ -256,6 +269,7 @@ fn a_changed_policy_keeps_old_roots_on_their_opening_policy() {
 
 #[test]
 fn the_reload_route_installs_an_edited_policy_without_a_restart() {
+    let _scenario = serialize_server_scenarios();
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let config = write_config(dir.path(), CONFIG);
     let db = dir.path().join("appa.db");
@@ -343,6 +357,7 @@ fn the_reload_route_installs_an_edited_policy_without_a_restart() {
 
 #[test]
 fn a_damaged_database_refuses_to_serve() {
+    let _scenario = serialize_server_scenarios();
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let config = write_config(dir.path(), CONFIG);
     let db = dir.path().join("appa.db");

@@ -12,14 +12,14 @@ use axum::routing::post;
 const TURN_ENDS: [&str; 3] = ["Stop", "StopFailure", "SubagentStop"];
 
 fn turn_end_command() -> &'static str {
-    "[ \"${APPA_GATE:-}\" = 1 ] || exit 0; b=${APPA_INSTALL_DIR:-$HOME/.local/bin}/appa-runtime; \
-     [ -x \"$b\" ] || b=appa-runtime; \"$b\" hook --turn-end || exit 0"
+    "[ \"${APPA_GATE:-}\" = 1 ] || exit 0; b=${APPA_INSTALL_DIR:-$HOME/.local/bin}/appa; \
+     [ -x \"$b\" ] || b=appa; \"$b\" hook --turn-end || exit 0"
 }
 
 /// Where the shipped commands look for the binary first. Without it they would
-/// find whatever appa-runtime this machine has installed, not the one built here.
+/// find whatever appa this machine has installed, not the one built here.
 fn install_dir() -> &'static std::path::Path {
-    std::path::Path::new(env!("CARGO_BIN_EXE_appa-runtime"))
+    std::path::Path::new(env!("CARGO_BIN_EXE_appa"))
         .parent()
         .expect("the built binary sits in a directory")
 }
@@ -30,6 +30,51 @@ fn shipped(file: &str) -> serde_json::Value {
         .join(file);
     serde_json::from_str(&std::fs::read_to_string(path).unwrap_or_else(|_| panic!("the shipped {file} is readable")))
         .unwrap_or_else(|_| panic!("the shipped {file} parses"))
+}
+
+fn plugin_file(file: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../integrations/claude-code/plugin")
+        .join(file)
+}
+
+#[test]
+fn runtime_starters_can_replace_the_retired_binary_name() {
+    let posix =
+        std::fs::read_to_string(plugin_file("hooks/ensure-runtime.sh")).expect("the POSIX runtime starter is readable");
+    assert!(
+        posix.contains("appa | */appa | appa-runtime | */appa-runtime"),
+        "the POSIX starter must recognize a stale pre-0.5 runtime",
+    );
+
+    let windows =
+        std::fs::read_to_string(plugin_file("hooks/hook.ps1")).expect("the Windows runtime starter is readable");
+    assert!(
+        windows.contains("$process.ProcessName -eq \"appa-runtime\""),
+        "the Windows starter must recognize a stale pre-0.5 runtime",
+    );
+    assert!(
+        windows.contains("[StringComparison]::OrdinalIgnoreCase"),
+        "the Windows starter must verify the stale process's installed path",
+    );
+}
+
+#[test]
+fn an_ungated_session_has_no_appa_statusline() {
+    let output = Command::new("sh")
+        .arg(plugin_file("statusline.sh"))
+        .env_remove("APPA_GATE")
+        .stdin(Stdio::piped())
+        .output()
+        .expect("the POSIX statusline runs");
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"", "plain Claude must have no APPA statusline");
+
+    let windows = std::fs::read_to_string(plugin_file("statusline.ps1")).expect("the Windows statusline is readable");
+    assert!(
+        windows.contains("if ($env:APPA_GATE -ne \"1\") {\n        exit 0\n    }"),
+        "the Windows statusline must also be silent outside clappa",
+    );
 }
 
 /// The two shipped hook maps gate the same events. Nothing else compares

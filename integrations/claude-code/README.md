@@ -2,7 +2,7 @@
 
 Everything needed to protect a Claude Code session through the
 appa-runtime process lives in this directory: the plugin (hooks, the
-`execute_remedy_plan` MCP server, the `appa-debug` skill), the
+`execute_remedy_plan` MCP server, the `appa-guide` skill), the
 statusline script, example policies, and the install and uninstall
 instructions below. The process itself is the `appa-runtime` crate;
 its [README](../../appa-runtime/README.md) covers build,
@@ -37,55 +37,54 @@ receives it, in the `Agent` tool's result.
 
 ## Install
 
-The plugin manager installs the protection; nothing else is downloaded ahead
-of time:
+This flow needs Cargo, the `claude` command, and `curl`. Install the native CLI
+and let it initialize Claude Code:
 
 ```sh
-claude plugin marketplace add archestra-ai/OpenAPPA
-claude plugin install appa-runtime@appa
+cargo install --path appa-runtime --force
+appa init claude-code
 ```
 
-The runtime binary arrives through the `appa-setup` skill: run
-`/appa-setup` in a plain `claude` session (`skills/appa-setup`) — it
-downloads the release archive for the current system, verifies its
-SHA-256 against the release `SHA256SUMS` and its version against
-`version.txt`, and places the binary — each step under the session's
-normal command approval. The last step starts the runtime through the plugin's own
-starter and reports the answer `/health` gave, so the install ends with a
-process that has actually run on this machine, the default policy written,
-and no start left for the first protected session to pay for. While the repository is private, run
-`gh auth login && gh auth setup-git` first.
+Init installs `clappa` beside `appa` so the short command works in later examples.
+
+From a checkout, `appa init` finds `integrations/claude-code` and registers that
+exact local marketplace. From an extracted release it uses the marketplace
+shipped beside the binaries. Otherwise it uses `archestra-ai/OpenAPPA`. It
+uninstalls an existing user-scoped APPA plugin and replaces its marketplace
+before installing, so branch tests never stack two APPA hook sets.
+
+Initialization deploys the same `appa` build for its internal `runtime` command, creates the starting
+policy only when it is missing, installs `clappa`, preserves a custom Claude
+statusline, registers the plugin, and starts the runtime through the same
+starter used at SessionStart. A successful command therefore proves that one
+runtime and one plugin from the selected source are active.
 
 Linux binaries require glibc 2.34 or newer. Alpine and other musl-only
 systems are not supported by the release assets.
 
-The plugin ships the POSIX hook commands. On native Windows, use a
-checkout marketplace and replace `plugin/hooks/hooks.json` with
-`plugin/hooks/hooks.windows.json`, which drives the `hook.ps1` adapter;
-WSL runs the POSIX hooks as-is.
+The plugin ships POSIX and native Windows hook commands. `appa init` activates
+the PowerShell adapter on native Windows; WSL uses the POSIX hooks.
 
 ### File locations
 
 | System | Runtime | Policy | Database |
 | --- | --- | --- | --- |
-| Linux | `~/.local/bin/appa-runtime` | `~/.config/appa/appa.toml` | `~/.local/share/appa/` |
-| macOS | `~/.local/bin/appa-runtime` | `~/Library/Application Support/appa/appa.toml` | `~/Library/Application Support/appa/` |
-| Windows | `%LOCALAPPDATA%\appa\bin\appa-runtime.exe` | `%APPDATA%\appa\appa.toml` | `%LOCALAPPDATA%\appa\` |
+| Linux | `~/.local/bin/appa runtime` | `~/.config/appa/appa.toml` | `~/.local/share/appa/` |
+| macOS | `~/.local/bin/appa runtime` | `~/Library/Application Support/appa/appa.toml` | `~/Library/Application Support/appa/` |
+| Windows | `%LOCALAPPDATA%\appa\bin\appa.exe runtime` | `%APPDATA%\appa\appa.toml` | `%LOCALAPPDATA%\appa\` |
 
 The runtime creates the starting policy only when the policy path does
 not exist. It never replaces the policy or database.
 
 Set `APPA_INSTALL_DIR`, `APPA_CONFIG_DIR`, or `APPA_DATA_DIR` in the
-environment to change these locations; the hooks and the setup
-instructions follow them.
+environment to change these locations; `appa init` and the hooks follow them.
 
 ## Protect a Claude Code session
 
 The plugin is present in every session but inert until a session
 opts in with `APPA_GATE=1`. Keep normal `claude` sessions unprotected
-and use a separate `clappa` command for protected ones. The setup task
-creates
-it as an executable beside the runtime binary — a PATH command works in
+and use a separate `clappa` command for protected ones. `appa init` creates
+it as an executable beside the `appa` command — a PATH command works in
 every open terminal with no shell reload, unlike an alias:
 
 ```sh
@@ -111,12 +110,9 @@ A protected session starts the installed runtime at SessionStart when
 nothing healthy answers `/health` — normally a no-op, because the install
 left it running — or replaces a runtime that answers `stale <pid>`,
 which a running process does once an install replaced its binary on
-disk. It then blocks every action while the runtime is
-unavailable. When the binary is not installed at all,
-the `appa-setup` skill installs it: invoked with `/appa-setup`, it has
-the model download the release archive for the current system, verify
-its checksum and version, and install the binary — each step under the
-session's normal command approval. There is no login service: a runtime
+disk. It then blocks every action while the runtime is unavailable. The starter
+never installs software; rerun `appa init claude-code` when the binary or
+plugin is missing. There is no login service: a runtime
 that dies mid-session blocks the session until the next session start
 brings it back. Check the runtime with:
 
@@ -131,7 +127,7 @@ by hand.
 
 The default policy names only Claude Code's built-in tools. APPA blocks every
 installed MCP tool until the policy names it. Start `clappa` and run
-`/appa-guide init`. The skill exists only in protected sessions. It inventories MCP
+`/appa-guide init` from that protected session. It inventories MCP
 servers, proposes one policy entry per tool, and marks which tools read data
 that must stay in the session or send data outward. It asks once about servers
 it cannot judge. You review the complete proposal before it writes anything.
@@ -143,7 +139,7 @@ all follow it:
 
 ```sh
 cp integrations/claude-code/examples/claude-code.appa.toml appa.toml
-nohup cargo run --bin appa-runtime -- --config appa.toml --db appa.db --listen 127.0.0.1:8788 >appa-runtime.log 2>&1 &
+nohup cargo run --bin appa -- runtime --config appa.toml --db appa.db --listen 127.0.0.1:8788 >appa-runtime.log 2>&1 &
 APPA_GATE=1 APPA_RUNTIME_URL=http://127.0.0.1:8788 claude --plugin-dir integrations/claude-code/plugin
 ```
 
@@ -174,33 +170,33 @@ down from passing as a refusal: the hooks fail closed, so a gate that is
 not answering blocks both sessions rather than one.
 
 The check reads nothing of APPA's own log or database. It needs the
-`claude` CLI on PATH and logged in, and a runtime binary — a local
-build, an installed one, or `APPA_RUNTIME_BIN`. It spends the machine's
+`claude` CLI on PATH and logged in, and an appa binary — a local build,
+an installed one, or `APPA_BIN`. It spends the machine's
 Claude usage, so nothing runs it automatically.
 
 ## Upgrade
 
-The plugin tracks the marketplace. To upgrade the runtime, stop the
-running one, remove the binary from the location in the table above, and
-run `/appa-setup` in a plain `claude` session again; it installs the latest
-release and starts it. Stop it first: a runtime already answering on the
-port keeps serving, and the new binary would never run.
+Install the new `appa` package, then rerun `appa init claude-code`. Init replaces
+the deployed runtime and the APPA marketplace together, preserves policy and
+database files, and restarts a runtime that reports its installed binary as
+stale.
 
 ## Uninstall
 
 ```sh
 claude plugin uninstall appa-runtime
 claude plugin marketplace remove appa
-pkill -f appa-runtime
-rm ~/.local/bin/appa-runtime ~/.local/bin/clappa ~/.local/bin/appa-statusline.sh
+pkill -f 'appa runtime'
+rm ~/.local/bin/appa ~/.cargo/bin/clappa ~/.local/bin/appa-statusline.sh
+cargo uninstall appa
 
-# drop the statusline entry the setup wrote, and keep one of your own:
+# drop the statusline entry appa init wrote, and keep one of your own:
 jq 'if (.statusLine.command? // "") | test("appa-statusline") then del(.statusLine) else . end' \
   ~/.claude/settings.json > ~/.claude/settings.json.new &&
   mv ~/.claude/settings.json.new ~/.claude/settings.json
 ```
 
-The setup writes the `statusLine` entry into your own settings, so
+`appa init` writes the `statusLine` entry into your own settings, so
 removing the script alone leaves Claude Code running a command that no
 longer exists. The `jq` line removes that entry only while it runs
 `appa-statusline.sh`, so a statusline of your own survives untouched.
@@ -209,17 +205,19 @@ The policy and database stay at the locations in the table above; delete
 them only if you want the history gone. Remove a `clappa` shell alias
 separately if you added one instead of the command.
 
-## Statusline, manually
+## Statusline
 
-Claude Code reads `statusLine` only from your own settings — a plugin
-cannot set it. In a protected session the script shows the APPA pixel
+Claude Code reads `statusLine` only from your own global settings — a plugin
+cannot set it. `appa init` adds the platform script there unless you already
+have a custom statusline. In a protected session the script shows the APPA pixel
 mascot plus the session's current Trust and Audience, read from the
-process's `GET /status`. In an unprotected session it shows the mascot
-alone and never queries the runtime. Both platform scripts fail open: runtime down, unknown
+process's `GET /status`. In an unprotected session it prints nothing and never
+queries the runtime, so regular `claude` has no APPA statusline. Both platform
+scripts fail open inside a protected session: runtime down, unknown
 trajectory, or malformed input prints the mascot alone, never a blocked
 action. The POSIX script also needs `jq` and `curl`.
 
-To set it, merge this into `~/.claude/settings.json`, pointing at a
+To set it manually, merge this into `~/.claude/settings.json`, pointing at a
 checkout of this repository:
 
 ```json
@@ -272,13 +270,3 @@ every statusline refresh:
   unprotected session.
 - **The plugin adds roughly zero tokens to a session.** The protection
   is hooks and an MCP server, not prompt text.
-- **The install asks once whether it may be counted.** On yes, `/appa-setup`
-  sends a single event naming the version, OS and architecture, and nothing
-  else — no identifier for you or the machine, and nothing kept on disk to
-  recognise you later. On no, or on no answer, it sends nothing. Set
-  `APPA_TELEMETRY=0` to refuse it without being asked, which is the way to
-  handle a scripted or fleet install. The runtime itself never reports
-  anything: it still binds loopback only and makes no outbound call of its
-  own. The reporters are `report-install.sh` and `report-install.ps1` in the
-  plugin directory; read them before you answer if you would rather see it
-  than take our word.

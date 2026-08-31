@@ -1,14 +1,14 @@
 #!/bin/sh
-# Starts the installed appa-runtime when no healthy runtime answers.
-# Two callers share it: the last step of the install (the appa-setup skill)
-# and every protected SessionStart, which runs it before the hooks post
+# Starts the installed `appa runtime` process when no healthy runtime answers.
+# Two callers share it: `appa init claude-code` and every protected
+# SessionStart, which runs it before the hooks post
 # their first event. A protected session therefore needs no login service,
 # and an install that ends here leaves the runtime up, so the first
 # protected session pays nothing for the start. Exit 0 means a healthy
 # runtime answers; any other exit makes the chained protection hook block,
 # and tells the install that it has nothing to report as running.
-# Installing the binary is not this script's job: the appa-setup skill
-# does that (skills/appa-setup).
+# Installing the binary is not this script's job: `appa init claude-code`
+# installs it before registering this plugin.
 #
 # Concurrent starts need no lock. The runtime binds the loopback port, so
 # the first process to bind serves and every later one exits at once with
@@ -43,7 +43,8 @@ healthy() {
 # here makes the install take effect, at the cost of the protected
 # sessions already open, whose hooks fail closed until the start below
 # answers. The pid arrives in an HTTP body from whoever holds the port,
-# so only this user's own appa-runtime process is ever signalled.
+# so only this user's own appa process is ever signalled. The retired
+# appa-runtime name is accepted so init can replace pre-0.5 installs.
 # Returns 0 once the port refuses, which is the start's normal starting
 # point; exits 0 itself when another starter has already replaced the
 # runtime, and 1 when the stale runtime cannot be stopped.
@@ -59,13 +60,13 @@ stop_stale_runtime() {
   owner=$(ps -o uid= -p "$1" 2>/dev/null | tr -d ' ')
   if [ -n "$owner" ]; then
     if [ "$owner" != "$(id -u)" ]; then
-      printf 'appa protection: pid %s is not this user'"'"'s appa-runtime; not stopping it\n' "$1" >&2
+      printf 'appa protection: pid %s is not this user'"'"'s appa runtime; not stopping it\n' "$1" >&2
       return 1
     fi
     case $(ps -o comm= -p "$1" 2>/dev/null) in
-      appa-runtime | */appa-runtime) ;;
+      appa | */appa | appa-runtime | */appa-runtime) ;;
       *)
-        printf 'appa protection: pid %s is not appa-runtime; not stopping it\n' "$1" >&2
+        printf 'appa protection: pid %s is not appa runtime; not stopping it\n' "$1" >&2
         return 1
         ;;
     esac
@@ -109,11 +110,11 @@ case "$(uname -s)" in
     ;;
 esac
 
-expected_binary=${APPA_INSTALL_DIR:-"$HOME/.local/bin"}/appa-runtime
+expected_binary=${APPA_INSTALL_DIR:-"$HOME/.local/bin"}/appa
 binary=$expected_binary
 if [ ! -x "$binary" ]; then
-  binary=$(command -v appa-runtime 2>/dev/null) || {
-    printf 'appa protection: appa-runtime is not installed; expected at %s. Run in a plain terminal: claude /appa-setup\n' \
+  binary=$(command -v appa 2>/dev/null) || {
+    printf 'appa protection: appa is not installed; expected at %s. Run in a plain terminal: appa init claude-code\n' \
       "$expected_binary" >&2
     exit 1
   }
@@ -124,7 +125,7 @@ fi
 # path on macOS and two different paths everywhere else.
 mkdir -p "$config_dir" "$data_dir"
 
-nohup "$binary" --config "$config_dir/appa.toml" --db "$data_dir/appa.db" \
+nohup "$binary" runtime --config "$config_dir/appa.toml" --db "$data_dir/appa.db" \
   >>"$data_dir/runtime.stdout.log" 2>>"$data_dir/runtime.stderr.log" \
   </dev/null &
 

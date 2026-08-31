@@ -1,10 +1,8 @@
-//! Process entry. Policy decisions live behind the runtime API; this file
+//! Internal `appa runtime` command: an HTTP listener for hooks. Policy decisions live behind the runtime API; this file
 //! parses flags, initializes a missing deployment config, opens the
-//! runtime, picks the adapter codec, and serves. Invoked as `appa-runtime hook`
-//! it is instead the client the harness runs once per hook (see `hook_client`).
+//! runtime, picks the adapter codec, and serves.
 
-mod hook_client;
-
+use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::net::SocketAddr;
@@ -16,10 +14,11 @@ use std::time::SystemTime;
 use axum::extract::State;
 use axum::routing::{get, post};
 use clap::Parser;
+use sha2::{Digest, Sha256};
 
-use appa_runtime::api::{Reloaded, Runtime};
-use appa_runtime::config::Config;
-use appa_runtime::{hooks, mcp};
+use crate::api::{Reloaded, Runtime};
+use crate::config::Config;
+use crate::{hooks, mcp};
 use appa_runtime_api::Codec;
 
 const DEFAULT_CONFIG: &str = include_str!("../../integrations/claude-code/examples/claude-code.appa.toml");
@@ -39,18 +38,10 @@ fn ensure_default_config(path: &Path) -> io::Result<bool> {
 }
 
 #[derive(Parser)]
-#[command(
-    name = "appa-runtime",
-    version = include_str!("../../version.txt").trim()
-)]
-/// Gate a harness's flows. With no subcommand it serves the runtime; `hook` posts
-/// one hook event to a runtime already serving.
+#[command(name = "appa runtime", version)]
 struct Args {
-    #[command(subcommand)]
-    command: Option<Command>,
-
-    #[arg(long, env = "APPA_CONFIG", default_value = "appa.toml")]
-    config: PathBuf,
+    #[arg(long, env = "APPA_CONFIG", global = true)]
+    config: Option<PathBuf>,
 
     #[arg(long, env = "APPA_DB", default_value = "appa.db")]
     db: PathBuf,
@@ -61,28 +52,11 @@ struct Args {
     #[arg(long, default_value = "127.0.0.1:8787")]
     listen: SocketAddr,
 
-    #[arg(long, value_enum, default_value_t = Adapter::ClaudeCode)]
+    #[arg(long, value_enum, default_value_t = Adapter::ClaudeCode, global = true)]
     adapter: Adapter,
 
     #[arg(short, action = clap::ArgAction::Count)]
     verbose: u8,
-}
-
-/// The one thing this binary does besides serve. The harness spawns it once per
-/// hook, so it runs before anything the server needs is built.
-#[derive(clap::Subcommand)]
-enum Command {
-    /// Post the hook event on stdin to the running runtime and print its answer.
-    Hook {
-        #[arg(long, env = "APPA_RUNTIME_URL", default_value = "http://127.0.0.1:8787")]
-        url: String,
-
-        /// Post a hook that reports a finished turn. It decides nothing, so it
-        /// discards the answer and never blocks, and waits on no evidence round
-        /// trip, so it takes the shorter deadline.
-        #[arg(long)]
-        turn_end: bool,
-    },
 }
 
 fn require_loopback(addr: &SocketAddr) -> Result<(), String> {
@@ -164,19 +138,20 @@ fn log_level(verbose: u8) -> &'static str {
 /// replacement so the plugin's starter replaces the process too.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ExecutableAtStart {
-    path: PathBuf,
     len: u64,
     modified: SystemTime,
+    digest: String,
 }
 
 impl ExecutableAtStart {
     fn snapshot(path: PathBuf) -> Option<Self> {
         let metadata = fs::metadata(&path).ok()?;
         let modified = metadata.modified().ok()?;
+        let digest = binary_digest(&path).ok()?;
         Some(Self {
-            path,
             len: metadata.len(),
             modified,
+            digest,
         })
     }
 
@@ -184,11 +159,33 @@ impl ExecutableAtStart {
         std::env::current_exe().ok().and_then(Self::snapshot)
     }
 
-    /// Whether a different file now stands at the executable's path. A path that cannot be
-    /// read is not a replacement: there is nothing newer to run.
+    /// Whether the executable installed at this process's path no longer matches the one it
+    /// started from. A missing or unreadable path is stale too: Unix can keep an unlinked old
+    /// executable running after an install removes it.
     fn is_replaced(&self) -> bool {
-        Self::snapshot(self.path.clone()).is_some_and(|now| now != *self)
+        self.differs_from(current_executable_metadata())
     }
+
+    fn differs_from(&self, current: io::Result<(u64, SystemTime)>) -> bool {
+        current
+            .map(|(len, modified)| len != self.len || modified != self.modified)
+            .unwrap_or(true)
+    }
+}
+
+/// Read only the path the operating system says this process started from. Keeping this
+/// filesystem lookup outside Axum's extracted state makes the trust boundary explicit: an HTTP
+/// request supplies neither the executable path nor any part of it.
+fn current_executable_metadata() -> io::Result<(u64, SystemTime)> {
+    let path = std::env::current_exe()?;
+    let metadata = fs::metadata(path)?;
+    Ok((metadata.len(), metadata.modified()?))
+}
+
+fn binary_digest(path: &Path) -> io::Result<String> {
+    let bytes = fs::read(path)?;
+    let digest = Sha256::digest(bytes);
+    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 #[derive(Clone)]
@@ -212,14 +209,20 @@ async fn hook(
 /// `ok` while this process serves the executable installed on disk; `stale <pid>` once an
 /// install replaced that file, naming the process to stop before starting the new build.
 async fn health(State(state): State<AppState>) -> String {
-    health_answer(state.executable.as_ref(), std::process::id())
+    let stale = state.executable.as_ref().is_some_and(ExecutableAtStart::is_replaced);
+    health_answer(stale, std::process::id())
 }
 
-fn health_answer(executable: Option<&ExecutableAtStart>, pid: u32) -> String {
-    match executable {
-        Some(executable) if executable.is_replaced() => format!("stale {pid}"),
-        _ => "ok".to_owned(),
-    }
+async fn binary_fingerprint(State(state): State<AppState>) -> Result<String, axum::http::StatusCode> {
+    state
+        .executable
+        .as_ref()
+        .map(|executable| executable.digest.clone())
+        .ok_or(axum::http::StatusCode::NOT_FOUND)
+}
+
+fn health_answer(stale: bool, pid: u32) -> String {
+    if stale { format!("stale {pid}") } else { "ok".to_owned() }
 }
 
 async fn reload(State(state): State<AppState>) -> Result<axum::Json<Reloaded>, (axum::http::StatusCode, String)> {
@@ -244,27 +247,30 @@ struct StatusQuery {
 async fn status(
     State(state): State<AppState>,
     query: Result<axum::extract::Query<StatusQuery>, axum::extract::rejection::QueryRejection>,
-) -> Result<axum::Json<appa_runtime::api::TrajectoryStatus>, axum::http::StatusCode> {
+) -> Result<axum::Json<crate::api::TrajectoryStatus>, axum::http::StatusCode> {
     let query = query.map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
-    let id = appa_runtime::api::TrajectoryId(query.0.trajectory);
+    let id = crate::api::TrajectoryId(query.0.trajectory);
     match state.runtime.status(&id) {
         Some(status) => Ok(axum::Json(status)),
         None => Err(axum::http::StatusCode::NOT_FOUND),
     }
 }
 
-fn main() -> ExitCode {
-    let args = Args::parse();
-    if let Some(Command::Hook { url, turn_end }) = &args.command {
-        return hook_client::run(url, hook_client::Decides::of_a_turn_end(*turn_end));
-    }
-    match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
-        Ok(async_runtime) => async_runtime.block_on(serve(args)),
+/// Run the internal daemon command from arguments supplied by the public CLI.
+pub fn run_from<I, T>(args: I) -> ExitCode
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    let args = Args::parse_from(args);
+    let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+        Ok(runtime) => runtime,
         Err(error) => {
-            eprintln!("appa-runtime: cannot start the async runtime: {error}");
-            ExitCode::FAILURE
+            eprintln!("appa runtime: cannot create async runtime: {error}");
+            return ExitCode::FAILURE;
         }
-    }
+    };
+    runtime.block_on(serve(args))
 }
 
 async fn serve(args: Args) -> ExitCode {
@@ -275,33 +281,35 @@ async fn serve(args: Args) -> ExitCode {
         )
         .init();
 
+    let config_path = args.config.unwrap_or_else(|| PathBuf::from("appa.toml"));
+
     if let Err(refusal) = require_loopback(&args.listen) {
-        eprintln!("appa-runtime: {refusal}");
+        eprintln!("appa runtime: {refusal}");
         return ExitCode::FAILURE;
     }
-    match ensure_default_config(&args.config) {
-        Ok(true) => tracing::info!(path = %args.config.display(), "created default configuration"),
+    match ensure_default_config(&config_path) {
+        Ok(true) => tracing::info!(path = %config_path.display(), "created default configuration"),
         Ok(false) => {}
         Err(error) => {
-            eprintln!("appa-runtime: cannot create {}: {error}", args.config.display());
+            eprintln!("appa runtime: cannot create {}: {error}", config_path.display());
             return ExitCode::FAILURE;
         }
     }
-    let config = match Config::load(&args.config) {
+    let config = match Config::load(&config_path) {
         Ok(config) => config,
         Err(error) => {
-            eprintln!("appa-runtime: {error}");
+            eprintln!("appa runtime: {error}");
             return ExitCode::FAILURE;
         }
     };
     if let Err(refusal) = refuse_unobservable_returns(args.adapter, config.policy_file().value()) {
-        eprintln!("appa-runtime: {refusal}");
+        eprintln!("appa runtime: {refusal}");
         return ExitCode::FAILURE;
     }
     let runtime = match Runtime::open(config, args.db, args.modules_dir) {
         Ok(runtime) => Arc::new(runtime),
         Err(error) => {
-            eprintln!("appa-runtime: {error}");
+            eprintln!("appa runtime: {error}");
             return ExitCode::FAILURE;
         }
     };
@@ -309,12 +317,13 @@ async fn serve(args: Args) -> ExitCode {
     let state = AppState {
         runtime: Arc::clone(&runtime),
         codec: args.adapter.codec(),
-        config: args.config,
+        config: config_path,
         adapter: args.adapter,
         executable: ExecutableAtStart::of_this_process(),
     };
     let app = axum::Router::new()
         .route("/health", get(health))
+        .route("/binary-fingerprint", get(binary_fingerprint))
         .route("/status", get(status))
         .route("/hook", post(hook))
         .route("/reload", post(reload))
@@ -324,15 +333,15 @@ async fn serve(args: Args) -> ExitCode {
     let listener = match tokio::net::TcpListener::bind(args.listen).await {
         Ok(listener) => listener,
         Err(error) => {
-            eprintln!("appa-runtime: cannot bind {}: {error}", args.listen);
+            eprintln!("appa runtime: cannot bind {}: {error}", args.listen);
             return ExitCode::FAILURE;
         }
     };
-    tracing::info!(listen = %args.listen, "appa-runtime serving /hook, /mcp, /status, /reload, and /health");
+    tracing::info!(listen = %args.listen, "appa-runtime serving /hook, /mcp, /status, /reload, /health, and /binary-fingerprint");
     match axum::serve(listener, app).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("appa-runtime: server failed: {error}");
+            eprintln!("appa runtime: server failed: {error}");
             ExitCode::FAILURE
         }
     }
@@ -402,24 +411,29 @@ mod tests {
     #[test]
     fn health_reports_a_replaced_executable_by_the_pid_to_stop() {
         let directory = tempfile::tempdir().expect("temporary directory");
-        let path = directory.path().join("appa-runtime");
+        let path = directory.path().join("appa");
         fs::write(&path, "build one").expect("the executable is written");
         let started = ExecutableAtStart::snapshot(path.clone()).expect("the executable is readable");
 
-        assert_eq!(health_answer(Some(&started), 41), "ok");
-        assert_eq!(health_answer(None, 41), "ok");
+        let replaced = |path: &Path| {
+            started.differs_from(fs::metadata(path).and_then(|metadata| Ok((metadata.len(), metadata.modified()?))))
+        };
+
+        assert!(!replaced(&path));
+        assert_eq!(health_answer(false, 41), "ok");
 
         let later = started.modified + std::time::Duration::from_secs(2);
         fs::File::open(&path)
             .and_then(|file| file.set_modified(later))
             .expect("the executable's timestamp is moved");
-        assert_eq!(health_answer(Some(&started), 41), "stale 41");
+        assert!(replaced(&path));
+        assert_eq!(health_answer(true, 41), "stale 41");
 
         fs::write(&path, "build two, longer").expect("the executable is replaced");
-        assert_eq!(health_answer(Some(&started), 41), "stale 41");
+        assert!(replaced(&path));
 
         fs::remove_file(&path).expect("the executable is removed");
-        assert_eq!(health_answer(Some(&started), 41), "ok");
+        assert!(replaced(&path));
     }
 
     #[test]

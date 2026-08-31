@@ -95,7 +95,7 @@ impl ServerHandler for RemedyService {
 }
 
 /// The release version the CLI advertises, so an MCP client and `--version` agree.
-const RUNTIME_VERSION: &str = include_str!("../../version.txt").trim_ascii();
+const RUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const SESSION_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
 
@@ -132,10 +132,7 @@ mod tests {
             )
             .expect("the deployment opens"),
         ));
-        assert_eq!(
-            service.get_info().server_info.version,
-            include_str!("../../version.txt").trim()
-        );
+        assert_eq!(service.get_info().server_info.version, env!("CARGO_PKG_VERSION"));
     }
 
     fn config() -> Config {

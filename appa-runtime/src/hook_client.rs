@@ -1,4 +1,4 @@
-//! The hook client: this same binary, invoked as `appa-runtime hook`, posting one
+//! The hook client: this same binary, invoked as `appa hook`, posting one
 //! hook event read on stdin to the running runtime and printing its answer.
 //!
 //! The harness spawns a process per hook, so the cost of reaching the runtime is
@@ -64,13 +64,13 @@ impl Endpoint {
 /// map already registers each hook for one event and is where that choice is
 /// reviewed, and nothing in the posted event can move a hook off it.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Decides {
+enum Decides {
     Authorization,
     Nothing,
 }
 
 impl Decides {
-    pub(crate) fn of_a_turn_end(turn_end: bool) -> Self {
+    fn of_a_turn_end(turn_end: bool) -> Self {
         match turn_end {
             true => Self::Nothing,
             false => Self::Authorization,
@@ -186,7 +186,8 @@ fn refusal(answer: &Answer) -> String {
     }
 }
 
-pub(crate) fn run(url: &str, decides: Decides) -> ExitCode {
+pub fn run(url: &str, turn_end: bool) -> ExitCode {
+    let decides = Decides::of_a_turn_end(turn_end);
     let mut event = Vec::new();
     if let Err(error) = std::io::stdin().read_to_end(&mut event) {
         return block(&format!("the hook event could not be read: {error}"));

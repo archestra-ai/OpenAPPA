@@ -77,8 +77,42 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "appa"
+version = "0.6.1"
+dependencies = [
+ "appa-adapter-claude-code",
+ "appa-builtin",
+ "appa-engine",
+ "appa-eventlog",
+ "appa-policy",
+ "appa-runtime-api",
+ "axum",
+ "clap",
+ "futures-util",
+ "libc",
+ "libloading",
+ "rand 0.10.2",
+ "reqwest",
+ "rig-agent",
+ "rig-core",
+ "rmcp 3.1.2",
+ "rustls",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
 name = "appa-adapter-claude-code"
-version = "0.0.0"
+version = "0.6.1"
 dependencies = [
  "appa-runtime-api",
  "serde",
@@ -88,9 +122,9 @@ dependencies = [
 
 [[package]]
 name = "appa-agent-python"
-version = "0.1.0"
+version = "0.6.1"
 dependencies = [
- "appa-runtime",
+ "appa",
  "appa-runtime-api",
  "pyo3",
  "reqwest",
@@ -103,7 +137,7 @@ dependencies = [
 
 [[package]]
 name = "appa-builtin"
-version = "0.0.0"
+version = "0.6.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -112,7 +146,7 @@ dependencies = [
 
 [[package]]
 name = "appa-engine"
-version = "0.0.0"
+version = "0.6.1"
 dependencies = [
  "proptest",
  "serde",
@@ -125,7 +159,7 @@ dependencies = [
 
 [[package]]
 name = "appa-eventlog"
-version = "0.0.0"
+version = "0.6.1"
 dependencies = [
  "appa-engine",
  "appa-policy",
@@ -137,9 +171,9 @@ dependencies = [
 
 [[package]]
 name = "appa-example-agent"
-version = "0.0.0"
+version = "0.6.1"
 dependencies = [
- "appa-runtime",
+ "appa",
  "appa-runtime-api",
  "axum",
  "reqwest",
@@ -167,51 +201,18 @@ version = "0.0.0"
 
 [[package]]
 name = "appa-policy"
-version = "0.0.0"
+version = "0.6.1"
 dependencies = [
  "appa-engine",
  "serde",
  "serde_json",
  "thiserror",
  "toml",
-]
-
-[[package]]
-name = "appa-runtime"
-version = "0.0.0"
-dependencies = [
- "appa-adapter-claude-code",
- "appa-builtin",
- "appa-engine",
- "appa-eventlog",
- "appa-policy",
- "appa-runtime-api",
- "axum",
- "clap",
- "futures-util",
- "libc",
- "libloading",
- "rand 0.10.2",
- "reqwest",
- "rig-agent",
- "rig-core",
- "rmcp 3.1.2",
- "rustls",
- "schemars",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
- "url",
 ]
 
 [[package]]
 name = "appa-runtime-api"
-version = "0.0.0"
+version = "0.6.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -514,10 +515,10 @@ name = "corporate-agent-demo"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "appa",
  "appa-engine",
  "appa-example-agent",
  "appa-policy",
- "appa-runtime",
  "axum",
  "clap",
  "corp-systems",
@@ -2856,10 +2857,10 @@ name = "website-chat-playground"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "appa",
  "appa-engine",
  "appa-example-agent",
  "appa-policy",
- "appa-runtime",
  "axum",
  "clap",
  "getrandom 0.3.4",

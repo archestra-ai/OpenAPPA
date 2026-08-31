@@ -30,9 +30,7 @@ jobs:
             integrations/claude-code/plugin/statusline.sh
 
       - name: Lint plugin shell scripts
-        run: |
-          shellcheck -s sh integrations/claude-code/plugin/hooks/ensure-runtime.sh
-          shellcheck -s sh integrations/claude-code/plugin/report-install.sh
+        run: shellcheck -s sh integrations/claude-code/plugin/hooks/ensure-runtime.sh
 
       - name: Validate plugin JSON
         run: |

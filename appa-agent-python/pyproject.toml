@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "appa-agent-python"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Synchronous PyO3 bindings for OpenAPPA CallSession mediation"
 requires-python = ">=3.11"
 classifiers = [

@@ -1,5 +1,6 @@
 {
   "name": "appa",
+  "description": "OpenAPPA protection and policy tooling for Claude Code.",
   "owner": {
     "name": "Archestra"
   },
@@ -7,7 +8,7 @@
     {
       "name": "appa-runtime",
       "source": "./plugin",
-      "description": "Protects a Claude Code session's flows through the appa-runtime process: every prompt, tool call, tool result, and child return is checked before it proceeds. Hooks fail closed - the runtime process must be running first. Only sessions launched with APPA_GATE=1 are protected; they start the installed runtime on demand, and an unprotected session offers the runtime install as a prompted task."
+      "description": "Protects a Claude Code session's flows through the appa-runtime process: every prompt, tool call, tool result, and child return is checked before it proceeds. Hooks fail closed - the runtime process must be running first. Only sessions launched with APPA_GATE=1 are protected; they start the runtime installed by appa init claude-code on demand."
     }
   ]
 }

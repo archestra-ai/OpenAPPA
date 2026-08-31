@@ -1,4 +1,4 @@
-name: Build appa-runtime binaries
+name: Build appa binaries
 
 on:
   workflow_call:
@@ -37,44 +37,44 @@ jobs:
             os: Linux
             arch: amd64
             target: x86_64-unknown-linux-gnu
-            executable: appa-runtime
-            asset: appa-runtime-x86_64-unknown-linux-gnu
-            archive: appa-runtime-x86_64-unknown-linux-gnu.tar.gz
+            executable: appa
+            asset: appa-x86_64-unknown-linux-gnu
+            archive: appa-x86_64-unknown-linux-gnu.tar.gz
           - runner: ubuntu-22.04-arm
             os: Linux
             arch: arm64
             target: aarch64-unknown-linux-gnu
-            executable: appa-runtime
-            asset: appa-runtime-aarch64-unknown-linux-gnu
-            archive: appa-runtime-aarch64-unknown-linux-gnu.tar.gz
+            executable: appa
+            asset: appa-aarch64-unknown-linux-gnu
+            archive: appa-aarch64-unknown-linux-gnu.tar.gz
           - runner: macos-15-intel
             os: macOS
             arch: amd64
             target: x86_64-apple-darwin
-            executable: appa-runtime
-            asset: appa-runtime-x86_64-apple-darwin
-            archive: appa-runtime-x86_64-apple-darwin.tar.gz
+            executable: appa
+            asset: appa-x86_64-apple-darwin
+            archive: appa-x86_64-apple-darwin.tar.gz
           - runner: macos-15
             os: macOS
             arch: arm64
             target: aarch64-apple-darwin
-            executable: appa-runtime
-            asset: appa-runtime-aarch64-apple-darwin
-            archive: appa-runtime-aarch64-apple-darwin.tar.gz
+            executable: appa
+            asset: appa-aarch64-apple-darwin
+            archive: appa-aarch64-apple-darwin.tar.gz
           - runner: windows-latest
             os: Windows
             arch: amd64
             target: x86_64-pc-windows-msvc
-            executable: appa-runtime.exe
-            asset: appa-runtime-x86_64-pc-windows-msvc
-            archive: appa-runtime-x86_64-pc-windows-msvc.zip
+            executable: appa.exe
+            asset: appa-x86_64-pc-windows-msvc
+            archive: appa-x86_64-pc-windows-msvc.zip
           - runner: windows-11-arm
             os: Windows
             arch: arm64
             target: aarch64-pc-windows-msvc
-            executable: appa-runtime.exe
-            asset: appa-runtime-aarch64-pc-windows-msvc
-            archive: appa-runtime-aarch64-pc-windows-msvc.zip
+            executable: appa.exe
+            asset: appa-aarch64-pc-windows-msvc
+            archive: appa-aarch64-pc-windows-msvc.zip
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     defaults:
@@ -94,7 +94,7 @@ jobs:
         env:
           RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
           TARGET: ${{ matrix.target }}
-        run: cargo build --release --locked --package appa-runtime --target "$TARGET"
+        run: cargo build --release --locked --package appa --target "$TARGET"
 
       - name: Verify release version
         if: inputs.expected_version != ''
@@ -104,7 +104,7 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           actual_version=$("./target/${TARGET}/release/${EXECUTABLE}" --version)
-          test "$actual_version" = "appa-runtime ${EXPECTED_VERSION}"
+          test "$actual_version" = "appa ${EXPECTED_VERSION}"
 
       - name: Verify Linux glibc baseline
         if: runner.os == 'Linux'
@@ -133,6 +133,9 @@ jobs:
           mkdir -p "dist/${ASSET}"
           cp "target/${TARGET}/release/${EXECUTABLE}" "dist/${ASSET}/${EXECUTABLE}"
           cp -R integrations/claude-code "dist/${ASSET}/claude-code"
+          cp -R batteries "dist/${ASSET}/claude-code/batteries"
+          mkdir -p "dist/${ASSET}/claude-code/website/content/docs"
+          cp website/content/docs/contracts.md "dist/${ASSET}/claude-code/website/content/docs/contracts.md"
           if [[ "$RUNNER_OS" != "Windows" ]]; then
             chmod 755 "dist/${ASSET}/${EXECUTABLE}"
             chmod 755 "dist/${ASSET}/claude-code/plugin/statusline.sh"
@@ -162,7 +165,9 @@ jobs:
           mkdir verify
           tar -xzf "dist/${ARCHIVE}" -C verify
           cd verify
-          "./${EXECUTABLE}" >runtime.stdout.log 2>runtime.stderr.log &
+          test -x appa
+          ./appa init claude-code --help >/dev/null
+          "./${EXECUTABLE}" runtime >runtime.stdout.log 2>runtime.stderr.log &
           runtime_pid=$!
           cleanup() {
             kill "$runtime_pid" 2>/dev/null || true
@@ -179,7 +184,8 @@ jobs:
               test -f claude-code/plugin/hooks/hooks.json
               test -f claude-code/plugin/hooks/session-context.md
               test -f claude-code/plugin/skills/appa-guide/SKILL.md
-              test -f claude-code/plugin/skills/appa-setup/SKILL.md
+              test -d claude-code/batteries
+              test -f claude-code/website/content/docs/contracts.md
               test -x claude-code/plugin/statusline.sh
               exit 0
             fi
@@ -203,6 +209,7 @@ jobs:
           $stderr = Join-Path $package "runtime.stderr.log"
           $start = @{
             FilePath = Join-Path $package $env:EXECUTABLE
+            ArgumentList = @("runtime")
             WorkingDirectory = $package
             PassThru = $true
             RedirectStandardOutput = $stdout
@@ -231,6 +238,14 @@ jobs:
             if (-not (Test-Path (Join-Path $package "appa.toml"))) {
               throw "Extracted runtime did not create appa.toml"
             }
+            $cli = Join-Path $package "appa.exe"
+            if (-not (Test-Path $cli)) {
+              throw "Extracted package does not contain appa.exe"
+            }
+            & $cli init claude-code --help | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+              throw "Extracted appa.exe does not expose init claude-code"
+            }
             if (-not (Test-Path (Join-Path $package "claude-code/.claude-plugin/marketplace.json"))) {
               throw "Extracted package does not contain the Claude Code marketplace"
             }
@@ -258,8 +273,11 @@ jobs:
             if (-not (Test-Path (Join-Path $package "claude-code/plugin/skills/appa-guide/SKILL.md"))) {
               throw "Extracted package does not contain the Claude Code appa-guide skill"
             }
-            if (-not (Test-Path (Join-Path $package "claude-code/plugin/skills/appa-setup/SKILL.md"))) {
-              throw "Extracted package does not contain the Claude Code appa-setup skill"
+            if (-not (Test-Path (Join-Path $package "claude-code/batteries"))) {
+              throw "Extracted package does not contain batteries for appa-guide"
+            }
+            if (-not (Test-Path (Join-Path $package "claude-code/website/content/docs/contracts.md"))) {
+              throw "Extracted package does not contain the contract guide for appa-guide"
             }
           } finally {
             $process.Refresh()

@@ -20,6 +20,7 @@ exclude = ["bench/corp-systems"]
 [workspace.package]
 edition = "2024"
 publish = false
+version = "0.6.1"
 
 [workspace.lints.rust]
 dead_code = "deny"
@@ -71,5 +72,5 @@ appa-engine = { path = "appa-engine" }
 appa-eventlog = { path = "appa-eventlog" }
 appa-policy = { path = "appa-policy" }
 appa-runtime-api = { path = "appa-runtime-api" }
-appa-runtime = { path = "appa-runtime" }
+appa-runtime = { package = "appa", path = "appa-runtime" }
 appa-example-agent = { path = "appa-example-agent" }

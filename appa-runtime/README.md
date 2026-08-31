@@ -11,19 +11,38 @@ policy the deployment cannot honor refuses to start. Every decision is
 persisted as engine facts in the SQLite log, and a reopened database
 re-validates its persisted log before it is trusted.
 
-## Install a release
+## Install
 
-The [Claude Code integration guide](../integrations/claude-code/README.md)
-covers the install: the plugin manager installs the gate, and a plain
-Claude Code session installs the verified runtime binary as a prompted
-task. An existing policy and database are always preserved.
+The Claude Code adapter requires the `claude` command and `curl`.
+
+From a source checkout, install `appa`, then initialize the harness adapter:
+
+```sh
+cargo install --path appa-runtime --force
+appa init claude-code
+```
+
+From an extracted release archive on POSIX:
+
+```sh
+install -m 755 appa ~/.local/bin/
+appa init claude-code --source ./claude-code
+```
+
+From a checkout, `init` installs that checkout's marketplace. From an extracted
+release it uses the marketplace shipped beside the binaries. Otherwise it uses
+`archestra-ai/OpenAPPA`. It replaces an existing APPA plugin instead of stacking
+another copy, deploys the same `appa` build for its internal `runtime` command, creates `clappa`, installs the
+statusline unless Claude already has a custom one, preserves an existing policy,
+and starts the runtime. The [Claude Code integration guide](../integrations/claude-code/README.md)
+covers the complete flow.
 
 ## Development quickstart
 
 ### 1. Build
 
 ```sh
-cargo build -p appa-runtime
+cargo build -p appa
 ```
 
 ### 2. Prepare the configuration
@@ -68,8 +87,24 @@ suspicious. Pass its path directly to `--config`.
 
 ### 3. Start the process
 
+Before starting it, the installed `appa` CLI can describe the facts a
+configuring human or agent may rely on:
+
 ```sh
-./target/debug/appa-runtime --config appa.toml --db appa.db
+appa describe --config appa.toml
+```
+
+`describe` is read-only. It works for a missing, malformed, or incomplete
+config and never creates the default config or database. It reports config
+state, includes and battery names, effective policy tools, referenced groups,
+and membership wiring. Claude's session tool inventory and authenticated
+connector identities are explicitly reported as unavailable because the
+adapter does not expose them to a standalone process.
+Without `--config`, the installed command reads the same platform config
+directory used by the Claude Code starter (`APPA_CONFIG_DIR` can override it).
+
+```sh
+./target/debug/appa runtime --config appa.toml --db appa.db
 ```
 
 `curl localhost:8787/health` prints `ok` when it is up. The listener

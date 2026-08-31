@@ -45,34 +45,50 @@ OpenAPPA to do differently.
 - Show TOML only when the user asks for it.
 - Ask one focused question at a time. Do not make the user classify every tool
   when its name and description already make the answer clear.
-- Configure the installed OpenAPPA only. Never inspect OpenAPPA source code,
-  tests, Git history, local repository checkouts, or implementation details.
-  Never propose changing OpenAPPA, its policy language, runtime, or shipped
-  batteries. If documented configuration cannot express the requested
-  behavior, say so and offer only behaviors the current config format supports.
+- Configure the installed OpenAPPA only. The marketplace's `installLocation`
+  may be a local checkout; read only its installed battery files and contract
+  guide named below. Never search that checkout, inspect source code, tests,
+  Git history, or implementation details. Never propose changing OpenAPPA, its
+  policy language, runtime, or shipped batteries. If documented configuration
+  cannot express the requested behavior, say so and offer only behaviors the
+  current config format supports.
 
 For OpenAPPA configuration, read only:
 
+- the output of `appa describe --config <live-path>`;
 - the live root config and included files relevant to the request;
 - a matched battery's `appa.toml` and README;
 - the relevant section of the installed guide at
-  `~/.claude/plugins/marketplaces/appa/website/content/docs/contracts.md`;
-- if that guide is unavailable or does not answer the question, the relevant
-  section of <https://www.openappa.com/contracts>.
+  `<marketplace-root>/website/content/docs/contracts.md`.
 
-If these sources do not establish the syntax or behavior, stop. Do not search
-the OpenAPPA repository for an answer.
+If the installed marketplace content is missing or these sources do not
+establish the syntax or behavior, stop and report an incomplete installation.
+Do not fetch a different OpenAPPA version or search the repository for an
+answer.
 
 ## Find the live config
 
-Run:
+Read `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/known_marketplaces.json` and
+take the `installLocation` for the `appa` marketplace as
+`<marketplace-root>`. Local checkout installs use
+the checkout itself; packaged and remote installs may use a Claude-managed
+clone. If the entry or directory is missing, stop and report an incomplete
+installation. Do not assume a fixed marketplace path.
+
+Run `appa describe` first. Use the complete path on its `Config:` line, including
+spaces. This is the installed deployment path and follows `APPA_CONFIG` and
+`APPA_CONFIG_DIR` when either is set.
+
+Then run:
 
 ```sh
-ps ax -o command | grep appa-runtime | grep -v grep
+ps ax -o command | grep '[a]ppa runtime'
 ```
 
-Use the path after `--config`. If the process has no visible config path, or
-is not running, ask the user for the path. Do not guess it.
+If a running process visibly names a different `--config` path, stop and ask
+the user which deployment to configure. Do not split an unquoted path on
+spaces. If no runtime is running, continue with the path reported by `appa
+describe`; initialization has already established it.
 
 The runtime address is
 `${APPA_RUNTIME_URL:-http://127.0.0.1:8787}`.
@@ -81,39 +97,46 @@ The runtime address is
 
 ### Inspect
 
-1. Read the root config first. Record its tool rules and included batteries.
-2. Run `claude mcp list` for configured servers.
-3. Add every MCP server visible in the current session, even when
+1. Run `appa describe --config <live-path>` before reading or changing
+   the config. It is read-only and succeeds when the config is missing or
+   invalid. Record its config state, effective policy tools, included battery
+   names, referenced groups, and membership resolver/binding status. Treat its
+   session integrations, tools, and accounts as unavailable when it says so;
+   never turn an unavailable fact into an empty inventory.
+2. Read the root config. Record its tool rules and included batteries, and
+   preserve its comments. If `appa describe` and the file disagree, stop and
+   report the mismatch instead of guessing.
+3. Run `claude mcp list` for configured servers.
+4. Add every MCP server visible in the current session, even when
    `claude mcp list` omits it. MCP tools use `mcp__<server>__<tool>` names;
    plugin-provided servers use `mcp__plugin_<plugin>_<server>__<tool>` names.
    Keep each exact full tool name and description.
-4. Cross-check both sources. Record every configured MCP server whose tools
+5. Cross-check both sources. Record every configured MCP server whose tools
    could not be detected. Keep it separate from Claude Code's built-in tools.
    Do not invent its tool list.
-5. Compare the installed tools with the root rules. Existing root rules stay
+6. Compare the installed tools with the root rules. Existing root rules stay
    in control, including rules for tools a battery also covers.
+
+The command cannot see Claude's session tool catalogue or authenticated
+connector accounts. The session supplies tool facts; the user supplies an
+account identity when a connector does not expose one. Do not probe private
+mail, messages, or files merely to infer an identity.
 
 ### Find useful batteries
 
 Look under:
 
 ```sh
-~/.claude/plugins/marketplaces/appa/batteries/
+<marketplace-root>/batteries/
 ```
 
 Match a battery by the tool names in its `appa.toml`, not by its directory
 name. For a matched battery, read only its `appa.toml` and README. Do not run
 its scripts while inspecting it.
 
-If that marketplace clone or its `batteries/` directory is missing, list the
-batteries from GitHub:
-
-```sh
-gh api repos/archestra-ai/OpenAPPA/contents/batteries --jq '.[].name'
-```
-
-Use the GitHub contents API to read only a matched battery's `appa.toml` and
-README. Do not search other repositories.
+If that marketplace clone or its `batteries/` directory is missing, stop and
+report an incomplete installation. Never configure one APPA build with
+batteries fetched from another version.
 
 When proposing a battery, give it exactly one short sentence that says what it
 covers, what protection it adds, and any important assumption. Keep it under
@@ -129,15 +152,21 @@ the user asks.
 
 Check what each matched battery expects the root config to provide. Record
 anything missing that the battery or complete config needs in order to work.
+A proposal may mention only groups listed under `Referenced groups:` by
+`appa describe`, or a group the user explicitly establishes during this flow
+with a concrete resolver. A registered membership resolver does not prove
+that an arbitrary plausible group name exists.
 
 ### Cover the remaining tools
 
 Create root rules only for installed tools that neither the root config nor a
 matched battery covers.
 
-- A tool that reads user, company, local, or authenticated data returns
-  private data: `delta = { audience = ["private"] }`. Reuse the config's
-  existing private reader name when it has one.
+- A tool that reads personal or authenticated data may return data for a
+  configured `@self`. Organization-wide data may return data for a configured
+  `@internal`. If the suitable group was not reported by `appa describe`,
+  leave the tool blocked and explain the missing resolver. Never substitute
+  `"private"`, `@company`, `@employees`, or another plausible reader or group.
 - A tool that publishes, posts, sends, shares, or uploads requires data that
   may be public: `requires = { audience = { contains = ["public"] } }`.
 - A clearly public read or a tool whose result carries no data uses
@@ -153,6 +182,20 @@ do not ask about each tool separately.
 
 Wait for the answer before showing the proposal. This answer does not replace
 the approval required below. If nothing is unclear, do not ask.
+
+For Gmail, match only exact tools visible in this session whose names start
+with `mcp__claude_ai_Gmail__`; do not assume a fixed connector tool list. If
+the connected account is not exposed, include the account and intended data
+boundary in the one grouped ambiguity question. A non-consumer email domain
+is only a candidate boundary and still needs confirmation. Never suggest
+`gmail.com` or another consumer-mail domain as `@internal`.
+
+Confirmation alone does not create a working domain-backed group. The current
+membership resolver must expand a group to concrete reader IDs, so Gmail by
+itself cannot implement `@internal` from a domain. Require a real directory
+resolver that can enumerate those readers; otherwise leave internal-dependent
+tools blocked and say why. This boundary answer is separate from approval to
+write or install anything.
 
 ### Propose, then apply
 
@@ -189,17 +232,20 @@ End with: **Approve, or tell me what to change.** Wait for the reply.
 
 After approval:
 
-1. Copy each approved battery directory beside the root config under
+1. Run `appa describe --config <live-path>` again. If the config,
+   batteries, referenced groups, or membership wiring changed since the
+   proposal, revise the proposal and ask for approval again.
+2. Copy each approved battery directory beside the root config under
    `batteries/<name>/` and add its `appa.toml` to the root `include` list. Use
-   the marketplace clone when present; otherwise fetch every file in that
-   battery directory from GitHub so its supporting scripts are included. Leave
-   an existing copied battery unchanged unless the user asked to refresh it.
-2. Add any root support the battery requires, such as its human-approval
+   the installed marketplace clone so supporting scripts stay on the same
+   APPA version. Leave an existing copied battery unchanged unless the user
+   asked to refresh it.
+3. Add any root support the battery requires, such as its human-approval
    authority. This is part of making the approved behavior work; describe the
    behavior to the user, not this wiring.
-3. Add the approved uncovered-tool rules to the root config. Do not remove
+4. Add the approved uncovered-tool rules to the root config. Do not remove
    overlapping root rules; they intentionally override batteries.
-4. Reload and report the result as described below.
+5. Reload and report the result as described below.
 
 ## Adjust the current config
 
@@ -208,23 +254,33 @@ Start from the user's requested outcome, not from a full tool rescan.
 If the requested outcome is ambiguous, ask one focused question and wait. Do
 not guess.
 
-1. Read the root config and only the included files relevant to the requested
+1. Run `appa describe --config <live-path>`. Record the config state, batteries,
+   policy tools, referenced groups, and membership wiring. Keep session tools
+   and accounts unavailable when the command says they are unavailable.
+2. Read the root config and only the included files relevant to the requested
    changes.
-2. For policy syntax or behavior that the current config does not demonstrate,
+3. For policy syntax or behavior that the current config does not demonstrate,
    first consult the relevant section of
-   `~/.claude/plugins/marketplaces/appa/website/content/docs/contracts.md`.
-   If it is unavailable or does not answer the question, consult the relevant
-   section of <https://www.openappa.com/contracts>. Do not guess syntax, search
+   `<marketplace-root>/website/content/docs/contracts.md`.
+   If it is unavailable or does not answer the question, stop and report an
+   incomplete installation. Do not guess syntax, fetch another version, search
    for an OpenAPPA checkout, or inspect source code.
-3. Explain three things: what happens now, what you propose, and the practical
+4. Explain three things: what happens now, what you propose, and the practical
    effect. Add one short **OpenAPPA pieces** line naming every primitive used.
    Ask only for a decision that changes the result.
-4. If a battery would help, propose it with the same one-sentence rule used in
+5. If a battery would help, propose it with the same one-sentence rule used in
    `init` mode. Existing root rules still take priority.
-5. End with: **Approve, or tell me what to change.** Wait for the reply.
-6. Apply only the approved changes in the root config. To change battery
-   behavior, add or edit a root rule; never modify the battery.
-7. Reload and report the result as described below.
+6. End with: **Approve, or tell me what to change.** Wait for the reply.
+7. Run `appa describe --config <live-path>` again. If the config, batteries,
+   referenced groups, or membership wiring changed since the proposal, revise
+   the proposal and ask for approval again.
+8. Copy each newly approved battery directory from the installed marketplace
+   beside the root config under `batteries/<name>/`, add its `appa.toml` to the
+   root `include` list, and add any root support it requires. Leave an existing
+   copied battery unchanged unless the user asked to refresh it.
+9. Apply only the approved root-rule changes. To change battery behavior, add
+   or edit a root rule; never modify the battery.
+10. Reload and report the result as described below.
 
 For several root rules with the same tool name, order matters. Put a narrow
 argument-specific rule before its general fallback. Do not reorder unrelated

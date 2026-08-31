@@ -1,6 +1,6 @@
 [package]
 name = "appa-eventlog"
-version = "0.0.0"
+version.workspace = true
 edition.workspace = true
 publish = false
 

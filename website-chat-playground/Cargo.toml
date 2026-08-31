@@ -6,7 +6,7 @@ publish = false
 description = "The chat-playground service: multi-turn sessions over the appa-example-agent loop, corp tools in-process, one SSE stream per turn"
 
 [dependencies]
-appa-runtime = { path = "../appa-runtime" }
+appa-runtime = { package = "appa", path = "../appa-runtime" }
 appa-policy = { path = "../appa-policy" }
 appa-engine = { path = "../appa-engine" }
 appa-example-agent = { path = "../appa-example-agent" }
