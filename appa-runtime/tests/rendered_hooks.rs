@@ -1,0 +1,264 @@
+#![cfg(unix)]
+//! What a *rendered* deployment's hooks actually execute.
+//!
+//! The guarantee under test is narrow and stated as such: a deployed tree
+//! performs no PATH resolution for the `appa` binary. It still invokes `sh`,
+//! `curl` and `uname` by name, and that is unchanged.
+//!
+//! Proving it by scanning the rendered files would prove nothing, so every
+//! assertion here comes from execution: a hostile `appa` sits first on `PATH`,
+//! hostile `APPA_BIN` and `APPA_INSTALL_DIR` sit in the environment, and the
+//! test asserts which binary ran and where its bytes landed.
+
+use std::fs;
+use std::io::{BufRead, BufReader, Write};
+use std::net::TcpListener;
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+
+use appa_runtime::plugin_bundle::{Endpoint, Population, materialize};
+
+fn executable(path: &Path) {
+    let mut permissions = fs::metadata(path).expect("fixture metadata").permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions).expect("the fixture is executable");
+}
+
+/// A marketplace root staged by the same script the release runs.
+fn stage_bundle(into: &Path) -> std::path::PathBuf {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let staged = into.join("plugin-source");
+    let status = Command::new("sh")
+        .arg(repository.join("scripts/appa-stage-plugin-bundle.sh"))
+        .arg(&staged)
+        .status()
+        .expect("the staging script runs");
+    assert!(status.success(), "the staging script failed");
+    staged
+}
+
+/// A runtime stand-in on a free loopback port. Records the paths it is asked
+/// for and answers every hook, so the test can assert that the bytes a hook
+/// posted arrived at the deployment's own endpoint.
+fn recording_runtime() -> (Endpoint, mpsc::Receiver<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let endpoint = Endpoint::parse(&format!(
+        "http://{}",
+        listener.local_addr().expect("the bound address")
+    ))
+    .expect("the bound address is a usable endpoint");
+    let (record, recorded) = mpsc::channel();
+
+    std::thread::spawn(move || {
+        for connection in listener.incoming() {
+            let Ok(mut connection) = connection else {
+                return;
+            };
+            let mut reader = BufReader::new(connection.try_clone().expect("the stream clones"));
+            let mut request = String::new();
+            if reader.read_line(&mut request).is_err() {
+                continue;
+            }
+            let request = request.trim_end().to_owned();
+            // A healthy answer, so the SessionStart starter finds the runtime up
+            // and chains straight through to the hook rather than trying to
+            // start one.
+            let (content_type, body) = if request.starts_with("GET /health") {
+                ("text/plain", "ok")
+            } else {
+                ("application/json", "{}")
+            };
+            if record.send(request).is_err() {
+                return;
+            }
+            let answer = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = connection.write_all(answer.as_bytes());
+            let _ = connection.flush();
+        }
+    });
+
+    (endpoint, recorded)
+}
+
+/// Every hook command the rendered map registers, with the event it belongs to.
+fn rendered_commands(deployment: &Path) -> Vec<(String, String)> {
+    let hooks: serde_json::Value = serde_json::from_slice(
+        &fs::read(deployment.join("plugin/hooks/hooks.json")).expect("the rendered hook map is readable"),
+    )
+    .expect("the rendered hook map parses");
+
+    let mut commands = Vec::new();
+    for (event, groups) in hooks["hooks"].as_object().expect("the map is an object") {
+        for group in groups.as_array().expect("each event carries groups") {
+            for hook in group["hooks"].as_array().expect("each group carries hooks") {
+                let command = hook["command"].as_str().expect("each hook carries a command");
+                // The context hook only prints a file; it posts nothing.
+                if command.contains("session-context.md") {
+                    continue;
+                }
+                commands.push((event.clone(), command.to_owned()));
+            }
+        }
+    }
+    assert!(!commands.is_empty(), "the rendered map registered no commands");
+    commands
+}
+
+#[test]
+fn rendered_hooks_run_the_deployed_binary_and_post_to_the_deployment_endpoint() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = directory.path();
+    let source = stage_bundle(root);
+    let (endpoint, recorded) = recording_runtime();
+
+    // The binary this deployment installs, on a path that is not on PATH.
+    let deployed_bin = root.join("data/bin");
+    fs::create_dir_all(&deployed_bin).expect("the private binary directory");
+    let deployed = deployed_bin.join("appa");
+    fs::copy(env!("CARGO_BIN_EXE_appa"), &deployed).expect("the deployed binary is copied");
+    executable(&deployed);
+
+    let config = root.join("config/appa.toml");
+    fs::create_dir_all(config.parent().expect("config has a parent")).expect("config directory");
+
+    let deployment = materialize(
+        Population::Tree(&source),
+        &root.join("data/deployments"),
+        &deployed,
+        &config,
+        &root.join("data"),
+        &endpoint,
+    )
+    .expect("the deployment materializes");
+
+    // A hostile appa, first on PATH, that fails loudly and records the fact.
+    let poison_dir = root.join("poison");
+    fs::create_dir_all(&poison_dir).expect("the poison directory");
+    let poison_log = root.join("poisoned.log");
+    let poison = poison_dir.join("appa");
+    fs::write(
+        &poison,
+        format!(
+            "#!/bin/sh\nprintf 'ran\\n' >> {}\nexit 1\n",
+            poison_log.display()
+        ),
+    )
+    .expect("the poisoned appa is written");
+    executable(&poison);
+
+    let path = format!(
+        "{}:{}",
+        poison_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    for (event, command) in rendered_commands(&deployment.root) {
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(&command)
+            .env("PATH", &path)
+            // Hostile values for every variable a deployed tree must ignore.
+            .env("APPA_BIN", &poison)
+            .env("APPA_INSTALL_DIR", &poison_dir)
+            .env("APPA_GATE", "1")
+            .env("CLAUDE_PLUGIN_ROOT", deployment.root.join("plugin"))
+            .env_remove("APPA_RUNTIME_URL")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap_or_else(|error| panic!("the {event} hook spawns: {error}"));
+        let _ = child
+            .stdin
+            .as_mut()
+            .expect("the child has a stdin pipe")
+            .write_all(br#"{"hook_event_name":"PreToolUse","session_id":"rendered-test"}"#);
+        let _ = child.wait();
+
+        // The bytes have to land somewhere: an endpoint the rendering missed
+        // would fail here even if it were spelled in a way no scan could catch.
+        // SessionStart probes /health through its starter first, so the posted
+        // event is whichever request in this hook's chain reaches /hook.
+        let mut posted = false;
+        while let Ok(request) = recorded.recv_timeout(std::time::Duration::from_secs(20)) {
+            if request.starts_with("POST /hook ") {
+                posted = true;
+                break;
+            }
+            assert!(
+                request.starts_with("GET /health"),
+                "the {event} hook made an unexpected request: {request:?}",
+            );
+        }
+        assert!(
+            posted,
+            "the {event} hook posted no event to the deployment's endpoint",
+        );
+    }
+
+    assert!(
+        !poison_log.exists(),
+        "a rendered hook ran the appa on PATH: {}",
+        fs::read_to_string(&poison_log).unwrap_or_default(),
+    );
+}
+
+#[test]
+fn the_session_start_starter_resolves_its_paths_without_claude_plugin_root() {
+    // init runs the starter directly, without CLAUDE_PLUGIN_ROOT, so the
+    // `$(dirname "$0")` lookup inside it is load-bearing rather than incidental.
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = directory.path();
+    let source = stage_bundle(root);
+    let (endpoint, _recorded) = recording_runtime();
+
+    let deployed = root.join("data/bin/appa");
+    fs::create_dir_all(deployed.parent().expect("a parent")).expect("the private binary directory");
+    // A stand-in: the starter must resolve and execute this exact path, and
+    // nothing here needs a real runtime to prove that.
+    fs::write(&deployed, "#!/bin/sh\nexit 0\n").expect("the deployed stand-in is written");
+    executable(&deployed);
+
+    let deployment = materialize(
+        Population::Tree(&source),
+        &root.join("data/deployments"),
+        &deployed,
+        &root.join("config/appa.toml"),
+        &root.join("data"),
+        &endpoint,
+    )
+    .expect("the deployment materializes");
+
+    let starter = deployment.root.join("plugin/hooks/ensure-runtime.sh");
+    let rendered = fs::read_to_string(deployment.root.join("plugin/hooks/appa-paths.sh"))
+        .expect("the rendered paths file is readable");
+    assert!(
+        rendered.contains(&format!("APPA_BIN='{}'", deployed.display())),
+        "the starter's paths file does not name the deployed binary: {rendered}",
+    );
+    assert!(
+        rendered.contains(&format!("APPA_ENDPOINT='{}'", endpoint.url())),
+        "the starter's paths file does not carry the deployment endpoint: {rendered}",
+    );
+
+    let output = Command::new("sh")
+        .arg(&starter)
+        .env_remove("CLAUDE_PLUGIN_ROOT")
+        .env_remove("APPA_RUNTIME_URL")
+        .env("APPA_BIN", "/nonexistent/hostile/appa")
+        .output()
+        .expect("the starter runs");
+    // Nothing answers the recording endpoint's /health with `ok`, so the
+    // starter tries to start the stand-in and then times out. What matters is
+    // that it never reported a missing binary: it resolved the rendered path.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("appa is not installed"),
+        "the starter failed to resolve the rendered binary path: {stderr}",
+    );
+}

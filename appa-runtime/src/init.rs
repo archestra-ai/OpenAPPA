@@ -1148,29 +1148,154 @@ fn verify_runtime_binary(runtime: &Path, endpoint: &Endpoint) -> Result<(), Init
 mod tests {
     use super::*;
 
+    /// A stand-in the stop set can actually find and signal.
+    ///
+    /// macOS kills a copied platform binary outright -- a copy of `/bin/sh` or
+    /// `/bin/sleep` dies with SIGKILL before it runs a single instruction -- so
+    /// a test built on one would pass without ever exercising the stop set,
+    /// because a killed process is also a stopped one. `perl` copies and runs,
+    /// and can be told to ignore SIGTERM, which is the case that must abort
+    /// init rather than be assumed gone.
+    #[cfg(unix)]
+    const STAND_IN: &str = "/usr/bin/perl";
+
+    /// A process whose executable really *is* `at`, so verification finds it
+    /// there rather than taking a spoofable argv on trust.
+    ///
+    /// The stand-in is reaped on its own thread. A dead child that nobody has
+    /// waited for is a zombie, and `kill(pid, 0)` still succeeds on one, so
+    /// without the reaper these tests could not tell a stopped process from a
+    /// running one. In production the retired runtime is never init's child.
+    #[cfg(unix)]
+    fn process_executing(at: &Path, ignores_sigterm: bool) -> Option<i32> {
+        use std::os::unix::fs::PermissionsExt;
+
+        if !Path::new(STAND_IN).is_file() {
+            return None;
+        }
+        fs::create_dir_all(at.parent().expect("a parent")).expect("the directory exists");
+        fs::copy(STAND_IN, at).expect("the stand-in executable is copied");
+        fs::set_permissions(at, fs::Permissions::from_mode(0o755)).expect("the stand-in is executable");
+
+        // The stand-in announces itself by creating a file. Waiting on a signal
+        // it sends is the only reliable liveness proof here: a copied binary the
+        // platform refuses to run leaves a zombie that `kill(pid, 0)` still
+        // reports as alive, so checking the pid would accept a process that
+        // never ran.
+        let ready = at.with_extension("ready");
+        let disposition = if ignores_sigterm {
+            "$SIG{TERM} = 'IGNORE'; "
+        } else {
+            ""
+        };
+        let script = format!(
+            "{disposition}open(my $f, '>', $ARGV[0]) or die; close $f; sleep 30"
+        );
+        let mut child = Command::new(at)
+            .args(["-e", &script])
+            .arg(&ready)
+            .spawn()
+            .expect("the stand-in process starts");
+        let pid = child.id() as i32;
+        std::thread::spawn(move || child.wait());
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if ready.is_file() {
+                return Some(pid);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        // This platform will not run the stand-in at all. Skip rather than
+        // report a pass that exercised nothing.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        None
+    }
+
+    /// Whether a pid is still running, once its reaper has had a moment.
+    #[cfg(unix)]
+    fn still_running(pid: i32) -> bool {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_runtime_at_the_retired_path_is_stopped() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let retired = directory.path().join("bin/appa");
+        let Some(pid) = process_executing(&retired, false) else {
+            return;
+        };
+
+        let survivors = stop_processes_executing(&retired).expect("the stop set runs");
+
+        assert!(survivors.is_empty(), "a stoppable runtime was reported as surviving");
+        assert!(
+            !still_running(pid),
+            "the runtime at the retired path is still running",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_runtime_at_another_path_is_left_alone() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        // What an init run under a different APPA_INSTALL_DIR or APPA_DATA_DIR
+        // leaves behind: a path this environment never computes.
+        let elsewhere = directory.path().join("other-install/appa");
+        let Some(pid) = process_executing(&elsewhere, false) else {
+            return;
+        };
+        let retired = directory.path().join("bin/appa");
+        fs::create_dir_all(retired.parent().expect("a parent")).expect("the retired directory");
+        fs::copy(STAND_IN, &retired).expect("the retired binary exists but runs nothing");
+
+        let survivors = stop_processes_executing(&retired).expect("the stop set runs");
+
+        assert!(survivors.is_empty());
+        assert!(
+            still_running(pid),
+            "a runtime outside the stop set must be left running, not killed",
+        );
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_verified_runtime_that_refuses_to_die_is_reported() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let retired = directory.path().join("bin/appa");
+        // Ignores SIGTERM, which is exactly the case that must abort init
+        // rather than let a new plugin bind to an old runtime.
+        let Some(pid) = process_executing(&retired, true) else {
+            return;
+        };
+
+        let survivors = stop_processes_executing(&retired).expect("the stop set runs");
+
+        assert_eq!(
+            survivors,
+            vec![pid],
+            "a verified target that outlived SIGTERM must be reported, not assumed gone",
+        );
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+
     #[cfg(unix)]
     #[test]
     fn cleanup_stops_an_unlinked_legacy_runtime() {
-        use std::os::unix::fs::PermissionsExt;
-
         let directory = tempfile::tempdir().expect("temporary directory");
         let target = directory.path().join("appa-runtime");
-        fs::copy("/bin/sleep", &target).expect("the legacy executable is copied");
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).expect("the legacy executable is executable");
-        let mut child = Command::new(&target)
-            .arg("5")
-            .spawn()
-            .expect("the legacy process starts");
+        let Some(pid) = process_executing(&target, false) else {
+            return;
+        };
+        fs::remove_file(target.with_extension("ready")).expect("the readiness marker is removed");
         fs::remove_file(&target).expect("Cargo unlinks the installed legacy executable");
-        let reaper = std::thread::spawn(move || child.wait().expect("the legacy process is reaped"));
 
         stop_legacy_runtime_at(&target).expect("legacy cleanup succeeds");
 
-        let status = reaper.join().expect("the reaper joins");
-        assert!(
-            !status.success(),
-            "cleanup must stop the unlinked process before sleep completes"
-        );
+        assert!(!still_running(pid), "cleanup must stop the unlinked process");
     }
 
     #[test]
