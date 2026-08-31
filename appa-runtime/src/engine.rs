@@ -1733,12 +1733,18 @@ impl RuntimeEngine {
                     if !audience.providers().contains(provider) || !qualified_by(provider, member) {
                         continue;
                     }
+                    // Claims for an id other than the member asked are a broken answer — a
+                    // source could otherwise canonicalize its member to another provider's
+                    // namespace, or pre-seat an identity mapping for a member it does not
+                    // own. Conservatively, the member was not answered.
+                    let claims = match claims {
+                        Some(Some(answered)) if answered.id != *member => None,
+                        other => other.clone(),
+                    };
                     match (gathered.lookups.get(member), claims) {
                         (Some((_, Some(_))), _) => {}
                         (_, claims) => {
-                            gathered
-                                .lookups
-                                .insert(member.clone(), (provider.clone(), claims.clone()));
+                            gathered.lookups.insert(member.clone(), (provider.clone(), claims));
                         }
                     }
                 }
@@ -1804,10 +1810,12 @@ impl RuntimeEngine {
                 match gathered.identity.get(&claims.id) {
                     Some(Some(_)) => {}
                     Some(None) => {
+                        // The member id is directory data the model has not seen: it stays
+                        // out of the model-visible refusal.
+                        tracing::debug!(implementation = name.as_str(), id = %claims.id, "identity gave no principal");
                         return Err(AudienceFailure::Refused(format!(
-                            "identity implementation {} gave no principal for {}",
+                            "identity implementation {} gave no principal for a claimed member",
                             name.as_str(),
-                            claims.id
                         )));
                     }
                     None => {
@@ -1826,8 +1834,13 @@ impl RuntimeEngine {
             }
         }
         if let Err(refusal) = audience.expansions(&payload) {
+            // The refusal's own Display can carry directory data (member ids, claimed
+            // emails) the model has not seen; the model-visible detail names only the
+            // failure class and its provider/selector.
+            tracing::debug!(%refusal, "gathered audience evidence refused");
             return Err(AudienceFailure::Refused(format!(
-                "the gathered audience evidence is not admissible: {refusal}"
+                "the gathered audience evidence is not admissible: {}",
+                refusal_class(&refusal)
             )));
         }
         Ok(ActAudience { payload, gathered })
@@ -1865,9 +1878,10 @@ impl RuntimeEngine {
             match act.gathered.lookups.get(spec.selector.as_str()) {
                 Some((_, Some(_))) => {}
                 Some((_, None)) => {
+                    // The member can be a reader a delta wrote that the model never saw.
                     return Ok(AudienceConsult::Unresolved(format!(
-                        "audience source {} gave no answer for member {}",
-                        spec.provider, spec.selector
+                        "audience source {} gave no answer for a member lookup",
+                        spec.provider
                     )));
                 }
                 None => requests.push(ExternalRequest::MemberLookup {
@@ -1890,11 +1904,53 @@ impl RuntimeEngine {
     }
 }
 
-/// Is `id` inside `provider`'s own namespace — `<provider>:<non-empty rest>`?
+/// One model-visible line for an evidence refusal: the failure class and, where they are
+/// policy or argument data the model already holds, the provider and selector — never a
+/// member id or a claimed email, which are directory data.
+fn refusal_class(refusal: &appa_engine::audience::EvidenceRefusal) -> String {
+    use appa_engine::audience::EvidenceRefusal;
+    match refusal {
+        EvidenceRefusal::DuplicateSelector { provider, selector } => {
+            format!("two answers for selector {provider}:{selector} in one operation")
+        }
+        EvidenceRefusal::DuplicateLookup { .. } => "two lookups for one member in one operation".to_string(),
+        EvidenceRefusal::DuplicateIdentity { .. } => {
+            "two identity mappings for one member in one operation".to_string()
+        }
+        EvidenceRefusal::ForeignMember { provider, selector, .. } => {
+            format!("selector {provider}:{selector} reports a member outside its own provider namespace")
+        }
+        EvidenceRefusal::ForeignLookup { provider, .. } => {
+            format!("a lookup under provider {provider} answers outside that namespace")
+        }
+        EvidenceRefusal::ForeignLookupClaims { provider, .. } => {
+            format!("a lookup under provider {provider} carries claims for a different id")
+        }
+        EvidenceRefusal::DuplicateMember { provider, selector, .. } => {
+            format!("selector {provider}:{selector} reports one member twice in one answer")
+        }
+        EvidenceRefusal::ReservedPrincipal { .. } => "an identity mapping names a reserved principal".to_string(),
+        EvidenceRefusal::MalformedEmail { .. } => {
+            "a member claims a verified email that does not parse as one address".to_string()
+        }
+        EvidenceRefusal::UnmappedIdentity { .. } => {
+            "the identity implementation returned no mapping for a claimed member".to_string()
+        }
+        EvidenceRefusal::UnroutableSelector { provider, selector } => {
+            format!("no registered audience source serves selector {provider}:{selector}")
+        }
+        EvidenceRefusal::UnroutableLookup { provider, .. } => {
+            format!("no registered audience provider {provider} serves a member lookup")
+        }
+    }
+}
+
+/// Is `id` inside `provider`'s own namespace? One rule decides qualification everywhere:
+/// the engine's `ReaderId::provider_prefix`, which also decides which readers the engine
+/// asks to canonicalize. A second spelling of the rule here would let an id the engine asks
+/// about fall outside what this gathering records — and the act would re-ask forever.
 fn qualified_by(provider: &str, id: &str) -> bool {
-    id.strip_prefix(provider)
-        .and_then(|rest| rest.strip_prefix(':'))
-        .is_some_and(|rest| !rest.is_empty())
+    appa_engine::label::ReaderId::new(id).provider_prefix() == Some(provider)
 }
 
 /// Everything a proposal carries beyond its tool and arguments, gathered before it is judged.

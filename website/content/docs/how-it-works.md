@@ -20,7 +20,7 @@ Because policy checks happen prospectively before tools run, sensitive data is n
 OpenAPPA operates on three runtime concepts:
 
 1. **Security Labels** (`label`)  
-   Attached to every running trajectory. A label tracks audience (who is authorized to receive the trajectory's data) and trust rank (whether data comes from a vetted internal source or untrusted external data). An audience can name readers exactly, or symbolically: OpenAPPA ships the built-in chain `self` ⊆ `internal` ⊆ `public`, and policies declare named audiences such as `@finance` on top of it. A symbolic audience stays symbolic in the label and the log; when a decision needs actual membership, OpenAPPA reads the configured sources — Google Workspace, Slack, GitHub, or your own — for that one act, pins the answer, and replays from the pin without ever consulting a source again.
+   Attached to every running trajectory. A label tracks audience (who is authorized to receive the trajectory's data) and trust rank (whether data comes from a vetted internal source or untrusted external data). An audience can name readers exactly, or symbolically: OpenAPPA ships the built-in chain `self` ⊆ `internal` ⊆ `public`, and policies declare named audiences such as `@finance` on top of it. A symbolic audience stays symbolic in the label and the log; when a decision needs actual membership, OpenAPPA reads the configured sources — Google Workspace, Slack, or GitHub, each bound to your own endpoint or command — for that one act, pins the answer, and replays from the pin without ever consulting a source again.
 
 2. **Tool Contracts** (`delta` & `requires`)  
    Declarative rules configured per tool. Reading data restricts the trajectory's label (`delta`), while invoking an outbound tool verifies that the destination is permitted by the trajectory's current label (`requires`).
@@ -200,7 +200,7 @@ You don't need to throw away existing security controls. OpenAPPA unifies them a
 | Custom approval webhooks / LLM evaluators | Authority (`url`, `command`, or model builtin) |
 | Content scanners & argument-aware trust, audience, and review classifiers | Annotator (endpoint, command, or model builtin) inside its declared mandate |
 | PII redactors & sanitizers | Sanitizer (`builtin = "redact-email"`, endpoint, command, or model builtin) |
-| Directory / IAM group lookups | Audience sources (`[audience.self]`, `[audience.internal]`, `[[audience.group]]`) fed by the Google Workspace, Slack, and GitHub batteries or a custom source |
+| Directory / IAM group lookups | Audience sources (`[audience.self]`, `[audience.internal]`, `[[audience.group]]`): the Google Workspace, Slack, and GitHub catalogs, each bound to your own endpoint or command |
 | Imperative `if/else` access checks | Tool Contracts (`delta` & `requires`) |
 
 Crucially, an authority or sanitizer can do only what its `permits` declares, and an annotator can answer only inside its declared mandate. Even if a third-party scanner or classifier makes a mistake, it cannot grant permissions beyond its pre-configured bounds.

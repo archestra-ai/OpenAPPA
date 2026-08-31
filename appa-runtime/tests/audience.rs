@@ -50,6 +50,10 @@ url = "AUDIENCE_URL"
 #[derive(Clone)]
 enum Answer {
     Members(Vec<(&'static str, Option<&'static str>)>),
+    /// Answer a member lookup with claims echoing the member asked, carrying this email.
+    Claims(Option<&'static str>),
+    /// Answer a member lookup with claims for a different member than the one asked.
+    ForeignClaims,
     Down,
 }
 
@@ -79,7 +83,18 @@ async fn serve_source() -> (String, Source) {
             "/audience",
             post(|State(source): State<Source>, body: String| async move {
                 let request: serde_json::Value = serde_json::from_str(&body).expect("the request is JSON");
+                let member = request["artifact"]["member"].as_str().map(str::to_string);
                 source.requests.lock().unwrap().push(request);
+                let claims = |id: &str, email: Option<&str>| {
+                    let claims = match email {
+                        Some(email) => serde_json::json!({ "id": id, "verified_email": email }),
+                        None => serde_json::json!({ "id": id }),
+                    };
+                    (
+                        axum::http::StatusCode::OK,
+                        serde_json::json!({ "version": 1, "answer": { "claims": claims } }).to_string(),
+                    )
+                };
                 match source.answer.lock().unwrap().clone() {
                     Answer::Members(members) => {
                         let members: Vec<serde_json::Value> = members
@@ -94,6 +109,8 @@ async fn serve_source() -> (String, Source) {
                             serde_json::json!({ "version": 1, "answer": { "members": members } }).to_string(),
                         )
                     }
+                    Answer::Claims(email) => claims(&member.expect("a claims answer serves a member lookup"), email),
+                    Answer::ForeignClaims => claims("slack:U-other", None),
                     Answer::Down => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom".to_string()),
                 }
             }),
@@ -317,6 +334,58 @@ fn a_referenced_audience_source_must_be_bound() {
         Runtime::open(config, dir.path().join("appa.db"), None),
         Err(appa_runtime::api::OpenError::UnboundExternal { .. })
     ));
+}
+
+#[tokio::test]
+async fn a_qualified_recipient_is_checked_through_a_member_lookup() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, source) = serve_source().await;
+    let runtime = narrowed(&dir, &url).await;
+
+    // The lookup canonicalizes the recipient to the principal the narrowed audience holds.
+    source.set(Answer::Claims(Some("bob@corp.example")));
+    assert_eq!(
+        propose(&runtime, send("slack:U-bob")).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    ran(&runtime, send("slack:U-bob")).await;
+    let requests = source.requests();
+    assert_eq!(requests.len(), 1, "one act, one lookup per member");
+    assert_eq!(requests[0]["kind"], "audience");
+    assert_eq!(requests[0]["artifact"], serde_json::json!({ "member": "slack:U-bob" }));
+}
+
+#[tokio::test]
+async fn foreign_lookup_claims_are_no_answer_and_are_not_re_asked() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, source) = serve_source().await;
+    let runtime = narrowed(&dir, &url).await;
+    let before = audit_len(&runtime);
+
+    // Claims for a different member than the one asked are a broken answer: the call is
+    // refused operationally after exactly one consult, and no decision is recorded.
+    source.set(Answer::ForeignClaims);
+    assert!(matches!(
+        propose(&runtime, send("slack:U-bob")).await,
+        HookDecision::DenyCall { .. }
+    ));
+    assert_eq!(source.requests().len(), 1, "a broken answer is not re-asked");
+    assert_eq!(audit_len(&runtime), before);
+}
+
+#[tokio::test]
+async fn a_bare_provider_prefix_recipient_is_a_literal_reader() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, source) = serve_source().await;
+    let runtime = narrowed(&dir, &url).await;
+
+    // "slack:" names no member, so it denotes itself: the check decides without any
+    // consult instead of looping against the source.
+    assert!(matches!(
+        propose(&runtime, send("slack:")).await,
+        HookDecision::DenyCall { .. }
+    ));
+    assert!(source.requests().is_empty(), "a bare prefix is never looked up");
 }
 
 fn send_capped() -> ProposedCall {

@@ -35,7 +35,7 @@ Where a policy checks the current audience or the trajectory's history, it names
 | Key | Under | Meaning | Example |
 |---|---|---|---|
 | **`contains`** | `requires.audience` | The current audience must include these readers. A `$arg` placeholder is allowed only here. | `audience = { contains = ["$recipient"] }` |
-| **`within`** | `requires.audience` | The current audience must be a subset of these readers. | `audience = { within = ["internal"] }` |
+| **`within`** | `requires.audience` | The current audience must sit within this audience. | `audience = { within = ["internal"] }` |
 | **`contains`** | `requires.effects` | The trajectory already recorded this effect. | `effects = { contains = ["backup.completed"] }` |
 | **`excludes`** | `requires.effects` | The effect is neither recorded in the trajectory nor reserved by an unsettled dispatch. | `effects = { excludes = ["migration.applied"] }` |
 
@@ -49,11 +49,11 @@ OpenAPPA ships a built-in audience chain:
 
 `self` is the deployment's operating human. `internal` is the organization. `public` is the unrestricted state. The chain is fixed — a policy maps sources into its levels but never adds levels. Beyond the chain, `[[audience.group]]` declares named audiences (`@finance`), composed from the same sources.
 
-A symbolic audience is a named reader set, and it stays symbolic: labels and log records hold `internal ∩ [alice]` or `internal ∩ @finance` as written. When a decision needs actual membership — a `contains` or `within` comparison — OpenAPPA consults the configured sources for exactly the sets that decision reads, pins the answers to that one act, and records them with it. Replay reads the pinned answers and never consults a source. Directory changes apply to the next act; they never rewrite a label.
+A symbolic audience is a named reader set, and it stays symbolic: a label holds `internal ∩ [alice]` or `internal ∩ @finance` without expanding either name. When a decision needs actual membership — a `contains` or `within` comparison — OpenAPPA consults the configured sources for exactly the sets that decision reads, pins the answers to that one act, and records them with it. Replay reads the pinned answers and never consults a source. Directory changes apply to the next act; they never rewrite a label.
 
 #### Audience sources
 
-The stock batteries register one audience source per provider. A source offers selector templates; a `from` list picks collections out of them:
+This build ships one audience source per provider, each with a fixed set of selector templates. A `from` list picks collections out of them; a provider enters the policy identity only when a selector references it:
 
 | Provider | Selectors |
 |---|---|
@@ -61,7 +61,7 @@ The stock batteries register one audience source per provider. A source offers s
 | `slack` | `viewer`, `full-members`, `user-group/<handle>` |
 | `github` | `viewer`, `org/<org>/members`, `org/<org>/team/<team>` |
 
-`viewer` names the requesting principal and feeds only `self`. The full-membership collections — and, for GitHub, one explicitly selected organization's members — feed `internal`: membership in unrelated, open-source, or personal organizations never implies `internal`. The named collections feed `[[audience.group]]` entries. A selector that does not fit its level refuses the policy at load.
+`viewer` names the requesting principal and feeds only `self`. The full-membership collections — and, for GitHub, one explicitly selected organization's members — feed `internal`: membership in unrelated, open-source, or personal organizations never implies `internal`. The named and full-membership collections feed `[[audience.group]]` entries; `viewer` does not. A selector that does not fit its level refuses the policy at load.
 
 ```toml
 [audience.self]
@@ -80,9 +80,9 @@ within = "internal"                    # a trusted policy assertion: @finance �
 from   = ["google-workspace:group/finance@corp.com", "github:org/archestra-ai/team/finance"]
 ```
 
-Multiple sources feeding one audience are unioned. `within` asserts containment in a built-in audience (`self` or `internal`) and the engine trusts it as policy: if the finance source reports an externally addressed member, that reader belongs to `@finance` and therefore to `internal` — OpenAPPA never second-guesses a configured source by inspecting a reader's email domain.
+Multiple sources feeding one audience are unioned. `within` asserts containment in a built-in audience (`self` or `internal`), and the engine trusts the assertion as policy. If the finance source reports an externally addressed member, that reader belongs to `@finance` and therefore to `internal`: OpenAPPA never second-guesses a configured source by inspecting a reader's email domain.
 
-A mention is `@` followed by the one selector grammar: `@finance` names a configured `[[audience.group]]`, and `@slack:user-group/oncall` reads a source collection directly, without a declaration. A mention written in the policy is validated at load — `@finacne` with no declaration refuses the policy. A mention supplied dynamically, through a `$arg` placeholder, that no source serves fails operationally at the call: the call does not run and nothing is recorded.
+A mention is `@` followed by the one selector grammar: `@finance` names a configured `[[audience.group]]`, and `@slack:user-group/oncall` reads a source collection directly, without a group declaration. A direct source mention still needs its provider referenced by some `from` list — a provider enters the registered sources exactly when a selector picks from it. A mention written in the policy is validated at load: `@finacne` with no declaration refuses the policy. A dynamically supplied mention no source serves fails the call operationally — the call does not run and nothing is recorded.
 
 #### Identity
 
@@ -587,7 +587,7 @@ Every transport receives one JSON object per consult:
 | `version` | The consult shape. It is `1`. |
 | `kind` | `authority`, `sanitizer`, `annotation`, `audience`, or `identity`. |
 | `name` | The registered name, for one service that answers for several. |
-| `declaration` | The policy's own words for this component: its `hint` and `permits`, an annotator's mandate vocabulary, or an audience source's selector templates. The policy author wrote it; the agent never can. |
+| `declaration` | The registered half: the component's `hint` and `permits`, an annotator's mandate vocabulary, or an audience source's selector templates. The agent never writes it. |
 | `artifact` | The value under judgment: the call and its unmet requirements, the body to rewrite, an annotator's `args`, a selector or member to read, or the member claims to canonicalize. |
 
 | Kind | `declaration` | `artifact` | `answer` |

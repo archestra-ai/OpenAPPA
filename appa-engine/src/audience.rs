@@ -86,8 +86,9 @@ impl<'de> Deserialize<'de> for IdentityMapping {
 }
 
 /// The primitive audience evidence one operation pins: everything its expansions are
-/// recomputed from. Duplicate or conflicting entries never validate; an entry nothing needed
-/// is surplus and refused at admission.
+/// recomputed from. Duplicate or conflicting entries never validate. Routable answers beyond
+/// what an act asks are admissible — they only pre-answer later asks — and replay holds every
+/// entry, surplus included, to the same validation.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AudienceEvidence {
@@ -161,6 +162,16 @@ pub enum EvidenceRefusal {
     },
     #[error("lookup under provider {provider} answers for member {member:?} outside that namespace")]
     ForeignLookup { provider: String, member: String },
+    #[error("the lookup of member {member:?} under provider {provider} carries claims for a different id")]
+    ForeignLookupClaims { provider: String, member: String },
+    #[error("selector {provider}:{selector} reports member {id:?} twice in one answer")]
+    DuplicateMember {
+        provider: String,
+        selector: String,
+        id: String,
+    },
+    #[error("identity mapping for {id:?} names a reserved principal")]
+    ReservedPrincipal { id: String },
     #[error("member {id:?} claims verified email {email:?}, which does not parse as one address")]
     MalformedEmail { id: String, email: String },
     #[error("identity implementation returned no mapping for {id:?}")]
@@ -525,14 +536,19 @@ impl AudienceRegistry {
                 selector: claims.selector.clone(),
             };
             let mut members = BTreeSet::new();
+            let mut ids = BTreeSet::new();
             for member in &claims.members {
-                if member
-                    .id
-                    .strip_prefix(claims.provider.as_str())
-                    .and_then(|rest| rest.strip_prefix(':'))
-                    .is_none()
-                {
+                if ReaderId::new(member.id.clone()).provider_prefix() != Some(claims.provider.as_str()) {
                     return Err(EvidenceRefusal::ForeignMember {
+                        provider: claims.provider.clone(),
+                        selector: claims.selector.clone(),
+                        id: member.id.clone(),
+                    });
+                }
+                // One id may not appear twice under one selector: the second entry could
+                // carry a conflicting verified email and seat a second principal.
+                if !ids.insert(member.id.as_str()) {
+                    return Err(EvidenceRefusal::DuplicateMember {
                         provider: claims.provider.clone(),
                         selector: claims.selector.clone(),
                         id: member.id.clone(),
@@ -558,12 +574,7 @@ impl AudienceRegistry {
                     member: lookup.member.clone(),
                 });
             }
-            if lookup
-                .member
-                .strip_prefix(lookup.provider.as_str())
-                .and_then(|rest| rest.strip_prefix(':'))
-                .is_none()
-            {
+            if ReaderId::new(lookup.member.clone()).provider_prefix() != Some(lookup.provider.as_str()) {
                 return Err(EvidenceRefusal::ForeignLookup {
                     provider: lookup.provider.clone(),
                     member: lookup.member.clone(),
@@ -572,6 +583,14 @@ impl AudienceRegistry {
             let principal = match &lookup.claims {
                 // Not found is definitive: the reader keeps its qualified identity.
                 None => ReaderId::new(lookup.member.clone()),
+                // Claims for another id would let a source canonicalize a member it does
+                // not own, or pre-seat an identity mapping for it.
+                Some(claims) if claims.id != lookup.member => {
+                    return Err(EvidenceRefusal::ForeignLookupClaims {
+                        provider: lookup.provider.clone(),
+                        member: lookup.member.clone(),
+                    });
+                }
                 Some(claims) => identity.principal(claims)?,
             };
             answers.push((
@@ -634,6 +653,12 @@ impl<'a> IdentityTable<'a> {
     ) -> Result<IdentityTable<'a>, EvidenceRefusal> {
         let mut mappings: BTreeMap<&str, &ReaderId> = BTreeMap::new();
         for mapping in pinned {
+            // Deserialization refuses reserved principals, but a mapping built in process
+            // (a buggy custom implementation) must fail here, not when the record it was
+            // pinned into refuses to decode: the live act and its replay hold one test.
+            if !mapping.principal.is_literal() {
+                return Err(EvidenceRefusal::ReservedPrincipal { id: mapping.id.clone() });
+            }
             if mappings.insert(mapping.id.as_str(), &mapping.principal).is_some() {
                 return Err(EvidenceRefusal::DuplicateIdentity { id: mapping.id.clone() });
             }
@@ -941,6 +966,67 @@ mod tests {
         assert!(matches!(
             registry.expansions(&malformed),
             Err(EvidenceRefusal::MalformedEmail { .. })
+        ));
+
+        // One member twice under one selector could seat two principals for one id.
+        let doubled = AudienceEvidence {
+            sources: vec![SourceClaims {
+                provider: "slack".into(),
+                selector: "viewer".into(),
+                members: vec![member("slack:U1", None), member("slack:U1", Some("a@corp.com"))],
+            }],
+            ..AudienceEvidence::default()
+        };
+        assert!(matches!(
+            registry.expansions(&doubled),
+            Err(EvidenceRefusal::DuplicateMember { .. })
+        ));
+
+        // A bare provider prefix names no member: it is not inside the provider's namespace.
+        let bare = AudienceEvidence {
+            sources: vec![SourceClaims {
+                provider: "slack".into(),
+                selector: "viewer".into(),
+                members: vec![member("slack:", None)],
+            }],
+            ..AudienceEvidence::default()
+        };
+        assert!(matches!(
+            registry.expansions(&bare),
+            Err(EvidenceRefusal::ForeignMember { .. })
+        ));
+
+        // A lookup's claims must be for the member asked — a source may not canonicalize a
+        // member it does not own.
+        let hijack = AudienceEvidence {
+            lookups: vec![MemberLookup {
+                provider: "slack".into(),
+                member: "slack:U1".into(),
+                claims: Some(member("google-workspace:alice", Some("alice@corp.com"))),
+            }],
+            ..AudienceEvidence::default()
+        };
+        assert!(matches!(
+            registry.expansions(&hijack),
+            Err(EvidenceRefusal::ForeignLookupClaims { .. })
+        ));
+
+        // A Rust-constructed identity mapping with a reserved principal fails validation,
+        // not the eventual decode of the record it was pinned into.
+        let mut custom = corp_config();
+        custom.identity = Some(IdentityImplementation::Custom(IdentityImplementationName::new(
+            "corp-identity",
+        )));
+        let reserved = AudienceEvidence {
+            identity: vec![IdentityMapping {
+                id: "slack:U1".into(),
+                principal: ReaderId::new("internal"),
+            }],
+            ..AudienceEvidence::default()
+        };
+        assert!(matches!(
+            AudienceRegistry::build(&custom).expansions(&reserved),
+            Err(EvidenceRefusal::ReservedPrincipal { .. })
         ));
     }
 

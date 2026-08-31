@@ -170,6 +170,8 @@ pub(crate) enum EventError {
     BindingMismatch,
     #[error("the family log stayed contended after {attempts} replays")]
     Contended { attempts: u32 },
+    #[error("external resolution did not settle after {rounds} rounds")]
+    ResolutionDiverged { rounds: u32 },
     #[error("the engine returned a follow-up this event cannot deliver")]
     UnexpectedDecision,
     #[error("the persisted log is refused: {0}")]
@@ -200,6 +202,7 @@ impl EventError {
             | EventError::PolicyUnavailable(_)
             | EventError::EngineInvariant(_)
             | EventError::Contended { .. }
+            | EventError::ResolutionDiverged { .. }
             | EventError::AnnotationRefused { .. }
             | EventError::UndeclaredTool { .. }
             | EventError::UnexpectedDecision => true,

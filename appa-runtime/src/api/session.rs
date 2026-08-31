@@ -141,6 +141,11 @@ fn return_decision(decision: EngineDecision) -> Result<ChildReturnDecision, Even
 
 const REPLAY_LIMIT: u32 = 8;
 
+/// The most external-resolution rounds one invocation runs before refusing operationally.
+/// Gathering is designed to close at least one ask per round, so this cap never fires on a
+/// healthy deployment; it bounds the blast radius of a gathering bug or a hostile external.
+const RESOLUTION_ROUNDS: u32 = 8;
+
 fn fresh_entropy() -> OfferNonce {
     OfferNonce(rand::random::<[u8; 32]>())
 }
@@ -653,7 +658,7 @@ impl Session {
         // did not hold. Rounds are finite, so a round that changes nothing is the only
         // way this loop fails to converge.
         let mut evidence: Vec<ExternalEvidence> = Vec::new();
-        loop {
+        for _ in 0..RESOLUTION_ROUNDS {
             let carried = evidence.clone();
             let entering = carried.is_empty();
             let decision = self.drive(&policy, opened.take(), entering, |context| {
@@ -688,6 +693,12 @@ impl Session {
                 return Err(EventError::UnexpectedDecision);
             }
         }
+        // Every round is supposed to close at least one ask for good; a run this long is a
+        // gathering bug or a hostile external, and the invocation refuses operationally
+        // rather than hold the turn lease against a source forever.
+        Err(EventError::ResolutionDiverged {
+            rounds: RESOLUTION_ROUNDS,
+        })
     }
 
     fn drive(

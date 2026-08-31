@@ -86,9 +86,9 @@ const TERMS = {
   "[externals.<kind>.<name>]":
     "One deployment binding: a registered authority or sanitizer bound to exactly one of url, command, or builtin; an annotator without a declared builtin, an audience source, or a custom identity implementation, bound to url or command. A binding without a registration refuses the deployment, and so does an unbound sanitizer, annotator, referenced audience source, or custom identity implementation; an unbound authority returns no answer.",
   declaration:
-    "The policy-authored half of a consult: the component's hint and permits, or an annotator's mandate vocabulary. The agent never writes it.",
+    "The registered half of a consult: the component's hint and permits, an annotator's mandate vocabulary, or an audience source's selector templates. The agent never writes it.",
   artifact:
-    "The judged half of a consult: the call and its unmet requirements, the body to rewrite, an annotator's args, or a group name. Never the trajectory.",
+    "The judged half of a consult: the call and its unmet requirements, the body to rewrite, an annotator's args, a selector or member to read, or the member claims to canonicalize. Never the trajectory.",
   internal:
     "The built-in organization audience, between self and public in the shipped chain. Symbolic in labels and the log; extensionally the union of the configured internal sources, the members of self, and every group declared within either. Reading internal data closes off public destinations.",
   "{public, trusted}":

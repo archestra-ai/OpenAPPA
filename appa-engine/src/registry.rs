@@ -384,6 +384,12 @@ pub enum LoadError {
     #[error("audience source provider {0:?} is registered more than once")]
     DuplicateAudienceProvider(String),
     #[error(
+        "audience source provider name {0:?} is malformed: a provider is a non-empty name without `:` or a leading `@`"
+    )]
+    MalformedAudienceProvider(String),
+    #[error("named audience name {0:?} is malformed: a name is non-empty, written bare, and holds no `:`")]
+    MalformedNamedAudience(String),
+    #[error(
         "audience source provider name \"email\" is reserved: the identity implementation owns the `email:` principal namespace"
     )]
     ReservedAudienceProvider,
@@ -1297,12 +1303,24 @@ fn validated_audience_registry(config: &AudienceConfig) -> Result<AudienceRegist
         if source.provider == "email" {
             return Err(LoadError::ReservedAudienceProvider);
         }
+        // A provider name with a `:` makes one member id qualified under two providers, a
+        // leading `@` makes its members non-literal readers, and an empty name owns no
+        // namespace at all. The one qualification rule (`ReaderId::provider_prefix`) stays
+        // unambiguous only over names this shape.
+        if source.provider.is_empty() || source.provider.contains(':') || source.provider.starts_with('@') {
+            return Err(LoadError::MalformedAudienceProvider(source.provider.clone()));
+        }
         if !providers.insert(source.provider.as_str()) {
             return Err(LoadError::DuplicateAudienceProvider(source.provider.clone()));
         }
     }
     let mut named = BTreeSet::new();
     for group in &config.groups {
+        // A name with a `:` round-trips through its `@` spelling as a source selector — a
+        // durable label would decode to a different atom — and an empty name spells `@`.
+        if group.name.as_str().is_empty() || group.name.as_str().contains(':') || group.name.as_str().starts_with('@') {
+            return Err(LoadError::MalformedNamedAudience(group.name.as_str().to_string()));
+        }
         if !named.insert(group.name.clone()) {
             return Err(LoadError::DuplicateNamedAudience(group.name.as_str().to_string()));
         }
@@ -1656,6 +1674,45 @@ mod tests {
             ("sanitizer redactor from", transition_from),
             ("sanitizer redactor to", transition_to),
         ]
+    }
+
+    #[test]
+    fn audience_provider_and_group_names_are_shaped_at_load() {
+        use crate::audience::{NamedAudience, SourceRegistration};
+        let source = |provider: &str| SourceRegistration {
+            provider: provider.to_string(),
+            templates: vec![crate::audience::SelectorTemplate::new("viewer")],
+        };
+        // A `:` makes one member id qualified under two providers, `@` makes members
+        // non-literal, and an empty name owns no namespace.
+        for provider in ["", "a:b", "@evil"] {
+            let mut cfg = base();
+            cfg.audience.sources = vec![source(provider)];
+            assert!(
+                matches!(
+                    Registry::build_covered(cfg),
+                    Err(LoadError::MalformedAudienceProvider(_))
+                ),
+                "{provider:?}"
+            );
+        }
+        // A group name with `:` round-trips through its `@` spelling as a source selector.
+        for name in ["", "a:b", "@x"] {
+            let mut cfg = base();
+            cfg.audience.sources = vec![source("slack")];
+            cfg.audience.groups = vec![NamedAudience {
+                name: crate::names::GroupName::new(name),
+                within: None,
+                from: vec![SelectorSpec {
+                    provider: "slack".into(),
+                    selector: "viewer".into(),
+                }],
+            }];
+            assert!(
+                matches!(Registry::build_covered(cfg), Err(LoadError::MalformedNamedAudience(_))),
+                "{name:?}"
+            );
+        }
     }
 
     #[test]

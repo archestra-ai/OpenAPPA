@@ -64,12 +64,14 @@ impl ReaderId {
 
     /// The provider prefix of a qualified reader (`slack:U012345` → `slack`), when one exists.
     /// Only a prefix naming a *registered* audience source routes the reader through
-    /// canonicalization; every other spelling compares exactly as written.
+    /// canonicalization; every other spelling compares exactly as written. A bare prefix with
+    /// nothing after the `:` names no member, so it is not qualified: it denotes itself. This
+    /// is the one qualification rule; every namespace check derives from it.
     pub fn provider_prefix(&self) -> Option<&str> {
         self.0
             .split_once(':')
+            .filter(|(provider, rest)| !provider.is_empty() && !rest.is_empty())
             .map(|(provider, _)| provider)
-            .filter(|provider| !provider.is_empty())
     }
 
     /// A reader that denotes itself under *every* deployment: it has no provider prefix any
