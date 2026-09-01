@@ -1,0 +1,9 @@
+# Google Workspace battery.
+#
+# This battery ships `audience-source.py`, the `google-workspace`
+# audience source; it carries no tool rules yet. Audience mappings are
+# root-only, so the binding sits beside them in the root config, not
+# here — the README shows the wiring.
+
+[policy]
+version = 2
