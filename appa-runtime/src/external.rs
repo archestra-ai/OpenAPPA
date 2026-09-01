@@ -715,12 +715,22 @@ async fn run_command_process(
         .kill_on_drop(true);
     configured.as_std_mut().process_group(0);
     // The runtime's own namespace stops here: no bearer token it sends, and no wiring
-    // variable, reaches the child. A command's own provider credential is the exception the
-    // namespace carves out, because the child is the only thing that reads it.
+    // variable, reaches the child. The binding's own provider credential is put back
+    // afterwards, so a command inherits the one variable it reads and no other's.
     for (key, _) in std::env::vars_os() {
-        if crate::config::withheld_from_child(&key.to_string_lossy()) {
+        if key
+            .to_string_lossy()
+            .starts_with(crate::config::RUNTIME_VARIABLE_PREFIX)
+        {
             configured.env_remove(key);
         }
+    }
+    if let Some((var, credential)) = command
+        .token_env
+        .as_ref()
+        .and_then(|var| std::env::var_os(var).map(|credential| (var, credential)))
+    {
+        configured.env(var, credential);
     }
 
     let child = configured.spawn().map_err(|_| NoAnswerReason::Unreachable)?;
@@ -1103,6 +1113,7 @@ mod tests {
                 "one argument".to_string(),
             ],
             cwd: dir.to_path_buf(),
+            token_env: Some("APPA_PROVIDER_TEST_TOKEN".to_string()),
         };
         config
             .annotators
@@ -1161,6 +1172,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("a fixture directory is created");
         unsafe { std::env::set_var("APPA_COMMAND_TEST_SECRET", "must-not-leak") };
         unsafe { std::env::set_var("APPA_PROVIDER_TEST_TOKEN", "provider-credential") };
+        // Another battery's credential: in the same namespace, named by no binding here.
+        unsafe { std::env::set_var("APPA_PROVIDER_OTHER_TOKEN", "must-not-leak") };
         let services = command_services(
             dir.path(),
             r#"cat > request.json
@@ -1174,6 +1187,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         let outcome = resolve_command(&services).await;
         unsafe { std::env::remove_var("APPA_COMMAND_TEST_SECRET") };
         unsafe { std::env::remove_var("APPA_PROVIDER_TEST_TOKEN") };
+        unsafe { std::env::remove_var("APPA_PROVIDER_OTHER_TOKEN") };
 
         assert_eq!(
             outcome,
@@ -1197,8 +1211,8 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         assert_eq!(
             std::fs::read_to_string(dir.path().join("appa-env.txt")).unwrap(),
             "APPA_PROVIDER_TEST_TOKEN=provider-credential\n",
-            "a command inherits the provider credential it reads for itself, and nothing else of \
-             the runtime's namespace"
+            "a command inherits the one credential its binding names — not the runtime's own \
+             variables, and not another binding's credential in the same namespace"
         );
 
         // The same command serves an authority: the transport is kind-agnostic.
@@ -1294,6 +1308,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             AnnotatorImplementation::Command(ResolverCommand {
                 argv: vec!["/definitely/missing/resolver".to_string()],
                 cwd: dir.path().to_path_buf(),
+                token_env: None,
             }),
         );
         assert_eq!(

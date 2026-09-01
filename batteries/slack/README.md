@@ -58,17 +58,18 @@ from = ["slack:user-group/finance"]
 
 [externals.audience.slack]
 command = ["python3", "batteries/slack/audience-source.py"]
+token_env = "APPA_PROVIDER_SLACK_TOKEN"
 ```
 
 A command path is resolved against the directory of the config file
 that names it, so write the path as your root config sees the battery.
 
-The script reads its token from `APPA_PROVIDER_SLACK_TOKEN`. The token needs the
-`users:read`, `users:read.email`, and `usergroups:read` scopes. The
-runtime keeps its own `APPA_*` variables — its wiring and every
-`token_env` secret — out of a command it runs, and passes through only
-the `APPA_PROVIDER_*` namespace, which holds credentials a command reads
-for itself and the runtime never sends. Any Slack error or missing answer stops the
+The script reads its token from `APPA_PROVIDER_SLACK_TOKEN`, which the
+binding's `token_env` forwards. The token needs the `users:read`,
+`users:read.email`, and `usergroups:read` scopes. A command inherits
+none of the runtime's `APPA_*` namespace — not its wiring, not a bearer
+token it sends, not another command's credential — only the one
+`APPA_PROVIDER_*` variable its own binding names. Any Slack error or missing answer stops the
 operation without recording a decision; nothing is guessed.
 
 Reads are workspace-wide: `full-members` and `user-group/<handle>` page

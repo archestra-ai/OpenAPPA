@@ -89,27 +89,26 @@ def viewer_members(call):
     return [claims]
 
 
-def directory_users(call):
-    """Every account the Workspace itself administers, live and reachable."""
-    return [
-        user
-        for user in paginated(call, f"{DIRECTORY_ROOT}/users", "users", customer="my_customer", maxResults=500)
-        if not user.get("suspended") and not user.get("archived")
-    ]
+def directory_users(call, active_only):
+    """Every account this Workspace administers.
+
+    `active_only` separates two different questions. Who belongs to the
+    workspace right now excludes a suspended or archived account. Whether the
+    Workspace administers an address does not: it still owns that identity, and
+    a direct member lookup attests it, so a group expansion must agree.
+    """
+    users = paginated(call, f"{DIRECTORY_ROOT}/users", "users", customer="my_customer", maxResults=500)
+    if not active_only:
+        return list(users)
+    return [user for user in users if not user.get("suspended") and not user.get("archived")]
 
 
 def full_members(call):
-    return [claims_of(user["primaryEmail"]) for user in directory_users(call)]
+    return [claims_of(user["primaryEmail"]) for user in directory_users(call, active_only=True)]
 
 
 def group_members(call, address):
-    # Membership proves that someone belongs to the group. Only a directory
-    # account proves that this Workspace administers their email identity, and
-    # the API's own member `type` does not draw that line: its EXTERNAL value
-    # is documented as unused, so an outside auditor arrives as an ordinary
-    # USER. One directory pass answers the question the type cannot.
-    administered = {user["primaryEmail"] for user in directory_users(call)}
-    members = []
+    addresses = []
     visited = {address}
     queue = [address]
     while queue:
@@ -120,13 +119,8 @@ def group_members(call, address):
                     pass
                 case "USER" | "EXTERNAL":
                     email = member["email"]
-                    # A member the directory does not administer belongs to the
-                    # group like any other, but the Workspace attests nothing
-                    # about their address: they keep their qualified identity
-                    # and merge with no other provider's reader.
-                    members.append(
-                        claims_of(email) if email in administered else {"id": f"google-workspace:{email}"}
-                    )
+                    if email not in addresses:
+                        addresses.append(email)
                 case "GROUP":
                     nested = member["email"]
                     if nested not in visited:
@@ -136,11 +130,21 @@ def group_members(call, address):
                     # A CUSTOMER member stands for the whole domain; an
                     # unexpandable entry must fail, never under-report.
                     raise RuntimeError(f"group {address} holds an unexpandable {other} member")
-    unique = []
-    for claims in members:
-        if claims not in unique:
-            unique.append(claims)
-    return unique
+    if not addresses:
+        return []
+    # Membership proves that someone belongs to the group. Only a directory
+    # account proves that this Workspace administers their email identity, and
+    # the API's own member `type` does not draw that line: its EXTERNAL value
+    # is documented as unused, so an outside auditor arrives as an ordinary
+    # USER. One directory pass answers the question the type cannot — after the
+    # traversal, so an empty or unexpandable group never pays for it. A member
+    # the directory does not administer belongs to the group like any other,
+    # but the Workspace attests nothing about their address: they keep their
+    # qualified identity and merge with no other provider's reader.
+    administered = {user["primaryEmail"] for user in directory_users(call, active_only=False)}
+    return [
+        claims_of(email) if email in administered else {"id": f"google-workspace:{email}"} for email in addresses
+    ]
 
 
 def member_claims(call, member):

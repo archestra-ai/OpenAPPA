@@ -20,18 +20,13 @@ pub struct Config {
 /// consult both stay in this process.
 pub(crate) const RUNTIME_VARIABLE_PREFIX: &str = "APPA_";
 
-/// The one part of the runtime's namespace that survives into a child: the credential a
-/// `command` external reads for itself — a battery's provider token, which the runtime
-/// never reads and never sends. `token_env` may not name one, so the passthrough cannot
+/// The namespace a `command` external's own credential lives in — a battery's provider
+/// token, which the runtime never reads and never sends. A child inherits nothing of the
+/// runtime's namespace by default; the one variable its binding names is put back, and only
+/// from this namespace, so a credential reaches the one command that reads it and no other.
+/// A `url` binding's `token_env` may not name a variable here, so the passthrough cannot
 /// become a way to hand a subprocess a secret this runtime holds.
 pub(crate) const PROVIDER_CREDENTIAL_PREFIX: &str = "APPA_PROVIDER_";
-
-/// Whether a variable of this process must be removed from a `command` external's
-/// environment. The `claude-code` consult is stricter still and keeps nothing of the
-/// namespace, carve-out included: it reads no provider credential.
-pub(crate) fn withheld_from_child(key: &str) -> bool {
-    key.starts_with(RUNTIME_VARIABLE_PREFIX) && !key.starts_with(PROVIDER_CREDENTIAL_PREFIX)
-}
 
 /// The effective policy file: deterministic TOML bytes after includes
 /// compose, and the policy value parsed from those bytes. The stored
@@ -99,8 +94,15 @@ impl ExternalBindings {
 /// declared it — an embedded host supplies an absolute one itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Binding {
-    Url { url: String, token_env: Option<String> },
-    Command { argv: Vec<String>, cwd: PathBuf },
+    Url {
+        url: String,
+        token_env: Option<String>,
+    },
+    Command {
+        argv: Vec<String>,
+        cwd: PathBuf,
+        token_env: Option<String>,
+    },
     Builtin(String),
 }
 
@@ -243,11 +245,14 @@ pub enum AnnotatorImplementation {
     Command(ResolverCommand),
 }
 
-/// A command binding's argv and the directory of the config that declared it.
+/// A command binding's argv, the directory of the config that declared it, and the one
+/// `APPA_PROVIDER_*` variable its child inherits. The name is carried, never the value: the
+/// runtime forwards the variable at spawn and never reads the credential itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolverCommand {
     pub argv: Vec<String>,
     pub cwd: PathBuf,
+    pub token_env: Option<String>,
 }
 
 pub const CLAUDE_CODE_BUILTIN: &str = "claude-code";
@@ -365,9 +370,16 @@ pub enum ConfigError {
         var: String,
     },
     #[error(
-        "the {section} endpoint {name:?} names {var}, which reaches command children: a token this runtime sends itself needs a variable outside {prefix}"
+        "the {section} endpoint {name:?} names {var}, which a command child can inherit: a token this runtime sends itself needs a variable outside {prefix}"
     )]
     ChildCredentialVariable {
+        section: &'static str,
+        name: String,
+        var: String,
+        prefix: &'static str,
+    },
+    #[error("the {section} command {name:?} names {var}, and only a {prefix} variable reaches its child")]
+    CommandCredentialVariable {
         section: &'static str,
         name: String,
         var: String,
@@ -868,7 +880,7 @@ fn embedded_binding(
             entry
         }
         Binding::Builtin(builtin) => vec![("builtin", toml::Value::String(builtin.clone()))],
-        Binding::Command { argv, cwd } => {
+        Binding::Command { argv, cwd, token_env } => {
             if !cwd.is_absolute() {
                 return Err(ConfigError::RelativeCommandCwd {
                     section: section.name(),
@@ -879,10 +891,14 @@ fn embedded_binding(
                 field: "externals command cwd",
             })?;
             command_cwds.insert(section.origin_key(name), toml::Value::String(cwd.to_string()));
-            vec![(
+            let mut entry = vec![(
                 "command",
                 toml::Value::Array(argv.iter().cloned().map(toml::Value::String).collect()),
-            )]
+            )];
+            if let Some(token_env) = token_env {
+                entry.push(("token_env", toml::Value::String(token_env.clone())));
+            }
+            entry
         }
     };
     Ok(toml::Value::Table(
@@ -1137,7 +1153,7 @@ fn resolve_binding(
             }
             Ok(Implementation::Builtin(builtin))
         }
-        (None, None, Some(argv)) if token_env.is_none() => resolve_command(section, name, argv, origins),
+        (None, None, Some(argv)) => resolve_command(section, name, argv, token_env, origins),
         _ => Err(ConfigError::ImplementationChoice {
             section: section.name(),
             name: name.to_string(),
@@ -1145,10 +1161,16 @@ fn resolve_binding(
     }
 }
 
+/// A command's `token_env` is the opposite of a URL's: the runtime sends nothing, it
+/// forwards one variable to the child that reads it, and only from the passthrough
+/// namespace. Presence is deliberately not checked here — the runtime never reads the
+/// value, so a policy stays loadable and describable on a machine that holds no provider
+/// credential, and a missing one surfaces as the child's own refusal to answer.
 fn resolve_command(
     section: Section,
     name: &str,
     argv: Vec<String>,
+    token_env: Option<String>,
     origins: &BTreeMap<String, PathBuf>,
 ) -> Result<Implementation, ConfigError> {
     if argv.is_empty() || argv.iter().any(String::is_empty) {
@@ -1157,9 +1179,20 @@ fn resolve_command(
             name: name.to_string(),
         });
     }
+    if let Some(var) = token_env
+        .as_ref()
+        .filter(|var| !var.starts_with(PROVIDER_CREDENTIAL_PREFIX))
+    {
+        return Err(ConfigError::CommandCredentialVariable {
+            section: section.name(),
+            name: name.to_string(),
+            var: var.clone(),
+            prefix: PROVIDER_CREDENTIAL_PREFIX,
+        });
+    }
     #[cfg(not(unix))]
     {
-        let _ = (argv, origins);
+        let _ = (argv, origins, token_env);
         return Err(ConfigError::UnsupportedCommandPlatform {
             section: section.name(),
             name: name.to_string(),
@@ -1173,6 +1206,7 @@ fn resolve_command(
                 .get(&section.origin_key(name))
                 .expect("every composed command binding records its source")
                 .clone(),
+            token_env,
         }))
     }
 }
@@ -1442,6 +1476,46 @@ mod tests {
             parse_with(&empty, |_| Some(String::new())),
             Err(ConfigError::MissingSecret { .. }),
         ));
+    }
+
+    /// A command's `token_env` is the mirror of a URL's: nothing is sent, one variable is
+    /// forwarded to the child that reads it, and only from the passthrough namespace.
+    #[cfg(unix)]
+    #[test]
+    fn a_command_forwards_one_credential_and_only_from_the_passthrough_namespace() {
+        let with = |token_env: &str| {
+            format!(
+                "{MINIMAL}\n[externals.audience.slack]\ncommand = [\"python3\", \"source.py\"]\ntoken_env = \"{token_env}\"\n"
+            )
+        };
+        let set = |var: &str| (var == "APPA_PROVIDER_SLACK_TOKEN").then(|| "xoxb-fixture".to_string());
+
+        assert!(
+            matches!(
+                parse_with(&with("APPA_SLACK_TOKEN"), set),
+                Err(ConfigError::CommandCredentialVariable { .. })
+            ),
+            "the runtime's own namespace never reaches a child, so a command cannot name it"
+        );
+        assert!(matches!(
+            parse_with(&with("SLACK_TOKEN"), set),
+            Err(ConfigError::CommandCredentialVariable { .. }),
+        ));
+        assert!(
+            parse_with(&with("APPA_PROVIDER_GITHUB_TOKEN"), set).is_ok(),
+            "the runtime never reads the value, so a policy stays loadable and describable \
+             without the credential on the machine"
+        );
+
+        let config = parse_with(&with("APPA_PROVIDER_SLACK_TOKEN"), set).expect("the bound credential validates");
+        let Some(Implementation::Command(command)) = config.externals.audience.get("slack") else {
+            panic!("the slack audience source is a command")
+        };
+        assert_eq!(command.token_env.as_deref(), Some("APPA_PROVIDER_SLACK_TOKEN"));
+        assert!(
+            !format!("{command:?}").contains("xoxb-fixture"),
+            "the binding carries the variable name, never the credential"
+        );
     }
 
     #[test]
@@ -1845,6 +1919,7 @@ mod tests {
                 Binding::Command {
                     argv: vec!["python3".to_string(), argument.to_string()],
                     cwd: std::fs::canonicalize(cwd).expect("canonical command directory"),
+                    token_env: None,
                 },
             );
             embedded(bindings).expect("embedded command config loads")
@@ -1872,6 +1947,7 @@ mod tests {
             Binding::Command {
                 argv: vec!["python3".to_string()],
                 cwd: PathBuf::from("battery"),
+                token_env: None,
             },
         );
         assert!(matches!(

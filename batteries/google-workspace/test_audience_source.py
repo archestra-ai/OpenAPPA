@@ -159,22 +159,44 @@ class SelectorTests(unittest.TestCase):
             {"members": [{"id": "google-workspace:alice@corp.com", "verified_email": "alice@corp.com"}]},
         )
 
-    def test_an_unexpandable_group_member_is_a_failure_not_an_under_report(self):
-        url = f"{DIRECTORY}/groups/everyone%40corp.com/members"
+    def test_a_group_member_the_directory_administers_is_attested_however_the_account_stands(self):
+        # Suspended memberships leave the group, but an archived account is one
+        # the Workspace still administers: a direct member lookup attests that
+        # address, so the group expansion must not disagree with itself.
+        url = f"{DIRECTORY}/groups/finance%40corp.com/members"
         call = fixture_api(
             [
-                empty_directory(),
-                (url, {"maxResults": 200}, {"members": [{"type": "CUSTOMER", "id": "C123"}]}),
+                (
+                    f"{DIRECTORY}/users",
+                    {"customer": "my_customer", "maxResults": 500},
+                    {"users": [{"primaryEmail": "old@corp.com", "archived": True}]},
+                ),
+                (url, {"maxResults": 200}, {"members": [{"type": "USER", "email": "old@corp.com"}]}),
             ]
         )
+        self.assertEqual(
+            AUDIENCE_SOURCE.answer(call, {"selector": "group/finance@corp.com"}),
+            {"members": [{"id": "google-workspace:old@corp.com", "verified_email": "old@corp.com"}]},
+        )
+
+    def test_an_unexpandable_group_member_is_a_failure_not_an_under_report(self):
+        # No directory fixture: the traversal fails before anything needs
+        # attesting, so the tenant-wide pass is never paid for.
+        url = f"{DIRECTORY}/groups/everyone%40corp.com/members"
+        call = fixture_api([(url, {"maxResults": 200}, {"members": [{"type": "CUSTOMER", "id": "C123"}]})])
         with self.assertRaises(RuntimeError):
             AUDIENCE_SOURCE.answer(call, {"selector": "group/everyone@corp.com"})
 
     def test_an_unknown_group_is_a_failure_not_an_empty_answer(self):
         url = f"{DIRECTORY}/groups/typo%40corp.com/members"
-        call = fixture_api([empty_directory(), (url, {"maxResults": 200}, AUDIENCE_SOURCE.NotFound(url))])
+        call = fixture_api([(url, {"maxResults": 200}, AUDIENCE_SOURCE.NotFound(url))])
         with self.assertRaises(AUDIENCE_SOURCE.NotFound):
             AUDIENCE_SOURCE.answer(call, {"selector": "group/typo@corp.com"})
+
+    def test_an_empty_group_answers_without_a_directory_pass(self):
+        url = f"{DIRECTORY}/groups/empty%40corp.com/members"
+        call = fixture_api([(url, {"maxResults": 200}, {"members": []})])
+        self.assertEqual(AUDIENCE_SOURCE.answer(call, {"selector": "group/empty@corp.com"}), {"members": []})
 
     def test_an_unserved_selector_is_refused(self):
         call = fixture_api([])
