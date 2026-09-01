@@ -120,6 +120,10 @@ fn export_committed_repository(repository: &Path, destination: &Path) -> std::io
         }
         let target = destination.join(&relative);
         match entry.header().entry_type() {
+            // BSD tar (and therefore `git archive` on macOS) may prepend PAX
+            // metadata records. They describe following entries and are not
+            // files in the repository export.
+            tar::EntryType::XHeader | tar::EntryType::XGlobalHeader => {}
             tar::EntryType::Directory => fs::create_dir_all(&target)?,
             tar::EntryType::Regular => {
                 if let Some(parent) = target.parent() {
