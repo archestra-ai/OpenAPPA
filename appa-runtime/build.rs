@@ -53,7 +53,6 @@ fn main() {
     if let Some(reference) = release {
         assert!(!reference.trim().is_empty(), "APPA_RELEASE_REF must not be empty");
         println!("cargo:rustc-env=APPA_RELEASE_REF={reference}");
-        println!("cargo:rustc-env=APPA_PLUGIN_SOURCE_KIND=release");
         return;
     }
 

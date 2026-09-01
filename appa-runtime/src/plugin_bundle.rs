@@ -588,10 +588,6 @@ pub enum Population<'a> {
 #[derive(Debug, Clone)]
 pub struct Deployment {
     pub root: PathBuf,
-    /// Whether an existing deployment was validated and reused, rather than
-    /// materialized afresh. This is the convergence property: a rerun that
-    /// changes nothing reuses, and one that finds drift does not.
-    pub reused: bool,
 }
 
 /// Materialize the deployment for this source and these paths, or reuse the
@@ -671,10 +667,7 @@ pub fn materialize(
         match reusable(&published, &plan) {
             Ok(()) => {
                 let _ = fs::remove_dir_all(&incoming);
-                return Ok(Deployment {
-                    root: published,
-                    reused: true,
-                });
+                return Ok(Deployment { root: published });
             }
             Err(reason) => {
                 tracing::debug!(path = %published.display(), %reason, "quarantining a damaged deployment");
@@ -711,7 +704,6 @@ pub fn materialize(
 
     Ok(Deployment {
         root: deployments_dir.join(digest.to_string()),
-        reused: false,
     })
 }
 
@@ -922,7 +914,7 @@ fn safe_relative(path: &Path) -> EntryPath {
 // ---------------------------------------------------------------------------
 
 /// Turn the staged tree into a deployment for these exact paths: select the
-/// platform hook map, write the generated paths files, and replace the legacy
+/// platform hook map, write the generated paths files, and replace the default
 /// endpoint literal everywhere it appears.
 fn render(root: &Path, plan: &DeploymentPlan) -> Result<(), PluginBundleError> {
     select_platform_hooks(root)?;
@@ -944,12 +936,11 @@ fn select_platform_hooks(root: &Path) -> Result<(), PluginBundleError> {
     }
 }
 
-/// Replace the legacy endpoint literal in every text file of the deployment.
+/// Replace the default endpoint literal in every text file of the deployment.
 ///
-/// Three successive drafts of this change each missed a consumer, so the
-/// substitution is total over the tree rather than driven by a hand-written list
-/// of files. A file that does not contain the literal is left untouched, and
-/// binary files cannot contain it.
+/// The substitution is total over the tree rather than driven by a list of
+/// files, so no consumer of the literal can be missed. A file that does not
+/// contain the literal is left untouched, and binary files cannot contain it.
 fn render_endpoint(root: &Path, endpoint_url: &str) -> Result<(), PluginBundleError> {
     if endpoint_url == DEFAULT_ENDPOINT_URL {
         return Ok(());
@@ -1496,21 +1487,21 @@ mod tests {
         sample_tree(source.path());
 
         let first = deploy(source.path(), deployments.path(), "http://127.0.0.1:9999");
-        assert!(!first.reused);
 
         let paths = fs::read_to_string(first.root.join(PATHS_SH)).unwrap();
         assert!(paths.contains("APPA_BIN='/data/bin/appa'"));
         assert!(paths.contains("APPA_ENDPOINT='http://127.0.0.1:9999'"));
 
-        // Every consumer carrying the legacy literal is rendered, without a
-        // hand-written list of files.
+        // Every consumer carrying the default literal is rendered.
         let statusline = fs::read_to_string(first.root.join("plugin/statusline.sh")).unwrap();
         assert!(statusline.contains("http://127.0.0.1:9999"));
         assert!(!statusline.contains(DEFAULT_ENDPOINT_URL));
 
+        // A rerun that changes nothing converges on the same directory and moves
+        // nothing aside.
         let second = deploy(source.path(), deployments.path(), "http://127.0.0.1:9999");
-        assert!(second.reused);
         assert_eq!(second.root, first.root);
+        assert_eq!(fs::read_dir(deployments.path()).unwrap().count(), 1);
     }
 
     #[test]
@@ -1570,7 +1561,6 @@ mod tests {
             fs::write(first.root.join(name), damaged).unwrap();
 
             let repaired = deploy(source.path(), deployments.path(), DEFAULT_ENDPOINT_URL);
-            assert!(!repaired.reused, "{name} was reused while stale");
             assert!(
                 fs::read_to_string(repaired.root.join(name)).unwrap().contains(restored),
                 "{name} was not restored",

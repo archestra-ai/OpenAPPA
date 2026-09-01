@@ -11,10 +11,10 @@ case "$*" in
     exit 0
     ;;
   *"/policy-key"*)
-    # A runtime that does not answer for its policy, which is what curl --fail
-    # reports as a failure and init reads as nothing to reconcile. Set
-    # FAKE_POLICY_KEY to give the endpoint a policy to serve instead.
+    # FAKE_POLICY_KEY is the policy the endpoint serves. Unset, the route is
+    # missing, which curl --fail reports as a failure and init refuses.
     if [ -z "${FAKE_POLICY_KEY:-}" ]; then
+      printf 'curl: (22) The requested URL returned error: 404\n' >&2
       exit 22
     fi
     printf '%s\n' "$FAKE_POLICY_KEY"

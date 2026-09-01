@@ -5,10 +5,20 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
+use appa_engine::profile::PolicyFileKey;
+use appa_runtime::config::Config;
 use sha2::{Digest, Sha256};
 
 mod common;
-use common::stage_bundle;
+use common::{repo_root, stage_bundle};
+
+/// The key of the policy a first install writes: the shipped default, which
+/// composes to the same bytes wherever it is loaded from.
+fn default_policy_key() -> String {
+    let example = repo_root().join("integrations/claude-code/examples/claude-code.appa.toml");
+    let config = Config::load(&example).expect("the shipped default loads");
+    PolicyFileKey::of(config.policy_file().bytes()).as_str().to_owned()
+}
 
 fn executable(path: &Path) {
     let mut permissions = fs::metadata(path).expect("fixture metadata").permissions();
@@ -64,11 +74,10 @@ fn init_installs_one_local_adapter_and_is_safe_to_run_again() {
     fs::create_dir_all(&bin).expect("bin directory");
     fs::create_dir_all(plugin.join("hooks")).expect("plugin hooks");
     let appa = install_test_binaries(&bin);
-    fs::copy(&appa, bin.join("appa-runtime")).expect("legacy runtime fixture is copied");
-    executable(&bin.join("appa-runtime"));
     install_fake_curl(&bin);
     let source = stage_bundle(directory.path());
     let fingerprint = runtime_fingerprint(&appa);
+    let policy_key = default_policy_key();
 
     let fake_claude = bin.join("claude");
     fs::copy(
@@ -107,7 +116,8 @@ fn init_installs_one_local_adapter_and_is_safe_to_run_again() {
             .env("FAKE_CLAUDE_LOG", &log)
             .env("FAKE_PLUGIN_ROOT", &plugin)
             .env("FAKE_RUNTIME_FINGERPRINT", reported_fingerprint)
-            .env("FAKE_RUNTIME_CONFIG", reported_config);
+            .env("FAKE_RUNTIME_CONFIG", reported_config)
+            .env("FAKE_POLICY_KEY", &policy_key);
         if let Some(failure) = fail_once {
             command.env("FAKE_CLAUDE_FAIL_ONCE", failure);
         }
@@ -134,11 +144,9 @@ fn init_installs_one_local_adapter_and_is_safe_to_run_again() {
     assert!(first_stdout.contains("development source"));
     assert!(first_stdout.contains("(created)"));
     // The harness binary lands on an appa-private path, not on PATH, and the
-    // copy that is on PATH is named rather than removed.
+    // copy that is on PATH is left alone.
     assert!(deployed_binary(&data).is_file());
     assert!(bin.join("appa").is_file());
-    assert!(first_stdout.contains("A previous appa remains at"));
-    assert!(!bin.join("appa-runtime").exists());
     assert!(bin.join("clappa").is_file());
     assert!(bin.join("appa-statusline.sh").is_file());
     assert!(config.join("appa.toml").is_file());
@@ -177,8 +185,6 @@ fn init_installs_one_local_adapter_and_is_safe_to_run_again() {
         Some(1)
     );
 
-    fs::copy(&appa, bin.join("appa-runtime")).expect("legacy runtime is restored for the failed-upgrade fixture");
-    executable(&bin.join("appa-runtime"));
     for failure in ["marketplace-add", "plugin-install"] {
         let failed = run(&fingerprint, &mine, Some(failure));
         assert!(!failed.status.success(), "the injected {failure} failure must surface");
@@ -194,10 +200,6 @@ fn init_installs_one_local_adapter_and_is_safe_to_run_again() {
         assert!(
             claude.join("marketplace-appa").is_file(),
             "{failure} must restore the marketplace"
-        );
-        assert!(
-            bin.join("appa-runtime").is_file(),
-            "{failure} must leave the previous runtime available",
         );
         assert!(
             !fs::read_to_string(bin.join("clappa"))
@@ -375,6 +377,7 @@ fn init_keeps_a_custom_statusline() {
         .env("FAKE_PLUGIN_ROOT", &plugin)
         .env("FAKE_RUNTIME_FINGERPRINT", fingerprint)
         .env("FAKE_RUNTIME_CONFIG", config.join("appa.toml"))
+        .env("FAKE_POLICY_KEY", default_policy_key())
         .output()
         .expect("appa init runs");
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
@@ -435,6 +438,7 @@ fn relative_directory_overrides_are_rendered_absolute() {
         .env("FAKE_RUNTIME_FINGERPRINT", fingerprint)
         // The deployment the answering runtime claims: this init's own config.
         .env("FAKE_RUNTIME_CONFIG", root.join("config/appa.toml"))
+        .env("FAKE_POLICY_KEY", default_policy_key())
         .output()
         .expect("appa init runs");
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
