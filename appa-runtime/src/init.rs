@@ -118,6 +118,26 @@ impl RuntimeOutcome {
     }
 }
 
+/// The policy key of the config file this init validated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ComposedPolicy {
+    /// The key, comparable against the one a runtime serves.
+    Key(String),
+    /// A `token_env` resolves only where the runtime runs, so this process cannot compose
+    /// the file at all. Not knowing is never the same as agreeing: the runtime may be
+    /// serving anything, and only the person running init can settle it.
+    Unknowable,
+}
+
+/// Why a running runtime may not be answering under the file this init validated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Divergence {
+    /// It serves a different policy than this file composes to.
+    Serving,
+    /// Whether it serves this file cannot be established here.
+    Unestablished,
+}
+
 struct DeploymentPaths {
     install_dir: PathBuf,
     config_dir: PathBuf,
@@ -275,7 +295,7 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
     // 8. The plugin and the launcher now point at this configuration; a runtime the
     //    starter left running may not. Asked last, because a decline still leaves a
     //    complete install — only the policy in memory lags.
-    let runtime_outcome = reconcile_policy(&endpoint, &config, composed_policy)?;
+    let runtime_outcome = reconcile_policy(&endpoint, &config, &composed_policy)?;
 
     // 9. Anything left on PATH that this init did not deploy is named, never
     //    removed: it is the user's file to keep or drop.
@@ -1001,17 +1021,16 @@ fn confirm_rewrite(
 /// which init can report only as an endpoint that never became healthy. Running
 /// both refusals here names the file and the fault, before anything outside
 /// this file has changed.
-/// Answers with the policy key this file composes to, or `None` when the file resolves
-/// only where the runtime runs — the caller then has nothing to compare a serving runtime
-/// against.
-fn verify_config(path: &Path) -> Result<Option<String>, InitError> {
+/// Answers with the policy key this file composes to, or [`ComposedPolicy::Unknowable`]
+/// when the file resolves only where the runtime runs.
+fn verify_config(path: &Path) -> Result<ComposedPolicy, InitError> {
     let config = match Config::load(path) {
         Ok(config) => config,
         // A `token_env` resolves where the runtime runs, not here. A hook starts
         // it with the session's environment, which carries variables this
         // terminal does not, so a secret this process cannot see is not init's
         // to refuse: the start that follows is what proves the token reachable.
-        Err(ConfigError::MissingSecret { .. }) => return Ok(None),
+        Err(ConfigError::MissingSecret { .. }) => return Ok(ComposedPolicy::Unknowable),
         Err(source) => {
             return Err(InitError::UnloadableConfig {
                 path: path.to_path_buf(),
@@ -1025,7 +1044,9 @@ fn verify_config(path: &Path) -> Result<Option<String>, InitError> {
             reason,
         }
     })?;
-    Ok(Some(crate::engine::policy_file_key(config.policy_file().bytes())))
+    Ok(ComposedPolicy::Key(crate::engine::policy_file_key(
+        config.policy_file().bytes(),
+    )))
 }
 
 fn run_claude<const N: usize>(arguments: [&str; N]) -> Result<Output, InitError> {
@@ -1815,24 +1836,32 @@ fn clear_confirmed_foreign_with(
 /// this file itself. A runtime it left running does not: it still serves what it loaded at
 /// startup, and a config written since is on disk only. Comparing the two keys keeps the
 /// question to the case that has one — an install that changed nothing asks nothing.
-fn reconcile_policy(endpoint: &Endpoint, config: &Path, composed: Option<String>) -> Result<RuntimeOutcome, InitError> {
-    if !policy_diverged(composed.as_deref(), serving_policy_key(endpoint).as_deref()) {
+fn reconcile_policy(endpoint: &Endpoint, config: &Path, composed: &ComposedPolicy) -> Result<RuntimeOutcome, InitError> {
+    let Some(divergence) = policy_divergence(composed, serving_policy_key(endpoint).as_deref()) else {
         return Ok(RuntimeOutcome::Healthy);
-    }
-    if !confirm_reload(config)? {
+    };
+    if !confirm_reload(config, divergence)? {
         return Ok(RuntimeOutcome::OlderPolicy);
     }
     reload_policy(endpoint, config)?;
     Ok(RuntimeOutcome::Reloaded)
 }
 
-/// Whether a serving runtime lags the file this init validated.
+/// Why a serving runtime may not be answering under the file this init validated, or
+/// `None` when it demonstrably is.
 ///
-/// Absent either key there is nothing to compare: a config that resolves only where the
-/// runtime runs gives init no key of its own, and a runtime that does not answer for its
-/// policy gives none either. Init never guesses at a divergence, so both cases are quiet.
-fn policy_diverged(composed: Option<&str>, serving: Option<&str>) -> bool {
-    matches!((composed, serving), (Some(composed), Some(serving)) if composed != serving)
+/// A runtime that does not answer for its policy leaves nothing to reconcile at all: init
+/// cannot reach it to compare or to reload, so it stays quiet. A config init cannot compose
+/// is the opposite case — the runtime can be asked, and only a person can decide, so the
+/// question is put rather than answered by assumption. The reload itself resolves the
+/// secret where the runtime runs, which is the environment that has it.
+fn policy_divergence(composed: &ComposedPolicy, serving: Option<&str>) -> Option<Divergence> {
+    let serving = serving?;
+    match composed {
+        ComposedPolicy::Key(key) if key == serving => None,
+        ComposedPolicy::Key(_) => Some(Divergence::Serving),
+        ComposedPolicy::Unknowable => Some(Divergence::Unestablished),
+    }
 }
 
 /// The policy key the endpoint answers under, or `None` when it does not answer for one.
@@ -1872,25 +1901,40 @@ fn reload_policy(endpoint: &Endpoint, config: &Path) -> Result<(), InitError> {
 
 /// A terminal is asked; anything else reloads. A script that just wrote a config wants it
 /// serving, and there is no one there to answer.
-fn confirm_reload(config: &Path) -> Result<bool, InitError> {
+fn confirm_reload(config: &Path, divergence: Divergence) -> Result<bool, InitError> {
     let stdin = std::io::stdin();
     if !stdin.is_terminal() {
         return Ok(true);
     }
     let stderr = std::io::stderr();
-    confirm_reload_with(config, &mut stdin.lock(), &mut stderr.lock())
+    confirm_reload_with(config, divergence, &mut stdin.lock(), &mut stderr.lock())
 }
 
-fn confirm_reload_with(config: &Path, input: &mut impl BufRead, output: &mut impl Write) -> Result<bool, InitError> {
+fn confirm_reload_with(
+    config: &Path,
+    divergence: Divergence,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> Result<bool, InitError> {
     let prompt = |source| InitError::WriteFile {
         path: config.to_path_buf(),
         source,
     };
+    let config = friendly_path(config);
+    // Each case states exactly what init established, and no more: one knows the running
+    // runtime serves something else, the other knows only that it cannot tell.
+    let question = match divergence {
+        Divergence::Serving => format!(
+            "appa: the running runtime still serves the policy it started with, not {config}."
+        ),
+        Divergence::Unestablished => format!(
+            "appa: {config} resolves a secret only where the runtime runs, so this cannot tell\n\
+             whether the running runtime already serves it."
+        ),
+    };
     write!(
         output,
-        "appa: the running runtime still serves the policy it started with, not {}.\n\
-         Reload it now? Sessions open right now keep the deployment they started with. [Y/n] ",
-        friendly_path(config),
+        "{question}\nReload it now? Sessions open right now keep the deployment they started with. [Y/n] ",
     )
     .and_then(|()| output.flush())
     .map_err(prompt)?;
@@ -2087,32 +2131,44 @@ mod tests {
     }
 
     #[test]
-    fn only_two_answerable_and_differing_policy_keys_are_a_divergence() {
-        assert!(policy_diverged(Some("composed"), Some("serving")));
+    fn a_serving_runtime_is_reconciled_only_when_agreement_is_not_established() {
+        let key = |key: &str| ComposedPolicy::Key(key.to_string());
+        assert_eq!(
+            policy_divergence(&key("composed"), Some("serving")),
+            Some(Divergence::Serving)
+        );
         // An install that changed nothing must ask nothing.
-        assert!(!policy_diverged(Some("same"), Some("same")));
-        // Neither side answering for a policy is silence, never an assumed divergence:
-        // a config resolving only where the runtime runs, and a runtime that does not
-        // report its policy at all.
-        assert!(!policy_diverged(None, Some("serving")));
-        assert!(!policy_diverged(Some("composed"), None));
-        assert!(!policy_diverged(None, None));
+        assert_eq!(policy_divergence(&key("same"), Some("same")), None);
+        // A config this process cannot compose is unsettled, never settled: assuming
+        // agreement here is what would leave an older policy serving unremarked.
+        assert_eq!(
+            policy_divergence(&ComposedPolicy::Unknowable, Some("serving")),
+            Some(Divergence::Unestablished)
+        );
+        // A runtime that answers for no policy cannot be compared or reloaded, so there
+        // is nothing to put to the user either way.
+        assert_eq!(policy_divergence(&key("composed"), None), None);
+        assert_eq!(policy_divergence(&ComposedPolicy::Unknowable, None), None);
     }
 
     #[test]
     fn reloading_a_lagging_runtime_requires_a_y_or_default_yes_answer() {
         let config = PathBuf::from("/home/user/config/appa.toml");
-        for answer in ["y\n", "YES\n", "\n"] {
-            assert!(
-                confirm_reload_with(&config, &mut answer.as_bytes(), &mut Vec::new()).expect("the answer reads"),
-                "{answer:?} approves"
-            );
-        }
-        for answer in ["n\n", "no\n", "anything else\n", ""] {
-            assert!(
-                !confirm_reload_with(&config, &mut answer.as_bytes(), &mut Vec::new()).expect("the answer reads"),
-                "{answer:?} refuses"
-            );
+        for divergence in [Divergence::Serving, Divergence::Unestablished] {
+            for answer in ["y\n", "YES\n", "\n"] {
+                assert!(
+                    confirm_reload_with(&config, divergence, &mut answer.as_bytes(), &mut Vec::new())
+                        .expect("the answer reads"),
+                    "{answer:?} approves under {divergence:?}"
+                );
+            }
+            for answer in ["n\n", "no\n", "anything else\n", ""] {
+                assert!(
+                    !confirm_reload_with(&config, divergence, &mut answer.as_bytes(), &mut Vec::new())
+                        .expect("the answer reads"),
+                    "{answer:?} refuses under {divergence:?}"
+                );
+            }
         }
     }
 
@@ -2141,7 +2197,8 @@ mod tests {
         let endpoint = health_answers(vec!["agreed".to_string()]);
         let config = PathBuf::from("/home/user/config/appa.toml");
         assert_eq!(
-            reconcile_policy(&endpoint, &config, Some("agreed".to_string())).expect("the reconcile completes"),
+            reconcile_policy(&endpoint, &config, &ComposedPolicy::Key("agreed".to_string()))
+                .expect("the reconcile completes"),
             RuntimeOutcome::Healthy
         );
     }

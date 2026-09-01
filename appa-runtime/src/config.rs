@@ -812,13 +812,18 @@ fn embedded_document(policy: toml::Value, bindings: &ExternalBindings) -> Result
             "model".to_string(),
             toml::Value::String(bindings.claude_code.model.clone()),
         );
-        claude_code.insert(
-            "timeout_ms".to_string(),
-            embedded_integer(
-                "externals.claude_code.timeout_ms",
-                bindings.claude_code.timeout.as_millis(),
-            )?,
-        );
+        // Only a budget that differs from the default is written, so a host that leaves it
+        // alone composes the same bytes — and so the same policy key — as an authored table
+        // that names `command` and `model` and omits `timeout_ms`.
+        if bindings.claude_code.timeout != DEFAULT_CLAUDE_CODE_TIMEOUT {
+            claude_code.insert(
+                "timeout_ms".to_string(),
+                embedded_integer(
+                    "externals.claude_code.timeout_ms",
+                    bindings.claude_code.timeout.as_millis(),
+                )?,
+            );
+        }
         external_table.insert("claude_code".to_string(), toml::Value::Table(claude_code));
     }
 
@@ -1919,6 +1924,44 @@ mod tests {
 
     fn embedded(bindings: ExternalBindings) -> Result<Config, ConfigError> {
         Config::embedded("version = 2".to_string(), bindings)
+    }
+
+    #[test]
+    fn an_embedded_default_budget_stores_what_an_authored_table_omitting_it_stores() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let mut bindings = ExternalBindings::new(Duration::from_millis(5000), 65_536);
+        bindings.claude_code = ClaudeCode {
+            command: PathBuf::from("/opt/claude/bin/claude"),
+            model: "pinned".to_string(),
+            timeout: DEFAULT_CLAUDE_CODE_TIMEOUT,
+        };
+        let host = Config::embedded(
+            "version = 2\nanything = \"the runtime does not interpret this\"\n".to_string(),
+            bindings,
+        )
+        .expect("the embedded claude bindings load");
+
+        // Both sides come back through the file loader, so only their content can differ,
+        // never their serialization.
+        let from_host = dir.path().join("host.toml");
+        std::fs::write(&from_host, host.policy_file().bytes()).expect("write the stored embedded config");
+        let from_host = Config::load(&from_host).expect("the stored embedded config reloads");
+
+        let authored_path = dir.path().join("authored.toml");
+        std::fs::write(
+            &authored_path,
+            "[policy]\nversion = 2\nanything = \"the runtime does not interpret this\"\n\n\
+             [externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n\n\
+             [externals.claude_code]\ncommand = \"/opt/claude/bin/claude\"\nmodel = \"pinned\"\n",
+        )
+        .expect("write the authored config");
+        let authored = Config::load(&authored_path).expect("the authored claude table loads");
+
+        // A budget neither side states must not be stated by one of them: an install
+        // compares these policy keys, so equal deployments must compose equal bytes.
+        assert_eq!(from_host.policy_file().bytes(), authored.policy_file().bytes());
+        assert_eq!(from_host.externals.claude_code, authored.externals.claude_code);
+        assert_eq!(authored.externals.claude_code.timeout, DEFAULT_CLAUDE_CODE_TIMEOUT);
     }
 
     #[cfg(unix)]
