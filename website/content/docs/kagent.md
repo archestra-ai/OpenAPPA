@@ -30,7 +30,7 @@ Google ADK remains an unmodified upstream dependency. The design does not fork, 
 
 OpenAPPA policy semantics remain in [How it works](/how-it-works) and [Policy contracts](/contracts).
 
-## Keep kagent changes generic
+## Generic kagent changes
 
 The kagent fork implements only generic extension infrastructure:
 
@@ -65,7 +65,7 @@ The OpenAPPA companion owns:
 
 kagent sees only generic host payloads, phase names, digests, deadlines, decisions, and opaque handles.
 
-## Use an OCI companion container
+## OCI companion container
 
 The selected process model is a digest-pinned OCI companion container in the same Substrate Actor.
 
@@ -95,7 +95,7 @@ Actor-wide CNI policy permits only cluster DNS and an authenticated egress gatew
 
 The kagent process and its in-process tools remain in the trusted computing base. The sidecar isolates OpenAPPA memory and state but cannot sandbox malicious code already running as kagent.
 
-## Follow proven plugin patterns
+## Established plugin patterns
 
 The protocol borrows established mechanisms rather than using Go shared-library loading.
 
@@ -109,7 +109,7 @@ The protocol borrows established mechanisms rather than using Go shared-library 
 
 The design does not use the Go [`plugin`](https://pkg.go.dev/plugin) package. Its toolchain coupling, platform limits, race-detector limitations, shared address space, and unload restrictions conflict with independently shipped extensions.
 
-## Configure extensions dynamically
+## Dynamic extension configuration
 
 A Harness can declare several ordered dynamic extensions. Each declaration is generic:
 
@@ -153,18 +153,18 @@ It mounts immutable Revision-owned copies and stores no secret bytes in the Revi
 
 The immutable Revision includes these generic values. A plugin revision never changes inside a live scope.
 
-## Negotiate a neutral protocol
+## Neutral protocol negotiation
 
 The sidecar starts before registration and serves the private socket.
 
 The host performs these steps:
 
-1. Verify the sidecar workload identity and per-launch socket secret.
-2. Call `GetExtensionInfo` for plugin ID, artifact version, protocol range, state schema, and manifest digest.
-3. Send the complete generic host capability and sink inventory.
-4. Select one protocol major and capability set.
-5. Require the extension to accept the inventory digest and return ready.
-6. Enable the extension only after both container readiness and protocol readiness succeed.
+1. The host verifies the sidecar workload identity and per-launch socket secret.
+2. The host calls `GetExtensionInfo` for the plugin and protocol identities.
+3. The host sends the complete capability and sink inventory.
+4. The host selects one protocol major and capability set.
+5. The extension accepts the inventory digest and reports its ready state.
+6. The host enables the extension after container and protocol readiness succeed.
 
 The inventory describes mechanics, not OpenAPPA policy:
 
@@ -180,7 +180,7 @@ The OpenAPPA sidecar validates its own policy against that inventory.
 
 kagent treats the signed ready response as a generic required-extension attestation.
 
-## Use existing ADK and kagent surfaces
+## Existing ADK and kagent surfaces
 
 Current public ADK interfaces cover only part of the required lifecycle.
 
@@ -209,7 +209,7 @@ No OpenAPPA payload or decision uses a direct kagent API.
 
 All host-side enforcement data crosses only the generic extension protocol. It contains no ADK Go types or OpenAPPA policy types.
 
-## Keep extension ordering deterministic
+## Deterministic extension ordering
 
 The Revision defines one total extension order.
 
@@ -223,7 +223,7 @@ Other extensions can observe metadata or already committed content only after th
 
 No runtime plugin can be appended after manifest verification.
 
-## Use immutable event envelopes
+## Immutable event envelopes
 
 Every host event has a generic immutable envelope:
 
@@ -256,7 +256,7 @@ The host never parses a lease or persists it beyond that delivery lifecycle.
 
 The sidecar resolves held interactions and recovery state from its private store by host event ID.
 
-## Use generic decisions
+## Generic decisions
 
 The sidecar returns only generic host decisions:
 
@@ -274,7 +274,7 @@ A decision binds the event digest, extension revision, deadline, and permitted n
 
 The host executes no replacement that lacks a matching permit. It publishes no content that lacks a matching commit or event decision.
 
-## Gate one tool lifecycle mechanically
+## Mechanical tool lifecycle gate
 
 ```text
 ADK proposes a tool call
@@ -293,7 +293,7 @@ The extension sees the provider-final descriptor, actual source identity, exact 
 
 The host blocks name collisions, descriptor drift, mutable argument reuse, callback bypass, and automatic transport retry before plugin policy runs.
 
-## Gate the model provider request
+## Model provider request gate
 
 After all request processors and model callbacks, the host snapshots the exact provider request.
 
@@ -305,7 +305,7 @@ The same gate covers each enabled standard, live, realtime, history, and embeddi
 
 A live or realtime send uses a kagent-owned wrapper around the public live-session send interface. An unsupported path remains disabled.
 
-## Gate every result and response sink
+## Result and response sink gates
 
 The generic event gate runs before any plugin callback can observe uncommitted event content.
 
@@ -327,7 +327,7 @@ This immutable kagent workload property does not depend on an extension manifest
 
 Readiness sends a canary through every model, tool, session, A2A, memory, MCP, and exporter path. Any captured canary content keeps the Actor unready.
 
-## Cover children, remote agents, and interactions
+## Child, remote agent, and interaction coverage
 
 The host exposes generic child phases:
 
@@ -355,7 +355,7 @@ It does not interpret approve, decline, cancel, Authority, offer, or remedy mean
 
 The OpenAPPA plugin owns response meaning, replay protection, expiry, remote-hop state, and resume decisions.
 
-## Keep OpenAPPA semantics inside the sidecar
+## OpenAPPA semantics in the sidecar
 
 The OpenAPPA sidecar maps generic phases to current Engine and runtime behavior.
 
@@ -374,7 +374,7 @@ It alone implements:
 
 The kagent fork does not know these concepts.
 
-## Keep state ownership separate
+## Separate state ownership
 
 kagent keeps its ordinary ADK session and A2A task stores.
 
@@ -396,7 +396,7 @@ A durable fencing epoch accompanies every state write. The host records one atom
 
 Restore remains blocked until every required extension validates its own generation and accepts the host inventory.
 
-## Classify uncertain crashes conservatively
+## Conservative crash classification
 
 The selected first-release recovery rule is conservative.
 
@@ -410,7 +410,7 @@ The host emits `recovery.reconcile` through the ordinary extension phase API.
 
 The affected generic scope remains frozen until the sidecar returns `suppress`, `hold`, replayed `commit`, or terminal `fail`.
 
-## Pin and drain plugin upgrades
+## Pinned revisions and upgrade drain
 
 One plugin artifact and protocol selection remain pinned for each live scope.
 
@@ -424,14 +424,14 @@ The old workload rejects new roots but remains available for its assigned scopes
 
 The plugin owns any state migration. An incompatible revision requires instance replacement and drain.
 
-## Install the generic host and OpenAPPA plugin
+## Generic host and plugin installation
 
 Installation has two independently versioned artifacts:
 
 1. A kagent fork with the generic dynamic extension host, public-ADK adapters, and generic lifecycle points.
 2. The OpenAPPA kagent plugin companion image and its signed manifest.
 
-Create immutable policy configuration for the sidecar:
+The following commands create immutable policy configuration for the sidecar:
 
 ```sh
 kubectl -n kagent create configmap customer-support-policy-v1 \
@@ -445,7 +445,7 @@ The generic Harness references the extension image and opaque configuration. The
 
 The OpenAPPA plugin reports unready until its policy, state, runtime, host inventory, and required generic phases validate.
 
-Create a new `AgentInstance` from the prepared Harness. Existing instances cannot change their pinned extension set.
+A prepared Harness creates a new `AgentInstance`. Existing instances cannot change their pinned extension set.
 
 ## Architecture
 
@@ -474,7 +474,7 @@ Create a new `AgentInstance` from the prepared Harness. Existing instances canno
 
 The Unix socket and generic event protocol are the only enforcement-data interface between kagent and the OpenAPPA component.
 
-## Refuse incomplete coverage
+## Incomplete coverage refusal
 
 The protected instance remains unready when any required phase is missing, shared, reordered, bypassable, or unsupported.
 
@@ -492,13 +492,13 @@ The first release refuses:
 - Any partial capability mode for the required OpenAPPA plugin.
 - Any path that would require patched, vendored, copied, replaced, or internal Google ADK code.
 
-## Move an existing agent
+## Existing agent migration
 
 An existing `AgentInstance` cannot add a new dynamic extension set.
 
-Create a replacement protected instance and route new roots to it.
+The controller creates a replacement protected instance and routes new roots to it.
 
-Keep existing task and context IDs on the old instance until a fixed drain deadline.
+Existing task and context IDs remain on the old instance until a fixed drain deadline.
 
 At the deadline, cancel remaining old work and suspend the old instance.
 
