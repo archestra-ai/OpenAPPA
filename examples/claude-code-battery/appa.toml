@@ -18,6 +18,16 @@ hint = "Ask the person running the session."
 [policy.authority.permits]
 attention = ["hitl"]
 
+# Audience mappings are root-only. The Slack battery ships the source
+# script; mapping its collections here registers the `slack` provider,
+# so the binding below must sit beside the mapping. The script reads
+# its token from APPA_SLACK_TOKEN.
+[policy.audience.self]
+from = ["slack:viewer"]
+
+[policy.audience.internal]
+from = ["slack:full-members"]
+
 [externals]
 timeout_ms = 5000
 review_timeout_ms = 600000
@@ -25,6 +35,9 @@ max_body_bytes = 65536
 
 [externals.authorities.hitl]
 builtin = "hitl"
+
+[externals.audience.slack]
+command = ["python3", "../../batteries/slack/audience-source.py"]
 
 # Root contracts run before every included battery. This local rule bypasses
 # the shipped Bash classifier for `cargo test` and adds a fresh approval step.

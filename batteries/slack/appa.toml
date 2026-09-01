@@ -20,6 +20,10 @@
 #   name = "mcp__claude_ai_Slack__slack_send_message(channel_id:C0ABC123)"
 #   requires = { trust = "trusted" }
 #   delta = {}
+#
+# The battery also ships `audience-source.py`, the `slack` audience
+# source. Audience mappings are root-only, so the binding sits beside
+# them in the root config, not here — the README shows the wiring.
 
 [policy]
 version = 2

@@ -1,8 +1,8 @@
 # Slack battery
 
-Rules for the claude.ai Slack connector, all 19 of its tools. No scripts,
-no argument patterns, no channel ids. Add it to your root config with
-`include`. The root config must define an authority named `hitl`.
+Rules for the claude.ai Slack connector, all 19 of its tools. No argument
+patterns, no channel ids. Add it to your root config with `include`. The
+root config must define an authority named `hitl`.
 
 ## Files
 
@@ -19,6 +19,51 @@ your own Drafts. Trusted data, no approval.
 *Writes other people read* — sending or scheduling a message, creating
 or updating a canvas, creating a channel. Trusted data and a person's
 approval, every time.
+
+**`audience-source.py`** — the `slack` audience source. It answers the
+stock catalog's selectors over the Slack Web API:
+
+- `slack:viewer` — the token's own principal. Feeds `self`, so use a
+  user token when the session acts for a person; a bot token makes the
+  bot the viewer.
+- `slack:full-members` — every full workspace member. Guests
+  (multi- and single-channel) and Slack Connect participants are in the
+  workspace but are not full members; bots and deactivated accounts are
+  out too. Feeds `internal`.
+- `slack:user-group/<handle>` — one user group, exactly as Slack
+  reports it — a guest in the group is in the audience. Feeds
+  `[[audience.group]]` entries.
+
+It also answers the member lookup that canonicalizes a `slack:U...`
+reader. Verified emails come from Slack profiles; a member without one
+keeps the qualified `slack:` identity.
+
+The source is not wired by this file: audience mappings are root-only,
+and the binding must sit beside them. In the root config:
+
+```toml
+[policy.audience.self]
+from = ["slack:viewer"]
+
+[policy.audience.internal]
+from = ["slack:full-members"]
+
+[[policy.audience.group]]
+name = "finance"
+within = "internal"
+from = ["slack:user-group/finance"]
+
+[externals.audience.slack]
+command = ["python3", "batteries/slack/audience-source.py"]
+```
+
+The script reads its token from `APPA_SLACK_TOKEN`. The token needs the
+`users:read`, `users:read.email`, and `usergroups:read` scopes. Any
+Slack error or missing answer stops the operation without recording a
+decision; nothing is guessed.
+
+**`test_audience_source.py`** — fixture tests over recorded Slack Web
+API payloads, no network. Run with `python3 test_audience_source.py`.
 
 ## Change the behaviour
 
