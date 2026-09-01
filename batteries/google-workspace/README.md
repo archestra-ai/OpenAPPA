@@ -14,9 +14,11 @@ Google's OpenID userinfo and Admin SDK Directory APIs:
 - `google-workspace:full-members` — every active Workspace user;
   suspended and archived accounts are out. Feeds `internal`.
 - `google-workspace:group/<group-address>` — one Workspace group.
-  Nested groups are expanded; a member outside the Workspace keeps the
-  address Google reports — the group is the source of truth for its own
-  membership, whatever the member's email domain. Feeds
+  Nested groups are expanded, and a member outside the Workspace
+  belongs to the group like any other: the group is the source of truth
+  for its own membership, whatever the member's email domain. That
+  member keeps its qualified identity, since the Workspace administers
+  no account for the address and so attests nothing about it. Feeds
   `[[audience.group]]` entries.
 
 It also answers the member lookup that canonicalizes a
@@ -43,11 +45,20 @@ from = ["google-workspace:group/finance@corp.com"]
 command = ["python3", "batteries/google-workspace/audience-source.py"]
 ```
 
-The script reads its token from `APPA_GOOGLE_WORKSPACE_TOKEN`: an
+A command path is resolved against the directory of the config file
+that names it, so write the path as your root config sees the battery.
+
+The script reads its token from `OPENAPPA_GOOGLE_WORKSPACE_TOKEN`: an
 OAuth2 access token with the `admin.directory.user.readonly` and
 `admin.directory.group.member.readonly` scopes plus `openid email`.
-Any API error or missing answer stops the operation without recording
-a decision; nothing is guessed.
+The runtime strips every `APPA_*` variable from a command it runs — its
+own credentials never reach an external — so a source's token must be
+named outside that prefix. Any API error or missing answer stops the
+operation without recording a decision; nothing is guessed.
+
+Reads are directory-wide: `full-members` pages through every account.
+Size `externals.timeout_ms` and `externals.max_body_bytes` for your
+Workspace, not for a single annotation.
 
 **`test_audience_source.py`** — fixture tests over recorded Google API
 payloads, no network. Run with `python3 test_audience_source.py`.

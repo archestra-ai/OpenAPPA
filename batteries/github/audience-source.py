@@ -13,7 +13,7 @@ owner's addresses through /user/emails, while a profile's public email
 is whatever its owner typed, so every other member keeps the bare
 `github:<login>` identity and distinct identities never merge by guess.
 
-Credentials come from APPA_GITHUB_TOKEN (read:org and user:email
+Credentials come from OPENAPPA_GITHUB_TOKEN (read:org and user:email
 scopes). Any GitHub error or missing answer exits nonzero: the runtime
 treats that as no answer and refuses the operation, so an API hiccup
 never becomes a policy decision.
@@ -28,7 +28,7 @@ import urllib.request
 
 
 API_ROOT = "https://api.github.com"
-TOKEN_VAR = "APPA_GITHUB_TOKEN"
+TOKEN_VAR = "OPENAPPA_GITHUB_TOKEN"
 TIMEOUT_SECONDS = 30
 PAGE_SIZE = 100
 
@@ -104,7 +104,7 @@ def member_claims(call, member):
     if not member.startswith(prefix) or member == prefix:
         raise ValueError(f"{member!r} is not a github-qualified member")
     try:
-        call(f"/users/{urllib.parse.quote(member[len(prefix):])}")
+        call(f"/users/{urllib.parse.quote(member[len(prefix):], safe='')}")
     except NotFound:
         # GitHub definitively does not know this member, who keeps the
         # qualified identity.
@@ -126,9 +126,10 @@ def answer(call, artifact):
                 case str():
                     match selector.split("/"):
                         case ["org", org, "members"] if org:
-                            path = f"/orgs/{urllib.parse.quote(org)}/members"
+                            path = f"/orgs/{urllib.parse.quote(org, safe='')}/members"
                         case ["org", org, "team", team] if org and team:
-                            path = f"/orgs/{urllib.parse.quote(org)}/teams/{urllib.parse.quote(team)}/members"
+                            org = urllib.parse.quote(org, safe="")
+                            path = f"/orgs/{org}/teams/{urllib.parse.quote(team, safe='')}/members"
                         case _:
                             raise ValueError(f"{selector!r} names no collection this source serves")
                     members = collection_members(call, path)

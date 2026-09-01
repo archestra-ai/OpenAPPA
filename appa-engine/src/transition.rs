@@ -2613,9 +2613,24 @@ impl<'a> Sequence<'a> {
             .ok_or(TransitionRefusal::NotForked)?
             .clone();
         let views = self.projection.view(&parent);
-        // The crossing act derived the return stage: mirror its asks.
-        let lineage = views.lineage(&crate::basis::SubjectKey::Return(id.clone()));
-        self.audit_atoms(crate::plan::return_stage_atoms(self.engine.registry(), &lineage));
+        let subject = crate::basis::SubjectKey::Return(id.clone());
+        // Only a crossing that executes a return-stage offer read the stage:
+        // the act staged the menu before opening the offer it now spends. A
+        // crossing that merges without a stage — a raw return, or one whose
+        // bound derivation narrows nothing — asked none of these atoms, and
+        // mirroring them there would excuse evidence the live seal refuses.
+        if self
+            .declared
+            .as_ref()
+            .and_then(|open| match &open.act {
+                crate::basis::DecidedAct::Offer(offer) => views.offer(offer),
+                _ => None,
+            })
+            .is_some_and(|recorded| recorded.subject == subject)
+        {
+            let lineage = views.lineage(&subject);
+            self.audit_atoms(crate::plan::return_stage_atoms(self.engine.registry(), &lineage));
+        }
         let pending = views.pending_return(id).cloned();
         if views.has_ended(child) && pending.is_none() {
             return Err(TransitionRefusal::BranchEnded);

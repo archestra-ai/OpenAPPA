@@ -26,17 +26,20 @@ stock catalog's selectors over the Slack Web API:
 - `slack:viewer` — the token's own principal. Feeds `self`, so use a
   user token when the session acts for a person; a bot token makes the
   bot the viewer.
-- `slack:full-members` — every full workspace member. Guests
-  (multi- and single-channel) and Slack Connect participants are in the
-  workspace but are not full members; bots and deactivated accounts are
-  out too. Feeds `internal`.
+- `slack:full-members` — every full member of the token's own
+  workspace. Guests (multi- and single-channel) and Slack Connect
+  participants are in the workspace but are not full members; bots and
+  deactivated accounts are out too. On an Enterprise Grid an account
+  Slack places in another workspace of the org is not a member here.
+  Feeds `internal`.
 - `slack:user-group/<handle>` — one user group, exactly as Slack
   reports it — a guest in the group is in the audience. Feeds
   `[[audience.group]]` entries.
 
 It also answers the member lookup that canonicalizes a `slack:U...`
-reader. Verified emails come from Slack profiles; a member without one
-keeps the qualified `slack:` identity.
+reader. A verified email comes from a Slack profile only where Slack
+marks the address confirmed; every other member keeps the qualified
+`slack:` identity.
 
 The source is not wired by this file: audience mappings are root-only,
 and the binding must sit beside them. In the root config:
@@ -57,10 +60,20 @@ from = ["slack:user-group/finance"]
 command = ["python3", "batteries/slack/audience-source.py"]
 ```
 
-The script reads its token from `APPA_SLACK_TOKEN`. The token needs the
-`users:read`, `users:read.email`, and `usergroups:read` scopes. Any
-Slack error or missing answer stops the operation without recording a
-decision; nothing is guessed.
+A command path is resolved against the directory of the config file
+that names it, so write the path as your root config sees the battery.
+
+The script reads its token from `OPENAPPA_SLACK_TOKEN`. The token needs the
+`users:read`, `users:read.email`, and `usergroups:read` scopes. The
+runtime strips every `APPA_*` variable from a command it runs — its own
+credentials never reach an external — so a source's token must be named
+outside that prefix. Any Slack error or missing answer stops the
+operation without recording a decision; nothing is guessed.
+
+Reads are workspace-wide: `full-members` and `user-group/<handle>` page
+through the whole directory. Size `externals.timeout_ms` and
+`externals.max_body_bytes` for your workspace, not for a single
+annotation.
 
 **`test_audience_source.py`** — fixture tests over recorded Slack Web
 API payloads, no network. Run with `python3 test_audience_source.py`.

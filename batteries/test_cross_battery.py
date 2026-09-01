@@ -52,7 +52,14 @@ class CrossBatteryIdentityTests(unittest.TestCase):
                     (
                         "users.info",
                         {"user": "U012345"},
-                        {"ok": True, "user": {"id": "U012345", "profile": {"email": "alice@corp.com"}}},
+                        {
+                            "ok": True,
+                            "user": {
+                                "id": "U012345",
+                                "profile": {"email": "alice@corp.com"},
+                                "is_email_confirmed": True,
+                            },
+                        },
                     ),
                 ]
             ),

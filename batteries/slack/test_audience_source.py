@@ -29,7 +29,14 @@ def fixture_api(responses):
 
 def user(id, email=None, **flags):
     profile = {"email": email} if email else {}
-    return {"id": id, "team_id": flags.pop("team_id", "T1"), "profile": profile, **flags}
+    confirmed = {"is_email_confirmed": True} if email else {}
+    return {
+        "id": id,
+        "team_id": flags.pop("team_id", "T1"),
+        "profile": profile,
+        **confirmed,
+        **flags,
+    }
 
 
 class SelectorTests(unittest.TestCase):
@@ -44,6 +51,40 @@ class SelectorTests(unittest.TestCase):
             AUDIENCE_SOURCE.answer(call, {"selector": "viewer"}),
             {"members": [{"id": "slack:U1", "verified_email": "alice@corp.com"}]},
         )
+
+    def test_an_unconfirmed_profile_address_is_not_a_verified_claim(self):
+        call = fixture_api(
+            [
+                ("auth.test", {}, {"ok": True, "user_id": "U1", "team_id": "T1"}),
+                (
+                    "users.info",
+                    {"user": "U1"},
+                    {
+                        "ok": True,
+                        "user": {
+                            "id": "U1",
+                            "team_id": "T1",
+                            "profile": {"email": "alice@corp.com"},
+                            "is_email_confirmed": False,
+                        },
+                    },
+                ),
+            ]
+        )
+        self.assertEqual(
+            AUDIENCE_SOURCE.answer(call, {"selector": "viewer"}),
+            {"members": [{"id": "slack:U1"}]},
+        )
+
+    def test_a_page_without_members_is_a_failure_not_a_partial_answer(self):
+        call = fixture_api(
+            [
+                ("auth.test", {}, {"ok": True, "user_id": "U1", "team_id": "T1"}),
+                ("users.list", {"limit": 200}, {"ok": True}),
+            ]
+        )
+        with self.assertRaises(KeyError):
+            AUDIENCE_SOURCE.answer(call, {"selector": "full-members"})
 
     def test_full_members_excludes_guests_connect_bots_and_deleted(self):
         page_one = {
@@ -63,6 +104,7 @@ class SelectorTests(unittest.TestCase):
                 user("U6", "app@corp.com", is_app_user=True),
                 user("U7", "gone@corp.com", deleted=True),
                 user("U8", "foreign@partner.com", team_id="T2"),
+                {"id": "U0", "profile": {}},
                 user("USLACKBOT"),
                 user("U9"),
             ],
@@ -94,13 +136,19 @@ class SelectorTests(unittest.TestCase):
                     {"ok": True, "usergroups": [{"id": "S1", "handle": "finance"}, {"id": "S2", "handle": "eng"}]},
                 ),
                 ("usergroups.users.list", {"usergroup": "S1"}, {"ok": True, "users": ["U1", "U2", "U3"]}),
-                ("users.info", {"user": "U1"}, {"ok": True, "user": user("U1", "alice@corp.com")}),
                 (
-                    "users.info",
-                    {"user": "U2"},
-                    {"ok": True, "user": user("U2", "auditor@consulting.com", is_restricted=True)},
+                    "users.list",
+                    {"limit": 200},
+                    {
+                        "ok": True,
+                        "members": [
+                            user("U1", "alice@corp.com"),
+                            user("U2", "auditor@consulting.com", is_restricted=True),
+                            user("U3", deleted=True),
+                            user("U4", "unrelated@corp.com"),
+                        ],
+                    },
                 ),
-                ("users.info", {"user": "U3"}, {"ok": True, "user": user("U3", deleted=True)}),
             ]
         )
         self.assertEqual(
@@ -184,7 +232,7 @@ class EnvelopeTests(unittest.TestCase):
         }
 
     def test_a_foreign_envelope_is_refused(self):
-        env = {"PATH": "/usr/bin:/bin", "APPA_SLACK_TOKEN": "xoxb-fixture"}
+        env = {"PATH": "/usr/bin:/bin", "OPENAPPA_SLACK_TOKEN": "xoxb-fixture"}
         for request in [
             self.envelope(version=2),
             self.envelope(kind="annotation"),
@@ -197,7 +245,7 @@ class EnvelopeTests(unittest.TestCase):
     def test_a_missing_token_is_a_failure_before_any_network(self):
         result = self.run_script(self.envelope(), {"PATH": "/usr/bin:/bin"})
         self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn("APPA_SLACK_TOKEN", result.stderr)
+        self.assertIn("OPENAPPA_SLACK_TOKEN", result.stderr)
 
 
 if __name__ == "__main__":

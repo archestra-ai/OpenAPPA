@@ -88,7 +88,7 @@ class SelectorTests(unittest.TestCase):
                     {
                         "members": [
                             {"type": "USER", "email": "alice@corp.com", "status": "ACTIVE"},
-                            {"type": "USER", "email": "auditor@consulting.com"},
+                            {"type": "EXTERNAL", "email": "auditor@consulting.com"},
                             {"type": "USER", "email": "gone@corp.com", "status": "SUSPENDED"},
                             {"type": "GROUP", "email": "leads@corp.com"},
                         ]
@@ -112,7 +112,9 @@ class SelectorTests(unittest.TestCase):
             {
                 "members": [
                     {"id": "google-workspace:alice@corp.com", "verified_email": "alice@corp.com"},
-                    {"id": "google-workspace:auditor@consulting.com", "verified_email": "auditor@consulting.com"},
+                    # An external member belongs to the group but the
+                    # Workspace attests no account for that address.
+                    {"id": "google-workspace:auditor@consulting.com"},
                     {"id": "google-workspace:bob@corp.com", "verified_email": "bob@corp.com"},
                 ]
             },
@@ -182,7 +184,7 @@ class EnvelopeTests(unittest.TestCase):
         }
 
     def test_a_foreign_envelope_is_refused(self):
-        env = {"PATH": "/usr/bin:/bin", "APPA_GOOGLE_WORKSPACE_TOKEN": "ya29-fixture"}
+        env = {"PATH": "/usr/bin:/bin", "OPENAPPA_GOOGLE_WORKSPACE_TOKEN": "ya29-fixture"}
         for request in [
             self.envelope(version=2),
             self.envelope(kind="annotation"),
@@ -195,7 +197,7 @@ class EnvelopeTests(unittest.TestCase):
     def test_a_missing_token_is_a_failure_before_any_network(self):
         result = self.run_script(self.envelope(), {"PATH": "/usr/bin:/bin"})
         self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn("APPA_GOOGLE_WORKSPACE_TOKEN", result.stderr)
+        self.assertIn("OPENAPPA_GOOGLE_WORKSPACE_TOKEN", result.stderr)
 
 
 if __name__ == "__main__":

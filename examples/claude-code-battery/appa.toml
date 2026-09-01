@@ -28,10 +28,12 @@ from = ["slack:viewer"]
 [policy.audience.internal]
 from = ["slack:full-members"]
 
+# A directory read pages through a whole workspace, so the limits here
+# are sized for the audience sources rather than for a single annotation.
 [externals]
-timeout_ms = 5000
+timeout_ms = 30000
 review_timeout_ms = 600000
-max_body_bytes = 65536
+max_body_bytes = 1048576
 
 [externals.authorities.hitl]
 builtin = "hitl"

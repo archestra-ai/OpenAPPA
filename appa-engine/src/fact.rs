@@ -413,7 +413,9 @@ pub enum Fact {
 }
 
 impl Fact {
-    /// The pinned audience evidence this record carries, where it carries any.
+    /// The pinned audience evidence a record carries in its own field. A provider-run
+    /// [`Fact::ValueAdmitted`] carries evidence inside its provenance instead, and the
+    /// batch that lands it is bound to its act already.
     pub(crate) fn audience_evidence(&self) -> Option<&crate::audience::AudienceEvidence> {
         match self {
             Fact::DispatchOpened { evidence, .. }

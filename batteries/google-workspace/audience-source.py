@@ -14,11 +14,12 @@ and the member lookup that canonicalizes one
 A Workspace account's primary email is administered and attested by the
 Workspace itself, so members carry it as their verified email; the
 viewer's email is attested by the userinfo endpoint's own verified
-flag. Group members outside the Workspace keep the address Google
-reports for them — the group is the source of truth for its own
-membership.
+flag. A group member outside the Workspace belongs to the group like
+any other — the group is the source of truth for its own membership —
+but keeps its qualified identity: the Workspace administers no account
+for that address and attests nothing about it.
 
-Credentials come from APPA_GOOGLE_WORKSPACE_TOKEN: an OAuth2 access
+Credentials come from OPENAPPA_GOOGLE_WORKSPACE_TOKEN: an OAuth2 access
 token with the admin.directory.user.readonly and
 admin.directory.group.member.readonly scopes plus openid email. Any
 API error or missing answer exits nonzero: the runtime treats that as
@@ -36,7 +37,7 @@ import urllib.request
 
 USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
 DIRECTORY_ROOT = "https://admin.googleapis.com/admin/directory/v1"
-TOKEN_VAR = "APPA_GOOGLE_WORKSPACE_TOKEN"
+TOKEN_VAR = "OPENAPPA_GOOGLE_WORKSPACE_TOKEN"
 TIMEOUT_SECONDS = 30
 
 
@@ -100,12 +101,21 @@ def group_members(call, address):
     visited = {address}
     queue = [address]
     while queue:
-        group_url = f"{DIRECTORY_ROOT}/groups/{urllib.parse.quote(queue.pop(0))}/members"
+        group_url = f"{DIRECTORY_ROOT}/groups/{urllib.parse.quote(queue.pop(0), safe='')}/members"
         for member in paginated(call, group_url, "members", maxResults=200):
             match member.get("type"):
                 case "USER" if member.get("status") != "SUSPENDED":
                     members.append(claims_of(member["email"]))
                 case "USER":
+                    pass
+                # A member outside the Workspace belongs to the group — the
+                # group is the source of truth for its own membership — but
+                # the Workspace administers no account for that address, so
+                # the member keeps its qualified identity and merges with no
+                # other provider's reader.
+                case "EXTERNAL" if member.get("status") != "SUSPENDED":
+                    members.append({"id": f"google-workspace:{member['email']}"})
+                case "EXTERNAL":
                     pass
                 case "GROUP":
                     nested = member["email"]
@@ -128,7 +138,7 @@ def member_claims(call, member):
     if not member.startswith(prefix) or member == prefix:
         raise ValueError(f"{member!r} is not a google-workspace-qualified member")
     try:
-        user = call(f"{DIRECTORY_ROOT}/users/{urllib.parse.quote(member[len(prefix):])}")
+        user = call(f"{DIRECTORY_ROOT}/users/{urllib.parse.quote(member[len(prefix):], safe='')}")
     except NotFound:
         # The Workspace definitively does not know this member, who
         # keeps the qualified identity.

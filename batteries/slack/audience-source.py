@@ -10,7 +10,7 @@ Serves the stock `slack` selector catalog over the Slack Web API:
 
 and the member lookup that canonicalizes one `slack:U...` reader.
 
-Credentials come from APPA_SLACK_TOKEN (a bot or user token with
+Credentials come from OPENAPPA_SLACK_TOKEN (a bot or user token with
 users:read, users:read.email, and usergroups:read). Any Slack error,
 missing answer, or malformed response exits nonzero: the runtime treats
 that as no answer and refuses the operation, so a directory hiccup never
@@ -25,7 +25,7 @@ import urllib.request
 
 
 API_ROOT = "https://slack.com/api/"
-TOKEN_VAR = "APPA_SLACK_TOKEN"
+TOKEN_VAR = "OPENAPPA_SLACK_TOKEN"
 TIMEOUT_SECONDS = 30
 
 
@@ -53,10 +53,20 @@ def api_ok(call, method, **params):
     return response
 
 
+def verified_email_of(user):
+    """The profile address, only where Slack marks it confirmed: an
+    unconfirmed address would seat this account on another reader's
+    principal."""
+    email = user.get("profile", {}).get("email")
+    if isinstance(email, str) and email and user.get("is_email_confirmed"):
+        return email
+    return None
+
+
 def claims_of(user):
     claims = {"id": f"slack:{user['id']}"}
-    email = user.get("profile", {}).get("email")
-    if isinstance(email, str) and email:
+    email = verified_email_of(user)
+    if email:
         claims["verified_email"] = email
     return claims
 
@@ -69,7 +79,7 @@ def list_users(call):
         if cursor:
             params["cursor"] = cursor
         response = api_ok(call, "users.list", **params)
-        users.extend(response.get("members", []))
+        users.extend(response["members"])
         cursor = response.get("response_metadata", {}).get("next_cursor", "")
         if not cursor:
             return users
@@ -84,7 +94,9 @@ def is_full_member(user, team_id):
     # are in the workspace but are not full members.
     if user.get("is_restricted") or user.get("is_ultra_restricted") or user.get("is_stranger"):
         return False
-    return user.get("team_id", team_id) == team_id
+    # An account Slack does not place in this workspace is not a full
+    # member of it; a missing team is not evidence that it is.
+    return user.get("team_id") == team_id
 
 
 def viewer_members(call):
@@ -104,9 +116,14 @@ def user_group_members(call, handle):
     if not matches:
         raise RuntimeError(f"no user group has the handle {handle!r}")
     user_ids = api_ok(call, "usergroups.users.list", usergroup=matches[0]["id"])["users"]
+    # One directory pass rather than a lookup per member: a large group
+    # would otherwise outrun the runtime's consult timeout.
+    directory = {user["id"]: user for user in list_users(call)}
     members = []
     for user_id in user_ids:
-        user = api_ok(call, "users.info", user=user_id)["user"]
+        user = directory.get(user_id)
+        if user is None:
+            raise RuntimeError(f"the directory does not report group member {user_id}")
         if not user.get("deleted"):
             members.append(claims_of(user))
     return members
@@ -123,8 +140,8 @@ def member_claims(call, member):
         # The claims echo the queried spelling: claims for another id
         # are refused.
         claims = {"id": member}
-        email = response["user"].get("profile", {}).get("email")
-        if isinstance(email, str) and email:
+        email = verified_email_of(response["user"])
+        if email:
             claims["verified_email"] = email
         return claims
     if response.get("error") == "user_not_found":
