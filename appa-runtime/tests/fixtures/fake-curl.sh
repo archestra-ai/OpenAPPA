@@ -35,13 +35,12 @@ if [ -n "${FAKE_CURL_CALLS:-}" ]; then
   count=$(( $(cat "$FAKE_CURL_CALLS" 2>/dev/null || echo 0) + 1 ))
   printf '%s' "$count" >"$FAKE_CURL_CALLS"
   if [ -n "${FAKE_RUNTIME_FINGERPRINT_LATER:-}" ] && [ "$count" -gt 1 ]; then
-    printf '%s\n%s\n' "$FAKE_RUNTIME_FINGERPRINT_LATER" "${FAKE_RUNTIME_CONFIG:-}"
+    printf '%s\n%s\n' "$FAKE_RUNTIME_FINGERPRINT_LATER" "$FAKE_RUNTIME_CONFIG"
     exit 0
   fi
 fi
 
 # A deployment is the build and the configuration it serves, each on its own
-# line. FAKE_RUNTIME_CONFIG is the path the answering runtime claims; unset, it
-# is the config this init is installing, which is what a runtime of this same
-# deployment reports.
-printf '%s\n%s\n' "$FAKE_RUNTIME_FINGERPRINT" "${FAKE_RUNTIME_CONFIG:-}"
+# line. Both are mandatory: a caller that names only the build has not said which
+# deployment answers, and `set -u` refuses rather than answering for a nameless one.
+printf '%s\n%s\n' "$FAKE_RUNTIME_FINGERPRINT" "$FAKE_RUNTIME_CONFIG"
