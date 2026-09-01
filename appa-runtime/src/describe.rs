@@ -43,14 +43,92 @@ impl ConfigState {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct PolicyDescription {
     tools: Vec<String>,
-    referenced_groups: Vec<String>,
-    membership: Option<MembershipDescription>,
+    audience: Option<AudienceDescription>,
+}
+
+/// The audience side of a loadable policy, offline: what the configuration itself declares.
+/// Live provider group catalogues are session facts this command does not reach.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct AudienceDescription {
+    /// One entry per registered source: the provider, its advertised selector templates,
+    /// and whether `[externals.audience.<provider>]` binds it.
+    sources: Vec<SourceDescription>,
+    self_from: Vec<String>,
+    internal_from: Vec<String>,
+    /// One entry per `[[audience.group]]`: `@name`, its `within` target, and its selectors.
+    groups: Vec<GroupDescription>,
+    identity: IdentityDescription,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct MembershipDescription {
-    resolver: String,
+struct SourceDescription {
+    provider: String,
+    templates: Vec<String>,
     binding_configured: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GroupDescription {
+    name: String,
+    within: Option<&'static str>,
+    from: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum IdentityDescription {
+    #[default]
+    VerifiedEmail,
+    Custom {
+        name: String,
+        binding_configured: bool,
+    },
+}
+
+/// The declared audience configuration, with binding status answered by `bound(section, name)`.
+fn audience_description(compiled: &appa_policy::Config, bound: &dyn Fn(&str, &str) -> bool) -> AudienceDescription {
+    let audience = compiled.registry().audience();
+    let spelled = |spec: &appa_engine::audience::SelectorSpec| spec.to_string();
+    AudienceDescription {
+        sources: audience
+            .providers()
+            .iter()
+            .map(|provider| SourceDescription {
+                provider: provider.clone(),
+                templates: audience
+                    .templates(provider)
+                    .into_iter()
+                    .flatten()
+                    .map(|template| template.as_str().to_string())
+                    .collect(),
+                binding_configured: bound("audience", provider),
+            })
+            .collect(),
+        self_from: audience
+            .chain_from(appa_engine::label::ChainAudience::Self_)
+            .iter()
+            .map(spelled)
+            .collect(),
+        internal_from: audience
+            .chain_from(appa_engine::label::ChainAudience::Internal)
+            .iter()
+            .map(spelled)
+            .collect(),
+        groups: audience
+            .groups()
+            .map(|group| GroupDescription {
+                name: format!("@{}", group.name.as_str()),
+                within: group.within.map(|target| target.as_str()),
+                from: group.from.iter().map(spelled).collect(),
+            })
+            .collect(),
+        identity: match audience.identity() {
+            appa_engine::audience::IdentityImplementation::VerifiedEmail => IdentityDescription::VerifiedEmail,
+            appa_engine::audience::IdentityImplementation::Custom(name) => IdentityDescription::Custom {
+                name: name.as_str().to_string(),
+                binding_configured: bound("identity", name.as_str()),
+            },
+        },
+    }
 }
 
 fn inspect(path: &Path) -> (ConfigDescription, PolicyDescription) {
@@ -104,16 +182,10 @@ fn inspect(path: &Path) -> (ConfigDescription, PolicyDescription) {
                     if let Ok(source) = toml::to_string(loaded.policy_file().value())
                         && let Ok(compiled) = appa_policy::Config::from_toml_str(&source)
                     {
-                        policy.referenced_groups = compiled
-                            .registry()
-                            .groups()
-                            .iter()
-                            .map(|group| format!("@{}", group.as_str()))
-                            .collect();
-                        policy.membership = compiled.registry().membership().map(|resolver| MembershipDescription {
-                            resolver: resolver.as_str().to_string(),
-                            binding_configured: loaded.externals.membership.contains_key(resolver.as_str()),
-                        });
+                        policy.audience = Some(audience_description(&compiled, &|section, name| match section {
+                            "audience" => loaded.externals.audience.contains_key(name),
+                            _ => loaded.externals.identity.contains_key(name),
+                        }));
                     }
                 }
             }
@@ -139,20 +211,12 @@ fn describe_policy_value(policy_value: &toml::Value, root: &toml::Value, out: &m
     if let Ok(source) = toml::to_string(policy_value)
         && let Ok(compiled) = appa_policy::Config::from_toml_str(&source)
     {
-        out.referenced_groups = compiled
-            .registry()
-            .groups()
-            .iter()
-            .map(|group| format!("@{}", group.as_str()))
-            .collect();
-        out.membership = compiled.registry().membership().map(|resolver| MembershipDescription {
-            resolver: resolver.as_str().to_string(),
-            binding_configured: root
-                .get("externals")
-                .and_then(|externals| externals.get("membership"))
-                .and_then(|membership| membership.get(resolver.as_str()))
-                .is_some(),
-        });
+        out.audience = Some(audience_description(&compiled, &|section, name| {
+            root.get("externals")
+                .and_then(|externals| externals.get(section))
+                .and_then(|table| table.get(name))
+                .is_some()
+        }));
     }
 }
 
@@ -180,18 +244,57 @@ pub fn render(path: &Path, adapter: &'static str) -> String {
     }
     let _ = writeln!(output, "Batteries: {}", list_or_none(&config.batteries));
     let _ = writeln!(output, "Policy tools: {}", list_or_none(&policy.tools));
-    let _ = writeln!(output, "Referenced groups: {}", list_or_none(&policy.referenced_groups));
-    match &policy.membership {
-        Some(membership) => {
-            let binding = if membership.binding_configured {
-                "binding configured"
+    let _ = writeln!(output, "Audience chain: self ⊆ internal ⊆ public (built-in)");
+    match &policy.audience {
+        Some(audience) => {
+            if audience.sources.is_empty() {
+                let _ = writeln!(output, "Audience sources: none");
             } else {
-                "binding missing"
-            };
-            let _ = writeln!(output, "Membership: {} ({binding})", membership.resolver);
+                let _ = writeln!(output, "Audience sources:");
+                for source in &audience.sources {
+                    let binding = if source.binding_configured {
+                        "binding configured"
+                    } else {
+                        "binding missing"
+                    };
+                    let _ = writeln!(
+                        output,
+                        "  {}: {} ({binding})",
+                        source.provider,
+                        source.templates.join(", ")
+                    );
+                }
+            }
+            let _ = writeln!(output, "  self from: {}", list_or_none(&audience.self_from));
+            let _ = writeln!(output, "  internal from: {}", list_or_none(&audience.internal_from));
+            if audience.groups.is_empty() {
+                let _ = writeln!(output, "Named audiences: none");
+            } else {
+                let _ = writeln!(output, "Named audiences:");
+                for group in &audience.groups {
+                    let within = group.within.map(|target| format!(" ⊆ {target}")).unwrap_or_default();
+                    let _ = writeln!(output, "  {}{} from {}", group.name, within, group.from.join(", "));
+                }
+            }
+            match &audience.identity {
+                IdentityDescription::VerifiedEmail => {
+                    let _ = writeln!(output, "Identity: verified-email (built-in)");
+                }
+                IdentityDescription::Custom {
+                    name,
+                    binding_configured,
+                } => {
+                    let binding = if *binding_configured {
+                        "binding configured"
+                    } else {
+                        "binding missing"
+                    };
+                    let _ = writeln!(output, "Identity: {name} ({binding})");
+                }
+            }
         }
         None => {
-            let _ = writeln!(output, "Membership: none");
+            let _ = writeln!(output, "Audience configuration: unavailable (policy does not compile)");
         }
     }
     let _ = writeln!(
@@ -226,19 +329,19 @@ mod tests {
     }
 
     #[test]
-    fn loadable_config_reports_batteries_tools_groups_and_membership() {
+    fn loadable_config_reports_batteries_tools_sources_and_identity() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let battery = directory.path().join("batteries/mail");
         std::fs::create_dir_all(&battery).expect("battery directory");
         std::fs::write(
             battery.join("appa.toml"),
-            "[policy]\nversion = 1\n[[policy.tool]]\nname = \"mail_read\"\ndelta = { audience = [\"@self\"] }\n",
+            "[policy]\nversion = 2\n[[policy.tool]]\nname = \"mail_read\"\ndelta = { audience = [\"self\"] }\n",
         )
         .expect("battery config");
         let root = directory.path().join("appa.toml");
         std::fs::write(
             &root,
-            "include = [\"batteries/mail/appa.toml\"]\n[policy]\nversion = 1\n[policy.membership]\nname = \"directory\"\n[externals]\ntimeout_ms = 1000\nmax_body_bytes = 65536\n[externals.membership.directory]\ncommand = [\"true\"]\n",
+            "include = [\"batteries/mail/appa.toml\"]\n[policy]\nversion = 2\n[policy.audience.self]\nfrom = [\"slack:viewer\"]\n[[policy.audience.group]]\nname = \"finance\"\nwithin = \"internal\"\nfrom = [\"slack:user-group/finance\"]\n[policy.identity]\nimplementation = \"corp-identity\"\n[externals]\ntimeout_ms = 1000\nmax_body_bytes = 65536\n[externals.audience.slack]\ncommand = [\"true\"]\n[externals.identity.corp-identity]\ncommand = [\"true\"]\n",
         )
         .expect("root config");
 
@@ -249,13 +352,35 @@ mod tests {
         assert_eq!(config.state, ConfigState::Loadable);
         assert_eq!(config.batteries, ["mail"]);
         assert_eq!(policy.tools, ["mail_read"]);
-        assert_eq!(policy.referenced_groups, ["@self"]);
+        let audience = policy.audience.expect("a loadable policy describes its audience side");
         assert_eq!(
-            policy.membership,
-            Some(MembershipDescription {
-                resolver: "directory".to_string(),
+            audience.sources,
+            [SourceDescription {
+                provider: "slack".to_string(),
+                templates: vec![
+                    "viewer".to_string(),
+                    "full-members".to_string(),
+                    "user-group/<handle>".to_string()
+                ],
                 binding_configured: true,
-            })
+            }]
+        );
+        assert_eq!(audience.self_from, ["slack:viewer"]);
+        assert!(audience.internal_from.is_empty());
+        assert_eq!(
+            audience.groups,
+            [GroupDescription {
+                name: "@finance".to_string(),
+                within: Some("internal"),
+                from: vec!["slack:user-group/finance".to_string()],
+            }]
+        );
+        assert_eq!(
+            audience.identity,
+            IdentityDescription::Custom {
+                name: "corp-identity".to_string(),
+                binding_configured: true,
+            }
         );
     }
 

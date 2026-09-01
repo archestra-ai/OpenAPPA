@@ -42,7 +42,7 @@ async fn an_authority_the_host_never_heard_of_is_still_bound() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let sessions = sessions(&dir, Duration::from_secs(600));
     let policy = r#"
-version = 1
+version = 2
 trust_chain = ["suspicious", "trusted"]
 
 [[tool]]
@@ -70,7 +70,7 @@ async fn a_policy_this_deployment_cannot_run_is_refused_at_creation() {
     // builtin annotator takes no such binding — so a policy naming one cannot
     // run here and is refused when the session is created.
     let policy = r#"
-version = 1
+version = 2
 trust_chain = ["suspicious", "trusted"]
 
 [[annotator]]
@@ -96,7 +96,7 @@ async fn an_annotator_the_playground_does_not_implement_refuses_at_create() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let sessions = sessions(&dir, Duration::from_secs(600));
     let policy = r#"
-version = 1
+version = 2
 trust_chain = ["suspicious", "trusted"]
 
 [[annotator]]

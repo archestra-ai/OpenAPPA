@@ -6,7 +6,8 @@ use std::sync::Arc;
 use crate::elicit::Elicitation;
 
 use crate::consult::{
-    AnnotationAnswer, AnnotationArtifact, Consult, ConsultBody, MembershipArtifact, ReadersAnswer, SanitizerAnswer,
+    AnnotationAnswer, AnnotationArtifact, AudienceSourceArtifact, AudienceSourceDeclaration, Consult, ConsultBody,
+    LookupAnswer, MembersAnswer, PrincipalAnswer, SanitizerAnswer,
 };
 use crate::engine::{
     AuthorityVerdict, EngineDecision, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Feedback, ForkStatus,
@@ -139,6 +140,11 @@ fn return_decision(decision: EngineDecision) -> Result<ChildReturnDecision, Even
 }
 
 const REPLAY_LIMIT: u32 = 8;
+
+/// The most external-resolution rounds one invocation runs before refusing operationally.
+/// Gathering is designed to close at least one ask per round, so this cap never fires on a
+/// healthy deployment; it bounds the blast radius of a gathering bug or a hostile external.
+const RESOLUTION_ROUNDS: u32 = 8;
 
 fn fresh_entropy() -> OfferNonce {
     OfferNonce(rand::random::<[u8; 32]>())
@@ -663,7 +669,7 @@ impl Session {
         // did not hold. Rounds are finite, so a round that changes nothing is the only
         // way this loop fails to converge.
         let mut evidence: Vec<ExternalEvidence> = Vec::new();
-        loop {
+        for _ in 0..RESOLUTION_ROUNDS {
             let carried = evidence.clone();
             let entering = carried.is_empty();
             let decision = self.drive(&policy, opened.take(), entering, |context| {
@@ -698,6 +704,12 @@ impl Session {
                 return Err(EventError::UnexpectedDecision);
             }
         }
+        // Every round is supposed to close at least one ask for good; a run this long is a
+        // gathering bug or a hostile external, and the invocation refuses operationally
+        // rather than hold the turn lease against a source forever.
+        Err(EventError::ResolutionDiverged {
+            rounds: RESOLUTION_ROUNDS,
+        })
     }
 
     fn drive(
@@ -861,21 +873,72 @@ impl Session {
                     answer,
                 }
             }
-            ExternalRequest::Membership { resolver, group } => {
+            ExternalRequest::AudienceSource {
+                provider,
+                selector,
+                templates,
+            } => {
                 let consult = Consult {
-                    name: resolver.clone(),
-                    body: ConsultBody::Membership {
-                        artifact: MembershipArtifact { group: group.clone() },
+                    name: provider.clone(),
+                    body: ConsultBody::AudienceSource {
+                        declaration: AudienceSourceDeclaration {
+                            templates: templates.clone(),
+                        },
+                        artifact: AudienceSourceArtifact::Selector {
+                            selector: selector.clone(),
+                        },
                     },
                 };
-                let readers = match self.deployment.externals.consult(&consult, None).await {
-                    ConsultOutcome::Answer(answer) => ReadersAnswer::from_wire(&answer).map(|answer| answer.readers),
+                let members = match self.deployment.externals.consult(&consult, None).await {
+                    ConsultOutcome::Answer(answer) => MembersAnswer::from_wire(&answer).map(|answer| answer.members),
                     ConsultOutcome::NoAnswer(_) => None,
                 };
-                ExternalEvidence::Membership {
-                    resolver: resolver.clone(),
-                    group: group.clone(),
-                    readers,
+                ExternalEvidence::AudienceSource {
+                    provider: provider.clone(),
+                    selector: selector.clone(),
+                    members,
+                }
+            }
+            ExternalRequest::MemberLookup {
+                provider,
+                member,
+                templates,
+            } => {
+                let consult = Consult {
+                    name: provider.clone(),
+                    body: ConsultBody::AudienceSource {
+                        declaration: AudienceSourceDeclaration {
+                            templates: templates.clone(),
+                        },
+                        artifact: AudienceSourceArtifact::Member { member: member.clone() },
+                    },
+                };
+                let claims = match self.deployment.externals.consult(&consult, None).await {
+                    ConsultOutcome::Answer(answer) => LookupAnswer::from_wire(&answer).map(|answer| answer.claims),
+                    ConsultOutcome::NoAnswer(_) => None,
+                };
+                ExternalEvidence::MemberLookup {
+                    provider: provider.clone(),
+                    member: member.clone(),
+                    claims,
+                }
+            }
+            ExternalRequest::Identity { implementation, claims } => {
+                let consult = Consult {
+                    name: implementation.clone(),
+                    body: ConsultBody::Identity {
+                        artifact: claims.clone(),
+                    },
+                };
+                let principal = match self.deployment.externals.consult(&consult, None).await {
+                    ConsultOutcome::Answer(answer) => PrincipalAnswer::from_wire(&answer)
+                        .map(|answer| appa_engine::label::ReaderId::new(answer.principal)),
+                    ConsultOutcome::NoAnswer(_) => None,
+                };
+                ExternalEvidence::Identity {
+                    implementation: implementation.clone(),
+                    id: claims.id.clone(),
+                    principal,
                 }
             }
         })
@@ -976,7 +1039,7 @@ mod real_engine_tests {
     }
 
     const FETCH_AND_SEND: &str = r#"
-version = 1
+version = 2
 
 # A neutral fetch: its result folds at the trajectory's own label, so the
 # lifecycle tests release it freely. `taint` brings outside content in at the
@@ -1058,7 +1121,7 @@ context_control = true
     #[test]
     fn an_undialectal_policy_refuses_open() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let config = config_with("version = 1\nstray_key = true\n", None);
+        let config = config_with("version = 2\nstray_key = true\n", None);
         assert!(matches!(
             Runtime::open(config, dir.path().join("appa.db"), None),
             Err(OpenError::Policy(_)),
@@ -1069,7 +1132,7 @@ context_control = true
     fn an_inline_impl_binding_is_refused() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let policy = r#"
-version = 1
+version = 2
 [[policy.authority]]
 name = "approver"
 [policy.authority.permits]
@@ -1088,7 +1151,7 @@ builtin = "approve"
     fn a_policy_naming_an_unbound_authority_opens() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let policy = r#"
-version = 1
+version = 2
 [[policy.authority]]
 name = "approver"
 [policy.authority.permits]
@@ -1102,7 +1165,7 @@ attention = ["irreversible"]
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let db = dir.path().join("appa.db");
         let policy = r#"
-version = 1
+version = 2
 [[policy.tool]]
 name = "fetch"
 [policy.deployment]
@@ -1135,7 +1198,7 @@ starting_label = { trust = "suspicious" }
     fn a_reserved_tool_name_refuses_open() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let policy = r#"
-version = 1
+version = 2
 [[policy.tool]]
 name = "execute_remedy_plan"
 "#;
@@ -1401,7 +1464,7 @@ name = "execute_remedy_plan"
     }
 
     const READ_ONLY: &str = r#"
-version = 1
+version = 2
 
 [[policy.tool]]
 name = "read"
@@ -1661,12 +1724,17 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
     }
 
     #[tokio::test]
-    async fn rewritten_group_resolutions_refuse_the_log() {
-        let directory = {
+    async fn tampered_audience_evidence_refuses_the_log() {
+        let source = {
             use axum::routing::post;
             let app = axum::Router::new().route(
                 "/",
-                post(|| async { axum::Json(serde_json::json!({"version": 1, "answer": {"readers": ["carol"]}})) }),
+                post(|| async {
+                    axum::Json(serde_json::json!({
+                        "version": 1,
+                        "answer": {"members": [{"id": "slack:U1", "verified_email": "alice@corp.example"}]}
+                    }))
+                }),
             );
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
                 .await
@@ -1678,17 +1746,22 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
             format!("http://{addr}/")
         };
         let policy = r#"
-version = 1
+version = 2
 
-[policy.membership]
-name = "directory"
+[[policy.audience.group]]
+name = "team"
+from = ["slack:user-group/team"]
 
 [[policy.tool]]
-name = "read"
-delta = { audience = ["@team"] }
+name = "send"
+requires = { audience = { contains = ["@team"] } }
+delta = {}
+
+[policy.deployment]
+starting_label = { audience = ["alice@corp.example"] }
 "#;
         let text = format!(
-            "[policy]\n{policy}\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n[externals.membership.directory]\nurl = \"{directory}\"\n"
+            "[policy]\n{policy}\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n[externals.audience.slack]\nurl = \"{source}\"\n"
         );
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let path = dir.path().join("appa.toml");
@@ -1696,13 +1769,14 @@ delta = { audience = ["@team"] }
         let config = Config::load(&path).expect("the fixture validates");
         let runtime = Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens");
         let session = runtime.create_session(root()).expect("a fresh id opens");
-        let read = ProposedCall {
-            tool: "read".to_string(),
+        let send = ProposedCall {
+            tool: "send".to_string(),
             arguments: raw(serde_json::json!({})),
         };
+        // The source reports Alice, whose principal the starting audience holds: released.
         assert!(matches!(
-            session.on_tool_call(read.clone(), false).await,
-            Ok(ToolCallDecision::Deny { .. })
+            session.on_tool_call(send.clone(), false).await,
+            Ok(ToolCallDecision::Allow { .. })
         ));
         let released: Vec<_> = runtime
             .log_facts(&root())
@@ -1711,16 +1785,16 @@ delta = { audience = ["@team"] }
             .collect();
         let persisted = serde_json::to_string(&released).expect("the batch serializes");
         assert!(
-            persisted.contains("\"carol\""),
-            "the decision persists the readers it read"
+            persisted.contains("alice@corp.example"),
+            "the decision pins the claims it read: {persisted}"
         );
-        let tampered = persisted.replace("\"readers\":[\"carol\"]", "\"readers\":[\"mallory\"]");
+        let tampered = persisted.replace("alice@corp.example", "mallory@evil.example");
         assert_ne!(tampered, persisted);
         runtime
             .store()
             .corrupt_batch(&crate::engine::engine_id(&root()), 1, tampered.as_bytes());
         assert!(matches!(
-            session.on_tool_call(read, false).await,
+            session.on_tool_call(send, false).await,
             Err(EventError::UntrustedLog(_)),
         ));
     }
@@ -1802,7 +1876,7 @@ delta = { audience = ["@team"] }
     #[tokio::test]
     async fn a_marked_spawn_without_context_control_releases_unmarked() {
         const UNCONTROLLED: &str = r#"
-version = 1
+version = 2
 
 [[policy.tool]]
 name = "spawn"
@@ -1953,7 +2027,7 @@ context_control = false
     }
 
     const ATTENTION: &str = r#"
-version = 1
+version = 2
 
 [[policy.tool]]
 name = "wire"
@@ -2194,7 +2268,7 @@ attention = ["irreversible"]
     }
 
     const SUBSTITUTED_SEND: &str = r#"
-version = 1
+version = 2
 
 [[policy.tool]]
 name = "read_hr"
@@ -2214,7 +2288,7 @@ audience = { from = ["hr"], to = ["public"] }
 "#;
 
     const SUBSTITUTED_ATTENDED_SEND: &str = r#"
-version = 1
+version = 2
 
 [[policy.tool]]
 name = "read_hr"
@@ -2239,7 +2313,7 @@ attention = ["irreversible"]
 "#;
 
     const SUBSTITUTED_SEND_FORKING: &str = r#"
-version = 1
+version = 2
 
 [[policy.tool]]
 name = "read_hr"
@@ -2646,7 +2720,7 @@ context_control = true
     }
 
     const SANITIZED_CHILD: &str = r#"
-version = 1
+version = 2
 
 [[policy.tool]]
 name = "fetch"
@@ -2655,7 +2729,7 @@ name = "fetch"
 name = "scrub"
 on = ["tool_output"]
 [policy.sanitizer.permits]
-audience = { from = ["internal"], to = ["public"] }
+audience = { from = ["insider"], to = ["public"] }
 
 [policy.child]
 return_sanitizer = "scrub"
@@ -2753,7 +2827,7 @@ confined_child_return = true
     }
 
     const ATTESTED_CHILD: &str = r#"
-version = 1
+version = 2
 
 [[policy.sanitizer]]
 name = "attest-schema"
@@ -2767,7 +2841,7 @@ confined_child_return = true
 "#;
 
     const ATTESTED_CHILD_COMPOSED: &str = r#"
-version = 1
+version = 2
 
 [[sanitizer]]
 name = "attest-schema"
@@ -2781,7 +2855,7 @@ confined_child_return = true
 "#;
 
     const ATTEST_BOUND_CHILD: &str = r#"
-version = 1
+version = 2
 
 [[policy.sanitizer]]
 name = "attest-schema"
@@ -2880,7 +2954,7 @@ confined_child_return = true
             },
         );
         let config = Config::embedded(
-            "version = 1\n\n[deployment]\ncontext_control = true\n".to_string(),
+            "version = 2\n\n[deployment]\ncontext_control = true\n".to_string(),
             externals,
         )
         .expect("the policy embeds");
@@ -2891,18 +2965,18 @@ confined_child_return = true
     }
 
     const NARROWING: &str = r#"
-version = 1
+version = 2
 
 [[policy.tool]]
 name = "leak"
 parameters = { type = "object", properties = { q = { type = "string" } } }
-delta = { audience = ["internal"] }
+delta = { audience = ["insider"] }
 
 [[policy.sanitizer]]
 name = "scrub"
 on = ["tool_output"]
 [policy.sanitizer.permits]
-audience = { from = ["internal"], to = ["public"] }
+audience = { from = ["insider"], to = ["public"] }
 
 [policy.deployment]
 confined_results = ["leak"]
@@ -2916,19 +2990,19 @@ confined_results = ["leak"]
     }
 
     const EMITTING_LEAK: &str = r#"
-version = 1
+version = 2
 
 [[policy.tool]]
 name = "leak"
 parameters = { type = "object", properties = { q = { type = "string" } } }
 effects = ["leak"]
-delta = { audience = ["internal"] }
+delta = { audience = ["insider"] }
 
 [[policy.sanitizer]]
 name = "scrub"
 on = ["tool_output"]
 [policy.sanitizer.permits]
-audience = { from = ["internal"], to = ["public"] }
+audience = { from = ["insider"], to = ["public"] }
 
 [policy.deployment]
 confined_results = ["leak"]
@@ -3001,18 +3075,18 @@ confined_results = ["leak"]
     /// that clears only one: the derivation is admitted and staged, and
     /// the residual narrowing is what the model is told about.
     const PARTLY_CLEARED: &str = r#"
-version = 1
+version = 2
 
 [[policy.tool]]
 name = "leak"
 parameters = { type = "object", properties = { q = { type = "string" } } }
-delta = { audience = ["internal"], trust = "suspicious" }
+delta = { audience = ["insider"], trust = "suspicious" }
 
 [[policy.sanitizer]]
 name = "scrub"
 on = ["tool_output"]
 [policy.sanitizer.permits]
-audience = { from = ["internal"], to = ["public"] }
+audience = { from = ["insider"], to = ["public"] }
 
 [policy.deployment]
 confined_results = ["leak"]
@@ -3054,7 +3128,7 @@ confined_results = ["leak"]
     }
 
     const PARTLY_CLEARED_CHILD: &str = r#"
-version = 1
+version = 2
 
 [[policy.tool]]
 name = "fetch"
@@ -3067,7 +3141,7 @@ delta = { trust = "suspicious" }
 name = "scrub"
 on = ["tool_output"]
 [policy.sanitizer.permits]
-audience = { from = ["internal"], to = ["public"] }
+audience = { from = ["insider"], to = ["public"] }
 
 [policy.child]
 return_sanitizer = "scrub"
@@ -3174,7 +3248,7 @@ confined_child_return = true
     }
 
     const MARKED: &str = r#"
-version = 1
+version = 2
 
 # A neutral second tool: its result folds at the trajectory's own label.
 [[policy.tool]]
@@ -4455,7 +4529,7 @@ context_control = true
     fn bash_dispatch(label: &str) -> appa_engine::value::DispatchId {
         let policy = appa_policy::Config::from_toml_str(
             r#"
-                version = 1
+                version = 2
                 [[tool]]
                 name = "Bash"
             "#,

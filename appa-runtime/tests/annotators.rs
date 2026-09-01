@@ -140,11 +140,11 @@ fn http_policy(url: &str) -> String {
     format!(
         r#"
 [policy]
-version = 1
+version = 2
 
 [[policy.annotator]]
 name = "classifier"
-audiences = ["internal"]
+audiences = ["insider"]
 
 [[policy.tool]]
 name = "fetch"
@@ -176,7 +176,7 @@ delta = {}
     format!(
         r#"
 [policy]
-version = 1
+version = 2
 
 [[policy.annotator]]
 name = "classifier"
@@ -235,7 +235,7 @@ async fn an_http_annotator_annotates_the_complete_call_and_a_fresh_proposal_cons
         serde_json::json!({
             "inputs": [],
             "trust_ranks": ["suspicious", "trusted"],
-            "audiences": ["internal"],
+            "audiences": ["insider"],
             "attention_marks": [],
             "effects": [],
         })
@@ -277,7 +277,7 @@ async fn only_the_selected_declaration_consults_its_annotator() {
     let config = format!(
         r#"
 [policy]
-version = 1
+version = 2
 
 [[policy.annotator]]
 name = "classifier"
@@ -419,10 +419,10 @@ async fn a_mapped_input_shows_the_annotator_one_argument() {
     annotator.set("classifier", Answer::Wire(produced("trusted")));
     let config = http_policy(&url).replace(
         r#"name = "classifier"
-audiences = ["internal"]"#,
+audiences = ["insider"]"#,
         r#"name = "classifier"
 inputs = { subject = "$tool_call.arguments.url" }
-audiences = ["internal"]"#,
+audiences = ["insider"]"#,
     );
     let runtime = open_runtime(&dir, &config).await;
 
@@ -493,7 +493,7 @@ fn builtin_policy(command: &std::path::Path, extra: &str) -> String {
     format!(
         r#"
 [policy]
-version = 1
+version = 2
 
 [[policy.annotator]]
 name = "classifier"
@@ -658,7 +658,7 @@ async fn a_declared_llm_annotator_consults_the_llm_profile_and_no_binding() {
     let config = format!(
         r#"
 [policy]
-version = 1
+version = 2
 
 [[policy.annotator]]
 name = "classifier"
@@ -785,9 +785,9 @@ async fn a_produced_history_requirement_gates_on_the_effects_a_prior_release_com
     );
     let config = http_policy(&url).replace(
         r#"name = "classifier"
-audiences = ["internal"]"#,
+audiences = ["insider"]"#,
         r#"name = "classifier"
-audiences = ["internal"]
+audiences = ["insider"]
 effects = ["egress"]"#,
     );
     let runtime = open_runtime(&dir, &config).await;
@@ -815,7 +815,7 @@ fn wildcard_policy(url: &str) -> String {
     format!(
         r#"
 [policy]
-version = 1
+version = 2
 
 [[policy.annotator]]
 name = "gatekeeper"

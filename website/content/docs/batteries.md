@@ -29,7 +29,7 @@ include = [
 ]
 
 [policy]
-version = 1
+version = 2
 ```
 
 OpenAPPA combines these files into one config.
@@ -199,7 +199,7 @@ include = [
 ]
 
 [policy]
-version = 1
+version = 2
 
 [[policy.tool]]
 name = "Bash(command:kubectl)"
@@ -228,6 +228,10 @@ Every other Bash call reaches the battery's model annotator. The root also uses
 a local script for `Read`.
 
 The battery files stay unchanged.
+
+## Audience sources
+
+This build ships one audience source per provider — `google-workspace`, `slack`, and `github` — each with a fixed set of selector templates, available with no include. A policy maps their collections into the built-in `self` and `internal` audiences and into `[[audience.group]]` entries; only providers the policy references enter the policy identity. The [Policy reference](/contracts#audiences) has the catalog, the level rules, and the consult each source answers.
 
 ## Refuse when a script fails
 

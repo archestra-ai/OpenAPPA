@@ -8,7 +8,7 @@ use appa_runtime::{config::Config, hooks};
 use appa_runtime_api::{Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, ToolOutcome, TrajectoryId};
 
 fn policy_with(tools: &str) -> String {
-    format!("[policy]\nversion = 1\n{tools}\n[externals]\ntimeout_ms = 1000\nmax_body_bytes = 4096\n")
+    format!("[policy]\nversion = 2\n{tools}\n[externals]\ntimeout_ms = 1000\nmax_body_bytes = 4096\n")
 }
 
 fn with_notes() -> String {
@@ -259,12 +259,12 @@ async fn reload_rereads_includes_and_a_broken_include_refuses() {
     let battery_path = dir.path().join("battery.toml");
     std::fs::write(
         &root_path,
-        "include = [\"battery.toml\"]\n[policy]\nversion = 1\n[externals]\ntimeout_ms = 1000\nmax_body_bytes = 4096\n",
+        "include = [\"battery.toml\"]\n[policy]\nversion = 2\n[externals]\ntimeout_ms = 1000\nmax_body_bytes = 4096\n",
     )
     .expect("the root config writes");
     std::fs::write(
         &battery_path,
-        "[policy]\nversion = 1\n[[policy.tool]]\nname = \"notes\"\n",
+        "[policy]\nversion = 2\n[[policy.tool]]\nname = \"notes\"\n",
     )
     .expect("the battery writes");
     let runtime = Arc::new(
@@ -276,10 +276,10 @@ async fn reload_rereads_includes_and_a_broken_include_refuses() {
         .expect("the runtime opens"),
     );
 
-    std::fs::write(&battery_path, "[policy]\nversion = 1\nlimits = {}\n").expect("the broken battery writes");
+    std::fs::write(&battery_path, "[policy]\nversion = 2\nlimits = {}\n").expect("the broken battery writes");
     assert!(Config::load(&root_path).is_err(), "a broken include must refuse");
 
-    std::fs::write(&battery_path, "[policy]\nversion = 1\n").expect("the edited battery writes");
+    std::fs::write(&battery_path, "[policy]\nversion = 2\n").expect("the edited battery writes");
     let reloaded = runtime
         .reload(Config::load(&root_path).expect("the edited include loads"))
         .expect("the composed deployment reloads");

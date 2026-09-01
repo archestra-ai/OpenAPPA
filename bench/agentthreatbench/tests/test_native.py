@@ -186,7 +186,7 @@ def test_guarded_autonomy_child_crosses_only_bounded_attested_actions() -> None:
 
 
 CHILD_POLICY = """
-version = 1
+version = 2
 trust_chain = ["suspicious", "attested", "trusted"]
 
 [[tool]]

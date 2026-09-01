@@ -170,6 +170,8 @@ pub(crate) enum EventError {
     BindingMismatch,
     #[error("the family log stayed contended after {attempts} replays")]
     Contended { attempts: u32 },
+    #[error("external resolution did not settle after {rounds} rounds")]
+    ResolutionDiverged { rounds: u32 },
     #[error("the engine returned a follow-up this event cannot deliver")]
     UnexpectedDecision,
     #[error("the persisted log is refused: {0}")]
@@ -200,6 +202,7 @@ impl EventError {
             | EventError::PolicyUnavailable(_)
             | EventError::EngineInvariant(_)
             | EventError::Contended { .. }
+            | EventError::ResolutionDiverged { .. }
             | EventError::AnnotationRefused { .. }
             | EventError::UndeclaredTool { .. }
             | EventError::UnexpectedDecision => true,
@@ -900,9 +903,20 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
     }
     bound_exactly("annotator", bound_by_deployment.into_iter(), &externals.annotators)?;
     bound_exactly(
-        "membership resolver",
-        rc.membership.iter().map(|resolver| resolver.as_str()),
-        &externals.membership,
+        "audience source",
+        rc.audience.sources.iter().map(|source| source.provider.as_str()),
+        &externals.audience,
+    )?;
+    // The shipped `verified-email` implementation is engine-computed and takes no binding;
+    // only a policy-selected custom implementation binds, exactly once.
+    let custom_identity = match &rc.audience.identity {
+        Some(appa_engine::audience::IdentityImplementation::Custom(name)) => Some(name.as_str()),
+        Some(appa_engine::audience::IdentityImplementation::VerifiedEmail) | None => None,
+    };
+    bound_exactly(
+        "identity implementation",
+        custom_identity.into_iter(),
+        &externals.identity,
     )?;
     Ok(())
 }
@@ -963,7 +977,7 @@ fn compile_stored_policy(bytes: &[u8]) -> Result<appa_policy::Config, String> {
 pub(crate) mod testing {
     fn engine_dispatch(label: &str) -> appa_engine::value::DispatchId {
         let policy = appa_policy::Config::from_toml_str(
-            "version = 1
+            "version = 2
 [[tool]]
 name = \"Bash\"
 ",
@@ -1012,7 +1026,7 @@ mod deployment_tests {
     fn a_claude_builtin_deployment_opens_without_an_endpoint() {
         let tool_level = claude_config(
             r#"
-                version = 1
+                version = 2
                 [[annotator]]
                 name = "classifier"
                 builtin = "claude-code"
@@ -1031,7 +1045,7 @@ mod deployment_tests {
         let config = || {
             claude_config(
                 r#"
-                version = 1
+                version = 2
                 [[annotator]]
                 name = "classifier"
                 builtin = "claude-code"
@@ -1058,7 +1072,7 @@ mod deployment_tests {
         // recompiling them is the trust gate, and it runs before any fact replays.
         let legacy = br#"
 [policy]
-version = 1
+version = 2
 [[policy.dynamic_resolver]]
 name = "directory"
 [[policy.tool]]
@@ -1077,7 +1091,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     fn every_annotator_has_its_own_implementation() {
         let mut config = claude_config(
             r#"
-                version = 1
+                version = 2
                 [[annotator]]
                 name = "bash-classifier"
                 builtin = "claude-code"
@@ -1104,7 +1118,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     #[test]
     fn an_authority_may_stay_unbound_but_its_binding_must_be_declared() {
         let policy = r#"
-            version = 1
+            version = 2
             [[authority]]
             name = "reviewer"
             [authority.permits]
@@ -1129,7 +1143,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     #[test]
     fn missing_and_undeclared_annotator_implementations_are_refused() {
         let policy = r#"
-            version = 1
+            version = 2
             [[annotator]]
             name = "classifier"
             [[tool]]
@@ -1156,7 +1170,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     fn a_builtin_annotator_takes_no_deployment_binding() {
         let mut bound = claude_config(
             r#"
-                version = 1
+                version = 2
                 [[annotator]]
                 name = "classifier"
                 builtin = "claude-code"
@@ -1178,7 +1192,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     #[test]
     fn a_declared_llm_annotator_needs_the_llm_table_at_open_and_reload() {
         let policy = r#"
-            version = 1
+            version = 2
             [[annotator]]
             name = "classifier"
             builtin = "llm"
@@ -1216,7 +1230,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     #[test]
     fn the_llm_gate_follows_the_serving_deployment_and_never_a_refused_one() {
         let policy = r#"
-            version = 1
+            version = 2
             [[annotator]]
             name = "classifier"
             builtin = "llm"
@@ -1292,7 +1306,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     fn versioned_policy(description: &str) -> Config {
         claude_config(&format!(
             r#"
-            version = 1
+            version = 2
             [[tool]]
             name = "fetch"
             description = "{description}"

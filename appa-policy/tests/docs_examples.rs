@@ -32,7 +32,7 @@ fn toml_fences(reference: &str) -> Vec<&str> {
 fn as_policy(fence: &str) -> String {
     match fence.starts_with("version") {
         true => fence.to_string(),
-        false => format!("version = 1\n\n{fence}"),
+        false => format!("version = 2\n\n{fence}"),
     }
 }
 

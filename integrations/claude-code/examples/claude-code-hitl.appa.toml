@@ -33,7 +33,7 @@
 # fail-closed default: name the ones your session needs.
 
 [policy]
-version = 1
+version = 2
 
 # --- tools whose results stay inside the session's trust boundary ---
 

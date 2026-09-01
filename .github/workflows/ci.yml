@@ -68,7 +68,10 @@ jobs:
           jq -e .plugins integrations/claude-code/.claude-plugin/marketplace.json >/dev/null
 
       - name: Test battery externals
-        run: python3 -m unittest discover -s batteries/claude-code -p 'test_*.py'
+        run: |
+          for dir in $(dirname batteries/test_*.py batteries/*/test_*.py | sort -u); do
+            python3 -m unittest discover -s "$dir" -p 'test_*.py'
+          done
 
       - name: Check release versions
         run: |

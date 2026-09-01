@@ -146,7 +146,7 @@ mod tests {
     #[test]
     fn a_wildcard_advertises_the_covered_tools_under_their_own_names() {
         let crm: BTreeSet<System> = [System::Crm].into_iter().collect();
-        let policy = "version = 1\n[[annotator]]\nname = \"email-recipient-readers\"\n[[tool]]\nname = \"*\"\nannotator = \"email-recipient-readers\"\n";
+        let policy = "version = 2\n[[annotator]]\nname = \"email-recipient-readers\"\n[[tool]]\nname = \"*\"\nannotator = \"email-recipient-readers\"\n";
         let checked = check_policy(policy, &crm).expect("the wildcard policy loads");
         let advertised = advertised(&checked.config, &crm);
         let mut names: Vec<&str> = advertised.iter().map(|tool| tool.function.name.as_str()).collect();

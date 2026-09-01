@@ -24,9 +24,13 @@
 #   audience = { contains = ["private"] }
 #   #
 # To cover a whole organisation instead, match `owner:my-org`.
+#
+# The battery also ships `audience-source.py`, the `github` audience
+# source. Audience mappings are root-only, so the binding sits beside
+# them in the root config, not here — the README shows the wiring.
 
 [policy]
-version = 1
+version = 2
 
 # --- who am I: no outside content, nothing sent ---
 

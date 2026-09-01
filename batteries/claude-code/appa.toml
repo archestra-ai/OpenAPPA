@@ -1,7 +1,7 @@
 # Optional Claude Code rules for Bash and Read.
 
 [policy]
-version = 1
+version = 2
 
 # The stock model annotator produces Bash's complete contract before dispatch:
 # the labels on its output and the trust, audience, and review marks the

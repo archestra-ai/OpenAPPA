@@ -218,10 +218,8 @@ pub enum Fact {
         /// the registry at replay, which the opening's policy identity already fixes
         /// byte-for-byte.
         annotation: Option<crate::contract::PinnedAnnotation>,
-        #[serde(default)]
-        memberships: Vec<crate::contract::PinnedMembership>,
-        #[serde(default)]
-        resolutions: Vec<crate::groups::GroupResolution>,
+        #[serde(default, skip_serializing_if = "crate::audience::AudienceEvidence::is_empty")]
+        evidence: crate::audience::AudienceEvidence,
         subject: crate::basis::SubjectKey,
     },
     DispatchSucceeded {
@@ -242,8 +240,8 @@ pub enum Fact {
         authority: AuthorityName,
         covers: Vec<Gap>,
         reviewed: AuthorityReview,
-        #[serde(default)]
-        resolutions: Vec<crate::groups::GroupResolution>,
+        #[serde(default, skip_serializing_if = "crate::audience::AudienceEvidence::is_empty")]
+        evidence: crate::audience::AudienceEvidence,
     },
     Denial {
         trajectory: TrajectoryId,
@@ -267,8 +265,8 @@ pub enum Fact {
         plan: PlanId,
         sanitizer: SanitizerName,
         contribution: Label,
-        #[serde(default)]
-        resolutions: Vec<crate::groups::GroupResolution>,
+        #[serde(default, skip_serializing_if = "crate::audience::AudienceEvidence::is_empty")]
+        evidence: crate::audience::AudienceEvidence,
     },
     CandidateDerived {
         trajectory: TrajectoryId,
@@ -276,8 +274,8 @@ pub enum Fact {
         via: DerivedVia,
         derived: DerivedCandidate,
         lineage: SanitizerLineage,
-        #[serde(default)]
-        resolutions: Vec<crate::groups::GroupResolution>,
+        #[serde(default, skip_serializing_if = "crate::audience::AudienceEvidence::is_empty")]
+        evidence: crate::audience::AudienceEvidence,
     },
     CandidateAccepted {
         trajectory: TrajectoryId,
@@ -290,8 +288,8 @@ pub enum Fact {
         id: ChildReturnId,
         value: LabeledValue,
         derivation: ReturnDerivation,
-        #[serde(default)]
-        resolutions: Vec<crate::groups::GroupResolution>,
+        #[serde(default, skip_serializing_if = "crate::audience::AudienceEvidence::is_empty")]
+        evidence: crate::audience::AudienceEvidence,
     },
     ReturnSubmitted {
         trajectory: TrajectoryId,
@@ -302,8 +300,8 @@ pub enum Fact {
         digest: RawResultDigest,
         body: crate::value::ValueBody,
         policy: ReturnPolicy,
-        #[serde(default)]
-        resolutions: Vec<crate::groups::GroupResolution>,
+        #[serde(default, skip_serializing_if = "crate::audience::AudienceEvidence::is_empty")]
+        evidence: crate::audience::AudienceEvidence,
     },
     ReturnRejected {
         trajectory: TrajectoryId,
@@ -311,8 +309,8 @@ pub enum Fact {
         fork: ForkId,
         digest: RawResultDigest,
         reason: ReturnRejection,
-        #[serde(default)]
-        resolutions: Vec<crate::groups::GroupResolution>,
+        #[serde(default, skip_serializing_if = "crate::audience::AudienceEvidence::is_empty")]
+        evidence: crate::audience::AudienceEvidence,
     },
     /// One proposal batch was decided: the identity the runtime supplied and the
     /// policy content it was bound to. This is the decision boundary itself, so replay reads it
@@ -330,8 +328,8 @@ pub enum Fact {
         proposals: Vec<crate::value::ResolvedCall>,
         spawn: Option<crate::transition::SpawnMark>,
         released: Vec<DispatchId>,
-        #[serde(default)]
-        resolutions: Vec<crate::groups::GroupResolution>,
+        #[serde(default, skip_serializing_if = "crate::audience::AudienceEvidence::is_empty")]
+        evidence: crate::audience::AudienceEvidence,
     },
     /// One executable plan of one surfaced block, bound to the identity the model will name to
     /// execute it.
@@ -353,8 +351,8 @@ pub enum Fact {
         subject: crate::basis::SubjectKey,
         plan: crate::plan::ExecutableRemedyPlan,
         basis: crate::basis::PolicyBasis,
-        #[serde(default)]
-        resolutions: Vec<crate::groups::GroupResolution>,
+        #[serde(default, skip_serializing_if = "crate::audience::AudienceEvidence::is_empty")]
+        evidence: crate::audience::AudienceEvidence,
     },
     /// The agent selected this offer, and the engine prepared what its plan promised. Terminal: an offer is accepted once and never revives.
     ///
@@ -384,8 +382,8 @@ pub enum Fact {
         rulings: Vec<crate::execute::AuthorityEvidence>,
         sanitizer: Option<SanitizerName>,
         basis: crate::basis::PolicyBasis,
-        #[serde(default)]
-        resolutions: Vec<crate::groups::GroupResolution>,
+        #[serde(default, skip_serializing_if = "crate::audience::AudienceEvidence::is_empty")]
+        evidence: crate::audience::AudienceEvidence,
     },
     CallApprovalConsumed {
         trajectory: TrajectoryId,
@@ -415,6 +413,25 @@ pub enum Fact {
 }
 
 impl Fact {
+    /// The pinned audience evidence a record carries in its own field. A provider-run
+    /// [`Fact::ValueAdmitted`] carries evidence inside its provenance instead, and the
+    /// batch that lands it is bound to its act already.
+    pub(crate) fn audience_evidence(&self) -> Option<&crate::audience::AudienceEvidence> {
+        match self {
+            Fact::DispatchOpened { evidence, .. }
+            | Fact::Ruling { evidence, .. }
+            | Fact::OutputSanitizerBound { evidence, .. }
+            | Fact::CandidateDerived { evidence, .. }
+            | Fact::ChildReturn { evidence, .. }
+            | Fact::ReturnSubmitted { evidence, .. }
+            | Fact::ReturnRejected { evidence, .. }
+            | Fact::ProposalBatchDecided { evidence, .. }
+            | Fact::OfferOpened { evidence, .. }
+            | Fact::CallApproved { evidence, .. } => Some(evidence),
+            _ => None,
+        }
+    }
+
     pub fn trajectory(&self) -> &TrajectoryId {
         match self {
             Fact::TrajectoryOpened { trajectory, .. }

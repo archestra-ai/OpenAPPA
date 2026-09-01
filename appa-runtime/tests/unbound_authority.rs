@@ -12,7 +12,7 @@ use appa_runtime_api::{Actor, HookDecision, HookEvent, ProposedCall, TrajectoryI
 
 const POLICY: &str = r#"
 [policy]
-version = 1
+version = 2
 
 [[policy.tool]]
 name = "publish"

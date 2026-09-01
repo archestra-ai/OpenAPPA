@@ -20,7 +20,7 @@
 #   `send_email` (no authority may widen an audience — that block is terminal).
 
 [policy]
-version = 1
+version = 2
 trust_chain = ["suspicious", "vendor", "internal"]
 
 # User turns enter at internal trust with a public audience (also the loader's

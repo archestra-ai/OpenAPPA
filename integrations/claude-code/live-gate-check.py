@@ -41,7 +41,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 POLICY = """[policy]
-version = 1
+version = 2
 
 [[policy.tool]]
 name = "Read"

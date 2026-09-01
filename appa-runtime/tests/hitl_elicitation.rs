@@ -16,7 +16,7 @@ fn policy(review_timeout_ms: u64) -> String {
 
 const POLICY: &str = r#"
 [policy]
-version = 1
+version = 2
 
 [[policy.tool]]
 name = "read_notes"
@@ -199,7 +199,7 @@ async fn dynamic_deployment() -> Deployment {
     let policy = format!(
         r#"
 [policy]
-version = 1
+version = 2
 
 [[policy.annotator]]
 name = "classifier"

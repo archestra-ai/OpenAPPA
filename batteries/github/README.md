@@ -28,6 +28,56 @@ Gists, Notifications, Projects, security alerts) are not listed here.
 A tool the policy does not name is blocked; add rules for them in your
 root config if you enable those sets.
 
+**`audience-source.py`** — the `github` audience source. It answers the
+stock catalog's selectors over the GitHub REST API:
+
+- `github:viewer` — the token's own principal, with its primary
+  verified email from `/user/emails`. Feeds `self`.
+- `github:org/<org>/members` — one organization's members, bots
+  excluded. Feeds `internal`, and only for the organizations a policy
+  names — membership in unrelated, open-source, or personal
+  organizations never implies `internal`.
+- `github:org/<org>/team/<team>` — one organization team, by slug.
+  Feeds `[[audience.group]]` entries.
+
+It also answers the member lookup that canonicalizes a
+`github:<login>` reader. Only the viewer carries a verified email: a
+profile's public email is whatever its owner typed, so every other
+member keeps the bare `github:<login>` identity and distinct
+identities never merge by guess.
+
+The source is not wired by this file: audience mappings are root-only,
+and the binding must sit beside them. In the root config:
+
+```toml
+[policy.audience.self]
+from = ["github:viewer"]
+
+[policy.audience.internal]
+from = ["github:org/archestra-ai/members"]
+
+[[policy.audience.group]]
+name = "finance"
+within = "internal"
+from = ["github:org/archestra-ai/team/finance"]
+
+[externals.audience.github]
+command = ["python3", "batteries/github/audience-source.py"]
+```
+
+A command path is resolved against the directory of the config file
+that names it, so write the path as your root config sees the battery.
+
+The script reads its token from `OPENAPPA_GITHUB_TOKEN`. The token needs
+the `read:org` and `user:email` scopes. The runtime strips every
+`APPA_*` variable from a command it runs — its own credentials never
+reach an external — so a source's token must be named outside that
+prefix. Any GitHub error or missing answer stops the operation without
+recording a decision; nothing is guessed.
+
+**`test_audience_source.py`** — fixture tests over recorded GitHub REST
+payloads, no network. Run with `python3 test_audience_source.py`.
+
 ## Change the behaviour
 
 The default assumes public repositories. For a private repository, add

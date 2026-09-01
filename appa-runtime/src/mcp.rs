@@ -138,7 +138,7 @@ mod tests {
     fn config() -> Config {
         let text = r#"
             [policy]
-            version = 1
+            version = 2
             [externals]
             timeout_ms = 1000
             max_body_bytes = 4096
@@ -199,7 +199,7 @@ mod tests {
     ) {
         let policy = r#"
             [policy]
-            version = 1
+            version = 2
 
             [[policy.tool]]
             name = "wire"

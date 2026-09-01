@@ -36,17 +36,17 @@
 //! the plan from the live views and matches it by value, so an offer whose
 //! basis has moved declines instead of executing.
 
+use appa_engine::audience::{AudienceEvidence, IdentityImplementation, IdentityMapping, MemberClaims, SelectorSpec};
 use appa_engine::contract::{
-    AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, PinnedAnnotation, PinnedMembership,
-    ProducedAnnotation, RecipientSpec, Requires, ToolAnnotation, ToolDeclaration,
+    AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, PinnedAnnotation, ProducedAnnotation,
+    RecipientSpec, Requires, ToolDeclaration,
 };
 pub(crate) use appa_engine::engine::ForkStatus;
 use appa_engine::engine::{Engine, EngineError};
 use appa_engine::execute::{AuthorityEvidence, AuthorityReview};
 use appa_engine::fact::{BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ReturnDerivation};
-use appa_engine::groups::{DeclaredAudience, GroupExpansion};
-use appa_engine::label::{Audience, Label, ReaderId, Trust};
-use appa_engine::names::{GroupName, MarkName};
+use appa_engine::label::{Audience, Clause, DeclaredAudience, Label, ReaderId, SymbolicAtom, Trust};
+use appa_engine::names::MarkName;
 use appa_engine::plan::{ExecutableRemedyPlan, PlanId, PlannedBlock, RemedyPlan, RequiredRuling};
 use appa_engine::profile::PolicyFileKey as EnginePolicyFileKey;
 use appa_engine::projection::Views;
@@ -125,9 +125,27 @@ pub enum ExternalRequest {
         /// The consult artifact: the complete call, or one value per declared input.
         args: serde_json::Value,
     },
-    Membership {
-        resolver: String,
-        group: String,
+    /// One audience source read: the members of one selector's collection at the
+    /// registered source of `provider`.
+    AudienceSource {
+        provider: String,
+        selector: String,
+        /// The selector templates the policy registers for the provider: the consult's
+        /// declaration.
+        templates: Vec<String>,
+    },
+    /// One member lookup at its provider's source: the claims for one qualified reader.
+    MemberLookup {
+        provider: String,
+        member: String,
+        templates: Vec<String>,
+    },
+    /// One custom identity canonicalization: the principal for one member's claims. Only a
+    /// policy-selected custom implementation is consulted; the shipped `verified-email`
+    /// normalization is deterministic and recomputed by the engine.
+    Identity {
+        implementation: String,
+        claims: MemberClaims,
     },
 }
 
@@ -152,10 +170,22 @@ pub enum ExternalEvidence {
         call: appa_engine::value::CanonicalDigest,
         answer: AnnotationAnswer,
     },
-    Membership {
-        resolver: String,
-        group: String,
-        readers: Option<Vec<String>>,
+    AudienceSource {
+        provider: String,
+        selector: String,
+        members: Option<Vec<MemberClaims>>,
+    },
+    MemberLookup {
+        provider: String,
+        member: String,
+        /// `None`: the consult produced no answer. `Some(None)`: the provider definitively
+        /// does not know the member, who keeps its qualified identity.
+        claims: Option<Option<MemberClaims>>,
+    },
+    Identity {
+        implementation: String,
+        id: String,
+        principal: Option<ReaderId>,
     },
 }
 
@@ -854,21 +884,22 @@ impl RuntimeEngine {
                 detail: "deciding a proposal for a trajectory the log has not opened".to_string(),
             });
         };
-        let CallAnswers {
-            annotation,
-            memberships,
-        } = match self.answers_for(&views, &resolved, evidence) {
+        let CallAnswers { annotation } = match self.answers_for(&views, &resolved, evidence) {
             Ok(answers) => answers,
-            Err(Resolution::Feedback(text)) => return Ok(deny(text)),
-            Err(Resolution::Consult(requests)) => return Ok(EngineDecision::deliver(Next::ResolveExternal(requests))),
+            Err(Resolution(requests)) => return Ok(EngineDecision::deliver(Next::ResolveExternal(requests))),
         };
         let proposed = CoreProposedCall {
             tool: ToolName::new(call.tool.clone()),
             arguments: call.arguments.get().as_bytes().to_vec(),
             annotation,
-            memberships,
         };
-        let expansions = self.membership_evidence(evidence);
+        let act = match self.act_audience(evidence) {
+            Ok(act) => act,
+            Err(AudienceFailure::Consult(requests)) => {
+                return Ok(EngineDecision::deliver(Next::ResolveExternal(requests)));
+            }
+            Err(AudienceFailure::Refused(detail)) => return Ok(deny(unresolved_audience(&call.tool, &detail))),
+        };
         // A deployment that does not control context releases the marked call
         // unmarked, so the batch may be decided twice. The mark is all that
         // differs between the two attempts.
@@ -882,7 +913,7 @@ impl RuntimeEngine {
                     spawn: marked.then(|| SpawnMark::at(0)),
                     offer_nonce: engine_nonce(entropy),
                     evidence: Vec::new(),
-                    expansions: expansions.expansions(),
+                    audience: act.payload.clone(),
                 };
                 self.engine.handle(view, CoreEvent::Proposals(batch))
             };
@@ -894,11 +925,9 @@ impl RuntimeEngine {
         let decision = match judge() {
             Ok(decision) => decision,
             Err(TransitionError::MembershipNeeded { needed }) => {
-                return match self.membership_consult(&expansions, needed)? {
-                    MembershipConsult::Requests(requests) => {
-                        Ok(EngineDecision::deliver(Next::ResolveExternal(requests)))
-                    }
-                    MembershipConsult::Unresolved(group) => Ok(deny(unresolved_group(&call.tool, &group))),
+                return match self.audience_consult(&act, needed)? {
+                    AudienceConsult::Requests(requests) => Ok(EngineDecision::deliver(Next::ResolveExternal(requests))),
+                    AudienceConsult::Unresolved(detail) => Ok(deny(unresolved_audience(&call.tool, &detail))),
                 };
             }
             Err(error) => return Err(proposal_refusal(error)),
@@ -969,32 +998,35 @@ impl RuntimeEngine {
         evidence: &[ExternalEvidence],
         entropy: &OfferNonce,
     ) -> Result<EngineDecision, EngineRefusal> {
-        let expansions = self.membership_evidence(evidence);
+        let withheld = |detail: &str| {
+            Ok(EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
+                feedback: format!("[appa] {detail}; the result is withheld and may be retried"),
+                offers: Vec::new(),
+            })))
+        };
+        let act = match self.act_audience(evidence) {
+            Ok(act) => act,
+            Err(AudienceFailure::Consult(requests)) => {
+                return Ok(EngineDecision::deliver(Next::ResolveExternal(requests)));
+            }
+            Err(AudienceFailure::Refused(detail)) => return withheld(&detail),
+        };
         let judge = |evidence: &[ExternalEvidence]| {
             let report = ToolReport {
                 dispatch: dispatch.clone(),
                 outcome: engine_outcome(outcome),
                 evidence: sanitizer_evidence(evidence),
                 offer_nonce: engine_nonce(entropy),
-                expansions: expansions.expansions(),
+                audience: act.payload.clone(),
             };
             self.engine.handle(view, CoreEvent::Outcome(report))
         };
         let decision = match judge(evidence) {
             Ok(decision) => decision,
             Err(TransitionError::MembershipNeeded { needed }) => {
-                return match self.membership_consult(&expansions, needed)? {
-                    MembershipConsult::Requests(requests) => {
-                        Ok(EngineDecision::deliver(Next::ResolveExternal(requests)))
-                    }
-                    MembershipConsult::Unresolved(group) => {
-                        Ok(EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
-                            feedback: format!(
-                                "[appa] membership of {group} could not be resolved; the result is withheld and may be retried"
-                            ),
-                            offers: Vec::new(),
-                        })))
-                    }
+                return match self.audience_consult(&act, needed)? {
+                    AudienceConsult::Requests(requests) => Ok(EngineDecision::deliver(Next::ResolveExternal(requests))),
+                    AudienceConsult::Unresolved(detail) => withheld(&detail),
                 };
             }
             Err(error) => return Err(outcome_refusal(error)),
@@ -1070,47 +1102,33 @@ impl RuntimeEngine {
                     Ok(derived) => derived,
                     Err(next) => return Ok(next),
                 };
-                // A rewrite whose arguments select another ordered declaration is a new call
-                // under it: that declaration's annotation and placeholder groups are gathered
-                // about the rewritten arguments before the engine judges it. A rewrite that
-                // stays in its declaration carries no membership pins (the engine's
-                // unchanged-argument rule), but an Annotated declaration is still annotated
-                // afresh — the digest is the annotation's key, so a sanitizer rewrite always
-                // re-annotates. A derivation the engine cannot mint a call from is the
-                // engine's to refuse.
-                let (annotation, memberships) = match self
+                // A rewrite into an Annotated declaration — its own or another — is
+                // annotated afresh about the rewritten arguments before the engine judges
+                // it: the digest is the annotation's key. Any group its contract reads is
+                // asked through the act's own audience evidence, not gathered here. A
+                // derivation the engine cannot mint a call from is the engine's to refuse.
+                let annotation = match self
                     .engine
                     .resolve_call(call.tool().clone(), derived.as_str().as_bytes())
                 {
-                    Ok(rewritten) if rewritten.declaration_id() != call.declaration_id() => {
-                        match self.answers_for(&views, &rewritten, evidence) {
-                            Ok(answers) => (answers.annotation, answers.memberships),
-                            Err(Resolution::Consult(requests)) => {
-                                return Ok(EngineDecision::deliver(Next::ResolveExternal(requests)));
-                            }
-                            Err(Resolution::Feedback(text)) => return Ok(no_answer(text)),
-                        }
-                    }
                     Ok(rewritten) => match self.engine.registry().declaration(&rewritten) {
                         Some(declaration @ ToolDeclaration::Annotated { .. }) => {
                             match self.annotation_for(&views, declaration, &rewritten, evidence) {
-                                Ok(annotation) => (Some(annotation), Vec::new()),
-                                Err(Resolution::Consult(requests)) => {
+                                Ok(annotation) => Some(annotation),
+                                Err(Resolution(requests)) => {
                                     return Ok(EngineDecision::deliver(Next::ResolveExternal(requests)));
                                 }
-                                Err(Resolution::Feedback(text)) => return Ok(no_answer(text)),
                             }
                         }
-                        _ => (None, Vec::new()),
+                        _ => None,
                     },
-                    Err(_) => (None, Vec::new()),
+                    Err(_) => None,
                 };
                 OfferOutcome::Derived(Evidence::Rewrite {
                     sanitizer,
                     source,
                     derived,
                     annotation,
-                    memberships,
                 })
             }
             OfferConsult::Sanitizer {
@@ -1136,23 +1154,31 @@ impl RuntimeEngine {
                 }
             }
         };
-        let expansions = self.membership_evidence(evidence);
+        let act = match self.act_audience(evidence) {
+            Ok(act) => act,
+            Err(AudienceFailure::Consult(requests)) => {
+                return Ok(EngineDecision::deliver(Next::ResolveExternal(requests)));
+            }
+            Err(AudienceFailure::Refused(detail)) => {
+                return Ok(no_answer(format!(
+                    "[appa] {detail}; the offer stands and may be executed again"
+                )));
+            }
+        };
         let execution = OfferExecution {
             trajectory: engine_id(trajectory),
             offer: engine_offer,
             outcome,
             offer_nonce: engine_nonce(entropy),
-            expansions: expansions.expansions(),
+            audience: act.payload.clone(),
         };
         let decision = match self.engine.handle(view, CoreEvent::ExecuteOffer(execution)) {
             Ok(decision) => decision,
             Err(TransitionError::MembershipNeeded { needed }) => {
-                return match self.membership_consult(&expansions, needed)? {
-                    MembershipConsult::Requests(requests) => {
-                        Ok(EngineDecision::deliver(Next::ResolveExternal(requests)))
-                    }
-                    MembershipConsult::Unresolved(group) => Ok(no_answer(format!(
-                        "[appa] membership of {group} could not be resolved; the offer stands and may be executed again"
+                return match self.audience_consult(&act, needed)? {
+                    AudienceConsult::Requests(requests) => Ok(EngineDecision::deliver(Next::ResolveExternal(requests))),
+                    AudienceConsult::Unresolved(detail) => Ok(no_answer(format!(
+                        "[appa] {detail}; the offer stands and may be executed again"
                     ))),
                 };
             }
@@ -1335,7 +1361,19 @@ impl RuntimeEngine {
                 body: ValueBody::new(body),
             },
         };
-        let expansions = self.membership_evidence(evidence);
+        let withheld = |detail: &str| {
+            Ok(EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
+                feedback: format!("[appa] {detail}; the return is withheld and may be retried"),
+                offers: Vec::new(),
+            })))
+        };
+        let act = match self.act_audience(evidence) {
+            Ok(act) => act,
+            Err(AudienceFailure::Consult(requests)) => {
+                return Ok(EngineDecision::deliver(Next::ResolveExternal(requests)));
+            }
+            Err(AudienceFailure::Refused(detail)) => return withheld(&detail),
+        };
         let judge = |evidence: &[ExternalEvidence]| {
             let report = ChildReport {
                 child: engine_id(child),
@@ -1343,25 +1381,16 @@ impl RuntimeEngine {
                 submission: submission.clone(),
                 evidence: sanitizer_evidence(evidence),
                 offer_nonce: engine_nonce(entropy),
-                expansions: expansions.expansions(),
+                audience: act.payload.clone(),
             };
             self.engine.handle(view, CoreEvent::ChildReturn(report))
         };
         let decision = match judge(evidence) {
             Ok(decision) => decision,
             Err(TransitionError::MembershipNeeded { needed }) => {
-                return match self.membership_consult(&expansions, needed)? {
-                    MembershipConsult::Requests(requests) => {
-                        Ok(EngineDecision::deliver(Next::ResolveExternal(requests)))
-                    }
-                    MembershipConsult::Unresolved(group) => {
-                        Ok(EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
-                            feedback: format!(
-                                "[appa] membership of {group} could not be resolved; the return is withheld and may be retried"
-                            ),
-                            offers: Vec::new(),
-                        })))
-                    }
+                return match self.audience_consult(&act, needed)? {
+                    AudienceConsult::Requests(requests) => Ok(EngineDecision::deliver(Next::ResolveExternal(requests))),
+                    AudienceConsult::Unresolved(detail) => withheld(&detail),
                 };
             }
             Err(error) => return Err(child_refusal(error)),
@@ -1399,9 +1428,9 @@ impl RuntimeEngine {
     }
 
     /// Every answer a call must carry before it is proposed, from the evidence gathered so
-    /// far, or the consults still owed: the produced annotation for an Annotated declaration,
-    /// and the membership pins for the placeholder groups a declared contract's arguments
-    /// name. Every consult still owed goes out in one round; feedback ends the proposal.
+    /// far, or the consult still owed: the produced annotation for an Annotated declaration.
+    /// A declared call owes nothing here — the symbolic audiences its contract reads
+    /// surface from the act's own decision as membership asks.
     fn answers_for(
         &self,
         views: &Views,
@@ -1413,38 +1442,11 @@ impl RuntimeEngine {
             .registry()
             .declaration(resolved)
             .expect("a resolved call names its registered declaration");
-        let mut requests = Vec::new();
-        // An Annotated declaration owes exactly one thing: its produced annotation, which is
-        // complete, concrete, and literal — so it carries no membership pins.
-        let (annotation, memberships) = match declaration {
-            ToolDeclaration::Declared(contract) => {
-                let memberships = gather(&mut requests, self.memberships_for(contract, resolved, evidence))?;
-                (Some(None), memberships)
-            }
-            ToolDeclaration::Annotated { .. } => {
-                let annotation = gather(
-                    &mut requests,
-                    self.annotation_for(views, declaration, resolved, evidence),
-                )?;
-                (annotation.map(Some), Some(Vec::new()))
-            }
+        let annotation = match declaration {
+            ToolDeclaration::Declared(_) => None,
+            ToolDeclaration::Annotated { .. } => Some(self.annotation_for(views, declaration, resolved, evidence)?),
         };
-        match (annotation, memberships) {
-            (Some(annotation), Some(memberships)) => Ok(CallAnswers {
-                annotation,
-                memberships,
-            }),
-            _ => {
-                // A group several arguments name is asked for once.
-                let mut distinct: Vec<ExternalRequest> = Vec::with_capacity(requests.len());
-                for request in requests {
-                    if !distinct.contains(&request) {
-                        distinct.push(request);
-                    }
-                }
-                Err(Resolution::Consult(distinct))
-            }
-        }
+        Ok(CallAnswers { annotation })
     }
 
     /// The pinned annotation an Annotated declaration owes: a pin standing on an open offer
@@ -1481,7 +1483,7 @@ impl RuntimeEngine {
                 .annotator_inputs
                 .get(annotator.as_str())
                 .expect("the deployment registers every annotator the policy declares");
-            return Err(Resolution::Consult(vec![ExternalRequest::Annotation {
+            return Err(Resolution(vec![ExternalRequest::Annotation {
                 annotator: annotator.as_str().to_string(),
                 call: digest,
                 declaration: self.annotation_declaration(annotator, inputs),
@@ -1672,140 +1674,301 @@ impl RuntimeEngine {
         }
     }
 
-    fn membership_evidence(&self, evidence: &[ExternalEvidence]) -> MembershipEvidence {
-        let registry = self.engine.registry();
-        let mut gathered = MembershipEvidence::default();
-        let Some(resolver) = registry.membership() else {
-            return gathered;
-        };
+    /// The selector templates the policy registers for one provider, for a consult's
+    /// declaration.
+    fn templates_of(&self, provider: &str) -> Vec<String> {
+        self.engine
+            .registry()
+            .audience()
+            .templates(provider)
+            .map(|templates| templates.iter().map(|template| template.as_str().to_string()).collect())
+            .unwrap_or_default()
+    }
+
+    /// One act's audience evidence, gathered from the consult answers: the validated
+    /// source claims and member lookups, and — under a custom identity implementation —
+    /// the identity mappings for every claimed member. A failed consult stays runtime-side
+    /// as a recorded no-answer; an answer no registered source could have served is
+    /// dropped rather than carried into an act it would refuse. The gathered payload is
+    /// pre-validated against the same test replay applies, so an inadmissible answer is an
+    /// operational refusal here, never an engine error.
+    fn act_audience(&self, evidence: &[ExternalEvidence]) -> Result<ActAudience, AudienceFailure> {
+        let audience = self.engine.registry().audience();
+        let mut gathered = GatheredAudience::default();
         for entry in evidence {
-            let ExternalEvidence::Membership {
-                resolver: named,
-                group,
-                readers,
-            } = entry
-            else {
-                continue;
-            };
-            let group = GroupName::new(group.clone());
-            if named != resolver.as_str() || !registry.groups().contains(&group) {
-                continue;
-            }
-            let expansion = readers
-                .as_ref()
-                .and_then(|readers| GroupExpansion::new(group.clone(), readers.iter().map(ReaderId::new)).ok());
-            // An expansion outranks a no-answer for the same group, whichever was reported first.
-            match (gathered.answers.get(&group), expansion) {
-                (Some(Some(_)), _) => {}
-                (_, expansion) => {
-                    gathered.answers.insert(group, expansion);
-                }
-            }
-        }
-        gathered
-    }
-
-    fn membership_consult(
-        &self,
-        gathered: &MembershipEvidence,
-        needed: Vec<GroupName>,
-    ) -> Result<MembershipConsult, EngineRefusal> {
-        let Some(resolver) = self.engine.registry().membership() else {
-            // A policy that writes a group registers a resolver at load.
-            return Err(EngineRefusal::Invariant {
-                detail: "the engine reads a group under a policy that registers no membership resolver".to_string(),
-            });
-        };
-        if let Some(group) = needed
-            .iter()
-            .find(|group| matches!(gathered.answers.get(*group), Some(None)))
-        {
-            return Ok(MembershipConsult::Unresolved(group.clone()));
-        }
-        Ok(MembershipConsult::Requests(
-            needed
-                .into_iter()
-                .map(|group| ExternalRequest::Membership {
-                    resolver: resolver.as_str().to_string(),
-                    group: group.as_str().to_string(),
-                })
-                .collect(),
-        ))
-    }
-
-    fn memberships_for(
-        &self,
-        contract: &ToolAnnotation,
-        resolved: &ResolvedCall,
-        evidence: &[ExternalEvidence],
-    ) -> Result<Vec<PinnedMembership>, Resolution> {
-        // No placeholder resolving to a group, nothing to read: `group_reads` already
-        // answers empty for that, and for strictly more.
-        let reads = appa_engine::check::group_reads(contract, resolved);
-        if reads.is_empty() {
-            return Ok(Vec::new());
-        }
-        let Some(resolver) = self.engine.registry().membership() else {
-            let read = &reads[0];
-            return Err(Resolution::Feedback(format!(
-                "[appa] {}: argument {} names {}, but this deployment registers no membership resolver; the call was not checked",
-                resolved.tool().as_str(),
-                read.argument,
-                read.group
-            )));
-        };
-        let mut pins = Vec::new();
-        let mut requests: Vec<ExternalRequest> = Vec::new();
-        for read in reads {
-            let group = read.group.as_str();
-            let answer = evidence.iter().find_map(|entry| match entry {
-                ExternalEvidence::Membership {
-                    resolver: named,
-                    group: expanded,
-                    readers,
-                } if named == resolver.as_str() && expanded == group => Some(readers.clone()),
-                _ => None,
-            });
-            match answer {
-                None => {
-                    let request = ExternalRequest::Membership {
-                        resolver: resolver.as_str().to_string(),
-                        group: group.to_string(),
-                    };
-                    if !requests.contains(&request) {
-                        requests.push(request);
+            match entry {
+                ExternalEvidence::AudienceSource {
+                    provider,
+                    selector,
+                    members,
+                } => {
+                    let routable = audience
+                        .templates(provider)
+                        .is_some_and(|templates| templates.iter().any(|template| template.matches(selector)));
+                    if !routable {
+                        continue;
                     }
-                }
-                Some(Some(readers)) => {
-                    match PinnedMembership::new(read.argument.clone(), readers.into_iter().map(ReaderId::new)) {
-                        Ok(pin) => pins.push(pin),
-                        Err(_) => {
-                            return Err(Resolution::Feedback(unresolved_group(
-                                resolved.tool().as_str(),
-                                &read.group,
-                            )));
+                    // A claim outside the source's own provider namespace is a broken
+                    // answer; conservatively, the selector was not answered.
+                    let members = members
+                        .clone()
+                        .filter(|members| members.iter().all(|member| qualified_by(provider, &member.id)));
+                    let spec = SelectorSpec {
+                        provider: provider.clone(),
+                        selector: selector.clone(),
+                    };
+                    // An answer outranks a no-answer for the same selector.
+                    match (gathered.sources.get(&spec), members) {
+                        (Some(Some(_)), _) => {}
+                        (_, members) => {
+                            gathered.sources.insert(spec, members);
                         }
                     }
                 }
-                Some(None) => {
-                    return Err(Resolution::Feedback(unresolved_group(
-                        resolved.tool().as_str(),
-                        &read.group,
-                    )));
+                ExternalEvidence::MemberLookup {
+                    provider,
+                    member,
+                    claims,
+                } => {
+                    if !audience.providers().contains(provider) || !qualified_by(provider, member) {
+                        continue;
+                    }
+                    // Claims for an id other than the member asked are a broken answer — a
+                    // source could otherwise canonicalize its member to another provider's
+                    // namespace, or pre-seat an identity mapping for a member it does not
+                    // own. Conservatively, the member was not answered.
+                    let claims = match claims {
+                        Some(Some(answered)) if answered.id != *member => None,
+                        other => other.clone(),
+                    };
+                    match (gathered.lookups.get(member), claims) {
+                        (Some((_, Some(_))), _) => {}
+                        (_, claims) => {
+                            gathered.lookups.insert(member.clone(), (provider.clone(), claims));
+                        }
+                    }
                 }
+                ExternalEvidence::Identity {
+                    implementation,
+                    id,
+                    principal,
+                } => {
+                    let named = match audience.identity() {
+                        IdentityImplementation::Custom(name) => name.as_str() == implementation,
+                        IdentityImplementation::VerifiedEmail => false,
+                    };
+                    if !named {
+                        continue;
+                    }
+                    match (gathered.identity.get(id), principal) {
+                        (Some(Some(_)), _) => {}
+                        (_, principal) => {
+                            gathered.identity.insert(id.clone(), principal.clone());
+                        }
+                    }
+                }
+                _ => {}
             }
         }
-        if !requests.is_empty() {
-            return Err(Resolution::Consult(requests));
+        let mut payload = AudienceEvidence::default();
+        for (spec, members) in &gathered.sources {
+            if let Some(members) = members {
+                payload.sources.push(appa_engine::audience::SourceClaims {
+                    provider: spec.provider.clone(),
+                    selector: spec.selector.clone(),
+                    members: members.clone(),
+                });
+            }
         }
-        Ok(pins)
+        for (member, (provider, claims)) in &gathered.lookups {
+            if let Some(claims) = claims {
+                payload.lookups.push(appa_engine::audience::MemberLookup {
+                    provider: provider.clone(),
+                    member: member.clone(),
+                    claims: claims.clone(),
+                });
+            }
+        }
+        for (id, principal) in &gathered.identity {
+            if let Some(principal) = principal {
+                payload.identity.push(IdentityMapping {
+                    id: id.clone(),
+                    principal: principal.clone(),
+                });
+            }
+        }
+        // Under a custom identity implementation every claimed member canonicalizes through
+        // a pinned mapping; the ones still unmapped are this round's identity consults.
+        if let IdentityImplementation::Custom(name) = audience.identity() {
+            let mut requests: Vec<ExternalRequest> = Vec::new();
+            // One question per id, asked about the folded claim the engine will canonicalize
+            // through: a member reported twice, once silently, is one member.
+            let claimed = match appa_engine::audience::folded_claims(&payload) {
+                Ok(folded) => folded,
+                Err(refusal) => {
+                    tracing::debug!(%refusal, "gathered audience evidence refused");
+                    return Err(AudienceFailure::Refused(format!(
+                        "the gathered audience evidence is not admissible: {}",
+                        refusal_class(&refusal)
+                    )));
+                }
+            };
+            for claims in claimed.values() {
+                match gathered.identity.get(&claims.id) {
+                    Some(Some(_)) => {}
+                    Some(None) => {
+                        // The member id is directory data the model has not seen: it stays
+                        // out of the model-visible refusal.
+                        tracing::debug!(implementation = name.as_str(), id = %claims.id, "identity gave no principal");
+                        return Err(AudienceFailure::Refused(format!(
+                            "identity implementation {} gave no principal for a claimed member",
+                            name.as_str(),
+                        )));
+                    }
+                    None => {
+                        let request = ExternalRequest::Identity {
+                            implementation: name.as_str().to_string(),
+                            claims: claims.clone(),
+                        };
+                        if !requests.contains(&request) {
+                            requests.push(request);
+                        }
+                    }
+                }
+            }
+            if !requests.is_empty() {
+                return Err(AudienceFailure::Consult(requests));
+            }
+        }
+        if let Err(refusal) = audience.expansions(&payload) {
+            // The refusal's own Display can carry directory data (member ids, claimed
+            // emails) the model has not seen; the model-visible detail names only the
+            // failure class and its provider/selector.
+            tracing::debug!(%refusal, "gathered audience evidence refused");
+            return Err(AudienceFailure::Refused(format!(
+                "the gathered audience evidence is not admissible: {}",
+                refusal_class(&refusal)
+            )));
+        }
+        Ok(ActAudience { payload, gathered })
     }
+
+    /// The consults that answer the symbolic atoms an act still needs, or the operational
+    /// refusal where a needed answer already failed or no registered source serves an atom.
+    fn audience_consult(&self, act: &ActAudience, needed: Vec<SymbolicAtom>) -> Result<AudienceConsult, EngineRefusal> {
+        let audience = self.engine.registry().audience();
+        let primitives = match audience.needed_primitives(&needed) {
+            Ok(primitives) => primitives,
+            // A dynamically supplied reference no source serves: an operational failure,
+            // never a policy state. (A statically written one refuses at policy load.)
+            Err(unroutable) => return Ok(AudienceConsult::Unresolved(unroutable.to_string())),
+        };
+        let mut requests: Vec<ExternalRequest> = Vec::new();
+        for spec in &primitives.selectors {
+            match act.gathered.sources.get(spec) {
+                Some(Some(_)) => {}
+                Some(None) => {
+                    return Ok(AudienceConsult::Unresolved(format!(
+                        "audience source {} gave no answer for {}",
+                        spec.provider, spec.selector
+                    )));
+                }
+                None => requests.push(ExternalRequest::AudienceSource {
+                    provider: spec.provider.clone(),
+                    selector: spec.selector.clone(),
+                    templates: self.templates_of(&spec.provider),
+                }),
+            }
+        }
+        // A lookup's `selector` slot carries the qualified member it canonicalizes.
+        for spec in &primitives.lookups {
+            match act.gathered.lookups.get(spec.selector.as_str()) {
+                Some((_, Some(_))) => {}
+                Some((_, None)) => {
+                    // The member can be a reader a delta wrote that the model never saw.
+                    return Ok(AudienceConsult::Unresolved(format!(
+                        "audience source {} gave no answer for a member lookup",
+                        spec.provider
+                    )));
+                }
+                None => requests.push(ExternalRequest::MemberLookup {
+                    provider: spec.provider.clone(),
+                    member: spec.selector.clone(),
+                    templates: self.templates_of(&spec.provider),
+                }),
+            }
+        }
+        if requests.is_empty() {
+            // Every primitive is answered and pre-validated, yet the act still asked.
+            return Err(EngineRefusal::Invariant {
+                detail: format!(
+                    "the act re-asks for answered audience atoms: {}",
+                    needed.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+                ),
+            });
+        }
+        Ok(AudienceConsult::Requests(requests))
+    }
+}
+
+/// One model-visible line for an evidence refusal: the failure class and, where they are
+/// policy or argument data the model already holds, the provider and selector — never a
+/// member id or a claimed email, which are directory data.
+fn refusal_class(refusal: &appa_engine::audience::EvidenceRefusal) -> String {
+    use appa_engine::audience::EvidenceRefusal;
+    match refusal {
+        EvidenceRefusal::DuplicateSelector { provider, selector } => {
+            format!("two answers for selector {provider}:{selector} in one operation")
+        }
+        EvidenceRefusal::DuplicateLookup { .. } => "two lookups for one member in one operation".to_string(),
+        EvidenceRefusal::DuplicateIdentity { .. } => {
+            "two identity mappings for one member in one operation".to_string()
+        }
+        EvidenceRefusal::ForeignMember { provider, selector, .. } => {
+            format!("selector {provider}:{selector} reports a member outside its own provider namespace")
+        }
+        EvidenceRefusal::ForeignLookup { provider, .. } => {
+            format!("a lookup under provider {provider} answers outside that namespace")
+        }
+        EvidenceRefusal::ForeignLookupClaims { provider, .. } => {
+            format!("a lookup under provider {provider} carries claims for a different id")
+        }
+        EvidenceRefusal::DuplicateMember { provider, selector, .. } => {
+            format!("selector {provider}:{selector} reports one member twice in one answer")
+        }
+        EvidenceRefusal::ReservedPrincipal { .. } => "an identity mapping names a reserved principal".to_string(),
+        EvidenceRefusal::ConflictingClaims { .. } => {
+            "one member carries conflicting verified-email claims in one operation".to_string()
+        }
+        EvidenceRefusal::MalformedEmail { .. } => {
+            "a member claims a verified email that does not parse as one address".to_string()
+        }
+        EvidenceRefusal::UnmappedIdentity { .. } => {
+            "the identity implementation returned no mapping for a claimed member".to_string()
+        }
+        EvidenceRefusal::UnroutableSelector { provider, selector } => {
+            format!("no registered audience source serves selector {provider}:{selector}")
+        }
+        EvidenceRefusal::UnroutableLookup { provider, .. } => {
+            format!("no registered audience provider {provider} serves a member lookup")
+        }
+        EvidenceRefusal::UnrequestedEvidence { .. } => {
+            "evidence beyond this operation's inherited pins and its own asks".to_string()
+        }
+    }
+}
+
+/// Is `id` inside `provider`'s own namespace? One rule decides qualification everywhere:
+/// the engine's `ReaderId::provider_prefix`, which also decides which readers the engine
+/// asks to canonicalize. A second spelling of the rule here would let an id the engine asks
+/// about fall outside what this gathering records — and the act would re-ask forever.
+fn qualified_by(provider: &str, id: &str) -> bool {
+    appa_engine::label::ReaderId::new(id).provider_prefix() == Some(provider)
 }
 
 /// Everything a proposal carries beyond its tool and arguments, gathered before it is judged.
 struct CallAnswers {
     annotation: Option<PinnedAnnotation>,
-    memberships: Vec<PinnedMembership>,
 }
 
 /// The consult artifact an annotation request carries: the complete call — its proposed
@@ -1850,23 +2013,8 @@ fn annotation_args(
     serde_json::Value::Object(args)
 }
 
-/// One answer's contribution to a proposal's round of consults: the answer, or the consults it
-/// still owes gathered beside the others'. Feedback ends the round.
-fn gather<T>(requests: &mut Vec<ExternalRequest>, answer: Result<T, Resolution>) -> Result<Option<T>, Resolution> {
-    match answer {
-        Ok(answer) => Ok(Some(answer)),
-        Err(Resolution::Consult(consults)) => {
-            requests.extend(consults);
-            Ok(None)
-        }
-        Err(Resolution::Feedback(text)) => Err(Resolution::Feedback(text)),
-    }
-}
-
-fn unresolved_group(tool: &str, group: &GroupName) -> String {
-    format!(
-        "[appa] {tool}: membership of {group} could not be resolved; the call was not checked — propose it again later"
-    )
+fn unresolved_audience(tool: &str, detail: &str) -> String {
+    format!("[appa] {tool}: {detail}; the call was not checked — propose it again later")
 }
 
 enum AuthorityOutcome {
@@ -1881,26 +2029,35 @@ enum SanitizerAnswer {
     Derived(ValueBody),
 }
 
+/// The consults an answer still owes before its call can be judged.
 #[derive(Debug)]
-enum Resolution {
-    Feedback(String),
-    Consult(Vec<ExternalRequest>),
+struct Resolution(Vec<ExternalRequest>);
+
+enum AudienceConsult {
+    Requests(Vec<ExternalRequest>),
+    Unresolved(String),
 }
 
-enum MembershipConsult {
-    Requests(Vec<ExternalRequest>),
-    Unresolved(GroupName),
+/// Why an act cannot carry audience evidence yet: the identity consults still owed, or the
+/// operational refusal a failed or inadmissible answer forces.
+enum AudienceFailure {
+    Consult(Vec<ExternalRequest>),
+    Refused(String),
+}
+
+/// One act's gathered audience answers beside their validated payload: the payload is what
+/// the act pins, the gathered table also remembers which consults already failed.
+struct ActAudience {
+    payload: AudienceEvidence,
+    gathered: GatheredAudience,
 }
 
 #[derive(Debug, Default)]
-struct MembershipEvidence {
-    answers: BTreeMap<GroupName, Option<GroupExpansion>>,
-}
-
-impl MembershipEvidence {
-    fn expansions(&self) -> Vec<GroupExpansion> {
-        self.answers.values().flatten().cloned().collect()
-    }
+struct GatheredAudience {
+    sources: BTreeMap<SelectorSpec, Option<Vec<MemberClaims>>>,
+    /// Keyed by the qualified member; the value names the provider that answered.
+    lookups: BTreeMap<String, (String, Option<Option<MemberClaims>>)>,
+    identity: BTreeMap<String, Option<ReaderId>>,
 }
 
 fn deny(text: String) -> EngineDecision {
@@ -2196,18 +2353,25 @@ fn effect_names(effects: &EffectSet) -> Vec<String> {
 }
 
 fn audience_wire(audience: &Audience) -> String {
-    match audience {
-        Audience::Public => "public".to_string(),
-        Audience::Restricted(readers) if readers.is_empty() => "∅".to_string(),
-        Audience::Restricted(readers) => {
-            let shown: Vec<&str> = readers.iter().take(3).map(ReaderId::as_str).collect();
-            let rest = readers.len().saturating_sub(3);
-            if rest > 0 {
-                format!("{}+{rest}", shown.join(","))
-            } else {
-                shown.join(",")
-            }
-        }
+    if audience.is_public() {
+        return "public".to_string();
+    }
+    audience.clauses().map(clause_wire).collect::<Vec<_>>().join(" ∩ ")
+}
+
+/// One union clause's summary: the chain audience, group marks, and readers in canonical
+/// order — three entries shown, the rest counted; the empty clause is nobody.
+fn clause_wire(clause: &Clause) -> String {
+    let mut entries = crate::consult::clause_entries(clause);
+    if entries.is_empty() {
+        return "∅".to_string();
+    }
+    let rest = entries.len().saturating_sub(3);
+    entries.truncate(3);
+    if rest > 0 {
+        format!("{}+{rest}", entries.join(","))
+    } else {
+        entries.join(",")
     }
 }
 
@@ -2250,13 +2414,16 @@ fn gap_text(gap: &appa_engine::check::Gap) -> String {
             format!("trust is {actual:?}, below the required floor {required:?}")
         }
         Gap::Includes { recipients } => match recipients {
-            appa_engine::label::Audience::Public => "the readers are not the public audience".to_string(),
-            appa_engine::label::Audience::Restricted(readers) => {
-                format!("the readers do not include {} required recipient(s)", readers.len())
+            DeclaredAudience::Public => "the readers are not the public audience".to_string(),
+            DeclaredAudience::Union(clause) => {
+                format!(
+                    "the readers do not include {} required recipient(s)",
+                    clause_size(clause)
+                )
             }
         },
-        // The count only, as for `includes`: a cap may resolve a directory group.
-        Gap::Cap { cap } => format!("the committed readers exceed the cap of {}", audience_count(cap)),
+        // The count only, as for `includes`: a cap may read a directory group's members.
+        Gap::Cap { cap } => format!("the committed readers exceed the cap of {}", declared_count(cap)),
         Gap::Prior(effect) => format!("requires a prior {} effect", effect.as_str()),
         Gap::NoPrior(effect) => format!("forbidden after a {} effect", effect.as_str()),
         Gap::Attention(mark) => format!("requires attention: {}", mark.as_str()),
@@ -2296,12 +2463,37 @@ fn narrowing_feedback(narrowing: &appa_engine::check::Narrowing, chain: &TrustCh
 }
 
 fn audience_count(audience: &Audience) -> String {
+    if audience.is_public() {
+        return "public".to_string();
+    }
+    let clauses = audience.clauses().count();
+    if clauses > 1 {
+        return format!("an intersection of {clauses} audiences");
+    }
+    let clause = audience.clauses().next().expect("a non-public audience holds a clause");
+    clause_count(clause)
+}
+
+/// One clause's atom count as feedback shows it — counts only, never who.
+fn clause_count(clause: &Clause) -> String {
+    let symbolic = clause.groups().count() + usize::from(clause.chain().is_some());
+    match (clause.readers().len(), symbolic) {
+        (0, 0) => "nobody".to_string(),
+        (1, 0) => "1 reader".to_string(),
+        (count, 0) => format!("{count} readers"),
+        (0, _) => "a symbolic audience".to_string(),
+        (count, _) => format!("a symbolic audience and {count} reader(s)"),
+    }
+}
+
+fn clause_size(clause: &Clause) -> usize {
+    clause.readers().len() + clause.groups().count() + usize::from(clause.chain().is_some())
+}
+
+fn declared_count(audience: &DeclaredAudience) -> String {
     match audience {
-        Audience::Public => "public".to_string(),
-        Audience::Restricted(readers) => match readers.len() {
-            1 => "1 reader".to_string(),
-            count => format!("{count} readers"),
-        },
+        DeclaredAudience::Public => "public".to_string(),
+        DeclaredAudience::Union(clause) => clause_count(clause),
     }
 }
 
@@ -2390,18 +2582,16 @@ mod tests {
     use crate::consult::{AnnotationAnswer, HistoryEntry, RequiredAudienceAnswer, SanitizerPoint, WireAudience};
     use appa_engine::contract::{AudienceRequirement, HistoryRequirement, RecipientSpec};
     use appa_engine::fact::{EffectKind, EffectSet};
-    use appa_engine::groups::DeclaredAudience;
-    use appa_engine::label::{Audience, ReaderId, Trust};
+    use appa_engine::label::{Audience, DeclaredAudience, ReaderId, Trust};
     use appa_engine::names::{AnnotatorName, MarkName};
     use appa_engine::plan::{ExecutableRemedyPlan, PlanId, PlannedBlock, RemedyPlan, RemedyStep};
     use appa_engine::value::{RawResultDigest, ToolName, ValueBody};
-    use std::collections::BTreeSet;
 
     #[test]
     fn a_sanitizer_consult_names_its_point_and_the_tool_the_value_belongs_to() {
         let policy = appa_policy::Config::from_toml_str(
             r#"
-                version = 1
+                version = 2
                 [deployment]
                 confined_child_return = true
                 [[tool]]
@@ -2462,7 +2652,7 @@ mod tests {
     fn annotator_policy() -> appa_policy::Config {
         appa_policy::Config::from_toml_str(
             r#"
-                version = 1
+                version = 2
                 [[annotator]]
                 name = "classifier"
                 [[tool]]
@@ -2616,7 +2806,7 @@ mod tests {
         let owner = engine_id(&trajectory);
         let views = view.views(&owner).expect("the root is opened");
         let asked = match engine.annotation_for(&views, declaration, &call, &[]) {
-            Err(Resolution::Consult(requests)) => match requests.as_slice() {
+            Err(Resolution(requests)) => match requests.as_slice() {
                 [
                     ExternalRequest::Annotation {
                         annotator,
@@ -2724,7 +2914,7 @@ mod tests {
                     answer: answer(),
                 }],
             ),
-            Err(Resolution::Consult(_))
+            Err(Resolution(_))
         ));
     }
 
@@ -2764,18 +2954,33 @@ mod tests {
     }
 
     fn restricted(ids: &[&str]) -> Audience {
-        Audience::Restricted(ids.iter().map(|id| ReaderId::new((*id).to_string())).collect())
+        Audience::restricted(ids.iter().map(|id| ReaderId::new((*id).to_string())))
     }
 
     #[test]
     fn audience_wire_spells_every_reader_shape() {
-        assert_eq!(audience_wire(&Audience::Public), "public");
-        assert_eq!(audience_wire(&Audience::Restricted(BTreeSet::new())), "∅");
+        use appa_engine::label::{ChainAudience, Clause, GroupRef};
+        assert_eq!(audience_wire(&Audience::public()), "public");
+        assert_eq!(audience_wire(&Audience::nobody()), "∅");
         assert_eq!(audience_wire(&restricted(&["hr"])), "hr");
         assert_eq!(
             audience_wire(&restricted(&["d@x", "a@x", "c@x", "b@x"])),
             "a@x,b@x,c@x+1",
             "sorted, three shown, the rest counted",
+        );
+        let symbolic = Audience::of_clauses([
+            Clause::new(
+                [ChainAudience::Internal],
+                [GroupRef::Named(appa_engine::names::GroupName::new("finance"))],
+                [],
+            )
+            .expect("a symbolic clause"),
+            Clause::new([], [], [ReaderId::new("alice")]).expect("a reader clause"),
+        ]);
+        assert_eq!(
+            audience_wire(&symbolic),
+            "alice ∩ internal,@finance",
+            "clauses intersect in canonical order; each clause unions its spelled atoms",
         );
     }
 

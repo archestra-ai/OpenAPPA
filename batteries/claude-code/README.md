@@ -26,7 +26,7 @@ does not name:
 include = ["batteries/claude-code/appa.toml"]
 
 [policy]
-version = 1
+version = 2
 ```
 
 Root rules take precedence over the battery. Add a root rule when a particular

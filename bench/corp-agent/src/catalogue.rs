@@ -135,7 +135,7 @@ mod tests {
     /// The policy proper, as the dialect takes it — the `[policy]` table of a
     /// deployment file, unwrapped.
     const POLICY: &str = r#"
-version = 1
+version = 2
 trust_chain = ["suspicious", "internal"]
 
 [[tool]]

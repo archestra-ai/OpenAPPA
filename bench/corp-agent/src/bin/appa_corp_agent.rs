@@ -285,7 +285,8 @@ fn bind_hosted_externals(config: &mut Config, origin: &str) -> usize {
         .authorities
         .values_mut()
         .chain(externals.sanitizers.values_mut())
-        .chain(externals.membership.values_mut())
+        .chain(externals.audience.values_mut())
+        .chain(externals.identity.values_mut())
         .filter_map(|implementation| match implementation {
             Implementation::Resolver(endpoint) => Some(endpoint),
             Implementation::Builtin(_) | Implementation::Command(_) => None,

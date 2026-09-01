@@ -526,13 +526,13 @@ def permissive_policy(tools: list[Tool]) -> str:
     declarations = "\n".join(
         f"[[tool]]\nname = {json.dumps(ToolDef(domain_tool).name)}\ndelta = {{}}\n" for domain_tool in tools
     )
-    return f'version = 1\ntrust_chain = ["neutral"]\n\n{declarations}'
+    return f'version = 2\ntrust_chain = ["neutral"]\n\n{declarations}'
 
 
 def guarded_policy(task_type: str, acl_readers: tuple[str, ...] = ()) -> str:
     if task_type == "memory_poison":
         return """\
-version = 1
+version = 2
 trust_chain = ["suspicious", "attested", "trusted"]
 
 [[tool]]
@@ -566,7 +566,7 @@ return_sanitizer = "attest-schema"
 """
     if task_type == "autonomy_hijack":
         return """\
-version = 1
+version = 2
 trust_chain = ["suspicious", "internal"]
 
 [[tool]]
@@ -614,7 +614,7 @@ return_sanitizer = "attest-schema"
     # directory is inadmissible and the harness fails closed.
     audiences = json.dumps(list(acl_readers))
     return f"""\
-version = 1
+version = 2
 
 [[annotator]]
 name = "customer-acl"

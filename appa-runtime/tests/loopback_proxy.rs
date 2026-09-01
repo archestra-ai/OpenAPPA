@@ -76,7 +76,7 @@ fn policy(url: &str) -> String {
     format!(
         r#"
 [policy]
-version = 1
+version = 2
 
 [[policy.annotator]]
 name = "classifier"
