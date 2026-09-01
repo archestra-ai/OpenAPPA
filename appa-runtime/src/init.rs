@@ -147,6 +147,10 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
     //    leaving a new plugin registered against an old runtime that a rerun
     //    cannot dislodge.
     clear_retired_runtime(&paths)?;
+    //    Whatever still answers must be the build this init installs. A foreign
+    //    responder cannot be stopped from here, so it is refused now, while
+    //    Claude and the launcher are still untouched.
+    refuse_foreign_endpoint(&appa, &endpoint)?;
 
     // 5. Snapshot for recovery and disarm the launcher.
     let launcher_dir = appa.parent().unwrap_or(&paths.install_dir);
@@ -155,13 +159,20 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
         install_disabled_clappa(launcher_dir)?;
     }
 
-    // 6. The Claude switch and the binary, with the existing rollback.
-    let replacement = replace_plugin(&deployment.root, &marketplaces, &installations)
-        .and_then(|()| install_runtime(&appa, &deployed_appa));
-    if let Err(operation) = replacement {
-        if let Some(recovery) = recovery.as_ref()
-            && let Err(recovery_error) = restore_plugin(recovery).and_then(|()| install_clappa(launcher_dir).map(drop))
-        {
+    // 6. The Claude switch, the binary, and the runtime this plugin is being
+    //    bound to: one transaction. Verification is inside it, because a plugin
+    //    left registered against a runtime that failed verification is exactly
+    //    the skew this bundle exists to prevent.
+    let switch = replace_plugin(&deployment.root, &marketplaces, &installations)
+        .and_then(|()| install_runtime(&appa, &deployed_appa))
+        .and_then(|()| remove_legacy_runtime(&appa, &paths))
+        .and_then(|()| installed_plugin_root(&paths.claude_dir))
+        .and_then(|plugin_root| {
+            install_statusline(&plugin_root, &paths)?;
+            start_runtime(&plugin_root, &deployed_appa, &endpoint)
+        });
+    if let Err(operation) = switch {
+        if let Err(recovery_error) = undo_plugin_switch(recovery.as_ref(), launcher_dir) {
             return Err(InitError::PluginRecovery {
                 operation: Box::new(operation),
                 recovery: Box::new(recovery_error),
@@ -170,13 +181,10 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
         return Err(operation);
     }
 
-    remove_legacy_runtime(&appa, &paths)?;
-
-    // 7. Launcher, statusline, runtime, and the fingerprint backstop.
-    let plugin_root = installed_plugin_root(&paths.claude_dir)?;
+    // 7. Only now is the launcher armed. Every earlier return leaves `clappa`
+    //    absent on a first install and disabled on an upgrade, so a session
+    //    started against a half-installed bundle cannot be a protected one.
     install_clappa(launcher_dir)?;
-    install_statusline(&plugin_root, &paths)?;
-    start_runtime(&plugin_root, &deployed_appa, &endpoint)?;
     cleanup_plugin_recoveries(&paths.data_dir);
 
     // 8. Anything left on PATH that this init did not deploy is named, never
@@ -1012,6 +1020,24 @@ fn copy_directory(source_path: &Path, target: &Path) -> Result<(), InitError> {
     Ok(())
 }
 
+/// Undo a switch that has already reached Claude.
+///
+/// With a snapshot the previous plugin is restored and its launcher re-armed.
+/// Without one there was no APPA plugin before this init, so the new one is
+/// removed outright rather than left pointing Claude at a runtime this init
+/// could not verify. Both errors reach the caller, which reports them beside
+/// the failure that caused the undo.
+fn undo_plugin_switch(recovery: Option<&PluginRecovery>, launcher_dir: &Path) -> Result<(), InitError> {
+    match recovery {
+        Some(recovery) => restore_plugin(recovery).and_then(|()| install_clappa(launcher_dir).map(drop)),
+        None => {
+            run_claude(["plugin", "uninstall", PLUGIN, "--scope", "user", "--yes"])?;
+            run_claude(["plugin", "marketplace", "remove", MARKETPLACE])?;
+            Ok(())
+        }
+    }
+}
+
 fn restore_plugin(recovery: &PluginRecovery) -> Result<(), InitError> {
     for installation in &recovery.installations {
         let _ = run_claude_in(
@@ -1214,9 +1240,24 @@ fn start_runtime(plugin_root: &Path, runtime: &Path, endpoint: &Endpoint) -> Res
     }))
 }
 
-fn verify_runtime_binary(runtime: &Path, endpoint: &Endpoint) -> Result<(), InitError> {
-    let expected = Sha256::digest(fs::read(runtime).map_err(|source| InitError::InstallRuntime {
-        path: runtime.to_path_buf(),
+/// Who is answering the endpoint, as far as one probe can establish.
+///
+/// Managed stopping covers only the paths this environment resolves to, so a
+/// runtime left by an init run under a different `APPA_INSTALL_DIR` or
+/// `APPA_DATA_DIR` is foreign: named, never killed.
+enum EndpointOwner {
+    /// Nothing answered, or what answered serves no fingerprint. Before the
+    /// start this is the ordinary case; after it, it is a failure.
+    Unidentified,
+    /// The binary whose bytes were offered for comparison.
+    Deployment,
+    /// A different build.
+    Foreign,
+}
+
+fn endpoint_owner(binary: &Path, endpoint: &Endpoint) -> Result<EndpointOwner, InitError> {
+    let expected = Sha256::digest(fs::read(binary).map_err(|source| InitError::InstallRuntime {
+        path: binary.to_path_buf(),
         source,
     })?);
     let expected: String = expected.iter().map(|byte| format!("{byte:02x}")).collect();
@@ -1229,22 +1270,42 @@ fn verify_runtime_binary(runtime: &Path, endpoint: &Endpoint) -> Result<(), Init
             message: error.to_string(),
         })?;
     if !output.status.success() {
-        return Err(InitError::RuntimeIdentity {
-            endpoint: endpoint.url().to_owned(),
-            message: "the answering process exposes no binary fingerprint; stop it and rerun init".to_owned(),
-        });
+        return Ok(EndpointOwner::Unidentified);
     }
     let actual = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if actual == expected {
-        return Ok(());
-    }
-    // Managed stopping covers only the paths this environment resolves to. A
-    // runtime left by an init run under a different APPA_INSTALL_DIR or
-    // APPA_DATA_DIR is a foreign responder: named, never killed.
-    Err(InitError::RuntimeIdentity {
-        endpoint: endpoint.url().to_owned(),
-        message: "a different appa build is answering; stop that process and rerun init".to_owned(),
+    Ok(if actual == expected {
+        EndpointOwner::Deployment
+    } else {
+        EndpointOwner::Foreign
     })
+}
+
+/// Refuse a foreign owner while Claude and the launcher are still untouched.
+///
+/// Silence is not refused here: nothing answering is what a first install looks
+/// like, and the backstop after the start is what proves the runtime is ours.
+fn refuse_foreign_endpoint(binary: &Path, endpoint: &Endpoint) -> Result<(), InitError> {
+    match endpoint_owner(binary, endpoint)? {
+        EndpointOwner::Deployment | EndpointOwner::Unidentified => Ok(()),
+        EndpointOwner::Foreign => Err(InitError::RuntimeIdentity {
+            endpoint: endpoint.url().to_owned(),
+            message: "a different appa build already owns this endpoint; stop that process and rerun init".to_owned(),
+        }),
+    }
+}
+
+fn verify_runtime_binary(runtime: &Path, endpoint: &Endpoint) -> Result<(), InitError> {
+    match endpoint_owner(runtime, endpoint)? {
+        EndpointOwner::Deployment => Ok(()),
+        EndpointOwner::Unidentified => Err(InitError::RuntimeIdentity {
+            endpoint: endpoint.url().to_owned(),
+            message: "the answering process exposes no binary fingerprint; stop it and rerun init".to_owned(),
+        }),
+        EndpointOwner::Foreign => Err(InitError::RuntimeIdentity {
+            endpoint: endpoint.url().to_owned(),
+            message: "a different appa build is answering; stop that process and rerun init".to_owned(),
+        }),
+    }
 }
 
 #[cfg(test)]

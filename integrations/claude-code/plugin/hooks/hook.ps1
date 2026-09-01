@@ -101,18 +101,25 @@ function Stop-StaleRuntime {
 # of the install starts it through -EnsureRuntime. A runtime whose binary
 # an install replaced is stopped first. Installing the binary is
 # not this script's job: `appa init claude-code` does that first.
+#
+# Returns $true only while a healthy runtime answers, and $false on every way
+# of failing to get one -- a stale runtime that would not stop, a missing
+# binary, a start that never became healthy. The caller must block on $false:
+# posting anyway would send the event to the stale runtime this install just
+# replaced, which is the skew the whole bundle exists to prevent.
 function Start-RuntimeIfDown {
     if (Test-RuntimeHealthy) {
-        return
+        return $true
     }
     if (-not (Stop-StaleRuntime)) {
-        return
+        return $false
     }
     if (Test-RuntimeHealthy) {
-        return
+        return $true
     }
     if (-not (Test-Path -LiteralPath $binary)) {
-        return
+        [Console]::Error.WriteLine("appa protection: appa is not installed; expected at $binary")
+        return $false
     }
     # The runtime writes the default policy on its first start and refuses
     # to start when it cannot. The policy and the database live in two
@@ -135,10 +142,11 @@ function Start-RuntimeIfDown {
     $deadline = (Get-Date).AddSeconds(20)
     while ((Get-Date) -lt $deadline) {
         if (Test-RuntimeHealthy) {
-            return
+            return $true
         }
         Start-Sleep -Seconds 1
     }
+    $false
 }
 
 # The last step of the install starts the runtime through this switch, so
@@ -151,8 +159,7 @@ if ($EnsureRuntime) {
         [Console]::Error.WriteLine("appa protection: appa is not installed; expected at $binary")
         exit 1
     }
-    Start-RuntimeIfDown
-    if (Test-RuntimeHealthy) {
+    if (Start-RuntimeIfDown) {
         exit 0
     }
     [Console]::Error.WriteLine("appa protection: runtime did not become healthy at $runtimeUrl. Its own error is the last line of $(Join-Path $AppaDataDir 'runtime.stderr.log')")
@@ -177,7 +184,14 @@ try {
         $hookInput = $null
     }
     if ($null -ne $hookInput -and $hookInput.hook_event_name -eq "SessionStart") {
-        Start-RuntimeIfDown
+        # The POSIX map chains `ensure-runtime.sh && hook.sh || exit 2`, so a
+        # starter that fails there never reaches the post. This is that chain:
+        # throwing hands the failure to the same catch every other unanswered
+        # hook takes, which blocks. Posting anyway would send the event to the
+        # stale runtime the install just replaced.
+        if (-not (Start-RuntimeIfDown)) {
+            throw "the runtime at $runtimeUrl is not healthy and could not be started"
+        }
     }
     $timeout = if ($null -ne $hookInput -and $turnEnds -contains $hookInput.hook_event_name) { 30 } else { 120 }
     $response = Invoke-WebRequest -Uri "$runtimeUrl/hook" -Method Post `

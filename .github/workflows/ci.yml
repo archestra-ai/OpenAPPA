@@ -39,6 +39,27 @@ jobs:
             integrations/claude-code/plugin/hooks/appa-paths.sh \
             scripts/appa-stage-plugin-bundle.sh
 
+      # The Windows hook implementation had no check of any kind until a
+      # review found a fail-open bug in it. `pwsh` is preinstalled on the
+      # runner, and its own parser is the authority on what it will run.
+      - name: Lint plugin PowerShell scripts
+        shell: pwsh
+        run: |
+          $failed = $false
+          foreach ($script in @(
+            "integrations/claude-code/plugin/hooks/hook.ps1",
+            "integrations/claude-code/plugin/hooks/appa-paths.ps1",
+            "integrations/claude-code/plugin/statusline.ps1"
+          )) {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$null, [ref]$errors) | Out-Null
+            foreach ($error in $errors) {
+              Write-Output "::error file=$script,line=$($error.Extent.StartLineNumber)::$($error.Message)"
+              $failed = $true
+            }
+          }
+          if ($failed) { exit 1 }
+
       - name: Validate plugin JSON
         run: |
           jq -e .hooks integrations/claude-code/plugin/hooks/hooks.json >/dev/null

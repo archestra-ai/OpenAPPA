@@ -180,9 +180,30 @@ fn init_installs_one_local_adapter_and_is_safe_to_run_again() {
         );
     }
 
+    // A foreign runtime already owning the endpoint is refused before Claude is
+    // touched at all, so the installation it would have replaced is still the
+    // one that is registered and running.
+    let before = fs::read_to_string(&log).expect("Claude invocation log");
     let wrong_runtime = run("not-this-build", None);
     assert!(!wrong_runtime.status.success());
     assert!(String::from_utf8_lossy(&wrong_runtime.stderr).contains("different appa build"));
+    let after = fs::read_to_string(&log).expect("Claude invocation log");
+    assert_eq!(
+        after.lines().count() - before.lines().count(),
+        after
+            .lines()
+            .skip(before.lines().count())
+            .filter(|line| line.starts_with("plugin marketplace list"))
+            .count(),
+        "a refused endpoint must not reach a single mutating claude call: {}",
+        &after[before.len()..],
+    );
+    assert!(
+        !fs::read_to_string(bin.join("clappa"))
+            .expect("launcher")
+            .contains("init did not complete"),
+        "a refused endpoint must leave the working launcher armed",
+    );
 
     let unrecoverable = run(&fingerprint, Some("plugin-install-always"));
     assert!(!unrecoverable.status.success());
@@ -336,4 +357,89 @@ fn relative_directory_overrides_are_rendered_absolute() {
             "{name} does not resolve under the working directory it was given: {value}",
         );
     }
+}
+
+/// A runtime that fails verification *after* the Claude switch must take the
+/// switch with it.
+///
+/// The preflight refuses a foreign owner that is already there, but one can
+/// arrive between the preflight and the start. Leaving the new plugin
+/// registered and the launcher armed against it would be the exact skew this
+/// bundle exists to prevent: Claude gated by a plugin talking to a runtime
+/// nobody verified. There was no plugin here before, so undoing means removing
+/// the one just installed rather than restoring a predecessor.
+#[test]
+fn a_runtime_that_fails_verification_after_the_switch_undoes_it() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = directory.path();
+    let bin = root.join("bin");
+    let claude = root.join("claude");
+    let plugin = root.join("installed-plugin");
+    fs::create_dir_all(&bin).expect("bin directory");
+    fs::create_dir_all(plugin.join("hooks")).expect("plugin hooks");
+    let appa = install_test_binaries(&bin);
+    install_fake_curl(&bin);
+    let source = stage_bundle(root);
+
+    let fake_claude = bin.join("claude");
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-claude.sh"),
+        &fake_claude,
+    )
+    .expect("fake claude is copied");
+    executable(&fake_claude);
+    let starter = plugin.join("hooks/ensure-runtime.sh");
+    fs::write(&starter, "#!/bin/sh\nexit 0\n").expect("fake starter");
+    executable(&starter);
+    fs::write(plugin.join("statusline.sh"), "#!/bin/sh\nexit 0\n").expect("statusline");
+
+    let output = Command::new(&appa)
+        .current_dir(root)
+        .args(["init", "claude-code", "--plugin-source"])
+        .arg(&source)
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default()),
+        )
+        .env("HOME", root)
+        .env("APPA_INSTALL_DIR", &bin)
+        .env("APPA_CONFIG_DIR", root.join("config"))
+        .env("APPA_DATA_DIR", root.join("data"))
+        .env("CLAUDE_CONFIG_DIR", &claude)
+        .env("FAKE_CLAUDE_HOME", &claude)
+        .env("FAKE_CLAUDE_LOG", root.join("claude.log"))
+        .env("FAKE_PLUGIN_ROOT", &plugin)
+        // The preflight sees this build; everything after it sees a stranger.
+        .env("FAKE_CURL_CALLS", root.join("curl-calls"))
+        .env("FAKE_RUNTIME_FINGERPRINT", runtime_fingerprint(&appa))
+        .env("FAKE_RUNTIME_FINGERPRINT_LATER", "not-this-build")
+        .output()
+        .expect("appa init runs");
+
+    assert!(
+        !output.status.success(),
+        "verification against a foreign runtime must fail init",
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("different appa build"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let registry: serde_json::Value =
+        serde_json::from_slice(&fs::read(claude.join("plugins/installed_plugins.json")).expect("plugin registry"))
+            .expect("registry JSON");
+    assert_eq!(
+        registry["plugins"]["appa-runtime@appa"].as_array().map(Vec::len),
+        None,
+        "the plugin must not stay registered against a runtime that failed verification",
+    );
+    assert!(
+        !claude.join("marketplace-appa").is_file(),
+        "the marketplace must not stay registered either",
+    );
+    assert!(
+        !bin.join("clappa").exists(),
+        "the launcher must not be armed for a bundle whose runtime failed verification",
+    );
 }
