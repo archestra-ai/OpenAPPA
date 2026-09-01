@@ -11,7 +11,9 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use crate::config::{Config, ConfigError};
 use crate::plugin_bundle::{self, Deployment, Endpoint, PluginBundleError, PluginSource, Population};
+use crate::runtime_cli::{Adapter, refuse_unobservable_returns};
 
 const MARKETPLACE: &str = "appa";
 const PLUGIN: &str = "appa-runtime@appa";
@@ -32,6 +34,10 @@ pub enum InitError {
     InstallRuntime { path: PathBuf, source: std::io::Error },
     #[error("cannot initialize {path}: {source}")]
     WriteFile { path: PathBuf, source: std::io::Error },
+    #[error("the deployment config {path} does not load: {source}")]
+    UnloadableConfig { path: PathBuf, source: Box<ConfigError> },
+    #[error("the deployment config {path} cannot serve Claude Code: {reason}")]
+    UnusableConfig { path: PathBuf, reason: String },
     #[error("Claude's plugin registry at {path} is invalid: {message}")]
     PluginRegistry { path: PathBuf, message: String },
     #[error("Claude installed {PLUGIN}, but its installed plugin directory is unavailable")]
@@ -57,6 +63,28 @@ pub enum InitError {
         operation: Box<InitError>,
         recovery: Box<InitError>,
     },
+}
+
+/// What this init did to the config file, as the receipt reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigOutcome {
+    /// Seeded from this build's default, because no config was there.
+    Created,
+    /// Left exactly as it was found.
+    Kept,
+    /// Replaced with this build's default, at the user's word, the previous
+    /// file beside it.
+    Rewritten,
+}
+
+impl ConfigOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            ConfigOutcome::Created => "created",
+            ConfigOutcome::Kept => "kept",
+            ConfigOutcome::Rewritten => "rewritten",
+        }
+    }
 }
 
 struct DeploymentPaths {
@@ -116,7 +144,11 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
         }
     })?;
     let config = paths.config_dir.join("appa.toml");
-    let config_created = create_default_config(&config)?;
+    let config_outcome = match create_default_config(&config)? {
+        true => ConfigOutcome::Created,
+        false => offer_config_rewrite(&config)?,
+    };
+    verify_config(&config)?;
 
     // 3. Materialize the deployment, or validate and reuse an existing one.
     progress("preparing the plugin bundle");
@@ -216,7 +248,7 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
     Ok(render_receipt(
         &source_label(&source, &deployment),
         &config,
-        config_created,
+        config_outcome,
         stale_path_copy.as_deref(),
         std::io::stdout().is_terminal() && env::var_os("NO_COLOR").is_none(),
     ))
@@ -246,7 +278,7 @@ fn stale_path_copy(paths: &DeploymentPaths, deployed: &Path) -> Option<PathBuf> 
 fn render_receipt(
     adapter: &str,
     config: &Path,
-    config_created: bool,
+    config_outcome: ConfigOutcome,
     stale_path_copy: Option<&Path>,
     color: bool,
 ) -> String {
@@ -269,7 +301,7 @@ fn render_receipt(
         label("Runtime"),
         label("Config"),
         friendly_path(config),
-        if config_created { "created" } else { "kept" },
+        config_outcome.as_str(),
         label("Launcher"),
     );
     // A session loads its hooks at session start, and the hook wire carries no
@@ -821,6 +853,136 @@ fn create_default_config(path: &Path) -> Result<bool, InitError> {
         });
     }
     Ok(true)
+}
+
+/// The policy version this build's default config declares.
+fn template_policy_version() -> i64 {
+    policy_version(DEFAULT_CONFIG).expect("the bundled default config declares an integer policy version")
+}
+
+/// The `[policy] version` of one config's own text, before any include composes.
+fn policy_version(text: &str) -> Option<i64> {
+    toml::from_str::<toml::Value>(text)
+        .ok()?
+        .get("policy")?
+        .get("version")?
+        .as_integer()
+}
+
+/// Offer to replace a config authored against an older policy model.
+///
+/// The config is the user's, and init keeps it across every upgrade. A policy
+/// version below this build's is the one mechanical signal that it was authored
+/// against a model this build no longer writes, so it is also the only drift
+/// init asks about. Only a terminal is asked, and the answer defaults to no: a
+/// rewrite discards every edit the file carries, the include lines that bind
+/// batteries included, and keeps them only in the backup.
+fn offer_config_rewrite(path: &Path) -> Result<ConfigOutcome, InitError> {
+    let stdin = std::io::stdin();
+    if !stdin.is_terminal() {
+        return Ok(ConfigOutcome::Kept);
+    }
+    let stderr = std::io::stderr();
+    offer_config_rewrite_with(path, &mut stdin.lock(), &mut stderr.lock())
+}
+
+fn offer_config_rewrite_with(
+    path: &Path,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> Result<ConfigOutcome, InitError> {
+    let template = template_policy_version();
+    let text = fs::read_to_string(path).map_err(|source| InitError::WriteFile {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    // A config whose version is missing or unreadable is not old, it is broken:
+    // `verify_config` refuses it next, naming the fault it actually has.
+    match policy_version(&text) {
+        Some(found) if found < template => {}
+        _ => return Ok(ConfigOutcome::Kept),
+    }
+    let backup = path.with_extension("toml.bak");
+    if !confirm_rewrite(path, &backup, input, output)? {
+        return Ok(ConfigOutcome::Kept);
+    }
+    // The original moves aside whole, so nothing here can leave a half-written
+    // policy in place: the new file is written under `create_new` and removed
+    // again if that write fails, and a failure puts the original back.
+    fs::rename(path, &backup).map_err(|source| InitError::WriteFile {
+        path: backup.clone(),
+        source,
+    })?;
+    match create_default_config(path) {
+        Ok(_) => Ok(ConfigOutcome::Rewritten),
+        Err(written) => match fs::rename(&backup, path) {
+            Ok(()) => Err(written),
+            Err(source) => Err(InitError::WriteFile {
+                path: path.to_path_buf(),
+                source,
+            }),
+        },
+    }
+}
+
+fn confirm_rewrite(
+    path: &Path,
+    backup: &Path,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> Result<bool, InitError> {
+    let prompt = |source| InitError::WriteFile {
+        path: path.to_path_buf(),
+        source,
+    };
+    write!(
+        output,
+        "appa: {} was authored against an older policy model than this build writes.\n\
+         Rewrite it from this build's default? Your file, its include lines and every edit\n\
+         in it, is kept only at {}, replacing whatever is there. [y/N] ",
+        friendly_path(path),
+        friendly_path(backup),
+    )
+    .and_then(|()| output.flush())
+    .map_err(prompt)?;
+    let mut answer = String::new();
+    if input.read_line(&mut answer).map_err(prompt)? == 0 {
+        return Ok(false);
+    }
+    Ok(matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
+}
+
+/// The config the runtime will be started against, put through the runtime's
+/// own startup refusals first.
+///
+/// A config kept across upgrades drifts: an included battery moves ahead of the
+/// policy version an earlier init wrote, an include is edited to an absolute
+/// path, a hand-edited `Agent` row stops pinning the argument that keeps a
+/// subagent's return observable. The runtime refuses each of those at startup,
+/// which init can report only as an endpoint that never became healthy. Running
+/// both refusals here names the file and the fault, before anything outside
+/// this file has changed.
+fn verify_config(path: &Path) -> Result<(), InitError> {
+    let config = match Config::load(path) {
+        Ok(config) => config,
+        // A `token_env` resolves where the runtime runs, not here. A hook starts
+        // it with the session's environment, which carries variables this
+        // terminal does not, so a secret this process cannot see is not init's
+        // to refuse: the start that follows is what proves the token reachable.
+        Err(ConfigError::MissingSecret { .. }) => return Ok(()),
+        Err(source) => {
+            return Err(InitError::UnloadableConfig {
+                path: path.to_path_buf(),
+                source: Box::new(source),
+            });
+        }
+    };
+    refuse_unobservable_returns(Adapter::ClaudeCode, config.policy_file().value()).map_err(|reason| {
+        InitError::UnusableConfig {
+            path: path.to_path_buf(),
+            reason,
+        }
+    })
 }
 
 fn run_claude<const N: usize>(arguments: [&str; N]) -> Result<Output, InitError> {
@@ -1935,11 +2097,123 @@ mod tests {
     }
 
     #[test]
+    fn a_config_the_runtime_could_not_compose_stops_init() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let config = directory.path().join("appa.toml");
+
+        assert!(create_default_config(&config).expect("the default config is written"));
+        verify_config(&config).expect("the config init writes composes");
+
+        let ahead = template_policy_version() + 1;
+        fs::write(
+            directory.path().join("battery.toml"),
+            format!("[policy]\nversion = {ahead}\n"),
+        )
+        .expect("battery written");
+        let stale = fs::read_to_string(&config).expect("the config is readable");
+        fs::write(&config, format!("include = [\"battery.toml\"]\n{stale}")).expect("include written");
+
+        match verify_config(&config) {
+            Err(InitError::UnloadableConfig { source, .. }) => {
+                assert!(matches!(*source, ConfigError::IncludedVersion { .. }));
+            }
+            other => panic!("a battery ahead of the root policy version must stop init: {other:?}"),
+        }
+    }
+
+    /// A loadable config plus whatever `body` declares, at the path init keeps.
+    fn config_declaring(directory: &Path, body: &str) -> PathBuf {
+        let config = directory.join("appa.toml");
+        let version = template_policy_version();
+        fs::write(
+            &config,
+            format!("[policy]\nversion = {version}\n{body}\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n"),
+        )
+        .expect("the config is written");
+        config
+    }
+
+    #[test]
+    fn a_config_the_runtime_could_not_serve_stops_init() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let config = config_declaring(
+            directory.path(),
+            "[policy.deployment]\ncontext_control = true\n[[policy.tool]]\nname = \"Agent\"\ndelta = {}\n",
+        );
+
+        assert!(
+            matches!(verify_config(&config), Err(InitError::UnusableConfig { .. })),
+            "a subagent that can return unobserved must stop init, as it stops the runtime"
+        );
+    }
+
+    #[test]
+    fn a_token_this_process_cannot_see_is_left_to_the_runtime() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let config = config_declaring(
+            directory.path(),
+            "[externals.sanitizers.scrub]\nurl = \"https://scrub.internal\"\ntoken_env = \"APPA_UNSET_IN_THIS_PROCESS\"\n",
+        );
+
+        assert!(std::env::var_os("APPA_UNSET_IN_THIS_PROCESS").is_none());
+        verify_config(&config).expect("init does not judge a secret it cannot reach");
+    }
+
+    /// A config one policy version behind the build, at the path init keeps.
+    fn outdated_config(directory: &Path) -> PathBuf {
+        let config = directory.join("appa.toml");
+        let older = template_policy_version() - 1;
+        fs::write(&config, format!("[policy]\nversion = {older}\n")).expect("the config is written");
+        config
+    }
+
+    fn answer_rewrite(config: &Path, answer: &str) -> (ConfigOutcome, String) {
+        let mut prompt = Vec::new();
+        let outcome =
+            offer_config_rewrite_with(config, &mut answer.as_bytes(), &mut prompt).expect("the offer completes");
+        (outcome, String::from_utf8(prompt).expect("the prompt is text"))
+    }
+
+    #[test]
+    fn an_outdated_config_is_rewritten_only_on_an_explicit_yes() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let config = outdated_config(directory.path());
+        let authored = fs::read_to_string(&config).expect("the config is readable");
+        let backup = directory.path().join("appa.toml.bak");
+
+        for declined in ["", "\n", "n\n", "no\n"] {
+            let (outcome, prompt) = answer_rewrite(&config, declined);
+            assert!(!prompt.is_empty(), "the offer is shown");
+            assert_eq!(outcome, ConfigOutcome::Kept);
+            assert_eq!(fs::read_to_string(&config).ok(), Some(authored.clone()));
+            assert!(!backup.exists(), "a declined offer writes nothing");
+        }
+
+        assert_eq!(answer_rewrite(&config, "y\n").0, ConfigOutcome::Rewritten);
+        assert_eq!(fs::read_to_string(&config).ok(), Some(DEFAULT_CONFIG.to_string()));
+        assert_eq!(fs::read_to_string(&backup).ok(), Some(authored));
+        verify_config(&config).expect("the rewritten config composes");
+    }
+
+    #[test]
+    fn a_current_config_is_never_offered_for_rewrite() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let config = directory.path().join("appa.toml");
+        assert!(create_default_config(&config).expect("the default config is written"));
+
+        let (outcome, prompt) = answer_rewrite(&config, "y\n");
+        assert!(prompt.is_empty(), "no offer is made");
+        assert_eq!(outcome, ConfigOutcome::Kept);
+        assert_eq!(fs::read_to_string(&config).ok(), Some(DEFAULT_CONFIG.to_string()));
+        assert!(!directory.path().join("appa.toml.bak").exists());
+    }
+
+    #[test]
     fn receipt_is_compact_and_hides_installation_details() {
         let config = user_home()
             .unwrap_or_else(|| PathBuf::from("/home/user"))
             .join("config/appa.toml");
-        let receipt = render_receipt("current checkout", &config, false, None, false);
+        let receipt = render_receipt("current checkout", &config, ConfigOutcome::Kept, None, false);
 
         assert!(receipt.starts_with("OpenAPPA initialized for Claude Code\n\n"));
         assert!(receipt.contains("Adapter   current checkout"));
@@ -1950,7 +2224,7 @@ mod tests {
         assert!(!receipt.contains("appa-runtime (healthy)"));
         assert!(!receipt.contains("\u{1b}["));
 
-        let colored = render_receipt("current checkout", &config, false, None, true);
+        let colored = render_receipt("current checkout", &config, ConfigOutcome::Kept, None, true);
         assert!(colored.starts_with("\u{1b}[1;32m✓ OpenAPPA initialized\u{1b}[0m"));
     }
 }

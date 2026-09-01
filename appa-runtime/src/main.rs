@@ -70,7 +70,7 @@ fn require_loopback(addr: &SocketAddr) -> Result<(), String> {
 /// The adapter surface this binary can serve. The one place harness
 /// names appear in this crate: each variant maps to one codec crate.
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-enum Adapter {
+pub(crate) enum Adapter {
     ClaudeCode,
 }
 
@@ -82,7 +82,7 @@ impl Adapter {
     }
 }
 
-fn refuse_unobservable_returns(adapter: Adapter, policy: &toml::Value) -> Result<(), String> {
+pub(crate) fn refuse_unobservable_returns(adapter: Adapter, policy: &toml::Value) -> Result<(), String> {
     match adapter {
         Adapter::ClaudeCode => {
             let controls_context = policy
