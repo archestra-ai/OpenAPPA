@@ -757,15 +757,37 @@ fn sanitizer_schema() -> serde_json::Value {
     })
 }
 
+/// The stand-in member for a mandate vocabulary with no member of its own. A schema needs a
+/// non-empty `enum`: `{"enum": []}` is a schema no validator accepts, and `maxItems: 0`
+/// states the same bound in a keyword OpenAI's strict subset refuses, so either spelling
+/// loses the whole request before the model sees the call — the annotator then answers
+/// nothing and the call is refused for an operational reason no policy chose.
+///
+/// The name cannot collide with a policy value: it is rendered only when the vocabulary has
+/// no member to collide with. An answer that picks it anyway is refused like any other value
+/// outside the mandate, because [`AnnotationAnswer::from_wire`] confines every leaf to the
+/// declared vocabulary.
+const UNINHABITED_VOCABULARY: &str = "__appa_no_such_value__";
+
+/// One closed string vocabulary as a schema `enum`, never empty.
+fn closed_enum(vocabulary: &[impl AsRef<str>]) -> serde_json::Value {
+    let members: Vec<&str> = match vocabulary.is_empty() {
+        true => vec![UNINHABITED_VOCABULARY],
+        false => vocabulary.iter().map(AsRef::as_ref).collect(),
+    };
+    serde_json::json!({"type": "string", "enum": members})
+}
+
 fn dynamic_audience_schema(audiences: &[String]) -> serde_json::Value {
-    let readers: Vec<&String> = audiences
+    let readers: Vec<&str> = audiences
         .iter()
-        .filter(|audience| audience.as_str() != "public")
+        .map(String::as_str)
+        .filter(|audience| *audience != "public")
         .collect();
     serde_json::json!({
         "oneOf": [
             {"type": "string", "const": "public"},
-            {"type": "array", "items": {"type": "string", "enum": readers}}
+            {"type": "array", "items": closed_enum(&readers)}
         ]
     })
 }
@@ -774,9 +796,9 @@ fn dynamic_audience_schema(audiences: &[String]) -> serde_json::Value {
 /// variant with all its properties required, so an OpenAI-compatible provider can enforce
 /// it as written.
 fn annotation_schema(declaration: &AnnotationDeclaration) -> serde_json::Value {
-    let trust = serde_json::json!({"type": "string", "enum": declaration.trust_ranks});
+    let trust = closed_enum(&declaration.trust_ranks);
     let audience = dynamic_audience_schema(&declaration.audiences);
-    let effect = serde_json::json!({"type": "string", "enum": declaration.effects});
+    let effect = closed_enum(&declaration.effects);
     let object = |pairs: &[(&str, &serde_json::Value)]| {
         serde_json::json!({
             "type": "object",
@@ -802,10 +824,7 @@ fn annotation_schema(declaration: &AnnotationDeclaration) -> serde_json::Value {
             object(&[("contains", &audience), ("within", &audience)])
         ]
     });
-    let attention = serde_json::json!({
-        "type": "array",
-        "items": {"type": "string", "enum": declaration.attention_marks}
-    });
+    let attention = serde_json::json!({"type": "array", "items": closed_enum(&declaration.attention_marks)});
     let delta = serde_json::json!({"oneOf": [
         object(&[]),
         object(&[("trust", &trust)]),
@@ -1256,5 +1275,115 @@ mod tests {
             })
             .is_none()
         );
+    }
+
+    /// Every `enum` in a rendered schema, at any depth.
+    fn enum_sizes(schema: &serde_json::Value, found: &mut Vec<usize>) {
+        match schema {
+            serde_json::Value::Object(fields) => {
+                for (key, value) in fields {
+                    match (key.as_str(), value.as_array()) {
+                        ("enum", Some(members)) => found.push(members.len()),
+                        _ => enum_sizes(value, found),
+                    }
+                }
+            }
+            serde_json::Value::Array(items) => items.iter().for_each(|item| enum_sizes(item, found)),
+            _ => {}
+        }
+    }
+
+    /// Every `maxItems` in a rendered schema, at any depth.
+    fn mentions_max_items(schema: &serde_json::Value) -> bool {
+        match schema {
+            serde_json::Value::Object(fields) => fields
+                .iter()
+                .any(|(key, value)| key == "maxItems" || mentions_max_items(value)),
+            serde_json::Value::Array(items) => items.iter().any(mentions_max_items),
+            _ => false,
+        }
+    }
+
+    /// A mandate can name no rank, no reader, no mark and no effect kind — the policy loader
+    /// accepts an explicitly empty bound for each. Such a mandate still has to render a
+    /// schema every backend accepts, or the annotator answers nothing and the call is refused
+    /// for an operational reason no policy chose: `{"enum": []}` is a schema no validator
+    /// accepts, and `maxItems` is outside the strict subset the OpenAI transport sends under
+    /// `strict: true`. The stand-in member keeps the enum inhabited, and the decoder refuses
+    /// it on every leaf because no mandate permits it.
+    #[test]
+    fn an_empty_mandate_vocabulary_renders_a_schema_every_backend_accepts() {
+        let declaration = AnnotationDeclaration {
+            inputs: vec![],
+            trust_ranks: vec![],
+            audiences: vec![],
+            attention_marks: vec![],
+            effects: vec![],
+        };
+        let schema = annotation_schema(&declaration);
+
+        let mut sizes = Vec::new();
+        enum_sizes(&schema, &mut sizes);
+        assert!(!sizes.is_empty(), "the walk reached no enum at all: {schema}");
+        assert!(
+            sizes.iter().all(|size| *size > 0),
+            "an empty vocabulary renders an empty enum: {schema}"
+        );
+        assert!(
+            !mentions_max_items(&schema),
+            "maxItems is outside OpenAI's strict subset: {schema}"
+        );
+
+        assert_eq!(
+            AnnotationAnswer::from_wire(
+                &serde_json::json!({"delta": {}, "requires": {"history": [], "attention": []}, "emits": []}),
+                &declaration
+            )
+            .map(|answer| answer.emits),
+            Some(vec![]),
+            "the neutral annotation still decodes under an empty vocabulary"
+        );
+
+        let neutral = |extra: serde_json::Value| {
+            let mut answer = serde_json::json!({
+                "delta": {}, "requires": {"history": [], "attention": []}, "emits": []
+            });
+            for (key, value) in extra.as_object().expect("an object").clone() {
+                match key.as_str() {
+                    "delta" | "emits" => answer[key] = value,
+                    mark => answer["requires"][mark] = value,
+                }
+            }
+            answer
+        };
+        for (leaf, answer) in [
+            (
+                "delta.trust",
+                neutral(serde_json::json!({"delta": {"trust": UNINHABITED_VOCABULARY}})),
+            ),
+            (
+                "delta.audience",
+                neutral(serde_json::json!({"delta": {"audience": [UNINHABITED_VOCABULARY]}})),
+            ),
+            (
+                "requires.trust",
+                neutral(serde_json::json!({"trust": UNINHABITED_VOCABULARY})),
+            ),
+            (
+                "requires.attention",
+                neutral(serde_json::json!({"attention": [UNINHABITED_VOCABULARY]})),
+            ),
+            (
+                "requires.history",
+                neutral(serde_json::json!({"history": [{"contains": UNINHABITED_VOCABULARY}]})),
+            ),
+            ("emits", neutral(serde_json::json!({"emits": [UNINHABITED_VOCABULARY]}))),
+        ] {
+            assert_eq!(
+                AnnotationAnswer::from_wire(&answer, &declaration),
+                None,
+                "the stand-in member is admitted at {leaf}"
+            );
+        }
     }
 }
