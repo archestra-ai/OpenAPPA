@@ -3,7 +3,7 @@ title: kAgent
 nav_title: kAgent
 category: Integrations
 order: 6
-description: Proposal for OpenAPPA on kagent — an ADK plugin delivered through kagent's runtime-image settings, with no kagent or Google ADK fork.
+description: Proposal for OpenAPPA on kagent — an ADK plugin delivered through the kagent runtime-image settings, with no kagent or Google ADK fork.
 ---
 
 :::proposal
@@ -15,8 +15,8 @@ date: 2026-09-01
 
 Two stock surfaces carry the whole integration:
 
-- kagent's runtime-image settings name the image that runs every declarative agent. Point them at the OpenAPPA images: `appa-kagent-adk` for the python runtime, `appa-kagent-adk-go` for the Go runtime.
-- Both runtimes take plugins through Google ADK's official plugin API. The OpenAPPA images register one — `AppaPluginKagent` — which maps ADK callbacks to the eight `appa-runtime` hook events and enforces the answered `HookDecision`.
+- The kagent runtime-image settings name the image that runs every declarative agent. Point them at the OpenAPPA images: `appa-kagent-adk` for the python runtime, `appa-kagent-adk-go` for the Go runtime.
+- Both runtimes take plugins through the official Google ADK plugin API. The OpenAPPA images register one — `AppaPluginKagent` — which maps ADK callbacks to the eight `appa-runtime` hook events and enforces the answered `HookDecision`.
 
 `appa-runtime` owns the decisions: policy, the Engine, remedy plans, and trajectory state, as [How it works](/how-it-works) and [Policy contracts](/contracts) define them.
 
@@ -78,11 +78,11 @@ entrypoint flow — the stock calls, one delta:
             plugins=plugins).build()   ─▶ serve A2A
 ```
 
-The entrypoint replays the stock startup and appends one plugin to the list ADK already accepts. That one registration covers the root agent, every sub-agent, and every tool. The Go image does the same through the Go ADK's plugin API.
+The entrypoint replays the stock startup and appends one plugin to the list ADK already accepts. That one registration covers the root agent, every sub-agent, and every tool. The Go image does the same through the Go ADK plugin API.
 
 ### Callback-to-hook mapping
 
-The runtime's hook vocabulary is the eight `HookEvent` variants of `appa-runtime-api`. The plugin maps each gated ADK callback onto exactly one event. Callbacks with no event either pass through or hold as liveness gates.
+The runtime hook vocabulary is the eight `HookEvent` variants of `appa-runtime-api`. The plugin maps each gated ADK callback onto exactly one event. Callbacks with no event either pass through or hold as liveness gates.
 
 ```text
 ADK plugin callback                     ─▶ feeds /hook event
@@ -155,7 +155,7 @@ The load-bearing enforcement points, proven in the pinned ADK sources:
 
 - A deny returned from the before-tool callback skips execution and becomes the function response the model reads.
 - The user-message callback fires before the session append, so a blocked prompt never lands in stored history.
-- An agent called as a tool crosses the same gate as any tool call, and its return is substituted on the parent side.
+- An agent called as a tool crosses the same gate as any tool call, and the parent side substitutes its return.
 
 ### Remedy plans stay executable
 
@@ -178,19 +178,19 @@ a Redispatch plan names a tool instead — the agent
 calls it itself, through the normal gate
 ```
 
-- Human review rides kagent's stock approval flow: the run suspends, the A2A caller — the kagent UI or an upstream client — decides, and the run resumes. No answer grants nothing, and the offer stands.
+- Human review rides the stock kagent approval flow: the run suspends, the A2A caller — the kagent UI or an upstream client — decides, and the run resumes. No answer grants nothing, and the offer stands.
 - Every remedy call crosses the same hook gate as any tool call.
 
 ### Fail-closed rules
 
 1. An unreachable `/hook`, or an answer outside the contract, blocks the gated action.
-2. A config field the entrypoint does not support refuses to start. The stock parser's silence is not inherited.
+2. A config field the entrypoint does not support refuses to start. The stock parser ignores unknown fields, and the entrypoint does not.
 3. The model and emission callbacks feed no event, but they still hold when the `/hook` channel is down.
 4. When the pinned ADK has no error-turn callback, `appa-runtime` recovery closes the turn at the next admitted event.
 
 ### Scope
 
-Covered: declarative agents on both runtimes. Not covered: BYO agents and kagent's sandbox kinds.
+Covered: declarative agents on both runtimes. Not covered: BYO agents and the kagent sandbox kinds.
 
 ## Implementation plan
 
