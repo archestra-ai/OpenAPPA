@@ -1836,7 +1836,11 @@ fn clear_confirmed_foreign_with(
 /// this file itself. A runtime it left running does not: it still serves what it loaded at
 /// startup, and a config written since is on disk only. Comparing the two keys keeps the
 /// question to the case that has one — an install that changed nothing asks nothing.
-fn reconcile_policy(endpoint: &Endpoint, config: &Path, composed: &ComposedPolicy) -> Result<RuntimeOutcome, InitError> {
+fn reconcile_policy(
+    endpoint: &Endpoint,
+    config: &Path,
+    composed: &ComposedPolicy,
+) -> Result<RuntimeOutcome, InitError> {
     let Some(divergence) = policy_divergence(composed, serving_policy_key(endpoint).as_deref()) else {
         return Ok(RuntimeOutcome::Healthy);
     };
@@ -1924,9 +1928,9 @@ fn confirm_reload_with(
     // Each case states exactly what init established, and no more: one knows the running
     // runtime serves something else, the other knows only that it cannot tell.
     let question = match divergence {
-        Divergence::Serving => format!(
-            "appa: the running runtime still serves the policy it started with, not {config}."
-        ),
+        Divergence::Serving => {
+            format!("appa: the running runtime still serves the policy it started with, not {config}.")
+        }
         Divergence::Unestablished => format!(
             "appa: {config} resolves a secret only where the runtime runs, so this cannot tell\n\
              whether the running runtime already serves it."
