@@ -68,11 +68,12 @@ command = ["python3", "batteries/github/audience-source.py"]
 A command path is resolved against the directory of the config file
 that names it, so write the path as your root config sees the battery.
 
-The script reads its token from `OPENAPPA_GITHUB_TOKEN`. The token needs
-the `read:org` and `user:email` scopes. The runtime strips every
-`APPA_*` variable from a command it runs — its own credentials never
-reach an external — so a source's token must be named outside that
-prefix. Any GitHub error or missing answer stops the operation without
+The script reads its token from `APPA_PROVIDER_GITHUB_TOKEN`. The token needs
+the `read:org` and `user:email` scopes. The runtime keeps its own
+`APPA_*` variables — its wiring and every `token_env` secret — out of a
+command it runs, and passes through only the `APPA_PROVIDER_*`
+namespace, which holds credentials a command reads for itself and the
+runtime never sends. Any GitHub error or missing answer stops the operation without
 recording a decision; nothing is guessed.
 
 **`test_audience_source.py`** — fixture tests over recorded GitHub REST

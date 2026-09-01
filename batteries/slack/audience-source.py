@@ -10,7 +10,7 @@ Serves the stock `slack` selector catalog over the Slack Web API:
 
 and the member lookup that canonicalizes one `slack:U...` reader.
 
-Credentials come from OPENAPPA_SLACK_TOKEN (a bot or user token with
+Credentials come from APPA_PROVIDER_SLACK_TOKEN (a bot or user token with
 users:read, users:read.email, and usergroups:read). Any Slack error,
 missing answer, or malformed response exits nonzero: the runtime treats
 that as no answer and refuses the operation, so a directory hiccup never
@@ -25,7 +25,7 @@ import urllib.request
 
 
 API_ROOT = "https://slack.com/api/"
-TOKEN_VAR = "OPENAPPA_SLACK_TOKEN"
+TOKEN_VAR = "APPA_PROVIDER_SLACK_TOKEN"
 TIMEOUT_SECONDS = 30
 
 

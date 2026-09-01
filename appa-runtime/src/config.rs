@@ -14,6 +14,25 @@ pub struct Config {
     pub externals: Externals,
 }
 
+/// The runtime's own environment namespace: its wiring (`APPA_CONFIG`, `APPA_DB`,
+/// `APPA_GATE`, …) and every secret a `token_env` names. Nothing in it reaches a child
+/// process, so a bearer token this runtime sends and a gate variable that would recurse a
+/// consult both stay in this process.
+pub(crate) const RUNTIME_VARIABLE_PREFIX: &str = "APPA_";
+
+/// The one part of the runtime's namespace that survives into a child: the credential a
+/// `command` external reads for itself — a battery's provider token, which the runtime
+/// never reads and never sends. `token_env` may not name one, so the passthrough cannot
+/// become a way to hand a subprocess a secret this runtime holds.
+pub(crate) const PROVIDER_CREDENTIAL_PREFIX: &str = "APPA_PROVIDER_";
+
+/// Whether a variable of this process must be removed from a `command` external's
+/// environment. The `claude-code` consult is stricter still and keeps nothing of the
+/// namespace, carve-out included: it reads no provider credential.
+pub(crate) fn withheld_from_child(key: &str) -> bool {
+    key.starts_with(RUNTIME_VARIABLE_PREFIX) && !key.starts_with(PROVIDER_CREDENTIAL_PREFIX)
+}
+
 /// The effective policy file: deterministic TOML bytes after includes
 /// compose, and the policy value parsed from those bytes. The stored
 /// value and bytes always describe the same deployment.
@@ -344,6 +363,15 @@ pub enum ConfigError {
         section: &'static str,
         name: String,
         var: String,
+    },
+    #[error(
+        "the {section} endpoint {name:?} names {var}, which reaches command children: a token this runtime sends itself needs a variable outside {prefix}"
+    )]
+    ChildCredentialVariable {
+        section: &'static str,
+        name: String,
+        var: String,
+        prefix: &'static str,
     },
     #[error("the {section} endpoint {name:?} names {var}, which is not set")]
     MissingSecret {
@@ -1244,11 +1272,19 @@ fn resolve_token(
     let Some(var) = token_env else {
         return Ok(None);
     };
-    if !var.starts_with("APPA_") {
+    if !var.starts_with(RUNTIME_VARIABLE_PREFIX) {
         return Err(ConfigError::ForeignSecretVariable {
             section,
             name: name.to_string(),
             var,
+        });
+    }
+    if var.starts_with(PROVIDER_CREDENTIAL_PREFIX) {
+        return Err(ConfigError::ChildCredentialVariable {
+            section,
+            name: name.to_string(),
+            var,
+            prefix: PROVIDER_CREDENTIAL_PREFIX,
         });
     }
     match lookup(&var) {
@@ -1388,6 +1424,16 @@ mod tests {
             "{MINIMAL}\n[externals.authorities.security]\nurl = \"https://authority.internal\"\ntoken_env = \"APPA_AUTHORITY_TOKEN\"\n"
         );
         assert!(matches!(parse(&unset), Err(ConfigError::MissingSecret { .. })));
+
+        // The passthrough namespace reaches command children, so a token this runtime sends
+        // may not live there — the refusal comes before the variable is even read.
+        let passthrough = format!(
+            "{MINIMAL}\n[externals.authorities.security]\nurl = \"https://authority.internal\"\ntoken_env = \"APPA_PROVIDER_AUTHORITY_TOKEN\"\n"
+        );
+        assert!(matches!(
+            parse(&passthrough),
+            Err(ConfigError::ChildCredentialVariable { .. }),
+        ));
 
         let empty = format!(
             "{MINIMAL}\n[externals.authorities.security]\nurl = \"https://authority.internal\"\ntoken_env = \"APPA_AUTHORITY_TOKEN\"\n"

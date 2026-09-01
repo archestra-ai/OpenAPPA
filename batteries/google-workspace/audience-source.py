@@ -20,7 +20,7 @@ group member outside the directory belongs to the group like any other
 its qualified identity, because the Workspace administers no account
 for that address and attests nothing about it.
 
-Credentials come from OPENAPPA_GOOGLE_WORKSPACE_TOKEN: an OAuth2 access
+Credentials come from APPA_PROVIDER_GOOGLE_WORKSPACE_TOKEN: an OAuth2 access
 token with the admin.directory.user.readonly and
 admin.directory.group.member.readonly scopes plus openid email. Any
 API error or missing answer exits nonzero: the runtime treats that as
@@ -38,7 +38,7 @@ import urllib.request
 
 USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
 DIRECTORY_ROOT = "https://admin.googleapis.com/admin/directory/v1"
-TOKEN_VAR = "OPENAPPA_GOOGLE_WORKSPACE_TOKEN"
+TOKEN_VAR = "APPA_PROVIDER_GOOGLE_WORKSPACE_TOKEN"
 TIMEOUT_SECONDS = 30
 
 

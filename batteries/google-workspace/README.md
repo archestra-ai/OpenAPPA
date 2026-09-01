@@ -50,12 +50,13 @@ command = ["python3", "batteries/google-workspace/audience-source.py"]
 A command path is resolved against the directory of the config file
 that names it, so write the path as your root config sees the battery.
 
-The script reads its token from `OPENAPPA_GOOGLE_WORKSPACE_TOKEN`: an
+The script reads its token from `APPA_PROVIDER_GOOGLE_WORKSPACE_TOKEN`: an
 OAuth2 access token with the `admin.directory.user.readonly` and
 `admin.directory.group.member.readonly` scopes plus `openid email`.
-The runtime strips every `APPA_*` variable from a command it runs — its
-own credentials never reach an external — so a source's token must be
-named outside that prefix. Any API error or missing answer stops the
+The runtime keeps its own `APPA_*` variables — its wiring and every
+`token_env` secret — out of a command it runs, and passes through only
+the `APPA_PROVIDER_*` namespace, which holds credentials a command reads
+for itself and the runtime never sends. Any API error or missing answer stops the
 operation without recording a decision; nothing is guessed.
 
 Reads are directory-wide: `full-members` pages through every account.

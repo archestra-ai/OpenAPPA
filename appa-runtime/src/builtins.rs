@@ -469,10 +469,14 @@ fn isolate_claude_environment(command: &mut tokio::process::Command) {
     // tool-less, and non-persistent, so it is safe and necessary to clear the
     // harness marker before launching it.
     command.env_remove("CLAUDECODE");
-    // No APPA secret or wiring variable reaches the model: the child needs its own
-    // credentials and HOME, never this runtime's bearer tokens.
+    // No APPA variable of any kind reaches the model: the child needs its own credentials
+    // and HOME, never this runtime's bearer tokens — and not the provider credential a
+    // `command` external inherits either, which this consult never reads.
     for (key, _) in std::env::vars_os() {
-        if key.to_string_lossy().starts_with("APPA_") {
+        if key
+            .to_string_lossy()
+            .starts_with(crate::config::RUNTIME_VARIABLE_PREFIX)
+        {
             command.env_remove(key);
         }
     }

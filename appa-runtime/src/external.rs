@@ -714,8 +714,11 @@ async fn run_command_process(
         .stderr(Stdio::null())
         .kill_on_drop(true);
     configured.as_std_mut().process_group(0);
+    // The runtime's own namespace stops here: no bearer token it sends, and no wiring
+    // variable, reaches the child. A command's own provider credential is the exception the
+    // namespace carves out, because the child is the only thing that reads it.
     for (key, _) in std::env::vars_os() {
-        if key.to_string_lossy().starts_with("APPA_") {
+        if crate::config::withheld_from_child(&key.to_string_lossy()) {
             configured.env_remove(key);
         }
     }
@@ -1157,6 +1160,7 @@ mod tests {
     async fn a_command_receives_one_envelope_in_its_directory_and_answers_for_any_kind() {
         let dir = tempfile::tempdir().expect("a fixture directory is created");
         unsafe { std::env::set_var("APPA_COMMAND_TEST_SECRET", "must-not-leak") };
+        unsafe { std::env::set_var("APPA_PROVIDER_TEST_TOKEN", "provider-credential") };
         let services = command_services(
             dir.path(),
             r#"cat > request.json
@@ -1169,6 +1173,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         );
         let outcome = resolve_command(&services).await;
         unsafe { std::env::remove_var("APPA_COMMAND_TEST_SECRET") };
+        unsafe { std::env::remove_var("APPA_PROVIDER_TEST_TOKEN") };
 
         assert_eq!(
             outcome,
@@ -1191,8 +1196,9 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         );
         assert_eq!(
             std::fs::read_to_string(dir.path().join("appa-env.txt")).unwrap(),
-            "",
-            "no APPA_* variable reaches a resolver command"
+            "APPA_PROVIDER_TEST_TOKEN=provider-credential\n",
+            "a command inherits the provider credential it reads for itself, and nothing else of \
+             the runtime's namespace"
         );
 
         // The same command serves an authority: the transport is kind-agnostic.
@@ -1478,6 +1484,8 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         let command = fake_claude(capture.path(), &script);
         // The runtime's own wiring and secrets must not reach the child.
         unsafe { std::env::set_var("APPA_TEST_SECRET_TOKEN", "leaky") };
+        // Not even the credential a `command` external inherits: this consult reads none.
+        unsafe { std::env::set_var("APPA_PROVIDER_TEST_TOKEN", "leaky") };
         let raw = run_claude_code(
             &claude_backend(command, 2000, 65_536),
             &prompt,
@@ -1486,6 +1494,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         .await
         .expect("the fake Claude process returns structured output");
         unsafe { std::env::remove_var("APPA_TEST_SECRET_TOKEN") };
+        unsafe { std::env::remove_var("APPA_PROVIDER_TEST_TOKEN") };
         assert_eq!(raw["delta"]["trust"], "suspicious");
 
         let sent: serde_json::Value =
