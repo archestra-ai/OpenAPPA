@@ -839,6 +839,14 @@ fn extract_archive(archive: &Path, destination: &Path) -> Result<(), PluginBundl
             )));
         }
 
+        let kind = entry.header().entry_type();
+        // GitHub source archives may contain POSIX PAX metadata records. They
+        // describe following entries and do not materialize in the plugin
+        // tree; the following entry's resolved path is still checked below.
+        if matches!(kind, tar::EntryType::XHeader | tar::EntryType::XGlobalHeader) {
+            continue;
+        }
+
         let path = entry
             .path()
             .map_err(|error| malformed(format!("unreadable entry path: {error}")))?
@@ -857,7 +865,7 @@ fn extract_archive(archive: &Path, destination: &Path) -> Result<(), PluginBundl
             source,
         };
 
-        match entry.header().entry_type() {
+        match kind {
             tar::EntryType::Directory => fs::create_dir_all(&target).map_err(write)?,
             tar::EntryType::Regular => {
                 if let Some(parent) = target.parent() {
@@ -1626,6 +1634,17 @@ mod tests {
         {
             let encoder = flate2::write::GzEncoder::new(&mut bytes, flate2::Compression::fast());
             let mut archive = tar::Builder::new(encoder);
+
+            // GitHub source archives can begin with this POSIX PAX metadata
+            // entry. It is transport metadata, not part of the source tree.
+            let metadata = b"27 comment=GitHub archive\n";
+            let mut header = tar::Header::new_ustar();
+            header.set_path("pax_global_header").unwrap();
+            header.set_size(metadata.len() as u64);
+            header.set_entry_type(tar::EntryType::XGlobalHeader);
+            header.set_cksum();
+            archive.append(&header, metadata.as_slice()).unwrap();
+
             for (source, _) in crate::plugin_layout::REPOSITORY_MAPPINGS {
                 let path = repository.join(source);
                 let archived = Path::new("OpenAPPA-test").join(source);
