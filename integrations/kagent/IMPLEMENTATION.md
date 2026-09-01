@@ -1,11 +1,11 @@
-# kagent dynamic ADK extension implementation plan
+# kagent dynamic extension implementation plan
 
 Source baseline:
 
 - kagent commit `9e246fd3797457b18fc277680be1629a0f57fce0`
 - Google ADK Go `v2.2.0` at `b264039aaec43baedc123e5b9a0cf87681d0bbca`
 - Substrate `v0.0.20`
-- OpenAPPA `origin/main` at `df69b8a1adf9206cc2923b95fadd17f9d26224ae`
+- OpenAPPA `origin/main` at `77230bbb177d72ac740173036b715ff2b3f1ae24`
 
 The reader-facing proposal is at [openappa.com/kagent](https://www.openappa.com/kagent).
 
@@ -13,19 +13,24 @@ The reader-facing proposal is at [openappa.com/kagent](https://www.openappa.com/
 
 The human reviewer selected these constraints:
 
-1. Run the dynamic OpenAPPA ADK extension as a digest-pinned OCI companion container.
+1. Run the dynamic OpenAPPA extension as a digest-pinned OCI companion container.
 2. Permit generic non-OpenAPPA lifecycle infrastructure when ADK callbacks cannot cover readiness, egress, snapshots, or process lifecycle.
 3. Classify a crash after execution acknowledgement and before terminal completion as `Indeterminate` inside OpenAPPA.
 4. Pin one extension revision per live scope and drain old scopes during upgrades.
 5. Publish the OpenAPPA proposal and plugin, plus a separate kagent generic-host PR to a private fork.
+6. Keep Google ADK Go as an unmodified upstream dependency.
 
 These decisions are normative for the first implementation and PoC.
 
 ## Goal
 
-Add a generic dynamically supplied ADK extension system to the kagent fork.
+Add a generic dynamically supplied extension system to the kagent fork.
 
 Ship OpenAPPA as an independently built sidecar that uses this generic system.
+
+Use only public Google ADK interfaces and kagent-owned integration points. Do not fork, vendor, copy, patch, replace, or import internal Google ADK packages.
+
+If those surfaces cannot enforce a required boundary, report that capability as unavailable and refuse protected-workload activation.
 
 The kagent fork MUST contain no OpenAPPA logic or OpenAPPA-specific data model.
 
@@ -39,6 +44,7 @@ The combined system MUST preserve these invariants:
 6. kagent never parses a plugin policy, fact, Label, remedy, consult, or extension-specific state.
 7. The OpenAPPA sidecar owns all OpenAPPA state, semantics, recovery, and external consults.
 8. One extension artifact and protocol selection remain pinned for each live scope.
+9. No invariant depends on a change to Google ADK source.
 
 ## Evidence and adopted patterns
 
@@ -60,22 +66,24 @@ Do not use Go's standard [`plugin`](https://pkg.go.dev/plugin) package. It has s
 
 ## Current source constraints
 
-Current ADK and kagent lack the full required boundary set.
+Current public ADK and kagent surfaces lack the full required boundary set.
 
-| Requirement | Source evidence | Current limitation |
+| Requirement | Source evidence | Allowed integration path |
 |---|---|---|
-| Dynamic ADK plugin object | [kagent runner adapter](https://github.com/kagent-dev/kagent/blob/9e246fd3797457b18fc277680be1629a0f57fce0/go/adk/pkg/runner/adapter.go#L74-L95) | It installs compiled Go plugin objects only |
-| Provider-final catalog | [ADK](https://github.com/google/adk-go/blob/b264039aaec43baedc123e5b9a0cf87681d0bbca/internal/llminternal/base_flow.go#L707-L730) and [Bedrock](https://github.com/kagent-dev/kagent/blob/9e246fd3797457b18fc277680be1629a0f57fce0/go/adk/pkg/models/bedrock.go#L730-L808) | No callback sees final names and schemas |
-| Pre-plugin dispatch | [ADK tool flow](https://github.com/google/adk-go/blob/b264039aaec43baedc123e5b9a0cf87681d0bbca/internal/llminternal/base_flow.go#L1251-L1285) | Plugin callbacks see mutable arguments first |
-| Event drop before persistence | [ADK runner](https://github.com/google/adk-go/blob/b264039aaec43baedc123e5b9a0cf87681d0bbca/runner/runner.go#L316-L355) | `OnEvent` cannot drop and is not exclusive |
-| User input gate | [ADK user callback](https://github.com/google/adk-go/blob/b264039aaec43baedc123e5b9a0cf87681d0bbca/runner/runner.go#L613-L668) | Existing callback is usable but not dynamic |
-| Child terminal gate | [ADK task wrapper](https://github.com/google/adk-go/blob/b264039aaec43baedc123e5b9a0cf87681d0bbca/agent/llmagent/llm_agent_wrapper.go#L486-L590) | No pre-persistence child return callback |
-| Automatic memory | [ADK preloader](https://github.com/google/adk-go/blob/b264039aaec43baedc123e5b9a0cf87681d0bbca/tool/preloadmemorytool/tool.go#L72-L97) | Raw memory reaches model instructions outside tool callbacks |
-| MCP transport | [ADK client](https://github.com/google/adk-go/blob/b264039aaec43baedc123e5b9a0cf87681d0bbca/tool/mcptoolset/client.go#L67-L134) | It retries and hides raw arguments |
-| Remote A2A | [kagent tool](https://github.com/kagent-dev/kagent/blob/9e246fd3797457b18fc277680be1629a0f57fce0/go/adk/pkg/tools/remote_a2a_tool.go#L25-L145) | It forwards credentials and resolves Cards lazily |
-| Content telemetry | [kagent attributes](https://github.com/kagent-dev/kagent/blob/9e246fd3797457b18fc277680be1629a0f57fce0/go/adk/pkg/telemetry/attributes.go#L37-L47) | Payload attributes exist before a policy plugin can remove them |
-| Readiness | [kagent A2A server](https://github.com/kagent-dev/kagent/blob/9e246fd3797457b18fc277680be1629a0f57fce0/go/adk/pkg/a2a/server/server.go#L127-L144) | `/readyz` returns success without extension recovery |
-| Snapshot lifecycle | [kagent ActorTemplate](https://github.com/kagent-dev/kagent/blob/9e246fd3797457b18fc277680be1629a0f57fce0/go/core/v2/substrate/actor_template.go#L65-L88) | No extension quiescence or generation attestation |
+| Dynamic plugin object | [kagent runner adapter](https://github.com/kagent-dev/kagent/blob/9e246fd3797457b18fc277680be1629a0f57fce0/go/adk/pkg/runner/adapter.go#L74-L95) | Install one generic out-of-process proxy through the existing plugin surface |
+| Provider-final catalog | Public model interface and [kagent Bedrock adapter](https://github.com/kagent-dev/kagent/blob/9e246fd3797457b18fc277680be1629a0f57fce0/go/adk/pkg/models/bedrock.go#L730-L808) | Add the gate to kagent-owned adapters; refuse opaque upstream providers |
+| Pre-plugin dispatch | Existing public tool callbacks | Install the proxy first and disable later untrusted callbacks in protected workloads |
+| Event persistence | Public session service and Runner output | Wrap both surfaces in kagent; refuse any direct backing-store or yield path |
+| User input gate | Existing public `OnUserMessageCallback` | Route it through the dynamic proxy and session wrapper |
+| Child terminal gate | Public Agent, Runner, and session interfaces | Correlate child scopes in kagent wrappers; refuse unobservable paths |
+| Automatic memory | Public memory and tool interfaces | Disable stock preload and use a gated kagent-owned implementation |
+| MCP transport | Public tool interface | Use a kagent-owned no-retry transport; refuse the stock opaque client |
+| Remote A2A | [kagent tool](https://github.com/kagent-dev/kagent/blob/9e246fd3797457b18fc277680be1629a0f57fce0/go/adk/pkg/tools/remote_a2a_tool.go#L25-L145) | Wrap request and result handling in the kagent fork |
+| Content telemetry | Public configuration plus [kagent attributes](https://github.com/kagent-dev/kagent/blob/9e246fd3797457b18fc277680be1629a0f57fce0/go/adk/pkg/telemetry/attributes.go#L37-L47) | Disable upstream content capture and use content-free kagent wiring |
+| Readiness | [kagent A2A server](https://github.com/kagent-dev/kagent/blob/9e246fd3797457b18fc277680be1629a0f57fce0/go/adk/pkg/a2a/server/server.go#L127-L144) | Gate kagent readiness on generic extension recovery |
+| Snapshot lifecycle | [kagent ActorTemplate](https://github.com/kagent-dev/kagent/blob/9e246fd3797457b18fc277680be1629a0f57fce0/go/core/v2/substrate/actor_template.go#L65-L88) | Add generic lifecycle handling outside ADK |
+
+Source links into Google ADK explain observed behavior only. They are not implementation targets.
 
 Substrate can run [up to ten peer containers](https://github.com/kagent-dev/substrate/blob/v0.0.20/pkg/api/v1alpha1/actortemplate_types.go#L243-L305).
 
@@ -94,8 +102,9 @@ Add these as generic Substrate primitives. The compiler and Actor activation MUS
 - Generic extension API types and generated gRPC client.
 - Generic manifest validation and immutable Revision compilation.
 - Generic sidecar container, volume, socket, secret, egress, readiness, and snapshot rendering.
-- Generic ADK callback proxies and added extension points.
-- Immutable ADK descriptor and payload snapshots.
+- Dynamic proxies for existing public ADK callbacks.
+- Wrappers for public ADK model, tool, session, memory, Agent, and Runner interfaces.
+- Immutable descriptor and payload snapshots in kagent-owned adapters.
 - Generic execution proxy and sink barriers.
 - Generic interaction and remote metadata relay.
 - Host-native ADK session and A2A task state.
@@ -118,6 +127,7 @@ Add these as generic Substrate primitives. The compiler and Actor activation MUS
 - OpenAPPA tool names or special-case routing.
 - OpenAPPA database paths or schema migrations.
 - OpenAPPA readiness, coverage, consult, or audit logic.
+- A Google ADK fork, vendored or copied ADK source, replacement module, source patch, or import from an ADK `internal` package.
 
 Add CI rules that reject imports and identifiers from a maintained forbidden list in the kagent generic-host packages.
 
@@ -132,9 +142,8 @@ Add CI rules that reject imports and identifiers from a maintained forbidden lis
 | `go/core/v2/substrate` | Render multiple extension containers, private sockets, projected config and secrets, state volumes, egress, and probes |
 | `go/adk/pkg/extensions/protocol` | Generated neutral protobuf messages and client |
 | `go/adk/pkg/extensions/host` | Negotiation, ordering, health, deadlines, retries, and generic decisions |
-| ADK fork | Add provider catalog, pre-plugin dispatch, event, child, memory, transport, session, and publication points |
-| `go/adk/pkg/runner` | Build the dynamic proxy list and enforce final ordering |
-| `go/adk/pkg/tools` | Generic immutable execution proxy and remote request hooks |
+| `go/adk/pkg/runner` | Construct the dynamic proxy as the only content-bearing public ADK callback path |
+| `go/adk/pkg/tools` | Generic immutable execution proxy and remote request wrappers |
 | `go/adk/pkg/a2a` | Generic interaction relay and pre-publication gate |
 | `go/adk/pkg/session` | Generic pre-append gate and delivery deduplication |
 | telemetry | Enforce immutable content-free protected workload settings before provider construction |
@@ -144,7 +153,7 @@ Add CI rules that reject imports and identifiers from a maintained forbidden lis
 | Owner | OpenAPPA component |
 |---|---|
 | `appa-kagent-plugin-protocol` | OpenAPPA-side generated client/server binding to the neutral protocol |
-| `appa-kagent-plugin` | gRPC sidecar, ADK event mapping, readiness, dynamic tools, interactions, and recovery |
+| `appa-kagent-plugin` | gRPC sidecar, generic host-phase mapping, readiness, dynamic tools, interactions, and recovery |
 | `appa-runtime-api` | Missing response emission, structured remedy, MRTR, and exact dispatch APIs required by the plugin |
 | `appa-runtime` | Engine session ownership, consults, durable plugin state, and protocol mapping |
 | OCI packaging | Signed sidecar image, manifest, SBOM, provenance, and migrations |
@@ -159,7 +168,7 @@ workload:
   image: ghcr.io/private-kagent/kagent-go-adk@sha256:<digest>
   extensions:
     - name: policy-gate
-      image: ghcr.io/archestra-ai/openappa-adk-plugin@sha256:<digest>
+      image: ghcr.io/archestra-ai/openappa-kagent-plugin@sha256:<digest>
       manifestDigest: sha256:<digest>
       signaturePolicyRef: required-extension-signers-v1
       required: true
@@ -233,11 +242,10 @@ Each image contains a signed manifest:
       "event.gate.v1",
       "session.persist.v1",
       "a2a.publish.v1",
-      "remote.request.v1"
-    ],
-    "optional": [
+      "remote.request.v1",
       "child.lifecycle.v1",
-      "remote.lifecycle.v1",
+      "memory.lifecycle.v1",
+      "mcp.transport.v1",
       "interaction.relay.v1",
       "snapshot.lifecycle.v1"
     ]
@@ -273,7 +281,7 @@ Define `kagent.extension.v1` with these generic RPCs:
 | `GetExtensionInfo` | Return artifact, protocol, manifest, and state schema identity |
 | `Negotiate` | Select protocol and capabilities for one host inventory |
 | `Activate` | Accept the immutable Revision and host inventory digest |
-| `InvokePhase` | Process one immutable ADK or lifecycle event |
+| `InvokePhase` | Process one immutable generic host or lifecycle event |
 | `Quiesce` | Stop new plugin work and commit one state generation |
 | `ValidateRestore` | Accept or reject a restored host and plugin inventory |
 | `Shutdown` | Drain and terminate cleanly |
@@ -281,6 +289,8 @@ Define `kagent.extension.v1` with these generic RPCs:
 Use the standard gRPC health service on the same Unix socket.
 
 The protocol package MUST contain neutral types only.
+
+It MUST NOT carry Google ADK Go types, ADK-private representations, or copied ADK source.
 
 ### Transport authentication
 
@@ -453,11 +463,17 @@ Every decision binds the producing extension, source event, payload digest, expi
 
 The host rejects mismatched, expired, duplicated, reordered, or unknown decisions.
 
-## Generic ADK extension points
+## Public ADK and kagent integration points
+
+Google ADK Go remains the upstream `v2.2.0` module. Do not use a `replace` directive, vendored or copied source, patches, or `internal` imports.
+
+Each integration below must use a public ADK interface or code owned by the kagent fork.
+
+For a protected workload, an unavailable required boundary rejects `Activate` and keeps the Actor unready.
 
 ### Current callback proxy
 
-Wrap current `plugin.Plugin` callbacks with one generic out-of-process proxy:
+Wrap current public `plugin.Plugin` callbacks with one generic out-of-process proxy:
 
 - `BeforeRunCallback`
 - `AfterRunCallback`
@@ -472,15 +488,19 @@ Wrap current `plugin.Plugin` callbacks with one generic out-of-process proxy:
 - `OnToolErrorCallback`
 - `OnEventCallback`
 
-These callbacks remain available to ordinary extensions. Required exclusive phases use stronger points below.
+Install this proxy first in the immutable callback order.
+
+Protected workloads disable any later callback that can observe or change uncommitted content before the proxy decision.
+
+Required phases use public-interface wrappers and kagent-owned barriers below. They do not add callbacks to Google ADK.
 
 ### Provider-final catalog
 
-Add a provider adapter callback after final name and schema conversion but before request transmission.
+Add a generic gate inside each kagent-owned provider adapter after final name and schema conversion but before request transmission.
 
 It returns the exact provider-visible catalog and reversible logical-name map.
 
-Add a raw function-call callback on provider response decoding. It returns the provider tool-call ID, mapped logical name, and original JSON argument token bytes.
+The kagent-owned decoder also returns the provider tool-call ID, mapped logical name, and original JSON argument token bytes.
 
 The host strictly parses and canonicalizes those bytes. It refuses an adapter that exposes only a decoded `map[string]any` or `float64` number path.
 
@@ -488,41 +508,51 @@ Pinned OpenAI code currently decodes arguments through `json.Unmarshal` into a m
 
 Reject provider-name collisions before sending the request.
 
-Refuse providers that cannot expose this callback.
+Only a kagent-owned provider adapter, or a public wrapper proven to expose the final outgoing request, qualifies. All other providers are unavailable.
 
-### Pre-plugin tool proposal
+### Tool proposal
 
-Add an exclusive gate at the beginning of `Flow.callTool`, before `pluginManager.RunBeforeToolCallback`.
+kagent constructs the Runner so the generic proxy is the only content-bearing public ADK callback path.
 
-The host creates an immutable RFC 8785 snapshot and descriptor digest before callback fan-out.
+Correlate that callback with raw bytes captured by the kagent-owned provider adapter. Then create an immutable RFC 8785 snapshot and descriptor digest.
 
-No plugin sees mutable uncommitted arguments before the exclusive owner decides.
+If kagent cannot exclude competing callbacks, the callback capability is unavailable.
+
+Refuse tool calls when the provider path did not expose raw arguments before ADK decoded them.
 
 ### Model request gate
 
-Add an exclusive `model.propose` gate after all request processors and model callbacks, but before telemetry or provider transmission.
+Place an exclusive `model.propose` gate in each kagent-owned provider adapter after request conversion and before telemetry or network transmission.
+
+A public model wrapper qualifies only when it exposes that same final outgoing request.
+
+For live and realtime sends, wrap the public ADK live-session send interface in kagent-owned code and gate before delegating.
 
 It receives the exact canonical provider request, endpoint, model, tool catalog, history, instructions, memory, admitted tool results, and retry identity.
 
 Only a matching permit can send the request to the provider.
 
-Apply this gate to standard generation, live flow, realtime sends, history sends, embedding requests, and every provider adapter.
+Declare a separate capability for standard generation, live flow, realtime sends, history sends, and embedding requests.
 
-Refuse a provider path that cannot expose its final request before network transmission.
+Refuse each path that cannot expose its final request through a kagent-owned adapter or a proven public wrapper.
 
 Provider retry uses the same event ID and exact request digest. A changed request requires a new phase event.
 
 ### Model response gate
 
-Add one gate after model callbacks and before every `handleFunctionCalls` path, including live streaming flow.
+Use the public `AfterModelCallback` as the standard response gate.
+
+For kagent-owned live and streaming adapters, gate the complete response before kagent dispatches calls or publishes content.
 
 It can replace the complete model response or suppress all contained calls.
 
+Refuse a live or streaming path that bypasses these surfaces.
+
 ### Event gate
 
-Add `Drop`, `Replace`, and `Emit` before `plugin.OnEventCallback`, session append, runner yield, and task state publication.
+Implement `Drop`, `Replace`, and `Emit` in kagent wrappers around the public session service and Runner output.
 
-No callback runs between the terminal event decision and the protected sink.
+Do not install other content-bearing `OnEventCallback` implementations in a protected workload.
 
 The first release sends every partial assistant event to the exclusive gate and drops it before persistence or yield.
 
@@ -532,25 +562,29 @@ The terminal event includes a closed authenticated-principal attestation. The ho
 
 ### Session persistence gate
 
-Add a generic pre-append hook for user, function-response, model, task, child, and resumed interaction events.
+Use a kagent-owned session implementation and backing store for user, function-response, model, task, child, and resumed interaction events.
 
-The hook receives exact event bytes and stable session lineage.
+The wrapper receives exact event bytes and stable session lineage.
+
+If the backing store cannot share one transaction with the host outbox, session persistence is unavailable.
 
 ### A2A publication gate
 
-Add a replaceable event gate after ADK-to-A2A conversion and before stream or task publication.
+Add a kagent-owned barrier before ADK-to-A2A conversion and before stream or task publication.
 
 It receives authenticated caller attestation as generic transport metadata.
 
 ### Child lifecycle
 
-Add generic phases for child proposal, start, state, terminal return, and parent delivery.
+Use public Agent, Runner, and session interfaces for child proposal, start, state, terminal return, and parent delivery.
 
 The host preallocates stable child and parent scope IDs.
 
 ### Memory lifecycle
 
-Replace stock automatic preload with generic `memory.propose` and `memory.complete` phases around `SearchMemory`.
+Disable stock automatic preload. Supply a kagent-owned implementation through public memory and tool interfaces.
+
+Wrap `SearchMemory` with generic `memory.propose` and `memory.complete` phases.
 
 No memory content enters model instructions before commit.
 
@@ -560,7 +594,9 @@ Include embedding endpoints and memory stores in the immutable host sink invento
 
 ### MCP transport
 
-Add a generic raw JSON-RPC interceptor that supports exact `params.arguments` injection and terminal response capture.
+Do not use the upstream opaque MCP client in protected workloads.
+
+Supply a kagent-owned tool implementation with raw JSON-RPC argument injection and terminal response capture.
 
 Disable automatic retry after request bytes can reach the MCP server.
 
@@ -634,7 +670,7 @@ Publish with that stable idempotency key, then mark the outbox row delivered.
 
 Recovery retries only the same outbox event and payload digest.
 
-ADK session append and its outbox row MUST share one transaction.
+The kagent-owned session store and its outbox row MUST share one transaction.
 
 A2A, memory, UI, and other external sinks MUST accept the host event ID as an idempotency key.
 
@@ -644,9 +680,11 @@ Protected host construction disables content telemetry before providers, Runner,
 
 This is an immutable workload property. Extension manifests cannot enable or disable host telemetry.
 
-Fork every content-capable telemetry constructor to omit payload fields at creation time.
+Configure upstream ADK telemetry through supported public options so it emits no content.
 
-This includes model, tool, Runner, A2A, and MCP instrumentation.
+Use content-free constructors for kagent-owned model, tool, Runner, A2A, and MCP instrumentation.
+
+Refuse a component when its content telemetry cannot be disabled without modifying Google ADK.
 
 Remove kagent's standard serialized tool-argument callback from protected workloads.
 
@@ -976,15 +1014,17 @@ No between-turn or immediate hot swap exists in the first release.
 | 1 | Add generic Harness extension API, manifests, Revision data, and signature policy |
 | 2 | Render sidecar containers, projected config and secrets, socket and state volumes, egress, and readiness |
 | 3 | Add neutral protobuf protocol, negotiation, health, and generic extension host |
-| 4 | Add provider-final catalog and reversible name-map hooks |
-| 5 | Add pre-plugin tool proposal and immutable execution proxy |
-| 6 | Add model response and exclusive event gates for standard and live flows |
-| 7 | Add session persistence and A2A publication gates |
-| 8 | Add child, task, remote, memory, and interaction lifecycle phases |
-| 9 | Add raw MCP transport interceptor and no-retry semantics |
-| 10 | Add immutable content-free telemetry, readiness, snapshot, recovery, and drain lifecycle |
+| 4 | Gate provider-final requests and catalogs in kagent-owned model adapters |
+| 5 | Install the first public tool callback proxy and kagent-owned execution wrappers |
+| 6 | Gate model responses through public callbacks and kagent-owned output wrappers |
+| 7 | Wrap the public session service and kagent A2A publication code |
+| 8 | Wrap public Agent, Runner, memory, remote, and interaction surfaces |
+| 9 | Add a kagent-owned raw MCP transport with no-retry semantics |
+| 10 | Configure upstream telemetry and add kagent readiness, snapshot, recovery, and drain lifecycle |
 
 Each PR is generic. Test fixtures MUST use neutral fake extensions and contain no OpenAPPA import or name in production packages.
+
+No PR changes Google ADK source, copies it, replaces its module, vendors it, or imports one of its `internal` packages.
 
 ## OpenAPPA plugin sequence
 
@@ -1012,7 +1052,10 @@ Each PR is generic. Test fixtures MUST use neutral fake extensions and contain n
 - Pin-and-drain upgrade routing.
 - Forbidden dependency and identifier checks.
 
-### Generic ADK integration tests
+### Public ADK and kagent integration tests
+
+- CI resolves `google.golang.org/adk/v2` from a clean module cache and asserts the pinned version and checksum.
+- CI rejects `replace` in `go.mod` or `go.work`, a `vendor/` tree, copied ADK source, any ADK source patch, and any ADK `internal` import in production packages.
 
 - Provider-final catalog and name-collision rejection.
 - Pre-plugin argument ownership and mutation attempts.
