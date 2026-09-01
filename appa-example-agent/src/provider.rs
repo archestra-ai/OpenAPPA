@@ -132,6 +132,11 @@ pub enum ProviderError {
     Timeout { attempts: u32, timeout: Duration },
     #[error("inference transport fault after {attempts} attempt(s)")]
     Transport { attempts: u32 },
+    /// The endpoint answered, but could not serve: a transient status (408, 429, 5xx) on
+    /// the last of the bounded attempts.
+    #[error("inference endpoint was unavailable (HTTP {code}) on the last of {attempts} attempt(s)")]
+    Unavailable { code: u16, attempts: u32 },
+    /// The endpoint answered with a status no retry changes: a rejected key, a bad request.
     #[error("inference endpoint returned HTTP {code} after {attempts} attempt(s)")]
     Status { code: u16, attempts: u32 },
     #[error("inference response was oversized or malformed after {attempts} attempt(s)")]
@@ -187,6 +192,7 @@ impl AttemptFault {
                 timeout: request_timeout,
             },
             AttemptFault::Transport => ProviderError::Transport { attempts },
+            AttemptFault::Status { code, .. } if self.retryable() => ProviderError::Unavailable { code, attempts },
             AttemptFault::Status { code, .. } => ProviderError::Status { code, attempts },
             AttemptFault::Malformed => ProviderError::Malformed { attempts },
             AttemptFault::NoChoice => ProviderError::NoChoice { attempts },
@@ -429,7 +435,7 @@ mod tests {
             .await
             .expect_err("the outage persists");
 
-        assert_eq!(error, ProviderError::Status { code: 429, attempts: 3 });
+        assert_eq!(error, ProviderError::Unavailable { code: 429, attempts: 3 });
         assert_eq!(*attempts.lock().expect("not poisoned"), 3);
     }
 

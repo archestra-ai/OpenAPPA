@@ -241,18 +241,19 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-/// The typed status the benchmark reads. A provider that could not be reached
-/// or answered past the deadline is `provider_failed`, which nothing in this
-/// repository can fix; a provider that answered unusably — a rejected key, a
-/// malformed body, no choices — is `provider_rejected`, a configuration or
-/// contract fault the benchmark must surface.
+/// The typed status the benchmark reads. A provider that could not be reached,
+/// answered past the deadline, or was unavailable on every bounded attempt is
+/// `provider_failed`, which nothing in this repository can fix; a provider that
+/// answered unusably — a rejected key, a malformed body, no choices — is
+/// `provider_rejected`, a configuration or contract fault the benchmark must
+/// surface.
 fn terminal_status(outcome: &Outcome) -> &'static str {
     use appa_example_agent::{ProviderError, StopReason};
     match outcome {
         Outcome::Answer(_) => "completed",
         Outcome::BudgetFinalized { .. } => "budget_finalized",
         Outcome::Stopped(StopReason::InferenceFailed(
-            ProviderError::Timeout { .. } | ProviderError::Transport { .. },
+            ProviderError::Timeout { .. } | ProviderError::Transport { .. } | ProviderError::Unavailable { .. },
         )) => "provider_failed",
         Outcome::Stopped(StopReason::InferenceFailed(
             ProviderError::Status { .. } | ProviderError::Malformed { .. } | ProviderError::NoChoice { .. },
@@ -468,6 +469,10 @@ mod tests {
         );
         assert_eq!(
             super::terminal_status(&stopped(ProviderError::Transport { attempts: 3 })),
+            "provider_failed"
+        );
+        assert_eq!(
+            super::terminal_status(&stopped(ProviderError::Unavailable { code: 503, attempts: 3 })),
             "provider_failed"
         );
         assert_eq!(
