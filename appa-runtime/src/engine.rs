@@ -1801,12 +1801,19 @@ impl RuntimeEngine {
         // a pinned mapping; the ones still unmapped are this round's identity consults.
         if let IdentityImplementation::Custom(name) = audience.identity() {
             let mut requests: Vec<ExternalRequest> = Vec::new();
-            let claimed = payload
-                .sources
-                .iter()
-                .flat_map(|claims| claims.members.iter())
-                .chain(payload.lookups.iter().filter_map(|lookup| lookup.claims.as_ref()));
-            for claims in claimed {
+            // One question per id, asked about the folded claim the engine will canonicalize
+            // through: a member reported twice, once silently, is one member.
+            let claimed = match appa_engine::audience::folded_claims(&payload) {
+                Ok(folded) => folded,
+                Err(refusal) => {
+                    tracing::debug!(%refusal, "gathered audience evidence refused");
+                    return Err(AudienceFailure::Refused(format!(
+                        "the gathered audience evidence is not admissible: {}",
+                        refusal_class(&refusal)
+                    )));
+                }
+            };
+            for claims in claimed.values() {
                 match gathered.identity.get(&claims.id) {
                     Some(Some(_)) => {}
                     Some(None) => {

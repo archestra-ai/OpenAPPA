@@ -187,6 +187,41 @@ pub enum EvidenceRefusal {
     UnrequestedEvidence { entry: String },
 }
 
+/// One operation-wide claim per provider id, folded across every occurrence the evidence
+/// carries. A collection that reports a member and a viewer that reports the same member
+/// with its verified address describe one reader, not a contradiction: a silent occurrence
+/// makes no counter-claim and defers to the verified one. Two different verified addresses
+/// for one id have no resolution and refuse. Every consumer resolves an occurrence through
+/// this table, so one id seats exactly one principal in an operation — the engine when it
+/// canonicalizes, and the runtime when it asks a custom implementation.
+pub fn folded_claims(evidence: &AudienceEvidence) -> Result<BTreeMap<String, MemberClaims>, EvidenceRefusal> {
+    let mut folded: BTreeMap<String, MemberClaims> = BTreeMap::new();
+    let occurrences = evidence
+        .sources
+        .iter()
+        .flat_map(|claims| claims.members.iter())
+        .chain(evidence.lookups.iter().filter_map(|lookup| lookup.claims.as_ref()));
+    for claims in occurrences {
+        match folded.entry(claims.id.clone()) {
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(claims.clone());
+            }
+            std::collections::btree_map::Entry::Occupied(mut held) => {
+                match (&held.get().verified_email, &claims.verified_email) {
+                    (Some(standing), Some(offered)) if standing != offered => {
+                        return Err(EvidenceRefusal::ConflictingClaims { id: claims.id.clone() });
+                    }
+                    (None, Some(_)) => {
+                        held.insert(claims.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    Ok(folded)
+}
+
 /// The conservative `verified-email` normalization, shipped and deterministic: a member with
 /// a well-formed verified email becomes `email:<local>@<lowercased-domain>`; a member
 /// without one keeps its provider-qualified id. Nothing merges identities beyond exact
@@ -533,23 +568,14 @@ impl AudienceRegistry {
         }
         let identity = IdentityTable::new(&self.identity, &evidence.identity)?;
 
-        // One operation-wide claim set per provider id: every occurrence of an id — across
-        // selectors and lookups — must carry the same verified email, so one id resolves to
-        // exactly one principal in this operation.
-        let mut claimed: BTreeMap<&str, &Option<String>> = BTreeMap::new();
-        let occurrences = evidence
-            .sources
-            .iter()
-            .flat_map(|claims| claims.members.iter())
-            .chain(evidence.lookups.iter().filter_map(|lookup| lookup.claims.as_ref()));
-        for claims in occurrences {
-            match claimed.insert(claims.id.as_str(), &claims.verified_email) {
-                Some(held) if held != &claims.verified_email => {
-                    return Err(EvidenceRefusal::ConflictingClaims { id: claims.id.clone() });
-                }
-                _ => {}
-            }
-        }
+        let folded = folded_claims(evidence)?;
+        // The folded claim of one occurrence: the id is in the table by construction.
+        let resolved = |claims: &MemberClaims| -> MemberClaims {
+            folded
+                .get(claims.id.as_str())
+                .expect("every occurring id is folded before principals are resolved")
+                .clone()
+        };
 
         // Per-selector principal sets, validated.
         let mut selector_members: BTreeMap<SelectorSpec, BTreeSet<ReaderId>> = BTreeMap::new();
@@ -577,7 +603,7 @@ impl AudienceRegistry {
                         id: member.id.clone(),
                     });
                 }
-                members.insert(identity.principal(member)?);
+                members.insert(identity.principal(&resolved(member))?);
             }
             if selector_members.insert(spec.clone(), members).is_some() {
                 return Err(EvidenceRefusal::DuplicateSelector {
@@ -614,7 +640,7 @@ impl AudienceRegistry {
                         member: lookup.member.clone(),
                     });
                 }
-                Some(claims) => identity.principal(claims)?,
+                Some(claims) => identity.principal(&resolved(claims))?,
             };
             answers.push((
                 SymbolicAtom::Reader(ReaderId::new(lookup.member.clone())),
@@ -1131,6 +1157,44 @@ mod tests {
             ..AudienceEvidence::default()
         };
         assert!(registry.expansions(&agreeing).is_ok());
+
+        // A silent occurrence is no counter-claim: the viewer reports its own verified
+        // address, the membership collection reports the same id and knows no address, and
+        // the one verified claim seats the principal for both — the common shape of a token
+        // owner who belongs to the organization the policy selected.
+        let silent_elsewhere = AudienceEvidence {
+            sources: vec![
+                SourceClaims {
+                    provider: "slack".into(),
+                    selector: "viewer".into(),
+                    members: vec![member("slack:U1", Some("a@corp.com"))],
+                },
+                SourceClaims {
+                    provider: "slack".into(),
+                    selector: "full-members".into(),
+                    members: vec![member("slack:U1", None), member("slack:U2", None)],
+                },
+            ],
+            ..AudienceEvidence::default()
+        };
+        let expansions = registry
+            .expansions(&silent_elsewhere)
+            .expect("a silent occurrence defers to the verified claim");
+        let members = |selector: &str| {
+            expansions
+                .members(&SymbolicAtom::Group(GroupRef::Source {
+                    provider: "slack".to_string(),
+                    selector: selector.to_string(),
+                }))
+                .expect("the selector is answered")
+                .clone()
+        };
+        assert_eq!(members("viewer"), BTreeSet::from([ReaderId::new("email:a@corp.com")]));
+        assert_eq!(
+            members("full-members"),
+            BTreeSet::from([ReaderId::new("email:a@corp.com"), ReaderId::new("slack:U2")]),
+            "the folded claim seats one principal for the id everywhere it occurs"
+        );
 
         // A lookup's claims must be for the member asked — a source may not canonicalize a
         // member it does not own.
