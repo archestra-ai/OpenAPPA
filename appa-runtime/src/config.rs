@@ -190,24 +190,30 @@ impl Externals {
 
 /// How this deployment runs the stock `claude-code` builtin. `command` overrides the
 /// executable (a service environment often strips `PATH`); `model` pins the model the
-/// consult runs on; `timeout` bounds one consult on its own budget instead of the shared
-/// machine-consult `timeout`.
+/// consult runs on; `timeout` bounds one consult.
+///
+/// A model consult runs for tens of seconds, so it owns its budget. `externals.timeout_ms`
+/// bounds an HTTP round trip and never applies here: a deployment that names no
+/// `timeout_ms` gets [`DEFAULT_CLAUDE_CODE_TIMEOUT`], not the shared one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaudeCode {
     pub command: PathBuf,
     pub model: String,
-    pub timeout: Option<Duration>,
+    pub timeout: Duration,
 }
+
+/// The budget one `claude-code` consult gets when the deployment names none.
+pub const DEFAULT_CLAUDE_CODE_TIMEOUT: Duration = Duration::from_secs(60);
 
 impl Default for ClaudeCode {
     /// The usable defaults every construction path shares — an embedded host building
-    /// its bindings by hand gets the same `claude` on `PATH` and `sonnet` alias the file
-    /// loader fills in, never an empty command.
+    /// its bindings by hand gets the same `claude` on `PATH`, `sonnet` alias, and consult
+    /// budget the file loader fills in, never an empty command.
     fn default() -> ClaudeCode {
         ClaudeCode {
             command: "claude".into(),
             model: "sonnet".to_string(),
-            timeout: None,
+            timeout: DEFAULT_CLAUDE_CODE_TIMEOUT,
         }
     }
 }
@@ -806,12 +812,13 @@ fn embedded_document(policy: toml::Value, bindings: &ExternalBindings) -> Result
             "model".to_string(),
             toml::Value::String(bindings.claude_code.model.clone()),
         );
-        if let Some(timeout) = bindings.claude_code.timeout {
-            claude_code.insert(
-                "timeout_ms".to_string(),
-                embedded_integer("externals.claude_code.timeout_ms", timeout.as_millis())?,
-            );
-        }
+        claude_code.insert(
+            "timeout_ms".to_string(),
+            embedded_integer(
+                "externals.claude_code.timeout_ms",
+                bindings.claude_code.timeout.as_millis(),
+            )?,
+        );
         external_table.insert("claude_code".to_string(), toml::Value::Table(claude_code));
     }
 
@@ -1212,8 +1219,8 @@ fn resolve_command(
 }
 
 /// The `[externals.claude_code]` table with its defaults filled: bare `claude` on `PATH`,
-/// the `sonnet` alias, and the shared machine-consult timeout. A zero `timeout_ms` is a
-/// refusal like the shared one.
+/// the `sonnet` alias, and the model-consult budget. A zero `timeout_ms` is a refusal like
+/// the shared one.
 fn resolve_claude_code(raw: Option<RawClaudeCode>) -> Result<ClaudeCode, ConfigError> {
     let raw = raw.unwrap_or(RawClaudeCode {
         command: None,
@@ -1226,7 +1233,9 @@ fn resolve_claude_code(raw: Option<RawClaudeCode>) -> Result<ClaudeCode, ConfigE
     Ok(ClaudeCode {
         command: raw.command.map(PathBuf::from).unwrap_or_else(|| "claude".into()),
         model: raw.model.unwrap_or_else(|| "sonnet".to_string()),
-        timeout: raw.timeout_ms.map(Duration::from_millis),
+        timeout: raw
+            .timeout_ms
+            .map_or(DEFAULT_CLAUDE_CODE_TIMEOUT, Duration::from_millis),
     })
 }
 
@@ -1547,10 +1556,10 @@ mod tests {
         let config = parse(MINIMAL).expect("no claude table is the default");
         assert_eq!(config.externals.claude_code.command, PathBuf::from("claude"));
         assert_eq!(config.externals.claude_code.model, "sonnet");
-        assert_eq!(config.externals.claude_code.timeout, None);
+        assert_eq!(config.externals.claude_code.timeout, DEFAULT_CLAUDE_CODE_TIMEOUT);
 
         let text = format!(
-            "{MINIMAL}\n[externals.claude_code]\ncommand = \"/opt/claude/bin/claude\"\nmodel = \"pinned\"\ntimeout_ms = 60000\n"
+            "{MINIMAL}\n[externals.claude_code]\ncommand = \"/opt/claude/bin/claude\"\nmodel = \"pinned\"\ntimeout_ms = 90000\n"
         );
         let config = parse(&text).expect("the claude table validates");
         assert_eq!(
@@ -1558,7 +1567,12 @@ mod tests {
             PathBuf::from("/opt/claude/bin/claude")
         );
         assert_eq!(config.externals.claude_code.model, "pinned");
-        assert_eq!(config.externals.claude_code.timeout, Some(Duration::from_secs(60)));
+        let pinned = Duration::from_secs(90);
+        assert_ne!(
+            pinned, DEFAULT_CLAUDE_CODE_TIMEOUT,
+            "the pin must differ from the default"
+        );
+        assert_eq!(config.externals.claude_code.timeout, pinned);
 
         let text = format!("{MINIMAL}\n[externals.claude_code]\ntimeout_ms = 0\n");
         assert!(matches!(parse(&text), Err(ConfigError::ZeroTimeout)));
