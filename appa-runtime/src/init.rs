@@ -1863,11 +1863,6 @@ fn reconcile_policy(
     if !confirm_reload(config, divergence)? {
         return Ok(RuntimeOutcome::OlderPolicy);
     }
-    // A reload reads the answering process's own configuration path, not the one named
-    // here, and a same-build runtime of another deployment answers this endpoint
-    // indistinguishably. The key it installed is what proves which file it read: reporting
-    // a reload this init did not cause would be exactly the untrue receipt the reconcile
-    // exists to remove.
     reload_policy(endpoint, config)?;
     Ok(RuntimeOutcome::Reloaded)
 }
