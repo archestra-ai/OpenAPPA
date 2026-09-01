@@ -3,8 +3,7 @@
 Use this battery for Claude Code sessions that need policy-aware shell commands
 and automatic privacy labels for local file reads.
 
-It covers two built-in tools, and its wildcard covers every tool the policy
-does not name:
+It covers two built-in tools:
 
 - **Bash** — Before a command runs, the Claude Code model decides what trust,
   audience, and fresh attention the command requires. It also labels the
@@ -14,11 +13,10 @@ does not name:
   Hidden paths, credential files, private keys, system-secret locations, and
   sensitive symlink targets produce private content. Other paths produce public
   content. The resolver does not block the read or lower its trust.
-- **Every other tool** — The wildcard rule sends a tool with no policy entry,
-  such as an MCP server's tool, to the Claude Code model for a per-call
-  contract before it runs. The annotator can hold an unknown tool's output to
-  suspicious trust and a private audience, or clear one it recognizes. Name a tool exactly, or add a
-  root rule, when it needs its own contract.
+
+The default config created by `appa init claude-code` separately provides the
+wildcard fallback for tools it does not name. Keeping that fallback in the root
+lets this battery compose without declaring a second wildcard or annotator.
 
 ## Add it to a deployment
 

@@ -28,24 +28,5 @@ name = "Read"
 description = "Reads a file and returns its contents."
 annotator = "claude-code.read-sensitivity"
 
-# The wildcard covers every tool this policy does not name — an MCP server's
-# tool, for one. Each covered call is annotated by the stock model before it
-# runs: the mandate admits both trust ranks, and "private" is the one literal
-# reader an annotation may name ("public" is always admissible), so it can
-# hold an unknown tool's output to suspicious trust and a private audience,
-# or clear one it recognizes. Name a tool exactly, or add a root rule, when
-# it needs its own contract.
-[[policy.annotator]]
-name = "claude-code.undeclared-tool"
-builtin = "claude-code"
-ranks = ["suspicious", "trusted"]
-audiences = ["private"]
-marks = ["hitl"]
-effects = []
-
-[[policy.tool]]
-name = "*"
-annotator = "claude-code.undeclared-tool"
-
 [externals.annotators."claude-code.read-sensitivity"]
 command = ["python3", "./read-sensitivity.py"]

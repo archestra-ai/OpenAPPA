@@ -42,3 +42,49 @@ fn every_shipped_example_opens() {
 fn the_complete_battery_example_opens() {
     opens(&repo_root().join("examples/claude-code-battery/appa.toml"));
 }
+
+#[cfg(unix)]
+#[test]
+fn the_initialized_default_composes_with_the_claude_code_battery() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let battery_dir = dir.path().join("batteries/claude-code");
+    std::fs::create_dir_all(&battery_dir).expect("the battery directory is created");
+
+    let repository = repo_root();
+    let default = std::fs::read_to_string(repository.join("integrations/claude-code/examples/claude-code.appa.toml"))
+        .expect("the initialized default is readable");
+    for file in ["appa.toml", "read-sensitivity.py"] {
+        std::fs::copy(
+            repository.join("batteries/claude-code").join(file),
+            battery_dir.join(file),
+        )
+        .expect("the battery file is copied");
+    }
+
+    let root = dir.path().join("appa.toml");
+    std::fs::write(
+        &root,
+        format!("include = [\"batteries/claude-code/appa.toml\"]\n\n{default}"),
+    )
+    .expect("the initialized config includes the battery");
+
+    let config = Config::load(&root).expect("the initialized config and battery compose");
+    let tools = config.policy_file().value()["tool"]
+        .as_array()
+        .expect("the composed tools are an array");
+    for (name, annotator) in [
+        ("Bash", "claude-code.bash-requirements"),
+        ("Read", "claude-code.read-sensitivity"),
+        ("*", "claude-code.undeclared-tool"),
+    ] {
+        let matches = tools
+            .iter()
+            .filter(|tool| tool["name"].as_str() == Some(name))
+            .collect::<Vec<_>>();
+        assert_eq!(matches.len(), 1, "{name} has exactly one composed rule");
+        assert_eq!(matches[0]["annotator"].as_str(), Some(annotator));
+    }
+
+    let database = dir.path().join("appa.db");
+    Runtime::open(config, database, None).expect("the composed deployment opens");
+}

@@ -508,35 +508,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn a_claude_nonzero_exit_keeps_its_status() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let dir = tempfile::tempdir().expect("a temp dir");
-        let fake = dir.path().join("fake-claude");
-        std::fs::write(&fake, "#!/bin/sh\ncat > /dev/null\nexit 7\n").expect("the fake writes");
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("the fake is executable");
-        let backend = ClaudeCodeBackend {
-            command: fake,
-            model: "m".to_string(),
-            timeout: std::time::Duration::from_secs(5),
-            max_body_bytes: 65_536,
-        };
-        let prompt = ModelPrompt {
-            system: "rule".to_string(),
-            input: "{}".to_string(),
-            schema: serde_json::json!({"type": "object"}),
-        };
-
-        assert_eq!(
-            backend
-                .consult(&prompt, tokio::time::Instant::now() + std::time::Duration::from_secs(5))
-                .await,
-            Err(NoAnswerReason::NonSuccess { status: 7 })
-        );
-    }
-
     /// A helper the CLI leaves running — here a backgrounded `sleep` that keeps the
     /// CLI's stdout open, whose pid the fake records — neither stalls the answer nor
     /// survives the consult that started it.

@@ -1417,22 +1417,50 @@ fn terminate_appa_pid(pid: i32) -> Result<(), InitError> {
 }
 
 #[cfg(windows)]
+const WINDOWS_APPA_IDENTITY_SCRIPT: &str = r#"
+$appaPid = [int]$env:APPA_STALE_PID
+$appaProcess = Get-Process -Id $appaPid -ErrorAction SilentlyContinue
+$appaState = 'missing'
+if ($null -ne $appaProcess) {
+    $appaState = 'foreign'
+    $appaCim = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $appaPid" -ErrorAction SilentlyContinue
+    $appaOwner = if ($null -ne $appaCim) {
+        Invoke-CimMethod -InputObject $appaCim -MethodName GetOwnerSid -ErrorAction SilentlyContinue
+    } else {
+        $null
+    }
+    $appaCallerSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    if ($appaProcess.ProcessName -ieq 'appa' -and
+        $null -ne $appaCim -and $appaCim.Name -ieq 'appa.exe' -and
+        $null -ne $appaOwner -and $appaOwner.ReturnValue -eq 0 -and
+        $appaOwner.Sid -eq $appaCallerSid) {
+        $appaState = 'owned'
+    }
+}
+"#;
+
+#[cfg(windows)]
 fn is_owned_appa_runtime(pid: i32) -> Result<bool, InitError> {
-    let answer = powershell(
-        "$p = Get-Process -Id ([int]$env:APPA_STALE_PID) -ErrorAction SilentlyContinue; \
-         if ($null -ne $p) { $p.ProcessName }",
-        [("APPA_STALE_PID", pid.to_string())],
-    )?;
-    Ok(answer.trim().eq_ignore_ascii_case("appa"))
+    let command = format!("{WINDOWS_APPA_IDENTITY_SCRIPT}\n$appaState");
+    let answer = powershell(&command, [("APPA_STALE_PID", pid.to_string())])?;
+    Ok(answer.trim() == "owned")
 }
 
 #[cfg(windows)]
 fn terminate_appa_pid(pid: i32) -> Result<(), InitError> {
-    powershell(
-        "Stop-Process -Id ([int]$env:APPA_STALE_PID) -Force -ErrorAction Stop",
-        [("APPA_STALE_PID", pid.to_string())],
-    )
-    .map(drop)
+    // Resolve the process object first and stop that object, not a freshly
+    // looked-up PID. The SID/name checks are repeated in this same PowerShell
+    // invocation so an elevated init never turns a forged health answer into
+    // authority to terminate another user's process.
+    let command = format!(
+        "{WINDOWS_APPA_IDENTITY_SCRIPT}\n\
+         if ($appaState -eq 'missing') {{ exit 0 }}\n\
+         if ($appaState -ne 'owned') {{ throw 'pid is not this user''s appa runtime' }}\n\
+         if (-not $appaProcess.HasExited) {{ \
+             Stop-Process -InputObject $appaProcess -Force -ErrorAction Stop \
+         }}"
+    );
+    powershell(&command, [("APPA_STALE_PID", pid.to_string())]).map(drop)
 }
 
 fn endpoint_owner(binary: &Path, endpoint: &Endpoint) -> Result<EndpointOwner, InitError> {
