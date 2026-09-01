@@ -1386,41 +1386,57 @@ mod tests {
 
     #[test]
     fn canonicalization_rules_are_exactly_three() {
-        // Empty clause collapses to nobody and is never dropped.
-        let disjoint = Audience::restricted([reader("alice")]).combine(&Audience::restricted([reader("bob")]));
-        assert_eq!(disjoint, Audience::nobody());
-        assert!(!disjoint.is_public(), "nobody is not public");
-        let with_symbols = Audience::of_clauses([clause([ChainAudience::Internal], [], [])]).combine(&disjoint);
-        assert_eq!(
-            with_symbols,
-            Audience::nobody(),
-            "an empty clause absorbs the intersection"
-        );
-
-        // Stable-reader clauses merge by exact intersection.
-        let ab = Audience::restricted([reader("a"), reader("b")]);
-        let bc = Audience::restricted([reader("b"), reader("c")]);
-        assert_eq!(ab.combine(&bc), Audience::restricted([reader("b")]));
-        let email = Audience::restricted([reader("a@x.example"), reader("b")]);
-        assert_eq!(
-            email.combine(&Audience::restricted([reader("a@x.example")])),
-            Audience::restricted([reader("a@x.example")]),
-            "the email principal namespace is reserved, hence stable and mergeable"
-        );
+        let chain = |level| Audience::of_clauses([clause([level], [], [])]);
+        let readers = |readers: &[&str]| Audience::restricted(readers.iter().map(|reader| ReaderId::new(*reader)));
+        for (case, left, right, expected) in [
+            // An empty clause collapses to nobody and is never dropped.
+            (
+                "disjoint stable readers",
+                readers(&["alice"]),
+                readers(&["bob"]),
+                Audience::nobody(),
+            ),
+            (
+                "an empty clause absorbs the intersection",
+                chain(ChainAudience::Internal),
+                Audience::nobody(),
+                Audience::nobody(),
+            ),
+            // Stable-reader clauses merge by exact intersection.
+            (
+                "overlapping stable readers",
+                readers(&["a", "b"]),
+                readers(&["b", "c"]),
+                readers(&["b"]),
+            ),
+            // The email principal namespace is reserved, hence stable and mergeable.
+            (
+                "an email principal",
+                readers(&["a@x.example", "b"]),
+                readers(&["a@x.example"]),
+                readers(&["a@x.example"]),
+            ),
+            // Structural subsumption retains the narrower clause and drops the broader one.
+            (
+                "a narrower chain",
+                chain(ChainAudience::Self_),
+                chain(ChainAudience::Internal),
+                chain(ChainAudience::Self_),
+            ),
+            (
+                "a narrower group clause",
+                Audience::of_clauses([clause([], ["finance"], ["a"])]),
+                Audience::of_clauses([clause([], ["finance"], ["a", "b"])]),
+                Audience::of_clauses([clause([], ["finance"], ["a"])]),
+            ),
+        ] {
+            assert_eq!(left.combine(&right), expected, "{case}");
+        }
+        assert!(!Audience::nobody().is_public(), "nobody is not public");
 
         // A reader a deployment could canonicalize keeps its clause: raw-disjoint is not
         // principal-disjoint, so no exact intersection may erase it.
-        let qualified = Audience::restricted([reader("slack:u1")]);
-        let plain = Audience::restricted([reader("a")]);
-        assert_eq!(qualified.combine(&plain).clauses().count(), 2);
-
-        // Structural subsumption retains the narrower clause and drops the broader one.
-        let self_only = Audience::of_clauses([clause([ChainAudience::Self_], [], [])]);
-        let internal = Audience::of_clauses([clause([ChainAudience::Internal], [], [])]);
-        assert_eq!(self_only.combine(&internal), self_only);
-        let narrow = Audience::of_clauses([clause([], ["finance"], ["a"])]);
-        let broad = Audience::of_clauses([clause([], ["finance"], ["a", "b"])]);
-        assert_eq!(narrow.combine(&broad), narrow);
+        assert_eq!(readers(&["slack:u1"]).combine(&readers(&["a"])).clauses().count(), 2);
     }
 
     #[test]

@@ -2,13 +2,13 @@
 //! remedy that names the authority leaves its offer standing.
 
 mod common;
-use common::{offers, raw};
+use common::{actor, offer_of, propose, raw, root};
 
 use std::sync::Arc;
 
-use appa_runtime::api::{OfferId, RemedyOutcome, Runtime};
+use appa_runtime::api::{RemedyOutcome, Runtime};
 use appa_runtime::{config::Config, hooks};
-use appa_runtime_api::{Actor, HookDecision, HookEvent, ProposedCall, TrajectoryId};
+use appa_runtime_api::{HookDecision, HookEvent, ProposedCall};
 
 const POLICY: &str = r#"
 [policy]
@@ -30,44 +30,11 @@ timeout_ms = 1000
 max_body_bytes = 4096
 "#;
 
-fn root() -> TrajectoryId {
-    TrajectoryId("unbound-authority".to_string())
-}
-
-fn actor() -> Actor {
-    Actor {
-        root: root(),
-        child: None,
-    }
-}
-
 fn publish() -> ProposedCall {
     ProposedCall {
         tool: "publish".to_string(),
         arguments: raw(serde_json::json!({})),
     }
-}
-
-async fn propose(runtime: &Arc<Runtime>) -> HookDecision {
-    hooks::handle(
-        runtime,
-        HookEvent::ToolCall {
-            actor: actor(),
-            call: publish(),
-            spawn: false,
-        },
-    )
-    .await
-}
-
-fn offer_of(decision: &HookDecision) -> OfferId {
-    let HookDecision::DenyCall { feedback, .. } = decision else {
-        panic!("expected a deny carrying feedback, got {decision:?}")
-    };
-    offers(feedback)
-        .last()
-        .cloned()
-        .unwrap_or_else(|| panic!("no offer id in feedback: {feedback}"))
 }
 
 #[tokio::test]
@@ -82,7 +49,7 @@ async fn a_remedy_naming_an_unbound_authority_gives_no_answer_and_the_offer_stan
         HookDecision::Ack
     );
 
-    let offer = offer_of(&propose(&runtime).await);
+    let offer = offer_of(&propose(&runtime, publish()).await);
     for _ in 0..2 {
         assert!(matches!(
             runtime.execute_remedy(&actor(), offer.clone()).await,
@@ -90,7 +57,7 @@ async fn a_remedy_naming_an_unbound_authority_gives_no_answer_and_the_offer_stan
         ));
     }
     assert!(
-        matches!(propose(&runtime).await, HookDecision::DenyCall { .. }),
+        matches!(propose(&runtime, publish()).await, HookDecision::DenyCall { .. }),
         "nothing was released"
     );
 }

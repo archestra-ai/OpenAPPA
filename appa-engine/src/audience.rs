@@ -1017,45 +1017,28 @@ mod tests {
 
     #[test]
     fn verified_email_is_conservative() {
-        // Same verified corporate email from two providers: one principal.
-        let gw = member("google-workspace:alice@corp.com", Some("alice@corp.com"));
-        let slack = member("slack:U012345", Some("alice@corp.com"));
-        assert_eq!(
-            verified_email_principal(&gw).unwrap(),
-            verified_email_principal(&slack).unwrap()
-        );
-        assert_eq!(verified_email_principal(&gw).unwrap().as_str(), "alice@corp.com");
-
-        // A personal email stays a different principal — no corporate guessing.
-        let github = member("github:alice", Some("alice@gmail.com"));
-        assert_ne!(
-            verified_email_principal(&github).unwrap(),
-            verified_email_principal(&gw).unwrap()
-        );
-
-        // No verified email: the qualified identity stands.
-        assert_eq!(
-            verified_email_principal(&member("github:alice", None))
-                .unwrap()
-                .as_str(),
-            "github:alice"
-        );
-
-        // Domain case folds; the local part never does, and no dots or +suffixes fold.
-        assert_eq!(
-            verified_email_principal(&member("x:1", Some("Alice@CORP.com")))
-                .unwrap()
-                .as_str(),
-            "Alice@corp.com"
-        );
-        assert_ne!(
-            verified_email_principal(&member("x:1", Some("a.lice@corp.com"))).unwrap(),
-            verified_email_principal(&member("x:2", Some("alice@corp.com"))).unwrap()
-        );
-        assert_ne!(
-            verified_email_principal(&member("x:1", Some("alice+x@corp.com"))).unwrap(),
-            verified_email_principal(&member("x:2", Some("alice@corp.com"))).unwrap()
-        );
+        // One verified corporate address is one principal whichever provider reports it; a
+        // personal address, a missing one, and any local-part variation each stay distinct.
+        // Only the domain case folds: no dots, no +suffixes, and never the local part.
+        for (id, email, principal) in [
+            (
+                "google-workspace:alice@corp.com",
+                Some("alice@corp.com"),
+                "alice@corp.com",
+            ),
+            ("slack:U012345", Some("alice@corp.com"), "alice@corp.com"),
+            ("github:alice", Some("alice@gmail.com"), "alice@gmail.com"),
+            ("github:alice", None, "github:alice"),
+            ("x:1", Some("Alice@CORP.com"), "Alice@corp.com"),
+            ("x:1", Some("a.lice@corp.com"), "a.lice@corp.com"),
+            ("x:1", Some("alice+x@corp.com"), "alice+x@corp.com"),
+        ] {
+            assert_eq!(
+                verified_email_principal(&member(id, email)).unwrap(),
+                ReaderId::new(principal),
+                "{id} with {email:?}"
+            );
+        }
 
         // A malformed claimed email is an invalid answer, not a fallback.
         for bad in ["nodomain", "two@at@signs", "@corp.com", "alice@", "a b@corp.com"] {
@@ -1065,14 +1048,12 @@ mod tests {
         // An address is the principal itself: a reader written as one — by a policy, by a
         // tool argument, by an annotation — is the reader the verified claim resolves to,
         // so an ordinary email recipient meets the directory member who holds that address.
-        assert_eq!(verified_email_principal(&gw).unwrap(), ReaderId::new("alice@corp.com"));
         // The reader ingress folds domain case the same way, so one identity has one
-        // spelling wherever it is written.
+        // spelling wherever it is written; a qualified id and an opaque reader stay as written.
         assert_eq!(
             ReaderId::new("Alice@CORP.com"),
             verified_email_principal(&member("x:1", Some("Alice@corp.com"))).unwrap()
         );
-        // Nothing else is touched: a qualified id and an opaque reader stay as written.
         assert_eq!(ReaderId::new("slack:U1").as_str(), "slack:U1");
         assert_eq!(ReaderId::new("Insider").as_str(), "Insider");
     }
@@ -1214,144 +1195,124 @@ mod tests {
         );
     }
 
+    /// Which refusal a case expects.
+    type Refuses = fn(&EvidenceRefusal) -> bool;
+
+    fn slack(selector: &str, members: Vec<MemberClaims>) -> SourceClaims {
+        SourceClaims {
+            provider: "slack".into(),
+            selector: selector.into(),
+            members,
+        }
+    }
+
+    fn sources(sources: Vec<SourceClaims>) -> AudienceEvidence {
+        AudienceEvidence {
+            sources,
+            ..AudienceEvidence::default()
+        }
+    }
+
     #[test]
     fn evidence_validation_refuses_duplicates_and_foreign_claims() {
         let registry = registry(corp_config());
-        let twice = AudienceEvidence {
-            sources: vec![
-                SourceClaims {
-                    provider: "slack".into(),
-                    selector: "viewer".into(),
-                    members: vec![],
+        let refused: [(&str, AudienceEvidence, Refuses); 7] = [
+            (
+                "one selector answered twice",
+                sources(vec![
+                    slack("viewer", vec![]),
+                    slack("viewer", vec![member("slack:U1", None)]),
+                ]),
+                |refusal| matches!(refusal, EvidenceRefusal::DuplicateSelector { .. }),
+            ),
+            (
+                "a member outside the provider's namespace",
+                sources(vec![slack("viewer", vec![member("github:alice", None)])]),
+                |refusal| matches!(refusal, EvidenceRefusal::ForeignMember { .. }),
+            ),
+            (
+                // A bare provider prefix names no member: it is not inside the namespace.
+                "a bare provider prefix as a member",
+                sources(vec![slack("viewer", vec![member("slack:", None)])]),
+                |refusal| matches!(refusal, EvidenceRefusal::ForeignMember { .. }),
+            ),
+            (
+                "a malformed verified email",
+                sources(vec![slack("viewer", vec![member("slack:U1", Some("not-an-email"))])]),
+                |refusal| matches!(refusal, EvidenceRefusal::MalformedEmail { .. }),
+            ),
+            (
+                // One member twice under one selector could seat two principals for one id.
+                "one member twice under one selector",
+                sources(vec![slack(
+                    "viewer",
+                    vec![
+                        member("slack:U1", Some("a@corp.com")),
+                        member("slack:U1", Some("a@corp.com")),
+                    ],
+                )]),
+                |refusal| matches!(refusal, EvidenceRefusal::DuplicateMember { .. }),
+            ),
+            (
+                // One id, one operation-wide claim set: two verified emails across two
+                // selectors would resolve to two principals.
+                "one member with two verified emails across selectors",
+                sources(vec![
+                    slack("viewer", vec![member("slack:U1", Some("a@corp.com"))]),
+                    slack("full-members", vec![member("slack:U1", Some("b@corp.com"))]),
+                ]),
+                |refusal| matches!(refusal, EvidenceRefusal::ConflictingClaims { .. }),
+            ),
+            (
+                // A source may not canonicalize a member it does not own.
+                "a lookup answering for another member",
+                AudienceEvidence {
+                    lookups: vec![MemberLookup {
+                        provider: "slack".into(),
+                        member: "slack:U1".into(),
+                        claims: Some(member("google-workspace:alice", Some("alice@corp.com"))),
+                    }],
+                    ..AudienceEvidence::default()
                 },
-                SourceClaims {
-                    provider: "slack".into(),
-                    selector: "viewer".into(),
-                    members: vec![member("slack:U1", None)],
-                },
-            ],
-            ..AudienceEvidence::default()
-        };
-        assert!(matches!(
-            registry.expansions(&twice),
-            Err(EvidenceRefusal::DuplicateSelector { .. })
-        ));
+                |refusal| matches!(refusal, EvidenceRefusal::ForeignLookupClaims { .. }),
+            ),
+        ];
+        for (case, evidence, expected) in refused {
+            match registry.expansions(&evidence) {
+                Err(refusal) => assert!(expected(&refusal), "{case}: {refusal:?}"),
+                Ok(_) => panic!("{case}: admitted"),
+            }
+        }
 
-        let foreign = AudienceEvidence {
-            sources: vec![SourceClaims {
-                provider: "slack".into(),
-                selector: "viewer".into(),
-                members: vec![member("github:alice", None)],
-            }],
-            ..AudienceEvidence::default()
-        };
-        assert!(matches!(
-            registry.expansions(&foreign),
-            Err(EvidenceRefusal::ForeignMember { .. })
-        ));
-
-        let malformed = AudienceEvidence {
-            sources: vec![SourceClaims {
-                provider: "slack".into(),
-                selector: "viewer".into(),
-                members: vec![member("slack:U1", Some("not-an-email"))],
-            }],
-            ..AudienceEvidence::default()
-        };
-        assert!(matches!(
-            registry.expansions(&malformed),
-            Err(EvidenceRefusal::MalformedEmail { .. })
-        ));
-
-        // One member twice under one selector could seat two principals for one id.
-        let doubled = AudienceEvidence {
-            sources: vec![SourceClaims {
-                provider: "slack".into(),
-                selector: "viewer".into(),
-                members: vec![
-                    member("slack:U1", Some("a@corp.com")),
-                    member("slack:U1", Some("a@corp.com")),
-                ],
-            }],
-            ..AudienceEvidence::default()
-        };
-        assert!(matches!(
-            registry.expansions(&doubled),
-            Err(EvidenceRefusal::DuplicateMember { .. })
-        ));
-
-        // A bare provider prefix names no member: it is not inside the provider's namespace.
-        let bare = AudienceEvidence {
-            sources: vec![SourceClaims {
-                provider: "slack".into(),
-                selector: "viewer".into(),
-                members: vec![member("slack:", None)],
-            }],
-            ..AudienceEvidence::default()
-        };
-        assert!(matches!(
-            registry.expansions(&bare),
-            Err(EvidenceRefusal::ForeignMember { .. })
-        ));
-
-        // One id, one operation-wide claim set: the same member reported with different
-        // verified emails across two selectors would resolve to two principals.
-        let conflicting = AudienceEvidence {
-            sources: vec![
-                SourceClaims {
-                    provider: "slack".into(),
-                    selector: "viewer".into(),
-                    members: vec![member("slack:U1", Some("a@corp.com"))],
-                },
-                SourceClaims {
-                    provider: "slack".into(),
-                    selector: "full-members".into(),
-                    members: vec![member("slack:U1", Some("b@corp.com"))],
-                },
-            ],
-            ..AudienceEvidence::default()
-        };
-        assert!(matches!(
-            registry.expansions(&conflicting),
-            Err(EvidenceRefusal::ConflictingClaims { .. })
-        ));
-        // The same claims twice are consistent, not conflicting.
-        let agreeing = AudienceEvidence {
-            sources: vec![
-                SourceClaims {
-                    provider: "slack".into(),
-                    selector: "viewer".into(),
-                    members: vec![member("slack:U1", Some("a@corp.com"))],
-                },
-                SourceClaims {
-                    provider: "slack".into(),
-                    selector: "full-members".into(),
-                    members: vec![member("slack:U1", Some("a@corp.com"))],
-                },
-            ],
-            ..AudienceEvidence::default()
-        };
-        assert!(registry.expansions(&agreeing).is_ok());
+        // The same claims twice are consistent, not conflicting; nor are two domain-case
+        // spellings of one address, which resolve to one principal.
+        for (case, evidence) in [
+            (
+                "one claim repeated",
+                sources(vec![
+                    slack("viewer", vec![member("slack:U1", Some("a@corp.com"))]),
+                    slack("full-members", vec![member("slack:U1", Some("a@corp.com"))]),
+                ]),
+            ),
+            (
+                "one address under two domain cases",
+                sources(vec![
+                    slack("viewer", vec![member("slack:U1", Some("Alice@CORP.com"))]),
+                    slack("full-members", vec![member("slack:U1", Some("Alice@corp.com"))]),
+                ]),
+            ),
+        ] {
+            assert!(registry.expansions(&evidence).is_ok(), "{case}");
+        }
 
         // A silent occurrence is no counter-claim: the viewer reports its own verified
         // address, the membership collection reports the same id and knows no address, and
         // the one verified claim seats the principal for both — the common shape of a token
         // owner who belongs to the organization the policy selected.
-        let silent_elsewhere = AudienceEvidence {
-            sources: vec![
-                SourceClaims {
-                    provider: "slack".into(),
-                    selector: "viewer".into(),
-                    members: vec![member("slack:U1", Some("a@corp.com"))],
-                },
-                SourceClaims {
-                    provider: "slack".into(),
-                    selector: "full-members".into(),
-                    members: vec![member("slack:U1", None), member("slack:U2", None)],
-                },
-            ],
-            ..AudienceEvidence::default()
-        };
+        let silent_elsewhere = sources(vec![
+            slack("viewer", vec![member("slack:U1", Some("a@corp.com"))]),
+            slack("full-members", vec![member("slack:U1", None), member("slack:U2", None)]),
+        ]);
         let expansions = registry
             .expansions(&silent_elsewhere)
             .expect("a silent occurrence defers to the verified claim");
@@ -1370,43 +1331,6 @@ mod tests {
             BTreeSet::from([ReaderId::new("a@corp.com"), ReaderId::new("slack:U2")]),
             "the folded claim seats one principal for the id everywhere it occurs"
         );
-
-        // Two claims conflict when they name different readers, not when two sources spell
-        // one address with different domain case: both resolve to the same principal.
-        let spelled_twice = AudienceEvidence {
-            sources: vec![
-                SourceClaims {
-                    provider: "slack".into(),
-                    selector: "viewer".into(),
-                    members: vec![member("slack:U1", Some("Alice@CORP.com"))],
-                },
-                SourceClaims {
-                    provider: "slack".into(),
-                    selector: "full-members".into(),
-                    members: vec![member("slack:U1", Some("Alice@corp.com"))],
-                },
-            ],
-            ..AudienceEvidence::default()
-        };
-        assert!(
-            registry.expansions(&spelled_twice).is_ok(),
-            "one address under two domain cases is one claim"
-        );
-
-        // A lookup's claims must be for the member asked — a source may not canonicalize a
-        // member it does not own.
-        let hijack = AudienceEvidence {
-            lookups: vec![MemberLookup {
-                provider: "slack".into(),
-                member: "slack:U1".into(),
-                claims: Some(member("google-workspace:alice", Some("alice@corp.com"))),
-            }],
-            ..AudienceEvidence::default()
-        };
-        assert!(matches!(
-            registry.expansions(&hijack),
-            Err(EvidenceRefusal::ForeignLookupClaims { .. })
-        ));
 
         // A Rust-constructed identity mapping with a reserved principal fails validation,
         // not the eventual decode of the record it was pinned into.

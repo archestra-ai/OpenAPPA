@@ -11589,42 +11589,8 @@ mod tests {
         ReaderId::new(format!("{local}@corp.com"))
     }
 
-    #[test]
-    fn a_public_placeholder_argument_is_the_public_audience() {
-        let e = audience_engine(vec![], known(TRUSTED, Audience::restricted([ReaderId::new("auditor")])));
-        let restricted = vec![opened(&e)];
-        let decision = e
-            .handle(
-                &viewing(&e, &restricted),
-                batch("b1", Vec::new(), vec![send_to("public")]),
-            )
-            .expect("the batch decides");
-        let (released, blocked) = answered(&decision);
-        assert!(released.is_empty());
-        assert_eq!(
-            blocked[0].block.raw.requirement_gaps,
-            vec![crate::check::Gap::Includes {
-                recipients: DeclaredAudience::Public
-            }]
-        );
-        assert!(
-            blocked[0].offers.is_empty(),
-            "no authority holds a reader ceiling, so nothing covers a Public recipient"
-        );
-
-        let e = audience_engine(vec![], known(TRUSTED, Audience::public()));
-        let public = vec![opened(&e)];
-        let decision = e
-            .handle(&viewing(&e, &public), batch("b2", Vec::new(), vec![send_to("public")]))
-            .expect("the batch decides");
-        let (released, blocked) = answered(&decision);
-        assert_eq!(tool_names(released), ["send"]);
-        assert!(blocked.is_empty());
-    }
-
-    #[test]
-    fn a_public_reader_ceiling_covers_a_public_placeholder_recipient() {
-        let officer = crate::authority::Authority {
+    fn public_ceiling_officer() -> crate::authority::Authority {
+        crate::authority::Authority {
             name: AuthorityName::new("officer"),
             mandate: crate::authority::Mandate {
                 reader_ceiling: Some(DeclaredAudience::literal(Audience::public())),
@@ -11632,20 +11598,51 @@ mod tests {
             },
             scope: crate::authority::Scope::default(),
             hint: None,
-        };
-        let e = audience_engine(
-            vec![officer],
-            known(TRUSTED, Audience::restricted([ReaderId::new("auditor")])),
-        );
-        let restricted = vec![opened(&e)];
-        let decision = e
-            .handle(
-                &viewing(&e, &restricted),
-                batch("b1", Vec::new(), vec![send_to("public")]),
-            )
-            .expect("the batch decides");
-        let (_, blocked) = answered(&decision);
-        assert_eq!(blocked[0].offers.len(), 1, "one ruling plan names the officer");
+        }
+    }
+
+    #[test]
+    fn a_public_placeholder_argument_is_the_public_audience() {
+        let auditor = || Audience::restricted([ReaderId::new("auditor")]);
+        for (case, authorities, label, released, offers) in [
+            (
+                "no authority holds a reader ceiling, so nothing covers a Public recipient",
+                vec![],
+                auditor(),
+                vec![],
+                0,
+            ),
+            ("a public label releases", vec![], Audience::public(), vec!["send"], 0),
+            (
+                "a public reader ceiling offers one ruling plan",
+                vec![public_ceiling_officer()],
+                auditor(),
+                vec![],
+                1,
+            ),
+        ] {
+            let e = audience_engine(authorities, known(TRUSTED, label));
+            let log = vec![opened(&e)];
+            let decision = e
+                .handle(&viewing(&e, &log), batch("b1", Vec::new(), vec![send_to("public")]))
+                .expect("the batch decides");
+            let (released_calls, blocked) = answered(&decision);
+            assert_eq!(tool_names(released_calls), released, "{case}");
+            match blocked {
+                [] => assert_eq!(offers, 0, "{case}"),
+                [block] => {
+                    assert_eq!(
+                        block.block.raw.requirement_gaps,
+                        vec![crate::check::Gap::Includes {
+                            recipients: DeclaredAudience::Public
+                        }],
+                        "{case}"
+                    );
+                    assert_eq!(block.offers.len(), offers, "{case}");
+                }
+                more => panic!("{case}: one proposal blocks at most once, got {more:?}"),
+            }
+        }
     }
 
     #[test]
@@ -11747,6 +11744,17 @@ mod tests {
             Err(crate::audience::Unroutable::UnknownGroup(_))
         ));
 
+        let decision = e
+            .handle(&viewing(&e, &log), batch("b4", Vec::new(), vec![send_to("@")]))
+            .expect("a malformed spelling still decides");
+        assert!(answered(&decision).0.is_empty());
+    }
+
+    #[test]
+    fn evidence_is_scoped_to_the_asked_atoms_and_the_registered_sources() {
+        let e = audience_engine(vec![], known(TRUSTED, Audience::restricted([corp_reader("alice")])));
+        let log = vec![opened(&e)];
+
         // Evidence outside the registered sources is refused, not ignored.
         let foreign = source_evidence(vec![crate::audience::SourceClaims {
             provider: "github".to_string(),
@@ -11786,11 +11794,6 @@ mod tests {
             .handle(&viewing(&e, &log), evidenced_batch("b3", vec![send_to("@team")], exact))
             .expect("the asked answers decide");
         assert_eq!(tool_names(answered(&decision).0), ["send"]);
-
-        let decision = e
-            .handle(&viewing(&e, &log), batch("b4", Vec::new(), vec![send_to("@")]))
-            .expect("a malformed spelling still decides");
-        assert!(answered(&decision).0.is_empty());
     }
 
     #[test]

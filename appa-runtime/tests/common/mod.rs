@@ -5,6 +5,11 @@
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use appa_runtime::api::{OfferId, Runtime};
+use appa_runtime::hooks;
+use appa_runtime_api::{Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, ToolOutcome, TrajectoryId};
 
 /// Fixture arguments, from a `json!` value to the bytes a harness would
 /// have sent. The adapter holds the harness's bytes already, so
@@ -33,15 +38,80 @@ pub fn stage_bundle(into: &Path) -> PathBuf {
 /// Every offer a feedback body names, in the order the feedback lists
 /// them. Which end a suite takes is its own assertion: a remedy plan
 /// that stages several offers surfaces one line each.
-pub fn offers(feedback: &str) -> Vec<appa_runtime::api::OfferId> {
+pub fn offers(feedback: &str) -> Vec<OfferId> {
     feedback
         .lines()
         .filter_map(|line| {
             let after = line.split("offer_id:").nth(1)?;
             let rest = after.trim_start().strip_prefix('"')?;
-            Some(appa_runtime::api::OfferId(rest[..rest.find('"')?].to_string()))
+            Some(OfferId(rest[..rest.find('"')?].to_string()))
         })
         .collect()
+}
+
+/// The last offer a feedback body names.
+pub fn last_offer(feedback: &str) -> OfferId {
+    offers(feedback)
+        .last()
+        .cloned()
+        .unwrap_or_else(|| panic!("no offer id in feedback: {feedback}"))
+}
+
+/// The last offer a denial's feedback names.
+pub fn offer_of(decision: &HookDecision) -> OfferId {
+    let HookDecision::DenyCall { feedback, .. } = decision else {
+        panic!("expected a deny carrying feedback, got {decision:?}")
+    };
+    last_offer(feedback)
+}
+
+/// The one root trajectory a suite's session runs as. Every suite opens
+/// its own database, so the id needs no suite-specific spelling.
+pub fn root() -> TrajectoryId {
+    TrajectoryId("test-root".to_string())
+}
+
+pub fn actor() -> Actor {
+    Actor {
+        root: root(),
+        child: None,
+    }
+}
+
+/// The root actor proposes one call.
+pub async fn propose(runtime: &Arc<Runtime>, call: ProposedCall) -> HookDecision {
+    hooks::handle(
+        runtime,
+        HookEvent::ToolCall {
+            actor: actor(),
+            call,
+            spawn: false,
+        },
+    )
+    .await
+}
+
+/// The root actor reports one call as run with a plain body, and the
+/// runtime acknowledges it.
+pub async fn ran(runtime: &Arc<Runtime>, call: ProposedCall) {
+    assert_eq!(
+        hooks::handle(
+            runtime,
+            HookEvent::ToolResult {
+                actor: actor(),
+                call,
+                outcome: ToolOutcome::Success {
+                    body: OutcomeBody::Available("done".to_string()),
+                },
+            },
+        )
+        .await,
+        HookDecision::Ack
+    );
+}
+
+pub fn audit_len(runtime: &Runtime) -> usize {
+    runtime.audit(&root()).expect("the audit reads").len()
 }
 
 /// Serve one router on an ephemeral loopback port for the rest of the
