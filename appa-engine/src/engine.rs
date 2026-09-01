@@ -267,11 +267,7 @@ impl Engine {
             EngineEvent::BindFork(binding) => self.decide_binding(view, &binding),
             EngineEvent::ExecuteOffer(execution) => self.decide_offer(view, &execution, &act),
         }?;
-        // The operation-scope test, after the decision's reads are complete: every pinned
-        // entry is inherited or answers an ask this act actually made.
-        self.registry
-            .audience()
-            .only_requested(&act.evidence, &act.inherited.borrow(), &act.expansions.reads())?;
+        act.settle(self.registry.audience())?;
         Ok(decision)
     }
 
@@ -310,11 +306,7 @@ impl Engine {
         inherited: AudienceEvidence,
     ) -> Result<ActEvidence, TransitionError> {
         let expansions = self.registry.audience().expansions(&evidence)?;
-        Ok(ActEvidence {
-            evidence,
-            expansions,
-            inherited: std::cell::RefCell::new(inherited),
-        })
+        Ok(ActEvidence::new(evidence, expansions, inherited))
     }
 
     fn context<'e>(&'e self, act: &'e ActEvidence) -> MembershipContext<'e> {
@@ -609,7 +601,7 @@ impl Engine {
         nonce: crate::value::OfferNonce,
         act: &ActEvidence,
     ) -> Result<EngineDecision, TransitionError> {
-        match branch::submit_child_return(views, child, &body, &act.evidence).map_err(branch_refusal)? {
+        match branch::submit_child_return(views, child, &body, &act.pinned()).map_err(branch_refusal)? {
             branch::RawCrossing::Merged(crossing) => {
                 facts.extend(crossing);
                 Ok(EngineDecision {
@@ -1322,7 +1314,7 @@ impl Engine {
             call,
             admission,
             &self.context(act),
-            &act.evidence,
+            &act.pinned(),
         )
         .map_err(|error| match error {
             AdmitError::SanitizerTransitionUnmet | AdmitError::SanitizerBindingMismatch => {
@@ -1647,11 +1639,11 @@ impl Engine {
         }
         act.inherit(&recorded.evidence)?;
         let under = self.act_evidence(
-            act.evidence.inheriting(&recorded.evidence)?,
+            act.pinned().inheriting(&recorded.evidence)?,
             AudienceEvidence::default(),
         )?;
         let follow_up = self.decided_follow_up(views, batch, &proposals, &recorded.released, &under)?;
-        act.expansions.absorb_reads(&under.expansions);
+        act.absorb(&under);
         Ok(Some(EngineDecision {
             append: None,
             follow_up,
@@ -2003,7 +1995,7 @@ impl Engine {
                 let subject = subject_at(position);
                 let pinned = views.candidate_evidence(&subject);
                 act.inherit(&pinned)?;
-                let under = self.act_evidence(act.evidence.inheriting(&pinned)?, AudienceEvidence::default())?;
+                let under = self.act_evidence(act.pinned().inheriting(&pinned)?, AudienceEvidence::default())?;
                 Ok((views.standing_call(&subject).unwrap_or(call), under))
             })
             .collect::<Result<_, TransitionError>>()?;
@@ -2089,7 +2081,7 @@ impl Engine {
             }
         }
         for (_, under) in &standing {
-            act.expansions.absorb_reads(&under.expansions);
+            act.absorb(under);
         }
         Ok(FollowUp::Proposals {
             released,
@@ -2260,7 +2252,7 @@ impl Engine {
             call,
             ResultAdmission::CandidateAccepted { offer: execution.offer },
             &self.context(act),
-            &act.evidence,
+            &act.pinned(),
         )
         .unwrap_or_else(|error| unreachable!("the confined stage admits what the log already proved: {error}"));
         facts.extend(admitted);
@@ -2364,7 +2356,7 @@ impl Engine {
             call,
             ResultAdmission::CandidateAdmissible,
             &self.context(act),
-            &act.evidence,
+            &act.pinned(),
         )
         .unwrap_or_else(|error| unreachable!("the confined stage admits what this act just derived: {error}"));
         facts.extend(admitted);
@@ -2822,9 +2814,9 @@ impl Engine {
             // atoms that contract reads were pinned by the hop that derived it.
             let pinned = views.candidate_evidence(&recorded.subject);
             act.inherit(&pinned)?;
-            let under = self.act_evidence(act.evidence.inheriting(&pinned)?, AudienceEvidence::default())?;
+            let under = self.act_evidence(act.pinned().inheriting(&pinned)?, AudienceEvidence::default())?;
             let reblocked = self.reblocked(views, recorded, execution, &under)?;
-            act.expansions.absorb_reads(&under.expansions);
+            act.absorb(&under);
             return Ok(match reblocked {
                 Some(block) => OfferFollowUp::Substituted { block: Box::new(block) },
                 None => OfferFollowUp::Invalidated,
@@ -3639,46 +3631,57 @@ pub(crate) enum ComposeRefusal {
     Evidence(crate::audience::EvidenceRefusal),
 }
 
-/// One act's audience reading: the merged pinned evidence its records persist, the
-/// membership answers that evidence recomputes to, and the inherited pins — entries earlier
-/// records of this chain already pinned, which the operation-scope test excuses. Built only
-/// through validation, so a context over it always reads admissible answers.
+/// One act's audience reading: the membership answers its merged pinned evidence recomputes
+/// to, over the act's operation-scope ledger. Built only through validation, so a context
+/// over it always reads admissible answers. Interior mutability on the ledger: overlay
+/// contexts built mid-decision discover pins and asks the act-building event could not name.
 #[derive(Clone, Debug)]
 pub(crate) struct ActEvidence {
-    evidence: AudienceEvidence,
     expansions: Expansions,
-    inherited: std::cell::RefCell<AudienceEvidence>,
+    ledger: std::cell::RefCell<crate::audience::ActLedger>,
 }
 
 impl ActEvidence {
-    /// Assemble from parts a caller validated together: the transition validator recomputes
-    /// `expansions` from `evidence` before building this. The validator runs its own
-    /// per-act operation-scope audit, so no inherited pins are carried here.
-    pub(crate) fn validated(evidence: AudienceEvidence, expansions: Expansions) -> ActEvidence {
+    fn new(evidence: AudienceEvidence, expansions: Expansions, inherited: AudienceEvidence) -> ActEvidence {
         ActEvidence {
-            evidence,
             expansions,
-            inherited: std::cell::RefCell::default(),
+            ledger: std::cell::RefCell::new(crate::audience::ActLedger::of(evidence, inherited)),
         }
+    }
+
+    /// Assemble from parts a caller validated together: the transition validator recomputes
+    /// `expansions` from `evidence` before building this. The validator keeps its own
+    /// per-act ledger, so no inherited pins are carried here.
+    pub(crate) fn validated(evidence: AudienceEvidence, expansions: Expansions) -> ActEvidence {
+        ActEvidence::new(evidence, expansions, AudienceEvidence::default())
     }
 
     /// The evidence a record of this act pins.
     pub(crate) fn pinned(&self) -> AudienceEvidence {
-        self.evidence.clone()
+        self.ledger.borrow().evidence().clone()
     }
 
-    /// The context's answers and ask log, for the validator's per-act audit.
+    /// The context's answers and ask log, for the validator's per-act ledger.
     pub(crate) fn expansions(&self) -> &Expansions {
         &self.expansions
     }
 
     /// Count `pins` — entries a record this act continues already pinned — as inherited, so
-    /// the operation-scope test excuses them. Interior mutability: overlay contexts built
-    /// mid-decision discover pins the act-building event could not name.
+    /// the operation-scope test excuses them.
     fn inherit(&self, pins: &AudienceEvidence) -> Result<(), crate::audience::EvidenceRefusal> {
-        let merged = self.inherited.borrow().inheriting(pins)?;
-        *self.inherited.borrow_mut() = merged;
-        Ok(())
+        self.ledger.borrow_mut().inherit(pins)
+    }
+
+    /// Count an overlay context's asks as this act's: it read on the act's behalf.
+    fn absorb(&self, overlay: &ActEvidence) {
+        self.ledger.borrow_mut().read(overlay.expansions.reads());
+    }
+
+    /// The operation-scope test, after the decision's reads are complete.
+    fn settle(&self, audience: &crate::audience::AudienceRegistry) -> Result<(), crate::audience::EvidenceRefusal> {
+        let mut ledger = self.ledger.borrow_mut();
+        ledger.read(self.expansions.reads());
+        ledger.settle(audience)
     }
 }
 
@@ -3751,7 +3754,7 @@ pub(crate) fn compose_batch<'a>(
                 Some(prepared) => {
                     act.inherit(&prepared.evidence).map_err(ComposeRefusal::Evidence)?;
                     let merged = act
-                        .evidence
+                        .pinned()
                         .inheriting(&prepared.evidence)
                         .map_err(ComposeRefusal::Evidence)?;
                     let expansions = registry
@@ -3864,7 +3867,7 @@ pub(crate) fn compose_batch<'a>(
     // operation-scope justification must count those asks.
     for (under, _) in &per_call {
         if let std::borrow::Cow::Owned(under) = under {
-            act.expansions.absorb_reads(&under.expansions);
+            act.absorb(under);
         }
     }
     Ok(composed)

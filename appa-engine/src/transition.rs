@@ -878,19 +878,6 @@ impl Remedy {
     }
 }
 
-/// The per-act operation-scope audit: the union of the pinned evidence the act's records
-/// carry, the asks their validations re-made (plus the deterministic gate atoms the live act
-/// answered), and the pins of the records the act continues. Settled when the act closes:
-/// every pinned entry must be an inherited pin or answer a collected ask — the same
-/// `only_requested` test the live act passed, so a log cannot smuggle evidence no operation
-/// requested.
-#[derive(Default)]
-struct ActAudit {
-    evidence: AudienceEvidence,
-    inherited: AudienceEvidence,
-    reads: BTreeSet<crate::label::SymbolicAtom>,
-}
-
 /// The one sequential transition validator. It admits records one at a time against the
 /// state the records before them built, and folds each admitted record into that state through
 /// [`Projection::fold`] — the same fold a held view advances by, so validation and projection can
@@ -917,7 +904,7 @@ pub(crate) struct Sequence<'a> {
     owing: Option<Owed>,
     substituted: Option<Substitution>,
     /// Interior mutability because contributions come from `&self` validation helpers.
-    audit: std::cell::RefCell<ActAudit>,
+    audit: std::cell::RefCell<crate::audience::ActLedger>,
 }
 
 struct Substitution {
@@ -2892,7 +2879,7 @@ impl<'a> Sequence<'a> {
     /// The membership answers a record's pinned primitives recompute to. Every pinned entry
     /// must belong to a registered source: junk or foreign evidence never validates, whatever
     /// answers it would add. The one funnel every evidence-carrying record passes, so it also
-    /// unions the evidence into the open act's operation-scope audit.
+    /// pins the evidence into the open act's ledger.
     fn recorded_expansions(&self, evidence: &AudienceEvidence) -> Result<Expansions, TransitionRefusal> {
         let expansions = self
             .engine
@@ -2900,40 +2887,34 @@ impl<'a> Sequence<'a> {
             .audience()
             .expansions(evidence)
             .map_err(TransitionRefusal::from)?;
-        let mut audit = self.audit.borrow_mut();
-        audit.evidence = evidence.inheriting(&audit.evidence).map_err(TransitionRefusal::from)?;
+        self.audit.borrow_mut().pin(evidence).map_err(TransitionRefusal::from)?;
         Ok(expansions)
     }
 
-    /// Fold a validation context's asks into the open act's audit, after the record's
+    /// Fold a validation context's asks into the open act's ledger, after the record's
     /// re-derivations ran over it.
     fn audit_reads(&self, expansions: &Expansions) {
-        self.audit.borrow_mut().reads.extend(expansions.reads());
+        self.audit.borrow_mut().read(expansions.reads());
     }
 
     /// Contribute the deterministic gate atoms the live act answered before this record's
     /// decision ran — a validation that re-derives less than the live gates demanded still
     /// justifies the evidence those gates gathered.
     fn audit_atoms(&self, atoms: impl IntoIterator<Item = crate::label::SymbolicAtom>) {
-        self.audit.borrow_mut().reads.extend(atoms);
+        self.audit.borrow_mut().read(atoms);
     }
 
     /// Count `pins` — entries pinned by a record the open act continues — as inherited.
     fn audit_inherit(&self, pins: &AudienceEvidence) -> Result<(), TransitionRefusal> {
-        let mut audit = self.audit.borrow_mut();
-        audit.inherited = audit.inherited.inheriting(pins).map_err(TransitionRefusal::from)?;
-        Ok(())
+        self.audit.borrow_mut().inherit(pins).map_err(TransitionRefusal::from)
     }
 
-    /// Settle the open act's operation-scope audit: every pinned entry is an inherited pin
-    /// or answers a collected ask, exactly the test the live act passed.
+    /// Settle the open act's ledger: every pinned entry is an inherited pin or answers a
+    /// collected ask, exactly the test the live act passed.
     fn settle_audit(&self) -> Result<(), TransitionRefusal> {
         let audit = std::mem::take(&mut *self.audit.borrow_mut());
-        let reads: Vec<crate::label::SymbolicAtom> = audit.reads.into_iter().collect();
-        self.engine
-            .registry()
-            .audience()
-            .only_requested(&audit.evidence, &audit.inherited, &reads)
+        audit
+            .settle(self.engine.registry().audience())
             .map_err(|refusal| match refusal {
                 crate::audience::EvidenceRefusal::UnrequestedEvidence { entry } => {
                     TransitionRefusal::UnrequestedEvidence { entry }

@@ -581,13 +581,6 @@ impl Expansions {
     pub(crate) fn reads(&self) -> Vec<SymbolicAtom> {
         self.reads.borrow().iter().cloned().collect()
     }
-
-    /// Fold another context's asks into this log — an overlay context reads on behalf of the
-    /// same act, and the act's justification must count those asks.
-    pub(crate) fn absorb_reads(&self, other: &Expansions) {
-        let absorbed: Vec<SymbolicAtom> = other.reads.borrow().iter().cloned().collect();
-        self.reads.borrow_mut().extend(absorbed);
-    }
 }
 
 /// Everything an audience evaluation reads beside the audiences themselves: the policy's
