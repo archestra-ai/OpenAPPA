@@ -9,7 +9,7 @@ use std::fmt::Write as _;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
-use crate::config::Config;
+use crate::config::{Config, Externals, Section};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ConfigDescription {
@@ -43,12 +43,23 @@ impl ConfigState {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct PolicyDescription {
     tools: Vec<String>,
-    audience: Option<AudienceDescription>,
+    audience: AudienceSide,
 }
 
-/// The audience side of a loadable policy, offline: what the configuration itself declares.
-/// Live provider group catalogues are session facts this command does not reach.
+/// The audience side of the policy, as far as this command can describe it offline.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum AudienceSide {
+    /// No policy to compile: the configuration is missing, unreadable, or not TOML.
+    #[default]
+    Absent,
+    /// The policy does not compile; the error names why.
+    Uncompiled(String),
+    Declared(AudienceDescription),
+}
+
+/// What the configuration itself declares about audiences. Live provider group catalogues
+/// are session facts this command does not reach.
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct AudienceDescription {
     /// One entry per registered source: the provider, its advertised selector templates,
     /// and whether `[externals.audience.<provider>]` binds it.
@@ -74,18 +85,41 @@ struct GroupDescription {
     from: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum IdentityDescription {
-    #[default]
     VerifiedEmail,
-    Custom {
-        name: String,
-        binding_configured: bool,
-    },
+    Custom { name: String, binding_configured: bool },
 }
 
-/// The declared audience configuration, with binding status answered by `bound(section, name)`.
-fn audience_description(compiled: &appa_policy::Config, bound: &dyn Fn(&str, &str) -> bool) -> AudienceDescription {
+/// Where the `[externals]` bindings are read from: the loaded configuration, or the raw TOML
+/// of one that does not load.
+#[derive(Clone, Copy)]
+enum Bindings<'a> {
+    Loaded(&'a Externals),
+    Raw(&'a toml::Value),
+}
+
+impl Bindings<'_> {
+    fn bound(self, section: Section, name: &str) -> bool {
+        match self {
+            Bindings::Loaded(externals) => match section {
+                Section::Authorities => externals.authorities.contains_key(name),
+                Section::Sanitizers => externals.sanitizers.contains_key(name),
+                Section::Annotators => externals.annotators.contains_key(name),
+                Section::Audience => externals.audience.contains_key(name),
+                Section::Identity => externals.identity.contains_key(name),
+            },
+            Bindings::Raw(root) => root
+                .get("externals")
+                .and_then(|externals| externals.get(section.name()))
+                .and_then(|table| table.get(name))
+                .is_some(),
+        }
+    }
+}
+
+/// The declared audience configuration, with each source's and the identity's binding status.
+fn audience_description(compiled: &appa_policy::Config, bindings: Bindings<'_>) -> AudienceDescription {
     let audience = compiled.registry().audience();
     let spelled = |spec: &appa_engine::audience::SelectorSpec| spec.to_string();
     AudienceDescription {
@@ -100,7 +134,7 @@ fn audience_description(compiled: &appa_policy::Config, bound: &dyn Fn(&str, &st
                     .flatten()
                     .map(|template| template.as_str().to_string())
                     .collect(),
-                binding_configured: bound("audience", provider),
+                binding_configured: bindings.bound(Section::Audience, provider),
             })
             .collect(),
         self_from: audience
@@ -125,7 +159,7 @@ fn audience_description(compiled: &appa_policy::Config, bound: &dyn Fn(&str, &st
             appa_engine::audience::IdentityImplementation::VerifiedEmail => IdentityDescription::VerifiedEmail,
             appa_engine::audience::IdentityImplementation::Custom(name) => IdentityDescription::Custom {
                 name: name.as_str().to_string(),
-                binding_configured: bound("identity", name.as_str()),
+                binding_configured: bindings.bound(Section::Identity, name.as_str()),
             },
         },
     }
@@ -172,21 +206,17 @@ fn inspect(path: &Path) -> (ConfigDescription, PolicyDescription) {
                     .retain(|battery| seen_batteries.insert(battery.clone()));
 
                 if let Some(root_policy) = root.get("policy") {
-                    describe_policy_value(root_policy, &root, &mut policy);
+                    describe_policy_value(root_policy, Bindings::Raw(&root), &mut policy);
                 }
 
                 if let Ok(loaded) = Config::load(path) {
                     config.state = ConfigState::Loadable;
                     config.diagnostic = None;
-                    describe_policy_value(loaded.policy_file().value(), &root, &mut policy);
-                    if let Ok(source) = toml::to_string(loaded.policy_file().value())
-                        && let Ok(compiled) = appa_policy::Config::from_toml_str(&source)
-                    {
-                        policy.audience = Some(audience_description(&compiled, &|section, name| match section {
-                            "audience" => loaded.externals.audience.contains_key(name),
-                            _ => loaded.externals.identity.contains_key(name),
-                        }));
-                    }
+                    describe_policy_value(
+                        loaded.policy_file().value(),
+                        Bindings::Loaded(&loaded.externals),
+                        &mut policy,
+                    );
                 }
             }
         },
@@ -195,7 +225,7 @@ fn inspect(path: &Path) -> (ConfigDescription, PolicyDescription) {
     (config, policy)
 }
 
-fn describe_policy_value(policy_value: &toml::Value, root: &toml::Value, out: &mut PolicyDescription) {
+fn describe_policy_value(policy_value: &toml::Value, bindings: Bindings<'_>, out: &mut PolicyDescription) {
     out.tools = policy_value
         .get("tool")
         .and_then(toml::Value::as_array)
@@ -208,16 +238,13 @@ fn describe_policy_value(policy_value: &toml::Value, root: &toml::Value, out: &m
         .into_iter()
         .collect();
 
-    if let Ok(source) = toml::to_string(policy_value)
-        && let Ok(compiled) = appa_policy::Config::from_toml_str(&source)
-    {
-        out.audience = Some(audience_description(&compiled, &|section, name| {
-            root.get("externals")
-                .and_then(|externals| externals.get(section))
-                .and_then(|table| table.get(name))
-                .is_some()
-        }));
-    }
+    let compiled = toml::to_string(policy_value)
+        .map_err(|error| error.to_string())
+        .and_then(|source| appa_policy::Config::from_toml_str(&source).map_err(|error| error.to_string()));
+    out.audience = match compiled {
+        Ok(compiled) => AudienceSide::Declared(audience_description(&compiled, bindings)),
+        Err(error) => AudienceSide::Uncompiled(error),
+    };
 }
 
 fn battery_name(path: &Path) -> Option<String> {
@@ -246,7 +273,7 @@ pub fn render(path: &Path, adapter: &'static str) -> String {
     let _ = writeln!(output, "Policy tools: {}", list_or_none(&policy.tools));
     let _ = writeln!(output, "Audience chain: self ⊆ internal ⊆ public (built-in)");
     match &policy.audience {
-        Some(audience) => {
+        AudienceSide::Declared(audience) => {
             if audience.sources.is_empty() {
                 let _ = writeln!(output, "Audience sources: none");
             } else {
@@ -293,8 +320,14 @@ pub fn render(path: &Path, adapter: &'static str) -> String {
                 }
             }
         }
-        None => {
-            let _ = writeln!(output, "Audience configuration: unavailable (policy does not compile)");
+        AudienceSide::Uncompiled(error) => {
+            let _ = writeln!(
+                output,
+                "Audience configuration: unavailable (policy does not compile: {error})"
+            );
+        }
+        AudienceSide::Absent => {
+            let _ = writeln!(output, "Audience configuration: unavailable (no policy)");
         }
     }
     let _ = writeln!(
@@ -352,7 +385,9 @@ mod tests {
         assert_eq!(config.state, ConfigState::Loadable);
         assert_eq!(config.batteries, ["mail"]);
         assert_eq!(policy.tools, ["mail_read"]);
-        let audience = policy.audience.expect("a loadable policy describes its audience side");
+        let AudienceSide::Declared(audience) = policy.audience else {
+            panic!("a loadable policy describes its audience side: {:?}", policy.audience);
+        };
         assert_eq!(
             audience.sources,
             [SourceDescription {

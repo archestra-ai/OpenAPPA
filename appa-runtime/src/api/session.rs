@@ -681,7 +681,7 @@ impl Session {
                 },
                 _ => return Ok(decision),
             }
-            if evidence == carried {
+            if evidence.len() == carried.len() {
                 return Err(EventError::UnexpectedDecision);
             }
         }

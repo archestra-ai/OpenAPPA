@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use appa_engine::audience::MemberClaims;
 use appa_engine::authority::{Authority, DeclaredTransition, Sanitizer};
 use appa_engine::check::Gap;
-use appa_engine::label::{Clause, DeclaredAudience, GroupRef, ReaderId, Trust};
+use appa_engine::label::{Clause, DeclaredAudience, ReaderId, Trust};
 use appa_engine::registry::TrustChain;
 
 /// Which registered external a consult addresses. Closed: the wire
@@ -176,12 +176,6 @@ impl Serialize for WireAudience {
     }
 }
 
-/// The `@`-marked spelling of one group reference, as policy writes it — the reference's
-/// own `Display`.
-pub(crate) fn group_mark(group: &GroupRef) -> String {
-    group.to_string()
-}
-
 /// One declared union clause's entries, in the policy's own spellings: the chain audience,
 /// the `@` group marks, then the literal readers.
 pub(crate) fn clause_entries(clause: &Clause) -> Vec<String> {
@@ -189,7 +183,7 @@ pub(crate) fn clause_entries(clause: &Clause) -> Vec<String> {
         .chain()
         .map(|chain| chain.as_str().to_string())
         .into_iter()
-        .chain(clause.groups().map(group_mark))
+        .chain(clause.groups().map(ToString::to_string))
         .chain(clause.readers().iter().map(|reader| reader.as_str().to_string()))
         .collect()
 }
@@ -839,6 +833,7 @@ fn annotation_schema(declaration: &AnnotationDeclaration) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use appa_engine::label::GroupRef;
 
     fn chain() -> TrustChain {
         TrustChain::new(vec!["suspicious".to_string(), "trusted".to_string()])

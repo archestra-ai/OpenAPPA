@@ -67,7 +67,7 @@ use appa_engine::value::{
     ResolvedCall, ToolName, TrajectoryId as EngineTrajectoryId, ValueBody,
 };
 use appa_eventlog::Log;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::api::OutcomeBody;
 pub(crate) use crate::api::{OfferId, ProposedCall, SpawnBinding, ToolOutcome, TrajectoryId};
@@ -893,44 +893,33 @@ impl RuntimeEngine {
             arguments: call.arguments.get().as_bytes().to_vec(),
             annotation,
         };
-        let act = match self.act_audience(evidence) {
-            Ok(act) => act,
-            Err(AudienceFailure::Consult(requests)) => {
-                return Ok(EngineDecision::deliver(Next::ResolveExternal(requests)));
-            }
-            Err(AudienceFailure::Refused(detail)) => return Ok(deny(unresolved_audience(&call.tool, &detail))),
-        };
         // A deployment that does not control context releases the marked call
         // unmarked, so the batch may be decided twice. The mark is all that
         // differs between the two attempts.
-        let judge = || {
-            let decide = |marked: bool| {
-                let batch = ProposalBatch {
-                    id: batch_id(entropy),
-                    trajectory: engine_id(trajectory),
-                    provider_results: Vec::new(),
-                    proposals: vec![proposed.clone()],
-                    spawn: marked.then(|| SpawnMark::at(0)),
-                    offer_nonce: engine_nonce(entropy),
-                    evidence: Vec::new(),
-                    audience: act.payload.clone(),
+        let judged =
+            self.judge_under_audience(evidence, UnresolvedAudience::Denied { tool: &call.tool }, |audience| {
+                let decide = |marked: bool| {
+                    let batch = ProposalBatch {
+                        id: batch_id(entropy),
+                        trajectory: engine_id(trajectory),
+                        provider_results: Vec::new(),
+                        proposals: vec![proposed.clone()],
+                        spawn: marked.then(|| SpawnMark::at(0)),
+                        offer_nonce: engine_nonce(entropy),
+                        evidence: Vec::new(),
+                        audience: audience.clone(),
+                    };
+                    self.engine.handle(view, CoreEvent::Proposals(batch))
                 };
-                self.engine.handle(view, CoreEvent::Proposals(batch))
-            };
-            match decide(spawn) {
-                Err(TransitionError::SpawnUncontrolled) if spawn => decide(false),
-                decided => decided,
-            }
-        };
-        let decision = match judge() {
-            Ok(decision) => decision,
-            Err(TransitionError::MembershipNeeded { needed }) => {
-                return match self.audience_consult(&act, needed)? {
-                    AudienceConsult::Requests(requests) => Ok(EngineDecision::deliver(Next::ResolveExternal(requests))),
-                    AudienceConsult::Unresolved(detail) => Ok(deny(unresolved_audience(&call.tool, &detail))),
-                };
-            }
-            Err(error) => return Err(proposal_refusal(error)),
+                match decide(spawn) {
+                    Err(TransitionError::SpawnUncontrolled) if spawn => decide(false),
+                    decided => decided,
+                }
+            })?;
+        let decision = match judged {
+            AudienceRound::Judged(decision) => decision,
+            AudienceRound::Presented(decision) => return Ok(decision),
+            AudienceRound::Failed(error) => return Err(proposal_refusal(error)),
         };
         let append = decision.append.map(ValidatedFactBatch::into_unsealed);
         let then = self.deliver_proposals(decision.follow_up)?;
@@ -998,38 +987,24 @@ impl RuntimeEngine {
         evidence: &[ExternalEvidence],
         entropy: &OfferNonce,
     ) -> Result<EngineDecision, EngineRefusal> {
-        let withheld = |detail: &str| {
-            Ok(EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
-                feedback: format!("[appa] {detail}; the result is withheld and may be retried"),
-                offers: Vec::new(),
-            })))
-        };
-        let act = match self.act_audience(evidence) {
-            Ok(act) => act,
-            Err(AudienceFailure::Consult(requests)) => {
-                return Ok(EngineDecision::deliver(Next::ResolveExternal(requests)));
-            }
-            Err(AudienceFailure::Refused(detail)) => return withheld(&detail),
-        };
-        let judge = |evidence: &[ExternalEvidence]| {
-            let report = ToolReport {
-                dispatch: dispatch.clone(),
-                outcome: engine_outcome(outcome),
-                evidence: sanitizer_evidence(evidence),
-                offer_nonce: engine_nonce(entropy),
-                audience: act.payload.clone(),
-            };
-            self.engine.handle(view, CoreEvent::Outcome(report))
-        };
-        let decision = match judge(evidence) {
-            Ok(decision) => decision,
-            Err(TransitionError::MembershipNeeded { needed }) => {
-                return match self.audience_consult(&act, needed)? {
-                    AudienceConsult::Requests(requests) => Ok(EngineDecision::deliver(Next::ResolveExternal(requests))),
-                    AudienceConsult::Unresolved(detail) => withheld(&detail),
+        let judged = self.judge_under_audience(
+            evidence,
+            UnresolvedAudience::Withheld { subject: "result" },
+            |audience| {
+                let report = ToolReport {
+                    dispatch: dispatch.clone(),
+                    outcome: engine_outcome(outcome),
+                    evidence: sanitizer_evidence(evidence),
+                    offer_nonce: engine_nonce(entropy),
+                    audience: audience.clone(),
                 };
-            }
-            Err(error) => return Err(outcome_refusal(error)),
+                self.engine.handle(view, CoreEvent::Outcome(report))
+            },
+        )?;
+        let decision = match judged {
+            AudienceRound::Judged(decision) => decision,
+            AudienceRound::Presented(decision) => return Ok(decision),
+            AudienceRound::Failed(error) => return Err(outcome_refusal(error)),
         };
         let append = decision.append.map(ValidatedFactBatch::into_unsealed);
         let then = match decision.follow_up {
@@ -1154,45 +1129,30 @@ impl RuntimeEngine {
                 }
             }
         };
-        let act = match self.act_audience(evidence) {
-            Ok(act) => act,
-            Err(AudienceFailure::Consult(requests)) => {
-                return Ok(EngineDecision::deliver(Next::ResolveExternal(requests)));
-            }
-            Err(AudienceFailure::Refused(detail)) => {
-                return Ok(no_answer(format!(
-                    "[appa] {detail}; the offer stands and may be executed again"
-                )));
-            }
-        };
-        let execution = OfferExecution {
-            trajectory: engine_id(trajectory),
-            offer: engine_offer,
-            outcome,
-            offer_nonce: engine_nonce(entropy),
-            audience: act.payload.clone(),
-        };
-        let decision = match self.engine.handle(view, CoreEvent::ExecuteOffer(execution)) {
-            Ok(decision) => decision,
-            Err(TransitionError::MembershipNeeded { needed }) => {
-                return match self.audience_consult(&act, needed)? {
-                    AudienceConsult::Requests(requests) => Ok(EngineDecision::deliver(Next::ResolveExternal(requests))),
-                    AudienceConsult::Unresolved(detail) => Ok(no_answer(format!(
-                        "[appa] {detail}; the offer stands and may be executed again"
-                    ))),
-                };
-            }
+        let judged = self.judge_under_audience(evidence, UnresolvedAudience::OfferStands, |audience| {
+            let execution = OfferExecution {
+                trajectory: engine_id(trajectory),
+                offer: engine_offer,
+                outcome,
+                offer_nonce: engine_nonce(entropy),
+                audience: audience.clone(),
+            };
+            self.engine.handle(view, CoreEvent::ExecuteOffer(execution))
+        })?;
+        let decision = match judged {
+            AudienceRound::Judged(decision) => decision,
+            AudienceRound::Presented(decision) => return Ok(decision),
             // A sanitizer's derivation the engine cannot use — malformed, schema-invalid, or not
             // a strict improvement — lands no fact and opens no dispatch; the offer stands for a
             // later deliberate retry. The external's answer is not an
             // integration fault, so it is not a refusal.
-            Err(TransitionError::Call(_) | TransitionError::SanitizerUnapplicable) => {
+            AudienceRound::Failed(TransitionError::Call(_) | TransitionError::SanitizerUnapplicable) => {
                 return Ok(no_answer(
                     "[appa] the sanitizer's derivation was not usable; the offer stands and may be executed again"
                         .to_string(),
                 ));
             }
-            Err(error) => return Err(offer_refusal(error)),
+            AudienceRound::Failed(error) => return Err(offer_refusal(error)),
         };
         let append = decision.append.map(ValidatedFactBatch::into_unsealed);
         let then = match decision.follow_up {
@@ -1361,39 +1321,25 @@ impl RuntimeEngine {
                 body: ValueBody::new(body),
             },
         };
-        let withheld = |detail: &str| {
-            Ok(EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
-                feedback: format!("[appa] {detail}; the return is withheld and may be retried"),
-                offers: Vec::new(),
-            })))
-        };
-        let act = match self.act_audience(evidence) {
-            Ok(act) => act,
-            Err(AudienceFailure::Consult(requests)) => {
-                return Ok(EngineDecision::deliver(Next::ResolveExternal(requests)));
-            }
-            Err(AudienceFailure::Refused(detail)) => return withheld(&detail),
-        };
-        let judge = |evidence: &[ExternalEvidence]| {
-            let report = ChildReport {
-                child: engine_id(child),
-                fork: fork.clone(),
-                submission: submission.clone(),
-                evidence: sanitizer_evidence(evidence),
-                offer_nonce: engine_nonce(entropy),
-                audience: act.payload.clone(),
-            };
-            self.engine.handle(view, CoreEvent::ChildReturn(report))
-        };
-        let decision = match judge(evidence) {
-            Ok(decision) => decision,
-            Err(TransitionError::MembershipNeeded { needed }) => {
-                return match self.audience_consult(&act, needed)? {
-                    AudienceConsult::Requests(requests) => Ok(EngineDecision::deliver(Next::ResolveExternal(requests))),
-                    AudienceConsult::Unresolved(detail) => withheld(&detail),
+        let judged = self.judge_under_audience(
+            evidence,
+            UnresolvedAudience::Withheld { subject: "return" },
+            |audience| {
+                let report = ChildReport {
+                    child: engine_id(child),
+                    fork: fork.clone(),
+                    submission: submission.clone(),
+                    evidence: sanitizer_evidence(evidence),
+                    offer_nonce: engine_nonce(entropy),
+                    audience: audience.clone(),
                 };
-            }
-            Err(error) => return Err(child_refusal(error)),
+                self.engine.handle(view, CoreEvent::ChildReturn(report))
+            },
+        )?;
+        let decision = match judged {
+            AudienceRound::Judged(decision) => decision,
+            AudienceRound::Presented(decision) => return Ok(decision),
+            AudienceRound::Failed(error) => return Err(child_refusal(error)),
         };
         let append = decision.append.map(ValidatedFactBatch::into_unsealed);
         let then = match decision.follow_up {
@@ -1675,26 +1621,60 @@ impl RuntimeEngine {
     }
 
     /// The selector templates the policy registers for one provider, for a consult's
-    /// declaration.
-    fn templates_of(&self, provider: &str) -> Vec<String> {
+    /// declaration. Every primitive a consult asks for names a registered provider.
+    fn templates_of(&self, provider: &str) -> Result<Vec<String>, EngineRefusal> {
         self.engine
             .registry()
             .audience()
             .templates(provider)
             .map(|templates| templates.iter().map(|template| template.as_str().to_string()).collect())
-            .unwrap_or_default()
+            .ok_or_else(|| EngineRefusal::Invariant {
+                detail: format!("a consult names the unregistered audience provider {provider}"),
+            })
     }
 
-    /// One act's audience evidence, gathered from the consult answers: the validated
-    /// source claims and member lookups, and — under a custom identity implementation —
-    /// the identity mappings for every claimed member. A failed consult stays runtime-side
-    /// as a recorded no-answer; an answer no registered source could have served is
-    /// dropped rather than carried into an act it would refuse. The gathered payload is
-    /// pre-validated against the same test replay applies, so an inadmissible answer is an
-    /// operational refusal here, never an engine error.
+    /// One act judged under its audience evidence: the evidence gathered from the consult
+    /// answers, the act judged with it pinned, and — while the engine still needs membership
+    /// answers — the consults that gather them. An answer the act cannot obtain is presented
+    /// the way `unresolved` names.
+    fn judge_under_audience<T>(
+        &self,
+        evidence: &[ExternalEvidence],
+        unresolved: UnresolvedAudience<'_>,
+        judge: impl FnOnce(&AudienceEvidence) -> Result<T, TransitionError>,
+    ) -> Result<AudienceRound<T>, EngineRefusal> {
+        let act = match self.act_audience(evidence) {
+            Ok(act) => act,
+            Err(AudienceFailure::Consult(requests)) => {
+                return Ok(AudienceRound::Presented(EngineDecision::deliver(
+                    Next::ResolveExternal(requests),
+                )));
+            }
+            Err(AudienceFailure::Refused(detail)) => return Ok(AudienceRound::Presented(unresolved.present(&detail))),
+        };
+        match judge(&act.payload) {
+            Ok(judged) => Ok(AudienceRound::Judged(judged)),
+            Err(TransitionError::MembershipNeeded { needed }) => match self.audience_consult(&act, needed)? {
+                AudienceConsult::Requests(requests) => Ok(AudienceRound::Presented(EngineDecision::deliver(
+                    Next::ResolveExternal(requests),
+                ))),
+                AudienceConsult::Unresolved(detail) => Ok(AudienceRound::Presented(unresolved.present(&detail))),
+            },
+            Err(error) => Ok(AudienceRound::Failed(error)),
+        }
+    }
+
+    /// One act's audience evidence, gathered from the consult answers: the source claims,
+    /// member lookups, and — under a custom identity implementation — the identity mappings
+    /// for every claimed member. A failed consult stays runtime-side as a recorded no-answer;
+    /// an answer no registered source could have served is dropped rather than carried into
+    /// an act it would refuse. The gathered payload is pre-validated against the same test
+    /// replay applies — the engine's, which is the one rule on duplicate or foreign answers
+    /// — so an inadmissible answer is an operational refusal here, never an engine error.
     fn act_audience(&self, evidence: &[ExternalEvidence]) -> Result<ActAudience, AudienceFailure> {
         let audience = self.engine.registry().audience();
-        let mut gathered = GatheredAudience::default();
+        let mut payload = AudienceEvidence::default();
+        let mut unanswered = Unanswered::default();
         for entry in evidence {
             match entry {
                 ExternalEvidence::AudienceSource {
@@ -1713,15 +1693,17 @@ impl RuntimeEngine {
                     let members = members
                         .clone()
                         .filter(|members| members.iter().all(|member| qualified_by(provider, &member.id)));
-                    let spec = SelectorSpec {
-                        provider: provider.clone(),
-                        selector: selector.clone(),
-                    };
-                    // An answer outranks a no-answer for the same selector.
-                    match (gathered.sources.get(&spec), members) {
-                        (Some(Some(_)), _) => {}
-                        (_, members) => {
-                            gathered.sources.insert(spec, members);
+                    match members {
+                        Some(members) => payload.sources.push(appa_engine::audience::SourceClaims {
+                            provider: provider.clone(),
+                            selector: selector.clone(),
+                            members,
+                        }),
+                        None => {
+                            unanswered.selectors.insert(SelectorSpec {
+                                provider: provider.clone(),
+                                selector: selector.clone(),
+                            });
                         }
                     }
                 }
@@ -1741,10 +1723,14 @@ impl RuntimeEngine {
                         Some(Some(answered)) if answered.id != *member => None,
                         other => other.clone(),
                     };
-                    match (gathered.lookups.get(member), claims) {
-                        (Some((_, Some(_))), _) => {}
-                        (_, claims) => {
-                            gathered.lookups.insert(member.clone(), (provider.clone(), claims));
+                    match claims {
+                        Some(claims) => payload.lookups.push(appa_engine::audience::MemberLookup {
+                            provider: provider.clone(),
+                            member: member.clone(),
+                            claims,
+                        }),
+                        None => {
+                            unanswered.members.insert(member.clone());
                         }
                     }
                 }
@@ -1760,41 +1746,17 @@ impl RuntimeEngine {
                     if !named {
                         continue;
                     }
-                    match (gathered.identity.get(id), principal) {
-                        (Some(Some(_)), _) => {}
-                        (_, principal) => {
-                            gathered.identity.insert(id.clone(), principal.clone());
+                    match principal {
+                        Some(principal) => payload.identity.push(IdentityMapping {
+                            id: id.clone(),
+                            principal: principal.clone(),
+                        }),
+                        None => {
+                            unanswered.identities.insert(id.clone());
                         }
                     }
                 }
                 _ => {}
-            }
-        }
-        let mut payload = AudienceEvidence::default();
-        for (spec, members) in &gathered.sources {
-            if let Some(members) = members {
-                payload.sources.push(appa_engine::audience::SourceClaims {
-                    provider: spec.provider.clone(),
-                    selector: spec.selector.clone(),
-                    members: members.clone(),
-                });
-            }
-        }
-        for (member, (provider, claims)) in &gathered.lookups {
-            if let Some(claims) = claims {
-                payload.lookups.push(appa_engine::audience::MemberLookup {
-                    provider: provider.clone(),
-                    member: member.clone(),
-                    claims: claims.clone(),
-                });
-            }
-        }
-        for (id, principal) in &gathered.identity {
-            if let Some(principal) = principal {
-                payload.identity.push(IdentityMapping {
-                    id: id.clone(),
-                    principal: principal.clone(),
-                });
             }
         }
         // Under a custom identity implementation every claimed member canonicalizes through
@@ -1814,26 +1776,24 @@ impl RuntimeEngine {
                 }
             };
             for claims in claimed.values() {
-                match gathered.identity.get(&claims.id) {
-                    Some(Some(_)) => {}
-                    Some(None) => {
-                        // The member id is directory data the model has not seen: it stays
-                        // out of the model-visible refusal.
-                        tracing::debug!(implementation = name.as_str(), id = %claims.id, "identity gave no principal");
-                        return Err(AudienceFailure::Refused(format!(
-                            "identity implementation {} gave no principal for a claimed member",
-                            name.as_str(),
-                        )));
-                    }
-                    None => {
-                        let request = ExternalRequest::Identity {
-                            implementation: name.as_str().to_string(),
-                            claims: claims.clone(),
-                        };
-                        if !requests.contains(&request) {
-                            requests.push(request);
-                        }
-                    }
+                if payload.identity.iter().any(|mapping| mapping.id == claims.id) {
+                    continue;
+                }
+                if unanswered.identities.contains(&claims.id) {
+                    // The member id is directory data the model has not seen: it stays
+                    // out of the model-visible refusal.
+                    tracing::debug!(implementation = name.as_str(), id = %claims.id, "identity gave no principal");
+                    return Err(AudienceFailure::Refused(format!(
+                        "identity implementation {} gave no principal for a claimed member",
+                        name.as_str(),
+                    )));
+                }
+                let request = ExternalRequest::Identity {
+                    implementation: name.as_str().to_string(),
+                    claims: claims.clone(),
+                };
+                if !requests.contains(&request) {
+                    requests.push(request);
                 }
             }
             if !requests.is_empty() {
@@ -1850,7 +1810,7 @@ impl RuntimeEngine {
                 refusal_class(&refusal)
             )));
         }
-        Ok(ActAudience { payload, gathered })
+        Ok(ActAudience { payload, unanswered })
     }
 
     /// The consults that answer the symbolic atoms an act still needs, or the operational
@@ -1865,37 +1825,42 @@ impl RuntimeEngine {
         };
         let mut requests: Vec<ExternalRequest> = Vec::new();
         for spec in &primitives.selectors {
-            match act.gathered.sources.get(spec) {
-                Some(Some(_)) => {}
-                Some(None) => {
-                    return Ok(AudienceConsult::Unresolved(format!(
-                        "audience source {} gave no answer for {}",
-                        spec.provider, spec.selector
-                    )));
-                }
-                None => requests.push(ExternalRequest::AudienceSource {
-                    provider: spec.provider.clone(),
-                    selector: spec.selector.clone(),
-                    templates: self.templates_of(&spec.provider),
-                }),
+            let answered = act
+                .payload
+                .sources
+                .iter()
+                .any(|claims| claims.provider == spec.provider && claims.selector == spec.selector);
+            if answered {
+                continue;
             }
+            if act.unanswered.selectors.contains(spec) {
+                return Ok(AudienceConsult::Unresolved(format!(
+                    "audience source {} gave no answer for {}",
+                    spec.provider, spec.selector
+                )));
+            }
+            requests.push(ExternalRequest::AudienceSource {
+                provider: spec.provider.clone(),
+                selector: spec.selector.clone(),
+                templates: self.templates_of(&spec.provider)?,
+            });
         }
         for spec in &primitives.lookups {
-            match act.gathered.lookups.get(spec.member.as_str()) {
-                Some((_, Some(_))) => {}
-                Some((_, None)) => {
-                    // The member can be a reader a delta wrote that the model never saw.
-                    return Ok(AudienceConsult::Unresolved(format!(
-                        "audience source {} gave no answer for a member lookup",
-                        spec.provider
-                    )));
-                }
-                None => requests.push(ExternalRequest::MemberLookup {
-                    provider: spec.provider.clone(),
-                    member: spec.member.clone(),
-                    templates: self.templates_of(&spec.provider),
-                }),
+            if act.payload.lookups.iter().any(|lookup| lookup.member == spec.member) {
+                continue;
             }
+            if act.unanswered.members.contains(&spec.member) {
+                // The member can be a reader a delta wrote that the model never saw.
+                return Ok(AudienceConsult::Unresolved(format!(
+                    "audience source {} gave no answer for a member lookup",
+                    spec.provider
+                )));
+            }
+            requests.push(ExternalRequest::MemberLookup {
+                provider: spec.provider.clone(),
+                member: spec.member.clone(),
+                templates: self.templates_of(&spec.provider)?,
+            });
         }
         if requests.is_empty() {
             // Every primitive is answered and pre-validated, yet the act still asked.
@@ -2040,6 +2005,43 @@ enum AudienceConsult {
     Unresolved(String),
 }
 
+/// How an act presents an audience answer it cannot obtain: a failed or inadmissible
+/// consult, or a dynamically supplied reference no registered source serves.
+#[derive(Clone, Copy)]
+enum UnresolvedAudience<'a> {
+    /// The proposed call is denied.
+    Denied { tool: &'a str },
+    /// The value — a tool result or a child's return — is withheld and may be retried.
+    Withheld { subject: &'static str },
+    /// The offer stands and may be executed again.
+    OfferStands,
+}
+
+impl UnresolvedAudience<'_> {
+    fn present(self, detail: &str) -> EngineDecision {
+        match self {
+            UnresolvedAudience::Denied { tool } => deny(unresolved_audience(tool, detail)),
+            UnresolvedAudience::Withheld { subject } => {
+                EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
+                    feedback: format!("[appa] {detail}; the {subject} is withheld and may be retried"),
+                    offers: Vec::new(),
+                }))
+            }
+            UnresolvedAudience::OfferStands => {
+                no_answer(format!("[appa] {detail}; the offer stands and may be executed again"))
+            }
+        }
+    }
+}
+
+/// Where one act's audience round ends: judged, presented short of a judgment (consults
+/// still owed, or an unobtainable answer), or failed in the engine for another reason.
+enum AudienceRound<T> {
+    Judged(T),
+    Presented(EngineDecision),
+    Failed(TransitionError),
+}
+
 /// Why an act cannot carry audience evidence yet: the identity consults still owed, or the
 /// operational refusal a failed or inadmissible answer forces.
 enum AudienceFailure {
@@ -2047,19 +2049,20 @@ enum AudienceFailure {
     Refused(String),
 }
 
-/// One act's gathered audience answers beside their validated payload: the payload is what
-/// the act pins, the gathered table also remembers which consults already failed.
+/// One act's validated audience payload — what the act pins — beside the consults that
+/// already produced no answer, which are never re-asked.
 struct ActAudience {
     payload: AudienceEvidence,
-    gathered: GatheredAudience,
+    unanswered: Unanswered,
 }
 
 #[derive(Debug, Default)]
-struct GatheredAudience {
-    sources: BTreeMap<SelectorSpec, Option<Vec<MemberClaims>>>,
-    /// Keyed by the qualified member; the value names the provider that answered.
-    lookups: BTreeMap<String, (String, Option<Option<MemberClaims>>)>,
-    identity: BTreeMap<String, Option<ReaderId>>,
+struct Unanswered {
+    selectors: BTreeSet<SelectorSpec>,
+    /// Qualified members whose lookup produced no answer.
+    members: BTreeSet<String>,
+    /// Member ids the custom identity implementation gave no principal for.
+    identities: BTreeSet<String>,
 }
 
 fn deny(text: String) -> EngineDecision {
