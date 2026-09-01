@@ -94,14 +94,20 @@ fn real_claude_keeps_the_marketplace_directory_and_copies_the_plugin() {
     // Re-installing the same version is a no-op that does not refresh the copy,
     // which is why init removes the marketplace and re-adds it rather than
     // installing over the top.
+    //
+    // Marking the installed copy rather than comparing timestamps: a refresh
+    // that copies unchanged bytes can preserve or coarsely round the
+    // modification time, and then a timestamp comparison reports a no-op it
+    // never observed. Edited content survives only if nothing was copied over
+    // it, whether the refresh would replace the tree or write through it.
     let marker = Path::new(install_path).join("hooks/hooks.json");
-    let before = fs::metadata(&marker).expect("hook map metadata");
+    let marked = "{\"appa-reinstall-probe\": true}\n";
+    fs::write(&marker, marked).expect("the installed hook map is marked");
     let reinstalled = claude(&config, &["plugin", "install", "appa-runtime@appa", "--scope", "user"]);
     assert!(reinstalled.status.success());
-    let after = fs::metadata(&marker).expect("hook map metadata");
     assert_eq!(
-        before.modified().ok(),
-        after.modified().ok(),
+        fs::read_to_string(&marker).expect("hook map contents"),
+        marked,
         "a same-version reinstall now refreshes the copy; init's remove-then-add may be unnecessary",
     );
 

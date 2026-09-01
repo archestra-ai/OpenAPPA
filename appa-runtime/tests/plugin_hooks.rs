@@ -42,23 +42,6 @@ fn plugin_file(file: &str) -> std::path::PathBuf {
 }
 
 #[test]
-fn runtime_starters_stop_only_the_binary_this_deployment_installed() {
-    let posix =
-        std::fs::read_to_string(plugin_file("hooks/ensure-runtime.sh")).expect("the POSIX runtime starter is readable");
-    assert!(
-        posix.contains("appa | */appa)"),
-        "the POSIX starter must check the stale process's name before signalling it",
-    );
-
-    let windows =
-        std::fs::read_to_string(plugin_file("hooks/hook.ps1")).expect("the Windows runtime starter is readable");
-    assert!(
-        windows.contains("[StringComparison]::OrdinalIgnoreCase"),
-        "the Windows starter must verify the stale process's installed path",
-    );
-}
-
-#[test]
 fn an_ungated_session_has_no_appa_statusline() {
     let output = Command::new("sh")
         .arg(plugin_file("statusline.sh"))

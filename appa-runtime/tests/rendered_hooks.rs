@@ -72,6 +72,16 @@ fn recording_runtime() -> (Endpoint, mpsc::Receiver<String>) {
     (endpoint, recorded)
 }
 
+/// An endpoint nothing is listening on: bound to learn a free port, then
+/// released. A starter probing this one finds no runtime and proceeds to start
+/// the binary its paths file names, which is the branch under test.
+fn dead_endpoint() -> Endpoint {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let address = listener.local_addr().expect("the bound address");
+    drop(listener);
+    Endpoint::parse(&format!("http://{address}")).expect("the released address is a usable endpoint")
+}
+
 /// Every hook command the rendered map registers, with the event it belongs to.
 fn rendered_commands(deployment: &Path) -> Vec<(String, String)> {
     let hooks: serde_json::Value = serde_json::from_slice(
@@ -186,19 +196,26 @@ fn rendered_hooks_run_the_deployed_binary_and_post_to_the_deployment_endpoint() 
 }
 
 #[test]
-fn the_session_start_starter_resolves_its_paths_without_claude_plugin_root() {
+fn the_session_start_starter_starts_the_binary_its_deployment_installed() {
     // init runs the starter directly, without CLAUDE_PLUGIN_ROOT, so the
-    // `$(dirname "$0")` lookup inside it is load-bearing rather than incidental.
+    // directory lookup inside it is load-bearing rather than incidental. The
+    // endpoint is dead on purpose: a starter that finds a healthy runtime exits
+    // before it ever resolves a binary, which would prove nothing at all.
     let directory = tempfile::tempdir().expect("temporary directory");
     let root = directory.path();
     let source = stage_bundle(root);
-    let (endpoint, _recorded) = recording_runtime();
+    let endpoint = dead_endpoint();
 
     let deployed = root.join("data/bin/appa");
+    let started = root.join("started");
     fs::create_dir_all(deployed.parent().expect("a parent")).expect("the private binary directory");
-    // A stand-in: the starter must resolve and execute this exact path, and
-    // nothing here needs a real runtime to prove that.
-    fs::write(&deployed, "#!/bin/sh\nexit 0\n").expect("the deployed stand-in is written");
+    // A stand-in that records having run. It never becomes healthy, so the
+    // starter goes on to fail -- the marker, not the exit status, is the proof.
+    fs::write(
+        &deployed,
+        format!("#!/bin/sh\nprintf 'started\\n' > '{}'\nexit 0\n", started.display()),
+    )
+    .expect("the deployed stand-in is written");
     executable(&deployed);
 
     let deployment = materialize(
@@ -211,31 +228,27 @@ fn the_session_start_starter_resolves_its_paths_without_claude_plugin_root() {
     )
     .expect("the deployment materializes");
 
-    let starter = deployment.root.join("plugin/hooks/ensure-runtime.sh");
-    let rendered = fs::read_to_string(deployment.root.join("plugin/hooks/appa-paths.sh"))
-        .expect("the rendered paths file is readable");
-    assert!(
-        rendered.contains(&format!("APPA_BIN='{}'", deployed.display())),
-        "the starter's paths file does not name the deployed binary: {rendered}",
-    );
-    assert!(
-        rendered.contains(&format!("APPA_ENDPOINT='{}'", endpoint.url())),
-        "the starter's paths file does not carry the deployment endpoint: {rendered}",
-    );
-
-    let output = Command::new("sh")
-        .arg(&starter)
+    let mut child = Command::new("sh")
+        .arg(deployment.root.join("plugin/hooks/ensure-runtime.sh"))
         .env_remove("CLAUDE_PLUGIN_ROOT")
         .env_remove("APPA_RUNTIME_URL")
+        // Everything the starter could resolve through instead is hostile.
         .env("APPA_BIN", "/nonexistent/hostile/appa")
-        .output()
+        .env("APPA_INSTALL_DIR", "/nonexistent/hostile")
+        .spawn()
         .expect("the starter runs");
-    // Nothing answers the recording endpoint's /health with `ok`, so the
-    // starter tries to start the stand-in and then times out. What matters is
-    // that it never reported a missing binary: it resolved the rendered path.
-    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // The starter waits 20 seconds for health it will never see; the marker
+    // appears as soon as it has resolved and executed the rendered path.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while std::time::Instant::now() < deadline && !started.is_file() {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+
     assert!(
-        !stderr.contains("appa is not installed"),
-        "the starter failed to resolve the rendered binary path: {stderr}",
+        started.is_file(),
+        "the starter did not execute the binary its paths file names",
     );
 }
