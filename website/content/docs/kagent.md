@@ -13,18 +13,18 @@ date: 2026-09-01
 
 [kagent](https://github.com/kagent-dev/kagent) runs LLM agents on Kubernetes. The operator creates `Agent` resources, and the kagent controller runs each declarative agent on a shared runtime image that the install configuration selects. This proposal gates those agents with OpenAPPA through that stock configuration. It does not fork, patch, or vendor kagent or Google ADK.
 
-`appa-adapter-kagent` is the adapter. Its image extends kagent's published agent-runtime image with two files: a small entrypoint and one Google ADK plugin. The plugin maps ADK callbacks to the eight `appa-runtime` `/hook` events and enforces the returned decisions inside the ADK dispatch loop. `appa-runtime` stays a separate process. It owns policy, the Engine, consults, remedy plans, trajectory state, and `appa.db`. Policy semantics stay in [How it works](/how-it-works) and [Policy contracts](/contracts).
+`appa-adapter-kagent` is the adapter. It ships one image per kagent runtime: `appa-adapter-kagent` for the python runtime and `appa-adapter-kagent-go` for the Go runtime. Each extends kagent's published runtime image for that runtime with a small entrypoint and one ADK plugin. The plugin maps ADK callbacks to the eight `appa-runtime` `/hook` events and enforces the returned decisions inside the ADK dispatch loop. `appa-runtime` stays a separate process. It owns policy, the Engine, consults, remedy plans, trajectory state, and `appa.db`. Policy semantics stay in [How it works](/how-it-works) and [Policy contracts](/contracts).
 
 Two stock surfaces carry the whole integration:
 
-- The helm value `controller.agentImage` selects the runtime image for every declarative agent. Naming the adapter image there is ordinary install configuration.
-- `KAgentApp(plugins=[...])` is a public constructor parameter of kagent's published runtime library. kagent registers its own plugins through the same parameter, and the adapter plugin registers beside them.
+- kagent's runtime-image install settings select the image that runs every declarative agent, per runtime. Naming the adapter images there is ordinary install configuration.
+- Both kagent runtimes are Google ADK, and each registers plugins through its ADK's official plugin API. kagent registers its own plugins there, and the adapter plugin registers beside them.
 
-The [implementation plan](../../../integrations/kagent/IMPLEMENTATION.md) pins the exact source baselines and backs every claim on this page with code evidence.
+The [implementation plan](https://github.com/archestra-ai/OpenAPPA/blob/main/integrations/kagent/IMPLEMENTATION.md) pins the exact source baselines and backs every claim on this page with code evidence.
 
 ## Overview
 
-- The platform operator points `controller.agentImage` at the adapter image. Every declarative python-runtime agent — the default runtime — rolls onto it. No CRD edits, no agent changes.
+- The platform operator points the runtime-image settings at the adapter images. Every declarative agent — python and Go runtime alike — rolls onto them. No CRD edits, no agent changes.
 - `APPA_RUNTIME_URL` arrives as a baked image default, or per agent through the agent's deployment env.
 - Inside each agent pod, the adapter entrypoint rebuilds the compiled agent from the mounted config — the same steps as the stock entrypoint — and registers `AppaHookPlugin`.
 - Each gated ADK callback becomes one `/hook` request to the shared `appa-runtime`. The plugin enforces the returned `HookDecision` where the callback fires: it can deny a tool call with feedback the model reads, replace a tool result, or substitute a child's return.
@@ -63,7 +63,7 @@ The agent exists in the pod only as mounted configuration. No developer code and
 
 All gated pods of one deployment report to one shared `appa-runtime`. A parent and each agent it calls run as separate workloads, and their hooks must reach the same runtime to correlate into one trajectory.
 
-### One image wraps the stock runtime
+### One image per runtime wraps the stock runtime
 
 ```text
 ┌─ appa-adapter-kagent image ───────────────────────────┐
@@ -91,6 +91,8 @@ entrypoint flow — the stock calls, one delta:
 ```
 
 The stock entrypoint performs the identical sequence with a closed plugin list. The plugin list handed to ADK becomes its plugin manager, so one registration covers the root agent, every sub-agent, and every tool. Google ADK stays an unmodified dependency, and the image keeps the stock runtime contract: the same args, the same serving port, the same readiness endpoint.
+
+The Go runtime gets the same treatment. `appa-adapter-kagent-go` is a runtime main built on kagent's public Go packages that registers the Go `AppaHookPlugin` through the Go ADK's plugin API — the registration point kagent itself uses. Both adapter images emit the same wire to `appa-runtime`.
 
 ### Callback-to-hook mapping
 
@@ -178,16 +180,16 @@ Each called agent runs in its own pod with its own plugin instance. The child si
 1. An unreachable `/hook` endpoint, or a response outside the contract, blocks the gated action. The plugin raises, and ADK aborts the invocation.
 2. A mounted config with a field the entrypoint does not support refuses to start, and the pod stays unready. The stock config parser ignores unknown fields — the adapter must not inherit that silence.
 3. The model and emission callbacks feed no event, but they still hold the action when the `/hook` channel is down.
-4. The pinned google-adk defines no error-turn callback, so a turn that dies on an unhandled error emits no `TurnEnd`. The model-error and tool-error callbacks catch the common failures earlier. For the rest, `appa-runtime` recovery classifies the open dispatch as `Indeterminate` at the next admitted event, and the next `Prompt` fails closed if the runtime is down.
+4. When the pinned ADK version defines no error-turn callback, a turn that dies on an unhandled error emits no `TurnEnd`. The model-error and tool-error callbacks catch the common failures earlier. For the rest, `appa-runtime` recovery classifies the open dispatch as `Indeterminate` at the next admitted event, and the next `Prompt` fails closed if the runtime is down.
 
 ### Scope and limits
 
-- Covered: declarative agents on the python runtime — the default — in the current stable kagent release.
-- Not covered: go-runtime agents (opt-in, and the Go ADK's plugin list is compiled in), BYO agents (per-agent images whose authors add the one plugin line themselves), and kagent's sandbox kinds.
+- Covered: declarative agents on both runtimes — the python runtime through `appa-adapter-kagent`, and the Go runtime through `appa-adapter-kagent-go`. The implementation plan names the delivery knob per release line and each runtime's verification status.
+- Not covered: BYO agents (per-agent images whose authors add the one plugin line themselves, in either language) and kagent's sandbox kinds.
 - `SessionStart` is a first-invocation proxy. A session that is created but never invoked emits nothing, and also flows nothing.
 - The entrypoint replays the stock entrypoint's behavior instead of calling it, because upstream has no plugin configuration knob. Each upstream release therefore costs one small equivalence re-check. A one-field upstream contribution would remove the duplication.
 - Forward path: kagent's release-candidate line replaces the Agent controller with a `Harness` × `AgentTemplate` model, where the same adapter image lands in the Harness's required workload-image field. The implementation plan covers both lanes in full.
 
 ## Implementation plan
 
-The [kagent implementation plan](../../../integrations/kagent/IMPLEMENTATION.md) pins the source baselines, defines the artifacts, the entrypoint and plugin specification, the runtime-side codec, both delivery lanes with their rollout procedures, trajectory identity, and the verification matrix — with code evidence for every claim.
+The [kagent implementation plan](https://github.com/archestra-ai/OpenAPPA/blob/main/integrations/kagent/IMPLEMENTATION.md) pins the source baselines, defines the artifacts, the entrypoint and plugin specification, the runtime-side codec, both delivery lanes with their rollout procedures, trajectory identity, and the verification matrix — with code evidence for every claim.
