@@ -1,20 +1,6 @@
 # kagent adapter implementation plan
 
-The adapter family follows the `appa-adapter-claude-code` conventions: one adapter name, the `appa` prefix on every OpenAPPA-owned artifact, a runtime-side codec crate selected by the runtime's adapter switch, and no policy state outside `appa-runtime`.
-
-## Naming
-
-| Artifact | Name | Mirrors |
-|---|---|---|
-| Rust codec crate | `appa-adapter-kagent` | `appa-adapter-claude-code` |
-| Python package (plugin + entrypoint) | `appa-adapter-kagent` | one adapter, one name |
-| Python runtime OCI image | `ghcr.io/archestra-ai/appa-adapter-kagent` | — |
-| Go runtime OCI image | `ghcr.io/archestra-ai/appa-adapter-kagent-go` | — |
-| Go module (plugin + runtime main) | `appa-adapter-kagent-go` | — |
-| Runtime env var | `APPA_RUNTIME_URL` | Claude Code integration |
-| Policy examples | `integrations/kagent/examples/*.appa.toml` | `integrations/claude-code/examples` |
-
-Both runtime images emit the same adapter wire, and the one codec crate parses it. The runtime selects the codec through its closed `Adapter` enum ([appa-runtime/src/main.rs](../../appa-runtime/src/main.rs)) — one new variant beside `ClaudeCode`, mapped to `appa_adapter_kagent::codec()`.
+`appa-adapter-kagent` is the Rust codec crate: a workspace crate compiled into `appa-runtime`, selected by the runtime's closed `Adapter` enum ([appa-runtime/src/main.rs](../../appa-runtime/src/main.rs)) as `appa_adapter_kagent::codec()`. The agent side wraps kagent's ADK runtimes and takes its names from them. The `appa-kagent-adk` python package (plugin + entrypoint) ships as the `ghcr.io/archestra-ai/appa-kagent-adk` image. The `appa-kagent-adk-go` Go module (plugin + runtime main) ships as the `ghcr.io/archestra-ai/appa-kagent-adk-go` image. The crate name never names an image. Both images read `APPA_RUNTIME_URL`, both emit the same adapter wire, and the one codec crate parses it.
 
 ## Source baselines
 
@@ -47,7 +33,7 @@ Both plugins hold no policy state. They serialize callback moments into wire eve
 
 The shipped controller reconciles every `Agent` into a plain Deployment + Service. The declarative runtime image is install configuration:
 
-- **Python (the stable default runtime)**: `spec.declarative.runtime` defaults to `python` in the shipped CRD ([agent_types.go#L175](https://github.com/kagent-dev/kagent/blob/v0.9.12/go/api/v1alpha2/agent_types.go#L175)). Helm `controller.agentImage.{registry,repository,tag}` flows into the controller ConfigMap as `IMAGE_*` ([controller-configmap.yaml#L12-L18](https://github.com/kagent-dev/kagent/blob/v0.9.12/helm/kagent/templates/controller-configmap.yaml#L12-L18)) and lands as the agent Deployment's image. Pointing it at `appa-adapter-kagent` gates every python-runtime agent with zero agent changes.
+- **Python (the stable default runtime)**: `spec.declarative.runtime` defaults to `python` in the shipped CRD ([agent_types.go#L175](https://github.com/kagent-dev/kagent/blob/v0.9.12/go/api/v1alpha2/agent_types.go#L175)). Helm `controller.agentImage.{registry,repository,tag}` flows into the controller ConfigMap as `IMAGE_*` ([controller-configmap.yaml#L12-L18](https://github.com/kagent-dev/kagent/blob/v0.9.12/helm/kagent/templates/controller-configmap.yaml#L12-L18)) and lands as the agent Deployment's image. Pointing it at `appa-kagent-adk` gates every python-runtime agent with zero agent changes.
 - **Go**: v0.9.12 has no Go-image value and no Go-image controller flag, and its Go ADK is the v1 line without the v2 plugin API. Go-runtime agents are opt-in there. To gate one on stable, set `runtime: python` on that Agent (one field) — or move to lane B, which carries the Go adapter.
 
 Runtime contract the python image must keep — the controller sets container args, not the command:
@@ -62,7 +48,7 @@ Rollout: one `helm upgrade` re-renders every declarative python agent onto the a
 
 Two observed states, one adapter story:
 
-**B1 — the current release candidates (v1alpha2 `Agent` → Deployment, both image knobs).** Same Deployment path as lane A, with three differences. The runtime default flips to `go` ([rc4 agent_types.go#L235-L241](https://github.com/kagent-dev/kagent/blob/v0.10.0-rc4/go/api/v1alpha2/agent_types.go#L235-L241)). `controller.goAgentImage.{registry,repository,tag}` exists beside `controller.agentImage` ([rc4 controller-configmap.yaml#L28](https://github.com/kagent-dev/kagent/blob/v0.10.0-rc4/helm/kagent/templates/controller-configmap.yaml#L28), [app.go#L226](https://github.com/kagent-dev/kagent/blob/v0.10.0-rc4/go/core/pkg/app/app.go#L226)). And agents with skills or `executeCodeBlocks` resolve a `<tag>-full` Go-image variant, so the Go adapter publishes both tags. Point both values at the matching adapter images and every declarative agent is gated — python agents by `appa-adapter-kagent`, go agents by `appa-adapter-kagent-go`. Foundry-model agents require the Go runtime by compiler validation ([rc4 compiler.go#L224-L227](https://github.com/kagent-dev/kagent/blob/v0.10.0-rc4/go/core/internal/controller/translator/agent/compiler.go#L224-L227)). The Go adapter covers them, because it is a Go ADK runtime.
+**B1 — the current release candidates (v1alpha2 `Agent` → Deployment, both image knobs).** Same Deployment path as lane A, with three differences. The runtime default flips to `go` ([rc4 agent_types.go#L235-L241](https://github.com/kagent-dev/kagent/blob/v0.10.0-rc4/go/api/v1alpha2/agent_types.go#L235-L241)). `controller.goAgentImage.{registry,repository,tag}` exists beside `controller.agentImage` ([rc4 controller-configmap.yaml#L28](https://github.com/kagent-dev/kagent/blob/v0.10.0-rc4/helm/kagent/templates/controller-configmap.yaml#L28), [app.go#L226](https://github.com/kagent-dev/kagent/blob/v0.10.0-rc4/go/core/pkg/app/app.go#L226)). And agents with skills or `executeCodeBlocks` resolve a `<tag>-full` Go-image variant, so the Go adapter publishes both tags. Point both values at the matching images and every declarative agent is gated — python agents by `appa-kagent-adk`, go agents by `appa-kagent-adk-go`. Foundry-model agents require the Go runtime by compiler validation ([rc4 compiler.go#L224-L227](https://github.com/kagent-dev/kagent/blob/v0.10.0-rc4/go/core/internal/controller/translator/agent/compiler.go#L224-L227)). The Go adapter covers them, because it is a Go ADK runtime.
 
 **B2 — main (v1alpha3 `AgentTemplate` × `Harness` → Substrate Actor).** The Harness names the runtime image directly and selects which templates it runs:
 
@@ -71,7 +57,7 @@ kind: Harness
 spec:
   kagent: {}
   workload:
-    image: ghcr.io/archestra-ai/appa-adapter-kagent@sha256:<digest>
+    image: ghcr.io/archestra-ai/appa-kagent-adk@sha256:<digest>
   env:
     - name: APPA_RUNTIME_URL
       value: http://appa-runtime.appa-system:8787
@@ -107,7 +93,7 @@ The plugin implements google-adk `BasePlugin`. The 1.31.1 wheel defines 12 lifec
 | `before_run_callback` | none | pass through — `Prompt` already gates the same bytes | `runners.py` 843-861 |
 | `before_model_callback`, `after_model_callback`, `on_model_error_callback`, `on_event_callback` | none | liveness gates: raise when the `/hook` channel is down, pass otherwise | `base_plugin.py` 233, 253, 272, 155 |
 
-`ChildEnd` is unfed by design. Return substitution is enforceable only where the parent receives the value, so returns cross at `SpawnResult`. The `appa-adapter-claude-code` parse map makes the same choice.
+`ChildEnd` is unfed by design. Return substitution is enforceable only where the parent receives the value, so returns cross at `SpawnResult`.
 
 Per-ADK differences the plugin handles:
 
@@ -123,9 +109,9 @@ Entrypoint (python image), in order:
 
 ### Go — `AppaHookPlugin` on the Go ADK (design, verification pending)
 
-The Go adapter is a small runtime main, module `appa-adapter-kagent-go`, that imports kagent's public `go/adk` packages, constructs the same agent the stock Go runtime builds from the rendered config, and registers the Go `AppaHookPlugin` through the ADK v2 plugin API — the registration point kagent itself uses ([rc4 adapter.go#L93-L111](https://github.com/kagent-dev/kagent/blob/v0.10.0-rc4/go/adk/pkg/runner/adapter.go#L93-L111)). It emits the same adapter wire as the python plugin.
+The Go adapter is a small runtime main, module `appa-kagent-adk-go`, that imports kagent's public `go/adk` packages, constructs the same agent the stock Go runtime builds from the rendered config, and registers the Go `AppaHookPlugin` through the ADK v2 plugin API — the registration point kagent itself uses ([rc4 adapter.go#L93-L111](https://github.com/kagent-dev/kagent/blob/v0.10.0-rc4/go/adk/pkg/runner/adapter.go#L93-L111)). It emits the same adapter wire as the python plugin.
 
-Verification status, stated plainly: the callback-to-hook mapping above is proven for the python plugin against its pinned google-adk versions. The Go mapping must be proven the same way against `google.golang.org/adk/v2` at the locked version (v2.1.0 on rc4, v2.2.0 on main) before the Go image ships: which plugin callbacks exist, whether a before-tool return skips execution and reaches the model as the function response, whether an after-tool return replaces the result, and where the user message crosses into session state. The Go runtime also serves Foundry-model agents, which the compiler ties to the Go runtime. Deliverables: both tags (`<tag>` and `<tag>-full`, the variant kagent resolves for agents with skills or `executeCodeBlocks`).
+Verification status: the callback-to-hook mapping above is proven for the python plugin against its pinned google-adk versions. The Go mapping must be proven the same way against `google.golang.org/adk/v2` at the locked version (v2.1.0 on rc4, v2.2.0 on main) before the Go image ships: which plugin callbacks exist, whether a before-tool return skips execution and reaches the model as the function response, whether an after-tool return replaces the result, and where the user message crosses into session state. The Go runtime also serves Foundry-model agents, which the compiler ties to the Go runtime. Deliverables: both tags (`<tag>` and `<tag>-full`, the variant kagent resolves for agents with skills or `executeCodeBlocks`).
 
 ## Wire and codec
 
@@ -156,11 +142,11 @@ Each plugin emits one JSON event per callback: event kind, trajectory ids, tool 
 | PR | Change |
 |---|---|
 | 1 | `appa-adapter-kagent` Rust codec crate: wire parse to `HookEvent`, decision render, `Adapter` enum variant, unit tests against recorded wire fixtures |
-| 2 | `appa-adapter-kagent` Python package: `AppaHookPlugin` with the callback table, per-ADK deltas, fail-closed transport, liveness gates, deny-dict self-recognition |
+| 2 | `appa-kagent-adk` Python package: `AppaHookPlugin` with the callback table, per-ADK deltas, fail-closed transport, liveness gates, deny-dict self-recognition |
 | 3 | Python entrypoint: strict config schema and refusal rules, stock plugin parity, both config deliveries, the controller args contract |
 | 4 | Python OCI image with pinned base digest, SBOM, and provenance |
 | 5 | Lane A end-to-end: kind cluster with the stable chart, `controller.agentImage` swap, parent-and-child scenario against one shared runtime |
-| 6 | `appa-adapter-kagent-go`: adk/v2 mapping verification, the Go plugin and runtime main, both image tags |
+| 6 | `appa-kagent-adk-go`: adk/v2 mapping verification, the Go plugin and runtime main, both image tags |
 | 7 | Lane B end-to-end: the B1 dual-knob swap on the release-candidate chart, and B2 Harness × AgentTemplate on the Substrate path |
 
 No kagent PR and no Google ADK PR is required. The optional upstream contribution (a plugin config knob) is independent and non-blocking.
