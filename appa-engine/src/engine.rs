@@ -11939,7 +11939,9 @@ mod tests {
                     *evidence = crate::audience::AudienceEvidence::default();
                 }
             }),
-            Err(TransitionRefusal::ForgedEvidence),
+            Err(TransitionRefusal::UnansweredDecision {
+                needed: vec![group_atom("team")]
+            }),
             "a decision over an unanswered symbolic audience claims answers it does not pin"
         );
     }
@@ -11998,6 +12000,52 @@ mod tests {
             e.validate_replay(&[log, tampered].concat()),
             Err(TransitionRefusal::ForgedEvidence),
             "an approval that drops the offer's pins is forged"
+        );
+    }
+
+    /// A record pinning evidence the act could not have consumed names why: a selector
+    /// answered twice is the duplicate, not an unspecified forgery.
+    #[test]
+    fn replay_names_the_refusal_of_a_duplicated_pin() {
+        let officer = crate::authority::Authority {
+            name: AuthorityName::new("officer"),
+            mandate: crate::authority::Mandate {
+                reader_ceiling: Some(DeclaredAudience::literal(Audience::public())),
+                ..crate::authority::Mandate::default()
+            },
+            scope: crate::authority::Scope::default(),
+            hint: None,
+        };
+        let e = audience_engine(
+            vec![officer],
+            known(TRUSTED, Audience::restricted([corp_reader("alice")])),
+        );
+        let opening = vec![opened(&e)];
+        let mut blocked = appended_facts(
+            e.handle(
+                &viewing(&e, &opening),
+                evidenced_batch(
+                    "b1",
+                    vec![send_to("@wide")],
+                    source_evidence(vec![user_group("wide", wide_as_reported())]),
+                ),
+            )
+            .expect("the batch decides"),
+        );
+        for fact in &mut blocked {
+            if let Fact::ProposalBatchDecided { evidence, .. } = fact {
+                let again = evidence.sources[0].clone();
+                evidence.sources.push(again);
+            }
+        }
+        assert_eq!(
+            e.validate_replay(&[opening, blocked].concat()),
+            Err(TransitionRefusal::ForeignEvidence(
+                crate::audience::EvidenceRefusal::DuplicateSelector {
+                    provider: "slack".to_string(),
+                    selector: "user-group/wide".to_string(),
+                }
+            ))
         );
     }
 

@@ -484,6 +484,12 @@ impl From<crate::label::MembershipNeeded> for TransitionError {
     }
 }
 
+impl From<crate::label::MembershipNeeded> for TransitionRefusal {
+    fn from(needed: crate::label::MembershipNeeded) -> TransitionRefusal {
+        TransitionRefusal::UnansweredDecision { needed: needed.needed }
+    }
+}
+
 /// One engine interaction's outcome: the sealed batch to append against its basis
 /// revision, and the one typed follow-up package. The runtime appends the whole batch
 /// before it performs any follow-up item.
@@ -711,10 +717,15 @@ pub enum TransitionRefusal {
     SplitAdmission,
     #[error("an admitted value does not carry the label its source derives")]
     ForgedLabel,
-    #[error(
-        "a record persists audience evidence other than what its operation consumed, or claims a decision its pinned evidence cannot answer"
-    )]
+    #[error("a record persists audience evidence or an annotation other than what its operation consumed")]
     ForgedEvidence,
+    #[error("a record pins audience evidence its operation could not have consumed: {0}")]
+    ForeignEvidence(#[from] crate::audience::EvidenceRefusal),
+    #[error(
+        "a record claims a decision its pinned evidence cannot answer: {}",
+        needed.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+    )]
+    UnansweredDecision { needed: Vec<crate::label::SymbolicAtom> },
     #[error("a second value is admitted for one dispatch or child return")]
     RepeatAdmission,
     #[error("admitted value names a dispatch not opened earlier in the log")]
@@ -1520,7 +1531,7 @@ impl<'a> Sequence<'a> {
                 let role = views.call_role(subject);
                 let context = self.context(expansions);
                 let CheckOutcome::Block(block) = crate::check::evaluate(&contract, views, candidate, &stage, &context)
-                    .map_err(|_| TransitionRefusal::ForgedEvidence)?
+                    .map_err(TransitionRefusal::from)?
                 else {
                     return Err(TransitionRefusal::UnbackedOffer);
                 };
@@ -1546,7 +1557,7 @@ impl<'a> Sequence<'a> {
                 )
                 // A recorded act whose pinned evidence leaves an enumeration read undecided
                 // reconstructed a menu the evidence cannot back.
-                .map_err(|_| TransitionRefusal::ForgedEvidence)?
+                .map_err(TransitionRefusal::from)?
                 .plans
                 .iter()
                 .filter_map(crate::plan::RemedyPlan::executable)
@@ -1589,7 +1600,7 @@ impl<'a> Sequence<'a> {
                     &lineage,
                     &self.context(expansions),
                 )
-                .map_err(|_| TransitionRefusal::ForgedEvidence)
+                .map_err(TransitionRefusal::from)
             }
             crate::basis::SubjectKey::Return(id) => {
                 let child = id.child();
@@ -1646,7 +1657,7 @@ impl<'a> Sequence<'a> {
                     &lineage,
                     &self.context(expansions),
                 )
-                .map_err(|_| TransitionRefusal::ForgedEvidence)
+                .map_err(TransitionRefusal::from)
             }
             crate::basis::SubjectKey::Approval(_) => Err(TransitionRefusal::ForeignOffer),
         }
@@ -2270,9 +2281,8 @@ impl<'a> Sequence<'a> {
             &act,
         )
         .map_err(|refusal| match refusal {
-            crate::engine::ComposeRefusal::MembershipNeeded(_) | crate::engine::ComposeRefusal::Evidence(_) => {
-                TransitionRefusal::ForgedEvidence
-            }
+            crate::engine::ComposeRefusal::MembershipNeeded(needed) => needed.into(),
+            crate::engine::ComposeRefusal::Evidence(refusal) => refusal.into(),
             crate::engine::ComposeRefusal::Malformed(error) => match error {
                 crate::engine::EngineError::InvalidCall(error) => TransitionRefusal::InvalidPayload(error),
                 crate::engine::EngineError::UnknownTool(tool) | crate::engine::EngineError::ProviderRunTool(tool) => {
@@ -2419,7 +2429,7 @@ impl<'a> Sequence<'a> {
                             name,
                             &self.context(expansions),
                         )
-                        .map_err(|_| TransitionRefusal::ForgedEvidence)?,
+                        .map_err(TransitionRefusal::from)?,
                     },
                     evidence: (!approval.rulings.is_empty() || approval.sanitizer.is_some()).then(|| evidence.clone()),
                 };
@@ -2431,7 +2441,7 @@ impl<'a> Sequence<'a> {
                 return match checked {
                     Ok(CheckOutcome::Block(_)) => Ok(()),
                     Ok(CheckOutcome::Allow) => Err(TransitionRefusal::UnreleasedDispatch),
-                    Err(_) => Err(TransitionRefusal::ForgedEvidence),
+                    Err(needed) => Err(needed.into()),
                 };
             }
             Obligation::Free => {}
@@ -2442,7 +2452,7 @@ impl<'a> Sequence<'a> {
             Ok(CheckOutcome::Allow) if remedy.is_some() => Err(TransitionRefusal::DanglingRemedy),
             Ok(CheckOutcome::Allow) => Ok(()),
             Ok(CheckOutcome::Block(_)) => Err(TransitionRefusal::UnreleasedDispatch),
-            Err(_) => Err(TransitionRefusal::ForgedEvidence),
+            Err(needed) => Err(needed.into()),
         }
     }
 
@@ -2775,7 +2785,7 @@ impl<'a> Sequence<'a> {
                 match registered.derive_output(&fold, &[], &self.context(&expansions)) {
                     Ok(Some(_)) => {}
                     Ok(None) => return Err(TransitionRefusal::ReturnRecordMismatch),
-                    Err(_) => return Err(TransitionRefusal::ForgedEvidence),
+                    Err(needed) => return Err(needed.into()),
                 }
             }
         }
@@ -2822,12 +2832,9 @@ impl<'a> Sequence<'a> {
             .ok_or_else(|| TransitionRefusal::UnknownSanitizer(name.as_str().to_string()))?;
         let fold = views.branch_label(child);
         let derives = match reason {
-            crate::fact::ReturnRejection::MandateUnmet => {
-                match registered.derive_output(&fold, &[], &self.context(&expansions)) {
-                    Ok(derived) => derived.is_none(),
-                    Err(_) => return Err(TransitionRefusal::ForgedEvidence),
-                }
-            }
+            crate::fact::ReturnRejection::MandateUnmet => registered
+                .derive_output(&fold, &[], &self.context(&expansions))?
+                .is_none(),
             crate::fact::ReturnRejection::PreconditionUnmet => name.is_attest_schema(),
         };
         if !derives {
@@ -2892,11 +2899,9 @@ impl<'a> Sequence<'a> {
             .registry()
             .audience()
             .expansions(evidence)
-            .map_err(|_| TransitionRefusal::ForgedEvidence)?;
+            .map_err(TransitionRefusal::from)?;
         let mut audit = self.audit.borrow_mut();
-        audit.evidence = evidence
-            .inheriting(&audit.evidence)
-            .map_err(|_| TransitionRefusal::ForgedEvidence)?;
+        audit.evidence = evidence.inheriting(&audit.evidence).map_err(TransitionRefusal::from)?;
         Ok(expansions)
     }
 
@@ -2916,10 +2921,7 @@ impl<'a> Sequence<'a> {
     /// Count `pins` — entries pinned by a record the open act continues — as inherited.
     fn audit_inherit(&self, pins: &AudienceEvidence) -> Result<(), TransitionRefusal> {
         let mut audit = self.audit.borrow_mut();
-        audit.inherited = audit
-            .inherited
-            .inheriting(pins)
-            .map_err(|_| TransitionRefusal::ForgedEvidence)?;
+        audit.inherited = audit.inherited.inheriting(pins).map_err(TransitionRefusal::from)?;
         Ok(())
     }
 
@@ -2936,7 +2938,7 @@ impl<'a> Sequence<'a> {
                 crate::audience::EvidenceRefusal::UnrequestedEvidence { entry } => {
                     TransitionRefusal::UnrequestedEvidence { entry }
                 }
-                _ => TransitionRefusal::ForgedEvidence,
+                other => TransitionRefusal::ForeignEvidence(other),
             })
     }
 
@@ -3101,7 +3103,7 @@ impl<'a> Sequence<'a> {
         let label = match registered.derive_output(&from_label, &contract.tags, &self.context(&expansions)) {
             Ok(Some(label)) => label,
             Ok(None) => return Err(TransitionRefusal::SanitizerUnapplicable),
-            Err(_) => return Err(TransitionRefusal::ForgedEvidence),
+            Err(needed) => return Err(needed.into()),
         };
         if value.label != label {
             return Err(TransitionRefusal::ForgedLabel);
@@ -3212,7 +3214,7 @@ impl<'a> Sequence<'a> {
         let label = match registered.derive_output(&from_label, &[], &self.context(expansions)) {
             Ok(Some(label)) => label,
             Ok(None) => return Err(TransitionRefusal::SanitizerUnapplicable),
-            Err(_) => return Err(TransitionRefusal::ForgedEvidence),
+            Err(needed) => return Err(needed.into()),
         };
         if value.label != label {
             return Err(TransitionRefusal::ForgedLabel);
@@ -3321,7 +3323,7 @@ impl<'a> Sequence<'a> {
             match registered.derive_input(&stage.released(&views.current_label()), &before_contract.tags, &context) {
                 Ok(Some(derived)) => derived,
                 Ok(None) => return Err(TransitionRefusal::SanitizerUnapplicable),
-                Err(_) => return Err(TransitionRefusal::ForgedEvidence),
+                Err(needed) => return Err(needed.into()),
             };
         if label != &derived {
             return Err(TransitionRefusal::ForgedLabel);
@@ -3332,8 +3334,8 @@ impl<'a> Sequence<'a> {
             return Err(TransitionRefusal::UnbackedOffer);
         };
         let next = CallStage::substituting(derived, lineage.clone());
-        let after = crate::check::evaluate(&contract, &views, call, &next, &context)
-            .map_err(|_| TransitionRefusal::ForgedEvidence)?;
+        let after =
+            crate::check::evaluate(&contract, &views, call, &next, &context).map_err(TransitionRefusal::from)?;
         if !crate::plan::substitution_helps(&before, &after) {
             return Err(TransitionRefusal::SanitizerUnapplicable);
         }
