@@ -3693,7 +3693,7 @@ pub(crate) fn membership_context<'e>(registry: &'e Registry, act: &'e ActEvidenc
 fn require_atoms(act: &ActEvidence, atoms: impl IntoIterator<Item = SymbolicAtom>) -> Result<(), TransitionError> {
     let mut needed: Vec<SymbolicAtom> = atoms
         .into_iter()
-        .filter(|atom| act.expansions.members(atom).is_none())
+        .filter(|atom| !act.expansions.answered(atom))
         .collect();
     if needed.is_empty() {
         return Ok(());
@@ -3769,7 +3769,7 @@ pub(crate) fn compose_batch<'a>(
                 needed.extend(
                     approval_atoms(registry, prepared)
                         .into_iter()
-                        .filter(|atom| under.expansions.members(atom).is_none()),
+                        .filter(|atom| !under.expansions.answered(atom)),
                 );
             }
             per_call.push((under, spends));

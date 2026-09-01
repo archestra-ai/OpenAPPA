@@ -486,7 +486,7 @@ impl<'a> Search<'a> {
             let mut unanswered: Vec<SymbolicAtom> =
                 plan::block_atoms(self.registry, &context.contract, &eval, context.role)
                     .into_iter()
-                    .filter(|atom| self.context.expansions.members(atom).is_none())
+                    .filter(|atom| !self.context.expansions.answered(atom))
                     .collect();
             if !unanswered.is_empty() {
                 unanswered.sort();

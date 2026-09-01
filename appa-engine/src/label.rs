@@ -521,40 +521,60 @@ pub struct MembershipNeeded {
     pub needed: Vec<SymbolicAtom>,
 }
 
-/// The membership answers one operation reads: one exact reader set per symbolic atom,
-/// post-identity and post-closure. Built by the operation's driver from pinned primitive
-/// evidence — source answers, member lookups, identity mappings — and rebuilt identically on
-/// replay, so a live decision and its replay read the same directory answers. An empty set is
-/// a valid answer.
+/// The membership answers one operation reads: one exact reader set per group or chain
+/// atom, post-identity and post-closure, and one principal per canonicalized reader. Built
+/// by the operation's driver from pinned primitive evidence — source answers, member
+/// lookups, identity mappings — and rebuilt identically on replay, so a live decision and
+/// its replay read the same directory answers. An empty set is a valid answer.
 ///
-/// Every ask through [`Expansions::members`] — answered or not — lands in the reads log, so
-/// after a decision runs the log names exactly the atoms the operation deterministically
-/// requested. The log is bookkeeping, never an answer: it takes no part in equality.
+/// Every ask — answered or not — lands in the reads log, so after a decision runs the log
+/// names exactly the atoms the operation deterministically requested. The log is
+/// bookkeeping, never an answer: it takes no part in equality.
 #[derive(Clone, Debug, Default)]
 pub struct Expansions {
-    answers: BTreeMap<SymbolicAtom, BTreeSet<ReaderId>>,
+    members: BTreeMap<SymbolicAtom, BTreeSet<ReaderId>>,
+    principals: BTreeMap<ReaderId, ReaderId>,
     reads: std::cell::RefCell<BTreeSet<SymbolicAtom>>,
 }
 
 impl PartialEq for Expansions {
     fn eq(&self, other: &Expansions) -> bool {
-        self.answers == other.answers
+        self.members == other.members && self.principals == other.principals
     }
 }
 
 impl Eq for Expansions {}
 
 impl Expansions {
-    pub fn new(answers: impl IntoIterator<Item = (SymbolicAtom, BTreeSet<ReaderId>)>) -> Expansions {
+    pub(crate) fn new(
+        members: impl IntoIterator<Item = (SymbolicAtom, BTreeSet<ReaderId>)>,
+        principals: impl IntoIterator<Item = (ReaderId, ReaderId)>,
+    ) -> Expansions {
         Expansions {
-            answers: answers.into_iter().collect(),
+            members: members.into_iter().collect(),
+            principals: principals.into_iter().collect(),
             reads: std::cell::RefCell::default(),
         }
     }
 
+    /// The reader set a group or chain atom denotes, where the operation answered it.
     pub(crate) fn members(&self, atom: &SymbolicAtom) -> Option<&BTreeSet<ReaderId>> {
         self.reads.borrow_mut().insert(atom.clone());
-        self.answers.get(atom)
+        self.members.get(atom)
+    }
+
+    /// The principal a qualified reader canonicalizes to, where the operation answered it.
+    pub(crate) fn principal(&self, reader: &ReaderId) -> Option<&ReaderId> {
+        self.reads.borrow_mut().insert(SymbolicAtom::Reader(reader.clone()));
+        self.principals.get(reader)
+    }
+
+    /// Is the atom answered, whichever kind it is?
+    pub(crate) fn answered(&self, atom: &SymbolicAtom) -> bool {
+        match atom {
+            SymbolicAtom::Reader(reader) => self.principal(reader).is_some(),
+            SymbolicAtom::Chain(_) | SymbolicAtom::Group(_) => self.members(atom).is_some(),
+        }
     }
 
     /// The atoms asked so far, sorted. A snapshot: later asks keep logging.
@@ -614,16 +634,11 @@ impl<'a> MembershipContext<'a> {
     /// registered source — then the operation's pinned canonicalization, or the atom to ask.
     fn principal(&self, reader: &ReaderId) -> Result<ReaderId, SymbolicAtom> {
         match reader.provider_prefix() {
-            Some(provider) if self.providers.contains(provider) => {
-                let atom = SymbolicAtom::Reader(reader.clone());
-                match self.expansions.members(&atom) {
-                    Some(answer) => {
-                        debug_assert_eq!(answer.len(), 1, "a reader canonicalization answers one principal");
-                        Ok(answer.first().cloned().unwrap_or_else(|| reader.clone()))
-                    }
-                    None => Err(atom),
-                }
-            }
+            Some(provider) if self.providers.contains(provider) => self
+                .expansions
+                .principal(reader)
+                .cloned()
+                .ok_or_else(|| SymbolicAtom::Reader(reader.clone())),
             _ => Ok(reader.clone()),
         }
     }
@@ -1020,23 +1035,22 @@ mod tests {
                             internal.extend(self_closed.iter().cloned());
                         }
                     }
-                    let expansions = Expansions::new([
-                        (SymbolicAtom::Chain(ChainAudience::Self_), self_closed),
-                        (SymbolicAtom::Chain(ChainAudience::Internal), internal),
-                        (SymbolicAtom::Group(named("finance")), finance),
-                        (SymbolicAtom::Group(named("legal")), legal),
-                        (
-                            SymbolicAtom::Group(GroupRef::Source {
-                                provider: "slack".into(),
-                                selector: "user-group/eng".into(),
-                            }),
-                            eng,
-                        ),
-                        (
-                            SymbolicAtom::Reader(ReaderId::new("slack:u1")),
-                            BTreeSet::from([principal]),
-                        ),
-                    ]);
+                    let expansions = Expansions::new(
+                        [
+                            (SymbolicAtom::Chain(ChainAudience::Self_), self_closed),
+                            (SymbolicAtom::Chain(ChainAudience::Internal), internal),
+                            (SymbolicAtom::Group(named("finance")), finance),
+                            (SymbolicAtom::Group(named("legal")), legal),
+                            (
+                                SymbolicAtom::Group(GroupRef::Source {
+                                    provider: "slack".into(),
+                                    selector: "user-group/eng".into(),
+                                }),
+                                eng,
+                            ),
+                        ],
+                        [(ReaderId::new("slack:u1"), principal)],
+                    );
                     (within, expansions)
                 },
             )
@@ -1105,7 +1119,7 @@ mod tests {
             label in label_strategy(),
             clause in clause_strategy(),
         ) {
-            let nothing = Expansions::new([]);
+            let nothing = Expansions::new([], []);
             let within = WithinAssertions::default();
             let providers = providers();
             let context = MembershipContext::new(&within, &providers, &nothing);
@@ -1313,15 +1327,18 @@ mod tests {
             }
             other => panic!("expected a membership ask, got {other:?}"),
         }
-        let answered = Expansions::new([(
-            SymbolicAtom::Chain(ChainAudience::Internal),
-            BTreeSet::from([reader("alice@corp.com")]),
-        )]);
+        let answered = Expansions::new(
+            [(
+                SymbolicAtom::Chain(ChainAudience::Internal),
+                BTreeSet::from([reader("alice@corp.com")]),
+            )],
+            [],
+        );
         assert_eq!(
             internal_label.covers(&alice, &MembershipContext::new(&nothing, &providers, &answered)),
             Evaluation::Holds
         );
-        let empty = Expansions::new([(SymbolicAtom::Chain(ChainAudience::Internal), BTreeSet::new())]);
+        let empty = Expansions::new([(SymbolicAtom::Chain(ChainAudience::Internal), BTreeSet::new())], []);
         assert_eq!(
             internal_label.covers(&alice, &MembershipContext::new(&nothing, &providers, &empty)),
             Evaluation::Fails,
@@ -1339,26 +1356,26 @@ mod tests {
         // $recipient = slack:U012345, where Slack reports Alice's verified corporate email
         // and the internal closure holds her principal: the cross-provider case end-to-end.
         let recipient = DeclaredAudience::restricted([reader("slack:U012345")]);
-        let unanswered = Expansions::new([(
-            SymbolicAtom::Chain(ChainAudience::Internal),
-            BTreeSet::from([reader("alice@corp.com")]),
-        )]);
+        let unanswered = Expansions::new(
+            [(
+                SymbolicAtom::Chain(ChainAudience::Internal),
+                BTreeSet::from([reader("alice@corp.com")]),
+            )],
+            [],
+        );
         match internal_label.covers(&recipient, &MembershipContext::new(&nothing, &providers, &unanswered)) {
             Evaluation::Needs(MembershipNeeded { needed }) => {
                 assert_eq!(needed, vec![SymbolicAtom::Reader(reader("slack:U012345"))]);
             }
             other => panic!("expected a canonicalization ask, got {other:?}"),
         }
-        let answered = Expansions::new([
-            (
+        let answered = Expansions::new(
+            [(
                 SymbolicAtom::Chain(ChainAudience::Internal),
                 BTreeSet::from([reader("alice@corp.com")]),
-            ),
-            (
-                SymbolicAtom::Reader(reader("slack:U012345")),
-                BTreeSet::from([reader("alice@corp.com")]),
-            ),
-        ]);
+            )],
+            [(reader("slack:U012345"), reader("alice@corp.com"))],
+        );
         assert_eq!(
             internal_label.covers(&recipient, &MembershipContext::new(&nothing, &providers, &answered)),
             Evaluation::Holds

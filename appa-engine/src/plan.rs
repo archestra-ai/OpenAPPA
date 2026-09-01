@@ -2578,7 +2578,7 @@ mod tests {
         );
 
         let answered = crate::label::TestContext {
-            expansions: crate::label::Expansions::new([(atom, BTreeSet::from([ReaderId::new("hr")]))]),
+            expansions: crate::label::Expansions::new([(atom, BTreeSet::from([ReaderId::new("hr")]))], []),
             ..Default::default()
         };
         let planned = plan(&registry, &views, blocked(), &answered.context()).expect("every atom is answered");

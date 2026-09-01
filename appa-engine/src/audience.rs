@@ -643,6 +643,7 @@ impl AudienceRegistry {
         }
 
         let mut answers: Vec<(SymbolicAtom, BTreeSet<ReaderId>)> = Vec::new();
+        let mut principals: Vec<(ReaderId, ReaderId)> = Vec::new();
 
         // Reader canonicalizations from lookups.
         let mut seen_lookups = BTreeSet::new();
@@ -671,10 +672,7 @@ impl AudienceRegistry {
                 }
                 Some(claims) => identity.principal(&resolved(claims))?,
             };
-            answers.push((
-                SymbolicAtom::Reader(ReaderId::new(lookup.member.clone())),
-                BTreeSet::from([principal]),
-            ));
+            principals.push((ReaderId::new(lookup.member.clone()), principal));
         }
 
         // Source-qualified selector atoms answer directly.
@@ -713,7 +711,7 @@ impl AudienceRegistry {
             }
         }
 
-        Ok(Expansions::new(answers))
+        Ok(Expansions::new(answers, principals))
     }
 
     /// The operation-scope test on one act's pinned evidence: every entry is an inherited
@@ -1309,12 +1307,12 @@ mod tests {
         };
         let expansions = registry.expansions(&evidence).unwrap();
         assert_eq!(
-            expansions.members(&SymbolicAtom::Reader(ReaderId::new("slack:U012345"))),
-            Some(&BTreeSet::from([ReaderId::new("alice@corp.com")]))
+            expansions.principal(&ReaderId::new("slack:U012345")),
+            Some(&ReaderId::new("alice@corp.com"))
         );
         assert_eq!(
-            expansions.members(&SymbolicAtom::Reader(ReaderId::new("slack:UGONE"))),
-            Some(&BTreeSet::from([ReaderId::new("slack:UGONE")])),
+            expansions.principal(&ReaderId::new("slack:UGONE")),
+            Some(&ReaderId::new("slack:UGONE")),
             "not found keeps the qualified identity"
         );
     }

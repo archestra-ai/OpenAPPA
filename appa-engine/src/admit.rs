@@ -828,10 +828,13 @@ mod tests {
         let call = get_call();
         let (mut log, dispatch) = open_log(&call);
         let answered = crate::label::TestContext {
-            expansions: crate::label::Expansions::new([(
-                team_atom.clone(),
-                std::collections::BTreeSet::from([ReaderId::new("insider")]),
-            )]),
+            expansions: crate::label::Expansions::new(
+                [(
+                    team_atom.clone(),
+                    std::collections::BTreeSet::from([ReaderId::new("insider")]),
+                )],
+                [],
+            ),
             ..crate::label::TestContext::default()
         };
         log.push(Fact::OutputSanitizerBound {
