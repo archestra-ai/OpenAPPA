@@ -56,6 +56,12 @@ pub enum InitError {
     RuntimeIdentity { endpoint: String, message: String },
     #[error("a previous appa runtime (pid {pid}) is still executing {path}; stop it and rerun init")]
     RuntimeSurvived { pid: i32, path: PathBuf },
+    #[error("the runtime at {endpoint} refused to serve {path}: {message}")]
+    ReloadRefused {
+        endpoint: String,
+        path: PathBuf,
+        message: String,
+    },
     #[error(transparent)]
     PluginBundle(#[from] PluginBundleError),
     #[error("{operation}; restoring the previous Claude Code plugin also failed: {recovery}")]
@@ -83,6 +89,31 @@ impl ConfigOutcome {
             ConfigOutcome::Created => "created",
             ConfigOutcome::Kept => "kept",
             ConfigOutcome::Rewritten => "rewritten",
+        }
+    }
+}
+
+/// What this init did about the policy the running runtime serves.
+///
+/// The starter leaves an already-healthy runtime alone, and that process keeps serving the
+/// policy it loaded at startup. A restart loads this file itself, so the keys agree and
+/// there is nothing to say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeOutcome {
+    /// Serving the configuration this init validated, with nothing to reconcile.
+    Healthy,
+    /// Serving an older policy until it was reloaded, at the user's word.
+    Reloaded,
+    /// Still serving an older policy, because the user declined the reload.
+    OlderPolicy,
+}
+
+impl RuntimeOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            RuntimeOutcome::Healthy => "healthy",
+            RuntimeOutcome::Reloaded => "healthy (policy reloaded)",
+            RuntimeOutcome::OlderPolicy => "healthy (serving an older policy)",
         }
     }
 }
@@ -148,7 +179,7 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
         true => ConfigOutcome::Created,
         false => offer_config_rewrite(&config)?,
     };
-    verify_config(&config)?;
+    let composed_policy = verify_config(&config)?;
 
     // 3. Materialize the deployment, or validate and reuse an existing one.
     progress("preparing the plugin bundle");
@@ -241,7 +272,12 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
     install_clappa(launcher_dir)?;
     cleanup_plugin_recoveries(&paths.data_dir);
 
-    // 8. Anything left on PATH that this init did not deploy is named, never
+    // 8. The plugin and the launcher now point at this configuration; a runtime the
+    //    starter left running may not. Asked last, because a decline still leaves a
+    //    complete install — only the policy in memory lags.
+    let runtime_outcome = reconcile_policy(&endpoint, &config, composed_policy)?;
+
+    // 9. Anything left on PATH that this init did not deploy is named, never
     //    removed: it is the user's file to keep or drop.
     let stale_path_copy = stale_path_copy(&paths, &deployed_appa);
 
@@ -249,6 +285,7 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
         &source_label(&source, &deployment),
         &config,
         config_outcome,
+        runtime_outcome,
         stale_path_copy.as_deref(),
         std::io::stdout().is_terminal() && env::var_os("NO_COLOR").is_none(),
     ))
@@ -279,6 +316,7 @@ fn render_receipt(
     adapter: &str,
     config: &Path,
     config_outcome: ConfigOutcome,
+    runtime_outcome: RuntimeOutcome,
     stale_path_copy: Option<&Path>,
     color: bool,
 ) -> String {
@@ -295,10 +333,11 @@ fn render_receipt(
         }
     };
     let mut receipt = format!(
-        "{title}\n\n  {} {adapter}\n  {} {PLUGIN}\n  {} healthy\n  {} {} ({})\n  {} clappa\n",
+        "{title}\n\n  {} {adapter}\n  {} {PLUGIN}\n  {} {}\n  {} {} ({})\n  {} clappa\n",
         label("Adapter"),
         label("Plugin"),
         label("Runtime"),
+        runtime_outcome.as_str(),
         label("Config"),
         friendly_path(config),
         config_outcome.as_str(),
@@ -962,14 +1001,17 @@ fn confirm_rewrite(
 /// which init can report only as an endpoint that never became healthy. Running
 /// both refusals here names the file and the fault, before anything outside
 /// this file has changed.
-fn verify_config(path: &Path) -> Result<(), InitError> {
+/// Answers with the policy key this file composes to, or `None` when the file resolves
+/// only where the runtime runs — the caller then has nothing to compare a serving runtime
+/// against.
+fn verify_config(path: &Path) -> Result<Option<String>, InitError> {
     let config = match Config::load(path) {
         Ok(config) => config,
         // A `token_env` resolves where the runtime runs, not here. A hook starts
         // it with the session's environment, which carries variables this
         // terminal does not, so a secret this process cannot see is not init's
         // to refuse: the start that follows is what proves the token reachable.
-        Err(ConfigError::MissingSecret { .. }) => return Ok(()),
+        Err(ConfigError::MissingSecret { .. }) => return Ok(None),
         Err(source) => {
             return Err(InitError::UnloadableConfig {
                 path: path.to_path_buf(),
@@ -982,7 +1024,8 @@ fn verify_config(path: &Path) -> Result<(), InitError> {
             path: path.to_path_buf(),
             reason,
         }
-    })
+    })?;
+    Ok(Some(crate::engine::policy_file_key(config.policy_file().bytes())))
 }
 
 fn run_claude<const N: usize>(arguments: [&str; N]) -> Result<Output, InitError> {
@@ -1766,6 +1809,98 @@ fn clear_confirmed_foreign_with(
     Err(InitError::RuntimeSurvived { pid, path })
 }
 
+/// Reconcile the policy a surviving runtime serves with the file this init validated.
+///
+/// The starter replaces a runtime whose executable changed, and that fresh process loads
+/// this file itself. A runtime it left running does not: it still serves what it loaded at
+/// startup, and a config written since is on disk only. Comparing the two keys keeps the
+/// question to the case that has one — an install that changed nothing asks nothing.
+fn reconcile_policy(endpoint: &Endpoint, config: &Path, composed: Option<String>) -> Result<RuntimeOutcome, InitError> {
+    if !policy_diverged(composed.as_deref(), serving_policy_key(endpoint).as_deref()) {
+        return Ok(RuntimeOutcome::Healthy);
+    }
+    if !confirm_reload(config)? {
+        return Ok(RuntimeOutcome::OlderPolicy);
+    }
+    reload_policy(endpoint, config)?;
+    Ok(RuntimeOutcome::Reloaded)
+}
+
+/// Whether a serving runtime lags the file this init validated.
+///
+/// Absent either key there is nothing to compare: a config that resolves only where the
+/// runtime runs gives init no key of its own, and a runtime that does not answer for its
+/// policy gives none either. Init never guesses at a divergence, so both cases are quiet.
+fn policy_diverged(composed: Option<&str>, serving: Option<&str>) -> bool {
+    matches!((composed, serving), (Some(composed), Some(serving)) if composed != serving)
+}
+
+/// The policy key the endpoint answers under, or `None` when it does not answer for one.
+fn serving_policy_key(endpoint: &Endpoint) -> Option<String> {
+    let output = Command::new("curl")
+        .args(["--fail", "--silent", "--max-time", "2"])
+        .arg(endpoint.join("/policy-key"))
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let key = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!key.is_empty()).then_some(key)
+}
+
+/// Ask the running runtime to serve the configuration on disk.
+///
+/// The runtime validates the file again before it swaps: a refusal here is a fault worth
+/// naming, not a receipt footnote, because the deployment keeps serving the older policy.
+fn reload_policy(endpoint: &Endpoint, config: &Path) -> Result<(), InitError> {
+    let refused = |message: String| InitError::ReloadRefused {
+        endpoint: endpoint.url().to_owned(),
+        path: config.to_path_buf(),
+        message,
+    };
+    let output = Command::new("curl")
+        .args(["--fail", "--silent", "--show-error", "--max-time", "10", "-X", "POST"])
+        .arg(endpoint.join("/reload"))
+        .output()
+        .map_err(|error| refused(error.to_string()))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(refused(String::from_utf8_lossy(&output.stderr).trim().to_owned()))
+}
+
+/// A terminal is asked; anything else reloads. A script that just wrote a config wants it
+/// serving, and there is no one there to answer.
+fn confirm_reload(config: &Path) -> Result<bool, InitError> {
+    let stdin = std::io::stdin();
+    if !stdin.is_terminal() {
+        return Ok(true);
+    }
+    let stderr = std::io::stderr();
+    confirm_reload_with(config, &mut stdin.lock(), &mut stderr.lock())
+}
+
+fn confirm_reload_with(config: &Path, input: &mut impl BufRead, output: &mut impl Write) -> Result<bool, InitError> {
+    let prompt = |source| InitError::WriteFile {
+        path: config.to_path_buf(),
+        source,
+    };
+    write!(
+        output,
+        "appa: the running runtime still serves the policy it started with, not {}.\n\
+         Reload it now? Sessions open right now keep the deployment they started with. [Y/n] ",
+        friendly_path(config),
+    )
+    .and_then(|()| output.flush())
+    .map_err(prompt)?;
+    let mut answer = String::new();
+    if input.read_line(&mut answer).map_err(prompt)? == 0 {
+        return Ok(false);
+    }
+    Ok(matches!(answer.trim().to_ascii_lowercase().as_str(), "" | "y" | "yes"))
+}
+
 fn verify_runtime_binary(runtime: &Path, endpoint: &Endpoint) -> Result<(), InitError> {
     match endpoint_owner(runtime, endpoint)? {
         EndpointOwner::Deployment => Ok(()),
@@ -1930,6 +2065,61 @@ mod tests {
                 "{answer:?} refuses"
             );
         }
+    }
+
+    #[test]
+    fn only_two_answerable_and_differing_policy_keys_are_a_divergence() {
+        assert!(policy_diverged(Some("composed"), Some("serving")));
+        // An install that changed nothing must ask nothing.
+        assert!(!policy_diverged(Some("same"), Some("same")));
+        // Neither side answering for a policy is silence, never an assumed divergence:
+        // a config resolving only where the runtime runs, and a runtime that does not
+        // report its policy at all.
+        assert!(!policy_diverged(None, Some("serving")));
+        assert!(!policy_diverged(Some("composed"), None));
+        assert!(!policy_diverged(None, None));
+    }
+
+    #[test]
+    fn reloading_a_lagging_runtime_requires_a_y_or_default_yes_answer() {
+        let config = PathBuf::from("/home/user/config/appa.toml");
+        for answer in ["y\n", "YES\n", "\n"] {
+            assert!(
+                confirm_reload_with(&config, &mut answer.as_bytes(), &mut Vec::new()).expect("the answer reads"),
+                "{answer:?} approves"
+            );
+        }
+        for answer in ["n\n", "no\n", "anything else\n", ""] {
+            assert!(
+                !confirm_reload_with(&config, &mut answer.as_bytes(), &mut Vec::new()).expect("the answer reads"),
+                "{answer:?} refuses"
+            );
+        }
+    }
+
+    #[test]
+    fn a_serving_policy_key_is_read_only_when_the_endpoint_answers_one() {
+        let endpoint = health_answers(vec!["c54f1509".to_string()]);
+        assert_eq!(serving_policy_key(&endpoint).as_deref(), Some("c54f1509"));
+
+        // A runtime predating the route answers nothing usable, and an unbound port
+        // answers not at all. Both leave init with no key rather than a wrong one.
+        let blank = health_answers(vec![String::new()]);
+        assert_eq!(serving_policy_key(&blank), None);
+        let unbound = Endpoint::parse("http://127.0.0.1:1").expect("the endpoint parses");
+        assert_eq!(serving_policy_key(&unbound), None);
+    }
+
+    #[test]
+    fn a_matching_policy_key_reconciles_without_asking_or_reloading() {
+        // One answer is served: the key probe. A reload would need a second connection,
+        // so reaching one at all would hang rather than pass.
+        let endpoint = health_answers(vec!["agreed".to_string()]);
+        let config = PathBuf::from("/home/user/config/appa.toml");
+        assert_eq!(
+            reconcile_policy(&endpoint, &config, Some("agreed".to_string())).expect("the reconcile completes"),
+            RuntimeOutcome::Healthy
+        );
     }
 
     #[cfg(unix)]
@@ -2213,7 +2403,14 @@ mod tests {
         let config = user_home()
             .unwrap_or_else(|| PathBuf::from("/home/user"))
             .join("config/appa.toml");
-        let receipt = render_receipt("current checkout", &config, ConfigOutcome::Kept, None, false);
+        let receipt = render_receipt(
+            "current checkout",
+            &config,
+            ConfigOutcome::Kept,
+            RuntimeOutcome::Healthy,
+            None,
+            false,
+        );
 
         assert!(receipt.starts_with("OpenAPPA initialized for Claude Code\n\n"));
         assert!(receipt.contains("Adapter   current checkout"));
@@ -2224,7 +2421,14 @@ mod tests {
         assert!(!receipt.contains("appa-runtime (healthy)"));
         assert!(!receipt.contains("\u{1b}["));
 
-        let colored = render_receipt("current checkout", &config, ConfigOutcome::Kept, None, true);
+        let colored = render_receipt(
+            "current checkout",
+            &config,
+            ConfigOutcome::Kept,
+            RuntimeOutcome::Healthy,
+            None,
+            true,
+        );
         assert!(colored.starts_with("\u{1b}[1;32m✓ OpenAPPA initialized\u{1b}[0m"));
     }
 }

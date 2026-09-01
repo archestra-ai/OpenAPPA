@@ -432,6 +432,19 @@ impl Runtime {
         })
     }
 
+    /// The policy file key the serving deployment answers under. An install compares it
+    /// against the key of the configuration it just validated: a process that kept
+    /// running across the install serves the policy it loaded at startup, and only a
+    /// difference here is worth reloading.
+    pub fn serving_policy_key(&self) -> String {
+        let serving = self
+            .inner
+            .deployment
+            .read()
+            .expect("the deployment lock is never poisoned: no panic runs while it is held");
+        crate::engine::policy_file_key(serving.config.policy_file().bytes())
+    }
+
     /// Replace the serving deployment with the one this configuration
     /// declares, without stopping the process (
     /// reloading a policy). The caller reads the file; the runtime never

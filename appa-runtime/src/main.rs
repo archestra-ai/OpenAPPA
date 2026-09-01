@@ -213,6 +213,13 @@ async fn health(State(state): State<AppState>) -> String {
     health_answer(stale, std::process::id())
 }
 
+/// The policy this process serves, so an install can tell whether a runtime it left
+/// running still answers under the configuration on disk. Read-only: reloading is the
+/// caller's separate, deliberate step.
+async fn policy_key(State(state): State<AppState>) -> String {
+    state.runtime.serving_policy_key()
+}
+
 async fn binary_fingerprint(State(state): State<AppState>) -> Result<String, axum::http::StatusCode> {
     state
         .executable
@@ -328,6 +335,7 @@ async fn serve(args: Args) -> ExitCode {
     let app = axum::Router::new()
         .route("/health", get(health))
         .route("/binary-fingerprint", get(binary_fingerprint))
+        .route("/policy-key", get(policy_key))
         .route("/status", get(status))
         .route("/hook", post(hook))
         .route("/reload", post(reload))
@@ -341,7 +349,10 @@ async fn serve(args: Args) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    tracing::info!(listen = %args.listen, "appa-runtime serving /hook, /mcp, /status, /reload, /health, and /binary-fingerprint");
+    tracing::info!(
+        listen = %args.listen,
+        "appa-runtime serving /hook, /mcp, /status, /reload, /health, /binary-fingerprint, and /policy-key"
+    );
     match axum::serve(listener, app).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
