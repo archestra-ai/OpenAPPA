@@ -13,7 +13,7 @@ You need Claude Code and `curl`.
 
 ```sh
 curl -fsSL https://openappa.com/install.sh | sh
-appa init claude-code
+~/.local/bin/appa init claude-code
 ```
 
 The installer downloads the release binary for your Linux or macOS machine,

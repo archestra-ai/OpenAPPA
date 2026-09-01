@@ -65,7 +65,7 @@ fastest way to watch a policy make a decision on real work:
 
 ```sh
 curl -fsSL https://openappa.com/install.sh | sh
-appa init claude-code
+~/.local/bin/appa init claude-code
 ```
 
 The installer verifies the checksum of the release binary for Linux or macOS

@@ -275,7 +275,6 @@ jobs:
             exit 1
           fi
           sha256sum "${expected_archives[@]}" > SHA256SUMS
-          test -f appa-install.sh
           sh -n appa-install.sh
 
       - name: Read release state

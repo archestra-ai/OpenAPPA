@@ -22,7 +22,7 @@ the release archive, verifies its checksum, and places `appa` in
 
 ```sh
 curl -fsSL https://openappa.com/install.sh | sh
-appa init claude-code
+~/.local/bin/appa init claude-code
 ```
 
 A build from a checkout carries its exact Git commit and plugin-tree digest, so

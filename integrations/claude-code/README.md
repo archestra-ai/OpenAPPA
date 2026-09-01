@@ -52,7 +52,7 @@ temporary file changes, and caches it, so a later init needs no network:
 
 ```sh
 curl -fsSL https://openappa.com/install.sh | sh
-appa init claude-code
+~/.local/bin/appa init claude-code
 ```
 
 A clean checkout build downloads the source archive for its exact commit,
