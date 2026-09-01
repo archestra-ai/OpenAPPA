@@ -64,7 +64,7 @@ The design follows primary sources from widely adopted plugin systems.
 | [gRPC health checking](https://grpc.io/docs/guides/health-checking/) | Standard sidecar health protocol |
 | [Buf breaking checks](https://buf.build/docs/breaking/) | Protocol compatibility enforcement in CI |
 
-The design excludes Go's standard [`plugin`](https://pkg.go.dev/plugin) package.
+The design excludes the standard Go [`plugin`](https://pkg.go.dev/plugin) package.
 
 That package has strict toolchain coupling, shared memory, platform limits, no unload, weak race-detector support, and no independent lifecycle.
 
@@ -74,16 +74,16 @@ Current public ADK and kagent surfaces lack the full required boundary set.
 
 | Requirement | Source evidence | Allowed integration path |
 |---|---|---|
-| Dynamic plugin object | [kagent runner adapter](https://github.com/kagent-dev/kagent/blob/9e246fd3797457b18fc277680be1629a0f57fce0/go/adk/pkg/runner/adapter.go#L74-L95) | Install one generic out-of-process proxy through the existing plugin surface |
-| Provider-final catalog | Public model interface and [kagent Bedrock adapter](https://github.com/kagent-dev/kagent/blob/9e246fd3797457b18fc277680be1629a0f57fce0/go/adk/pkg/models/bedrock.go#L730-L808) | Add the gate to kagent-owned adapters; refuse opaque upstream providers |
-| Pre-plugin dispatch | Existing public tool callbacks | Install the proxy first and disable later untrusted callbacks in protected workloads |
-| Event persistence | Public session service and Runner output | Wrap both surfaces in kagent; refuse any direct backing-store or yield path |
-| User input gate | Existing public `OnUserMessageCallback` | Route it through the dynamic proxy and session wrapper |
-| Child terminal gate | Public Agent, Runner, and session interfaces | Correlate child scopes in kagent wrappers; refuse unobservable paths |
-| Automatic memory | Public memory and tool interfaces | Disable stock preload and use a gated kagent-owned implementation |
-| MCP transport | Public tool interface | Use a kagent-owned no-retry transport; refuse the stock opaque client |
-| Remote A2A | [kagent tool](https://github.com/kagent-dev/kagent/blob/9e246fd3797457b18fc277680be1629a0f57fce0/go/adk/pkg/tools/remote_a2a_tool.go#L25-L145) | Wrap request and result handling in the kagent fork |
-| Content telemetry | Public configuration plus [kagent attributes](https://github.com/kagent-dev/kagent/blob/9e246fd3797457b18fc277680be1629a0f57fce0/go/adk/pkg/telemetry/attributes.go#L37-L47) | Disable upstream content capture and use content-free kagent wiring |
+| Dynamic plugin object | [kagent runner adapter](https://github.com/kagent-dev/kagent/blob/9e246fd3797457b18fc277680be1629a0f57fce0/go/adk/pkg/runner/adapter.go#L74-L95) | Generic proxy through the existing plugin surface |
+| Provider-final catalog | [kagent Bedrock adapter](https://github.com/kagent-dev/kagent/blob/9e246fd3797457b18fc277680be1629a0f57fce0/go/adk/pkg/models/bedrock.go#L730-L808) | Gate in kagent-owned adapters, with opaque providers unavailable |
+| Pre-plugin dispatch | Existing public tool callbacks | Sole content-bearing proxy in protected workloads |
+| Event persistence | Public session service and Runner output | Kagent-owned wrappers, with direct paths unavailable |
+| User input gate | Existing public `OnUserMessageCallback` | Dynamic proxy and session wrapper |
+| Child terminal gate | Public Agent, Runner, and session interfaces | Child-scope correlation, with unobservable paths unavailable |
+| Automatic memory | Public memory and tool interfaces | Stock preload disabled, kagent-owned gate enabled |
+| MCP transport | Public tool interface | Kagent-owned no-retry transport |
+| Remote A2A | [kagent tool](https://github.com/kagent-dev/kagent/blob/9e246fd3797457b18fc277680be1629a0f57fce0/go/adk/pkg/tools/remote_a2a_tool.go#L25-L145) | Kagent-owned request and result wrappers |
+| Content telemetry | [kagent attributes](https://github.com/kagent-dev/kagent/blob/9e246fd3797457b18fc277680be1629a0f57fce0/go/adk/pkg/telemetry/attributes.go#L37-L47) | Public controls and content-free kagent wiring |
 | Readiness | [kagent A2A server](https://github.com/kagent-dev/kagent/blob/9e246fd3797457b18fc277680be1629a0f57fce0/go/adk/pkg/a2a/server/server.go#L127-L144) | Gate kagent readiness on generic extension recovery |
 | Snapshot lifecycle | [kagent ActorTemplate](https://github.com/kagent-dev/kagent/blob/9e246fd3797457b18fc277680be1629a0f57fce0/go/core/v2/substrate/actor_template.go#L65-L88) | Add generic lifecycle handling outside ADK |
 
@@ -332,7 +332,7 @@ Startup order:
 
 The host inventory includes every executable path and content sink. It MUST include provider, ADK, kagent, and Substrate versions.
 
-No kagent code decides whether an OpenAPPA policy is covered. The OpenAPPA plugin accepts or rejects the generic inventory.
+The OpenAPPA plugin decides whether the generic inventory covers its policy. Kagent does not interpret that decision.
 
 ## Multiple extension ordering
 
@@ -350,7 +350,7 @@ Only one extension can own an exclusive phase.
 
 The host rejects a phase conflict before Actor readiness.
 
-No runtime plugin, configured callback, or A2A executor plugin can be appended after final ordering validation.
+Final ordering validation fixes the runtime plugin, configured callback, and A2A executor lists.
 
 The host keeps one durable generic sequencer per scope.
 
@@ -566,9 +566,11 @@ A protected workload contains no other content-bearing `OnEventCallback` impleme
 
 The first release sends every partial assistant event to the exclusive gate and drops it before persistence or yield.
 
-Only one terminal text response can be emitted. Inline data, files, artifacts, citations, thought parts, and multiple terminal responses are refused until their codecs exist.
+The host emits only one terminal text response.
 
-The terminal event includes a closed authenticated-principal attestation. The host does not interpret the plugin's recipient policy.
+The host refuses other content forms until their codecs exist.
+
+The terminal event includes a closed authenticated-principal attestation. The host does not interpret the recipient policy from the plugin.
 
 ### Session persistence gate
 
@@ -614,7 +616,7 @@ Revision preparation runs MCP discovery.
 
 The Revision pins the server, transport, tool descriptors, schemas, raw metadata, and discovery generation.
 
-Discovery failure MUST reject preparation. It cannot be logged and skipped.
+Discovery failure rejects Revision preparation. The host does not skip the failure.
 
 Controller-originated MCP App tool and resource calls enter through a generic `external.operation` phase before any network request.
 
@@ -642,7 +644,7 @@ The host extracts no content before the exclusive extension commits the terminal
 
 ## Mechanical execution protocol
 
-The host owns the actual invocation of in-process ADK tools.
+The kagent-owned tool wrapper invokes each ADK tool through the public tool interface.
 
 For each tool call:
 
@@ -700,7 +702,7 @@ Kagent-owned model, tool, Runner, A2A, and MCP instrumentation uses content-free
 
 The host refuses a component when public options cannot disable its content telemetry.
 
-Protected workloads exclude kagent's standard serialized tool-argument callback.
+Protected workloads exclude the standard serialized tool-argument callback from kagent.
 
 The host inventory lists every telemetry constructor and exporter with its content-free implementation digest.
 
@@ -780,7 +782,7 @@ Missing provider, tool, child, memory, MCP, A2A, interaction, telemetry, snapsho
 
 For `tool.propose`, the plugin receives the logical descriptor, provider-final descriptor, reversible name map, source identity, and raw canonical argument bytes.
 
-It performs strict canonical call resolution inside the sidecar.
+It resolves the canonical call inside the sidecar.
 
 The plugin handles contracts, Annotators, mandates, Membership evidence, requirement gaps, effects, and remedy plans.
 
@@ -866,7 +868,7 @@ At restart:
 
 Crash classification:
 
-- Before plugin acknowledgement of `execution.begin`: no execution started.
+- Before `execution.begin` acknowledgement: the tool did not start.
 - After acknowledgement and before terminal completion: plugin records `Indeterminate` internally.
 - After a persisted terminal commit: replay the same generic delivery decision.
 
@@ -895,7 +897,7 @@ Sequence:
 7. The manifest binds the provider snapshot, key version, files, and completion marker.
 8. The host calls `ValidateRestore` before a restored Actor becomes ready.
 
-The OpenAPPA state volume is mounted only in the OpenAPPA sidecar.
+Only the OpenAPPA sidecar mounts the OpenAPPA state volume.
 
 Each extension manifest binds generation, fencing epoch, state schema, file digests, WAL state, policy-independent extension revision, and encryption-key version.
 
@@ -955,7 +957,7 @@ The gateway resolves external DNS and enforces scheme, host, port, and TLS or SP
 
 It also enforces IP ranges, redirects, and DNS rebinding rules.
 
-The Actor MUST remain unready when CNI isolation, gateway routing, DNS policy, or workload identity cannot be installed and attested.
+The Actor remains unready if CNI isolation, gateway routing, DNS policy, or workload identity lacks attestation.
 
 Projected Secret and ConfigMap volumes keep secret bytes out of literal ActorTemplate environment values.
 
@@ -1055,7 +1057,7 @@ No PR changes Google ADK source, copies it, replaces its module, vendors it, or 
 | PR slice | Change |
 |---|---|
 | 1 | Neutral protocol binding, sidecar handshake, inventory validation, and health |
-| 2 | Tool proposal, permit, begin, complete, commit, and conservative recovery |
+| 2 | Tool proposal, permit, execution acknowledgement, completion, commit, and recovery |
 | 3 | Event, session, assistant response, and publication gates |
 | 4 | Child, task, remote, memory, and MCP mappings |
 | 5 | Dynamic remedy tool, interaction relay, and durable continuation |
@@ -1113,7 +1115,7 @@ No PR changes Google ADK source, copies it, replaces its module, vendors it, or 
 - Remedy families and every runtime outcome.
 - Result, child-return, and assistant response admission.
 - Human interaction accept, decline, cancel, expiry, replay, and remote hops.
-- Crash before permit, before begin acknowledgement, during execution, after result, and after commit.
+- Crash windows before permit, before execution acknowledgement, during execution, after result, and after commit.
 - Replay of exact terminal decisions and `Indeterminate` effect handling.
 
 ### End-to-end GCP acceptance

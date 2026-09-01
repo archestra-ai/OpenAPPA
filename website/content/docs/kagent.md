@@ -48,7 +48,7 @@ The fork MUST NOT modify Google ADK source, copy it, or replace its module. A mi
 
 The wrapper MUST live in kagent-owned code and use only public ADK imports. It MUST NOT copy ADK source or reproduce an internal package.
 
-If neither surface provides the boundary, the host reports the capability as unavailable. A required extension then refuses activation.
+If neither surface has the boundary, the host reports the capability as unavailable. A required extension then refuses activation.
 
 The generic protocol MUST NOT contain OpenAPPA domain terms.
 
@@ -73,7 +73,7 @@ Substrate already supports [multiple containers with independent readiness probe
 
 The baseline lacks shared memory sockets, projected config and secrets, per-container identity, filesystem controls, seccomp, and enforced egress.
 
-These are required generic Substrate additions. Extension activation fails when any declared primitive is unavailable.
+Generic Substrate work adds these required features. Extension activation fails when a declared primitive is unavailable.
 
 The generic fork adds extension containers without adding an OpenAPPA-specific sidecar role.
 
@@ -89,7 +89,7 @@ The extension receives opaque configuration and secret mounts. kagent verifies s
 
 The extension image runs as a dedicated UID with a read-only root filesystem and no Linux capabilities.
 
-It also has bounded resources and deny-by-default egress.
+Resource limits and deny-by-default egress also apply.
 
 Actor-wide CNI policy permits only cluster DNS and an authenticated egress gateway. The gateway enforces per-container destination, TLS identity, redirect, and DNS-rebinding rules.
 
@@ -157,7 +157,7 @@ The immutable Revision includes these generic values. A plugin revision never ch
 
 The sidecar starts before registration and serves the private socket.
 
-The host performs these steps:
+The host uses this sequence:
 
 1. The host verifies the sidecar workload identity and per-launch socket secret.
 2. The host calls `GetExtensionInfo` for the plugin and protocol identities.
@@ -186,19 +186,19 @@ Current public ADK interfaces cover only part of the required lifecycle.
 
 | Boundary | Existing public surface | kagent-owned integration |
 |---|---|---|
-| Ordinary tool callbacks | `BeforeTool`, `AfterTool`, and tool-error callbacks | Install the dynamic proxy first in a fixed callback order |
-| User input | `OnUserMessageCallback` and injected session service | Proxy the callback and gate append in the session-service wrapper |
-| Model request | Injected model interface and kagent-owned provider adapters | Gate the provider-final request; refuse opaque upstream providers |
-| Provider-final tool catalog | Kagent-owned provider adapters | Export final descriptors and a reversible provider-name map |
-| Raw function-call arguments | Kagent-owned provider decoders | Preserve token bytes before ADK map decoding; refuse opaque decoders |
-| Tool execution | Public tool interface and existing tool callbacks | Wrap the tool and make the dynamic proxy the first callback |
-| Model response | Existing model callbacks and injected model wrapper | Gate supported standard or live paths; refuse bypassing paths |
-| Session persistence | Injected session service | Gate exact bytes before the backing service appends them |
-| Runner and task publication | Public Runner output plus kagent-owned A2A code | Gate before kagent yields, stores, or publishes content |
-| Child return | Public Agent, Runner, and session interfaces | Correlate child scopes in kagent wrappers; refuse unobservable paths |
-| Memory | Public memory and tool interfaces | Disable stock preload and use a gated kagent-owned implementation |
-| MCP | Public tool interface | Use a kagent-owned no-retry transport; refuse stock opaque transport |
-| Remote A2A | Existing kagent remote tool | Wrap request and result handling in the kagent fork |
+| Ordinary tool callbacks | `BeforeTool`, `AfterTool`, and tool-error callbacks | Sole content-bearing dynamic proxy |
+| User input | `OnUserMessageCallback` and injected session service | Callback proxy and session append gate |
+| Model request | Injected model interface and kagent-owned provider adapters | Provider-final gate, with opaque upstream providers unavailable |
+| Provider-final tool catalog | Kagent-owned provider adapters | Final descriptors and reversible provider-name map |
+| Raw function-call arguments | Kagent-owned provider decoders | Token preservation before ADK map decoding |
+| Tool execution | Public tool interface and existing tool callbacks | Tool wrapper and sole content-bearing proxy |
+| Model response | Existing model callbacks and injected model wrapper | Standard and supported live-path gates |
+| Session persistence | Injected session service | Exact-byte gate before backing-store append |
+| Runner and task publication | Public Runner output plus kagent-owned A2A code | Barrier before yield, storage, or publication |
+| Child return | Public Agent, Runner, and session interfaces | Child-scope correlation, with unobservable paths unavailable |
+| Memory | Public memory and tool interfaces | Stock preload disabled, kagent-owned gate enabled |
+| MCP | Public tool interface | Kagent-owned no-retry transport |
+| Remote A2A | Existing kagent remote tool | Kagent-owned request and result wrappers |
 | Snapshot, readiness, egress, and drain | Outside ADK | Use the generic kagent and Substrate lifecycle interface |
 
 The protected profile uses only these public interfaces and kagent-owned integration points. It disables any path that can bypass them.
@@ -221,7 +221,7 @@ The OpenAPPA plugin requires exclusive ownership of all uncommitted content phas
 
 Other extensions can observe metadata or already committed content only after that exclusive gate.
 
-No runtime plugin can be appended after manifest verification.
+The fixed manifest excludes runtime plugin additions after verification.
 
 ## Immutable event envelopes
 
@@ -476,7 +476,7 @@ The Unix socket and generic event protocol are the only enforcement-data interfa
 
 ## Incomplete coverage refusal
 
-The protected instance remains unready when any required phase is missing, shared, reordered, bypassable, or unsupported.
+The protected instance remains unready if a required phase lacks sole, fixed, supported ownership.
 
 The first release refuses:
 
@@ -485,7 +485,7 @@ The first release refuses:
 - Automatic memory preload without the synthetic lifecycle extension.
 - Dynamic tool catalogs that change inside a prepared Revision.
 - Runtime plugins or callbacks appended after manifest verification.
-- Content telemetry that cannot be disabled before payload creation.
+- Components without a public content-telemetry control.
 - Remote A2A paths without immutable Card, header replacement, state preservation, and terminal gates.
 - Streaming assistant content before the exclusive publication gate.
 - Hot plugin swaps and mixed plugin revisions inside one scope.
