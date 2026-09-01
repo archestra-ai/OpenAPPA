@@ -13,25 +13,28 @@ re-validates its persisted log before it is trusted.
 
 ## Install
 
-The Claude Code adapter requires the `claude` command and `curl`.
+The Claude Code adapter requires the `claude` command, `curl`, and Cargo when building from a checkout.
 
-From a source checkout, install `appa`, then initialize the harness adapter:
-
-```sh
-cargo install --path appa-runtime --force
-appa init claude-code
-```
-
-From an extracted release archive on POSIX:
+Every `appa` build knows the SHA-256 of the plugin artifact belonging to its own
+release and accepts no other bytes. From an extracted release archive on POSIX,
+init downloads that artifact, verifies it, and caches it:
 
 ```sh
 install -m 755 appa ~/.local/bin/
-appa init claude-code --source ./claude-code
+appa init claude-code
 ```
 
-From a checkout, `init` installs that checkout's marketplace. From an extracted
-release it uses the marketplace shipped beside the binaries. Otherwise it uses
-`archestra-ai/OpenAPPA`. It replaces an existing APPA plugin instead of stacking
+A build from a checkout has no such digest, refuses to download, and requires an
+explicit source:
+
+```sh
+cargo install --path appa-runtime --force
+plugin=$(mktemp -d)/bundle
+sh scripts/appa-stage-plugin-bundle.sh "$plugin"
+appa init claude-code --plugin-source "$plugin"
+```
+
+The result does not depend on the working directory. It replaces an existing APPA plugin instead of stacking
 another copy, deploys the same `appa` build for its internal `runtime` command, creates `clappa`, installs the
 statusline unless Claude already has a custom one, preserves an existing policy,
 and starts the runtime. The [Claude Code integration guide](../integrations/claude-code/README.md)

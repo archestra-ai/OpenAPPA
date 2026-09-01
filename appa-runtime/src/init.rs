@@ -11,9 +11,10 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use crate::plugin_bundle::{self, Deployment, Endpoint, PluginBundleError, PluginSource, Population};
+
 const MARKETPLACE: &str = "appa";
 const PLUGIN: &str = "appa-runtime@appa";
-const REMOTE_MARKETPLACE: &str = "archestra-ai/OpenAPPA";
 const RECOVERY_PREFIX: &str = ".appa-init-recovery-";
 const DEFAULT_CONFIG: &str = include_str!("../../integrations/claude-code/examples/claude-code.appa.toml");
 
@@ -27,8 +28,6 @@ pub enum InitError {
     ClaudeUnavailable(std::io::Error),
     #[error("`claude {command}` failed: {message}")]
     ClaudeCommand { command: String, message: String },
-    #[error("the local Claude Code marketplace at {0} is incomplete")]
-    InvalidMarketplace(PathBuf),
     #[error("cannot install the runtime at {path}: {source}")]
     InstallRuntime { path: PathBuf, source: std::io::Error },
     #[error("cannot initialize {path}: {source}")]
@@ -47,38 +46,17 @@ pub enum InitError {
     MissingPluginFile(PathBuf),
     #[error("the installed Claude plugin could not start `appa runtime`: {0}")]
     Starter(String),
-    #[error("the runtime at 127.0.0.1:8787 is not this installed build: {0}")]
-    RuntimeIdentity(String),
+    #[error("the runtime at {endpoint} is not this installed build: {message}")]
+    RuntimeIdentity { endpoint: String, message: String },
+    #[error("a previous appa runtime (pid {pid}) is still executing {path}; stop it and rerun init")]
+    RuntimeSurvived { pid: i32, path: PathBuf },
+    #[error(transparent)]
+    PluginBundle(#[from] PluginBundleError),
     #[error("{operation}; restoring the previous Claude Code plugin also failed: {recovery}")]
     PluginRecovery {
         operation: Box<InitError>,
         recovery: Box<InitError>,
     },
-}
-
-#[derive(Clone)]
-enum MarketplaceSource {
-    Local(PathBuf),
-    Remote(String),
-}
-
-impl MarketplaceSource {
-    fn command_argument(&self) -> &OsStr {
-        match self {
-            Self::Local(path) => path.as_os_str(),
-            Self::Remote(source) => source.as_ref(),
-        }
-    }
-
-    fn label(&self) -> String {
-        match self {
-            Self::Local(path) if env::current_dir().is_ok_and(|current| current.starts_with(path)) => {
-                "current checkout".to_owned()
-            }
-            Self::Local(path) => friendly_path(path),
-            Self::Remote(source) => source.clone(),
-        }
-    }
 }
 
 struct DeploymentPaths {
@@ -88,48 +66,113 @@ struct DeploymentPaths {
     claude_dir: PathBuf,
 }
 
+/// A directory override made absolute, without touching the filesystem.
+///
+/// Overrides are rendered into a deployment's hooks and hashed into its
+/// identity, and a hook runs from whatever working directory Claude was
+/// launched in. A relative override would therefore resolve somewhere else
+/// entirely at hook time, so it is made absolute here, once, before any of that.
+/// This is lexical: no `canonicalize`, no case folding, consistent with
+/// refusing rather than normalizing elsewhere.
+fn absolute_directory(path: PathBuf) -> PathBuf {
+    std::path::absolute(&path).unwrap_or(path)
+}
+
 /// The platform config file used by installed deployments and `appa describe`.
 pub fn installed_config_path() -> PathBuf {
     installed_config_dir().map_or_else(|| PathBuf::from("appa.toml"), |dir| dir.join("appa.toml"))
 }
 
-/// Install this build and this checkout's adapter into Claude Code.
+/// Install the plugin belonging to this binary's own release into Claude Code,
+/// together with this binary, as one bundle.
+///
+/// The sequence is ordered so that nothing outside a temporary file changes
+/// until the plugin source has been resolved and verified, and so that the
+/// endpoint is cleared before any mutation rather than after Claude has been
+/// switched over.
 pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
     let appa = env::current_exe().map_err(InitError::CurrentExecutable)?;
-    let source = resolve_marketplace_source(explicit_source, &appa)?;
+    let endpoint = Endpoint::resolve()?;
+
+    // 1. Resolve and verify the source. Nothing outside a temp file has changed.
+    let source = PluginSource::resolve(explicit_source)?;
     let paths = deployment_paths()?;
     let installations = installed_plugin_installations(&paths.claude_dir)?;
     let marketplaces = run_claude(["plugin", "marketplace", "list"])?;
 
-    fs::create_dir_all(&paths.install_dir).map_err(|source| InitError::InstallRuntime {
-        path: paths.install_dir.clone(),
-        source,
-    })?;
-    let deployed_appa = paths.install_dir.join(appa_filename());
-
-    fs::create_dir_all(&paths.config_dir).map_err(|source| InitError::WriteFile {
-        path: paths.config_dir.clone(),
-        source,
-    })?;
-    fs::create_dir_all(&paths.data_dir).map_err(|source| InitError::WriteFile {
-        path: paths.data_dir.clone(),
-        source,
+    // 2. Directories, and the config that survives every upgrade.
+    for directory in [&paths.install_dir, &paths.config_dir, &paths.data_dir] {
+        fs::create_dir_all(directory).map_err(|source| InitError::WriteFile {
+            path: directory.clone(),
+            source,
+        })?;
+    }
+    let deployed_appa = paths.data_dir.join("bin").join(appa_filename());
+    fs::create_dir_all(deployed_appa.parent().expect("the deployed binary has a parent")).map_err(|source| {
+        InitError::InstallRuntime {
+            path: deployed_appa.clone(),
+            source,
+        }
     })?;
     let config = paths.config_dir.join("appa.toml");
     let config_created = create_default_config(&config)?;
+
+    // 3. Materialize the deployment, or validate and reuse an existing one.
+    let deployments = paths.data_dir.join("deployments");
+    let deploy = |population| {
+        plugin_bundle::materialize(
+            population,
+            &deployments,
+            &deployed_appa,
+            &config,
+            &paths.data_dir,
+            &endpoint,
+        )
+    };
+    let deployment = match &source {
+        PluginSource::Explicit(path) => deploy(Population::Tree(path))?,
+        PluginSource::Release(digest) => {
+            let archive = plugin_bundle::ensure_archive(
+                *digest,
+                env!("CARGO_PKG_VERSION"),
+                &paths.data_dir.join("cache").join("plugin"),
+                &plugin_bundle::release_base_url(),
+            )?;
+            deploy(Population::Archive(&archive))?
+        }
+    };
+
+    // 4. Clear the endpoint before anything is mutated. A verified runtime at a
+    //    retired install path that will not stop aborts init here, rather than
+    //    leaving a new plugin registered against an old runtime that a rerun
+    //    cannot dislodge.
+    clear_retired_runtime(&paths)?;
+    //    Whatever still answers must be the build this init installs. A foreign
+    //    responder cannot be stopped from here, so it is refused now, while
+    //    Claude and the launcher are still untouched.
+    refuse_foreign_endpoint(&appa, &endpoint)?;
+
+    // 5. Snapshot for recovery and disarm the launcher.
     let launcher_dir = appa.parent().unwrap_or(&paths.install_dir);
     let recovery = prepare_plugin_recovery(&installations, &paths.data_dir)?;
-
     if recovery.is_some() {
         install_disabled_clappa(launcher_dir)?;
     }
 
-    let replacement =
-        replace_plugin(&source, &marketplaces, &installations).and_then(|()| install_runtime(&appa, &deployed_appa));
-    if let Err(operation) = replacement {
-        if let Some(recovery) = recovery.as_ref()
-            && let Err(recovery_error) = restore_plugin(recovery).and_then(|()| install_clappa(launcher_dir).map(drop))
-        {
+    // 6. The Claude switch, the binary, and the runtime this plugin is being
+    //    bound to: one transaction. Verification is inside it, because a plugin
+    //    left registered against a runtime that failed verification is exactly
+    //    the skew this bundle exists to prevent.
+    let switch = replace_plugin(&deployment.root, &marketplaces, &installations)
+        .and_then(|()| install_runtime(&appa, &deployed_appa))
+        .and_then(|()| remove_legacy_runtime(&appa, &paths))
+        .and_then(|()| installed_plugin_root(&paths.claude_dir))
+        .and_then(|plugin_root| {
+            install_statusline(&plugin_root, &paths)?;
+            start_runtime(&plugin_root, &deployed_appa, &endpoint)
+        });
+    if let Err(operation) = switch {
+        if let Err(recovery_error) = undo_plugin_switch(recovery.as_ref(), launcher_dir) {
             return Err(InitError::PluginRecovery {
                 operation: Box::new(operation),
                 recovery: Box::new(recovery_error),
@@ -138,24 +181,47 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
         return Err(operation);
     }
 
-    remove_legacy_runtime(&appa, &paths)?;
-
-    let plugin_root = installed_plugin_root(&paths.claude_dir)?;
-    activate_platform_hooks(&plugin_root)?;
+    // 7. Only now is the launcher armed. Every earlier return leaves `clappa`
+    //    absent on a first install and disabled on an upgrade, so a session
+    //    started against a half-installed bundle cannot be a protected one.
     install_clappa(launcher_dir)?;
-    install_statusline(&plugin_root, &paths)?;
-    start_runtime(&plugin_root, &paths, &deployed_appa)?;
     cleanup_plugin_recoveries(&paths.data_dir);
 
+    // 8. Anything left on PATH that this init did not deploy is named, never
+    //    removed: it is the user's file to keep or drop.
+    let stale_path_copy = stale_path_copy(&paths, &deployed_appa);
+
     Ok(render_receipt(
-        &source.label(),
+        &source_label(&source, &deployment),
         &config,
         config_created,
+        stale_path_copy.as_deref(),
         std::io::stdout().is_terminal() && env::var_os("NO_COLOR").is_none(),
     ))
 }
 
-fn render_receipt(adapter: &str, config: &Path, config_created: bool, color: bool) -> String {
+fn source_label(source: &PluginSource, deployment: &Deployment) -> String {
+    let origin = match source {
+        PluginSource::Explicit(path) => format!("{} (development source)", friendly_path(path)),
+        PluginSource::Release(_) => format!("appa {} release plugin", env!("CARGO_PKG_VERSION")),
+    };
+    format!("{origin} -> {}", friendly_path(&deployment.root))
+}
+
+/// A copy of `appa` at the retired install path, which earlier versions
+/// deployed to and which may still shadow this build on PATH.
+fn stale_path_copy(paths: &DeploymentPaths, deployed: &Path) -> Option<PathBuf> {
+    let retired = paths.install_dir.join(appa_filename());
+    (retired.is_file() && !same_file(&retired, deployed)).then_some(retired)
+}
+
+fn render_receipt(
+    adapter: &str,
+    config: &Path,
+    config_created: bool,
+    stale_path_copy: Option<&Path>,
+    color: bool,
+) -> String {
     let title = if color {
         "\u{1b}[1;32m✓ OpenAPPA initialized\u{1b}[0m \u{1b}[2mfor Claude Code\u{1b}[0m"
     } else {
@@ -168,8 +234,8 @@ fn render_receipt(adapter: &str, config: &Path, config_created: bool, color: boo
             format!("{name:<9}")
         }
     };
-    format!(
-        "{title}\n\n  {} {adapter}\n  {} {PLUGIN}\n  {} healthy\n  {} {} ({})\n  {} clappa\n\nNext: run `clappa`, then `/appa-guide init`.\n",
+    let mut receipt = format!(
+        "{title}\n\n  {} {adapter}\n  {} {PLUGIN}\n  {} healthy\n  {} {} ({})\n  {} clappa\n",
         label("Adapter"),
         label("Plugin"),
         label("Runtime"),
@@ -177,7 +243,19 @@ fn render_receipt(adapter: &str, config: &Path, config_created: bool, color: boo
         friendly_path(config),
         if config_created { "created" } else { "kept" },
         label("Launcher"),
-    )
+    );
+    // A session loads its hooks at session start, and the hook wire carries no
+    // version, so a session running across an upgrade keeps talking to the
+    // runtime it started with.
+    receipt.push_str("\nRestart any running `clappa` session to pick this up.\n");
+    if let Some(stale) = stale_path_copy {
+        receipt.push_str(&format!(
+            "\nA previous appa remains at {}. It is not used any more and may shadow\nthis build on PATH; remove it when you are ready.\n",
+            friendly_path(stale),
+        ));
+    }
+    receipt.push_str("\nNext: run `clappa`, then `/appa-guide init`.\n");
+    receipt
 }
 
 fn friendly_path(path: &Path) -> String {
@@ -193,77 +271,6 @@ fn friendly_path(path: &Path) -> String {
     )
 }
 
-fn resolve_marketplace_source(explicit: Option<&str>, appa: &Path) -> Result<MarketplaceSource, InitError> {
-    if let Some(source) = explicit {
-        let path = PathBuf::from(source);
-        if path.exists() {
-            return local_marketplace(path);
-        }
-        return Ok(MarketplaceSource::Remote(source.to_owned()));
-    }
-
-    if let Ok(current) = env::current_dir() {
-        let mut fallback = None;
-        for ancestor in current.ancestors() {
-            for candidate in [ancestor.to_path_buf(), ancestor.join("integrations/claude-code")] {
-                if marketplace_manifest(&candidate).is_file() {
-                    if candidate.join("batteries").is_dir()
-                        && candidate.join("website/content/docs/contracts.md").is_file()
-                    {
-                        return local_marketplace(candidate);
-                    }
-                    fallback.get_or_insert(candidate);
-                }
-            }
-        }
-        if let Some(candidate) = fallback {
-            return local_marketplace(candidate);
-        }
-    }
-
-    if let Some(parent) = appa.parent() {
-        let packaged = parent.join("claude-code");
-        if marketplace_manifest(&packaged).is_file() {
-            return local_marketplace(packaged);
-        }
-    }
-
-    Ok(MarketplaceSource::Remote(REMOTE_MARKETPLACE.to_owned()))
-}
-
-fn local_marketplace(path: PathBuf) -> Result<MarketplaceSource, InitError> {
-    #[cfg(not(windows))]
-    let path = path.canonicalize().unwrap_or(path);
-    // Windows canonicalization adds a `\\?\` prefix that Claude Code rejects as
-    // an invalid marketplace source. The discovered paths are already absolute,
-    // and an explicit relative path must remain relative to this process.
-    #[cfg(windows)]
-    let path = path;
-    let manifest = marketplace_manifest(&path);
-    let marketplace = fs::read(&manifest)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
-    let plugin_source = marketplace
-        .filter(|value| value.get("name").and_then(Value::as_str) == Some(MARKETPLACE))
-        .and_then(|value| {
-            value.get("plugins")?.as_array()?.iter().find_map(|plugin| {
-                (plugin.get("name").and_then(Value::as_str) == Some("appa-runtime"))
-                    .then(|| plugin.get("source").and_then(Value::as_str))
-                    .flatten()
-                    .map(str::to_owned)
-            })
-        })
-        .map(|source| path.join(source.trim_start_matches("./")));
-    let Some(plugin_source) = plugin_source else {
-        return Err(InitError::InvalidMarketplace(path));
-    };
-    if !plugin_source.join(".claude-plugin/plugin.json").is_file() || !plugin_source.join("hooks/hooks.json").is_file()
-    {
-        return Err(InitError::InvalidMarketplace(path));
-    }
-    Ok(MarketplaceSource::Local(path))
-}
-
 fn marketplace_manifest(path: &Path) -> PathBuf {
     path.join(".claude-plugin/marketplace.json")
 }
@@ -273,7 +280,7 @@ fn deployment_paths() -> Result<DeploymentPaths, InitError> {
     let config_dir = installed_config_dir().ok_or(InitError::MissingHome)?;
     let data_dir = installed_data_dir().ok_or(InitError::MissingHome)?;
     let install_dir = if let Some(path) = env::var_os("APPA_INSTALL_DIR") {
-        PathBuf::from(path)
+        absolute_directory(PathBuf::from(path))
     } else if cfg!(windows) {
         data_dir.join("bin")
     } else {
@@ -281,6 +288,7 @@ fn deployment_paths() -> Result<DeploymentPaths, InitError> {
     };
     let claude_dir = env::var_os("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
+        .map(absolute_directory)
         .or_else(|| home.map(|path| path.join(".claude")))
         .ok_or(InitError::MissingHome)?;
     Ok(DeploymentPaths {
@@ -306,7 +314,7 @@ fn user_home() -> Option<PathBuf> {
 
 fn installed_config_dir() -> Option<PathBuf> {
     if let Some(path) = env::var_os("APPA_CONFIG_DIR") {
-        return Some(PathBuf::from(path));
+        return Some(absolute_directory(PathBuf::from(path)));
     }
     #[cfg(target_os = "macos")]
     return env::var_os("HOME")
@@ -327,7 +335,7 @@ fn installed_config_dir() -> Option<PathBuf> {
 
 fn installed_data_dir() -> Option<PathBuf> {
     if let Some(path) = env::var_os("APPA_DATA_DIR") {
-        return Some(PathBuf::from(path));
+        return Some(absolute_directory(PathBuf::from(path)));
     }
     #[cfg(target_os = "macos")]
     return env::var_os("HOME")
@@ -441,7 +449,198 @@ fn stop_legacy_runtime_at(target: &Path) -> Result<(), InitError> {
 
 #[cfg(windows)]
 fn stop_legacy_runtime_at(target: &Path) -> Result<(), InitError> {
-    stop_windows_process_at(target, "appa-runtime")
+    // Legacy cleanup removes the file next, and a surviving process surfaces
+    // there as a failed removal.
+    stop_windows_processes_at(target, "appa-runtime").map(drop)
+}
+
+/// Stop any runtime executing the retired install path before anything is
+/// mutated.
+///
+/// The stop set is exact: `<install_dir>/appa`, the path an init with the
+/// environment resolving as it does now would have deployed to. Managed
+/// stopping and default-endpoint ownership are bounded to that. A runtime left
+/// by an init run under a different `APPA_INSTALL_DIR` or `APPA_DATA_DIR`
+/// executes a path this init never computes, so it is not in the stop set;
+/// `verify_runtime_binary` reports it as a foreign responder and leaves it
+/// running.
+///
+/// A verified target that survives termination aborts init, because the
+/// fingerprint backstop runs after the Claude switch: proceeding would register
+/// the new plugin against an old runtime, and a rerun would find the same
+/// surviving process and do the same thing again.
+fn clear_retired_runtime(paths: &DeploymentPaths) -> Result<(), InitError> {
+    let retired = paths.install_dir.join(appa_filename());
+    match stop_processes_executing(&retired)?.first() {
+        Some(&pid) => Err(InitError::RuntimeSurvived { pid, path: retired }),
+        None => Ok(()),
+    }
+}
+
+/// The subcommand a managed runtime is started with, by every starter and by
+/// init itself. It is what distinguishes a runtime from any other invocation of
+/// the same binary.
+#[cfg(unix)]
+const RUNTIME_SUBCOMMAND: &str = "runtime";
+
+/// Terminate every managed runtime whose executable *is* `target`, and return
+/// those still alive afterwards.
+///
+/// Two conditions, and a candidate needs both. The executable must be the
+/// retired path, verified against the operating system's own answer for that
+/// pid, because `ps` reports argv and argv is spoofable. And argv must name the
+/// `runtime` subcommand, because the retired binary is also what a concurrent
+/// `appa init` or an in-flight `appa hook` is executing, and terminating those
+/// would interrupt work that has nothing to do with the runtime being replaced.
+/// Argv is only ever narrowing here: it can excuse a process from the stop set,
+/// never admit one the executable check rejected.
+///
+/// Windows applies the executable condition alone. Reading another process's
+/// command line there needs a CIM query rather than `Get-Process`, and the same
+/// helper serves legacy cleanup, whose binary had no subcommand at all.
+#[cfg(unix)]
+fn stop_processes_executing(target: &Path) -> Result<Vec<i32>, InitError> {
+    let Ok(output) = Command::new("ps").args(["-axo", "pid=,command="]).output() else {
+        return Ok(Vec::new());
+    };
+    if !output.status.success() {
+        // Restricted environments may deny ps. Continue, and let the fingerprint
+        // check report whatever is answering.
+        return Ok(Vec::new());
+    }
+    let Some(identity) = file_identity(target) else {
+        return Ok(Vec::new());
+    };
+
+    // init itself commonly runs from the retired path -- that is what a user
+    // typing `~/.local/bin/appa init claude-code` does -- and it is in the stop
+    // set by every other measure, so it is excluded by pid.
+    let own = std::process::id() as i32;
+    let mut signalled = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let Some((pid, arguments)) = line.trim_start().split_once(char::is_whitespace) else {
+            continue;
+        };
+        let Ok(pid) = pid.parse::<i32>() else {
+            continue;
+        };
+        if pid == own {
+            continue;
+        }
+        // A whole token, so a path that merely contains the word does not match.
+        // The starter runs `<binary> runtime --listen <addr>`, and a binary path
+        // carrying spaces splits into tokens that are all still not `runtime`.
+        if !arguments.split_whitespace().any(|token| token == RUNTIME_SUBCOMMAND) {
+            continue;
+        }
+        match executable_of(pid) {
+            Some(executable) if file_identity(&executable) == Some(identity) => {}
+            // Not this executable, or unreadable: report and skip.
+            _ => continue,
+        }
+        if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(InitError::InstallRuntime {
+                    path: target.to_path_buf(),
+                    source: error,
+                });
+            }
+            continue;
+        }
+        signalled.push(pid);
+    }
+
+    if signalled.is_empty() {
+        return Ok(Vec::new());
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        signalled.retain(|pid| unsafe { libc::kill(*pid, 0) == 0 });
+        if signalled.is_empty() {
+            return Ok(Vec::new());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    signalled.retain(|pid| unsafe { libc::kill(*pid, 0) == 0 });
+    Ok(signalled)
+}
+
+/// OS file identity, so a runtime launched through a symlinked install path is
+/// not wrongly excluded. On Unix `(dev, ino)` is exact, and it identifies hard
+/// links to one file as that file.
+#[cfg(unix)]
+fn file_identity(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = fs::metadata(path).ok()?;
+    Some((metadata.dev(), metadata.ino()))
+}
+
+/// The executable a pid is actually running, from the operating system rather
+/// than from its own argv.
+#[cfg(target_os = "linux")]
+fn executable_of(pid: i32) -> Option<PathBuf> {
+    fs::read_link(format!("/proc/{pid}/exe")).ok()
+}
+
+#[cfg(target_os = "macos")]
+fn executable_of(pid: i32) -> Option<PathBuf> {
+    // PROC_PIDPATHINFO_MAXSIZE
+    const MAX: usize = 4 * libc::PATH_MAX as usize;
+
+    let mut buffer = vec![0u8; MAX];
+    let written = unsafe { libc::proc_pidpath(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
+    if written <= 0 {
+        return None;
+    }
+    buffer.truncate(written as usize);
+    Some(PathBuf::from(String::from_utf8(buffer).ok()?))
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn executable_of(_pid: i32) -> Option<PathBuf> {
+    // No portable primitive here: report and skip rather than kill on argv.
+    None
+}
+
+#[cfg(windows)]
+fn stop_processes_executing(target: &Path) -> Result<Vec<i32>, InitError> {
+    stop_windows_processes_at(target, "appa")
+}
+
+/// The comparison operand on Windows: the fully resolved path, folded for the
+/// case-insensitive filesystem.
+///
+/// Both sides are canonicalized, rather than trusting `Get-Process.Path` to
+/// return one particular form. `fs::canonicalize` yields the Win32 final path,
+/// whose extended-length prefix is stripped so the two sides can be compared as
+/// written. This is equality of resolved final paths, not file-ID identity, so
+/// two hard links to one file at different paths compare unequal -- a gap named
+/// in the deployment documentation rather than papered over.
+#[cfg(windows)]
+fn windows_identity(path: &Path) -> Option<String> {
+    let canonical = fs::canonicalize(path).ok()?;
+    let text = canonical.to_str()?;
+    Some(text.strip_prefix(r"\\?\").unwrap_or(text).to_lowercase())
+}
+
+/// Whether two paths name the same file, resolving symlinks.
+fn same_file(left: &Path, right: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        match (file_identity(left), file_identity(right)) {
+            (Some(left), Some(right)) => left == right,
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        match (fs::canonicalize(left), fs::canonicalize(right)) {
+            (Ok(left), Ok(right)) => left == right,
+            _ => false,
+        }
+    }
 }
 
 fn install_runtime(source: &Path, target: &Path) -> Result<(), InitError> {
@@ -450,7 +649,7 @@ fn install_runtime(source: &Path, target: &Path) -> Result<(), InitError> {
     }
     #[cfg(windows)]
     if target.exists() {
-        stop_windows_process_at(target, "appa")?;
+        stop_windows_processes_at(target, "appa")?;
         fs::remove_file(target).map_err(|source| InitError::InstallRuntime {
             path: target.to_path_buf(),
             source,
@@ -484,30 +683,95 @@ fn install_runtime(source: &Path, target: &Path) -> Result<(), InitError> {
     Ok(())
 }
 
+/// Terminate every `process_name` process whose resolved executable is
+/// `target`, and answer with those still alive afterwards.
+///
+/// PowerShell only enumerates and stops. The comparison happens here, so
+/// Windows and Unix apply the same rule and neither swallows a discovery or
+/// termination failure the way `-ErrorAction SilentlyContinue` did.
 #[cfg(windows)]
-fn stop_windows_process_at(target: &Path, process_name: &str) -> Result<(), InitError> {
-    let output = Command::new("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            "$target = $env:APPA_RUNTIME_REPLACE_TARGET; $name = $env:APPA_RUNTIME_REPLACE_NAME; Get-Process -Name $name -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $target } | Stop-Process -Force -ErrorAction SilentlyContinue; exit 0",
-        ])
-        .env("APPA_RUNTIME_REPLACE_TARGET", target)
-        .env("APPA_RUNTIME_REPLACE_NAME", process_name)
-        .output()
-        .map_err(|source| InitError::InstallRuntime {
-            path: target.to_path_buf(),
-            source,
-        })?;
-    if output.status.success() {
-        return Ok(());
+fn stop_windows_processes_at(target: &Path, process_name: &str) -> Result<Vec<i32>, InitError> {
+    let Some(identity) = windows_identity(target) else {
+        // A path that will not resolve is reported and skipped, never killed.
+        return Ok(Vec::new());
+    };
+
+    let listed = powershell(
+        "Get-Process -Name $env:APPA_STOP_NAME -ErrorAction SilentlyContinue | \
+         ForEach-Object { \"$($_.Id)`t$($_.Path)\" }",
+        [("APPA_STOP_NAME", process_name.to_owned())],
+    )?;
+
+    let own = std::process::id() as i32;
+    let mut targets = Vec::new();
+    for line in listed.lines() {
+        let Some((pid, path)) = line.trim_end().split_once('\t') else {
+            continue;
+        };
+        let Ok(pid) = pid.trim().parse::<i32>() else {
+            continue;
+        };
+        // init commonly runs from the retired path itself.
+        if pid == own {
+            continue;
+        }
+        // An empty or access-denied path is reported and skipped.
+        if path.is_empty() {
+            tracing::debug!(pid, "skipping a process whose executable path is unreadable");
+            continue;
+        }
+        if windows_identity(Path::new(path)).as_deref() == Some(identity.as_str()) {
+            targets.push(pid);
+        }
     }
-    // Process discovery is a migration convenience. Continue the install and let
-    // runtime identity verification reject a surviving daemon.
-    Ok(())
+    if targets.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let ids = targets.iter().map(i32::to_string).collect::<Vec<_>>().join(",");
+    let survivors = powershell(
+        "$ids = $env:APPA_STOP_IDS -split ',' | ForEach-Object { [int]$_ }; \
+         foreach ($id in $ids) { Stop-Process -Id $id -Force -ErrorAction Stop }; \
+         $deadline = (Get-Date).AddSeconds(10); \
+         while ((Get-Date) -lt $deadline) { \
+           $alive = @($ids | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue }); \
+           if ($alive.Count -eq 0) { break }; \
+           Start-Sleep -Milliseconds 200 \
+         }; \
+         $ids | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue }",
+        [("APPA_STOP_IDS", ids)],
+    )?;
+
+    Ok(survivors
+        .lines()
+        .filter_map(|line| line.trim().parse::<i32>().ok())
+        .collect())
+}
+
+/// Run one PowerShell command, surfacing its failure rather than exiting 0.
+#[cfg(windows)]
+fn powershell<const N: usize>(command: &str, environment: [(&str, String); N]) -> Result<String, InitError> {
+    let mut process = Command::new("powershell.exe");
+    process.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        command,
+    ]);
+    for (name, value) in environment {
+        process.env(name, value);
+    }
+    let output = process
+        .output()
+        .map_err(|error| InitError::Starter(error.to_string()))?;
+    if !output.status.success() {
+        return Err(InitError::Starter(
+            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 fn create_default_config(path: &Path) -> Result<bool, InitError> {
@@ -664,7 +928,7 @@ struct PluginRecovery {
 }
 
 fn replace_plugin(
-    source: &MarketplaceSource,
+    deployment: &Path,
     marketplaces: &Output,
     installations: &[PluginInstallation],
 ) -> Result<(), InitError> {
@@ -681,7 +945,7 @@ fn replace_plugin(
         OsStr::new("plugin"),
         OsStr::new("marketplace"),
         OsStr::new("add"),
-        source.command_argument(),
+        deployment.as_os_str(),
     ])?;
     run_claude(["plugin", "install", PLUGIN, "--scope", "user"])?;
     Ok(())
@@ -754,6 +1018,24 @@ fn copy_directory(source_path: &Path, target: &Path) -> Result<(), InitError> {
         }
     }
     Ok(())
+}
+
+/// Undo a switch that has already reached Claude.
+///
+/// With a snapshot the previous plugin is restored and its launcher re-armed.
+/// Without one there was no APPA plugin before this init, so the new one is
+/// removed outright rather than left pointing Claude at a runtime this init
+/// could not verify. Both errors reach the caller, which reports them beside
+/// the failure that caused the undo.
+fn undo_plugin_switch(recovery: Option<&PluginRecovery>, launcher_dir: &Path) -> Result<(), InitError> {
+    match recovery {
+        Some(recovery) => restore_plugin(recovery).and_then(|()| install_clappa(launcher_dir).map(drop)),
+        None => {
+            run_claude(["plugin", "uninstall", PLUGIN, "--scope", "user", "--yes"])?;
+            run_claude(["plugin", "marketplace", "remove", MARKETPLACE])?;
+            Ok(())
+        }
+    }
 }
 
 fn restore_plugin(recovery: &PluginRecovery) -> Result<(), InitError> {
@@ -840,22 +1122,6 @@ fn install_disabled_clappa(install_dir: &Path) -> Result<(), InitError> {
     Ok(())
 }
 
-#[cfg(not(windows))]
-fn activate_platform_hooks(_plugin_root: &Path) -> Result<(), InitError> {
-    Ok(())
-}
-
-#[cfg(windows)]
-fn activate_platform_hooks(plugin_root: &Path) -> Result<(), InitError> {
-    let source = plugin_root.join("hooks/hooks.windows.json");
-    let target = plugin_root.join("hooks/hooks.json");
-    if !source.is_file() {
-        return Err(InitError::MissingPluginFile(source));
-    }
-    fs::copy(&source, &target).map_err(|source| InitError::WriteFile { path: target, source })?;
-    Ok(())
-}
-
 fn install_statusline(plugin_root: &Path, paths: &DeploymentPaths) -> Result<(), InitError> {
     #[cfg(windows)]
     let (source, target) = (
@@ -932,7 +1198,7 @@ fn install_statusline(plugin_root: &Path, paths: &DeploymentPaths) -> Result<(),
     Ok(())
 }
 
-fn start_runtime(plugin_root: &Path, paths: &DeploymentPaths, runtime: &Path) -> Result<(), InitError> {
+fn start_runtime(plugin_root: &Path, runtime: &Path, endpoint: &Endpoint) -> Result<(), InitError> {
     #[cfg(windows)]
     let mut command = {
         let starter = plugin_root.join("hooks/hook.ps1");
@@ -955,15 +1221,16 @@ fn start_runtime(plugin_root: &Path, paths: &DeploymentPaths, runtime: &Path) ->
         command.arg(starter);
         command
     };
+    // Every path and the endpoint reach the starter through the appa-paths file
+    // rendered into the deployment beside it. APPA_RUNTIME_URL is removed rather
+    // than set: to a starter it means "the user runs their own runtime here",
+    // and setting it would suppress managed replacement permanently.
     let output = command
-        .env("APPA_INSTALL_DIR", &paths.install_dir)
-        .env("APPA_CONFIG_DIR", &paths.config_dir)
-        .env("APPA_DATA_DIR", &paths.data_dir)
         .env_remove("APPA_RUNTIME_URL")
         .output()
         .map_err(|error| InitError::Starter(error.to_string()))?;
     if output.status.success() {
-        return verify_runtime_binary(runtime);
+        return verify_runtime_binary(runtime, endpoint);
     }
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
     Err(InitError::Starter(if stderr.is_empty() {
@@ -973,63 +1240,250 @@ fn start_runtime(plugin_root: &Path, paths: &DeploymentPaths, runtime: &Path) ->
     }))
 }
 
-fn verify_runtime_binary(runtime: &Path) -> Result<(), InitError> {
-    let expected = Sha256::digest(fs::read(runtime).map_err(|source| InitError::InstallRuntime {
-        path: runtime.to_path_buf(),
+/// Who is answering the endpoint, as far as one probe can establish.
+///
+/// Managed stopping covers only the paths this environment resolves to, so a
+/// runtime left by an init run under a different `APPA_INSTALL_DIR` or
+/// `APPA_DATA_DIR` is foreign: named, never killed.
+enum EndpointOwner {
+    /// Nothing answered, or what answered serves no fingerprint. Before the
+    /// start this is the ordinary case; after it, it is a failure.
+    Unidentified,
+    /// The binary whose bytes were offered for comparison.
+    Deployment,
+    /// A different build.
+    Foreign,
+}
+
+fn endpoint_owner(binary: &Path, endpoint: &Endpoint) -> Result<EndpointOwner, InitError> {
+    let expected = Sha256::digest(fs::read(binary).map_err(|source| InitError::InstallRuntime {
+        path: binary.to_path_buf(),
         source,
     })?);
     let expected: String = expected.iter().map(|byte| format!("{byte:02x}")).collect();
     let output = Command::new("curl")
-        .args([
-            "--fail",
-            "--silent",
-            "--max-time",
-            "2",
-            "http://127.0.0.1:8787/binary-fingerprint",
-        ])
+        .args(["--fail", "--silent", "--max-time", "2"])
+        .arg(endpoint.join("/binary-fingerprint"))
         .output()
-        .map_err(|error| InitError::RuntimeIdentity(error.to_string()))?;
+        .map_err(|error| InitError::RuntimeIdentity {
+            endpoint: endpoint.url().to_owned(),
+            message: error.to_string(),
+        })?;
     if !output.status.success() {
-        return Err(InitError::RuntimeIdentity(
-            "the answering process exposes no binary fingerprint; stop it and rerun init".to_owned(),
-        ));
+        return Ok(EndpointOwner::Unidentified);
     }
     let actual = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if actual == expected {
-        return Ok(());
+    Ok(if actual == expected {
+        EndpointOwner::Deployment
+    } else {
+        EndpointOwner::Foreign
+    })
+}
+
+/// Refuse a foreign owner while Claude and the launcher are still untouched.
+///
+/// Silence is not refused here: nothing answering is what a first install looks
+/// like, and the backstop after the start is what proves the runtime is ours.
+fn refuse_foreign_endpoint(binary: &Path, endpoint: &Endpoint) -> Result<(), InitError> {
+    match endpoint_owner(binary, endpoint)? {
+        EndpointOwner::Deployment | EndpointOwner::Unidentified => Ok(()),
+        EndpointOwner::Foreign => Err(InitError::RuntimeIdentity {
+            endpoint: endpoint.url().to_owned(),
+            message: "a different appa build already owns this endpoint; stop that process and rerun init".to_owned(),
+        }),
     }
-    Err(InitError::RuntimeIdentity(
-        "a different appa build is answering; stop it and rerun init".to_owned(),
-    ))
+}
+
+fn verify_runtime_binary(runtime: &Path, endpoint: &Endpoint) -> Result<(), InitError> {
+    match endpoint_owner(runtime, endpoint)? {
+        EndpointOwner::Deployment => Ok(()),
+        EndpointOwner::Unidentified => Err(InitError::RuntimeIdentity {
+            endpoint: endpoint.url().to_owned(),
+            message: "the answering process exposes no binary fingerprint; stop it and rerun init".to_owned(),
+        }),
+        EndpointOwner::Foreign => Err(InitError::RuntimeIdentity {
+            endpoint: endpoint.url().to_owned(),
+            message: "a different appa build is answering; stop that process and rerun init".to_owned(),
+        }),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// A stand-in the stop set can actually find and signal.
+    ///
+    /// macOS kills a copied platform binary outright -- a copy of `/bin/sh` or
+    /// `/bin/sleep` dies with SIGKILL before it runs a single instruction -- so
+    /// a test built on one would pass without ever exercising the stop set,
+    /// because a killed process is also a stopped one. `perl` copies and runs,
+    /// and can be told to ignore SIGTERM, which is the case that must abort
+    /// init rather than be assumed gone.
+    #[cfg(unix)]
+    const STAND_IN: &str = "/usr/bin/perl";
+
+    /// What every starter runs: the subcommand plus the endpoint it binds.
+    #[cfg(unix)]
+    const RUNTIME_ARGUMENTS: &[&str] = &["runtime", "--listen", "127.0.0.1:8787"];
+
+    /// A process whose executable really *is* `at`, started with `arguments`, so
+    /// verification finds it there rather than taking a spoofable argv on trust
+    /// and the stop set sees the argv it decides on.
+    ///
+    /// The stand-in is reaped on its own thread. A dead child that nobody has
+    /// waited for is a zombie, and `kill(pid, 0)` still succeeds on one, so
+    /// without the reaper these tests could not tell a stopped process from a
+    /// running one. In production the retired runtime is never init's child.
+    #[cfg(unix)]
+    fn process_executing(at: &Path, ignores_sigterm: bool, arguments: &[&str]) -> Option<i32> {
+        use std::os::unix::fs::PermissionsExt;
+
+        if !Path::new(STAND_IN).is_file() {
+            return None;
+        }
+        fs::create_dir_all(at.parent().expect("a parent")).expect("the directory exists");
+        fs::copy(STAND_IN, at).expect("the stand-in executable is copied");
+        fs::set_permissions(at, fs::Permissions::from_mode(0o755)).expect("the stand-in is executable");
+
+        // The stand-in announces itself by creating a file. Waiting on a signal
+        // it sends is the only reliable liveness proof here: a copied binary the
+        // platform refuses to run leaves a zombie that `kill(pid, 0)` still
+        // reports as alive, so checking the pid would accept a process that
+        // never ran.
+        let ready = at.with_extension("ready");
+        let disposition = if ignores_sigterm { "$SIG{TERM} = 'IGNORE'; " } else { "" };
+        let script = format!("{disposition}open(my $f, '>', $ARGV[0]) or die; close $f; sleep 30");
+        let mut child = Command::new(at)
+            .args(["-e", &script])
+            .arg(&ready)
+            .args(arguments)
+            .spawn()
+            .expect("the stand-in process starts");
+        let pid = child.id() as i32;
+        std::thread::spawn(move || child.wait());
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if ready.is_file() {
+                return Some(pid);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        // This platform will not run the stand-in at all. Skip rather than
+        // report a pass that exercised nothing.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        None
+    }
+
+    /// Whether a pid is still running, once its reaper has had a moment.
+    #[cfg(unix)]
+    fn still_running(pid: i32) -> bool {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_runtime_at_the_retired_path_is_stopped() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let retired = directory.path().join("bin/appa");
+        let Some(pid) = process_executing(&retired, false, RUNTIME_ARGUMENTS) else {
+            return;
+        };
+
+        let survivors = stop_processes_executing(&retired).expect("the stop set runs");
+
+        assert!(survivors.is_empty(), "a stoppable runtime was reported as surviving");
+        assert!(!still_running(pid), "the runtime at the retired path is still running",);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_runtime_at_another_path_is_left_alone() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        // What an init run under a different APPA_INSTALL_DIR or APPA_DATA_DIR
+        // leaves behind: a path this environment never computes.
+        let elsewhere = directory.path().join("other-install/appa");
+        let Some(pid) = process_executing(&elsewhere, false, RUNTIME_ARGUMENTS) else {
+            return;
+        };
+        let retired = directory.path().join("bin/appa");
+        fs::create_dir_all(retired.parent().expect("a parent")).expect("the retired directory");
+        fs::copy(STAND_IN, &retired).expect("the retired binary exists but runs nothing");
+
+        let survivors = stop_processes_executing(&retired).expect("the stop set runs");
+
+        assert!(survivors.is_empty());
+        assert!(
+            still_running(pid),
+            "a runtime outside the stop set must be left running, not killed",
+        );
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+
+    /// What a second `appa init`, or an `appa hook` in flight, looks like: the
+    /// retired executable, doing something that is not serving the endpoint.
+    /// Terminating it would interrupt work unrelated to the runtime being
+    /// replaced -- and killing a concurrent init mid-switch is the worst of
+    /// them, because the Claude plugin replacement it is performing is not
+    /// atomic.
+    #[cfg(unix)]
+    #[test]
+    fn another_invocation_of_the_retired_binary_is_left_alone() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let retired = directory.path().join("bin/appa");
+        let Some(pid) = process_executing(&retired, false, &["init", "claude-code"]) else {
+            return;
+        };
+
+        let survivors = stop_processes_executing(&retired).expect("the stop set runs");
+
+        assert!(survivors.is_empty());
+        assert!(
+            still_running(pid),
+            "the stop set signalled a process that is not a runtime",
+        );
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_verified_runtime_that_refuses_to_die_is_reported() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let retired = directory.path().join("bin/appa");
+        // Ignores SIGTERM, which is exactly the case that must abort init
+        // rather than let a new plugin bind to an old runtime.
+        let Some(pid) = process_executing(&retired, true, RUNTIME_ARGUMENTS) else {
+            return;
+        };
+
+        let survivors = stop_processes_executing(&retired).expect("the stop set runs");
+
+        assert_eq!(
+            survivors,
+            vec![pid],
+            "a verified target that outlived SIGTERM must be reported, not assumed gone",
+        );
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+
     #[cfg(unix)]
     #[test]
     fn cleanup_stops_an_unlinked_legacy_runtime() {
-        use std::os::unix::fs::PermissionsExt;
-
         let directory = tempfile::tempdir().expect("temporary directory");
+        // The retired daemon was its own binary and took no subcommand; legacy
+        // cleanup matches on the executable path alone.
         let target = directory.path().join("appa-runtime");
-        fs::copy("/bin/sleep", &target).expect("the legacy executable is copied");
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).expect("the legacy executable is executable");
-        let mut child = Command::new(&target)
-            .arg("5")
-            .spawn()
-            .expect("the legacy process starts");
+        let Some(pid) = process_executing(&target, false, &[]) else {
+            return;
+        };
+        fs::remove_file(target.with_extension("ready")).expect("the readiness marker is removed");
         fs::remove_file(&target).expect("Cargo unlinks the installed legacy executable");
-        let reaper = std::thread::spawn(move || child.wait().expect("the legacy process is reaped"));
 
         stop_legacy_runtime_at(&target).expect("legacy cleanup succeeds");
 
-        let status = reaper.join().expect("the reaper joins");
-        assert!(
-            !status.success(),
-            "cleanup must stop the unlinked process before sleep completes"
-        );
+        assert!(!still_running(pid), "cleanup must stop the unlinked process");
     }
 
     #[test]
@@ -1044,7 +1498,7 @@ mod tests {
         let config = user_home()
             .unwrap_or_else(|| PathBuf::from("/home/user"))
             .join("config/appa.toml");
-        let receipt = render_receipt("current checkout", &config, false, false);
+        let receipt = render_receipt("current checkout", &config, false, None, false);
 
         assert!(receipt.starts_with("OpenAPPA initialized for Claude Code\n\n"));
         assert!(receipt.contains("Adapter   current checkout"));
@@ -1055,7 +1509,7 @@ mod tests {
         assert!(!receipt.contains("appa-runtime (healthy)"));
         assert!(!receipt.contains("\u{1b}["));
 
-        let colored = render_receipt("current checkout", &config, false, true);
+        let colored = render_receipt("current checkout", &config, false, None, true);
         assert!(colored.starts_with("\u{1b}[1;32m✓ OpenAPPA initialized\u{1b}[0m"));
     }
 }

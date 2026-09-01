@@ -12,12 +12,24 @@ on:
         required: false
         default: ""
         type: string
+      plugin_sha256:
+        description: SHA-256 of the plugin artifact these binaries must accept
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       source_ref:
         description: Branch, tag, or commit SHA to build
         required: true
         default: main
+        type: string
+      plugin_sha256:
+        description: >-
+          SHA-256 of the plugin artifact these binaries must accept, as the
+          release workflow's plugin-artifact job computes it. Required: a binary
+          built here without one refuses every init that does not pass an
+          explicit --plugin-source, and the package smoke test rejects it.
+        required: true
         type: string
 
 permissions: {}
@@ -90,8 +102,12 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
+      # The binary accepts only the plugin artifact whose digest it is built
+      # with. Baking it in at compile time is what makes a shipped binary
+      # unable to install any other release's plugin.
       - name: Build binary
         env:
+          APPA_PLUGIN_SHA256: ${{ inputs.plugin_sha256 }}
           RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
           TARGET: ${{ matrix.target }}
         run: cargo build --release --locked --package appa --target "$TARGET"
@@ -130,15 +146,13 @@ jobs:
           EXECUTABLE: ${{ matrix.executable }}
           TARGET: ${{ matrix.target }}
         run: |
+          # Binary only. The plugin ships once, platform-independently, as
+          # appa-plugin-<version>.tar.gz, and init fetches exactly the artifact
+          # whose digest this binary was built with.
           mkdir -p "dist/${ASSET}"
           cp "target/${TARGET}/release/${EXECUTABLE}" "dist/${ASSET}/${EXECUTABLE}"
-          cp -R integrations/claude-code "dist/${ASSET}/claude-code"
-          cp -R batteries "dist/${ASSET}/claude-code/batteries"
-          mkdir -p "dist/${ASSET}/claude-code/website/content/docs"
-          cp website/content/docs/contracts.md "dist/${ASSET}/claude-code/website/content/docs/contracts.md"
           if [[ "$RUNNER_OS" != "Windows" ]]; then
             chmod 755 "dist/${ASSET}/${EXECUTABLE}"
-            chmod 755 "dist/${ASSET}/claude-code/plugin/statusline.sh"
           fi
 
       - name: Package Unix archive
@@ -167,6 +181,19 @@ jobs:
           cd verify
           test -x appa
           ./appa init claude-code --help >/dev/null
+          # [profile.release] pins debug-assertions = false, so neither
+          # debug-only seam is readable here. A release binary that honoured
+          # them could be pointed at another release's plugin.
+          hostile=$(APPA_PLUGIN_SHA256=$(printf 'a%.0s' {1..64}) \
+            APPA_RELEASE_BASE_URL=http://127.0.0.1:9 \
+            APPA_ENDPOINT=http://127.0.0.1:9999 \
+            ./appa init claude-code 2>&1 || true)
+          case "$hostile" in
+            *"development build"*|*"127.0.0.1:9"*)
+              echo "::error::the released binary honoured a debug-only seam: $hostile"
+              exit 1
+              ;;
+          esac
           "./${EXECUTABLE}" runtime >runtime.stdout.log 2>runtime.stderr.log &
           runtime_pid=$!
           cleanup() {
@@ -178,15 +205,6 @@ jobs:
             if health="$(curl --fail --silent --max-time 1 http://127.0.0.1:8787/health 2>/dev/null)"; then
               test "$health" = "ok"
               test -s appa.toml
-              test -f claude-code/.claude-plugin/marketplace.json
-              test -f claude-code/plugin/.claude-plugin/plugin.json
-              test -f claude-code/plugin/.mcp.json
-              test -f claude-code/plugin/hooks/hooks.json
-              test -f claude-code/plugin/hooks/session-context.md
-              test -f claude-code/plugin/skills/appa-guide/SKILL.md
-              test -d claude-code/batteries
-              test -f claude-code/website/content/docs/contracts.md
-              test -x claude-code/plugin/statusline.sh
               exit 0
             fi
             kill -0 "$runtime_pid" 2>/dev/null || break
@@ -246,38 +264,18 @@ jobs:
             if ($LASTEXITCODE -ne 0) {
               throw "Extracted appa.exe does not expose init claude-code"
             }
-            if (-not (Test-Path (Join-Path $package "claude-code/.claude-plugin/marketplace.json"))) {
-              throw "Extracted package does not contain the Claude Code marketplace"
-            }
-            if (-not (Test-Path (Join-Path $package "claude-code/plugin/hooks/hooks.json"))) {
-              throw "Extracted package does not contain the Claude Code plugin"
-            }
-            if (-not (Test-Path (Join-Path $package "claude-code/plugin/.claude-plugin/plugin.json"))) {
-              throw "Extracted package does not contain the Claude Code plugin manifest"
-            }
-            if (-not (Test-Path (Join-Path $package "claude-code/plugin/.mcp.json"))) {
-              throw "Extracted package does not contain the Claude Code MCP configuration"
-            }
-            if (-not (Test-Path (Join-Path $package "claude-code/plugin/hooks/session-context.md"))) {
-              throw "Extracted package does not contain the Claude Code session context"
-            }
-            if (-not (Test-Path (Join-Path $package "claude-code/plugin/hooks/hooks.windows.json"))) {
-              throw "Extracted package does not contain the Windows Claude Code hooks"
-            }
-            if (-not (Test-Path (Join-Path $package "claude-code/plugin/hooks/hook.ps1"))) {
-              throw "Extracted package does not contain the Windows Claude Code hook adapter"
-            }
-            if (-not (Test-Path (Join-Path $package "claude-code/plugin/statusline.ps1"))) {
-              throw "Extracted package does not contain the Windows Claude Code statusline"
-            }
-            if (-not (Test-Path (Join-Path $package "claude-code/plugin/skills/appa-guide/SKILL.md"))) {
-              throw "Extracted package does not contain the Claude Code appa-guide skill"
-            }
-            if (-not (Test-Path (Join-Path $package "claude-code/batteries"))) {
-              throw "Extracted package does not contain batteries for appa-guide"
-            }
-            if (-not (Test-Path (Join-Path $package "claude-code/website/content/docs/contracts.md"))) {
-              throw "Extracted package does not contain the contract guide for appa-guide"
+            # A released binary must ignore both debug-only seams: the digest
+            # it accepts is compiled in, so a hostile environment cannot point
+            # it at another release's plugin.
+            $env:APPA_PLUGIN_SHA256 = "a" * 64
+            $env:APPA_RELEASE_BASE_URL = "http://127.0.0.1:9"
+            $env:APPA_ENDPOINT = "http://127.0.0.1:9999"
+            $hostile = (& $cli init claude-code 2>&1 | Out-String)
+            $env:APPA_PLUGIN_SHA256 = $null
+            $env:APPA_RELEASE_BASE_URL = $null
+            $env:APPA_ENDPOINT = $null
+            if ($hostile -match "development build" -or $hostile -match "127\.0\.0\.1:9") {
+              throw "the released binary honoured a debug-only seam: $hostile"
             }
           } finally {
             $process.Refresh()
@@ -287,6 +285,7 @@ jobs:
       - name: Upload package
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
+          name: ${{ matrix.asset }}
           path: dist/${{ matrix.archive }}
           archive: false
           if-no-files-found: error

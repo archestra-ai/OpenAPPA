@@ -10,11 +10,11 @@ param(
 # Installing the runtime is `appa init claude-code`'s job.
 $protected = $env:APPA_GATE -eq "1"
 
-$dataDir = if ($env:APPA_DATA_DIR) { $env:APPA_DATA_DIR } else { Join-Path $env:LOCALAPPDATA "appa" }
-$configDir = if ($env:APPA_CONFIG_DIR) { $env:APPA_CONFIG_DIR } else { Join-Path $env:APPDATA "appa" }
-$installDir = if ($env:APPA_INSTALL_DIR) { $env:APPA_INSTALL_DIR } else { Join-Path $dataDir "bin" }
-$binary = Join-Path $installDir "appa.exe"
-$legacyBinary = Join-Path $installDir "appa-runtime.exe"
+# appa init claude-code renders these into the deployment: the absolute binary,
+# config and data paths it resolved, and the endpoint every consumer shares.
+# Nothing here consults PATH or APPA_INSTALL_DIR.
+. (Join-Path $PSScriptRoot "appa-paths.ps1")
+$binary = $AppaBin
 
 if ($SessionContext) {
     if (-not $protected) {
@@ -24,10 +24,12 @@ if ($SessionContext) {
     exit 0
 }
 
+# APPA_RUNTIME_URL keeps both of its jobs: the URL a client talks to, and the
+# signal that the runtime answering it is the user's own to restart.
 $runtimeUrl = if ($env:APPA_RUNTIME_URL) {
     $env:APPA_RUNTIME_URL.TrimEnd("/")
 } else {
-    "http://127.0.0.1:8787"
+    $AppaEndpoint
 }
 
 function Get-HealthAnswer {
@@ -54,8 +56,7 @@ function Test-RuntimeHealthy {
 # makes the install take effect, at the cost of the protected sessions
 # already open, whose hooks fail closed until the start answers. The pid
 # arrives in an HTTP body from whoever holds the port, so only a process
-# named appa is ever stopped. The retired appa-runtime name is accepted
-# so init can replace pre-0.5 installs. Returns $true once the port refuses
+# named appa is ever stopped. Returns $true once the port refuses
 # or another starter has already replaced the runtime, $false when the
 # stale runtime cannot be stopped.
 function Stop-StaleRuntime {
@@ -68,13 +69,7 @@ function Stop-StaleRuntime {
     # the wait below sees the port refuse or that starter's replacement.
     $process = Get-Process -Id $stalePid -ErrorAction SilentlyContinue
     if ($null -ne $process) {
-        $expectedPath = if ($process.ProcessName -eq "appa") {
-            $binary
-        } elseif ($process.ProcessName -eq "appa-runtime") {
-            $legacyBinary
-        } else {
-            $null
-        }
+        $expectedPath = if ($process.ProcessName -eq "appa") { $binary } else { $null }
         if ($null -eq $expectedPath -or -not [String]::Equals(
             $process.Path,
             $expectedPath,
@@ -106,31 +101,38 @@ function Stop-StaleRuntime {
 # of the install starts it through -EnsureRuntime. A runtime whose binary
 # an install replaced is stopped first. Installing the binary is
 # not this script's job: `appa init claude-code` does that first.
+#
+# Returns $true only while a healthy runtime answers, and $false on every way
+# of failing to get one -- a stale runtime that would not stop, a missing
+# binary, a start that never became healthy. The caller must block on $false:
+# posting anyway would send the event to the stale runtime this install just
+# replaced, which is the skew the whole bundle exists to prevent.
 function Start-RuntimeIfDown {
     if (Test-RuntimeHealthy) {
-        return
+        return $true
     }
     if (-not (Stop-StaleRuntime)) {
-        return
+        return $false
     }
     if (Test-RuntimeHealthy) {
-        return
+        return $true
     }
     if (-not (Test-Path -LiteralPath $binary)) {
-        return
+        [Console]::Error.WriteLine("appa protection: appa is not installed; expected at $binary")
+        return $false
     }
     # The runtime writes the default policy on its first start and refuses
     # to start when it cannot. The policy and the database live in two
     # different directories on Windows, so both must exist first.
-    New-Item -ItemType Directory -Path $configDir -Force | Out-Null
-    New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
+    New-Item -ItemType Directory -Path (Split-Path -Parent $AppaConfig) -Force | Out-Null
+    New-Item -ItemType Directory -Path $AppaDataDir -Force | Out-Null
     # Start-Process joins ArgumentList into one Windows command line. Quote the
     # path tokens explicitly so the standard user directories may contain spaces.
-    $configPath = Join-Path $configDir "appa.toml"
-    $databasePath = Join-Path $dataDir "appa.db"
+    $databasePath = Join-Path $AppaDataDir "appa.db"
     Start-Process -FilePath $binary -WindowStyle Hidden -ArgumentList @(
         "runtime",
-        "--config", "`"$configPath`"",
+        "--listen", $AppaListen,
+        "--config", "`"$AppaConfig`"",
         "--db", "`"$databasePath`""
     ) | Out-Null
     # A wall-clock budget, not a count of probes: one probe is instant
@@ -140,10 +142,11 @@ function Start-RuntimeIfDown {
     $deadline = (Get-Date).AddSeconds(20)
     while ((Get-Date) -lt $deadline) {
         if (Test-RuntimeHealthy) {
-            return
+            return $true
         }
         Start-Sleep -Seconds 1
     }
+    $false
 }
 
 # The last step of the install starts the runtime through this switch, so
@@ -156,11 +159,10 @@ if ($EnsureRuntime) {
         [Console]::Error.WriteLine("appa protection: appa is not installed; expected at $binary")
         exit 1
     }
-    Start-RuntimeIfDown
-    if (Test-RuntimeHealthy) {
+    if (Start-RuntimeIfDown) {
         exit 0
     }
-    [Console]::Error.WriteLine("appa protection: runtime did not become healthy at $runtimeUrl. Its own error is the last line of $(Join-Path $dataDir 'runtime.stderr.log')")
+    [Console]::Error.WriteLine("appa protection: runtime did not become healthy at $runtimeUrl. Its own error is the last line of $(Join-Path $AppaDataDir 'runtime.stderr.log')")
     exit 1
 }
 
@@ -182,7 +184,14 @@ try {
         $hookInput = $null
     }
     if ($null -ne $hookInput -and $hookInput.hook_event_name -eq "SessionStart") {
-        Start-RuntimeIfDown
+        # The POSIX map chains `ensure-runtime.sh && hook.sh || exit 2`, so a
+        # starter that fails there never reaches the post. This is that chain:
+        # throwing hands the failure to the same catch every other unanswered
+        # hook takes, which blocks. Posting anyway would send the event to the
+        # stale runtime the install just replaced.
+        if (-not (Start-RuntimeIfDown)) {
+            throw "the runtime at $runtimeUrl is not healthy and could not be started"
+        }
     }
     $timeout = if ($null -ne $hookInput -and $turnEnds -contains $hookInput.hook_event_name) { 30 } else { 120 }
     $response = Invoke-WebRequest -Uri "$runtimeUrl/hook" -Method Post `

@@ -7,6 +7,9 @@ use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
+mod common;
+use common::stage_bundle;
+
 fn executable(path: &Path) {
     let mut permissions = fs::metadata(path).expect("fixture metadata").permissions();
     permissions.set_mode(0o755);
@@ -30,9 +33,14 @@ fn install_fake_curl(bin: &Path) {
     executable(&curl);
 }
 
-fn runtime_fingerprint(bin: &Path) -> String {
-    let digest = Sha256::digest(fs::read(bin.join("appa")).expect("runtime bytes"));
+fn runtime_fingerprint(deployed: &Path) -> String {
+    let digest = Sha256::digest(fs::read(deployed).expect("runtime bytes"));
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Where init deploys the harness binary: private to appa, never on PATH.
+fn deployed_binary(data: &Path) -> std::path::PathBuf {
+    data.join("bin/appa")
 }
 
 #[test]
@@ -49,7 +57,8 @@ fn init_installs_one_local_adapter_and_is_safe_to_run_again() {
     fs::copy(&appa, bin.join("appa-runtime")).expect("legacy runtime fixture is copied");
     executable(&bin.join("appa-runtime"));
     install_fake_curl(&bin);
-    let fingerprint = runtime_fingerprint(&bin);
+    let source = stage_bundle(directory.path());
+    let fingerprint = runtime_fingerprint(&appa);
 
     let fake_claude = bin.join("claude");
     fs::copy(
@@ -68,9 +77,13 @@ fn init_installs_one_local_adapter_and_is_safe_to_run_again() {
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
     let run = |reported_fingerprint: &str, fail_once: Option<&str>| {
         let mut command = Command::new(&appa);
+        // Run from a directory that holds no marketplace: default resolution
+        // must not consult the working directory, and an explicit source is an
+        // ordinary path argument.
         command
-            .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join(".."))
-            .args(["init", "claude-code"])
+            .current_dir(directory.path())
+            .args(["init", "claude-code", "--plugin-source"])
+            .arg(&source)
             .env("PATH", &path)
             .env("HOME", directory.path())
             .env("APPA_INSTALL_DIR", &bin)
@@ -91,9 +104,13 @@ fn init_installs_one_local_adapter_and_is_safe_to_run_again() {
     assert!(first.status.success(), "{}", String::from_utf8_lossy(&first.stderr));
     let first_stdout = String::from_utf8(first.stdout).expect("UTF-8 output");
     assert!(first_stdout.starts_with("OpenAPPA initialized for Claude Code"));
-    assert!(first_stdout.contains("Adapter   current checkout"));
+    assert!(first_stdout.contains("development source"));
     assert!(first_stdout.contains("(created)"));
+    // The harness binary lands on an appa-private path, not on PATH, and the
+    // copy that is on PATH is named rather than removed.
+    assert!(deployed_binary(&data).is_file());
     assert!(bin.join("appa").is_file());
+    assert!(first_stdout.contains("A previous appa remains at"));
     assert!(!bin.join("appa-runtime").exists());
     assert!(bin.join("clappa").is_file());
     assert!(bin.join("appa-statusline.sh").is_file());
@@ -163,9 +180,30 @@ fn init_installs_one_local_adapter_and_is_safe_to_run_again() {
         );
     }
 
+    // A foreign runtime already owning the endpoint is refused before Claude is
+    // touched at all, so the installation it would have replaced is still the
+    // one that is registered and running.
+    let before = fs::read_to_string(&log).expect("Claude invocation log");
     let wrong_runtime = run("not-this-build", None);
     assert!(!wrong_runtime.status.success());
     assert!(String::from_utf8_lossy(&wrong_runtime.stderr).contains("different appa build"));
+    let after = fs::read_to_string(&log).expect("Claude invocation log");
+    assert_eq!(
+        after.lines().count() - before.lines().count(),
+        after
+            .lines()
+            .skip(before.lines().count())
+            .filter(|line| line.starts_with("plugin marketplace list"))
+            .count(),
+        "a refused endpoint must not reach a single mutating claude call: {}",
+        &after[before.len()..],
+    );
+    assert!(
+        !fs::read_to_string(bin.join("clappa"))
+            .expect("launcher")
+            .contains("init did not complete"),
+        "a refused endpoint must leave the working launcher armed",
+    );
 
     let unrecoverable = run(&fingerprint, Some("plugin-install-always"));
     assert!(!unrecoverable.status.success());
@@ -198,7 +236,8 @@ fn init_keeps_a_custom_statusline() {
     fs::create_dir_all(&claude).expect("Claude directory");
     let appa = install_test_binaries(&bin);
     install_fake_curl(&bin);
-    let fingerprint = runtime_fingerprint(&bin);
+    let source = stage_bundle(directory.path());
+    let fingerprint = runtime_fingerprint(&appa);
 
     let fake_claude = bin.join("claude");
     fs::copy(
@@ -218,8 +257,9 @@ fn init_keeps_a_custom_statusline() {
     .expect("custom settings");
 
     let output = Command::new(appa)
-        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join(".."))
-        .args(["init", "claude-code"])
+        .current_dir(directory.path())
+        .args(["init", "claude-code", "--plugin-source"])
+        .arg(&source)
         .env(
             "PATH",
             format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default()),
@@ -240,4 +280,166 @@ fn init_keeps_a_custom_statusline() {
     let settings = fs::read_to_string(claude.join("settings.json")).expect("settings remain");
     assert!(settings.contains("my-status"));
     assert!(!bin.join("appa-statusline.sh").exists());
+}
+
+/// A relative directory override must not reach the rendered hooks as written.
+///
+/// Hooks run from whatever working directory Claude was launched in, so a
+/// relative `state/bin/appa` would resolve somewhere else entirely at hook time
+/// and find no binary, config or database.
+#[test]
+fn relative_directory_overrides_are_rendered_absolute() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = directory.path().canonicalize().expect("a resolved root");
+    let bin = root.join("bin");
+    let claude = root.join("claude");
+    let plugin = root.join("installed-plugin");
+    fs::create_dir_all(&bin).expect("bin directory");
+    fs::create_dir_all(plugin.join("hooks")).expect("plugin hooks");
+    let appa = install_test_binaries(&bin);
+    install_fake_curl(&bin);
+    let source = stage_bundle(&root);
+    let fingerprint = runtime_fingerprint(&appa);
+
+    let fake_claude = bin.join("claude");
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-claude.sh"),
+        &fake_claude,
+    )
+    .expect("fake claude is copied");
+    executable(&fake_claude);
+    let starter = plugin.join("hooks/ensure-runtime.sh");
+    fs::write(&starter, "#!/bin/sh\nexit 0\n").expect("fake starter");
+    executable(&starter);
+    fs::write(plugin.join("statusline.sh"), "#!/bin/sh\nexit 0\n").expect("statusline");
+
+    let output = Command::new(&appa)
+        .current_dir(&root)
+        .args(["init", "claude-code", "--plugin-source"])
+        .arg(&source)
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default()),
+        )
+        .env("HOME", &root)
+        // Relative, resolved against this working directory and no other.
+        .env("APPA_INSTALL_DIR", "bin")
+        .env("APPA_CONFIG_DIR", "config")
+        .env("APPA_DATA_DIR", "state")
+        .env("CLAUDE_CONFIG_DIR", &claude)
+        .env("FAKE_CLAUDE_HOME", &claude)
+        .env("FAKE_CLAUDE_LOG", root.join("claude.log"))
+        .env("FAKE_PLUGIN_ROOT", &plugin)
+        .env("FAKE_RUNTIME_FINGERPRINT", fingerprint)
+        .output()
+        .expect("appa init runs");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+
+    let deployments = root.join("state/deployments");
+    let deployment = fs::read_dir(&deployments)
+        .expect("the deployment directory exists")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.join("plugin/hooks/appa-paths.sh").is_file())
+        .expect("one materialized deployment");
+
+    let rendered =
+        fs::read_to_string(deployment.join("plugin/hooks/appa-paths.sh")).expect("the rendered paths file is readable");
+    for name in ["APPA_BIN", "APPA_CONFIG", "APPA_DATA_DIR"] {
+        let value = rendered
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{name}='")))
+            .and_then(|rest| rest.strip_suffix('\''))
+            .unwrap_or_else(|| panic!("{name} is missing from {rendered}"));
+        assert!(Path::new(value).is_absolute(), "{name} was rendered relative: {value}",);
+        assert!(
+            Path::new(value).starts_with(&root),
+            "{name} does not resolve under the working directory it was given: {value}",
+        );
+    }
+}
+
+/// A runtime that fails verification *after* the Claude switch must take the
+/// switch with it.
+///
+/// The preflight refuses a foreign owner that is already there, but one can
+/// arrive between the preflight and the start. Leaving the new plugin
+/// registered and the launcher armed against it would be the exact skew this
+/// bundle exists to prevent: Claude gated by a plugin talking to a runtime
+/// nobody verified. There was no plugin here before, so undoing means removing
+/// the one just installed rather than restoring a predecessor.
+#[test]
+fn a_runtime_that_fails_verification_after_the_switch_undoes_it() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = directory.path();
+    let bin = root.join("bin");
+    let claude = root.join("claude");
+    let plugin = root.join("installed-plugin");
+    fs::create_dir_all(&bin).expect("bin directory");
+    fs::create_dir_all(plugin.join("hooks")).expect("plugin hooks");
+    let appa = install_test_binaries(&bin);
+    install_fake_curl(&bin);
+    let source = stage_bundle(root);
+
+    let fake_claude = bin.join("claude");
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-claude.sh"),
+        &fake_claude,
+    )
+    .expect("fake claude is copied");
+    executable(&fake_claude);
+    let starter = plugin.join("hooks/ensure-runtime.sh");
+    fs::write(&starter, "#!/bin/sh\nexit 0\n").expect("fake starter");
+    executable(&starter);
+    fs::write(plugin.join("statusline.sh"), "#!/bin/sh\nexit 0\n").expect("statusline");
+
+    let output = Command::new(&appa)
+        .current_dir(root)
+        .args(["init", "claude-code", "--plugin-source"])
+        .arg(&source)
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default()),
+        )
+        .env("HOME", root)
+        .env("APPA_INSTALL_DIR", &bin)
+        .env("APPA_CONFIG_DIR", root.join("config"))
+        .env("APPA_DATA_DIR", root.join("data"))
+        .env("CLAUDE_CONFIG_DIR", &claude)
+        .env("FAKE_CLAUDE_HOME", &claude)
+        .env("FAKE_CLAUDE_LOG", root.join("claude.log"))
+        .env("FAKE_PLUGIN_ROOT", &plugin)
+        // The preflight sees this build; everything after it sees a stranger.
+        .env("FAKE_CURL_CALLS", root.join("curl-calls"))
+        .env("FAKE_RUNTIME_FINGERPRINT", runtime_fingerprint(&appa))
+        .env("FAKE_RUNTIME_FINGERPRINT_LATER", "not-this-build")
+        .output()
+        .expect("appa init runs");
+
+    assert!(
+        !output.status.success(),
+        "verification against a foreign runtime must fail init",
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("different appa build"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let registry: serde_json::Value =
+        serde_json::from_slice(&fs::read(claude.join("plugins/installed_plugins.json")).expect("plugin registry"))
+            .expect("registry JSON");
+    assert_eq!(
+        registry["plugins"]["appa-runtime@appa"].as_array().map(Vec::len),
+        None,
+        "the plugin must not stay registered against a runtime that failed verification",
+    );
+    assert!(
+        !claude.join("marketplace-appa").is_file(),
+        "the marketplace must not stay registered either",
+    );
+    assert!(
+        !bin.join("clappa").exists(),
+        "the launcher must not be armed for a bundle whose runtime failed verification",
+    );
 }

@@ -32,6 +32,7 @@ dead_code = "deny"
 # `panic` stays at the default unwind: a module crate built in this workspace
 # needs it to contain a panic at its `extern "C"` boundary (see appa-builtin).
 [profile.release]
+debug-assertions = false
 opt-level = "s"
 lto = "thin"
 codegen-units = 16

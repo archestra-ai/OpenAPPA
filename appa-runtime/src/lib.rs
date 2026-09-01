@@ -7,6 +7,7 @@ pub mod hook_client;
 pub mod hooks;
 pub mod init;
 pub mod mcp;
+pub mod plugin_bundle;
 #[path = "main.rs"]
 pub mod runtime_cli;
 pub mod tls;
