@@ -499,12 +499,12 @@ impl DeclaredAudience {
 /// the source reports — consulted by derivation and by extensional closure, never by
 /// canonicalization.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct WithinAssertions {
+pub(crate) struct WithinAssertions {
     targets: BTreeMap<GroupName, ChainAudience>,
 }
 
 impl WithinAssertions {
-    pub fn new(targets: impl IntoIterator<Item = (GroupName, ChainAudience)>) -> WithinAssertions {
+    pub(crate) fn new(targets: impl IntoIterator<Item = (GroupName, ChainAudience)>) -> WithinAssertions {
         WithinAssertions {
             targets: targets.into_iter().collect(),
         }
@@ -591,10 +591,10 @@ impl Expansions {
 /// readers canonicalize), and the operation's answers. The first two are policy, fixed for
 /// the trajectory; the answers are the operation's pinned evidence.
 #[derive(Clone, Copy, Debug)]
-pub struct MembershipContext<'a> {
-    pub within: &'a WithinAssertions,
-    pub providers: &'a BTreeSet<String>,
-    pub expansions: &'a Expansions,
+pub(crate) struct MembershipContext<'a> {
+    pub(crate) within: &'a WithinAssertions,
+    pub(crate) providers: &'a BTreeSet<String>,
+    pub(crate) expansions: &'a Expansions,
 }
 
 /// Test fixture: owned context parts, so a unit test borrows one binding instead of three.
@@ -614,7 +614,7 @@ impl TestContext {
 }
 
 impl<'a> MembershipContext<'a> {
-    pub fn new(
+    pub(crate) fn new(
         within: &'a WithinAssertions,
         providers: &'a BTreeSet<String>,
         expansions: &'a Expansions,

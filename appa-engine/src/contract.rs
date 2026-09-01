@@ -48,7 +48,7 @@ impl Delta {
     }
 
     /// The symbolic atoms this delta writes into the label.
-    pub fn symbolic_atoms(&self) -> impl Iterator<Item = SymbolicAtom> + '_ {
+    pub(crate) fn symbolic_atoms(&self) -> impl Iterator<Item = SymbolicAtom> + '_ {
         self.audience.iter().flat_map(DeclaredAudience::symbolic_atoms)
     }
 }

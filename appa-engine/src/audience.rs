@@ -108,7 +108,7 @@ impl AudienceEvidence {
 
     /// Does this evidence carry every entry of `other`? An operation may extend what an
     /// earlier record pinned, never contradict or drop it.
-    pub fn contains(&self, other: &AudienceEvidence) -> bool {
+    pub(crate) fn contains(&self, other: &AudienceEvidence) -> bool {
         other.sources.iter().all(|claims| self.sources.contains(claims))
             && other.lookups.iter().all(|lookup| self.lookups.contains(lookup))
             && other.identity.iter().all(|mapping| self.identity.contains(mapping))
@@ -265,7 +265,7 @@ pub fn folded_claims(evidence: &AudienceEvidence) -> Result<BTreeMap<String, Mem
 /// equality: no dot folding, no `+suffix` stripping, no alias folding, and the local part
 /// keeps its case ([`ReaderId::new`] lowercases only the domain). A malformed claimed email
 /// is an invalid answer, never a silent fallback.
-pub fn verified_email_principal(claims: &MemberClaims) -> Result<ReaderId, EvidenceRefusal> {
+pub(crate) fn verified_email_principal(claims: &MemberClaims) -> Result<ReaderId, EvidenceRefusal> {
     match &claims.verified_email {
         None => Ok(ReaderId::new(claims.id.clone())),
         Some(email) => match crate::label::address_parts(email) {
@@ -489,7 +489,7 @@ impl AudienceRegistry {
     }
 
     /// The declared `within` assertions, as the evaluation consumes them.
-    pub fn within_assertions(&self) -> &crate::label::WithinAssertions {
+    pub(crate) fn within_assertions(&self) -> &crate::label::WithinAssertions {
         &self.within
     }
 
