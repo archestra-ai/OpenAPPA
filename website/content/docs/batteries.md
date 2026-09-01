@@ -1,7 +1,7 @@
 ---
 title: Batteries
-category: Integration
-order: 7
+category: Deep Dive
+order: 4
 description: Combine OpenAPPA configs and run annotator scripts.
 ---
 

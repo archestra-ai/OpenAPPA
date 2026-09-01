@@ -1,11 +1,13 @@
 ---
-title: kagent integration
-nav_title: kagent
+title: kAgent
+nav_title: kAgent
+category: Integrations
+order: 6
 description: Proposal for a dynamically supplied OpenAPPA ADK extension in kagent.
 ---
 
 :::proposal
-name: kagent integration
+name: kAgent
 date: 2026-08-27
 :::
 
