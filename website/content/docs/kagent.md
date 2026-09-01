@@ -157,6 +157,10 @@ The load-bearing enforcement points, proven in the pinned ADK sources:
 - The user-message callback fires before the session append, so a blocked prompt never lands in stored history.
 - An agent called as a tool crosses the same gate as any tool call, and the parent side substitutes its return.
 
+### Every gated call runs under one contract
+
+The policy produces the contract for a tool call in one of two ways: a static declaration, or a registered annotator that answers it per call. The consult happens inside the tool gate, on the runtime side — kagent never sees it. A wildcard annotator covers the tools the policy never names. That posture fits a kagent fleet, where CRD-declared toolsets produce a long tail of tools.
+
 ### Remedy plans stay executable
 
 A block is not a dead end. The blocking feedback quotes an offer id, and the agent executes the offered plan through `execute_remedy_plan` — the reserved tool `appa-runtime` itself serves. The images inject it at agent construction, beside `AppaPluginKagent`, so every declarative agent carries it with zero agent changes.

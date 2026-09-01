@@ -322,9 +322,33 @@ The go runtime carries the channel too. adk/v2 defines the confirmation contract
 
 Design: gate `execute_remedy_plan` with `require_confirmation` — the python `Callable` form, or `RequireConfirmationProvider` on the go toolset — scoped to offers whose plan needs a person. The approval then rides the stock kagent suspend/resume flow. One decision stays open before this ships: kagent approves before execution, where the elicitation consult answers during it. Whether the stock approval stands as the proof the authority requires — or a kagent-shaped authority channel gets its own name — is a question the spec settles, not this plan. Until then, a plan that names a human review stands unexecuted: no answer grants nothing, and the offer stands.
 
+## Annotators
+
+A `[[tool]]` entry either declares the complete contract or names a registered annotator, which answers it per proposed call. The consult runs engine-side inside the `ToolCall` round-trip, and the envelope carries only the annotator declaration and the artifact ([appa-runtime/src/consult.rs](../../appa-runtime/src/consult.rs)). The kagent wire already supplies the artifact ingredients — the tool name and the raw argument bytes — so annotators need no kagent surface, no plugin change, and no wire change. A no-answer renders as `Refuse` on the `ToolCall` hook, never as model-facing feedback ([appa-runtime/src/hooks.rs](../../appa-runtime/src/hooks.rs)) — the mapped `Refuse` leg in each table above.
+
+Three kagent-specific notes:
+
+- **Timeout budget.** The plugin `/hook` client timeout must exceed the runtime consult budget, or a slow annotator — endpoint, command, or model builtin — becomes a spurious fail-closed block. ADK has no callback timeout, so kagent carries no fail-open hazard: a slow consult costs latency, bounded upstream by A2A client patience.
+- **Tool naming and coverage.** An annotation pins to the canonical digest under the tool name as ADK dispatches it. `[[tool]]` entries and mandates must match that spelling for every toolset — an equivalence-test item below. The wildcard entry (`name = "*"`) is the recommended first posture for a fleet: CRD-declared toolsets produce a long tail the policy never names up front. Optional tooling: generate `[[tool]]` skeletons from the `Agent` and `RemoteMCPServer` resources in the cluster. The reserved `execute_remedy_plan` needs no entry — the runtime recognizes its own tool first.
+- **Builtin provisioning.** Model-builtin annotators execute in the `appa-runtime` deployment ([appa-runtime/src/external.rs](../../appa-runtime/src/external.rs)). `builtin = "llm"` needs `[externals.llm]` and model egress from the runtime pod. `builtin = "claude-code"` needs the claude CLI where the runtime runs. The quickstart inherits the same needs, because it bundles the runtime.
+
 ## Wire and codec
 
 Each plugin emits one JSON event per callback: event kind, trajectory ids, tool name, raw argument bytes, outcome, and value fields — the data the matching `HookEvent` variant needs. The `appa-adapter-kagent` Rust crate parses this wire into `HookEvent` and renders each `HookDecision` into the response the plugins enforce, through the `Codec` contract of `appa-runtime-api` (`parse`, `render`). The wire carries no policy meaning. Raw tool arguments cross as spelled, and the Engine canonicalizes them. The reserved tool crosses as spelled too — `execute_remedy_plan` — so the runtime recognizes its own tool and binds the vouch. One wire and one codec serve both runtime images.
+
+### Labels and flow completeness
+
+The contract triple — `delta`, `requires`, `emits` — is engine algebra, and no label crosses the wire in either direction. The engine narrows the trajectory label with `delta` when it admits a result. It checks `requires` — membership, `history`, and `attention` marks — against trajectory state at dispatch ([appa-engine/src/check.rs](../../appa-engine/src/check.rs)). It records `emits` into the effect ledger, and effects commit on `Success`, never on `Indeterminate`.
+
+That algebra is sound only over the flows the runtime saw, so the plugin keeps one invariant: every value that enters model attention or leaves the agent crosses a mapped hook. On kagent the list is closed:
+
+- User input crosses at `Prompt`, before the session append.
+- Tool and child returns cross at `ToolResult` and `SpawnResult`.
+- Delegated entries cross at `ChildStart`.
+- ADK memory and artifact loaders are ordinary tools, so they cross the tool gate.
+- The CRD-compiled instruction is static config, not a flow.
+
+The liveness gates hold everything else when the `/hook` channel is down. The implemented model gates sinks at tool dispatch and defines no emission event — `TurnEnd` gates nothing by design ([appa-runtime/src/hooks.rs](../../appa-runtime/src/hooks.rs)). If the spec later defines a gated response sink, `on_event_callback` is the ready carrier on kagent: it can replace events. That is a forward path, not current behavior.
 
 ## Trajectory identity
 
@@ -380,6 +404,7 @@ Adapter tests (per runtime):
 Equivalence tests:
 
 - Each entrypoint output matches the stock counterpart for the same rendered config, minus the added plugin.
+- Record the tool names each toolset dispatches, per ADK version. `[[tool]]` entries and mandates match that spelling.
 - Re-run on every kagent and ADK version bump, per lane. The callback tables re-verify against the newly locked ADK.
 
 End-to-end tests:
@@ -390,5 +415,8 @@ End-to-end tests:
 - Cross-workload trajectory: parent and delegated child against one shared runtime — one trajectory, `ChildStart` and `SpawnResult` correlated.
 - Remedy execution per plan element: accept-narrowing, authorize with a stock authority, sanitize, derive hop, and redispatch — each on a gated agent, with the vouch spent once per act.
 - Human review: `require_confirmation` suspends the reserved call, an approval from the A2A client executes it, and a decline leaves the offer standing.
+- Annotated tool: the consult happens once, the annotation pins to the canonical digest, and replay re-reaches the decision without a second consult.
+- Annotator down: the gated call refuses at the `ToolCall` hook, and nothing model-facing crosses.
+- Wildcard: a tool the policy never names routes through the wildcard annotator and runs annotated.
 - Crash window: kill the agent workload between `ToolCall` and `ToolResult`, then make sure the runtime reports the dispatch `Indeterminate`.
 - Error-turn window per cell: on cell A-py and both go cells, force an unhandled model failure and make sure recovery closes the turn at the next admitted event. On the lane B python cells, make sure the error callbacks feed the failure `TurnEnd`s.
