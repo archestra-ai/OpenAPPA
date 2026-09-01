@@ -1945,6 +1945,9 @@ fn refusal_class(refusal: &appa_engine::audience::EvidenceRefusal) -> String {
         EvidenceRefusal::UnroutableLookup { provider, .. } => {
             format!("no registered audience provider {provider} serves a member lookup")
         }
+        EvidenceRefusal::UnrequestedEvidence { .. } => {
+            "evidence beyond this operation's inherited pins and its own asks".to_string()
+        }
     }
 }
 

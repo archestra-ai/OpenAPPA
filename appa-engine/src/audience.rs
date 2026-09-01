@@ -86,9 +86,10 @@ impl<'de> Deserialize<'de> for IdentityMapping {
 }
 
 /// The primitive audience evidence one operation pins: everything its expansions are
-/// recomputed from. Duplicate or conflicting entries never validate. Routable answers beyond
-/// what an act asks are admissible — they only pre-answer later asks — and replay holds every
-/// entry, surplus included, to the same validation.
+/// recomputed from. Duplicate or conflicting entries never validate, and after the act's
+/// decision runs, every entry must be an inherited pin or answer an ask the operation
+/// actually made ([`AudienceRegistry::only_requested`]) — evidence cannot be pre-loaded for
+/// asks nobody made, live or at replay.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AudienceEvidence {
@@ -182,6 +183,8 @@ pub enum EvidenceRefusal {
     UnroutableSelector { provider: String, selector: String },
     #[error("no registered audience provider {provider} serves the lookup of {member:?}")]
     UnroutableLookup { provider: String, member: String },
+    #[error("evidence entry {entry} is neither an inherited pin nor requested by this operation")]
+    UnrequestedEvidence { entry: String },
 }
 
 /// The conservative `verified-email` normalization, shipped and deterministic: a member with
@@ -656,6 +659,77 @@ impl AudienceRegistry {
         }
 
         Ok(Expansions::new(answers))
+    }
+
+    /// The operation-scope test on one act's pinned evidence: every entry is an inherited
+    /// pin — pinned by a record this act continues — or answers a primitive the operation
+    /// deterministically requested, read off the context's ask log after the decision ran.
+    /// Anything else is refused: evidence cannot be pre-loaded for asks nobody made. The
+    /// live act and its replay run this same test over the same reads.
+    pub fn only_requested(
+        &self,
+        evidence: &AudienceEvidence,
+        inherited: &AudienceEvidence,
+        reads: &[SymbolicAtom],
+    ) -> Result<(), EvidenceRefusal> {
+        // Per-atom translation: a routable ask justifies its primitives; an unroutable ask
+        // never answered, so it justifies nothing.
+        let mut requested = NeededPrimitives::default();
+        for atom in reads {
+            if let Ok(primitives) = self.needed_primitives(std::slice::from_ref(atom)) {
+                requested.selectors.extend(primitives.selectors);
+                requested.lookups.extend(primitives.lookups);
+            }
+        }
+        for claims in &evidence.sources {
+            let spec = SelectorSpec {
+                provider: claims.provider.clone(),
+                selector: claims.selector.clone(),
+            };
+            if !requested.selectors.contains(&spec) && !inherited.sources.contains(claims) {
+                return Err(EvidenceRefusal::UnrequestedEvidence {
+                    entry: format!("source {}:{}", claims.provider, claims.selector),
+                });
+            }
+        }
+        for lookup in &evidence.lookups {
+            let spec = SelectorSpec {
+                provider: lookup.provider.clone(),
+                selector: lookup.member.clone(),
+            };
+            if !requested.lookups.contains(&spec) && !inherited.lookups.contains(lookup) {
+                return Err(EvidenceRefusal::UnrequestedEvidence {
+                    entry: format!("lookup {}", lookup.member),
+                });
+            }
+        }
+        // An identity mapping is requested only through a member the admitted evidence
+        // reports, and only under a custom implementation — the shipped normalization
+        // recomputes and pins nothing.
+        let occurring = |id: &str| {
+            evidence
+                .sources
+                .iter()
+                .flat_map(|claims| claims.members.iter())
+                .any(|member| member.id == id)
+                || evidence
+                    .lookups
+                    .iter()
+                    .filter_map(|lookup| lookup.claims.as_ref())
+                    .any(|claims| claims.id == id)
+        };
+        for mapping in &evidence.identity {
+            let requested = match &self.identity {
+                IdentityImplementation::Custom(_) => occurring(&mapping.id),
+                IdentityImplementation::VerifiedEmail => false,
+            };
+            if !requested && !inherited.identity.contains(mapping) {
+                return Err(EvidenceRefusal::UnrequestedEvidence {
+                    entry: format!("identity mapping for {}", mapping.id),
+                });
+            }
+        }
+        Ok(())
     }
 }
 

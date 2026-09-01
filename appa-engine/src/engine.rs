@@ -257,13 +257,19 @@ impl Engine {
             return Err(TransitionError::UnopenedTrajectory);
         }
         let act = self.event_evidence(view, &event)?;
-        match event {
+        let decision = match event {
             EngineEvent::Proposals(batch) => self.decide_proposals(view, &batch, &act),
             EngineEvent::Outcome(report) => self.decide_outcome(view, &report, &act),
             EngineEvent::ChildReturn(report) => self.decide_child_return(view, &report, &act),
             EngineEvent::BindFork(binding) => self.decide_binding(view, &binding),
             EngineEvent::ExecuteOffer(execution) => self.decide_offer(view, &execution, &act),
-        }
+        }?;
+        // The operation-scope test, after the decision's reads are complete: every pinned
+        // entry is inherited or answers an ask this act actually made.
+        self.registry
+            .audience()
+            .only_requested(&act.evidence, &act.inherited.borrow(), &act.expansions.reads())?;
+        Ok(decision)
     }
 
     /// The act's audience reading: the event's own pinned primitives over the ones the record
@@ -271,33 +277,41 @@ impl Engine {
     /// from its dispatch's.
     fn event_evidence(&self, view: &EngineView, event: &EngineEvent) -> Result<ActEvidence, TransitionError> {
         let projection = view.projection();
-        let merged = match event {
-            EngineEvent::Proposals(batch) => batch.audience.clone(),
+        let (merged, inherited) = match event {
+            EngineEvent::Proposals(batch) => (batch.audience.clone(), AudienceEvidence::default()),
             EngineEvent::ExecuteOffer(execution) => {
                 let views = projection.view(&execution.trajectory);
                 match views.offer(&execution.offer) {
-                    Some(offer) => execution.audience.inheriting(&offer.evidence),
-                    None => execution.audience.clone(),
+                    Some(offer) => (execution.audience.inheriting(&offer.evidence), offer.evidence.clone()),
+                    None => (execution.audience.clone(), AudienceEvidence::default()),
                 }
             }
             EngineEvent::Outcome(report) => {
                 let views = projection.view(report.dispatch.trajectory());
                 match views.dispatch_evidence(&report.dispatch) {
-                    Some(pinned) => report.audience.inheriting(pinned),
-                    None => report.audience.clone(),
+                    Some(pinned) => (report.audience.inheriting(pinned), pinned.clone()),
+                    None => (report.audience.clone(), AudienceEvidence::default()),
                 }
             }
-            EngineEvent::ChildReturn(report) => report.audience.clone(),
-            EngineEvent::BindFork(_) => AudienceEvidence::default(),
+            EngineEvent::ChildReturn(report) => (report.audience.clone(), AudienceEvidence::default()),
+            EngineEvent::BindFork(_) => (AudienceEvidence::default(), AudienceEvidence::default()),
         };
-        self.act_evidence(merged)
+        self.act_evidence(merged, inherited)
     }
 
     /// Validate one act's merged evidence and recompute the answers it carries. Junk or
     /// foreign evidence never enters a decision, whatever answers it would add.
-    fn act_evidence(&self, evidence: AudienceEvidence) -> Result<ActEvidence, TransitionError> {
+    fn act_evidence(
+        &self,
+        evidence: AudienceEvidence,
+        inherited: AudienceEvidence,
+    ) -> Result<ActEvidence, TransitionError> {
         let expansions = self.registry.audience().expansions(&evidence)?;
-        Ok(ActEvidence { evidence, expansions })
+        Ok(ActEvidence {
+            evidence,
+            expansions,
+            inherited: std::cell::RefCell::new(inherited),
+        })
     }
 
     fn context<'e>(&'e self, act: &'e ActEvidence) -> MembershipContext<'e> {
@@ -1626,10 +1640,13 @@ impl Engine {
         if recorded.evidence != batch.audience {
             return Err(TransitionError::BatchIdentityConflict);
         }
-        let under = self.act_evidence(act.evidence.inheriting(&recorded.evidence))?;
+        act.inherit(&recorded.evidence);
+        let under = self.act_evidence(act.evidence.inheriting(&recorded.evidence), AudienceEvidence::default())?;
+        let follow_up = self.decided_follow_up(views, batch, &proposals, &recorded.released, &under)?;
+        act.expansions.absorb_reads(&under.expansions);
         Ok(Some(EngineDecision {
             append: None,
-            follow_up: self.decided_follow_up(views, batch, &proposals, &recorded.released, &under)?,
+            follow_up,
         }))
     }
 
@@ -1975,7 +1992,9 @@ impl Engine {
             .enumerate()
             .map(|(position, call)| {
                 let subject = subject_at(position);
-                let under = self.act_evidence(act.evidence.inheriting(&views.candidate_evidence(&subject)))?;
+                let pinned = views.candidate_evidence(&subject);
+                act.inherit(&pinned);
+                let under = self.act_evidence(act.evidence.inheriting(&pinned), AudienceEvidence::default())?;
                 Ok((views.standing_call(&subject).unwrap_or(call), under))
             })
             .collect::<Result<_, TransitionError>>()?;
@@ -2059,6 +2078,9 @@ impl Engine {
                     }
                 }
             }
+        }
+        for (_, under) in &standing {
+            act.expansions.absorb_reads(&under.expansions);
         }
         Ok(FollowUp::Proposals {
             released,
@@ -2789,8 +2811,12 @@ impl Engine {
         if views.pending_block(&recorded.subject).is_some() {
             // The candidate may stand under another contract than the offer was planned on; the
             // atoms that contract reads were pinned by the hop that derived it.
-            let under = self.act_evidence(act.evidence.inheriting(&views.candidate_evidence(&recorded.subject)))?;
-            return Ok(match self.reblocked(views, recorded, execution, &under)? {
+            let pinned = views.candidate_evidence(&recorded.subject);
+            act.inherit(&pinned);
+            let under = self.act_evidence(act.evidence.inheriting(&pinned), AudienceEvidence::default())?;
+            let reblocked = self.reblocked(views, recorded, execution, &under)?;
+            act.expansions.absorb_reads(&under.expansions);
+            return Ok(match reblocked {
                 Some(block) => OfferFollowUp::Substituted { block: Box::new(block) },
                 None => OfferFollowUp::Invalidated,
             });
@@ -3603,25 +3629,46 @@ pub(crate) enum ComposeRefusal {
     MembershipNeeded(crate::label::MembershipNeeded),
 }
 
-/// One act's audience reading: the merged pinned evidence its records persist, and the
-/// membership answers that evidence recomputes to. Built only through validation, so a
-/// context over it always reads admissible answers.
+/// One act's audience reading: the merged pinned evidence its records persist, the
+/// membership answers that evidence recomputes to, and the inherited pins — entries earlier
+/// records of this chain already pinned, which the operation-scope test excuses. Built only
+/// through validation, so a context over it always reads admissible answers.
 #[derive(Clone, Debug)]
 pub(crate) struct ActEvidence {
     evidence: AudienceEvidence,
     expansions: Expansions,
+    inherited: std::cell::RefCell<AudienceEvidence>,
 }
 
 impl ActEvidence {
     /// Assemble from parts a caller validated together: the transition validator recomputes
-    /// `expansions` from `evidence` before building this.
+    /// `expansions` from `evidence` before building this. The validator runs its own
+    /// per-act operation-scope audit, so no inherited pins are carried here.
     pub(crate) fn validated(evidence: AudienceEvidence, expansions: Expansions) -> ActEvidence {
-        ActEvidence { evidence, expansions }
+        ActEvidence {
+            evidence,
+            expansions,
+            inherited: std::cell::RefCell::default(),
+        }
     }
 
     /// The evidence a record of this act pins.
     pub(crate) fn pinned(&self) -> AudienceEvidence {
         self.evidence.clone()
+    }
+
+    /// The context's answers and ask log, for the validator's per-act audit.
+    pub(crate) fn expansions(&self) -> &Expansions {
+        &self.expansions
+    }
+
+    /// Count `pins` — entries a record this act continues already pinned — as inherited, so
+    /// the operation-scope test excuses them. Interior mutability: overlay contexts built
+    /// mid-decision discover pins the act-building event could not name.
+    fn inherit(&self, pins: &AudienceEvidence) {
+        let mut inherited = self.inherited.borrow_mut();
+        let merged = inherited.inheriting(pins);
+        *inherited = merged;
     }
 }
 
@@ -3692,15 +3739,13 @@ pub(crate) fn compose_batch<'a>(
             let spends = if singleton { approval(&views, call) } else { None };
             let under = match spends.and_then(|offer| views.approval(&offer)) {
                 Some(prepared) => {
+                    act.inherit(&prepared.evidence);
                     let merged = act.evidence.inheriting(&prepared.evidence);
                     let expansions = registry
                         .audience()
                         .expansions(&merged)
                         .expect("two validated evidence sets merge into a validated one");
-                    std::borrow::Cow::Owned(ActEvidence {
-                        evidence: merged,
-                        expansions,
-                    })
+                    std::borrow::Cow::Owned(ActEvidence::validated(merged, expansions))
                 }
                 None => std::borrow::Cow::Borrowed(act),
             };
@@ -3801,6 +3846,13 @@ pub(crate) fn compose_batch<'a>(
             }
         }
         composed.push(Some(release));
+    }
+    // A spent approval's overlay context read on behalf of this act; the act's
+    // operation-scope justification must count those asks.
+    for (under, _) in &per_call {
+        if let std::borrow::Cow::Owned(under) = under {
+            act.expansions.absorb_reads(&under.expansions);
+        }
     }
     Ok(composed)
 }
@@ -11717,24 +11769,65 @@ mod tests {
             ))
         ));
 
-        // Routable answers beyond the asked atoms ride along: evidence may exceed the ask,
-        // never contradict it.
+        // Routable answers beyond the asked atoms are refused, not carried along: evidence
+        // is scoped to the operation's own asks and inherited pins, never pre-loaded.
         let surplus = source_evidence(vec![
             user_group("team", vec![slack_member("slack:UA", Some("alice@corp.com"))]),
             user_group("nobody", vec![]),
         ]);
-        let decision = e
-            .handle(
+        assert_eq!(
+            e.handle(
                 &viewing(&e, &log),
                 evidenced_batch("b3", vec![send_to("@team")], surplus),
-            )
-            .expect("surplus routable answers are admissible");
+            ),
+            Err(TransitionError::Invalid(TransitionRefusal::UnrequestedEvidence {
+                entry: "source slack:user-group/nobody".to_string()
+            }))
+        );
+        let exact = source_evidence(vec![user_group(
+            "team",
+            vec![slack_member("slack:UA", Some("alice@corp.com"))],
+        )]);
+        let decision = e
+            .handle(&viewing(&e, &log), evidenced_batch("b3", vec![send_to("@team")], exact))
+            .expect("the asked answers decide");
         assert_eq!(tool_names(answered(&decision).0), ["send"]);
 
         let decision = e
             .handle(&viewing(&e, &log), batch("b4", Vec::new(), vec![send_to("@")]))
             .expect("a malformed spelling still decides");
         assert!(answered(&decision).0.is_empty());
+    }
+
+    #[test]
+    fn replay_refuses_pinned_evidence_no_operation_requested() {
+        let e = audience_engine(vec![], known(TRUSTED, Audience::restricted([corp_reader("alice")])));
+        let log = vec![opened(&e)];
+        let exact = source_evidence(vec![user_group(
+            "team",
+            vec![slack_member("slack:UA", Some("alice@corp.com"))],
+        )]);
+        let decision = e
+            .handle(&viewing(&e, &log), evidenced_batch("b1", vec![send_to("@team")], exact))
+            .expect("the asked answers decide");
+        let mut facts = appended_facts(decision);
+        assert_eq!(e.validate_replay(&[log.clone(), facts.clone()].concat()), Ok(()));
+        // Tamper: a routable-but-unrequested answer smuggled consistently into every pinned
+        // evidence field of the act, so only the operation-scope audit can catch it.
+        for fact in &mut facts {
+            match fact {
+                Fact::ProposalBatchDecided { evidence, .. } | Fact::DispatchOpened { evidence, .. } => {
+                    evidence.sources.push(user_group("nobody", vec![]));
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            e.validate_replay(&[log, facts].concat()),
+            Err(TransitionRefusal::UnrequestedEvidence {
+                entry: "source slack:user-group/nobody".to_string()
+            })
+        );
     }
 
     #[test]

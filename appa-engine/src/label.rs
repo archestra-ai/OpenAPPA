@@ -491,20 +491,47 @@ pub struct MembershipNeeded {
 /// evidence — source answers, member lookups, identity mappings — and rebuilt identically on
 /// replay, so a live decision and its replay read the same directory answers. An empty set is
 /// a valid answer.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+///
+/// Every ask through [`Expansions::members`] — answered or not — lands in the reads log, so
+/// after a decision runs the log names exactly the atoms the operation deterministically
+/// requested. The log is bookkeeping, never an answer: it takes no part in equality.
+#[derive(Clone, Debug, Default)]
 pub struct Expansions {
     answers: BTreeMap<SymbolicAtom, BTreeSet<ReaderId>>,
+    reads: std::cell::RefCell<BTreeSet<SymbolicAtom>>,
 }
+
+impl PartialEq for Expansions {
+    fn eq(&self, other: &Expansions) -> bool {
+        self.answers == other.answers
+    }
+}
+
+impl Eq for Expansions {}
 
 impl Expansions {
     pub fn new(answers: impl IntoIterator<Item = (SymbolicAtom, BTreeSet<ReaderId>)>) -> Expansions {
         Expansions {
             answers: answers.into_iter().collect(),
+            reads: std::cell::RefCell::default(),
         }
     }
 
     pub(crate) fn members(&self, atom: &SymbolicAtom) -> Option<&BTreeSet<ReaderId>> {
+        self.reads.borrow_mut().insert(atom.clone());
         self.answers.get(atom)
+    }
+
+    /// The atoms asked so far, sorted. A snapshot: later asks keep logging.
+    pub(crate) fn reads(&self) -> Vec<SymbolicAtom> {
+        self.reads.borrow().iter().cloned().collect()
+    }
+
+    /// Fold another context's asks into this log — an overlay context reads on behalf of the
+    /// same act, and the act's justification must count those asks.
+    pub(crate) fn absorb_reads(&self, other: &Expansions) {
+        let absorbed: Vec<SymbolicAtom> = other.reads.borrow().iter().cloned().collect();
+        self.reads.borrow_mut().extend(absorbed);
     }
 }
 

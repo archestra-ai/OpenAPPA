@@ -49,7 +49,7 @@ OpenAPPA ships a built-in audience chain:
 
 `self` is the deployment's operating human. `internal` is the organization. `public` is the unrestricted state. The chain is fixed — a policy maps sources into its levels but never adds levels. Beyond the chain, `[[audience.group]]` declares named audiences (`@finance`), composed from the same sources.
 
-A symbolic audience is a named reader set, and it stays symbolic: a label holds `internal ∩ [alice]` or `internal ∩ @finance` without expanding either name. When a decision needs actual membership — a `contains` or `within` comparison — OpenAPPA consults the configured sources for exactly the sets that decision reads, pins the answers to that one act, and records them with it. Replay reads the pinned answers and never consults a source. Directory changes apply to the next act; they never rewrite a label.
+A symbolic audience is a named reader set, and it stays symbolic: a label holds `internal ∩ [alice]` or `internal ∩ @finance` without expanding either name. When a decision needs actual membership — a `contains` or `within` comparison — OpenAPPA consults the configured sources for exactly the sets that decision reads, pins the answers to that one act, and records them with it. An act accepts only that evidence: an answer neither inherited from the record the act continues nor requested by its own reads is refused, live and at replay. Replay reads the pinned answers and never consults a source. Directory changes apply to the next act; they never rewrite a label.
 
 #### Audience sources
 

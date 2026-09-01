@@ -671,6 +671,8 @@ pub enum OpeningTransitionRefusal {
 pub enum TransitionRefusal {
     #[error("the family log does not open with its TrajectoryOpened record")]
     Unopened,
+    #[error("evidence entry {entry} is neither an inherited pin nor requested by its act")]
+    UnrequestedEvidence { entry: String },
     #[error("the family log's opening record cannot be trusted: {0}")]
     Opening(#[from] OpeningTransitionRefusal),
     #[error("a record names a trajectory this family has not opened")]
@@ -865,6 +867,19 @@ impl Remedy {
     }
 }
 
+/// The per-act operation-scope audit: the union of the pinned evidence the act's records
+/// carry, the asks their validations re-made (plus the deterministic gate atoms the live act
+/// answered), and the pins of the records the act continues. Settled when the act closes:
+/// every pinned entry must be an inherited pin or answer a collected ask — the same
+/// `only_requested` test the live act passed, so a log cannot smuggle evidence no operation
+/// requested.
+#[derive(Default)]
+struct ActAudit {
+    evidence: AudienceEvidence,
+    inherited: AudienceEvidence,
+    reads: BTreeSet<crate::label::SymbolicAtom>,
+}
+
 /// The one sequential transition validator. It admits records one at a time against the
 /// state the records before them built, and folds each admitted record into that state through
 /// [`Projection::fold`] — the same fold a held view advances by, so validation and projection can
@@ -890,6 +905,8 @@ pub(crate) struct Sequence<'a> {
     deciding: Option<ProposalBatchId>,
     owing: Option<Owed>,
     substituted: Option<Substitution>,
+    /// Interior mutability because contributions come from `&self` validation helpers.
+    audit: std::cell::RefCell<ActAudit>,
 }
 
 struct Substitution {
@@ -969,6 +986,7 @@ impl<'a> Sequence<'a> {
             menu: None,
             owing: None,
             substituted: None,
+            audit: std::cell::RefCell::default(),
         }
     }
 
@@ -994,6 +1012,7 @@ impl<'a> Sequence<'a> {
             menu: None,
             owing: None,
             substituted: None,
+            audit: std::cell::RefCell::default(),
         }
     }
 
@@ -1432,6 +1451,7 @@ impl<'a> Sequence<'a> {
         }
         let expansions = self.recorded_expansions(evidence)?;
         let menu = self.stage_menu(&views, trajectory, act, call, subject, &expansions)?;
+        self.audit_reads(&expansions);
         if !menu.contains(plan) {
             return Err(TransitionRefusal::UnbackedOffer);
         }
@@ -1459,6 +1479,20 @@ impl<'a> Sequence<'a> {
         subject: &crate::basis::SubjectKey,
         expansions: &Expansions,
     ) -> Result<Vec<crate::plan::ExecutableRemedyPlan>, TransitionRefusal> {
+        // The pins of the record the surfacing act continues are inherited evidence.
+        match act {
+            crate::basis::DecidedAct::Offer(offer) => {
+                if let Some(recorded) = views.offer(offer) {
+                    self.audit_inherit(&recorded.evidence);
+                }
+            }
+            crate::basis::DecidedAct::Outcome(dispatch) => {
+                if let Some(pinned) = views.dispatch_evidence(dispatch) {
+                    self.audit_inherit(pinned);
+                }
+            }
+            _ => {}
+        }
         match subject {
             crate::basis::SubjectKey::Call {
                 trajectory: subject_trajectory,
@@ -1490,6 +1524,14 @@ impl<'a> Sequence<'a> {
                 else {
                     return Err(TransitionRefusal::UnbackedOffer);
                 };
+                // The live act answered this whole gate before planning; the enumeration may
+                // read less, but the gathered evidence is still the operation's own ask.
+                self.audit_atoms(crate::plan::block_atoms(
+                    self.engine.registry(),
+                    &contract,
+                    &block,
+                    role,
+                ));
                 Ok(crate::plan::plan(
                     self.engine.registry(),
                     views,
@@ -1533,6 +1575,11 @@ impl<'a> Sequence<'a> {
                 };
                 let lineage = views.lineage(subject);
                 let contract = self.dispatch_contract(trajectory, dispatch)?;
+                self.audit_atoms(crate::plan::confined_stage_atoms(
+                    self.engine.registry(),
+                    &contract,
+                    &lineage,
+                ));
                 crate::plan::confined_stage(
                     self.engine.registry(),
                     &contract,
@@ -1588,6 +1635,7 @@ impl<'a> Sequence<'a> {
                     }
                 };
                 let lineage = views.lineage(subject);
+                self.audit_atoms(crate::plan::return_stage_atoms(self.engine.registry(), &lineage));
                 crate::plan::return_stage(
                     self.engine.registry(),
                     views,
@@ -1709,12 +1757,23 @@ impl<'a> Sequence<'a> {
         if basis != &views.basis_for(&crate::basis::SubjectKey::Approval(*offer)) {
             return Err(TransitionRefusal::ForgedBasis);
         }
-        self.recorded_expansions(evidence)?;
+        let expansions = self.recorded_expansions(evidence)?;
         // The approval extends what the offer pinned, never contradicts or drops it.
         if !evidence.contains(&recorded.evidence) {
             return Err(TransitionRefusal::ForgedEvidence);
         }
-        let _ = contract;
+        self.audit_inherit(&recorded.evidence);
+        // The live approval act answered its whole deterministic gate — the standing block's
+        // atoms and the chosen plan's — before ruling; mirror the same ask here.
+        let stage = views.call_stage(&recorded.subject);
+        let role = views.call_role(&recorded.subject);
+        if let Ok(CheckOutcome::Block(raw)) =
+            crate::check::evaluate(&contract, &views, call, &stage, &self.context(&expansions))
+        {
+            self.audit_atoms(crate::plan::block_atoms(self.engine.registry(), &contract, &raw, role));
+        }
+        self.audit_atoms(crate::plan::plan_atoms(self.engine.registry(), &contract, offered));
+        self.audit_reads(&expansions);
         Ok(())
     }
 
@@ -1726,6 +1785,8 @@ impl<'a> Sequence<'a> {
         if self.declared.as_ref().is_some_and(|open| !open.owed.is_empty()) {
             return Err(TransitionRefusal::UnbackedAdvance);
         }
+        // The previous act is complete; its evidence must be inherited or asked-for.
+        self.settle_audit()?;
         if advance.flows.iter().any(|flow| !self.projection.is_opened(flow)) {
             return Err(TransitionRefusal::ForeignTrajectory);
         }
@@ -1995,6 +2056,7 @@ impl<'a> Sequence<'a> {
         if self.owing.is_some() {
             return Err(TransitionRefusal::UndischargedAcceptance);
         }
+        self.settle_audit()?;
         Ok(self.projection)
     }
 
@@ -2216,6 +2278,30 @@ impl<'a> Sequence<'a> {
                 other => unreachable!("composing a batch refuses only on the call it cannot build, not {other}"),
             },
         })?;
+        self.audit_reads(act.expansions());
+        // The live act answered every refused sibling's whole block gate before planning its
+        // remedies; a planless block leaves no offer record, so mirror that ask here.
+        let final_views = working.view(trajectory);
+        for (position, call) in composed
+            .iter()
+            .enumerate()
+            .filter(|(_, release)| release.is_none())
+            .map(|(position, _)| (position, &proposals[position]))
+        {
+            let Some(contract) = self.engine.registry().annotation_of(call) else {
+                continue;
+            };
+            let context = self.context(act.expansions());
+            if let Ok(CheckOutcome::Block(raw)) =
+                crate::check::evaluate(&contract, &final_views, call, &CallStage::default(), &context)
+            {
+                let role = match spawn == Some(SpawnMark::at(position)) {
+                    true => crate::plan::CallRole::MarkedSpawn,
+                    false => crate::plan::CallRole::Ordinary,
+                };
+                self.audit_atoms(crate::plan::block_atoms(self.engine.registry(), &contract, &raw, role));
+            }
+        }
         let expected: Vec<&DispatchId> = composed.iter().flatten().map(|release| &release.dispatch).collect();
         if expected.into_iter().ne(released) {
             return Err(TransitionRefusal::MisdecidedBatch);
@@ -2310,6 +2396,7 @@ impl<'a> Sequence<'a> {
             }
             Obligation::Consuming(offer) => {
                 let approval = views.approval(&offer).ok_or(TransitionRefusal::UnknownApproval)?;
+                self.audit_inherit(&approval.evidence);
                 let expected = Remedy {
                     rulings: approval
                         .rulings
@@ -2335,7 +2422,9 @@ impl<'a> Sequence<'a> {
                 if remedy.is_none_or(|landed| landed != expected) {
                     return Err(TransitionRefusal::UnbackedApproval);
                 }
-                return match crate::check::evaluate(&contract, &views, call, &stage, &self.context(expansions)) {
+                let checked = crate::check::evaluate(&contract, &views, call, &stage, &self.context(expansions));
+                self.audit_reads(expansions);
+                return match checked {
                     Ok(CheckOutcome::Block(_)) => Ok(()),
                     Ok(CheckOutcome::Allow) => Err(TransitionRefusal::UnreleasedDispatch),
                     Err(_) => Err(TransitionRefusal::ForgedEvidence),
@@ -2343,7 +2432,9 @@ impl<'a> Sequence<'a> {
             }
             Obligation::Free => {}
         }
-        match crate::check::evaluate(&contract, &views, call, &stage, &self.context(expansions)) {
+        let checked = crate::check::evaluate(&contract, &views, call, &stage, &self.context(expansions));
+        self.audit_reads(expansions);
+        match checked {
             Ok(CheckOutcome::Allow) if remedy.is_some() => Err(TransitionRefusal::DanglingRemedy),
             Ok(CheckOutcome::Allow) => Ok(()),
             Ok(CheckOutcome::Block(_)) => Err(TransitionRefusal::UnreleasedDispatch),
@@ -2665,6 +2756,7 @@ impl<'a> Sequence<'a> {
                 }
             }
         }
+        self.audit_reads(&expansions);
         Ok(())
     }
 
@@ -2718,6 +2810,7 @@ impl<'a> Sequence<'a> {
         if !derives {
             return Err(TransitionRefusal::ReturnRecordMismatch);
         }
+        self.audit_reads(&expansions);
         Ok(())
     }
 
@@ -2768,13 +2861,56 @@ impl<'a> Sequence<'a> {
 
     /// The membership answers a record's pinned primitives recompute to. Every pinned entry
     /// must belong to a registered source: junk or foreign evidence never validates, whatever
-    /// answers it would add.
+    /// answers it would add. The one funnel every evidence-carrying record passes, so it also
+    /// unions the evidence into the open act's operation-scope audit.
     fn recorded_expansions(&self, evidence: &AudienceEvidence) -> Result<Expansions, TransitionRefusal> {
-        self.engine
+        let expansions = self
+            .engine
             .registry()
             .audience()
             .expansions(evidence)
-            .map_err(|_| TransitionRefusal::ForgedEvidence)
+            .map_err(|_| TransitionRefusal::ForgedEvidence)?;
+        let mut audit = self.audit.borrow_mut();
+        let union = evidence.inheriting(&audit.evidence);
+        audit.evidence = union;
+        Ok(expansions)
+    }
+
+    /// Fold a validation context's asks into the open act's audit, after the record's
+    /// re-derivations ran over it.
+    fn audit_reads(&self, expansions: &Expansions) {
+        self.audit.borrow_mut().reads.extend(expansions.reads());
+    }
+
+    /// Contribute the deterministic gate atoms the live act answered before this record's
+    /// decision ran — a validation that re-derives less than the live gates demanded still
+    /// justifies the evidence those gates gathered.
+    fn audit_atoms(&self, atoms: impl IntoIterator<Item = crate::label::SymbolicAtom>) {
+        self.audit.borrow_mut().reads.extend(atoms);
+    }
+
+    /// Count `pins` — entries pinned by a record the open act continues — as inherited.
+    fn audit_inherit(&self, pins: &AudienceEvidence) {
+        let mut audit = self.audit.borrow_mut();
+        let merged = audit.inherited.inheriting(pins);
+        audit.inherited = merged;
+    }
+
+    /// Settle the open act's operation-scope audit: every pinned entry is an inherited pin
+    /// or answers a collected ask, exactly the test the live act passed.
+    fn settle_audit(&self) -> Result<(), TransitionRefusal> {
+        let audit = std::mem::take(&mut *self.audit.borrow_mut());
+        let reads: Vec<crate::label::SymbolicAtom> = audit.reads.into_iter().collect();
+        self.engine
+            .registry()
+            .audience()
+            .only_requested(&audit.evidence, &audit.inherited, &reads)
+            .map_err(|refusal| match refusal {
+                crate::audience::EvidenceRefusal::UnrequestedEvidence { entry } => {
+                    TransitionRefusal::UnrequestedEvidence { entry }
+                }
+                _ => TransitionRefusal::ForgedEvidence,
+            })
     }
 
     /// The membership context a record's evaluation reads: the policy's `within` assertions
@@ -2908,6 +3044,7 @@ impl<'a> Sequence<'a> {
                 if recorded.plan.hop() != Some(sanitizer) || &recorded.subject != subject {
                     return Err(TransitionRefusal::UnbackedOffer);
                 }
+                self.audit_inherit(&recorded.evidence);
                 let current = views.candidate(subject).ok_or(TransitionRefusal::UnknownOffer)?;
                 let DerivedCandidate::Result {
                     value: predecessor,
@@ -2954,6 +3091,10 @@ impl<'a> Sequence<'a> {
         if residual.is_none() {
             self.derived.insert(dispatch.clone(), Derived::Sanitized(value.clone()));
         }
+        if let Some(pinned) = views.dispatch_evidence(dispatch) {
+            self.audit_inherit(pinned);
+        }
+        self.audit_reads(&expansions);
         Ok(())
     }
 
@@ -3008,6 +3149,7 @@ impl<'a> Sequence<'a> {
                 if recorded.plan.hop() != Some(sanitizer) || &recorded.subject != subject {
                     return Err(TransitionRefusal::UnbackedOffer);
                 }
+                self.audit_inherit(&recorded.evidence);
                 let expected = views.lineage(subject).extend(sanitizer.clone());
                 if expected.as_ref() != Some(lineage) {
                     return Err(TransitionRefusal::SanitizerUnapplicable);
@@ -3059,6 +3201,7 @@ impl<'a> Sequence<'a> {
         if derived_residual.is_none() {
             self.return_settling.insert(id.clone());
         }
+        self.audit_reads(expansions);
         Ok(())
     }
 
@@ -3173,6 +3316,11 @@ impl<'a> Sequence<'a> {
             stage: next,
             released: false,
         });
+        // The live hop's act gated the standing block's whole atom set before offering.
+        let role = views.call_role(subject);
+        self.audit_atoms(crate::plan::block_atoms(registry, &before_contract, &before, role));
+        self.audit_inherit(&recorded.evidence);
+        self.audit_reads(expansions);
         Ok(())
     }
 
