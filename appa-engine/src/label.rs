@@ -1086,6 +1086,40 @@ mod tests {
             prop_assert_eq!(a.combine(&identity), a.clone());
         }
 
+        /// An empty clause anywhere is nobody: the fail-closed floor absorbs every fold, and
+        /// denotes the empty set under every assignment.
+        #[test]
+        fn nobody_absorbs(a in label_strategy(), (within, expansions) in assignment_strategy()) {
+            let nobody = Label::new(a.trust, Audience::nobody());
+            prop_assert_eq!(a.combine(&nobody).audience, Audience::nobody());
+            let providers = providers();
+            let context = MembershipContext::new(&within, &providers, &expansions);
+            prop_assert_eq!(eval(&Audience::nobody(), &context), Some(BTreeSet::new()));
+        }
+
+        /// The four universal edges decide without a single membership answer: public covers
+        /// everything and fits only a public cap; a restricted audience never covers the
+        /// universe and always fits it.
+        #[test]
+        fn universal_edges_decide_without_membership(
+            label in label_strategy(),
+            clause in clause_strategy(),
+        ) {
+            let nothing = Expansions::new([]);
+            let within = WithinAssertions::default();
+            let providers = providers();
+            let context = MembershipContext::new(&within, &providers, &nothing);
+            let restricted = DeclaredAudience::Union(clause);
+            prop_assert_eq!(label.within_cap(&DeclaredAudience::Public, &context), Evaluation::Holds);
+            if label.audience.is_public() {
+                prop_assert_eq!(label.covers(&DeclaredAudience::Public, &context), Evaluation::Holds);
+                prop_assert_eq!(label.covers(&restricted, &context), Evaluation::Holds);
+                prop_assert_eq!(label.within_cap(&restricted, &context), Evaluation::Fails);
+            } else {
+                prop_assert_eq!(label.covers(&DeclaredAudience::Public, &context), Evaluation::Fails);
+            }
+        }
+
         #[test]
         fn canonicalization_is_idempotent(a in audience_strategy()) {
             let again = Audience::of_clauses(a.clauses.iter().cloned());
@@ -1229,29 +1263,6 @@ mod tests {
 
     fn context_free() -> (WithinAssertions, BTreeSet<String>, Expansions) {
         (WithinAssertions::default(), providers(), Expansions::default())
-    }
-
-    #[test]
-    fn the_four_universal_edges_are_decided() {
-        let (nothing, providers, unanswered) = context_free();
-        let context = MembershipContext::new(&nothing, &providers, &unanswered);
-        let restricted = Label::new(Trust::new(1), Audience::restricted([reader("a")]));
-        let public = Label::new(Trust::new(1), Audience::public());
-        let some = DeclaredAudience::restricted([reader("a")]);
-
-        // Public covers everything, restricted never covers public — decided with no answers.
-        assert_eq!(public.covers(&DeclaredAudience::Public, &context), Evaluation::Holds);
-        assert_eq!(public.covers(&some, &context), Evaluation::Holds);
-        assert_eq!(
-            restricted.covers(&DeclaredAudience::Public, &context),
-            Evaluation::Fails
-        );
-        // Everything is within a public cap, public is never within a restricted cap.
-        assert_eq!(
-            restricted.within_cap(&DeclaredAudience::Public, &context),
-            Evaluation::Holds
-        );
-        assert_eq!(public.within_cap(&some, &context), Evaluation::Fails);
     }
 
     #[test]
