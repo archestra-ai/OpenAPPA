@@ -1631,10 +1631,7 @@ impl Engine {
             return Err(TransitionError::BatchIdentityConflict);
         }
         act.inherit(&recorded.evidence)?;
-        let under = self.act_evidence(
-            act.pinned().inheriting(&recorded.evidence)?,
-            AudienceEvidence::default(),
-        )?;
+        let under = self.act_evidence(act.inheriting(&recorded.evidence)?, AudienceEvidence::default())?;
         let follow_up = self.decided_follow_up(views, batch, &proposals, &recorded.released, &under)?;
         act.absorb(&under);
         Ok(Some(EngineDecision {
@@ -1988,7 +1985,7 @@ impl Engine {
                 let subject = subject_at(position);
                 let pinned = views.candidate_evidence(&subject);
                 act.inherit(pinned)?;
-                let under = self.act_evidence(act.pinned().inheriting(pinned)?, AudienceEvidence::default())?;
+                let under = self.act_evidence(act.inheriting(pinned)?, AudienceEvidence::default())?;
                 Ok((views.standing_call(&subject).unwrap_or(call), under))
             })
             .collect::<Result<_, TransitionError>>()?;
@@ -2792,7 +2789,7 @@ impl Engine {
             // atoms that contract reads were pinned by the hop that derived it.
             let pinned = views.candidate_evidence(&recorded.subject);
             act.inherit(pinned)?;
-            let under = self.act_evidence(act.pinned().inheriting(pinned)?, AudienceEvidence::default())?;
+            let under = self.act_evidence(act.inheriting(pinned)?, AudienceEvidence::default())?;
             let reblocked = self.reblocked(views, recorded, execution, &under)?;
             act.absorb(&under);
             return Ok(match reblocked {
@@ -3637,6 +3634,11 @@ impl ActEvidence {
     /// The evidence a record of this act pins.
     pub(crate) fn pinned(&self) -> AudienceEvidence {
         self.ledger.borrow().evidence().clone()
+    }
+
+    /// The act's pinned answers merged with `fresh`, read without snapshotting them first.
+    fn inheriting(&self, fresh: &AudienceEvidence) -> Result<AudienceEvidence, crate::audience::EvidenceRefusal> {
+        self.ledger.borrow().evidence().inheriting(fresh)
     }
 
     /// The context's answers and ask log, for the validator's per-act ledger.
