@@ -3,222 +3,169 @@ title: kAgent
 nav_title: kAgent
 category: Integrations
 order: 6
-description: Proposal for an OpenAPPA adapter for kagent without forking Google ADK.
+description: Proposal for the OpenAPPA kagent adapter — an ADK plugin delivered in the Harness workload image, with no kagent or Google ADK fork.
 ---
 
 :::proposal
 name: kAgent
-date: 2026-08-27
+date: 2026-09-01
 :::
 
-This proposal adds a generic out-of-process extension host to the kagent Go fork.
+[kagent](https://github.com/kagent-dev/kagent) runs LLM agents on Kubernetes. Its controller compiles each declarative agent (an `AgentTemplate` resource) into configuration, and runs it on a runtime image that the operator names in a `Harness` resource. This proposal gates kagent agents with OpenAPPA through those stock surfaces. It does not fork, patch, or vendor kagent or Google ADK.
 
-OpenAPPA uses `appa-adapter-kagent` as the kagent extension. The adapter maps the generic kagent harness wire to the existing `appa-runtime` `/hook` HTTP interface. The adapter does not link `appa-runtime`, own policy, call the Engine, or own `appa.db`.
+`appa-adapter-kagent` is the adapter. Its workload image extends the published `kagent-adk` image with two files: a small entrypoint and one Google ADK plugin. The plugin maps ADK callbacks to the eight `appa-runtime` `/hook` events and enforces the returned decisions inside the ADK dispatch loop. `appa-runtime` stays a separate process. It owns policy, the Engine, consults, remedy plans, trajectory state, and `appa.db`. Policy semantics stay in [How it works](/how-it-works) and [Policy contracts](/contracts).
 
-`appa-runtime` is a separate logical process. It owns policy loading, the Engine, consults, remedy plans, trajectory state, recovery semantics, and `appa.db`. The adapter fails closed when `APPA_RUNTIME_URL` is unavailable or rejects a bound request.
+Two upstream surfaces carry the whole integration:
 
-The kagent fork contains no OpenAPPA policy, Label, trajectory, remedy, consult, runtime, or persistence logic. Google ADK remains an unmodified upstream dependency. The design does not fork, vendor, copy, patch, replace, or import internal Google ADK packages.
+- `Harness.spec.workload.image` is a required, operator-supplied, digest-pinned image reference ([harness_types.go#L34-L40](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/go/api/v1alpha3/harness_types.go#L34-L40)). Every kagent install names a runtime image there. Naming the adapter image is ordinary configuration.
+- `KAgentApp(plugins=[...])` is a public constructor parameter of the published `kagent-adk` package ([_a2a.py#L65](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/python/packages/kagent-adk/src/kagent/adk/_a2a.py#L65)). kagent registers its own plugins through the same parameter ([cli.py#L95-L105](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/python/packages/kagent-adk/src/kagent/adk/cli.py#L95-L105)).
 
-This proposal uses [kagent commit `9e246fd37`](https://github.com/kagent-dev/kagent/commit/9e246fd3797457b18fc277680be1629a0f57fce0) as its source baseline. It also uses Google ADK Go 2.2.0 and Substrate 0.0.20.
+Source baseline: kagent commit [`52cc4de2`](https://github.com/kagent-dev/kagent/commit/52cc4de2a044a5062d10c4f189d863937c1bb0f9) (2026-09-01), google-adk 2.8.0 (kagent's lockfile resolution), Substrate v0.0.20 ([go.mod#L489](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/go/go.mod#L489)).
 
-OpenAPPA policy semantics remain in [How it works](/how-it-works) and [Policy contracts](/contracts).
+## Overview
 
-## Ownership
+- The platform operator edits one `Harness`: point `spec.workload.image` at the adapter image, and set `APPA_RUNTIME_URL` in `spec.env`.
+- The Harness label selector chooses which `AgentTemplate` resources run gated ([harness_types.go#L114-L117](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/go/api/v1alpha3/harness_types.go#L114-L117), [collections.go#L85-L102](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/go/core/v2/controller/collections.go#L85-L102)). Agent developers change nothing.
+- Inside each agent Actor, the adapter entrypoint rebuilds the compiled agent from `KAGENT_CONFIG_JSON` — the same steps as stock `kagent-adk static` — and registers `AppaHookPlugin`.
+- Each gated ADK callback becomes one `/hook` request to `appa-runtime`. The plugin enforces the returned `HookDecision` where the callback fires: it can deny a tool call with feedback the model reads, replace a tool result, or substitute a child's return.
+- Hooks fail closed. When the runtime is unreachable or answers outside the contract, the gated action does not run.
 
-| Component | Ownership |
-|---|---|
-| kagent fork | Neutral extension protocol, Harness Revision, public-ADK wrappers, immutable payload snapshots, host sink barriers, and host-native session and A2A state |
-| `appa-adapter-kagent` | Generic kagent protocol negotiation, channel HMAC state, replay and delivery ledger, lifecycle relay, and harness-wire to `/hook` mapping |
-| `appa-runtime` | Policy, Engine, consults, remedy plans, trajectory state, recovery semantics, runtime API, and `appa.db` |
+## Highlights
 
-The adapter has no OpenAPPA semantic state. Its replay and delivery ledger contains only generic event and delivery bindings. It contains no policy decision, Label, trajectory fact, consult result, remedy, continuation, dispatch identifier, or `appa.db` data.
-
-The kagent fork sees only generic host payloads, phase names, digests, deadlines, decisions, and opaque handles. It does not parse OpenAPPA configuration or response meaning.
-
-## Generic kagent changes
-
-The fork implements generic extension infrastructure only:
-
-- Dynamic extension configuration and artifact verification.
-- Version and capability negotiation.
-- Dynamic proxies for existing public ADK callbacks.
-- Generic wrappers around public ADK model, tool, session, memory, and Runner interfaces.
-- Generic barriers in kagent-owned provider, tool, A2A, publication, and lifecycle code.
-- Generic execution, event, interaction, and lifecycle decisions.
-- Generic sidecar readiness, egress, volume, snapshot, and drain handling.
-
-The fork has no OpenAPPA crate, Go package, protobuf package, policy schema, wire enum, generated type, special tool route, or database migration. A missing public ADK boundary makes its generic capability unavailable. A required adapter then rejects activation.
-
-The protected instance enforces four contracts:
-
-1. The host executes only the immutable payload permitted by the required extension.
-2. Raw tool and child results remain withheld until the extension commits a delivery payload.
-3. Every enabled model, session, A2A, memory, UI, log, telemetry, and storage path crosses an exclusive extension gate.
-4. The instance remains unready when its generic inventory cannot satisfy every required adapter capability.
-
-## Adapter and runtime boundary
-
-The kagent extension protocol remains neutral. It uses private Unix-domain-socket gRPC, mTLS, a boot epoch, sequence numbers, a channel digest, deadlines, and HMAC-SHA256. The protocol carries no OpenAPPA domain type.
-
-The adapter receives one immutable generic event. It validates peer identity, Revision, boot epoch, sequence, deadline, event digest, and HMAC. It records a generic replay or delivery entry, then maps the event to one `/hook` request. It maps the runtime response back to one generic host decision.
-
-The adapter binds every `/hook` request to these values:
-
-- Actor UID and extension ID.
-- Immutable kagent Revision and adapter artifact digest.
-- Runtime policy revision and runtime instance identity.
-- Boot epoch, sequence, event ID, event digest, and deadline.
-- Authenticated channel identity and request HMAC digest.
-
-`appa-runtime` verifies this binding before it evaluates a flow. A runtime response binds the same values and its policy revision. The adapter rejects a missing, mismatched, expired, reordered, or duplicate binding. A policy revision change creates a new kagent Revision and follows pin-and-drain.
-
-The adapter does not interpret `permit`, `commit`, `hold`, `interaction`, `event`, or `fail` as policy. It only verifies the runtime response binding and renders the matching neutral host decision.
-
-## Deployment profiles
-
-### Quickstart
-
-Quickstart uses one digest-pinned OpenAPPA companion container with two processes:
+### Gated agents on Kubernetes
 
 ```text
-+---------------------- OpenAPPA companion container -----------------------+
-| appa-adapter-kagent                  appa runtime --adapter kagent        |
-| kagent UDS gRPC <----adapter----> http://127.0.0.1:8787/hook <----runtime |
-| generic ledger                         policy, Engine, consults, appa.db  |
+Kubernetes cluster
++---------------------------------------------------------------------------+
+| kagent controller-v2 (stock)                                              |
+|   watches AgentTemplate, Harness, ModelConfig, RemoteMCPServer            |
+|   pairs   Harness.spec.allowedAgentTemplates selector -> AgentTemplates   |
+|   renders one immutable Revision per (AgentTemplate, Harness) pair        |
++------------------------------------+--------------------------------------+
+                                     | runs each Revision as a Substrate Actor
+                                     v
++--------------------- Substrate Actor (one per agent) ---------------------+
+| image: Harness.spec.workload.image = appa-adapter-kagent (digest-pinned)  |
+| env:   KAGENT_CONFIG_JSON (the compiled agent), APPA_RUNTIME_URL, ...     |
+|                                                                           |
+| adapter entrypoint -> KAgentApp(plugins=[.., AppaHookPlugin]) -> A2A :8080|
++-----------------------------+---------------------------------------------+
+                              | POST /hook  (fail closed)
+                              v
++------------------- appa-runtime (one shared service) ---------------------+
+| policy, Engine, consults, remedy plans, trajectory state, appa.db         |
 +---------------------------------------------------------------------------+
 ```
 
-`APPA_RUNTIME_URL=http://127.0.0.1:8787` selects the loopback runtime. The runtime listens only on loopback in this profile. Container networking does not expose the runtime port. The adapter has no `appa.db` mount. Only `appa-runtime` mounts the runtime policy, credentials, and durable `appa.db` volume.
+The controller injects the compiled agent as environment variables into the Actor ([actor_template.go#L43-L44](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/go/core/v2/substrate/actor_template.go#L43-L44)). The agent exists in the pod only as that data. No developer code and no per-agent image exists there, so one generic adapter image serves every admitted `AgentTemplate`.
 
-### Remote configuration
+All gated Actors of one deployment report to one shared `appa-runtime`. A parent and its delegated children run in separate Actors, and their hooks must reach the same runtime to correlate into one trajectory.
 
-Remote configuration uses the same `appa-adapter-kagent` image. `APPA_RUNTIME_URL` identifies an authenticated HTTPS runtime gateway or runtime instance.
-
-```text
-kagent host -- private UDS --> appa-adapter-kagent -- mTLS HTTPS --> appa-runtime gateway
-```
-
-The adapter authenticates the remote peer with a pinned CA and workload identity. The remote runtime authenticates the adapter identity and accepts only the configured Actor, extension, and Revision binding. The gateway forwards only to the bound runtime instance. The adapter rejects redirects, unpinned certificates, identity mismatch, and revision mismatch. Runtime policy and `appa.db` remain at the remote runtime.
-
-Both profiles use the same `/hook` request and response binding. Remote configuration changes do not relax the fail-closed rule.
-
-## OCI companion container
-
-The selected process model is a digest-pinned companion container in the same Substrate Actor. The kagent process and adapter communicate through a private Unix-domain socket. A shared memory-backed socket volume carries no durable runtime state.
-
-Substrate supports [multiple containers with independent readiness probes](https://github.com/kagent-dev/substrate/blob/v0.0.20/pkg/api/v1alpha1/actortemplate_types.go#L243-L356). Pinned kagent currently emits [one container](https://github.com/kagent-dev/kagent/blob/9e246fd3797457b18fc277680be1629a0f57fce0/go/core/v2/substrate/actor_template.go#L32-L91).
-
-The generic fork adds extension containers without an OpenAPPA-specific role. The adapter image runs as a dedicated UID with a read-only root filesystem and no Linux capabilities. Its generic ledger has a separate volume. The kagent container cannot mount it.
-
-Quickstart gives `appa-runtime` a separate private policy and `appa.db` volume. The adapter cannot mount either volume. Remote configuration has no runtime volume in the adapter container.
-
-Actor-wide CNI policy permits only cluster DNS and an authenticated egress gateway. The gateway enforces per-container destination, TLS identity, redirect, and DNS-rebinding rules. The kagent process and its in-process tools remain in the trusted computing base.
-
-## Dynamic extension configuration
-
-A Harness can declare several ordered dynamic extensions. The OpenAPPA declaration names an adapter artifact, not a policy runtime artifact:
-
-```yaml
-extensions:
-  - name: policy-gate
-    image: ghcr.io/archestra-ai/appa-adapter-kagent@sha256:<digest>
-    manifestDigest: sha256:<digest>
-    protocol: kagent.extension.v1
-    required: true
-    failureMode: closed
-    order: 10
-    socket: /run/kagent/extensions/policy-gate.sock
-    adapter:
-      runtimeUrlEnv: APPA_RUNTIME_URL
-      runtimeBinding:
-        runtimeId: customer-support-runtime-a
-        policyRevision: customer-support-policy-v1
-        remoteIdentity: spiffe://policy.example/runtime/customer-support-runtime-a
-    ledger:
-      durableDir: policy-gate-delivery-ledger
-    egress:
-      - runtime-gateway.policy.example:443
-    readiness:
-      path: /readyz
-      port: 8082
-```
-
-The generic compiler verifies OCI digest, signature policy, manifest digest, protocol range, references, capability claims, deadlines, limits, socket uniqueness, ledger ownership, egress, and readiness declarations. It treats adapter and runtime configuration as opaque bytes. An immutable Revision binds their digests. Any policy, credential, CA, runtime identity, or remote endpoint change creates a new Revision.
-
-## Negotiation and event relay
-
-The adapter serves the private socket before registration. The host verifies adapter workload identity and per-launch channel secret. It calls `GetExtensionInfo`, sends the complete generic capability and sink inventory, and activates the adapter after it accepts the inventory digest.
-
-The inventory describes mechanics, not OpenAPPA policy. It includes ADK and provider versions, callback phase ordering, tool and model paths, raw codecs, content-bearing sinks, and snapshot, recovery, and drain capabilities.
-
-The adapter sends the inventory activation event to `/hook`. `appa-runtime` validates policy coverage and returns the bound result. The adapter reports ready only after a valid runtime response. The host treats that response as a generic required-extension attestation.
-
-Every generic event contains an immutable payload, event ID, digest, Actor UID, Revision, scope, operation, descriptor, sequence, phase, and deadline. The host executes no replacement without a matching `permit`. It publishes no content without a matching `commit` or `event` decision.
-
-The adapter ledger makes relays replay-safe. A repeated event ID returns the original bound decision only after the adapter verifies the identical event digest and runtime revision. Runtime recovery remains authoritative. The adapter does not classify semantic outcomes or reconstruct trajectory state.
-
-## Lifecycle coverage
-
-The protected profile uses public ADK interfaces and kagent-owned integration points. It disables any path that bypasses them.
-
-| Boundary | kagent-owned integration |
-|---|---|
-| Tool callbacks and execution | Sole content-bearing proxy, immutable arguments, execution wrapper, and result gate |
-| User input and sessions | Callback proxy and exact-byte pre-append gate |
-| Model request and catalog | Provider-final request and descriptor gate |
-| Model response and publication | Standard and live-path gates before persistence or yield |
-| Child, memory, MCP, and remote A2A | Generic wrappers with immutable request and terminal-result gates |
-| Snapshot, readiness, egress, and drain | Generic kagent and Substrate lifecycle interface |
-
-The adapter relays generic events for every required phase. `appa-runtime` maps those events to policy evaluation, Engine admission, consults, remedies, trajectory transitions, and recovery. The adapter owns no dynamic OpenAPPA tool, response meaning, interaction continuation, delegation state, or audit record.
-
-## State and recovery
-
-| Store | Contents |
-|---|---|
-| kagent | ADK sessions, A2A tasks, and narrow generic host delivery records |
-| `appa-adapter-kagent` | Generic protocol negotiation, HMAC channel state, event digest, replay, delivery, expiry, and lifecycle relay records |
-| `appa-runtime` | Policy identity, `appa.db`, Engine facts, trajectory state, consult pins, remedies, interactions, delegations, audit records, and recovery state |
-
-The adapter ledger records no OpenAPPA semantic value. The runtime owns all migration of policy and `appa.db`. The adapter artifact can drain independently, but it cannot migrate runtime state.
-
-Before a snapshot, the host stops new work and asks each required adapter to quiesce. The adapter seals its generic ledger and relays lifecycle events to runtime. `appa-runtime` seals and validates its own state generation. A restore remains unready until the host, adapter, and runtime accept the same Actor, extension, adapter artifact, runtime identity, and policy revision bindings.
-
-A crash before adapter acknowledgement of `execution.begin` means the host did not execute the tool. A crash after that acknowledgement and before a terminal result leaves classification to `appa-runtime`. The host freezes the generic scope until the adapter relays a bound runtime `suppress`, `hold`, replayed `commit`, or terminal `fail` decision.
-
-## Revisions and installation
-
-One adapter artifact, protocol selection, runtime identity, and policy revision remain pinned for each live scope. Existing scopes drain on the prior binding. The host never hot-swaps an adapter or moves a live scope between runtime revisions.
-
-Installation has three independently versioned artifacts:
-
-1. A kagent fork with the generic dynamic extension host, public-ADK adapters, and lifecycle points.
-2. The signed `appa-adapter-kagent` image and manifest.
-3. The `appa-runtime` image or binary, policy revision, and runtime identity.
-
-The generic Harness references the adapter image. It does not reference `appa.db`. Quickstart provisions the runtime process and private volume in the same companion container. Remote configuration references a gateway identity and policy revision, not a runtime database mount.
-
-## Architecture
+### One image wraps kagent-adk
 
 ```text
-+------------------------------ Kubernetes / Substrate Actor ------------------------------+
-| kagent controller -> immutable Revision -> ActorTemplate                                 |
-|                                                                                           |
-| +--------------------------+ private UDS +---------------------------------------------+ |
-| | kagent + upstream ADK    |<----------->| OpenAPPA companion container                 | |
-| | generic extension host   |             | appa-adapter-kagent                          | |
-| | public ADK wrappers      |             | generic negotiation, HMAC, delivery ledger   | |
-| | sessions.db / A2A state  |             |                | APPA_RUNTIME_URL              | |
-| +--------------------------+             |                v                              | |
-|                                           | appa runtime --adapter kagent                | |
-|                                           | policy, Engine, consults, trajectory, appa.db| |
-|                                           +---------------------------------------------+ |
-+-------------------------------------------------------------------------------------------+
+appa-adapter-kagent image
++-------------------------------------------------------------+
+| OpenAPPA layer (two files)                                  |
+|   entrypoint.py       replays the `kagent-adk static` steps |
+|   appa_hook_plugin.py ADK BasePlugin -> POST /hook          |
++-------------------------------------------------------------+
+| base: published kagent-adk image, unmodified                |
+|   kagent-adk package  (cli.py present, not used as PID 1)   |
+|   google-adk 2.8.0    (BasePlugin is its official API)      |
++-------------------------------------------------------------+
 
-Remote configuration replaces the final loopback hop with authenticated HTTPS to the bound runtime gateway or instance. The runtime port remains loopback-only in quickstart.
+entrypoint flow — the same public calls as stock `static`, one delta:
+  materialize_from_env("/config")                  # env -> config files
+  cfg = AgentConfig.model_validate(config)         # refuse unsupported fields
+  plugins = [<stock STS / passthrough plugins>]
+  plugins.append(AppaHookPlugin(APPA_RUNTIME_URL)) # <-- the delta
+  KAgentApp(lambda: cfg.to_agent(name), card, url, name,
+            plugins=plugins).build()
+```
 
-## Incomplete coverage refusal
+Stock `kagent-adk static` performs the identical sequence with a closed plugin list ([cli.py#L76-L135](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/python/packages/kagent-adk/src/kagent/adk/cli.py#L76-L135)). The steps are materialize ([_config_materialize.py#L55-L69](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/python/packages/kagent-adk/src/kagent/adk/_config_materialize.py#L55-L69)), then validate and rebuild the agent ([types.py#L387-L403](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/python/packages/kagent-adk/src/kagent/adk/types.py#L387-L403)), then serve ([_a2a.py#L126-L149](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/python/packages/kagent-adk/src/kagent/adk/_a2a.py#L126-L149)). The plugin list handed to ADK's `App(plugins=...)` becomes ADK's `PluginManager`, so one registration covers the root agent, every sub-agent, and every tool. Google ADK stays an unmodified dependency.
 
-The protected instance remains unready when a required phase lacks sole, fixed, supported ownership. The first release refuses opaque provider paths, stock MCP transport without raw arguments and no-retry execution, unbounded memory preload, mutable catalogs, unverified callbacks, content telemetry, incomplete remote A2A gates, streaming before publication control, mixed revisions, unavailable runtime identity, failed runtime authentication, and any path that needs Google ADK source changes.
+### Callback-to-hook mapping
 
-The [kagent implementation plan](../../../integrations/kagent/IMPLEMENTATION.md) defines the neutral protocol, ownership boundary, deployment profiles, public-ADK integration, and verification matrix.
+The runtime's hook vocabulary is the eight `HookEvent` variants in `appa-runtime-api/src/lib.rs`. The plugin maps each gated ADK callback onto exactly one event, and callbacks with no event either pass through or hold as liveness gates.
+
+```text
+   ADK CALLBACK (google-adk 2.8.0, unmodified)           APPA RUNTIME /hook — the 8 HookEvents
+   time flows top→bottom within one turn                 and the decisions each one answers
+   ─────────────────────────────────────────             ─────────────────────────────────────
+
+session  first invocation of a fresh ADK session ──────▶ [1] SessionStart      ◀ Ack
+  │        detected in on_user_message_callback;             root TrajectoryId derived
+  ▼        no callback exists at session creation            from the ADK session id
+prompt   on_user_message_callback ─────────────────────▶ [2] Prompt            ◀ Ack | Block
+  │        fires BEFORE the session append, so a
+  │        Block keeps the exact bytes out of
+  │        stored session history
+  │      before_run_callback ───────x no event  (Prompt already gates the same bytes)
+  │      before_agent_cb (root) ────x no event  (root entry IS Prompt)
+  ▼
+model    before_model_callback ─────x no event ┐ no model-layer HookEvent exists;
+         after_model_callback ──────x no event │ the plugin holds these callbacks as
+         on_model_error_callback ───x no event ┘ liveness gates: /hook down ⇒ refuse
+  │
+  ▼
+tool     before_tool_callback ═════════════════════════▶ [3] ToolCall{spawn:F} ◀ AllowCall | DenyCall
+loop        deny: the returned dict SKIPS execution                              | Refuse
+  │         and becomes the function response the
+  │         model reads
+  │      after_tool_callback ══════════════════════════▶ [4] ToolResult        ◀ Ack | ReplaceOutput
+  │      on_tool_error_callback ───────────────────────▶ [4] ToolResult{Failure} | Block
+  ▼
+child    before_tool_cb (sub-agent tool) ──────────────▶ [3] ToolCall{spawn:T} ◀ AllowCall{binding}
+deleg.     │ child scope opens:
+           │  before_agent_cb (child) ─────────────────▶ [5] ChildStart        ◀ Ack
+           │      … child runs its own [3]/[4] loop …
+           │  after_agent_cb (child) ──────────────────▶ [6] TurnEnd (child)   ◀ Ack
+           └ after_tool_cb (sub-agent return) ─────────▶ [7] SpawnResult       ◀ Ack | ChildReturn{value}
+               the ONE point where the value the                                 | ReplaceOutput | Block
+               parent receives can be substituted
+  │
+  ▼
+emit     on_event_callback ─────────x no event  (no emission HookEvent;
+  │                                              held as a liveness gate)
+  ▼
+turn     after_run_callback ───────────────────────────▶ [6] TurnEnd (root)    ◀ Ack —
+end      on_run_error_callback ────────────────────────▶ [6] TurnEnd (root,      closes tool dispatches
+         on_agent_error_cb (child) ────────────────────▶ [6] TurnEnd  failure)   the turn abandoned
+
+                                                         [8] ChildEnd — unfed BY DESIGN:
+                                                             return substitution is enforceable
+                                                             only parent-side, so returns cross
+                                                             at [7] SpawnResult. The Claude Code
+                                                             adapter makes the same choice.
+```
+
+The enforcement mechanics come from ADK's own plugin contract, verified in the 2.8.0 wheel:
+
+- All 14 callbacks above exist on `BasePlugin` (`google/adk/plugins/base_plugin.py`, lines 114-394 in the 2.8.0 wheel).
+- A dict returned from `before_tool_callback` skips execution and becomes the function response the model reads — `DenyCall` with feedback (`google/adk/flows/llm_flows/functions.py`, lines 611-641).
+- A dict returned from `after_tool_callback` replaces the result the model sees — `ReplaceOutput` (`functions.py`, lines 652-683).
+- `on_user_message_callback` fires before the runner appends the message to session history (`google/adk/runners.py`, lines 675-700), so a `Block` on `Prompt` is a pre-append barrier.
+- kagent dispatches every declared remote sub-agent as an ordinary ADK tool, `KAgentRemoteA2AToolset` ([types.py#L521](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/python/packages/kagent-adk/src/kagent/adk/types.py#L521)), so the tool-call gate is also the spawn gate.
+
+kagent children run in separate Actors. The child Actor's own plugin recognizes the delegated entry from kagent's inbound metadata ([_agent_executor.py#L212-L214](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/python/packages/kagent-adk/src/kagent/adk/_agent_executor.py#L212-L214)). It feeds `ChildStart` and the child `TurnEnd`, while the parent's plugin feeds the spawn `ToolCall` and `SpawnResult`. Both report to the one shared runtime.
+
+### Fail-closed rules
+
+1. An unreachable `/hook` endpoint, or a response outside the contract, blocks the gated action. The plugin raises, and ADK aborts the invocation.
+2. A rendered config with a field the entrypoint does not support refuses to start, and the Actor stays unready. In-process `sub_agents` compiled from CRD sub-agent tools are the known case: stock `kagent-adk` drops them silently, and the adapter refuses instead.
+3. The model and emission callbacks feed no event, but they still hold the action when the `/hook` channel is down.
+4. A hard Actor crash emits nothing. `appa-runtime` recovery classifies the open dispatch as `Indeterminate` at the next admitted event.
+
+### Scope and limits
+
+- Covered: declarative `AgentTemplate` agents on the kagent (Python ADK) harness variant, run from this workload image on the Substrate path (helm `controller.substrate.enabled`).
+- Not covered: the Claude harness, which omits hooks, permission mode, memory, and inline MCP from its supported contract ([config.go#L48-L50](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/go/harness/claude/config/config.go#L48-L50)).
+- Also not covered: the Codex harness, the non-ADK framework wrappers, and agents on kagent's stock image, whose plugin list is closed ([cli.py#L95-L105](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/python/packages/kagent-adk/src/kagent/adk/cli.py#L95-L105)).
+- `SessionStart` is a first-invocation proxy. A session that is created but never invoked emits nothing, and also flows nothing.
+- The entrypoint replays the behavior of `kagent-adk static` instead of calling it, because upstream has no plugin configuration knob. Each `kagent-adk` release therefore costs one small equivalence re-check. A one-field upstream contribution would remove the duplication.
+
+## Implementation plan
+
+The [kagent implementation plan](../../../integrations/kagent/IMPLEMENTATION.md) defines the artifacts, the entrypoint and plugin specification, the runtime-side codec, deployment profiles, trajectory identity, and the verification matrix.
