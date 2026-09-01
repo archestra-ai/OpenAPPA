@@ -113,13 +113,13 @@ impl ToolShim {
         }
         let mut response = response;
         match read_body_capped(&mut response, self.body_cap_bytes).await {
-            Some(body) if body.len() <= self.body_cap_bytes => ToolOutcome::Success {
+            Ok(body) if body.len() <= self.body_cap_bytes => ToolOutcome::Success {
                 body: OutcomeBody::Available(String::from_utf8_lossy(&body).into_owned()),
             },
-            Some(_) => ToolOutcome::Success {
+            Ok(_) => ToolOutcome::Success {
                 body: OutcomeBody::Unavailable,
             },
-            None => ToolOutcome::Indeterminate,
+            Err(_) => ToolOutcome::Indeterminate,
         }
     }
 }

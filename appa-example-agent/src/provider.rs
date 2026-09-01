@@ -128,7 +128,9 @@ pub struct ProviderCompletion {
 /// on a guess.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum ProviderError {
-    #[error("inference transport fault or timeout after {attempts} attempt(s)")]
+    #[error("inference exceeded the {timeout:?} request deadline on each of {attempts} attempt(s)")]
+    Timeout { attempts: u32, timeout: Duration },
+    #[error("inference transport fault after {attempts} attempt(s)")]
     Transport { attempts: u32 },
     #[error("inference endpoint returned HTTP {code} after {attempts} attempt(s)")]
     Status { code: u16, attempts: u32 },
@@ -140,6 +142,7 @@ pub enum ProviderError {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AttemptFault {
+    Timeout,
     Transport,
     Status { code: u16, retry_after: Option<Duration> },
     Malformed,
@@ -147,9 +150,22 @@ enum AttemptFault {
 }
 
 impl AttemptFault {
+    /// A request that produced no usable response. An elapsed deadline and a
+    /// failed connection are kept apart because they call for opposite
+    /// remedies: a deadline that a long generation legitimately outgrows wants
+    /// a longer deadline, since every retry then meets the same wall, while a
+    /// flapping endpoint wants more attempts, spaced further apart.
+    fn of(error: &reqwest::Error) -> Self {
+        if error.is_timeout() {
+            AttemptFault::Timeout
+        } else {
+            AttemptFault::Transport
+        }
+    }
+
     fn retryable(self) -> bool {
         match self {
-            AttemptFault::Transport => true,
+            AttemptFault::Timeout | AttemptFault::Transport => true,
             AttemptFault::Status { code, .. } => matches!(code, 408 | 429 | 500 | 502 | 503 | 504),
             AttemptFault::Malformed | AttemptFault::NoChoice => false,
         }
@@ -162,8 +178,12 @@ impl AttemptFault {
         }
     }
 
-    fn finish(self, attempts: u32) -> ProviderError {
+    fn finish(self, attempts: u32, request_timeout: Duration) -> ProviderError {
         match self {
+            AttemptFault::Timeout => ProviderError::Timeout {
+                attempts,
+                timeout: request_timeout,
+            },
             AttemptFault::Transport => ProviderError::Transport { attempts },
             AttemptFault::Status { code, .. } => ProviderError::Status { code, attempts },
             AttemptFault::Malformed => ProviderError::Malformed { attempts },
@@ -213,7 +233,7 @@ impl OpenAiCompatible {
                 Err(fault) if fault.retryable() && attempt < self.config.max_attempts => {
                     tokio::time::sleep(self.retry_delay(attempt, fault.retry_after())).await;
                 }
-                Err(fault) => return Err(fault.finish(attempt)),
+                Err(fault) => return Err(fault.finish(attempt, self.config.request_timeout)),
             }
         }
         unreachable!("the retry policy always permits at least one attempt")
@@ -229,7 +249,7 @@ impl OpenAiCompatible {
             .json(request)
             .send()
             .await
-            .map_err(|_| AttemptFault::Transport)?;
+            .map_err(|error| AttemptFault::of(&error))?;
         if !response.status().is_success() {
             let retry_after = response
                 .headers()
@@ -246,7 +266,7 @@ impl OpenAiCompatible {
         let mut response = response;
         let body = read_body_capped(&mut response, self.config.response_body_cap_bytes)
             .await
-            .ok_or(AttemptFault::Transport)?;
+            .map_err(|error| AttemptFault::of(&error))?;
         if body.len() > self.config.response_body_cap_bytes {
             return Err(AttemptFault::Malformed);
         }
@@ -296,6 +316,10 @@ mod tests {
     }
 
     async fn provider(app: Router) -> OpenAiCompatible {
+        provider_with_request_timeout(app, DEFAULT_REQUEST_TIMEOUT).await
+    }
+
+    async fn provider_with_request_timeout(app: Router, request_timeout: Duration) -> OpenAiCompatible {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("a loopback port");
@@ -304,6 +328,7 @@ mod tests {
             let _ = axum::serve(listener, app).await;
         });
         let config = OpenAiConfig::new(format!("http://{address}"), "fixture/model", "test-key")
+            .with_request_timeout(request_timeout)
             .with_test_retry_policy(3, Duration::ZERO, Duration::ZERO);
         OpenAiCompatible::with_http_client(config, HttpClient::loopback())
     }
@@ -430,5 +455,33 @@ mod tests {
 
         assert_eq!(error, ProviderError::Malformed { attempts: 1 });
         assert_eq!(*attempts.lock().expect("not poisoned"), 1);
+    }
+
+    #[tokio::test]
+    async fn an_endpoint_slower_than_the_deadline_reports_the_deadline() {
+        let attempts = Arc::new(Mutex::new(0u32));
+        let app = Router::new().route(
+            "/chat/completions",
+            post({
+                let attempts = Arc::clone(&attempts);
+                move || {
+                    let attempts = Arc::clone(&attempts);
+                    async move {
+                        *attempts.lock().expect("not poisoned") += 1;
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                        axum::http::StatusCode::OK
+                    }
+                }
+            }),
+        );
+        let timeout = Duration::from_millis(50);
+        let error = provider_with_request_timeout(app, timeout)
+            .await
+            .complete(request())
+            .await
+            .expect_err("the endpoint never answers in time");
+
+        assert_eq!(error, ProviderError::Timeout { attempts: 3, timeout });
+        assert_eq!(*attempts.lock().expect("not poisoned"), 3);
     }
 }
