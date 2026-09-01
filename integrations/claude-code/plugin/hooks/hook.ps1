@@ -1,6 +1,11 @@
 param(
     [switch]$SessionContext,
-    [switch]$EnsureRuntime
+    [switch]$EnsureRuntime,
+    # The hooks that report a finished turn pass this. They decide nothing, so
+    # they never block, and they take the shorter deadline: a turn end waits on
+    # no evidence round trip. The map declares it beside the event it registers
+    # so nothing in a posted event can move a hook's blocking outcome.
+    [switch]$TurnEnd
 )
 
 # Hooks protect only sessions launched with APPA_GATE=1 (the clappa
@@ -78,7 +83,12 @@ function Stop-StaleRuntime {
             [Console]::Error.WriteLine("appa protection: pid $stalePid is not appa runtime; not stopping it")
             return $false
         }
-        Stop-Process -Id $stalePid -ErrorAction SilentlyContinue
+        try {
+            Stop-Process -Id $stalePid -ErrorAction Stop
+        } catch {
+            [Console]::Error.WriteLine("appa protection: cannot stop the stale runtime (pid $stalePid): $($_.Exception.Message)")
+            return $false
+        }
     }
     $deadline = (Get-Date).AddSeconds(10)
     while ((Get-Date) -lt $deadline) {
@@ -170,11 +180,6 @@ if (-not $protected) {
     exit 0
 }
 
-# The hooks that report a finished turn. They decide nothing, so they
-# never block, and they take the shorter deadline: a turn end waits on
-# no evidence round trip.
-$turnEnds = @("Stop", "StopFailure", "SubagentStop")
-
 try {
     $payload = [Console]::In.ReadToEnd()
     $hookInput = $null
@@ -193,7 +198,7 @@ try {
             throw "the runtime at $runtimeUrl is not healthy and could not be started"
         }
     }
-    $timeout = if ($null -ne $hookInput -and $turnEnds -contains $hookInput.hook_event_name) { 30 } else { 120 }
+    $timeout = if ($TurnEnd) { 30 } else { 120 }
     $response = Invoke-WebRequest -Uri "$runtimeUrl/hook" -Method Post `
         -ContentType "application/json" -Body $payload -TimeoutSec $timeout -UseBasicParsing
     [Console]::Out.Write([string]$response.Content)
@@ -203,7 +208,7 @@ try {
     # hooks means "do not stop", which would hold the actor in a turn it
     # has finished. A runtime that does not answer costs a call left
     # open, which the next turn end closes.
-    if ($null -ne $hookInput -and $turnEnds -contains $hookInput.hook_event_name) {
+    if ($TurnEnd) {
         [Console]::Error.WriteLine("OpenAPPA runtime did not answer the turn end: $failure")
         exit 0
     }

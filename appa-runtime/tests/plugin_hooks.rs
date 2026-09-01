@@ -89,6 +89,53 @@ fn both_shipped_hook_maps_gate_the_same_events() {
     }
 }
 
+/// The events each shipped map marks as turn ends, from the flag its hook
+/// command carries: `--turn-end` to hook.sh, `-TurnEnd` to hook.ps1. Nothing in
+/// the shipped scripts reads the event name for this, so the map is the only
+/// place the marking lives.
+fn turn_end_events(map: &serde_json::Value) -> Vec<String> {
+    let mut events: Vec<String> = map["hooks"]
+        .as_object()
+        .expect("the hook map is an object")
+        .iter()
+        .filter(|(_, groups)| {
+            groups
+                .as_array()
+                .expect("each event carries groups")
+                .iter()
+                .flat_map(|group| group["hooks"].as_array().expect("each group carries hooks"))
+                .any(|hook| {
+                    let command_words = hook["command"]
+                        .as_str()
+                        .map(str::split_whitespace)
+                        .into_iter()
+                        .flatten();
+                    let args = hook["args"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|arg| arg.as_str());
+                    command_words
+                        .chain(args)
+                        .any(|word| word == "--turn-end" || word == "-TurnEnd")
+                })
+        })
+        .map(|(event, _)| event.clone())
+        .collect();
+    events.sort();
+    events
+}
+
+/// Both shipped maps mark the same events as turn ends. A turn end marked on one
+/// platform and not the other would block, or fail to, on that platform alone.
+#[test]
+fn both_shipped_hook_maps_mark_the_same_turn_ends() {
+    let mut expected: Vec<String> = TURN_ENDS.iter().map(|event| (*event).to_owned()).collect();
+    expected.sort();
+    assert_eq!(turn_end_events(&shipped("hooks.json")), expected);
+    assert_eq!(turn_end_events(&shipped("hooks.windows.json")), expected);
+}
+
 /// Both shipped maps inject the same session context, and nothing else reaches
 /// the second SessionStart entry: a rename or a drift on one platform would
 /// leave that platform's sessions without the context the other one gets. The
