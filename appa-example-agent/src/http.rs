@@ -43,9 +43,10 @@ impl Default for HttpClient {
 
 /// Read a response body, buffering **at most `cap + 1` bytes**: the
 /// extra byte only flags "over cap". Total allocation stays `O(cap)`
-/// however much the backend sends. `None` is a transport fault
-/// mid-body.
-pub async fn read_body_capped(response: &mut reqwest::Response, cap: usize) -> Option<Vec<u8>> {
+/// however much the backend sends. The error is the transport fault
+/// mid-body, carried rather than flattened so a caller can tell an
+/// elapsed deadline from a dropped connection.
+pub async fn read_body_capped(response: &mut reqwest::Response, cap: usize) -> Result<Vec<u8>, reqwest::Error> {
     let limit = cap.saturating_add(1);
     let mut body = Vec::new();
     loop {
@@ -55,11 +56,11 @@ pub async fn read_body_capped(response: &mut reqwest::Response, cap: usize) -> O
                 let take = room.min(chunk.len());
                 body.extend_from_slice(&chunk[..take]);
                 if body.len() > cap {
-                    return Some(body);
+                    return Ok(body);
                 }
             }
-            Ok(None) => return Some(body),
-            Err(_) => return None,
+            Ok(None) => return Ok(body),
+            Err(error) => return Err(error),
         }
     }
 }
