@@ -48,7 +48,7 @@ const REQUIRED_DIRS: [&str; 2] = ["plugin", "batteries"];
 /// platform and removes the other, so a deployment carries exactly one. The same
 /// validator serves both, and this is the only thing it varies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TreeShape {
+enum TreeShape {
     Source,
     Deployment,
 }
@@ -107,7 +107,7 @@ pub enum PluginBundleError {
 pub struct PluginDigest([u8; 32]);
 
 impl PluginDigest {
-    pub fn parse(value: &str) -> Result<Self, PluginBundleError> {
+    fn parse(value: &str) -> Result<Self, PluginBundleError> {
         let trimmed = value.trim();
         let malformed = || PluginBundleError::MalformedDigest {
             value: trimmed.to_owned(),
@@ -125,13 +125,14 @@ impl PluginDigest {
         Ok(Self(bytes))
     }
 
-    pub fn of(bytes: &[u8]) -> Self {
+    #[cfg(test)]
+    fn of(bytes: &[u8]) -> Self {
         let mut digest = Sha256::new();
         digest.update(bytes);
         Self(digest.finalize().into())
     }
 
-    pub fn from_hasher(hasher: Sha256) -> Self {
+    fn from_hasher(hasher: Sha256) -> Self {
         Self(hasher.finalize().into())
     }
 }
@@ -214,7 +215,7 @@ impl BuildIdentity<'static> {
 /// development override; normal init resolves the identity baked into this
 /// binary without consulting PATH, the working directory, or mutable refs.
 #[derive(Debug, Clone)]
-pub enum PluginSource {
+pub(crate) enum PluginSource {
     Explicit(PathBuf),
     Release { reference: String, digest: PluginDigest },
     Commit { commit: String, digest: PluginDigest },
@@ -290,7 +291,7 @@ fn strip_extended_prefix(path: &Path) -> PathBuf {
 ///
 /// This checks shape, not content: a tree whose `batteries/` files were edited in
 /// place passes. Reuse pairs it with a byte comparison of the one generated file.
-pub fn validate_tree(root: &Path, shape: TreeShape) -> Result<(), PluginBundleError> {
+fn validate_tree(root: &Path, shape: TreeShape) -> Result<(), PluginBundleError> {
     let invalid = |reason: String| PluginBundleError::InvalidSource {
         path: root.to_path_buf(),
         reason,
@@ -312,31 +313,6 @@ pub fn validate_tree(root: &Path, shape: TreeShape) -> Result<(), PluginBundleEr
         return Err(invalid(format!("{WINDOWS_HOOKS} is missing")));
     }
     Ok(())
-}
-
-/// A staged relative path as the canonical digest encodes it: UTF-8 with `/`
-/// separators on every platform. The bundle is ASCII filenames, so a path that
-/// cannot be spelled this way is refused rather than normalized.
-pub fn portable_relative_path(relative: &Path) -> Result<String, PluginBundleError> {
-    let mut parts = Vec::new();
-    for component in relative.components() {
-        match component {
-            std::path::Component::Normal(part) => match part.to_str() {
-                Some(text) => parts.push(text),
-                None => {
-                    return Err(PluginBundleError::UnportablePath {
-                        path: relative.to_path_buf(),
-                    });
-                }
-            },
-            _ => {
-                return Err(PluginBundleError::UnportablePath {
-                    path: relative.to_path_buf(),
-                });
-            }
-        }
-    }
-    Ok(parts.join("/"))
 }
 
 // ---------------------------------------------------------------------------
@@ -401,7 +377,7 @@ impl Endpoint {
         &self.url
     }
 
-    pub fn listen(&self) -> SocketAddr {
+    fn listen(&self) -> SocketAddr {
         self.listen
     }
 
@@ -420,7 +396,7 @@ impl Endpoint {
 /// before rendering. Without this, editing a file in a `--plugin-source` tree
 /// and re-running init would reuse the existing deployment and never reach
 /// Claude.
-pub fn canonical_source_digest(root: &Path) -> Result<PluginDigest, PluginBundleError> {
+fn canonical_source_digest(root: &Path) -> Result<PluginDigest, PluginBundleError> {
     Ok(PluginDigest(canonical_tree_digest(root)?))
 }
 
@@ -437,18 +413,18 @@ impl From<TreeDigestError> for PluginBundleError {
 
 /// Everything a deployment's identity depends on beyond the source bytes.
 #[derive(Debug, Clone)]
-pub struct DeploymentPlan {
-    pub source_digest: PluginDigest,
-    pub binary_path: PathBuf,
-    pub config_path: PathBuf,
-    pub data_dir: PathBuf,
-    pub endpoint: Endpoint,
+struct DeploymentPlan {
+    source_digest: PluginDigest,
+    binary_path: PathBuf,
+    config_path: PathBuf,
+    data_dir: PathBuf,
+    endpoint: Endpoint,
 }
 
 /// The name of the deployment directory: the source identity plus every path and
 /// platform detail rendered into it, so a deployment can never be reused for a
 /// different binary, config, data directory, endpoint or platform.
-pub fn deployment_digest(plan: &DeploymentPlan) -> Result<PluginDigest, PluginBundleError> {
+fn deployment_digest(plan: &DeploymentPlan) -> Result<PluginDigest, PluginBundleError> {
     let mut hasher = Sha256::new();
     absorb_field(&mut hasher, plan.source_digest.to_string().as_bytes());
     absorb_field(&mut hasher, path_identity(&plan.binary_path)?.as_bytes());
@@ -563,7 +539,7 @@ pub fn materialize(
         Err(error) => {
             // Our own unpublished reservation: removing it deletes no
             // registered state.
-            let _ = fs::remove_dir_all(&incoming);
+            discard_reservation(&incoming);
             return Err(error);
         }
     };
@@ -572,7 +548,7 @@ pub fn materialize(
     if published.is_dir() {
         match reusable(&published, &plan) {
             Ok(()) => {
-                let _ = fs::remove_dir_all(&incoming);
+                discard_reservation(&incoming);
                 return Ok(Deployment { root: published });
             }
             Err(reason) => {
@@ -583,7 +559,7 @@ pub fn materialize(
     }
 
     if let Err(error) = render(&incoming, &plan) {
-        let _ = fs::remove_dir_all(&incoming);
+        discard_reservation(&incoming);
         return Err(error);
     }
 
@@ -597,10 +573,10 @@ pub fn materialize(
                 std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::DirectoryNotEmpty
             ) =>
         {
-            let _ = fs::remove_dir_all(&incoming);
+            discard_reservation(&incoming);
         }
         Err(source) => {
-            let _ = fs::remove_dir_all(&incoming);
+            discard_reservation(&incoming);
             return Err(PluginBundleError::WriteDeployment {
                 path: published,
                 source,
@@ -622,6 +598,15 @@ pub fn materialize(
 /// deliberately not a content hash of every file: a tree whose `batteries/`
 /// contents were edited in place is not detected, and init's convergence claim
 /// is scoped to match.
+/// Remove this init's own unpublished reservation. No registered state is
+/// lost with it, so a failure is noted rather than reported over the error
+/// or the deployment the caller is already returning.
+fn discard_reservation(incoming: &Path) {
+    if let Err(error) = fs::remove_dir_all(incoming) {
+        tracing::warn!(path = %incoming.display(), %error, "cannot remove an unpublished deployment");
+    }
+}
+
 fn reusable(published: &Path, plan: &DeploymentPlan) -> Result<(), String> {
     validate_tree(published, TreeShape::Deployment).map_err(|error| error.to_string())?;
     for (name, expected) in [(PATHS_SH, paths_sh(plan)), (PATHS_PS1, paths_ps1(plan))] {
@@ -972,7 +957,7 @@ fn cached_archive_path(cache_dir: &Path, version: &str, digest: PluginDigest) ->
 /// The release download base. `APPA_RELEASE_BASE_URL` overrides it in debug
 /// builds only, and init reads it once at the boundary rather than leaving the
 /// fetch to consult the environment underneath its caller.
-pub fn release_base_url() -> String {
+pub(crate) fn release_base_url() -> String {
     let configured = if cfg!(debug_assertions) {
         env::var("APPA_RELEASE_BASE_URL").ok()
     } else {
@@ -983,7 +968,7 @@ pub fn release_base_url() -> String {
 
 /// The immutable GitHub source-archive base. Like the release test seam, the
 /// override exists only in debug builds and cannot redirect a shipped binary.
-pub fn source_archive_base_url() -> String {
+pub(crate) fn source_archive_base_url() -> String {
     let configured = if cfg!(debug_assertions) {
         env::var("APPA_SOURCE_ARCHIVE_BASE_URL").ok()
     } else {
@@ -997,7 +982,7 @@ pub fn source_archive_base_url() -> String {
 ///
 /// Every path ends in the same check against the digest this binary was built
 /// with, so the cache cannot be used to bypass a refusal.
-pub fn ensure_archive(
+pub(crate) fn ensure_archive(
     digest: PluginDigest,
     reference: &str,
     version: &str,
@@ -1057,7 +1042,7 @@ fn commit_archive_name(commit: &str, digest: PluginDigest) -> String {
 /// GitHub's repository archive is transport only. It is staged into the same
 /// marketplace shape as a release and checked against the canonical tree
 /// digest baked into the binary before entering the cache.
-pub fn ensure_commit_archive(
+pub(crate) fn ensure_commit_archive(
     commit: &str,
     expected: PluginDigest,
     cache_dir: &Path,

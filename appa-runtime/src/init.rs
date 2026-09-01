@@ -26,6 +26,8 @@ pub enum InitError {
     CurrentExecutable(std::io::Error),
     #[error("cannot find a home directory; set HOME or the relevant APPA directory variables")]
     MissingHome,
+    #[error("cannot make the directory override {path} absolute: {source}")]
+    AbsolutePath { path: PathBuf, source: std::io::Error },
     #[error("the `claude` command is unavailable: {0}")]
     ClaudeUnavailable(std::io::Error),
     #[error("`claude {command}` failed: {message}")]
@@ -155,13 +157,20 @@ struct DeploymentPaths {
 /// entirely at hook time, so it is made absolute here, once, before any of that.
 /// This is lexical: no `canonicalize`, no case folding, consistent with
 /// refusing rather than normalizing elsewhere.
-fn absolute_directory(path: PathBuf) -> PathBuf {
-    std::path::absolute(&path).unwrap_or(path)
+fn absolute_directory(path: PathBuf) -> Result<PathBuf, InitError> {
+    std::path::absolute(&path).map_err(|source| InitError::AbsolutePath { path, source })
 }
 
 /// The platform config file used by installed deployments and `appa describe`.
 pub fn installed_config_path() -> PathBuf {
-    installed_config_dir().map_or_else(|| PathBuf::from("appa.toml"), |dir| dir.join("appa.toml"))
+    match installed_config_dir() {
+        Ok(Some(directory)) => directory.join("appa.toml"),
+        Ok(None) => PathBuf::from("appa.toml"),
+        Err(error) => {
+            tracing::warn!(%error, "falling back to the working directory for the config path");
+            PathBuf::from("appa.toml")
+        }
+    }
 }
 
 /// Install the plugin belonging to this binary's own release into Claude Code,
@@ -180,7 +189,7 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
     let source = PluginSource::resolve(explicit_source)?;
     let paths = deployment_paths()?;
     let installations = installed_plugin_installations(&paths.claude_dir)?;
-    let marketplaces = run_claude(["plugin", "marketplace", "list"])?;
+    let marketplaces = run_claude(["plugin", "marketplace", "list"], None)?;
 
     // 2. Directories, and the config that survives every upgrade.
     for directory in [&paths.install_dir, &paths.config_dir, &paths.data_dir] {
@@ -198,8 +207,8 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
     })?;
     let config = paths.config_dir.join("appa.toml");
     let config_outcome = match create_default_config(&config)? {
-        true => ConfigOutcome::Created,
-        false => offer_config_rewrite(&config)?,
+        ConfigOutcome::Kept => offer_config_rewrite(&config)?,
+        created => created,
     };
     let composed_policy = verify_config(&config)?;
 
@@ -521,26 +530,21 @@ fn friendly_path(path: &Path) -> String {
     )
 }
 
-fn marketplace_manifest(path: &Path) -> PathBuf {
-    path.join(".claude-plugin/marketplace.json")
-}
-
 fn deployment_paths() -> Result<DeploymentPaths, InitError> {
     let home = user_home();
-    let config_dir = installed_config_dir().ok_or(InitError::MissingHome)?;
-    let data_dir = installed_data_dir().ok_or(InitError::MissingHome)?;
+    let config_dir = installed_config_dir()?.ok_or(InitError::MissingHome)?;
+    let data_dir = installed_data_dir()?.ok_or(InitError::MissingHome)?;
     let install_dir = if let Some(path) = env::var_os("APPA_INSTALL_DIR") {
-        absolute_directory(PathBuf::from(path))
+        absolute_directory(PathBuf::from(path))?
     } else if cfg!(windows) {
         data_dir.join("bin")
     } else {
         home.as_ref().ok_or(InitError::MissingHome)?.join(".local/bin")
     };
-    let claude_dir = env::var_os("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .map(absolute_directory)
-        .or_else(|| home.map(|path| path.join(".claude")))
-        .ok_or(InitError::MissingHome)?;
+    let claude_dir = match env::var_os("CLAUDE_CONFIG_DIR") {
+        Some(path) => absolute_directory(PathBuf::from(path))?,
+        None => home.ok_or(InitError::MissingHome)?.join(".claude"),
+    };
     Ok(DeploymentPaths {
         install_dir,
         config_dir,
@@ -562,48 +566,48 @@ fn user_home() -> Option<PathBuf> {
     })
 }
 
-fn installed_config_dir() -> Option<PathBuf> {
+fn installed_config_dir() -> Result<Option<PathBuf>, InitError> {
     if let Some(path) = env::var_os("APPA_CONFIG_DIR") {
-        return Some(absolute_directory(PathBuf::from(path)));
+        return absolute_directory(PathBuf::from(path)).map(Some);
     }
     #[cfg(target_os = "macos")]
-    return env::var_os("HOME")
+    return Ok(env::var_os("HOME")
         .map(PathBuf::from)
-        .map(|home| home.join("Library/Application Support/appa"));
+        .map(|home| home.join("Library/Application Support/appa")));
     #[cfg(target_os = "windows")]
-    return env::var_os("APPDATA").map(PathBuf::from).map(|path| path.join("appa"));
+    return Ok(env::var_os("APPDATA").map(PathBuf::from).map(|path| path.join("appa")));
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    env::var_os("XDG_CONFIG_HOME")
+    Ok(env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .map(|path| path.join("appa"))
         .or_else(|| {
             env::var_os("HOME")
                 .map(PathBuf::from)
                 .map(|home| home.join(".config/appa"))
-        })
+        }))
 }
 
-fn installed_data_dir() -> Option<PathBuf> {
+fn installed_data_dir() -> Result<Option<PathBuf>, InitError> {
     if let Some(path) = env::var_os("APPA_DATA_DIR") {
-        return Some(absolute_directory(PathBuf::from(path)));
+        return absolute_directory(PathBuf::from(path)).map(Some);
     }
     #[cfg(target_os = "macos")]
-    return env::var_os("HOME")
+    return Ok(env::var_os("HOME")
         .map(PathBuf::from)
-        .map(|home| home.join("Library/Application Support/appa"));
+        .map(|home| home.join("Library/Application Support/appa")));
     #[cfg(target_os = "windows")]
-    return env::var_os("LOCALAPPDATA")
+    return Ok(env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
-        .map(|path| path.join("appa"));
+        .map(|path| path.join("appa")));
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    env::var_os("XDG_DATA_HOME")
+    Ok(env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .map(|path| path.join("appa"))
         .or_else(|| {
             env::var_os("HOME")
                 .map(PathBuf::from)
                 .map(|home| home.join(".local/share/appa"))
-        })
+        }))
 }
 
 fn appa_filename() -> &'static str {
@@ -689,11 +693,11 @@ fn install_runtime(source: &Path, target: &Path, compensation: &mut Compensation
             source,
         });
     if let Err(error) = permissions {
-        let _ = fs::remove_file(&temporary);
+        discard_file(&temporary);
         return Err(error);
     }
     if let Err(source) = fs::rename(&temporary, target) {
-        let _ = fs::remove_file(&temporary);
+        discard_file(&temporary);
         return Err(InitError::InstallRuntime {
             path: target.to_path_buf(),
             source,
@@ -792,10 +796,19 @@ fn powershell<const N: usize>(command: &str, environment: [(&str, String); N]) -
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn create_default_config(path: &Path) -> Result<bool, InitError> {
+/// Remove a file this init wrote and abandons. Nothing it protects is lost
+/// with it, so a failure is noted beside the error being returned.
+fn discard_file(path: &Path) {
+    if let Err(error) = fs::remove_file(path) {
+        tracing::warn!(path = %path.display(), %error, "cannot remove a file init abandoned");
+    }
+}
+
+/// Seed the config from this build's default, or keep the one already there.
+fn create_default_config(path: &Path) -> Result<ConfigOutcome, InitError> {
     let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
         Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(ConfigOutcome::Kept),
         Err(source) => {
             return Err(InitError::WriteFile {
                 path: path.to_path_buf(),
@@ -805,13 +818,13 @@ fn create_default_config(path: &Path) -> Result<bool, InitError> {
     };
     if let Err(source) = file.write_all(DEFAULT_CONFIG.as_bytes()).and_then(|()| file.sync_all()) {
         drop(file);
-        let _ = fs::remove_file(path);
+        discard_file(path);
         return Err(InitError::WriteFile {
             path: path.to_path_buf(),
             source,
         });
     }
-    Ok(true)
+    Ok(ConfigOutcome::Created)
 }
 
 /// The policy version this build's default config declares.
@@ -862,7 +875,21 @@ fn offer_config_rewrite_with(
         _ => return Ok(ConfigOutcome::Kept),
     }
     let backup = path.with_extension("toml.bak");
-    if !confirm_rewrite(path, &backup, input, output)? {
+    let rewrite = Confirmation {
+        question: format!(
+            "appa: {} was authored against an older policy model than this build writes.\n\
+             Rewrite it from this build's default? Your file, its include lines and every edit\n\
+             in it, is kept only at {}, replacing whatever is there.",
+            friendly_path(path),
+            friendly_path(&backup),
+        ),
+        default: Answer::No,
+    };
+    let prompt = |source| InitError::WriteFile {
+        path: path.to_path_buf(),
+        source,
+    };
+    if rewrite.ask(input, output).map_err(prompt)? == Answer::No {
         return Ok(ConfigOutcome::Kept);
     }
     // The original moves aside whole, so nothing here can leave a half-written
@@ -884,31 +911,40 @@ fn offer_config_rewrite_with(
     }
 }
 
-fn confirm_rewrite(
-    path: &Path,
-    backup: &Path,
-    input: &mut impl BufRead,
-    output: &mut impl Write,
-) -> Result<bool, InitError> {
-    let prompt = |source| InitError::WriteFile {
-        path: path.to_path_buf(),
-        source,
-    };
-    write!(
-        output,
-        "appa: {} was authored against an older policy model than this build writes.\n\
-         Rewrite it from this build's default? Your file, its include lines and every edit\n\
-         in it, is kept only at {}, replacing whatever is there. [y/N] ",
-        friendly_path(path),
-        friendly_path(backup),
-    )
-    .and_then(|()| output.flush())
-    .map_err(prompt)?;
-    let mut answer = String::new();
-    if input.read_line(&mut answer).map_err(prompt)? == 0 {
-        return Ok(false);
+/// What a yes-or-no question resolves to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Answer {
+    Yes,
+    No,
+}
+
+/// A yes-or-no question put to the person running init, with the answer an
+/// empty line means; the prompt capitalizes that choice.
+struct Confirmation {
+    question: String,
+    default: Answer,
+}
+
+impl Confirmation {
+    /// Ask on `output` and read one line from `input`. End of input, where no
+    /// one is there to answer, is a no whatever the default.
+    fn ask(&self, input: &mut impl BufRead, output: &mut impl Write) -> std::io::Result<Answer> {
+        let choices = match self.default {
+            Answer::Yes => "[Y/n]",
+            Answer::No => "[y/N]",
+        };
+        write!(output, "{} {choices} ", self.question)?;
+        output.flush()?;
+        let mut answer = String::new();
+        if input.read_line(&mut answer)? == 0 {
+            return Ok(Answer::No);
+        }
+        Ok(match answer.trim().to_ascii_lowercase().as_str() {
+            "" => self.default,
+            "y" | "yes" => Answer::Yes,
+            _ => Answer::No,
+        })
     }
-    Ok(matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
 }
 
 /// The config the runtime will be started against, put through the runtime's
@@ -949,26 +985,20 @@ fn verify_config(path: &Path) -> Result<ComposedPolicy, InitError> {
     )))
 }
 
-fn run_claude<const N: usize>(arguments: [&str; N]) -> Result<Output, InitError> {
-    run_claude_in(arguments, None)
-}
-
-fn run_claude_in<const N: usize>(arguments: [&str; N], directory: Option<&Path>) -> Result<Output, InitError> {
-    run_claude_os_in(arguments.map(OsStr::new), directory)
-}
-
-fn run_claude_os<const N: usize>(arguments: [&OsStr; N]) -> Result<Output, InitError> {
-    run_claude_os_in(arguments, None)
-}
-
-fn run_claude_os_in<const N: usize>(arguments: [&OsStr; N], directory: Option<&Path>) -> Result<Output, InitError> {
+/// Run one `claude` command, from `directory` when a project-scoped plugin
+/// installation names one, and answer with its output only when it succeeded.
+fn run_claude<A: AsRef<OsStr>>(
+    arguments: impl IntoIterator<Item = A>,
+    directory: Option<&Path>,
+) -> Result<Output, InitError> {
+    let arguments: Vec<A> = arguments.into_iter().collect();
     let command = arguments
         .iter()
-        .map(|argument| argument.to_string_lossy())
+        .map(|argument| argument.as_ref().to_string_lossy())
         .collect::<Vec<_>>()
         .join(" ");
     let mut process = Command::new("claude");
-    process.args(arguments);
+    process.args(&arguments);
     if let Some(directory) = directory {
         process.current_dir(directory);
     }
@@ -982,14 +1012,6 @@ fn run_claude_os_in<const N: usize>(arguments: [&OsStr; N], directory: Option<&P
         command,
         message: if stderr.is_empty() { stdout } else { stderr },
     })
-}
-
-fn output_text(output: &Output) -> String {
-    format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    )
 }
 
 fn is_appa_marketplace_line(line: &str) -> bool {
@@ -1086,21 +1108,29 @@ fn replace_plugin(
     installations: &[PluginInstallation],
 ) -> Result<(), InitError> {
     for installation in installations {
-        run_claude_in(
+        run_claude(
             ["plugin", "uninstall", PLUGIN, "--scope", &installation.scope, "--yes"],
             installation.project_path.as_deref(),
         )?;
     }
-    if output_text(marketplaces).lines().any(is_appa_marketplace_line) {
-        run_claude(["plugin", "marketplace", "remove", MARKETPLACE])?;
+    let listed = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&marketplaces.stdout),
+        String::from_utf8_lossy(&marketplaces.stderr)
+    );
+    if listed.lines().any(is_appa_marketplace_line) {
+        run_claude(["plugin", "marketplace", "remove", MARKETPLACE], None)?;
     }
-    run_claude_os([
-        OsStr::new("plugin"),
-        OsStr::new("marketplace"),
-        OsStr::new("add"),
-        deployment.as_os_str(),
-    ])?;
-    run_claude(["plugin", "install", PLUGIN, "--scope", "user"])?;
+    run_claude(
+        [
+            OsStr::new("plugin"),
+            OsStr::new("marketplace"),
+            OsStr::new("add"),
+            deployment.as_os_str(),
+        ],
+        None,
+    )?;
+    run_claude(["plugin", "install", PLUGIN, "--scope", "user"], None)?;
     Ok(())
 }
 
@@ -1129,7 +1159,7 @@ fn prepare_plugin_recovery(
         "plugins": [{ "name": "appa-runtime", "source": "./plugin" }]
     }))
     .expect("the recovery marketplace is valid JSON");
-    let manifest_path = marketplace_manifest(&marketplace);
+    let manifest_path = marketplace.join(".claude-plugin/marketplace.json");
     fs::write(&manifest_path, manifest).map_err(|source| InitError::WriteFile {
         path: manifest_path,
         source,
@@ -1184,29 +1214,40 @@ fn undo_plugin_switch(recovery: Option<&PluginRecovery>, launcher_dir: &Path) ->
     match recovery {
         Some(recovery) => restore_plugin(recovery).and_then(|()| install_clappa(launcher_dir).map(drop)),
         None => {
-            run_claude(["plugin", "uninstall", PLUGIN, "--scope", "user", "--yes"])?;
-            run_claude(["plugin", "marketplace", "remove", MARKETPLACE])?;
+            run_claude(["plugin", "uninstall", PLUGIN, "--scope", "user", "--yes"], None)?;
+            run_claude(["plugin", "marketplace", "remove", MARKETPLACE], None)?;
             Ok(())
         }
     }
 }
 
+/// Put the installation this init replaced back from its rollback source.
+/// Clearing whatever the failed switch left registered is best effort: what
+/// matters is that the add and the installs that follow succeed.
 fn restore_plugin(recovery: &PluginRecovery) -> Result<(), InitError> {
     for installation in &recovery.installations {
-        let _ = run_claude_in(
+        let cleared = run_claude(
             ["plugin", "uninstall", PLUGIN, "--scope", &installation.scope, "--yes"],
             installation.project_path.as_deref(),
         );
+        if let Err(error) = cleared {
+            tracing::warn!(scope = %installation.scope, %error, "cannot clear the plugin before restoring it");
+        }
     }
-    let _ = run_claude(["plugin", "marketplace", "remove", MARKETPLACE]);
-    run_claude_os([
-        OsStr::new("plugin"),
-        OsStr::new("marketplace"),
-        OsStr::new("add"),
-        recovery.marketplace.as_os_str(),
-    ])?;
+    if let Err(error) = run_claude(["plugin", "marketplace", "remove", MARKETPLACE], None) {
+        tracing::warn!(%error, "cannot clear the marketplace before restoring it");
+    }
+    run_claude(
+        [
+            OsStr::new("plugin"),
+            OsStr::new("marketplace"),
+            OsStr::new("add"),
+            recovery.marketplace.as_os_str(),
+        ],
+        None,
+    )?;
     for installation in &recovery.installations {
-        run_claude_in(
+        run_claude(
             ["plugin", "install", PLUGIN, "--scope", &installation.scope],
             installation.project_path.as_deref(),
         )?;
@@ -1217,8 +1258,10 @@ fn restore_plugin(recovery: &PluginRecovery) -> Result<(), InitError> {
 /// Remove this invocation's rollback source. Another init's, live or crashed,
 /// is not this one's to judge.
 fn cleanup_plugin_recovery(recovery: Option<&PluginRecovery>) {
-    if let Some(recovery) = recovery {
-        let _ = fs::remove_dir_all(&recovery.marketplace);
+    if let Some(recovery) = recovery
+        && let Err(error) = fs::remove_dir_all(&recovery.marketplace)
+    {
+        tracing::warn!(path = %recovery.marketplace.display(), %error, "cannot remove the rollback source");
     }
 }
 
@@ -1698,40 +1741,21 @@ fn classify_endpoint_owner(
     }
 }
 
-fn confirm_stop(pid: i32, endpoint: &Endpoint) -> Result<bool, InitError> {
+fn confirm_stop(pid: i32, endpoint: &Endpoint) -> Result<Answer, InitError> {
+    let stop = Confirmation {
+        question: format!(
+            "appa: another appa deployment (pid {pid}) owns {}. Stop it and continue?",
+            endpoint.url()
+        ),
+        default: Answer::Yes,
+    };
     let stdin = std::io::stdin();
     let stderr = std::io::stderr();
-    confirm_stop_with(pid, endpoint, &mut stdin.lock(), &mut stderr.lock())
-}
-
-fn confirm_stop_with(
-    pid: i32,
-    endpoint: &Endpoint,
-    input: &mut impl BufRead,
-    output: &mut impl Write,
-) -> Result<bool, InitError> {
-    write!(
-        output,
-        "appa: another appa deployment (pid {pid}) owns {}. Stop it and continue? [Y/n] ",
-        endpoint.url()
-    )
-    .and_then(|()| output.flush())
-    .map_err(|source| InitError::RuntimeIdentity {
-        endpoint: endpoint.url().to_owned(),
-        message: format!("cannot ask permission to stop pid {pid}: {source}"),
-    })?;
-    let mut answer = String::new();
-    if input
-        .read_line(&mut answer)
+    stop.ask(&mut stdin.lock(), &mut stderr.lock())
         .map_err(|source| InitError::RuntimeIdentity {
             endpoint: endpoint.url().to_owned(),
-            message: format!("cannot read permission to stop pid {pid}: {source}"),
-        })?
-        == 0
-    {
-        return Ok(false);
-    }
-    Ok(matches!(answer.trim().to_ascii_lowercase().as_str(), "" | "y" | "yes"))
+            message: format!("cannot ask permission to stop pid {pid}: {source}"),
+        })
 }
 
 /// Clear a foreign owner while Claude and the launcher are still untouched.
@@ -1752,7 +1776,7 @@ fn clear_confirmed_foreign_with(
     config: &Path,
     endpoint: &Endpoint,
     pid: i32,
-    confirm: impl FnOnce(i32, &Endpoint) -> Result<bool, InitError>,
+    confirm: impl FnOnce(i32, &Endpoint) -> Result<Answer, InitError>,
 ) -> Result<(), InitError> {
     if !is_owned_appa_runtime(pid)? {
         return Err(InitError::RuntimeIdentity {
@@ -1762,7 +1786,7 @@ fn clear_confirmed_foreign_with(
             ),
         });
     }
-    if !confirm(pid, endpoint)? {
+    if confirm(pid, endpoint)? == Answer::No {
         return Err(InitError::RuntimeIdentity {
             endpoint: endpoint.url().to_owned(),
             message: format!("another appa deployment (pid {pid}) still owns this endpoint; init cancelled"),
@@ -1808,7 +1832,7 @@ fn reconcile_policy(
     let Some(divergence) = policy_divergence(composed, &serving_policy_key(endpoint)?) else {
         return Ok(RuntimeOutcome::Healthy);
     };
-    if !confirm_reload(config, divergence)? {
+    if confirm_reload(config, divergence)? == Answer::No {
         return Ok(RuntimeOutcome::OlderPolicy);
     }
     reload_policy(endpoint, config)?;
@@ -1875,21 +1899,11 @@ fn reload_policy(endpoint: &Endpoint, config: &Path) -> Result<(), InitError> {
 
 /// A terminal is asked; anything else reloads. A script that just wrote a config wants it
 /// serving, and there is no one there to answer.
-fn confirm_reload(config: &Path, divergence: Divergence) -> Result<bool, InitError> {
+fn confirm_reload(config: &Path, divergence: Divergence) -> Result<Answer, InitError> {
     let stdin = std::io::stdin();
     if !stdin.is_terminal() {
-        return Ok(true);
+        return Ok(Answer::Yes);
     }
-    let stderr = std::io::stderr();
-    confirm_reload_with(config, divergence, &mut stdin.lock(), &mut stderr.lock())
-}
-
-fn confirm_reload_with(
-    config: &Path,
-    divergence: Divergence,
-    input: &mut impl BufRead,
-    output: &mut impl Write,
-) -> Result<bool, InitError> {
     let prompt = |source| InitError::WriteFile {
         path: config.to_path_buf(),
         source,
@@ -1897,7 +1911,7 @@ fn confirm_reload_with(
     let config = friendly_path(config);
     // Each case states exactly what init established, and no more: one knows the running
     // runtime serves something else, the other knows only that it cannot tell.
-    let question = match divergence {
+    let established = match divergence {
         Divergence::Serving => {
             format!("appa: the running runtime still serves the policy it started with, not {config}.")
         }
@@ -1906,17 +1920,14 @@ fn confirm_reload_with(
              whether the running runtime already serves it."
         ),
     };
-    write!(
-        output,
-        "{question}\nReload it now? Sessions open right now keep the deployment they started with. [Y/n] ",
-    )
-    .and_then(|()| output.flush())
-    .map_err(prompt)?;
-    let mut answer = String::new();
-    if input.read_line(&mut answer).map_err(prompt)? == 0 {
-        return Ok(false);
-    }
-    Ok(matches!(answer.trim().to_ascii_lowercase().as_str(), "" | "y" | "yes"))
+    let reload = Confirmation {
+        question: format!(
+            "{established}\nReload it now? Sessions open right now keep the deployment they started with."
+        ),
+        default: Answer::Yes,
+    };
+    let stderr = std::io::stderr();
+    reload.ask(&mut stdin.lock(), &mut stderr.lock()).map_err(prompt)
 }
 
 /// The endpoint answers for this deployment: this build, serving this configuration.
@@ -2006,14 +2017,9 @@ mod tests {
         unsafe { libc::kill(pid, 0) == 0 }
     }
 
-    #[cfg(unix)]
-    fn health_answers(answers: Vec<String>) -> Endpoint {
-        recorded_answers(answers).0
-    }
-
-    /// The same loopback fixture, with the request lines it served. A probe's path is part
-    /// of the contract it has with the runtime, so a test that cares which endpoint init
-    /// asks reads them; one that only cares how an answer parses takes `health_answers`.
+    /// A loopback fixture serving `answers` in turn, with the request lines it served. A
+    /// probe's path is part of the contract it has with the runtime, so a test that cares
+    /// which endpoint init asks reads them.
     #[cfg(unix)]
     fn recorded_answers(answers: Vec<String>) -> (Endpoint, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
         use std::io::{Read, Write};
@@ -2115,25 +2121,24 @@ mod tests {
     }
 
     #[test]
-    fn stopping_a_foreign_runtime_requires_a_y_or_default_yes_answer() {
-        let endpoint = Endpoint::parse("http://127.0.0.1:8787").expect("the endpoint parses");
-        for answer in ["y\n", "YES\n", "\n"] {
-            let mut output = Vec::new();
-            assert!(
-                confirm_stop_with(42, &endpoint, &mut answer.as_bytes(), &mut output).expect("the answer reads"),
-                "{answer:?} approves"
-            );
-            assert!(
-                String::from_utf8(output)
-                    .unwrap()
-                    .contains("Stop it and continue? [Y/n]")
-            );
-        }
-        for answer in ["n\n", "no\n", "anything else\n", ""] {
-            assert!(
-                !confirm_stop_with(42, &endpoint, &mut answer.as_bytes(), &mut Vec::new()).expect("the answer reads"),
-                "{answer:?} refuses"
-            );
+    fn an_empty_answer_takes_the_default_and_end_of_input_refuses() {
+        let ask = |default: Answer, answer: &str| {
+            let confirmation = Confirmation {
+                question: "continue?".to_owned(),
+                default,
+            };
+            confirmation
+                .ask(&mut answer.as_bytes(), &mut Vec::new())
+                .expect("the answer reads")
+        };
+        for default in [Answer::Yes, Answer::No] {
+            for answer in ["y\n", "YES\n", " yes \n"] {
+                assert_eq!(ask(default, answer), Answer::Yes, "{answer:?} under {default:?}");
+            }
+            for answer in ["n\n", "no\n", "anything else\n", ""] {
+                assert_eq!(ask(default, answer), Answer::No, "{answer:?} under {default:?}");
+            }
+            assert_eq!(ask(default, "\n"), default);
         }
     }
 
@@ -2155,27 +2160,6 @@ mod tests {
     }
 
     #[test]
-    fn reloading_a_lagging_runtime_requires_a_y_or_default_yes_answer() {
-        let config = PathBuf::from("/home/user/config/appa.toml");
-        for divergence in [Divergence::Serving, Divergence::Unestablished] {
-            for answer in ["y\n", "YES\n", "\n"] {
-                assert!(
-                    confirm_reload_with(&config, divergence, &mut answer.as_bytes(), &mut Vec::new())
-                        .expect("the answer reads"),
-                    "{answer:?} approves under {divergence:?}"
-                );
-            }
-            for answer in ["n\n", "no\n", "anything else\n", ""] {
-                assert!(
-                    !confirm_reload_with(&config, divergence, &mut answer.as_bytes(), &mut Vec::new())
-                        .expect("the answer reads"),
-                    "{answer:?} refuses under {divergence:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
     fn a_serving_policy_key_is_read_from_the_policy_route() {
         let (endpoint, asked) = recorded_answers(vec!["c54f1509".to_string()]);
         assert_eq!(serving_policy_key(&endpoint).expect("the key reads"), "c54f1509");
@@ -2191,7 +2175,7 @@ mod tests {
     /// the skew init exists to prevent.
     #[test]
     fn a_runtime_that_does_not_answer_for_its_policy_refuses_init() {
-        let blank = health_answers(vec![String::new()]);
+        let blank = recorded_answers(vec![String::new()]).0;
         assert!(matches!(serving_policy_key(&blank), Err(InitError::PolicyKey { .. })));
         let unbound = Endpoint::parse("http://127.0.0.1:1").expect("the endpoint parses");
         assert!(matches!(serving_policy_key(&unbound), Err(InitError::PolicyKey { .. })));
@@ -2201,7 +2185,7 @@ mod tests {
     fn a_matching_policy_key_reconciles_without_asking_or_reloading() {
         // One answer is served: the key probe. A reload would need a second connection,
         // so reaching one at all would hang rather than pass.
-        let endpoint = health_answers(vec!["agreed".to_string()]);
+        let endpoint = recorded_answers(vec!["agreed".to_string()]).0;
         let config = PathBuf::from("/home/user/config/appa.toml");
         assert_eq!(
             reconcile_policy(&endpoint, &config, &ComposedPolicy::Key("agreed".to_string()))
@@ -2234,12 +2218,12 @@ mod tests {
         };
         let candidate = directory.path().join("candidate-appa");
         fs::write(&candidate, "a different candidate build").expect("the candidate binary exists");
-        let endpoint = health_answers(vec![format!("different-fingerprint {pid}")]);
+        let endpoint = recorded_answers(vec![format!("different-fingerprint {pid}")]).0;
 
         let config = directory.path().join("appa.toml");
         clear_confirmed_foreign_with(&candidate, &config, &endpoint, pid, |approved_pid, _| {
             assert_eq!(approved_pid, pid);
-            Ok(true)
+            Ok(Answer::Yes)
         })
         .expect("the approved foreign runtime stops");
 
@@ -2255,7 +2239,7 @@ mod tests {
             return;
         };
         fs::remove_file(&replaced).expect("the installed binary is unlinked while its runtime remains");
-        let endpoint = health_answers(vec![format!("stale {pid}"), format!("stale {pid}")]);
+        let endpoint = recorded_answers(vec![format!("stale {pid}"), format!("stale {pid}")]).0;
 
         clear_stale_endpoint(&endpoint).expect("init stops its stale unlinked runtime");
 
@@ -2270,7 +2254,7 @@ mod tests {
         let Some(pid) = process_executing(&other, RUNTIME_ARGUMENTS) else {
             return;
         };
-        let endpoint = health_answers(vec![format!("stale {pid}")]);
+        let endpoint = recorded_answers(vec![format!("stale {pid}")]).0;
 
         let refused = clear_stale_endpoint(&endpoint);
 
@@ -2291,7 +2275,10 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let config = directory.path().join("appa.toml");
 
-        assert!(create_default_config(&config).expect("the default config is written"));
+        assert_eq!(
+            create_default_config(&config).expect("the default config is written"),
+            ConfigOutcome::Created
+        );
         verify_config(&config).expect("the config init writes composes");
 
         let ahead = template_policy_version() + 1;
@@ -2389,7 +2376,10 @@ mod tests {
     fn a_current_config_is_never_offered_for_rewrite() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let config = directory.path().join("appa.toml");
-        assert!(create_default_config(&config).expect("the default config is written"));
+        assert_eq!(
+            create_default_config(&config).expect("the default config is written"),
+            ConfigOutcome::Created
+        );
 
         let (outcome, prompt) = answer_rewrite(&config, "y\n");
         assert!(prompt.is_empty(), "no offer is made");
