@@ -31,6 +31,12 @@ case "$*" in
   *"/policy-key"*)
     # FAKE_POLICY_KEY is the policy the endpoint serves. Unset, the route is
     # missing, which curl --fail reports as a failure and init refuses.
+    # FAKE_POLICY_KEY_TIMEOUT is a runtime that never answers the route inside
+    # curl's deadline.
+    if [ -n "${FAKE_POLICY_KEY_TIMEOUT:-}" ]; then
+      printf 'curl: (28) Operation timed out after 2000 milliseconds\n' >&2
+      exit 28
+    fi
     if [ -z "${FAKE_POLICY_KEY:-}" ]; then
       printf 'curl: (22) The requested URL returned error: 404\n' >&2
       exit 22

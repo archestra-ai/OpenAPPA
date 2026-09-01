@@ -253,6 +253,32 @@ fn another_inits_rollback_source_survives_a_successful_init() {
     );
 }
 
+/// A runtime that does not answer for its policy inside the probe's deadline
+/// cannot be reconciled, so init fails and binds nothing to it rather than
+/// reporting it healthy.
+#[test]
+fn a_policy_key_timeout_fails_init() {
+    let fixture = Fixture::new();
+
+    let failed = fixture
+        .init()
+        .env("FAKE_POLICY_KEY_TIMEOUT", "1")
+        .output()
+        .expect("appa init runs");
+
+    assert!(!failed.status.success());
+    assert_eq!(
+        Installed::of(&fixture),
+        Installed {
+            binary: None,
+            statusline: None,
+            settings: None,
+            registry: Some(serde_json::json!({"version": 2, "plugins": {}})),
+        }
+    );
+    assert!(!fixture.bin.join("clappa").exists());
+}
+
 /// A first install that fails after its runtime is up leaves nothing behind:
 /// the runtime it started is stopped, and no file or registration it wrote
 /// survives to bind a session to a runtime whose policy init could not settle.
