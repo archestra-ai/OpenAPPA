@@ -23,6 +23,10 @@ fail() {
 }
 
 command -v curl >/dev/null 2>&1 || fail "curl is required"
+# A stalled release host fails the install instead of holding the shell.
+fetch() {
+  curl -fsS --connect-timeout 15 --speed-limit 1024 --speed-time 30 "$@"
+}
 
 if command -v sha256sum >/dev/null 2>&1; then
   digest() { sha256sum "$1" | cut -d' ' -f1; }
@@ -62,7 +66,7 @@ esac
 if [ -n "${APPA_VERSION:-}" ]; then
   tag=$APPA_VERSION
 else
-  latest=$(curl -fsS -o /dev/null -w '%{redirect_url}' "$repository/releases/latest") ||
+  latest=$(fetch -o /dev/null -w '%{redirect_url}' "$repository/releases/latest") ||
     fail "could not resolve the latest release from $repository"
   case $latest in
     "$repository/releases/tag/"*) tag=${latest#"$repository/releases/tag/"} ;;
@@ -78,9 +82,9 @@ trap 'rm -rf "$work"' EXIT
 # `latest`, so a release published mid-run cannot pair one with the other.
 release=$repository/releases/download/$tag
 printf 'Downloading appa %s for %s-%s\n' "$tag" "$architecture" "$platform" >&2
-curl -fsSL -o "$work/SHA256SUMS" "$release/SHA256SUMS" ||
+fetch -L -o "$work/SHA256SUMS" "$release/SHA256SUMS" ||
   fail "could not download $release/SHA256SUMS"
-curl -fsSL -o "$work/$archive" "$release/$archive" ||
+fetch -L -o "$work/$archive" "$release/$archive" ||
   fail "could not download $release/$archive"
 
 listed=$(grep -E "^[0-9a-f]{64}  $archive\$" "$work/SHA256SUMS" || true)
@@ -98,13 +102,17 @@ tar -xzf "$work/$archive" -C "$work/extract"
 version=$("$work/extract/appa" --version) ||
   fail "the $tag binary does not run on this system; Linux needs glibc 2.34 or newer"
 
+# The previous appa stays in place until the new one is completely written
+# beside it, so a failed copy never leaves the directory without a working
+# binary.
 mkdir -p "$install_dir"
-install -m 755 "$work/extract/appa" "$install_dir/appa"
+install -m 755 "$work/extract/appa" "$install_dir/appa.$$.new"
+mv -f "$install_dir/appa.$$.new" "$install_dir/appa"
 printf 'Installed %s to %s\n' "$version" "$install_dir/appa"
 case :$PATH: in
   *":$install_dir:"*) printf 'Next: appa init claude-code\n' ;;
   *)
     printf 'Add %s to PATH to run appa by name.\n' "$install_dir"
-    printf 'Next: %s/appa init claude-code\n' "$install_dir"
+    printf 'Next: "%s/appa" init claude-code\n' "$install_dir"
     ;;
 esac
