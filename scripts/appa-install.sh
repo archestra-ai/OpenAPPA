@@ -109,7 +109,7 @@ mkdir -p "$install_dir"
 install -m 755 "$work/extract/appa" "$install_dir/appa.$$.new"
 mv -f "$install_dir/appa.$$.new" "$install_dir/appa"
 printf 'Installed %s to %s\n' "$version" "$install_dir/appa"
-case :$PATH: in
+case :${PATH:-}: in
   *":$install_dir:"*) printf 'Next: appa init claude-code\n' ;;
   *)
     printf 'Add %s to PATH to run appa by name.\n' "$install_dir"

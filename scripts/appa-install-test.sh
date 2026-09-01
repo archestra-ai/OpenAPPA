@@ -93,9 +93,7 @@ report() {
 
 # Each case gets a fresh install directory, with a space in its name.
 case_dir() {
-  dir="$work/cases/$1/install dir"
-  mkdir -p "$(dirname "$dir")"
-  printf '%s\n' "$dir"
+  printf '%s\n' "$work/cases/$1/install dir"
 }
 
 expect_installed() {
@@ -153,7 +151,6 @@ while read -r hash name; do
   printf '%s  %s\n' "$(printf '%s' "$hash" | tr '0123456789abcdef' '123456789abcdef0')" "$name"
 done < "$work/SHA256SUMS.good" > "$release/SHA256SUMS"
 expect_refused digest-mismatch APPA_REPOSITORY_URL="$origin/good"
-restore
 
 # A PATH holding everything the installer needs except a digest tool.
 mkdir "$work/nodigest"
