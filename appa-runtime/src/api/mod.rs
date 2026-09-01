@@ -436,7 +436,7 @@ impl Runtime {
     /// against the key of the configuration it just validated: a process that kept
     /// running across the install serves the policy it loaded at startup, and only a
     /// difference here is worth reloading.
-    pub fn serving_policy_key(&self) -> String {
+    pub(crate) fn serving_policy_key(&self) -> String {
         let serving = self
             .inner
             .deployment
@@ -1391,6 +1391,28 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             retired_len(&runtime),
             0,
             "the cache does not carry compiled engines across a reload"
+        );
+    }
+
+    #[test]
+    fn the_serving_policy_key_names_the_deployment_answering_now() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime =
+            Runtime::open(versioned_policy("first"), dir.path().join("appa.db"), None).expect("the deployment opens");
+        let before = runtime.serving_policy_key();
+
+        let reloaded = runtime
+            .reload(versioned_policy("second"))
+            .expect("the second deployment loads");
+        assert_eq!(
+            runtime.serving_policy_key(),
+            reloaded.policy_key,
+            "the key answers for the deployment the reload installed"
+        );
+        assert_ne!(
+            runtime.serving_policy_key(),
+            before,
+            "a different policy answers under a different key, which is what makes the key a divergence signal"
         );
     }
 

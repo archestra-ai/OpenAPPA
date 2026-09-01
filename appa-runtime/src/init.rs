@@ -1992,16 +1992,35 @@ mod tests {
 
     #[cfg(unix)]
     fn health_answers(answers: Vec<String>) -> Endpoint {
+        recorded_answers(answers).0
+    }
+
+    /// The same loopback fixture, with the request lines it served. A probe's path is part
+    /// of the contract it has with the runtime, so a test that cares which endpoint init
+    /// asks reads them; one that only cares how an answer parses takes `health_answers`.
+    #[cfg(unix)]
+    fn recorded_answers(answers: Vec<String>) -> (Endpoint, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
         use std::io::{Read, Write};
         use std::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback health fixture binds");
         let endpoint = Endpoint::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = std::sync::Arc::clone(&asked);
         std::thread::spawn(move || {
             for answer in answers {
                 let (mut connection, _) = listener.accept().expect("the health probe connects");
                 let mut request = [0u8; 2048];
-                let _ = connection.read(&mut request);
+                let read = connection.read(&mut request).unwrap_or(0);
+                let requested = String::from_utf8_lossy(&request[..read])
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned();
+                recorder
+                    .lock()
+                    .expect("the request recorder is never poisoned")
+                    .push(requested);
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
                     answer.len()
@@ -2011,7 +2030,7 @@ mod tests {
                     .expect("the health answer writes");
             }
         });
-        endpoint
+        (endpoint, asked)
     }
 
     #[test]
@@ -2099,8 +2118,13 @@ mod tests {
 
     #[test]
     fn a_serving_policy_key_is_read_only_when_the_endpoint_answers_one() {
-        let endpoint = health_answers(vec!["c54f1509".to_string()]);
+        let (endpoint, asked) = recorded_answers(vec!["c54f1509".to_string()]);
         assert_eq!(serving_policy_key(&endpoint).as_deref(), Some("c54f1509"));
+        assert_eq!(
+            asked.lock().expect("the request recorder is never poisoned").as_slice(),
+            ["GET /policy-key HTTP/1.1".to_string()],
+            "the probe reads the policy route, and reads it without mutating"
+        );
 
         // A runtime predating the route answers nothing usable, and an unbound port
         // answers not at all. Both leave init with no key rather than a wrong one.
