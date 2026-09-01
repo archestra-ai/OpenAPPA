@@ -230,7 +230,7 @@ pub(crate) fn plan(
     views: &Views,
     blocked: BlockedCall<'_>,
     context: &MembershipContext<'_>,
-) -> PlannedBlock {
+) -> Result<PlannedBlock, MembershipNeeded> {
     let BlockedCall {
         call,
         contract,
@@ -254,8 +254,7 @@ pub(crate) fn plan(
         stage,
         role,
         context,
-    )
-    .expect("the blocked call's own check decided under this same state and context")
+    )?
     .into_iter()
     .filter(|plan| !denied.iter().any(|authority| plan.names_authority(authority)))
     .map(RemedyPlan::Executable)
@@ -263,11 +262,10 @@ pub(crate) fn plan(
 
     let terminal = |plan: &RemedyPlan| plan.executable().is_some_and(|plan| plan.hop().is_none());
     if !plans.iter().any(terminal) && !raw.requirement_gaps.is_empty() {
-        plans.extend(
-            direct_redispatches(registry, &current, raw, context)
-                .into_iter()
-                .map(RemedyPlan::Redispatch),
-        );
+        let mut needs = NeededAtoms::default();
+        let redispatches = direct_redispatches(registry, &current, raw, context, &mut needs);
+        needs.refuse_if_any()?;
+        plans.extend(redispatches.into_iter().map(RemedyPlan::Redispatch));
     }
     let fork_reason = match (&raw.narrowing, raw.requirement_gaps.is_empty()) {
         (Some(_), true) => {
@@ -280,16 +278,17 @@ pub(crate) fn plan(
             "If this trajectory's harness advertises a child-session tool, handle the work there if isolation is useful.\nA child inherits the same session label, so delegation does not clear these requirements."
         }
     };
-    PlannedBlock {
+    Ok(PlannedBlock {
         raw: raw.clone(),
         plans,
         fork_advice: Some(fork_reason.to_string()),
-    }
+    })
 }
 
 /// The executable plans of one stage over an explicit state: the branch's label and the
 /// history predicates. The log supplies them for a live block; a recovery route supplies the
-/// state it has reached (RMD-20).
+/// state it has reached (RMD-20). A membership read no pinned answer decides refuses the
+/// whole enumeration with the union of every undecided atom, never a smaller menu.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn enumerate_plans(
     registry: &Registry,
@@ -315,6 +314,7 @@ pub(crate) fn enumerate_plans(
         return Ok(Vec::new());
     }
 
+    let mut needs = NeededAtoms::default();
     let mut candidates: Vec<PlanCandidate> = input_hops(
         registry,
         contract,
@@ -323,6 +323,7 @@ pub(crate) fn enumerate_plans(
         &block.requirement_gaps,
         current,
         context,
+        &mut needs,
     )
     .into_iter()
     .map(|sanitizer| PlanCandidate {
@@ -330,8 +331,17 @@ pub(crate) fn enumerate_plans(
         required: Vec::new(),
     })
     .collect();
-    if let Some(assignments) = enumerate_assignments(registry, &block.requirement_gaps, &contract.tags, context) {
-        let settlements = narrowing_remedies(registry, current, contract, block.narrowing.as_ref(), context);
+    if let Some(assignments) =
+        enumerate_assignments(registry, &block.requirement_gaps, &contract.tags, context, &mut needs)
+    {
+        let settlements = narrowing_remedies(
+            registry,
+            current,
+            contract,
+            block.narrowing.as_ref(),
+            context,
+            &mut needs,
+        );
         for required in assignments {
             for settlement in &settlements {
                 let mut steps: Vec<RemedyStep> = match settlement {
@@ -349,6 +359,7 @@ pub(crate) fn enumerate_plans(
             }
         }
     }
+    needs.refuse_if_any()?;
     Ok(
         least_mandate_first(registry, &block.requirement_gaps, candidates, context)
             .into_iter()
@@ -360,6 +371,29 @@ pub(crate) fn enumerate_plans(
             })
             .collect(),
     )
+}
+
+/// The membership atoms enumeration read without a pinned answer, aggregated across every
+/// read actually performed. Enumeration never treats an undecided read as an inapplicable
+/// remedy: the atoms collect here and the whole enumeration refuses with their union, so a
+/// missing answer is an ask, never a silently smaller menu.
+#[derive(Default)]
+pub(crate) struct NeededAtoms(BTreeSet<SymbolicAtom>);
+
+impl NeededAtoms {
+    pub(crate) fn absorb(&mut self, needed: MembershipNeeded) {
+        self.0.extend(needed.needed);
+    }
+
+    pub(crate) fn refuse_if_any(self) -> Result<(), MembershipNeeded> {
+        if self.0.is_empty() {
+            Ok(())
+        } else {
+            Err(MembershipNeeded {
+                needed: self.0.into_iter().collect(),
+            })
+        }
+    }
 }
 
 struct PlanCandidate {
@@ -586,13 +620,21 @@ fn enumerate_assignments(
     gaps: &[Gap],
     tags: &[TagName],
     context: &MembershipContext<'_>,
+    needs: &mut NeededAtoms,
 ) -> Option<Vec<Vec<RequiredRuling>>> {
     let mut choices: Vec<Vec<&AuthorityName>> = Vec::with_capacity(gaps.len());
     for gap in gaps {
         let competent: Vec<&AuthorityName> = registry
             .authorities()
             .iter()
-            .filter(|authority| covers_gap(authority, gap, tags, context))
+            .filter(|authority| match gap_cover(authority, gap, tags, context) {
+                Evaluation::Holds => true,
+                Evaluation::Fails => false,
+                Evaluation::Needs(needed) => {
+                    needs.absorb(needed);
+                    false
+                }
+            })
             .map(|authority| &authority.name)
             .collect();
         if competent.is_empty() {
@@ -656,6 +698,7 @@ pub(crate) fn narrowing_remedies(
     contract: &ToolAnnotation,
     narrowing: Option<&Narrowing>,
     context: &MembershipContext<'_>,
+    needs: &mut NeededAtoms,
 ) -> Vec<NarrowingSettlement> {
     let Some(narrowing) = narrowing else {
         return vec![NarrowingSettlement::Nothing];
@@ -665,7 +708,7 @@ pub(crate) fn narrowing_remedies(
         return settlements;
     }
     let output = contract.output_label();
-    for sanitizer in applicable_output_sanitizers(registry, contract, &output, context) {
+    for sanitizer in applicable_output_sanitizers(registry, contract, &output, context, needs) {
         if sanitized_commit(current, &output, sanitizer).is_none() {
             continue;
         }
@@ -675,6 +718,7 @@ pub(crate) fn narrowing_remedies(
 }
 
 /// Every input-substitution progress hop this call stage offers, in registry name order.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn input_hops(
     registry: &Registry,
     contract: &ToolAnnotation,
@@ -683,6 +727,7 @@ pub(crate) fn input_hops(
     gaps: &[Gap],
     current: &Label,
     context: &MembershipContext<'_>,
+    needs: &mut NeededAtoms,
 ) -> Vec<SanitizerName> {
     if role == CallRole::MarkedSpawn {
         return Vec::new();
@@ -695,13 +740,16 @@ pub(crate) fn input_hops(
         .sanitizers()
         .filter(|sanitizer| !stage.lineage().contains(&sanitizer.name))
         .filter(|sanitizer| {
-            // An undecided admission or clearing is not offered: planning reads only the
-            // gathered answers, and offers stay deterministic under them.
-            sanitizer
-                .derive_input(&released, &contract.tags, context)
-                .ok()
-                .flatten()
-                .is_some_and(|derived| clears_a_recipient(&derived, gaps, context))
+            // An undecided admission or clearing joins the aggregate refusal instead of
+            // shrinking the menu.
+            match sanitizer.derive_input(&released, &contract.tags, context) {
+                Ok(Some(derived)) => clears_a_recipient(&derived, gaps, context, needs),
+                Ok(None) => false,
+                Err(needed) => {
+                    needs.absorb(needed);
+                    false
+                }
+            }
         })
         .map(|sanitizer| sanitizer.name.clone())
         .collect()
@@ -720,9 +768,16 @@ pub(crate) fn substitution_helps(before: &RawBlock, after: &check::CheckOutcome)
             .all(|gap| before.requirement_gaps.contains(gap))
 }
 
-fn clears_a_recipient(derived: &Label, gaps: &[Gap], context: &MembershipContext<'_>) -> bool {
+fn clears_a_recipient(derived: &Label, gaps: &[Gap], context: &MembershipContext<'_>, needs: &mut NeededAtoms) -> bool {
     gaps.iter().any(|gap| match gap {
-        Gap::Includes { recipients } => matches!(derived.covers(recipients, context), Evaluation::Holds),
+        Gap::Includes { recipients } => match derived.covers(recipients, context) {
+            Evaluation::Holds => true,
+            Evaluation::Fails => false,
+            Evaluation::Needs(needed) => {
+                needs.absorb(needed);
+                false
+            }
+        },
         _ => false,
     })
 }
@@ -732,17 +787,20 @@ fn applicable_output_sanitizers<'r>(
     contract: &ToolAnnotation,
     output: &Label,
     context: &MembershipContext<'_>,
+    needs: &mut NeededAtoms,
 ) -> Vec<&'r Sanitizer> {
     registry
         .sanitizers()
         .filter(|sanitizer| !sanitizer.name.is_attest_schema())
-        .filter(|sanitizer| {
-            sanitizer
-                .derive_output(output, &contract.tags, context)
-                .ok()
-                .flatten()
-                .is_some()
-        })
+        .filter(
+            |sanitizer| match sanitizer.derive_output(output, &contract.tags, context) {
+                Ok(derived) => derived.is_some(),
+                Err(needed) => {
+                    needs.absorb(needed);
+                    false
+                }
+            },
+        )
         .collect()
 }
 
@@ -768,10 +826,12 @@ pub(crate) fn confined_hop_helps(receiving: &Label, candidate: &Label, derived: 
 /// The next stage of one confined candidate: a progress hop for every registered output
 /// sanitizer that still helps, then acceptance of exactly the residual this candidate leaves.
 ///
-/// Total by construction. Acceptance is always available, so a confined candidate is
-/// never stuck whatever the catalogue holds, and no chain is precomputed — each hop persists one
-/// candidate and this runs again from it. The order is presentation only; hops come
-/// first because a hop costs the trajectory nothing and acceptance costs exactly the residual.
+/// Total by construction once every membership read is answered: acceptance is always
+/// available, so a confined candidate is never stuck whatever the catalogue holds, and no chain
+/// is precomputed — each hop persists one candidate and this runs again from it. An undecided
+/// membership read refuses the stage with the aggregate of missing atoms instead of dropping
+/// hops. The order is presentation only; hops come first because a hop costs the trajectory
+/// nothing and acceptance costs exactly the residual.
 pub(crate) fn confined_stage(
     registry: &Registry,
     contract: &ToolAnnotation,
@@ -780,19 +840,22 @@ pub(crate) fn confined_stage(
     residual: &Narrowing,
     lineage: &SanitizerLineage,
     context: &MembershipContext<'_>,
-) -> Vec<ExecutableRemedyPlan> {
+) -> Result<Vec<ExecutableRemedyPlan>, MembershipNeeded> {
+    let mut needs = NeededAtoms::default();
     let mut plans: Vec<ExecutableRemedyPlan> = Vec::new();
     let hops = registry
         .sanitizers()
         .filter(|sanitizer| !lineage.contains(&sanitizer.name))
         .filter(|sanitizer| !sanitizer.name.is_attest_schema())
-        .filter(|sanitizer| {
-            sanitizer
-                .derive_output(candidate, &contract.tags, context)
-                .ok()
-                .flatten()
-                .is_some_and(|derived| confined_hop_helps(receiving, candidate, &derived))
-        });
+        .filter(
+            |sanitizer| match sanitizer.derive_output(candidate, &contract.tags, context) {
+                Ok(derived) => derived.is_some_and(|derived| confined_hop_helps(receiving, candidate, &derived)),
+                Err(needed) => {
+                    needs.absorb(needed);
+                    false
+                }
+            },
+        );
     for sanitizer in hops {
         plans.push(ExecutableRemedyPlan {
             id: PlanId(plans.len() as u32),
@@ -800,12 +863,13 @@ pub(crate) fn confined_stage(
             required: Vec::new(),
         });
     }
+    needs.refuse_if_any()?;
     plans.push(ExecutableRemedyPlan {
         id: PlanId(plans.len() as u32),
         steps: vec![RemedyStep::Accept(residual.clone())],
         required: Vec::new(),
     });
-    plans
+    Ok(plans)
 }
 
 /// The next stage of one pending child return: a progress hop for
@@ -822,7 +886,8 @@ pub(crate) fn return_stage(
     residual: &Narrowing,
     lineage: &SanitizerLineage,
     context: &MembershipContext<'_>,
-) -> Vec<ExecutableRemedyPlan> {
+) -> Result<Vec<ExecutableRemedyPlan>, MembershipNeeded> {
+    let mut needs = NeededAtoms::default();
     let mut plans: Vec<ExecutableRemedyPlan> = Vec::new();
     if registry.profile().confines_child_return() {
         for sanitizer in registry.sanitizers() {
@@ -835,12 +900,14 @@ pub(crate) fn return_stage(
             if sanitizer.name.is_attest_schema() && !attest_applicable(views, child, body, &sanitizer.transition) {
                 continue;
             }
-            if sanitizer
-                .derive_output(candidate, &[], context)
-                .ok()
-                .flatten()
-                .is_some_and(|derived| confined_hop_helps(&residual.from, candidate, &derived))
-            {
+            let helps = match sanitizer.derive_output(candidate, &[], context) {
+                Ok(derived) => derived.is_some_and(|derived| confined_hop_helps(&residual.from, candidate, &derived)),
+                Err(needed) => {
+                    needs.absorb(needed);
+                    false
+                }
+            };
+            if helps {
                 plans.push(ExecutableRemedyPlan {
                     id: PlanId(plans.len() as u32),
                     steps: vec![RemedyStep::Derive(sanitizer.name.clone())],
@@ -849,12 +916,13 @@ pub(crate) fn return_stage(
             }
         }
     }
+    needs.refuse_if_any()?;
     plans.push(ExecutableRemedyPlan {
         id: PlanId(plans.len() as u32),
         steps: vec![RemedyStep::Accept(residual.clone())],
         required: Vec::new(),
     });
-    plans
+    Ok(plans)
 }
 
 /// The preconditions of the reserved `attest-schema` builtin, checked as applicability:
@@ -893,12 +961,11 @@ pub(crate) fn bound_contribution(
     contract: &ToolAnnotation,
     sanitizer: &SanitizerName,
     context: &MembershipContext<'_>,
-) -> Option<Label> {
-    registry
-        .sanitizer(sanitizer)?
-        .derive_output(&contract.output_label(), &contract.tags, context)
-        .ok()
-        .flatten()
+) -> Result<Option<Label>, MembershipNeeded> {
+    let Some(sanitizer) = registry.sanitizer(sanitizer) else {
+        return Ok(None);
+    };
+    sanitizer.derive_output(&contract.output_label(), &contract.tags, context)
 }
 
 /// The rulings a block's remedy plan needs gathered: for each authority the block routes to, the
@@ -943,6 +1010,9 @@ pub(crate) fn gap_cover(
     }
 }
 
+/// The structural cover predicate: held, and nothing else. Load-time counting is its only
+/// caller — every runtime path reads [`gap_cover`] three-valued and treats an undecided
+/// inclusion as a missing answer, never as a refuted cover.
 pub(crate) fn covers_gap(authority: &Authority, gap: &Gap, tags: &[TagName], context: &MembershipContext<'_>) -> bool {
     matches!(gap_cover(authority, gap, tags, context), Evaluation::Holds)
 }
@@ -1059,6 +1129,7 @@ fn direct_redispatches(
     current: &Label,
     raw: &RawBlock,
     context: &MembershipContext<'_>,
+    needs: &mut NeededAtoms,
 ) -> Vec<RedispatchPlan> {
     let mut direct = Vec::new();
     // A redispatch names the tool, not one ordered contract, so it clears a gap only when every
@@ -1067,7 +1138,7 @@ fn direct_redispatches(
         let variant_clears: Vec<Vec<Gap>> = registry
             .variants(name)
             .map(|declaration| match declaration.declared() {
-                Some(tool) => direct_clears(tool, &raw.requirement_gaps, current, context),
+                Some(tool) => direct_clears(tool, &raw.requirement_gaps, current, context, needs),
                 // An Annotated variant's requirements exist only per call: it provably clears
                 // nothing at load, so the tool never qualifies as a redispatch.
                 None => Vec::new(),
@@ -1094,14 +1165,23 @@ pub(crate) fn direct_clears(
     gaps: &[Gap],
     current: &Label,
     context: &MembershipContext<'_>,
+    needs: &mut NeededAtoms,
 ) -> Vec<Gap> {
     let has_cap = gaps.iter().any(|gap| matches!(gap, Gap::Cap { .. }));
     let committed = has_cap.then(|| check::committed_label(tool, current));
     gaps.iter()
         .filter(|gap| match (gap, &committed) {
             (Gap::Prior(kind), _) => tool.emits.contains(kind),
-            // An undecided cap comparison is not claimed: a redispatch promises a clearing.
-            (Gap::Cap { cap }, Some(committed)) => matches!(committed.within_cap(cap, context), Evaluation::Holds),
+            // An undecided cap comparison is a missing answer, not a refuted clearing: it joins
+            // the aggregate refusal so the redispatch list never silently shrinks.
+            (Gap::Cap { cap }, Some(committed)) => match committed.within_cap(cap, context) {
+                Evaluation::Holds => true,
+                Evaluation::Fails => false,
+                Evaluation::Needs(needed) => {
+                    needs.absorb(needed);
+                    false
+                }
+            },
             _ => false,
         })
         .cloned()
@@ -1186,6 +1266,7 @@ mod tests {
             },
             &parts.context(),
         )
+        .expect("test planning reads no undecided symbolic audience")
     }
 
     fn call(tool: &str, args: serde_json::Value) -> ResolvedCall {
@@ -2105,6 +2186,118 @@ mod tests {
         assert_eq!(assigned(&planned), vec![vec!["desk"]]);
         let contract = registry.tool(&ToolName::new("send")).unwrap().declared().unwrap();
         assert!(plan_atoms(&registry, contract, exec(&planned.plans[0])).is_empty());
+    }
+
+    #[test]
+    fn an_undecided_mandate_refuses_enumeration_with_its_atom_never_a_smaller_menu() {
+        let tool = ToolAnnotation {
+            description: Some("A test tool.".to_string()),
+            name: ToolName::new("send"),
+            tags: vec![],
+            delta: Delta::NONE,
+            parameters: crate::params::ToolParameters::open(),
+            emits: EffectSet::default(),
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: None,
+                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                        DeclaredAudience::restricted([ReaderId::new("hr")]),
+                    ))],
+                },
+                ..Requires::default()
+            },
+        };
+        let team_desk = Authority {
+            name: AuthorityName::new("desk"),
+            mandate: Mandate {
+                reader_ceiling: Some(DeclaredAudience::Union(
+                    crate::label::Clause::new(
+                        [],
+                        [crate::label::GroupRef::Named(crate::names::GroupName::new("team"))],
+                        [],
+                    )
+                    .expect("a group clause"),
+                )),
+                ..Mandate::default()
+            },
+            scope: Scope::default(),
+            hint: None,
+        };
+        let global = Authority {
+            name: AuthorityName::new("global"),
+            mandate: Mandate {
+                reader_ceiling: Some(DeclaredAudience::literal(Audience::public())),
+                ..Mandate::default()
+            },
+            scope: Scope::default(),
+            hint: None,
+        };
+        let registry = build(RegistryConfig {
+            trust_chain: chain(),
+            tools: declared(vec![tool]),
+            authorities: vec![team_desk, global],
+            sanitizers: vec![],
+            audience: crate::audience::AudienceConfig {
+                sources: vec![crate::audience::SourceRegistration {
+                    provider: "slack".to_string(),
+                    templates: vec![crate::audience::SelectorTemplate::new("user-group/<handle>")],
+                }],
+                groups: vec![crate::audience::NamedAudience {
+                    name: crate::names::GroupName::new("team"),
+                    within: None,
+                    from: vec![crate::audience::SelectorSpec {
+                        provider: "slack".to_string(),
+                        selector: "user-group/team".to_string(),
+                    }],
+                }],
+                ..crate::audience::AudienceConfig::default()
+            },
+            annotators: vec![],
+        });
+        let log = vec![opened(known(TRUSTED, Audience::restricted([ReaderId::new("intern")])))];
+        let proposal = call("send", json!({}));
+        let projection = Projection::build(&log, log.len() as u64);
+        let trajectory = traj();
+        let views = projection.view(&trajectory);
+        let contract = registry
+            .annotation_of(&proposal)
+            .expect("a test call resolves its annotation");
+        let atom = SymbolicAtom::Group(crate::label::GroupRef::Named(crate::names::GroupName::new("team")));
+        let unanswered = crate::label::TestContext::default();
+        let raw = match check::evaluate(
+            &contract,
+            &views,
+            &proposal,
+            &CallStage::default(),
+            &unanswered.context(),
+        ) {
+            Ok(CheckOutcome::Block(raw)) => raw,
+            other => panic!("expected a block, got {other:?}"),
+        };
+        let stage = CallStage::default();
+        let blocked = || BlockedCall {
+            call: &proposal,
+            contract: &contract,
+            raw: &raw,
+            stage: &stage,
+            role: CallRole::Ordinary,
+        };
+
+        // The public-ceiling authority alone could cover the gap, yet the menu is not quietly
+        // reconstructed around the undecided mandate: the enumeration refuses with the atom.
+        assert_eq!(
+            plan(&registry, &views, blocked(), &unanswered.context()),
+            Err(MembershipNeeded {
+                needed: vec![atom.clone()]
+            }),
+        );
+
+        let answered = crate::label::TestContext {
+            expansions: crate::label::Expansions::new([(atom, BTreeSet::from([ReaderId::new("hr")]))]),
+            ..Default::default()
+        };
+        let planned = plan(&registry, &views, blocked(), &answered.context()).expect("every atom is answered");
+        assert_eq!(assigned(&planned), vec![vec!["desk"], vec!["global"]]);
     }
 
     #[test]
@@ -3465,7 +3658,8 @@ mod tests {
                     role: CallRole::Ordinary,
                 },
                 &parts.context(),
-            );
+            )
+            .expect("literal audiences leave nothing undecided");
 
             let coverable = raw
                 .requirement_gaps
@@ -3563,7 +3757,8 @@ mod tests {
                     role: CallRole::Ordinary,
                 },
                 &parts.context(),
-            );
+            )
+            .expect("literal audiences leave nothing undecided");
 
             let authorities = registry.authorities();
             let mut bound: u128 = 1;
@@ -3708,7 +3903,8 @@ mod tests {
                     role: CallRole::Ordinary,
                 },
                 &parts.context(),
-            );
+            )
+            .expect("literal audiences leave nothing undecided");
 
             let competent = |authority: &Authority, gap: &Gap| -> bool {
                 let scoped = authority.scope.covers(&contract.tags);

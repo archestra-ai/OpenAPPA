@@ -718,6 +718,7 @@ mod tests {
                 &crate::names::SanitizerName::new("declassify"),
                 &parts.context(),
             )
+            .expect("the fixture's audiences are literal")
             .expect("declassify applies to this output"),
             evidence: crate::audience::AudienceEvidence::default(),
         });

@@ -537,7 +537,9 @@ impl<'a> Search<'a> {
             if path.excludes(&tool.name) {
                 continue;
             }
-            let clears = plan::direct_clears(tool, &eval.requirement_gaps, &state.label, &membership);
+            let mut undecided = plan::NeededAtoms::default();
+            let clears = plan::direct_clears(tool, &eval.requirement_gaps, &state.label, &membership, &mut undecided);
+            undecided.refuse_if_any()?;
             if clears.is_empty() {
                 continue;
             }
@@ -626,7 +628,10 @@ impl<'a> Search<'a> {
             if goal.excludes(&first.name) {
                 continue;
             }
-            let first_clears = plan::direct_clears(first, &eval.requirement_gaps, &state.label, &membership);
+            let mut undecided = plan::NeededAtoms::default();
+            let first_clears =
+                plan::direct_clears(first, &eval.requirement_gaps, &state.label, &membership, &mut undecided);
+            undecided.refuse_if_any()?;
             if first_clears.is_empty() {
                 continue;
             }
@@ -1727,7 +1732,8 @@ mod tests {
                     role: CallRole::Ordinary,
                 },
                 &parts.context(),
-            );
+            )
+            .expect("the fixture's audiences are literal");
             let expected: Vec<RecoveryRoute> = planned
                 .plans
                 .iter()

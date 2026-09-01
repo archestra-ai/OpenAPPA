@@ -1341,7 +1341,7 @@ impl Engine {
             stage.residual,
             stage.lineage,
             &self.context(act),
-        ))
+        )?)
     }
 
     /// The remedy menu a confined result's stage offers, with the group requirement raised before
@@ -1364,7 +1364,7 @@ impl Engine {
             residual,
             lineage,
             &self.context(act),
-        ))
+        )?)
     }
 
     /// The success checkpoint a still-open dispatch owes before any external step runs: its
@@ -1810,7 +1810,7 @@ impl Engine {
                     role,
                 },
                 act,
-            );
+            )?;
             facts.extend(opened_offers);
             blocked.push(block);
         }
@@ -1866,12 +1866,12 @@ impl Engine {
         opening: Opening<'_>,
         blocked: BlockedCall<'_>,
         act: &ActEvidence,
-    ) -> (Blocked, Vec<Fact>) {
+    ) -> Result<(Blocked, Vec<Fact>), TransitionError> {
         let call = blocked.call;
-        let planned = plan::plan(&self.registry, views, blocked, &self.context(act));
+        let planned = plan::plan(&self.registry, views, blocked, &self.context(act))?;
         let (block_id, offers, opened) =
             self.open_offers(views, opening, &call.digest(), &Engine::executable(&planned), act);
-        (
+        Ok((
             Blocked {
                 call: call.clone(),
                 block: planned,
@@ -1879,7 +1879,7 @@ impl Engine {
                 offers,
             },
             opened,
-        )
+        ))
     }
 
     fn open_offers(
@@ -2035,7 +2035,7 @@ impl Engine {
                                         role,
                                     },
                                     &self.context(under),
-                                ),
+                                )?,
                                 call: candidate,
                                 block_id,
                                 offers,
@@ -2115,7 +2115,7 @@ impl Engine {
                         role,
                     },
                     &self.context(act),
-                )
+                )?
                 .plans
                 .iter()
                 .filter_map(plan::RemedyPlan::executable)
@@ -2765,7 +2765,7 @@ impl Engine {
                         role,
                     },
                     under,
-                );
+                )?;
                 facts.extend(opened);
                 OfferFollowUp::Substituted { block: Box::new(block) }
             }
@@ -3017,7 +3017,7 @@ impl Engine {
                     role,
                 },
                 &self.context(act),
-            ),
+            )?,
             call,
             block_id,
             offers,
@@ -3055,7 +3055,12 @@ impl Engine {
             raw,
             evidence.iter().map(|given| (&given.authority, given.covers.as_slice())),
             &self.context(act),
-        )?;
+        )
+        .map_err(|error| match error {
+            // The undecided atoms surface as the act's ask, exactly as the gates raise them.
+            PlanError::MembershipNeeded(needed) => TransitionError::from(needed),
+            other => TransitionError::Plan(other),
+        })?;
         if evidence.iter().any(|given| given.offer != execution.offer) {
             return Err(PlanError::EvidenceOfferMismatch.into());
         }
@@ -3176,7 +3181,7 @@ impl Engine {
                 role,
             },
             act,
-        );
+        )?;
         facts.extend(opened);
         let batch = self.declaring(crate::basis::DecidedAct::Offer(execution.offer), advance, facts);
         Ok(EngineDecision {
@@ -3250,7 +3255,8 @@ impl Engine {
                 role: plan::CallRole::Ordinary,
             },
             &context,
-        ))
+        )
+        .expect("engine test plans read no undecided symbolic audience"))
     }
 
     /// Record a child's returned value at an engine-derived label AND merge it into the direct
@@ -3440,6 +3446,7 @@ fn approved_release(
             plan: approval.plan,
             sanitizer: sanitizer.clone(),
             contribution: crate::plan::bound_contribution(registry, contract, sanitizer, &context)
+                .expect("the compose gate answers a spent approval's sanitizer atoms")
                 .expect("a prepared approval binds an output sanitizer enumeration found applicable"),
             evidence: act.pinned(),
         });

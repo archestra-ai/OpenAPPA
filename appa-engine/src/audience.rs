@@ -170,6 +170,8 @@ pub enum EvidenceRefusal {
         selector: String,
         id: String,
     },
+    #[error("member {id:?} carries conflicting verified-email claims in one operation")]
+    ConflictingClaims { id: String },
     #[error("identity mapping for {id:?} names a reserved principal")]
     ReservedPrincipal { id: String },
     #[error("member {id:?} claims verified email {email:?}, which does not parse as one address")]
@@ -527,6 +529,24 @@ impl AudienceRegistry {
             }
         }
         let identity = IdentityTable::new(&self.identity, &evidence.identity)?;
+
+        // One operation-wide claim set per provider id: every occurrence of an id — across
+        // selectors and lookups — must carry the same verified email, so one id resolves to
+        // exactly one principal in this operation.
+        let mut claimed: BTreeMap<&str, &Option<String>> = BTreeMap::new();
+        let occurrences = evidence
+            .sources
+            .iter()
+            .flat_map(|claims| claims.members.iter())
+            .chain(evidence.lookups.iter().filter_map(|lookup| lookup.claims.as_ref()));
+        for claims in occurrences {
+            match claimed.insert(claims.id.as_str(), &claims.verified_email) {
+                Some(held) if held != &claims.verified_email => {
+                    return Err(EvidenceRefusal::ConflictingClaims { id: claims.id.clone() });
+                }
+                _ => {}
+            }
+        }
 
         // Per-selector principal sets, validated.
         let mut selector_members: BTreeMap<SelectorSpec, BTreeSet<ReaderId>> = BTreeMap::new();
@@ -973,7 +993,10 @@ mod tests {
             sources: vec![SourceClaims {
                 provider: "slack".into(),
                 selector: "viewer".into(),
-                members: vec![member("slack:U1", None), member("slack:U1", Some("a@corp.com"))],
+                members: vec![
+                    member("slack:U1", Some("a@corp.com")),
+                    member("slack:U1", Some("a@corp.com")),
+                ],
             }],
             ..AudienceEvidence::default()
         };
@@ -995,6 +1018,45 @@ mod tests {
             registry.expansions(&bare),
             Err(EvidenceRefusal::ForeignMember { .. })
         ));
+
+        // One id, one operation-wide claim set: the same member reported with different
+        // verified emails across two selectors would resolve to two principals.
+        let conflicting = AudienceEvidence {
+            sources: vec![
+                SourceClaims {
+                    provider: "slack".into(),
+                    selector: "viewer".into(),
+                    members: vec![member("slack:U1", Some("a@corp.com"))],
+                },
+                SourceClaims {
+                    provider: "slack".into(),
+                    selector: "full-members".into(),
+                    members: vec![member("slack:U1", Some("b@corp.com"))],
+                },
+            ],
+            ..AudienceEvidence::default()
+        };
+        assert!(matches!(
+            registry.expansions(&conflicting),
+            Err(EvidenceRefusal::ConflictingClaims { .. })
+        ));
+        // The same claims twice are consistent, not conflicting.
+        let agreeing = AudienceEvidence {
+            sources: vec![
+                SourceClaims {
+                    provider: "slack".into(),
+                    selector: "viewer".into(),
+                    members: vec![member("slack:U1", Some("a@corp.com"))],
+                },
+                SourceClaims {
+                    provider: "slack".into(),
+                    selector: "full-members".into(),
+                    members: vec![member("slack:U1", Some("a@corp.com"))],
+                },
+            ],
+            ..AudienceEvidence::default()
+        };
+        assert!(registry.expansions(&agreeing).is_ok());
 
         // A lookup's claims must be for the member asked — a source may not canonicalize a
         // member it does not own.

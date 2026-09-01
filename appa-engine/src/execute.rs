@@ -4,9 +4,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::check::Gap;
-use crate::label::MembershipContext;
+use crate::label::{Evaluation, MembershipContext};
 use crate::names::AuthorityName;
-use crate::plan::covers_gap;
+use crate::plan::{NeededAtoms, gap_cover};
 use crate::registry::Registry;
 
 /// One authority's approval of the exact canonical call an offer names.
@@ -40,6 +40,8 @@ pub enum PlanError {
     ReviewMismatch,
     #[error("this authority response was approved for a different offer")]
     EvidenceOfferMismatch,
+    #[error("the supplied evidence leaves a mandate's audience membership undecided")]
+    MembershipNeeded(crate::label::MembershipNeeded),
 }
 
 /// The mandate envelope of a released block: no ruling claims a gap the block
@@ -53,6 +55,7 @@ pub(crate) fn rulings_cover<'a>(
     rulings: impl Iterator<Item = (&'a AuthorityName, &'a [Gap])> + Clone,
     context: &MembershipContext<'_>,
 ) -> Result<(), PlanError> {
+    let mut needs = NeededAtoms::default();
     for (authority, covers) in rulings.clone() {
         let registered = registry
             .authority(authority)
@@ -61,10 +64,16 @@ pub(crate) fn rulings_cover<'a>(
             if !block.requirement_gaps.contains(gap) {
                 return Err(PlanError::RulingClaimsAbsentGap(gap.clone()));
             }
-            if !covers_gap(registered, gap, &contract.tags, context) {
-                return Err(PlanError::RulingExceedsMandate {
-                    authority: authority.as_str().to_string(),
-                });
+            match gap_cover(registered, gap, &contract.tags, context) {
+                Evaluation::Holds => {}
+                Evaluation::Fails => {
+                    return Err(PlanError::RulingExceedsMandate {
+                        authority: authority.as_str().to_string(),
+                    });
+                }
+                // An undecided cover is a missing answer, never an exceeded mandate: the
+                // atoms aggregate and refuse after every definitive judgment has its say.
+                Evaluation::Needs(needed) => needs.absorb(needed),
             }
         }
     }
@@ -73,7 +82,7 @@ pub(crate) fn rulings_cover<'a>(
             return Err(PlanError::GapUncovered(gap.clone()));
         }
     }
-    Ok(())
+    needs.refuse_if_any().map_err(PlanError::MembershipNeeded)
 }
 
 #[cfg(test)]

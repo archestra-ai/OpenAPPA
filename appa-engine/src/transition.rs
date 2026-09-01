@@ -1502,6 +1502,9 @@ impl<'a> Sequence<'a> {
                     },
                     &context,
                 )
+                // A recorded act whose pinned evidence leaves an enumeration read undecided
+                // reconstructed a menu the evidence cannot back.
+                .map_err(|_| TransitionRefusal::ForgedEvidence)?
                 .plans
                 .iter()
                 .filter_map(crate::plan::RemedyPlan::executable)
@@ -1530,7 +1533,7 @@ impl<'a> Sequence<'a> {
                 };
                 let lineage = views.lineage(subject);
                 let contract = self.dispatch_contract(trajectory, dispatch)?;
-                Ok(crate::plan::confined_stage(
+                crate::plan::confined_stage(
                     self.engine.registry(),
                     &contract,
                     receiving,
@@ -1538,7 +1541,8 @@ impl<'a> Sequence<'a> {
                     residual,
                     &lineage,
                     &self.context(expansions),
-                ))
+                )
+                .map_err(|_| TransitionRefusal::ForgedEvidence)
             }
             crate::basis::SubjectKey::Return(id) => {
                 let child = id.child();
@@ -1584,7 +1588,7 @@ impl<'a> Sequence<'a> {
                     }
                 };
                 let lineage = views.lineage(subject);
-                Ok(crate::plan::return_stage(
+                crate::plan::return_stage(
                     self.engine.registry(),
                     views,
                     child,
@@ -1593,7 +1597,8 @@ impl<'a> Sequence<'a> {
                     &residual,
                     &lineage,
                     &self.context(expansions),
-                ))
+                )
+                .map_err(|_| TransitionRefusal::ForgedEvidence)
             }
             crate::basis::SubjectKey::Approval(_) => Err(TransitionRefusal::ForeignOffer),
         }
@@ -2315,14 +2320,16 @@ impl<'a> Sequence<'a> {
                     reviewed: approval.rulings.iter().map(|given| given.reviewed.clone()).collect(),
                     acceptance: approval.acceptance.clone(),
                     sanitizer: approval.sanitizer.clone(),
-                    contribution: approval.sanitizer.as_ref().and_then(|name| {
-                        crate::plan::bound_contribution(
+                    contribution: match approval.sanitizer.as_ref() {
+                        None => None,
+                        Some(name) => crate::plan::bound_contribution(
                             self.engine.registry(),
                             &contract,
                             name,
                             &self.context(expansions),
                         )
-                    }),
+                        .map_err(|_| TransitionRefusal::ForgedEvidence)?,
+                    },
                     evidence: (!approval.rulings.is_empty() || approval.sanitizer.is_some()).then(|| evidence.clone()),
                 };
                 if remedy.is_none_or(|landed| landed != expected) {

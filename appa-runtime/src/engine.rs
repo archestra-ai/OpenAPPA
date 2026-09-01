@@ -1930,6 +1930,9 @@ fn refusal_class(refusal: &appa_engine::audience::EvidenceRefusal) -> String {
             format!("selector {provider}:{selector} reports one member twice in one answer")
         }
         EvidenceRefusal::ReservedPrincipal { .. } => "an identity mapping names a reserved principal".to_string(),
+        EvidenceRefusal::ConflictingClaims { .. } => {
+            "one member carries conflicting verified-email claims in one operation".to_string()
+        }
         EvidenceRefusal::MalformedEmail { .. } => {
             "a member claims a verified email that does not parse as one address".to_string()
         }
