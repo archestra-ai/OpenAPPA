@@ -62,6 +62,11 @@ pub enum InitError {
         path: PathBuf,
         message: String,
     },
+    #[error(
+        "the runtime at {endpoint} serves another deployment's configuration, not {path}; \
+         stop that process, or give this deployment an endpoint of its own, and rerun init"
+    )]
+    ForeignDeployment { endpoint: String, path: PathBuf },
     #[error(transparent)]
     PluginBundle(#[from] PluginBundleError),
     #[error("{operation}; restoring the previous Claude Code plugin also failed: {recovery}")]
@@ -1847,7 +1852,20 @@ fn reconcile_policy(
     if !confirm_reload(config, divergence)? {
         return Ok(RuntimeOutcome::OlderPolicy);
     }
-    reload_policy(endpoint, config)?;
+    // A reload reads the answering process's own configuration path, not the one named
+    // here, and a same-build runtime of another deployment answers this endpoint
+    // indistinguishably. The key it installed is what proves which file it read: reporting
+    // a reload this init did not cause would be exactly the untrue receipt the reconcile
+    // exists to remove.
+    let installed = reload_policy(endpoint, config)?;
+    if let ComposedPolicy::Key(key) = composed
+        && *key != installed
+    {
+        return Err(InitError::ForeignDeployment {
+            endpoint: endpoint.url().to_owned(),
+            path: config.to_path_buf(),
+        });
+    }
     Ok(RuntimeOutcome::Reloaded)
 }
 
@@ -1882,11 +1900,12 @@ fn serving_policy_key(endpoint: &Endpoint) -> Option<String> {
     (!key.is_empty()).then_some(key)
 }
 
-/// Ask the running runtime to serve the configuration on disk.
+/// Ask the running runtime to serve the configuration on disk, and answer with the policy
+/// key it installed.
 ///
 /// The runtime validates the file again before it swaps: a refusal here is a fault worth
 /// naming, not a receipt footnote, because the deployment keeps serving the older policy.
-fn reload_policy(endpoint: &Endpoint, config: &Path) -> Result<(), InitError> {
+fn reload_policy(endpoint: &Endpoint, config: &Path) -> Result<String, InitError> {
     let refused = |message: String| InitError::ReloadRefused {
         endpoint: endpoint.url().to_owned(),
         path: config.to_path_buf(),
@@ -1897,10 +1916,14 @@ fn reload_policy(endpoint: &Endpoint, config: &Path) -> Result<(), InitError> {
         .arg(endpoint.join("/reload"))
         .output()
         .map_err(|error| refused(error.to_string()))?;
-    if output.status.success() {
-        return Ok(());
+    if !output.status.success() {
+        return Err(refused(String::from_utf8_lossy(&output.stderr).trim().to_owned()));
     }
-    Err(refused(String::from_utf8_lossy(&output.stderr).trim().to_owned()))
+    let answer = String::from_utf8_lossy(&output.stdout);
+    serde_json::from_str::<Value>(&answer)
+        .ok()
+        .and_then(|body| Some(body.get("policy_key")?.as_str()?.to_owned()))
+        .ok_or_else(|| refused(format!("the reload named no policy key: {}", answer.trim())))
 }
 
 /// A terminal is asked; anything else reloads. A script that just wrote a config wants it
@@ -2204,6 +2227,45 @@ mod tests {
             reconcile_policy(&endpoint, &config, &ComposedPolicy::Key("agreed".to_string()))
                 .expect("the reconcile completes"),
             RuntimeOutcome::Healthy
+        );
+    }
+
+    #[test]
+    fn a_reload_that_installed_another_deployments_policy_is_never_reported_as_this_one() {
+        // Two answers, in the order a reconcile asks for them: the endpoint serves a
+        // different key, and the reload it is then given installs a third — what a
+        // same-build runtime of another deployment does, because `/reload` reads its own
+        // configuration path and not the one init names.
+        let (endpoint, asked) = recorded_answers(vec![
+            "another-deployment".to_string(),
+            r#"{"policy_key":"another-deployment-reloaded","policy_identity":"x","changed":true}"#.to_string(),
+        ]);
+        let config = PathBuf::from("/home/user/config/appa.toml");
+        let outcome = reconcile_policy(&endpoint, &config, &ComposedPolicy::Key("this-deployment".to_string()));
+        assert!(
+            matches!(outcome, Err(InitError::ForeignDeployment { .. })),
+            "got {outcome:?}"
+        );
+        assert_eq!(
+            asked.lock().expect("the request recorder is never poisoned").as_slice(),
+            [
+                "GET /policy-key HTTP/1.1".to_string(),
+                "POST /reload HTTP/1.1".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_reload_that_installed_this_deployments_policy_is_reported_as_reloaded() {
+        let (endpoint, _asked) = recorded_answers(vec![
+            "older".to_string(),
+            r#"{"policy_key":"this-deployment","policy_identity":"x","changed":true}"#.to_string(),
+        ]);
+        let config = PathBuf::from("/home/user/config/appa.toml");
+        assert_eq!(
+            reconcile_policy(&endpoint, &config, &ComposedPolicy::Key("this-deployment".to_string()))
+                .expect("the reconcile completes"),
+            RuntimeOutcome::Reloaded
         );
     }
 
