@@ -1987,8 +1987,8 @@ impl Engine {
             .map(|(position, call)| {
                 let subject = subject_at(position);
                 let pinned = views.candidate_evidence(&subject);
-                act.inherit(&pinned)?;
-                let under = self.act_evidence(act.pinned().inheriting(&pinned)?, AudienceEvidence::default())?;
+                act.inherit(pinned)?;
+                let under = self.act_evidence(act.pinned().inheriting(pinned)?, AudienceEvidence::default())?;
                 Ok((views.standing_call(&subject).unwrap_or(call), under))
             })
             .collect::<Result<_, TransitionError>>()?;
@@ -2791,8 +2791,8 @@ impl Engine {
             // The candidate may stand under another contract than the offer was planned on; the
             // atoms that contract reads were pinned by the hop that derived it.
             let pinned = views.candidate_evidence(&recorded.subject);
-            act.inherit(&pinned)?;
-            let under = self.act_evidence(act.pinned().inheriting(&pinned)?, AudienceEvidence::default())?;
+            act.inherit(pinned)?;
+            let under = self.act_evidence(act.pinned().inheriting(pinned)?, AudienceEvidence::default())?;
             let reblocked = self.reblocked(views, recorded, execution, &under)?;
             act.absorb(&under);
             return Ok(match reblocked {

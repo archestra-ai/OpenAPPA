@@ -1228,12 +1228,16 @@ impl Views<'_> {
 
     /// The pinned audience evidence the hop that derived this subject's candidate consumed;
     /// empty for a subject no hop has touched.
-    pub(crate) fn candidate_evidence(&self, subject: &SubjectKey) -> AudienceEvidence {
+    pub(crate) fn candidate_evidence(&self, subject: &SubjectKey) -> &AudienceEvidence {
+        const NONE: &AudienceEvidence = &AudienceEvidence {
+            sources: Vec::new(),
+            lookups: Vec::new(),
+            identity: Vec::new(),
+        };
         self.projection
             .candidates
             .get(subject)
-            .map(|held| held.evidence.clone())
-            .unwrap_or_default()
+            .map_or(NONE, |held| &held.evidence)
     }
 
     /// The call this subject stands on now: the candidate an input hop derived, or the proposal

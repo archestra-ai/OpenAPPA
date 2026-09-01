@@ -240,7 +240,7 @@ impl BlockContext {
         evidence = evidence.inheriting(&decided.evidence)?;
         // A candidate an input hop derived may stand under another contract than the proposal;
         // the atoms that contract reads were pinned by the hop.
-        evidence = evidence.inheriting(&views.candidate_evidence(subject))?;
+        evidence = evidence.inheriting(views.candidate_evidence(subject))?;
         let expansions = registry.audience().expansions(&evidence)?;
 
         let stage = views.call_stage(subject);
