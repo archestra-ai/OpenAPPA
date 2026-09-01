@@ -121,8 +121,8 @@ class SelectorTests(unittest.TestCase):
 
 
 class MemberLookupTests(unittest.TestCase):
-    def test_a_known_member_reports_a_bare_claim_never_a_profile_email(self):
-        call = fixture_api([("/users/alice", {}, {"login": "alice", "email": "spoof@corp.com"})])
+    def test_a_known_member_echoes_the_queried_spelling_never_a_profile_email(self):
+        call = fixture_api([("/users/alice", {}, {"login": "Alice", "email": "spoof@corp.com"})])
         self.assertEqual(
             AUDIENCE_SOURCE.answer(call, {"member": "github:alice"}),
             {"claims": {"id": "github:alice"}},

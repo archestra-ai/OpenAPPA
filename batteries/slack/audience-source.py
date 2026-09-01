@@ -120,7 +120,13 @@ def member_claims(call, member):
     if not isinstance(response, dict):
         raise RuntimeError("users.info failed: malformed response")
     if response.get("ok"):
-        return claims_of(response["user"])
+        # The claims echo the queried spelling: claims for another id
+        # are refused.
+        claims = {"id": member}
+        email = response["user"].get("profile", {}).get("email")
+        if isinstance(email, str) and email:
+            claims["verified_email"] = email
+        return claims
     if response.get("error") == "user_not_found":
         # Slack definitively does not know this member, who keeps the
         # qualified identity.

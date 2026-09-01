@@ -104,12 +104,14 @@ def member_claims(call, member):
     if not member.startswith(prefix) or member == prefix:
         raise ValueError(f"{member!r} is not a github-qualified member")
     try:
-        user = call(f"/users/{urllib.parse.quote(member[len(prefix):])}")
+        call(f"/users/{urllib.parse.quote(member[len(prefix):])}")
     except NotFound:
         # GitHub definitively does not know this member, who keeps the
         # qualified identity.
         return None
-    return bare_claims(user["login"])
+    # The claims echo the queried spelling: GitHub canonicalizes login
+    # case in its response, and claims for another id are refused.
+    return {"id": member}
 
 
 def answer(call, artifact):
