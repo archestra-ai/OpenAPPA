@@ -58,7 +58,7 @@ that releases one tool:
 
 ```toml
 [policy]
-version = 1
+version = 2
 
 [[policy.tool]]
 name = "Bash"
