@@ -194,7 +194,7 @@ impl Externals {
 ///
 /// A model consult runs for tens of seconds, so it owns its budget. `externals.timeout_ms`
 /// bounds an HTTP round trip and never applies here: a deployment that names no
-/// `timeout_ms` gets [`DEFAULT_CLAUDE_CODE_TIMEOUT`], not the shared one.
+/// `timeout_ms` gets a default sized for a model call, not the shared one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaudeCode {
     pub command: PathBuf,
@@ -203,7 +203,7 @@ pub struct ClaudeCode {
 }
 
 /// The budget one `claude-code` consult gets when the deployment names none.
-pub const DEFAULT_CLAUDE_CODE_TIMEOUT: Duration = Duration::from_secs(60);
+const DEFAULT_CLAUDE_CODE_TIMEOUT: Duration = Duration::from_secs(60);
 
 impl Default for ClaudeCode {
     /// The usable defaults every construction path shares — an embedded host building
