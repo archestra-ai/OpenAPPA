@@ -1483,7 +1483,7 @@ fn clear_stale_endpoint(endpoint: &Endpoint) -> Result<(), InitError> {
             });
         }
     }
-    terminate_appa_pid(pid)?;
+    terminate_owned_appa_runtime(pid, endpoint)?;
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while std::time::Instant::now() < deadline {
@@ -1779,13 +1779,7 @@ fn clear_confirmed_foreign_with(
             });
         }
     }
-    if !is_owned_appa_runtime(pid)? {
-        return Err(InitError::RuntimeIdentity {
-            endpoint: endpoint.url().to_owned(),
-            message: format!("pid {pid} changed identity after approval; not stopping it"),
-        });
-    }
-    terminate_appa_pid(pid)?;
+    terminate_owned_appa_runtime(pid, endpoint)?;
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while std::time::Instant::now() < deadline {
