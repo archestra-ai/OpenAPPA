@@ -94,11 +94,12 @@ mkdir "$work/extract"
 tar -xzf "$work/$archive" -C "$work/extract"
 [ -f "$work/extract/appa" ] || fail "$archive does not contain appa"
 
+# An installed appa is replaced only by one that runs here.
+version=$("$work/extract/appa" --version) ||
+  fail "the $tag binary does not run on this system; Linux needs glibc 2.34 or newer"
+
 mkdir -p "$install_dir"
 install -m 755 "$work/extract/appa" "$install_dir/appa"
-version=$("$install_dir/appa" --version) ||
-  fail "$install_dir/appa does not run on this system; Linux needs glibc 2.34 or newer"
-
 printf 'Installed %s to %s\n' "$version" "$install_dir/appa"
 case :$PATH: in
   *":$install_dir:"*) ;;
