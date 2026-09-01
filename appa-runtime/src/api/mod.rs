@@ -140,7 +140,7 @@ pub enum OpenError {
 /// as a deny.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum EventError {
-    #[error("a call is already outstanding; propose one call at a time")]
+    #[error("[appa] a call is already outstanding; propose one call at a time")]
     CallOutstanding,
     #[error(
         "the substituted {tool} call did not run and is now closed; propose your call again (a substituted call needs a fresh offer)"
