@@ -211,7 +211,10 @@ impl Engine {
         facts: Vec<Fact>,
     ) -> Vec<Fact> {
         // A record bound to the act it lands under — an offer, an approval, a provider
-        // admission — needs the act declared over it even when nothing moves.
+        // admission — needs the act declared over it even when nothing moves. So does a
+        // record pinning audience evidence: the declaration delimits the per-act audit
+        // bracket at replay, and evidence justified by a neighboring act's asks would
+        // otherwise pass a full-log replay that the live seal refuses.
         let bound = facts.iter().any(|fact| {
             matches!(
                 fact,
@@ -221,7 +224,7 @@ impl Engine {
                         provenance: crate::value::Provenance::ProviderRun { .. },
                         ..
                     }
-            )
+            ) || fact.audience_evidence().is_some_and(|evidence| !evidence.is_empty())
         });
         if advance.is_empty() && !bound {
             return facts;
@@ -14633,6 +14636,81 @@ mod tests {
                 fact,
                 Fact::ChildReturn { value, .. } if value.label.audience == symbolic("team")
             )));
+            let log = [log, facts].concat();
+            assert_eq!(e.validate_replay(&log), Ok(()));
+        }
+
+        #[test]
+        fn an_accepted_child_return_seals_and_replays_with_its_pinned_answers() {
+            // The return stage reads @team to judge the sanitizer's
+            // applicability, so the submission pins the answer on its offers
+            // and the accepting act inherits it: the acceptance batch must
+            // seal live and replay with that evidence.
+            let declassify = crate::authority::Sanitizer {
+                name: SanitizerName::new("declassify"),
+                on: crate::authority::SanitizerPoints {
+                    input: false,
+                    output: true,
+                },
+                transition: crate::authority::DeclaredTransition::Audience {
+                    from_includes: grouped(&[], &["team"]),
+                    to: DeclaredAudience::literal(Audience::public()),
+                },
+                scope: crate::authority::Scope::default(),
+                hint: None,
+            };
+            let cfg = returning_with_sources(vec![declassify]);
+            // Confine only the child return, so the child's own read never
+            // asks the sanitizer's atom and the stage is the one reader.
+            let mut declaration = crate::profile::covering_declaration(&cfg);
+            declaration.confined_results = std::collections::BTreeSet::new();
+            let e = Engine::open(DeploymentPolicy {
+                registry: cfg,
+                planner_cap: crate::registry::PlannerCap::default(),
+                dialect: PolicyDialectVersion::new(1),
+                child_return: ReturnPolicy::Raw,
+                profile: declaration,
+            })
+            .expect("a return-confined deployment opens");
+            let child = TrajectoryId::new("child");
+            let mut log = spawn_family(&e, None, &child);
+            reads(&e, &mut log, &child, "read_suspicious_internal");
+            let body = ValueBody::new("what I found");
+            let answers = source_evidence(vec![user_group("team", vec![slack_member("slack:U1", None)])]);
+
+            let submitted = e
+                .handle(
+                    &viewing(&e, &log),
+                    child_report_with(&log, &child, &body, vec![], answers.clone()),
+                )
+                .expect("the answered stage opens its offers");
+            let acceptance = pending_stage_of(&submitted).offers[0].0;
+            let log = [log, appended_facts(submitted)].concat();
+            assert_eq!(e.validate_replay(&log), Ok(()));
+
+            let accepted = e
+                .handle(
+                    &viewing(&e, &log),
+                    EngineEvent::ExecuteOffer(OfferExecution {
+                        trajectory: traj(),
+                        offer: acceptance,
+                        outcome: OfferOutcome::Approved(Vec::new()),
+                        offer_nonce: nonce(),
+                        audience: no_answers(),
+                    }),
+                )
+                .expect("the acceptance inherits the offer's pinned answers and seals");
+            assert!(matches!(
+                accepted.follow_up,
+                FollowUp::Offer(OfferFollowUp::Admitted { .. })
+            ));
+            let facts = appended_facts(accepted);
+            assert!(
+                facts
+                    .iter()
+                    .any(|fact| matches!(fact, Fact::ChildReturn { evidence, .. } if *evidence == answers)),
+                "the crossing carries the inherited answers"
+            );
             let log = [log, facts].concat();
             assert_eq!(e.validate_replay(&log), Ok(()));
         }

@@ -1660,6 +1660,8 @@ impl<'a> Sequence<'a> {
         use crate::basis::SubjectKey;
         let views = self.projection.view(trajectory);
         let recorded = ending_offer(&views, trajectory, offer)?;
+        // The executing act inherits the accepted offer's pinned evidence.
+        self.audit_inherit(&recorded.evidence);
         let (basis, subject) = (recorded.basis, recorded.subject.clone());
         let owed = match (&subject, recorded.plan.hop().is_some()) {
             (SubjectKey::Call { .. }, false) => Owed::Approval(*offer),
@@ -2603,7 +2605,7 @@ impl<'a> Sequence<'a> {
         derivation: &ReturnDerivation,
         evidence: &AudienceEvidence,
     ) -> Result<(), TransitionRefusal> {
-        self.recorded_expansions(evidence)?;
+        let expansions = self.recorded_expansions(evidence)?;
         let parent = self
             .projection
             .view(child)
@@ -2611,6 +2613,9 @@ impl<'a> Sequence<'a> {
             .ok_or(TransitionRefusal::NotForked)?
             .clone();
         let views = self.projection.view(&parent);
+        // The crossing act derived the return stage: mirror its asks.
+        let lineage = views.lineage(&crate::basis::SubjectKey::Return(id.clone()));
+        self.audit_atoms(crate::plan::return_stage_atoms(self.engine.registry(), &lineage));
         let pending = views.pending_return(id).cloned();
         if views.has_ended(child) && pending.is_none() {
             return Err(TransitionRefusal::BranchEnded);
@@ -2650,6 +2655,7 @@ impl<'a> Sequence<'a> {
         }
         // A terminal derivation's crossing is the batch this record lands in.
         self.return_settling.remove(id);
+        self.audit_reads(&expansions);
         Ok(())
     }
 

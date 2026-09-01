@@ -413,6 +413,23 @@ pub enum Fact {
 }
 
 impl Fact {
+    /// The pinned audience evidence this record carries, where it carries any.
+    pub(crate) fn audience_evidence(&self) -> Option<&crate::audience::AudienceEvidence> {
+        match self {
+            Fact::DispatchOpened { evidence, .. }
+            | Fact::Ruling { evidence, .. }
+            | Fact::OutputSanitizerBound { evidence, .. }
+            | Fact::CandidateDerived { evidence, .. }
+            | Fact::ChildReturn { evidence, .. }
+            | Fact::ReturnSubmitted { evidence, .. }
+            | Fact::ReturnRejected { evidence, .. }
+            | Fact::ProposalBatchDecided { evidence, .. }
+            | Fact::OfferOpened { evidence, .. }
+            | Fact::CallApproved { evidence, .. } => Some(evidence),
+            _ => None,
+        }
+    }
+
     pub fn trajectory(&self) -> &TrajectoryId {
         match self {
             Fact::TrajectoryOpened { trajectory, .. }
