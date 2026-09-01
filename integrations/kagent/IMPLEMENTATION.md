@@ -336,6 +336,20 @@ Three kagent-specific notes:
 
 Each plugin emits one JSON event per callback: event kind, trajectory ids, tool name, raw argument bytes, outcome, and value fields — the data the matching `HookEvent` variant needs. The `appa-adapter-kagent` Rust crate parses this wire into `HookEvent` and renders each `HookDecision` into the response the plugins enforce, through the `Codec` contract of `appa-runtime-api` (`parse`, `render`). The wire carries no policy meaning. Raw tool arguments cross as spelled, and the Engine canonicalizes them. The reserved tool crosses as spelled too — `execute_remedy_plan` — so the runtime recognizes its own tool and binds the vouch. One wire and one codec serve both runtime images.
 
+### Labels and flow completeness
+
+The contract triple — `delta`, `requires`, `emits` — is engine algebra, and no label crosses the wire in either direction. The engine narrows the trajectory label with `delta` when it admits a result. It checks `requires` — membership, `history`, and `attention` marks — against trajectory state at dispatch ([appa-engine/src/check.rs](../../appa-engine/src/check.rs)). It records `emits` into the effect ledger, and effects commit on `Success`, never on `Indeterminate`.
+
+That algebra is sound only over the flows the runtime saw, so the plugin keeps one invariant: every value that enters model attention or leaves the agent crosses a mapped hook. On kagent the list is closed:
+
+- User input crosses at `Prompt`, before the session append.
+- Tool and child returns cross at `ToolResult` and `SpawnResult`.
+- Delegated entries cross at `ChildStart`.
+- ADK memory and artifact loaders are ordinary tools, so they cross the tool gate.
+- The CRD-compiled instruction is static config, not a flow.
+
+The liveness gates hold everything else when the `/hook` channel is down. The implemented model gates sinks at tool dispatch and defines no emission event — `TurnEnd` gates nothing by design ([appa-runtime/src/hooks.rs](../../appa-runtime/src/hooks.rs)). If the spec later defines a gated response sink, `on_event_callback` is the ready carrier on kagent: it can replace events. That is a forward path, not current behavior.
+
 ## Trajectory identity
 
 - Root `TrajectoryId`: the ADK session id with a harness prefix, per the `appa-runtime-api` convention.
