@@ -107,8 +107,13 @@ impl ConfigOutcome {
 enum RuntimeOutcome {
     /// Serving the configuration this init validated, with nothing to reconcile.
     Healthy,
-    /// Serving an older policy until it was reloaded, at the user's word.
+    /// Serving an older policy until it was reloaded, at the user's word, and the key it
+    /// installed proves the file it read was this one.
     Reloaded,
+    /// Reloaded, but this init cannot compose the file's key and so cannot say the
+    /// responder read it. Never reported as a plain reload: an unchecked claim about which
+    /// policy is serving is the fault this reconcile exists to remove.
+    ReloadedUnconfirmed,
     /// Still serving an older policy, because the user declined the reload.
     OlderPolicy,
 }
@@ -118,6 +123,7 @@ impl RuntimeOutcome {
         match self {
             RuntimeOutcome::Healthy => "healthy",
             RuntimeOutcome::Reloaded => "healthy (policy reloaded)",
+            RuntimeOutcome::ReloadedUnconfirmed => "healthy (reloaded; serving policy unconfirmed)",
             RuntimeOutcome::OlderPolicy => "healthy (serving an older policy)",
         }
     }
@@ -280,16 +286,26 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
             install_statusline(&plugin_root, &paths)?;
             progress("starting the runtime");
             start_runtime(&plugin_root, &deployed_appa, &endpoint)
-        });
-    if let Err(operation) = switch {
-        if let Err(recovery_error) = undo_plugin_switch(recovery.as_ref(), launcher_dir) {
-            return Err(InitError::PluginRecovery {
-                operation: Box::new(operation),
-                recovery: Box::new(recovery_error),
-            });
+        })
+        //    The runtime this plugin is bound to must also be serving this
+        //    deployment's policy, so the reconcile is inside the transaction:
+        //    a refusal here means the endpoint belongs to someone else, and a
+        //    plugin left registered against it is the same skew as a plugin left
+        //    registered against a runtime that failed verification. A decline is
+        //    not a refusal — it answers `Ok` and the install stands.
+        .and_then(|()| reconcile_policy(&endpoint, &config, &composed_policy));
+    let runtime_outcome = match switch {
+        Ok(outcome) => outcome,
+        Err(operation) => {
+            if let Err(recovery_error) = undo_plugin_switch(recovery.as_ref(), launcher_dir) {
+                return Err(InitError::PluginRecovery {
+                    operation: Box::new(operation),
+                    recovery: Box::new(recovery_error),
+                });
+            }
+            return Err(operation);
         }
-        return Err(operation);
-    }
+    };
 
     // 7. Only now is the launcher armed. Every earlier return leaves `clappa`
     //    absent on a first install and disabled on an upgrade, so a session
@@ -297,12 +313,7 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
     install_clappa(launcher_dir)?;
     cleanup_plugin_recoveries(&paths.data_dir);
 
-    // 8. The plugin and the launcher now point at this configuration; a runtime the
-    //    starter left running may not. Asked last, because a decline still leaves a
-    //    complete install — only the policy in memory lags.
-    let runtime_outcome = reconcile_policy(&endpoint, &config, &composed_policy)?;
-
-    // 9. Anything left on PATH that this init did not deploy is named, never
+    // 8. Anything left on PATH that this init did not deploy is named, never
     //    removed: it is the user's file to keep or drop.
     let stale_path_copy = stale_path_copy(&paths, &deployed_appa);
 
@@ -1858,15 +1869,16 @@ fn reconcile_policy(
     // a reload this init did not cause would be exactly the untrue receipt the reconcile
     // exists to remove.
     let installed = reload_policy(endpoint, config)?;
-    if let ComposedPolicy::Key(key) = composed
-        && *key != installed
-    {
-        return Err(InitError::ForeignDeployment {
+    match composed {
+        ComposedPolicy::Key(key) if *key == installed => Ok(RuntimeOutcome::Reloaded),
+        ComposedPolicy::Key(_) => Err(InitError::ForeignDeployment {
             endpoint: endpoint.url().to_owned(),
             path: config.to_path_buf(),
-        });
+        }),
+        // Without a key of its own this init has nothing to check the answer against, so
+        // it reports the reload it caused and claims nothing about whose file was read.
+        ComposedPolicy::Unknowable => Ok(RuntimeOutcome::ReloadedUnconfirmed),
     }
-    Ok(RuntimeOutcome::Reloaded)
 }
 
 /// Why a serving runtime may not be answering under the file this init validated, or
@@ -2252,6 +2264,20 @@ mod tests {
                 "GET /policy-key HTTP/1.1".to_string(),
                 "POST /reload HTTP/1.1".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn a_reload_this_init_cannot_check_is_never_reported_as_a_plain_reload() {
+        let (endpoint, _asked) = recorded_answers(vec![
+            "whatever-is-serving".to_string(),
+            r#"{"policy_key":"whatever-was-installed","policy_identity":"x","changed":true}"#.to_string(),
+        ]);
+        let config = PathBuf::from("/home/user/config/appa.toml");
+        assert_eq!(
+            reconcile_policy(&endpoint, &config, &ComposedPolicy::Unknowable).expect("the reconcile completes"),
+            RuntimeOutcome::ReloadedUnconfirmed,
+            "a config this init cannot compose leaves the answer uncheckable, and the receipt says so"
         );
     }
 
