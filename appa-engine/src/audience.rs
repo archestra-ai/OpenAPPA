@@ -190,8 +190,11 @@ pub enum EvidenceRefusal {
 /// One operation-wide claim per provider id, folded across every occurrence the evidence
 /// carries. A collection that reports a member and a viewer that reports the same member
 /// with its verified address describe one reader, not a contradiction: a silent occurrence
-/// makes no counter-claim and defers to the verified one. Two different verified addresses
-/// for one id have no resolution and refuse. Every consumer resolves an occurrence through
+/// makes no counter-claim and defers to the verified one. Two verified addresses conflict
+/// when they name different principals, not when they are spelled differently: the same
+/// address under two domain cases is one claim, because that is the reader both resolve to.
+/// Addresses that do differ have no resolution and refuse. Every consumer resolves an
+/// occurrence through
 /// this table, so one id seats exactly one principal in an operation — the engine when it
 /// canonicalizes, and the runtime when it asks a custom implementation.
 pub fn folded_claims(evidence: &AudienceEvidence) -> Result<BTreeMap<String, MemberClaims>, EvidenceRefusal> {
@@ -208,7 +211,9 @@ pub fn folded_claims(evidence: &AudienceEvidence) -> Result<BTreeMap<String, Mem
             }
             std::collections::btree_map::Entry::Occupied(mut held) => {
                 match (&held.get().verified_email, &claims.verified_email) {
-                    (Some(standing), Some(offered)) if standing != offered => {
+                    (Some(_), Some(_))
+                        if verified_email_principal(held.get())? != verified_email_principal(claims)? =>
+                    {
                         return Err(EvidenceRefusal::ConflictingClaims { id: claims.id.clone() });
                     }
                     (None, Some(_)) => {
@@ -1201,6 +1206,28 @@ mod tests {
             members("full-members"),
             BTreeSet::from([ReaderId::new("a@corp.com"), ReaderId::new("slack:U2")]),
             "the folded claim seats one principal for the id everywhere it occurs"
+        );
+
+        // Two claims conflict when they name different readers, not when two sources spell
+        // one address with different domain case: both resolve to the same principal.
+        let spelled_twice = AudienceEvidence {
+            sources: vec![
+                SourceClaims {
+                    provider: "slack".into(),
+                    selector: "viewer".into(),
+                    members: vec![member("slack:U1", Some("Alice@CORP.com"))],
+                },
+                SourceClaims {
+                    provider: "slack".into(),
+                    selector: "full-members".into(),
+                    members: vec![member("slack:U1", Some("Alice@corp.com"))],
+                },
+            ],
+            ..AudienceEvidence::default()
+        };
+        assert!(
+            registry.expansions(&spelled_twice).is_ok(),
+            "one address under two domain cases is one claim"
         );
 
         // A lookup's claims must be for the member asked — a source may not canonicalize a
