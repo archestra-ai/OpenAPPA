@@ -1263,6 +1263,7 @@ impl Engine {
                             AdmitError::SanitizerTransitionUnmet | AdmitError::SanitizerBindingMismatch => {
                                 TransitionError::SanitizerUnapplicable
                             }
+                            AdmitError::MembershipNeeded(needed) => TransitionError::from(needed),
                             other => unreachable!("the outcome path derives what the log already proved: {other}"),
                         })?;
                         let DerivedCandidate::Result { residual: Some(_), .. } = &candidate else {
@@ -1327,6 +1328,7 @@ impl Engine {
             AdmitError::SanitizerTransitionUnmet | AdmitError::SanitizerBindingMismatch => {
                 TransitionError::SanitizerUnapplicable
             }
+            AdmitError::MembershipNeeded(needed) => TransitionError::from(needed),
             other => unreachable!("the outcome path admits what the log already proved: {other}"),
         })?;
         let admitted = batch.iter().find_map(|fact| match fact {

@@ -52,6 +52,8 @@ pub enum AdmitError {
     SanitizerBindingMismatch,
     #[error("the bound sanitizer is not registered for output, or the raw result does not satisfy its `from`")]
     SanitizerTransitionUnmet,
+    #[error("the bound sanitizer's transition awaits membership answers")]
+    MembershipNeeded(crate::label::MembershipNeeded),
     #[error(
         "the derivation still narrows the bound its dispatch pinned: the residual is the agent's to accept or improve at the confined stage"
     )]
@@ -119,11 +121,9 @@ pub(crate) fn bound_candidate(
         .sanitizer(sanitizer)
         .ok_or_else(|| AdmitError::UnknownTool(sanitizer.as_str().to_string()))?;
     let raw_label = contract.output_label();
-    // An undecided derivation cannot land here: a bound sanitizer's evidence was pinned at
-    // binding, so the same answers decide the transition again.
     let derived = registered
         .derive_output(&raw_label, &contract.tags, context)
-        .map_err(|_| AdmitError::SanitizerTransitionUnmet)?
+        .map_err(AdmitError::MembershipNeeded)?
         .ok_or(AdmitError::SanitizerTransitionUnmet)?;
     let receiving = views.receiving_bound(dispatch).ok_or(AdmitError::NotOpen)?;
     let residual = confined_residual(receiving, &derived);
@@ -765,6 +765,107 @@ mod tests {
                 },
             ),
             Err(AdmitError::ConfinedResidual)
+        );
+    }
+
+    /// A bound sanitizer whose `from` names a group derives only under that group's answer:
+    /// an admission whose context lacks it asks for the atom instead of reporting the
+    /// transition unmet.
+    #[test]
+    fn a_bound_derivation_missing_a_membership_answer_asks_for_it() {
+        let team = crate::label::GroupRef::Named(crate::names::GroupName::new("team"));
+        let team_atom = crate::label::SymbolicAtom::Group(team.clone());
+        let declassify = crate::names::SanitizerName::new("declassify");
+        let get = ToolAnnotation {
+            description: Some("A test tool.".to_string()),
+            name: ToolName::new("get_ticket"),
+            tags: vec![],
+            delta: Delta {
+                trust: Some(SUSPICIOUS),
+                audience: Some(DeclaredAudience::literal(internal())),
+            },
+            parameters: crate::params::ToolParameters::open(),
+            emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
+            requires: Default::default(),
+        };
+        let reg = Registry::build_covered(RegistryConfig {
+            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
+            tools: vec![ToolDeclaration::Declared(get)],
+            annotators: vec![],
+            authorities: vec![],
+            sanitizers: vec![Sanitizer {
+                name: declassify.clone(),
+                on: SanitizerPoints {
+                    input: false,
+                    output: true,
+                },
+                transition: DeclaredTransition::Audience {
+                    from_includes: DeclaredAudience::Union(
+                        crate::label::Clause::new([], [team], []).expect("a group clause"),
+                    ),
+                    to: DeclaredAudience::literal(internal()),
+                },
+                scope: Scope::default(),
+                hint: None,
+            }],
+            audience: crate::audience::AudienceConfig {
+                sources: vec![crate::audience::SourceRegistration {
+                    provider: "slack".to_string(),
+                    templates: vec![crate::audience::SelectorTemplate::new("user-group/<handle>")],
+                }],
+                groups: vec![crate::audience::NamedAudience {
+                    name: crate::names::GroupName::new("team"),
+                    within: None,
+                    from: vec![crate::audience::SelectorSpec {
+                        provider: "slack".to_string(),
+                        selector: "user-group/team".to_string(),
+                    }],
+                }],
+                ..crate::audience::AudienceConfig::default()
+            },
+        })
+        .unwrap();
+        let call = get_call();
+        let (mut log, dispatch) = open_log(&call);
+        let answered = crate::label::TestContext {
+            expansions: crate::label::Expansions::new([(
+                team_atom.clone(),
+                std::collections::BTreeSet::from([ReaderId::new("insider")]),
+            )]),
+            ..crate::label::TestContext::default()
+        };
+        log.push(Fact::OutputSanitizerBound {
+            trajectory: traj(),
+            dispatch: dispatch.clone(),
+            plan: crate::plan::PlanId::new(1),
+            sanitizer: declassify.clone(),
+            contribution: crate::plan::bound_contribution(
+                &reg,
+                &reg.annotation_of(&call).expect("the fixture registers the tool"),
+                &declassify,
+                &answered.context(),
+            )
+            .expect("the binding answered the group")
+            .expect("declassify applies to this output"),
+            evidence: crate::audience::AudienceEvidence::default(),
+        });
+        let p = views_of(&log);
+
+        assert_eq!(
+            admit(
+                &reg,
+                &p.view(&traj()),
+                &dispatch,
+                &call,
+                ResultAdmission::SuccessSanitized {
+                    body: ValueBody::new("redacted"),
+                    sanitizer: declassify,
+                    raw_digest: RawResultDigest::of(b"ticket"),
+                },
+            ),
+            Err(AdmitError::MembershipNeeded(crate::label::MembershipNeeded {
+                needed: vec![team_atom]
+            }))
         );
     }
 
