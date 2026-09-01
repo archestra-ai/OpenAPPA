@@ -295,10 +295,10 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
             outcome
         }
         Err(operation) => {
-            let unwound = compensation
-                .unwind()
-                .and_then(|()| undo_plugin_switch(recovery.as_ref(), launcher_dir));
-            if let Err(recovery_error) = unwound {
+            // Both recoveries are attempted; the first failure is the one reported.
+            let unwound = compensation.unwind();
+            let restored = undo_plugin_switch(recovery.as_ref(), launcher_dir);
+            if let Err(recovery_error) = unwound.and(restored) {
                 return Err(InitError::PluginRecovery {
                     operation: Box::new(operation),
                     recovery: Box::new(recovery_error),
