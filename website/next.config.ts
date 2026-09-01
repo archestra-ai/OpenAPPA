@@ -37,6 +37,14 @@ const nextConfig: NextConfig = {
       { source: "/docs", destination: "/", permanent: true },
       { source: "/docs/:slug", destination: "/:slug", permanent: true },
       { source: "/chat", destination: "/playground", permanent: true },
+      // The installer is a release asset, so the short URL always serves the
+      // script published with the latest release.
+      {
+        source: "/install.sh",
+        destination:
+          "https://github.com/archestra-ai/OpenAPPA/releases/latest/download/appa-install.sh",
+        permanent: false,
+      },
       {
         source: "/paper",
         destination: "https://arxiv.org/abs/2607.24625",
