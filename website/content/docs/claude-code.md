@@ -16,6 +16,11 @@ cargo install --path appa-runtime --force
 appa init claude-code
 ```
 
+Initialization prints progress while it resolves the matching plugin, updates
+Claude Code, and starts the runtime. If a different APPA build already owns the
+runtime endpoint, it asks before stopping that process; an unidentified
+listener is never stopped automatically.
+
 Initialization installs `clappa` beside `appa` so the short command works below.
 
 The native `appa` command installs the runtime, the matching Claude Code

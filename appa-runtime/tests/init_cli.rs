@@ -112,6 +112,19 @@ fn init_installs_one_local_adapter_and_is_safe_to_run_again() {
 
     let first = run(&fingerprint, None);
     assert!(first.status.success(), "{}", String::from_utf8_lossy(&first.stderr));
+    let first_stderr = String::from_utf8_lossy(&first.stderr);
+    for phase in [
+        "resolving the matching plugin",
+        "preparing the plugin bundle",
+        "checking the runtime endpoint",
+        "updating the Claude Code plugin",
+        "starting the runtime",
+    ] {
+        assert!(
+            first_stderr.contains(phase),
+            "missing progress phase {phase:?}: {first_stderr}"
+        );
+    }
     let first_stdout = String::from_utf8(first.stdout).expect("UTF-8 output");
     assert!(first_stdout.starts_with("OpenAPPA initialized for Claude Code"));
     assert!(first_stdout.contains("development source"));

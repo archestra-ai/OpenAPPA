@@ -3,7 +3,7 @@
 use std::env;
 use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
-use std::io::{IsTerminal, Write};
+use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -95,6 +95,7 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
     let endpoint = Endpoint::resolve()?;
 
     // 1. Resolve and verify the source. Nothing outside a temp file has changed.
+    progress("resolving the matching plugin");
     let source = PluginSource::resolve(explicit_source)?;
     let paths = deployment_paths()?;
     let installations = installed_plugin_installations(&paths.claude_dir)?;
@@ -118,6 +119,7 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
     let config_created = create_default_config(&config)?;
 
     // 3. Materialize the deployment, or validate and reuse an existing one.
+    progress("preparing the plugin bundle");
     let deployments = paths.data_dir.join("deployments");
     let deploy = |population| {
         plugin_bundle::materialize(
@@ -160,15 +162,15 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
     //    retired install path that will not stop aborts init here, rather than
     //    leaving a new plugin registered against an old runtime that a rerun
     //    cannot dislodge.
+    progress("checking the runtime endpoint");
     clear_retired_runtime(&paths)?;
     //    A previous install may have been unlinked before init ran. Its process
     //    still owns the endpoint, and its authenticated health answer names the
     //    stale pid even though no pathname remains for the retired-path scan.
     clear_stale_endpoint(&endpoint)?;
-    //    Whatever still answers must be the build this init installs. A foreign
-    //    responder cannot be stopped from here, so it is refused now, while
-    //    Claude and the launcher are still untouched.
-    refuse_foreign_endpoint(&appa, &endpoint)?;
+    //    A healthy runtime from another build is stopped only after an explicit
+    //    confirmation and only when it identifies a same-user appa pid.
+    clear_foreign_endpoint(&appa, &endpoint)?;
 
     // 5. Snapshot for recovery and disarm the launcher.
     let launcher_dir = appa.parent().unwrap_or(&paths.install_dir);
@@ -181,12 +183,14 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
     //    bound to: one transaction. Verification is inside it, because a plugin
     //    left registered against a runtime that failed verification is exactly
     //    the skew this bundle exists to prevent.
+    progress("updating the Claude Code plugin");
     let switch = replace_plugin(&deployment.root, &marketplaces, &installations)
         .and_then(|()| install_runtime(&appa, &deployed_appa))
         .and_then(|()| remove_legacy_runtime(&appa, &paths))
         .and_then(|()| installed_plugin_root(&paths.claude_dir))
         .and_then(|plugin_root| {
             install_statusline(&plugin_root, &paths)?;
+            progress("starting the runtime");
             start_runtime(&plugin_root, &deployed_appa, &endpoint)
         });
     if let Err(operation) = switch {
@@ -216,6 +220,10 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
         stale_path_copy.as_deref(),
         std::io::stdout().is_terminal() && env::var_os("NO_COLOR").is_none(),
     ))
+}
+
+fn progress(message: &str) {
+    eprintln!("appa init: {message}...");
 }
 
 fn source_label(source: &PluginSource, deployment: &Deployment) -> String {
@@ -1264,14 +1272,16 @@ fn start_runtime(plugin_root: &Path, runtime: &Path, endpoint: &Endpoint) -> Res
 /// A healthy runtime left by an init under a different `APPA_INSTALL_DIR` or
 /// `APPA_DATA_DIR` is foreign: named, never killed. Stale runtimes are cleared
 /// before this classification through their separate health protocol.
+#[derive(Debug, PartialEq, Eq)]
 enum EndpointOwner {
     /// Nothing answered, or what answered serves no fingerprint. Before the
     /// start this is the ordinary case; after it, it is a failure.
     Unidentified,
     /// The binary whose bytes were offered for comparison.
     Deployment,
-    /// A different build.
-    Foreign,
+    /// A different build. New runtimes name their pid; an older runtime may
+    /// return only its digest and remains ineligible for automatic stopping.
+    Foreign { pid: Option<i32> },
 }
 
 fn endpoint_health(endpoint: &Endpoint) -> Result<Option<String>, InitError> {
@@ -1289,12 +1299,15 @@ fn endpoint_health(endpoint: &Endpoint) -> Result<Option<String>, InitError> {
     Ok(Some(String::from_utf8_lossy(&output.stdout).trim().to_owned()))
 }
 
-fn stale_pid(answer: &str) -> Option<i32> {
-    let pid = answer.strip_prefix("stale ")?;
+fn positive_pid(pid: &str) -> Option<i32> {
     if pid.is_empty() || pid.starts_with('0') || !pid.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
     pid.parse().ok()
+}
+
+fn stale_pid(answer: &str) -> Option<i32> {
+    positive_pid(answer.strip_prefix("stale ")?)
 }
 
 /// Stop the exact stale APPA runtime named by the endpoint before classifying
@@ -1333,7 +1346,7 @@ fn clear_stale_endpoint(endpoint: &Endpoint) -> Result<(), InitError> {
             });
         }
     }
-    terminate_stale_pid(pid)?;
+    terminate_appa_pid(pid)?;
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while std::time::Instant::now() < deadline {
@@ -1389,7 +1402,7 @@ fn is_owned_appa_runtime(pid: i32) -> Result<bool, InitError> {
 }
 
 #[cfg(unix)]
-fn terminate_stale_pid(pid: i32) -> Result<(), InitError> {
+fn terminate_appa_pid(pid: i32) -> Result<(), InitError> {
     if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
         return Ok(());
     }
@@ -1414,7 +1427,7 @@ fn is_owned_appa_runtime(pid: i32) -> Result<bool, InitError> {
 }
 
 #[cfg(windows)]
-fn terminate_stale_pid(pid: i32) -> Result<(), InitError> {
+fn terminate_appa_pid(pid: i32) -> Result<(), InitError> {
     powershell(
         "Stop-Process -Id ([int]$env:APPA_STALE_PID) -Force -ErrorAction Stop",
         [("APPA_STALE_PID", pid.to_string())],
@@ -1439,26 +1452,128 @@ fn endpoint_owner(binary: &Path, endpoint: &Endpoint) -> Result<EndpointOwner, I
     if !output.status.success() {
         return Ok(EndpointOwner::Unidentified);
     }
-    let actual = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    Ok(if actual == expected {
-        EndpointOwner::Deployment
-    } else {
-        EndpointOwner::Foreign
-    })
+    let answer = String::from_utf8_lossy(&output.stdout);
+    Ok(classify_endpoint_owner(&expected, &answer))
 }
 
-/// Refuse a foreign owner while Claude and the launcher are still untouched.
+fn classify_endpoint_owner(expected: &str, answer: &str) -> EndpointOwner {
+    let mut fields = answer.split_whitespace();
+    let actual = fields.next().unwrap_or_default();
+    let pid = fields.next().and_then(positive_pid);
+    if actual == expected {
+        EndpointOwner::Deployment
+    } else {
+        EndpointOwner::Foreign { pid }
+    }
+}
+
+fn confirm_stop(pid: i32, endpoint: &Endpoint) -> Result<bool, InitError> {
+    let stdin = std::io::stdin();
+    let stderr = std::io::stderr();
+    confirm_stop_with(pid, endpoint, &mut stdin.lock(), &mut stderr.lock())
+}
+
+fn confirm_stop_with(
+    pid: i32,
+    endpoint: &Endpoint,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> Result<bool, InitError> {
+    write!(
+        output,
+        "appa: a different appa build (pid {pid}) owns {}. Stop it and continue? [Y/n] ",
+        endpoint.url()
+    )
+    .and_then(|()| output.flush())
+    .map_err(|source| InitError::RuntimeIdentity {
+        endpoint: endpoint.url().to_owned(),
+        message: format!("cannot ask permission to stop pid {pid}: {source}"),
+    })?;
+    let mut answer = String::new();
+    if input
+        .read_line(&mut answer)
+        .map_err(|source| InitError::RuntimeIdentity {
+            endpoint: endpoint.url().to_owned(),
+            message: format!("cannot read permission to stop pid {pid}: {source}"),
+        })?
+        == 0
+    {
+        return Ok(false);
+    }
+    Ok(matches!(answer.trim().to_ascii_lowercase().as_str(), "" | "y" | "yes"))
+}
+
+/// Clear a foreign owner while Claude and the launcher are still untouched.
 ///
-/// Silence is not refused here: nothing answering is what a first install looks
-/// like, and the backstop after the start is what proves the runtime is ours.
-fn refuse_foreign_endpoint(binary: &Path, endpoint: &Endpoint) -> Result<(), InitError> {
+/// Silence is accepted because that is a first install. A foreign process is
+/// eligible only when the APPA identity response names a same-user `appa`
+/// process and the user confirms the stop. The identity is checked again
+/// immediately before signalling to close the prompt-to-kill race.
+fn clear_foreign_endpoint(binary: &Path, endpoint: &Endpoint) -> Result<(), InitError> {
     match endpoint_owner(binary, endpoint)? {
         EndpointOwner::Deployment | EndpointOwner::Unidentified => Ok(()),
-        EndpointOwner::Foreign => Err(InitError::RuntimeIdentity {
+        EndpointOwner::Foreign { pid: None } => Err(InitError::RuntimeIdentity {
             endpoint: endpoint.url().to_owned(),
-            message: "a different appa build already owns this endpoint; stop that process and rerun init".to_owned(),
+            message: "a different appa build owns this endpoint, but this older runtime does not identify its pid; stop it and rerun init"
+                .to_owned(),
         }),
+        EndpointOwner::Foreign { pid: Some(pid) } => {
+            clear_confirmed_foreign_with(binary, endpoint, pid, confirm_stop)
+        }
     }
+}
+
+fn clear_confirmed_foreign_with(
+    binary: &Path,
+    endpoint: &Endpoint,
+    pid: i32,
+    confirm: impl FnOnce(i32, &Endpoint) -> Result<bool, InitError>,
+) -> Result<(), InitError> {
+    if !is_owned_appa_runtime(pid)? {
+        return Err(InitError::RuntimeIdentity {
+            endpoint: endpoint.url().to_owned(),
+            message: format!(
+                "a different build names pid {pid}, but it is not this user's appa runtime; not stopping it"
+            ),
+        });
+    }
+    if !confirm(pid, endpoint)? {
+        return Err(InitError::RuntimeIdentity {
+            endpoint: endpoint.url().to_owned(),
+            message: format!("a different appa build (pid {pid}) still owns this endpoint; init cancelled"),
+        });
+    }
+    match endpoint_owner(binary, endpoint)? {
+        EndpointOwner::Unidentified => return Ok(()),
+        EndpointOwner::Deployment => return Ok(()),
+        EndpointOwner::Foreign { pid: Some(current) } if current == pid => {}
+        EndpointOwner::Foreign { .. } => {
+            return Err(InitError::RuntimeIdentity {
+                endpoint: endpoint.url().to_owned(),
+                message: "the endpoint changed ownership after approval; not stopping either process".to_owned(),
+            });
+        }
+    }
+    if !is_owned_appa_runtime(pid)? {
+        return Err(InitError::RuntimeIdentity {
+            endpoint: endpoint.url().to_owned(),
+            message: format!("pid {pid} changed identity after approval; not stopping it"),
+        });
+    }
+    terminate_appa_pid(pid)?;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        match endpoint_health(endpoint)? {
+            None => return Ok(()),
+            Some(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
+        }
+    }
+    #[cfg(unix)]
+    let path = executable_of(pid).unwrap_or_else(|| PathBuf::from(format!("pid {pid} at {}", endpoint.url())));
+    #[cfg(windows)]
+    let path = PathBuf::from(format!("pid {pid} at {}", endpoint.url()));
+    Err(InitError::RuntimeSurvived { pid, path })
 }
 
 fn verify_runtime_binary(runtime: &Path, endpoint: &Endpoint) -> Result<(), InitError> {
@@ -1468,7 +1583,7 @@ fn verify_runtime_binary(runtime: &Path, endpoint: &Endpoint) -> Result<(), Init
             endpoint: endpoint.url().to_owned(),
             message: "the answering process exposes no binary fingerprint; stop it and rerun init".to_owned(),
         }),
-        EndpointOwner::Foreign => Err(InitError::RuntimeIdentity {
+        EndpointOwner::Foreign { .. } => Err(InitError::RuntimeIdentity {
             endpoint: endpoint.url().to_owned(),
             message: "a different appa build is answering; stop that process and rerun init".to_owned(),
         }),
@@ -1589,6 +1704,63 @@ mod tests {
         ] {
             assert_eq!(stale_pid(answer), None, "accepted {answer:?}");
         }
+    }
+
+    #[test]
+    fn runtime_identity_accepts_old_answers_but_only_new_answers_name_a_process() {
+        assert_eq!(classify_endpoint_owner("same", "same 42"), EndpointOwner::Deployment);
+        assert_eq!(
+            classify_endpoint_owner("same", "different 42"),
+            EndpointOwner::Foreign { pid: Some(42) }
+        );
+        assert_eq!(
+            classify_endpoint_owner("same", "different"),
+            EndpointOwner::Foreign { pid: None }
+        );
+    }
+
+    #[test]
+    fn stopping_a_foreign_runtime_requires_a_y_or_default_yes_answer() {
+        let endpoint = Endpoint::parse("http://127.0.0.1:8787").expect("the endpoint parses");
+        for answer in ["y\n", "YES\n", "\n"] {
+            let mut output = Vec::new();
+            assert!(
+                confirm_stop_with(42, &endpoint, &mut answer.as_bytes(), &mut output).expect("the answer reads"),
+                "{answer:?} approves"
+            );
+            assert!(
+                String::from_utf8(output)
+                    .unwrap()
+                    .contains("Stop it and continue? [Y/n]")
+            );
+        }
+        for answer in ["n\n", "no\n", "anything else\n", ""] {
+            assert!(
+                !confirm_stop_with(42, &endpoint, &mut answer.as_bytes(), &mut Vec::new()).expect("the answer reads"),
+                "{answer:?} refuses"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_approved_foreign_appa_runtime_is_stopped() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let foreign = directory.path().join("foreign/appa");
+        let Some(pid) = process_executing(&foreign, false, RUNTIME_ARGUMENTS) else {
+            return;
+        };
+        let candidate = directory.path().join("candidate-appa");
+        fs::write(&candidate, "a different candidate build").expect("the candidate binary exists");
+        let endpoint = health_answers(vec![format!("different-fingerprint {pid}")]);
+
+        clear_confirmed_foreign_with(&candidate, &endpoint, pid, |approved_pid, _| {
+            assert_eq!(approved_pid, pid);
+            Ok(true)
+        })
+        .expect("the approved foreign runtime stops");
+
+        assert!(!still_running(pid), "the approved runtime still owns its process");
     }
 
     #[cfg(unix)]

@@ -62,6 +62,11 @@ cargo install --path appa-runtime --force
 appa init claude-code
 ```
 
+Init reports each slow phase on stderr. If another installed APPA build owns
+the runtime endpoint, init identifies its process and asks `Stop it and
+continue? [Y/n]` before sending any signal. It never offers to stop an
+unidentified listener or another user's process.
+
 Init installs `clappa` beside `appa` so the short command works in later examples.
 
 Init uninstalls an existing user-scoped APPA plugin and replaces its marketplace

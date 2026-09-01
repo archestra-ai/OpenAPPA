@@ -217,8 +217,12 @@ async fn binary_fingerprint(State(state): State<AppState>) -> Result<String, axu
     state
         .executable
         .as_ref()
-        .map(|executable| executable.digest.clone())
+        .map(|executable| binary_fingerprint_answer(&executable.digest, std::process::id()))
         .ok_or(axum::http::StatusCode::NOT_FOUND)
+}
+
+fn binary_fingerprint_answer(digest: &str, pid: u32) -> String {
+    format!("{digest} {pid}")
 }
 
 fn health_answer(stale: bool, pid: u32) -> String {
@@ -440,6 +444,11 @@ mod tests {
 
         fs::remove_file(&path).expect("the executable is removed");
         assert!(replaced(&path));
+    }
+
+    #[test]
+    fn the_binary_fingerprint_names_the_process_that_serves_it() {
+        assert_eq!(binary_fingerprint_answer("abc123", 41), "abc123 41");
     }
 
     #[test]
