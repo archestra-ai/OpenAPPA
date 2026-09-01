@@ -16,19 +16,6 @@ on:
         description: SHA-256 of the plugin artifact these binaries must accept
         required: true
         type: string
-  workflow_dispatch:
-    inputs:
-      release_ref:
-        description: Immutable release tag to build and stamp into the binaries
-        required: true
-        type: string
-      plugin_sha256:
-        description: >-
-          SHA-256 of the plugin artifact these binaries must accept, as the
-          release workflow's plugin-artifact job computes it.
-        required: true
-        type: string
-
 permissions: {}
 
 concurrency:
