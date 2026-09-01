@@ -86,8 +86,12 @@ function Stop-StaleRuntime {
         try {
             Stop-Process -Id $stalePid -ErrorAction Stop
         } catch {
-            [Console]::Error.WriteLine("appa protection: cannot stop the stale runtime (pid $stalePid): $($_.Exception.Message)")
-            return $false
+            # Gone between the lookup and the stop: the same concurrent-starter
+            # race as no process at all, settled by the wait below.
+            if ($null -ne (Get-Process -Id $stalePid -ErrorAction SilentlyContinue)) {
+                [Console]::Error.WriteLine("appa protection: cannot stop the stale runtime (pid $stalePid): $($_.Exception.Message)")
+                return $false
+            }
         }
     }
     $deadline = (Get-Date).AddSeconds(10)
