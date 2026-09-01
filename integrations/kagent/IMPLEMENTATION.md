@@ -264,11 +264,22 @@ The two error rows close the error-turn gap on the lane B python cells. The gap 
 
 Entrypoint (python image), in order:
 
-1. Parse the mounted or env-delivered config with a strict schema, and refuse unknown fields with an unready exit.
+1. Parse the mounted or env-delivered config with a strict schema. Refuse unknown fields, and the named out-of-band fields the runtime cannot gate, with an unready exit (see [Out-of-band flows](#out-of-band-flows)).
 2. Validate with `AgentConfig.model_validate` and build the factory over `to_agent`.
-3. Rebuild the stock plugin list with the stock conditions (STS token propagation, LLM passthrough), then append `AppaPluginKagent(APPA_RUNTIME_URL)`.
-4. Append the reserved-tool toolset: a `McpToolset` over streamable HTTP at `$APPA_RUNTIME_URL/mcp` (see [Remedy-plan execution](#remedy-plan-execution)).
-5. Construct `KAgentApp(...)`, call `.build()`, and serve on the controller-given host and port — the same calls as [cli.py#L88-L101](https://github.com/kagent-dev/kagent/blob/v0.9.12/python/packages/kagent-adk/src/kagent/adk/cli.py#L88-L101).
+3. Bring each out-of-band ADK feature under a mapped hook: wrap `code_executor` and the memory auto-save callback so both cross the tool gate, and constrain the compaction summarizer (see [Out-of-band flows](#out-of-band-flows)).
+4. Rebuild the stock plugin list with the stock conditions (STS token propagation, LLM passthrough), then append `AppaPluginKagent(APPA_RUNTIME_URL)`.
+5. Append the reserved-tool toolset: a `McpToolset` over streamable HTTP at `$APPA_RUNTIME_URL/mcp` (see [Remedy-plan execution](#remedy-plan-execution)).
+6. Construct `KAgentApp(...)`, call `.build()`, and serve on the controller-given host and port — the same calls as [cli.py#L88-L101](https://github.com/kagent-dev/kagent/blob/v0.9.12/python/packages/kagent-adk/src/kagent/adk/cli.py#L88-L101).
+
+### Out-of-band flows
+
+Three ADK features on the python runtime move a value without a `FunctionTool` call, so `before_tool_callback` never sees them. The model callbacks stay liveness gates and do not gate the content. The entrypoint brings each feature under a mapped hook, constrains it, or refuses it. The go runtime wires none of the three.
+
+- **Code execution — gated on cells A-py and B1-py.** `executeCodeBlocks` sets `code_executor` to a `SandboxedLocalCodeExecutor` ([v0.9.12 types.py#L509](https://github.com/kagent-dev/kagent/blob/v0.9.12/python/packages/kagent-adk/src/kagent/adk/types.py#L509)). ADK runs it through the code-execution processor, not the tool path. The entrypoint wraps `agent.code_executor`. The wrapper sends a `ToolCall` for the code, runs the inner executor only on `AllowCall`, and returns the output through a `ToolResult`. Code execution then crosses the tool gate, and its output crosses at `ToolResult`. Main drops the feature, so cell B2-py needs no wrapper.
+- **Memory write-back — gated on the python cells.** A memory config adds an `after_agent_callback` that persists the session every few turns ([v0.9.12 types.py#L585](https://github.com/kagent-dev/kagent/blob/v0.9.12/python/packages/kagent-adk/src/kagent/adk/types.py#L585)). The read tools (`load_memory`, `save_memory`, `prefetch_memory`) stay ordinary tools and already cross the gate. The entrypoint wraps the persist callback: it sends a `ToolCall` for the persist and calls the stock callback only on `AllowCall`. An equivalence test pins the wrapped callback per version.
+- **Context compaction — constrained on the python cells.** A compaction `summarizer_model` sends turn history to a summarizer model and injects the summary into later attention ([v0.9.12 types.py#L345](https://github.com/kagent-dev/kagent/blob/v0.9.12/python/packages/kagent-adk/src/kagent/adk/types.py#L345)). APPA holds model calls as liveness gates, so the current model cannot gate the summarizer as a flow. The entrypoint constrains the summarizer to the agent model, and refuses a summarizer that names a different model or egress. The summary re-injection stays ungated. The spec closes it when it defines a summarization sink.
+
+The refusal set is explicit. The strict schema refuses unknown fields. The entrypoint also refuses each named field it can neither gate nor constrain: a divergent compaction `summarizer_model`, and any field that wires a model-native tool or a code path outside the mapped hooks. It classifies `share_tools` at build time, and refuses it when it wires a model-native tool. Every ADK feature that opens an out-of-band flow is gated, constrained, or refused, so none runs unseen.
 
 ### Go — `AppaPluginKagent` on the Go ADK (design, verification pending)
 
@@ -340,15 +351,17 @@ Each plugin emits one JSON event per callback: event kind, trajectory ids, tool 
 
 The contract triple — `delta`, `requires`, `emits` — is engine algebra, and no label crosses the wire in either direction. The engine narrows the trajectory label with `delta` when it admits a result. It checks `requires` — membership, `history`, and `attention` marks — against trajectory state at dispatch ([appa-engine/src/check.rs](../../appa-engine/src/check.rs)). It records `emits` into the effect ledger, and effects commit on `Success`, never on `Indeterminate`.
 
-That algebra is sound only over the flows the runtime saw, so the plugin keeps one invariant: every value that enters model attention or leaves the agent crosses a mapped hook. On kagent the list is closed:
+That algebra is sound only over the flows the runtime saw, so the runtime image keeps one invariant: every value that enters model attention or leaves the agent crosses a mapped hook, an entrypoint wrapper brings it under one, or the entrypoint refuses the config. On kagent the list is closed:
 
 - User input crosses at `Prompt`, before the session append.
 - Tool and child returns cross at `ToolResult` and `SpawnResult`.
 - Delegated entries cross at `ChildStart`.
-- ADK memory and artifact loaders are ordinary tools, so they cross the tool gate.
+- Memory read tools and artifact loaders are ordinary tools, so they cross the tool gate.
+- Code execution and the memory write-back cross the tool gate through their entrypoint wrappers ([Out-of-band flows](#out-of-band-flows)).
+- The compaction summarizer is constrained to the agent model, and the entrypoint refuses any other out-of-band feature.
 - The CRD-compiled instruction is static config, not a flow.
 
-The liveness gates hold everything else when the `/hook` channel is down. The implemented model gates sinks at tool dispatch and defines no emission event — `TurnEnd` gates nothing by design ([appa-runtime/src/hooks.rs](../../appa-runtime/src/hooks.rs)). If the spec later defines a gated response sink, `on_event_callback` is the ready carrier on kagent: it can replace events. That is a forward path, not current behavior.
+Two boundaries stay non-gated by design, and the invariant names them rather than hiding them. The agent reply leaves through the A2A event queue, which only `on_event_callback` sees, and that callback is a liveness gate — `TurnEnd` gates nothing, and the implemented model defines no emission event ([appa-runtime/src/hooks.rs](../../appa-runtime/src/hooks.rs)). The compaction summary re-enters attention without a hook. When the spec defines a response sink and a summarization sink, `on_event_callback` is the ready carrier on kagent, because it can replace events. That is a forward path, not current behavior. The liveness gates hold everything else when the `/hook` channel is down.
 
 ## Trajectory identity
 
@@ -368,6 +381,8 @@ The liveness gates hold everything else when the `/hook` channel is down. The im
 | Go-runtime agents on stable | A / go | No Go-image knob and a v1 Go ADK in v0.9.12: flip those agents to `runtime: python` (one field), or adopt lane B. |
 | Go mapping unproven | B / go | Verify against the locked `adk/v2` before shipping the Go image. Until then the Go lane is design, not a claim. |
 | CRD in-process `sub_agents` on the python runtime | B2 / python | The entrypoint refuses the config instead of dropping children. `appa-kagent-adk-go` consumes them natively once verified. |
+| Out-of-band ADK features (code exec, memory write-back, compaction) | python cells | The entrypoint gates code execution and the memory persist as `ToolCall`s, constrains the compaction summarizer to the agent model, and refuses what it can neither gate nor constrain. See [Out-of-band flows](#out-of-band-flows). |
+| Non-gated emission: the agent reply and the compaction summary | python cells | Named by design. The reply leaves through `on_event` (liveness only); the summary re-enters attention ungated. A spec response sink and summarization sink close them, with `on_event_callback` as the carrier. |
 | BYO agents | all | Per-agent images outside any shared runtime image. Their authors add the one plugin line, in either language. |
 | Sandbox kinds (`AgentHarness`, `SandboxAgent`) | all | Different subsystem, out of scope. |
 | Upstream has no plugin config knob | all | The entrypoints replay stock behavior through public calls. CI pins kagent and ADK versions per lane and re-runs the equivalence checks on each bump. Propose an upstream plugin-loading knob to delete the duplication. |
@@ -397,7 +412,9 @@ Adapter tests (per runtime):
 - Pre-append barrier: a blocked `Prompt` leaves no trace in session history.
 - Fail closed: runtime down at each callback blocks the action, and liveness gates hold model and emission callbacks.
 - Pass through: the reserved `execute_remedy_plan` call proceeds untouched on `PassControl`, and the runtime refuses an unvouched `/mcp` call.
-- Startup refusal: missing `APPA_RUNTIME_URL`, unknown config fields, `sub_agents` on the python runtime.
+- Out-of-band gate: a `DenyCall` on the code-execution `ToolCall` skips the subprocess, and the code output crosses at `ToolResult`; a `DenyCall` on the memory-persist `ToolCall` skips `add_session_to_memory`.
+- Compaction constraint: a `summarizer_model` equal to the agent model is accepted, and a divergent one refuses at startup.
+- Startup refusal: missing `APPA_RUNTIME_URL`, unknown config fields, `sub_agents` on the python runtime, and the out-of-band refusal set — a divergent compaction `summarizer_model`, and a `share_tools` value that wires a model-native tool.
 - Args contract: the entrypoints accept the controller args and answer readiness at the stock endpoint.
 - No link from the codec crate to `appa-runtime` or `appa-engine`, and no policy state in either plugin.
 
@@ -420,3 +437,4 @@ End-to-end tests:
 - Wildcard: a tool the policy never names routes through the wildcard annotator and runs annotated.
 - Crash window: kill the agent workload between `ToolCall` and `ToolResult`, then make sure the runtime reports the dispatch `Indeterminate`.
 - Error-turn window per cell: on cell A-py and both go cells, force an unhandled model failure and make sure recovery closes the turn at the next admitted event. On the lane B python cells, make sure the error callbacks feed the failure `TurnEnd`s.
+- Out-of-band flows on cell A-py: a code-execution agent whose policy denies the code sees the subprocess skipped, and a memory agent whose policy denies the persist writes nothing to the memory backend.
