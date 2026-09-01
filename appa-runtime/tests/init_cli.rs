@@ -224,6 +224,35 @@ fn a_failure_at_the_start_puts_the_previous_statusline_back() {
     );
 }
 
+/// The rollback source under the data directory belongs to the init that wrote
+/// it. A concurrent init, or one that crashed mid-switch, may still need its own,
+/// so a successful init removes only the one it made.
+#[test]
+fn another_inits_rollback_source_survives_a_successful_init() {
+    let fixture = Fixture::new();
+    let other = fixture.data.join(".appa-init-recovery-424242");
+    fs::create_dir_all(other.join("plugin")).expect("the other rollback source is written");
+    assert!(fixture.init().output().expect("appa init runs").status.success());
+    let upgrade = fixture.init().output().expect("appa init runs");
+    assert!(upgrade.status.success(), "{}", String::from_utf8_lossy(&upgrade.stderr));
+
+    assert!(
+        other.join("plugin").is_dir(),
+        "the other init's rollback source was removed"
+    );
+    let leftovers: Vec<_> = fs::read_dir(&fixture.data)
+        .expect("the data directory is readable")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(".appa-init-recovery-"))
+        .collect();
+    assert_eq!(
+        leftovers,
+        [".appa-init-recovery-424242"],
+        "this init's own rollback source was left"
+    );
+}
+
 /// A first install that fails after its runtime is up leaves nothing behind:
 /// the runtime it started is stopped, and no file or registration it wrote
 /// survives to bind a session to a runtime whose policy init could not settle.

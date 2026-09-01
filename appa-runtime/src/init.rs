@@ -303,7 +303,7 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
     //    absent on a first install and disabled on an upgrade, so a session
     //    started against a half-installed bundle cannot be a protected one.
     install_clappa(launcher_dir)?;
-    cleanup_plugin_recoveries(&paths.data_dir);
+    cleanup_plugin_recovery(recovery.as_ref());
 
     Ok(render_receipt(
         &source_label(&source, &deployment),
@@ -1214,14 +1214,11 @@ fn restore_plugin(recovery: &PluginRecovery) -> Result<(), InitError> {
     Ok(())
 }
 
-fn cleanup_plugin_recoveries(data_dir: &Path) {
-    let Ok(entries) = fs::read_dir(data_dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        if entry.file_name().to_string_lossy().starts_with(RECOVERY_PREFIX) {
-            let _ = fs::remove_dir_all(entry.path());
-        }
+/// Remove this invocation's rollback source. Another init's, live or crashed,
+/// is not this one's to judge.
+fn cleanup_plugin_recovery(recovery: Option<&PluginRecovery>) {
+    if let Some(recovery) = recovery {
+        let _ = fs::remove_dir_all(&recovery.marketplace);
     }
 }
 

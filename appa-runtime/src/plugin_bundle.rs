@@ -730,7 +730,7 @@ fn reusable(published: &Path, plan: &DeploymentPlan) -> Result<(), String> {
 /// Move a damaged deployment aside. Nothing is ever deleted, and the
 /// destination never pre-exists, so `rename` cannot silently replace a
 /// directory. The namespace is deliberately distinct from the
-/// `.appa-init-recovery-` prefix that init sweeps globally.
+/// `.appa-init-recovery-` prefix init names its rollback source with.
 fn quarantine(deployments_dir: &Path, published: &Path) -> Result<(), PluginBundleError> {
     let name = published
         .file_name()
