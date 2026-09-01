@@ -232,7 +232,7 @@ class EnvelopeTests(unittest.TestCase):
         }
 
     def test_a_foreign_envelope_is_refused(self):
-        env = {"PATH": "/usr/bin:/bin", "OPENAPPA_SLACK_TOKEN": "xoxb-fixture"}
+        env = {"PATH": "/usr/bin:/bin", "APPA_PROVIDER_SLACK_TOKEN": "xoxb-fixture"}
         for request in [
             self.envelope(version=2),
             self.envelope(kind="annotation"),
@@ -245,7 +245,7 @@ class EnvelopeTests(unittest.TestCase):
     def test_a_missing_token_is_a_failure_before_any_network(self):
         result = self.run_script(self.envelope(), {"PATH": "/usr/bin:/bin"})
         self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn("OPENAPPA_SLACK_TOKEN", result.stderr)
+        self.assertIn("APPA_PROVIDER_SLACK_TOKEN", result.stderr)
 
 
 if __name__ == "__main__":

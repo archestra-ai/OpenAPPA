@@ -40,6 +40,7 @@ builtin = "hitl"
 
 [externals.audience.slack]
 command = ["python3", "../../batteries/slack/audience-source.py"]
+token_env = "APPA_PROVIDER_SLACK_TOKEN"   # the one variable this command inherits
 
 # Root contracts run before every included battery. This local rule bypasses
 # the shipped Bash classifier for `cargo test` and adds a fresh approval step.

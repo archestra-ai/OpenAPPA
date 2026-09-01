@@ -46,8 +46,18 @@ impl Trust {
 /// `@` (a group reference). The constructor cannot enforce that, so the rule is
 /// [`is_literal`](ReaderId::is_literal), applied on every ingress that builds a reader set:
 /// registry declarations at load, annotation answers, and membership answers.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct ReaderId(String);
+
+/// Every reader that arrives as data — a persisted event at replay, an external's answer,
+/// an API payload — carries the same one spelling per identity as a constructed one.
+/// Deserializing straight into the field would let `alice@CORP.com` off the wire compare
+/// as a second reader.
+impl<'de> Deserialize<'de> for ReaderId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<ReaderId, D::Error> {
+        Ok(ReaderId::new(String::deserialize(deserializer)?))
+    }
+}
 
 impl ReaderId {
     /// Build a reader, normalized so that one identity has one spelling: an address keeps
@@ -1195,6 +1205,26 @@ mod tests {
         assert!(ReaderId::new("alice@corp.com").is_literal());
         assert!(ReaderId::new("slack:U012345").is_literal());
         assert!(ReaderId::new("Self").is_literal(), "reserved spellings are exact");
+    }
+
+    #[test]
+    fn a_reader_off_the_wire_normalizes_like_a_constructed_one() {
+        let wire: ReaderId = serde_json::from_str("\"Alice@CORP.com\"").expect("a reader deserializes from a string");
+        assert_eq!(wire, ReaderId::new("Alice@corp.com"));
+        assert_eq!(
+            wire.as_str(),
+            "Alice@corp.com",
+            "the local part survives the domain fold"
+        );
+        assert_eq!(
+            serde_json::to_string(&wire).expect("a reader serializes"),
+            "\"Alice@corp.com\"",
+            "a replayed record round-trips to the spelling every comparison uses"
+        );
+
+        // A reader that is no address keeps every byte, provider prefixes included.
+        let qualified: ReaderId = serde_json::from_str("\"slack:U012345\"").expect("a reader deserializes");
+        assert_eq!(qualified.as_str(), "slack:U012345");
     }
 
     fn context_free() -> (WithinAssertions, BTreeSet<String>, Expansions) {

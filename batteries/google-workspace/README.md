@@ -45,22 +45,26 @@ from = ["google-workspace:group/finance@corp.com"]
 
 [externals.audience.google-workspace]
 command = ["python3", "batteries/google-workspace/audience-source.py"]
+token_env = "APPA_PROVIDER_GOOGLE_WORKSPACE_TOKEN"
 ```
 
 A command path is resolved against the directory of the config file
 that names it, so write the path as your root config sees the battery.
 
-The script reads its token from `OPENAPPA_GOOGLE_WORKSPACE_TOKEN`: an
-OAuth2 access token with the `admin.directory.user.readonly` and
+The script reads its token from `APPA_PROVIDER_GOOGLE_WORKSPACE_TOKEN`,
+which the binding's `token_env` forwards: an OAuth2 access token with the
+`admin.directory.user.readonly` and
 `admin.directory.group.member.readonly` scopes plus `openid email`.
-The runtime strips every `APPA_*` variable from a command it runs — its
-own credentials never reach an external — so a source's token must be
-named outside that prefix. Any API error or missing answer stops the
+A command inherits none of the runtime's `APPA_*` namespace — not its
+wiring, not a bearer token it sends, not another command's credential —
+only the one `APPA_PROVIDER_*` variable its own binding names. Any API error or missing answer stops the
 operation without recording a decision; nothing is guessed.
 
-Reads are directory-wide: `full-members` pages through every account.
-Size `externals.timeout_ms` and `externals.max_body_bytes` for your
-Workspace, not for a single annotation.
+Reads are directory-wide: `full-members` pages through every account, and
+a non-empty `group/<address>` adds one directory pass after the traversal
+to decide which member addresses this Workspace administers. Size
+`externals.timeout_ms` and `externals.max_body_bytes` for your Workspace,
+not for a single annotation.
 
 **`test_audience_source.py`** — fixture tests over recorded Google API
 payloads, no network. Run with `python3 test_audience_source.py`.

@@ -559,14 +559,18 @@ An entry is `[externals.<kind>.<name>]`, with `<kind>` one of `authorities`, `sa
 
 | Binding | Serves | Notes |
 |---|---|---|
-| `url = "…"` | every kind | HTTPS anywhere; cleartext `http` only on loopback; no credentials in the URL. `token_env` names an `APPA_*` variable whose value is sent as a bearer token. |
-| `command = ["…", …]` | every kind | Unix only. One JSON consult on standard input, one JSON answer on standard output; no shell; the working folder is that of the file that declares it; bounded by `timeout_ms` and `max_body_bytes`. At most eight run at once per runtime. |
+| `url = "…"` | every kind | HTTPS anywhere; cleartext `http` only on loopback; no credentials in the URL. `token_env` names an `APPA_*` variable whose value is sent as a bearer token, and never an `APPA_PROVIDER_*` one. |
+| `command = ["…", …]` | every kind | Unix only. One JSON consult on standard input, one JSON answer on standard output; no shell; the working folder is that of the file that declares it; bounded by `timeout_ms` and `max_body_bytes`. At most eight run at once per runtime. The child inherits no `APPA_*` variable except the one `APPA_PROVIDER_*` credential its own `token_env` names. |
 | `builtin = "hitl"` | authorities | The harness asks a person. |
 | `builtin = "approve"` | authorities | Approves within `permits`. |
 | `builtin = "redact-email"` | sanitizers | Replaces email addresses with a placeholder. |
 | `builtin = "claude-code"` | authorities, sanitizers; an annotator names it on its declaration | Unix only. One isolated `claude -p` process per consult, tuned in `[externals.claude_code]`. |
 | `builtin = "llm"` | authorities, sanitizers; an annotator names it on its declaration | The API-key profile in `[externals.llm]`. |
 | `builtin = "<module>"` | authorities, sanitizers | A deployer module from `--modules-dir`, called in-process. |
+
+`APPA_*` is the runtime's own environment namespace: its wiring and every secret a `url` binding's `token_env` names. A child process inherits none of it.
+
+A `command` binding takes a `token_env` of its own, and it means the opposite of a URL's: the runtime sends nothing, it forwards that one variable to the child that reads it. The variable must be in the `APPA_PROVIDER_*` namespace — a credential belonging to the provider, such as a battery's Slack or GitHub token, which the runtime never reads. A `url` binding's `token_env` may not name a variable there, so the forwarding cannot carry a secret this runtime holds, and a command receives only the credential its own binding names, never another command's. The value is not read when the policy loads, so a policy stays loadable and describable on a machine that holds no provider credential; a missing one surfaces as the source's own refusal to answer. A `claude-code` consult inherits nothing of the namespace at all.
 
 ### The consult
 
