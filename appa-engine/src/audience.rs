@@ -497,7 +497,9 @@ impl AudienceRegistry {
         self.groups.values().filter(move |group| group.within == Some(level))
     }
 
-    fn route_selector(&self, provider: &str, selector: &str) -> Result<SelectorSpec, Unroutable> {
+    /// The one routing rule for a selector: its provider is registered and one of that
+    /// provider's templates matches it.
+    pub(crate) fn route_selector(&self, provider: &str, selector: &str) -> Result<SelectorSpec, Unroutable> {
         let templates = self
             .providers
             .get(provider)
@@ -577,15 +579,12 @@ impl AudienceRegistry {
     /// refuse the evidence — the live act and its replay hold it to the same test.
     pub fn expansions(&self, evidence: &AudienceEvidence) -> Result<Expansions, EvidenceRefusal> {
         for claims in &evidence.sources {
-            let routable = self
-                .templates(&claims.provider)
-                .is_some_and(|templates| templates.iter().any(|template| template.matches(&claims.selector)));
-            if !routable {
-                return Err(EvidenceRefusal::UnroutableSelector {
+            self.route_selector(&claims.provider, &claims.selector).map_err(|_| {
+                EvidenceRefusal::UnroutableSelector {
                     provider: claims.provider.clone(),
                     selector: claims.selector.clone(),
-                });
-            }
+                }
+            })?;
         }
         for lookup in &evidence.lookups {
             if !self.providers().contains(&lookup.provider) {

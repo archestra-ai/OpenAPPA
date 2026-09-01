@@ -77,10 +77,10 @@ impl ReaderId {
     }
 
     /// A literal reader ID: `public`, `self`, and `internal` are reserved audience states —
-    /// never readers — and the `@` mark is reserved for group references. Every ingress that
-    /// builds a reader set applies this rule.
+    /// never readers — the `@` mark is reserved for group references, and an empty id names
+    /// no one. Every ingress that builds a reader set applies this rule.
     pub fn is_literal(&self) -> bool {
-        !matches!(self.0.as_str(), "public" | "self" | "internal") && !self.0.starts_with('@')
+        !self.0.is_empty() && !matches!(self.0.as_str(), "public" | "self" | "internal") && !self.0.starts_with('@')
     }
 
     /// The provider prefix of a qualified reader (`slack:U012345` → `slack`), when one exists.
@@ -1239,7 +1239,7 @@ mod tests {
 
     #[test]
     fn reserved_spellings_are_never_readers() {
-        for reserved in ["public", "self", "internal", "@finance"] {
+        for reserved in ["public", "self", "internal", "@finance", ""] {
             assert!(!ReaderId::new(reserved).is_literal());
             assert!(Clause::new([], [], [reader(reserved)]).is_err());
         }

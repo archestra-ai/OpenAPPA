@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use appa_engine::audience::MemberClaims;
 use appa_engine::authority::{Authority, DeclaredTransition, Sanitizer};
 use appa_engine::check::Gap;
-use appa_engine::label::{Clause, DeclaredAudience, GroupRef, Trust};
+use appa_engine::label::{Clause, DeclaredAudience, GroupRef, ReaderId, Trust};
 use appa_engine::registry::TrustChain;
 
 /// Which registered external a consult addresses. Closed: the wire
@@ -157,7 +157,7 @@ impl WireAudience {
             serde_json::Value::Array(readers) => readers
                 .iter()
                 .map(|reader| match reader.as_str() {
-                    Some(reader) if is_literal_reader(reader) => Some(reader.to_string()),
+                    Some(reader) if ReaderId::new(reader).is_literal() => Some(reader.to_string()),
                     _ => None,
                 })
                 .collect::<Option<Vec<String>>>()
@@ -174,13 +174,6 @@ impl Serialize for WireAudience {
             WireAudience::Readers(readers) => readers.serialize(serializer),
         }
     }
-}
-
-/// Is `reader` an id an external answer may name? `public`, `self`, and `internal` are
-/// audience states, not readers; an `@` mark is a group reference only a source expands; an
-/// empty id names no one.
-pub(crate) fn is_literal_reader(reader: &str) -> bool {
-    !reader.is_empty() && !matches!(reader, "public" | "self" | "internal") && !reader.starts_with('@')
 }
 
 /// The `@`-marked spelling of one group reference, as policy writes it — the reference's
@@ -674,7 +667,7 @@ pub struct PrincipalAnswer {
 impl PrincipalAnswer {
     pub fn from_wire(answer: &serde_json::Value) -> Option<PrincipalAnswer> {
         let answer: PrincipalAnswer = serde_json::from_value(answer.clone()).ok()?;
-        is_literal_reader(&answer.principal).then_some(answer)
+        ReaderId::new(answer.principal.as_str()).is_literal().then_some(answer)
     }
 }
 
