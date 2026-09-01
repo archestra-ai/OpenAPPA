@@ -16,11 +16,6 @@ inputs = { subject = "$tool_call.arguments.file" }
 audiences = ["cfo@northwind.example", "legal-lead@northwind.example", "controller@northwind.example"]
 
 [[policy.annotator]]
-name = "document-search-acl"
-inputs = { subject = "$tool_call.arguments.query" }
-audiences = ["cfo@northwind.example", "legal-lead@northwind.example", "controller@northwind.example"]
-
-[[policy.annotator]]
 name = "document-write-acl"
 inputs = { subject = "$tool_call.arguments.file" }
 audiences = ["cfo@northwind.example", "legal-lead@northwind.example", "controller@northwind.example"]
@@ -45,10 +40,15 @@ effects = ["egress"]
 name = "fork"
 parameters = { type = "object", properties = { task = { type = "string", description = "The self-contained task for the child trajectory.", minLength = 1 } }, required = ["task"], additionalProperties = false }
 
+# A keyword query is not a document identity, so no directory can resolve it,
+# and an annotation carries one contract per call — nothing here knows which
+# documents a phrase matched. What holds is the collection-level fact: every
+# hit search returns is finance material the packet's readers may see. The
+# policy states it directly rather than consulting an ACL over invented text.
 [[policy.tool]]
 name = "search_finance"
 parameters = { type = "object", properties = { query = { type = "string", description = "Keyword or phrase to match against file names and contents." } }, required = ["query"], additionalProperties = false }
-annotator = "document-search-acl"
+delta = { audience = ["cfo@northwind.example", "legal-lead@northwind.example"] }
 
 [[policy.tool]]
 name = "read_finance"
@@ -96,9 +96,6 @@ timeout_ms = 5000
 max_body_bytes = 65536
 
 [externals.annotators.document-acl]
-url = "http://127.0.0.1:0/annotator"
-
-[externals.annotators.document-search-acl]
 url = "http://127.0.0.1:0/annotator"
 
 [externals.annotators.document-write-acl]
