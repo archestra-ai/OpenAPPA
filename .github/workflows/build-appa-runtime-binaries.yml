@@ -82,9 +82,28 @@ jobs:
       - name: Checkout project
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.release_ref }}
+          # A workflow input may name the release, but never selects code to
+          # execute in the default-branch cache scope. The caller's commit is
+          # the trusted source; the next step proves the tag names that commit.
+          ref: ${{ github.sha }}
           persist-credentials: false
           fetch-depth: 1
+
+      - name: Verify release tag targets the source commit
+        env:
+          RELEASE_REF: ${{ inputs.release_ref }}
+        run: |
+          if [[ ! "$RELEASE_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::release_ref must be a version tag"
+            exit 1
+          fi
+          git fetch --no-tags origin \
+            "refs/tags/${RELEASE_REF}:refs/tags/${RELEASE_REF}"
+          tag_commit=$(git rev-parse "${RELEASE_REF}^{commit}")
+          if [ "$tag_commit" != "$GITHUB_SHA" ]; then
+            echo "::error::${RELEASE_REF} targets ${tag_commit}, not source commit ${GITHUB_SHA}"
+            exit 1
+          fi
 
       # The binary accepts only the plugin artifact whose digest it is built
       # with. Baking it in at compile time is what makes a shipped binary

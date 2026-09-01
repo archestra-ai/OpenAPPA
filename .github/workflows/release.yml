@@ -196,7 +196,7 @@ jobs:
       - release-please
       - plugin-artifact
     permissions:
-      contents: read # Required by the reusable workflow to check out the release tag.
+      contents: read # Required to check out the source commit and verify its release tag.
     uses: ./.github/workflows/build-appa-runtime-binaries.yml
     with:
       release_ref: ${{ needs.release-please.outputs.tag_name }}
