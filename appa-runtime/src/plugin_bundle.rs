@@ -96,7 +96,9 @@ impl PluginDigest {
             return Err(malformed());
         }
         let mut bytes = [0u8; 32];
-        for (slot, pair) in bytes.iter_mut().zip(trimmed.as_bytes().chunks_exact(2)) {
+        // The length is already 64, so the remainder is empty by construction.
+        let (pairs, _) = trimmed.as_bytes().as_chunks::<2>();
+        for (slot, pair) in bytes.iter_mut().zip(pairs) {
             let hex = std::str::from_utf8(pair).map_err(|_| malformed())?;
             *slot = u8::from_str_radix(hex, 16).map_err(|_| malformed())?;
         }
