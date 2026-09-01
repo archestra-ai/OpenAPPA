@@ -52,7 +52,9 @@ fn main() {
 
     if let Some(reference) = release {
         assert!(!reference.trim().is_empty(), "APPA_RELEASE_REF must not be empty");
+        let digest = release_plugin_digest();
         println!("cargo:rustc-env=APPA_RELEASE_REF={reference}");
+        println!("cargo:rustc-env=APPA_PLUGIN_SHA256={digest}");
         return;
     }
 
@@ -66,6 +68,24 @@ fn main() {
             println!("cargo:rustc-env=APPA_PLUGIN_SOURCE_ROOT={}", repository.display());
         }
     }
+}
+
+/// The SHA-256 of the release plugin archive this build accepts, as 64 hex
+/// characters. A release binary resolves its plugin from nothing else, so a
+/// release build without it is refused here rather than at someone's install.
+fn release_plugin_digest() -> String {
+    let Some(digest) = env::var("APPA_PLUGIN_SHA256").ok() else {
+        panic!(
+            "a release build (APPA_RELEASE_REF is set) requires APPA_PLUGIN_SHA256, \
+             the SHA-256 of the release plugin archive"
+        );
+    };
+    let digest = digest.trim().to_owned();
+    assert!(
+        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "APPA_PLUGIN_SHA256 must be 64 hexadecimal characters, got {digest:?}"
+    );
+    digest
 }
 
 fn plugin_is_dirty(repository: &Path) -> bool {

@@ -56,6 +56,8 @@ pub enum PluginBundleError {
     MissingReleaseRef,
     #[error("this appa build carries an invalid plugin tree digest: {value}")]
     MalformedBuildDigest { value: String },
+    #[error("this appa build carries an unknown plugin source kind: {value}")]
+    MalformedBuildSourceKind { value: String },
     #[error("{value} is not a SHA-256 digest")]
     MalformedDigest { value: String },
     #[error("the plugin source at {path} is not a marketplace root: {reason}")]
@@ -144,6 +146,28 @@ impl fmt::Debug for PluginDigest {
     }
 }
 
+/// How a build without a release digest identifies its plugin source, as
+/// `build.rs` stamps it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceKind {
+    /// A clean checkout: the plugin is the tree at the build's Git commit.
+    Commit,
+    /// A dirty checkout: the plugin is the tree in the repository itself.
+    Local,
+}
+
+impl SourceKind {
+    fn parse(value: &str) -> Result<Self, PluginBundleError> {
+        match value {
+            "commit" => Ok(Self::Commit),
+            "local" => Ok(Self::Local),
+            other => Err(PluginBundleError::MalformedBuildSourceKind {
+                value: other.to_owned(),
+            }),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct BuildIdentity<'a> {
     pub release_digest: Option<PluginDigest>,
@@ -151,7 +175,7 @@ struct BuildIdentity<'a> {
     pub commit: Option<&'a str>,
     pub tree_digest: Option<PluginDigest>,
     pub local_root: Option<&'a str>,
-    pub source_kind: Option<&'a str>,
+    pub source_kind: Option<SourceKind>,
 }
 
 impl BuildIdentity<'static> {
@@ -174,7 +198,9 @@ impl BuildIdentity<'static> {
             commit: option_env!("APPA_BUILD_COMMIT"),
             tree_digest: Some(tree_digest),
             local_root: option_env!("APPA_PLUGIN_SOURCE_ROOT"),
-            source_kind: option_env!("APPA_PLUGIN_SOURCE_KIND"),
+            source_kind: option_env!("APPA_PLUGIN_SOURCE_KIND")
+                .map(SourceKind::parse)
+                .transpose()?,
         })
     }
 }
@@ -210,21 +236,21 @@ impl PluginSource {
         }
         let digest = build.tree_digest.ok_or(PluginBundleError::MissingBuildIdentity)?;
         match build.source_kind {
-            Some("commit") => {
+            Some(SourceKind::Commit) => {
                 let commit = build.commit.ok_or(PluginBundleError::MissingBuildIdentity)?;
                 Ok(Self::Commit {
                     commit: commit.to_owned(),
                     digest,
                 })
             }
-            Some("local") => {
+            Some(SourceKind::Local) => {
                 let root = build.local_root.ok_or(PluginBundleError::MissingBuildIdentity)?;
                 Ok(Self::Local {
                     root: PathBuf::from(root),
                     digest,
                 })
             }
-            _ => Err(PluginBundleError::MissingBuildIdentity),
+            None => Err(PluginBundleError::MissingBuildIdentity),
         }
     }
 }
@@ -1373,6 +1399,21 @@ mod tests {
     }
 
     #[test]
+    fn a_build_stamped_with_an_unknown_source_kind_is_refused() {
+        assert_eq!(SourceKind::parse("commit").unwrap(), SourceKind::Commit);
+        assert_eq!(SourceKind::parse("local").unwrap(), SourceKind::Local);
+        for value in ["", "release", "Commit", "git"] {
+            assert!(
+                matches!(
+                    SourceKind::parse(value),
+                    Err(PluginBundleError::MalformedBuildSourceKind { .. })
+                ),
+                "accepted {value:?}"
+            );
+        }
+    }
+
+    #[test]
     fn digest_rejects_malformed_hex() {
         for value in ["", "abc", &"z".repeat(64), &"a".repeat(63), &"a".repeat(65)] {
             assert!(PluginDigest::parse(value).is_err(), "accepted {value:?}");
@@ -1780,7 +1821,7 @@ mod tests {
                 commit: Some("71b5080ad2a49e21493887c5bf71a45c620e924f"),
                 tree_digest: Some(digest),
                 local_root: None,
-                source_kind: Some("commit"),
+                source_kind: Some(SourceKind::Commit),
             },
         )
         .unwrap();
@@ -1808,7 +1849,7 @@ mod tests {
                 commit: Some("ignored"),
                 tree_digest: Some(PluginDigest::of(b"tree")),
                 local_root: None,
-                source_kind: Some("release"),
+                source_kind: None,
             },
         )
         .unwrap();
