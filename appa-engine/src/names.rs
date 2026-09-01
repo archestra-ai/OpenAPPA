@@ -69,7 +69,10 @@ impl AudienceArgument {
         }
         match value.strip_prefix('@') {
             Some(reference) => crate::label::GroupRef::parse(reference).map(AudienceArgument::Group),
-            None => Some(AudienceArgument::Reader(crate::label::ReaderId::new(value))),
+            None => {
+                let reader = crate::label::ReaderId::new(value);
+                reader.is_literal().then_some(AudienceArgument::Reader(reader))
+            }
         }
     }
 }
@@ -117,6 +120,7 @@ mod tests {
         );
         assert_eq!(AudienceArgument::parse("@"), None);
         assert_eq!(AudienceArgument::parse("@slack:"), None);
+        assert_eq!(AudienceArgument::parse(""), None, "an empty id names no reader");
         assert_eq!(GroupName::new("auditors").to_string(), "@auditors");
     }
 }
