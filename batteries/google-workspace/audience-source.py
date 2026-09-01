@@ -12,11 +12,12 @@ and the member lookup that canonicalizes one
 `google-workspace:<address>` reader.
 
 A Workspace account's primary email is administered and attested by the
-Workspace itself, so members carry it as their verified email; the
-viewer's email is attested by the userinfo endpoint's own verified
-flag. A group member outside the Workspace belongs to the group like
-any other — the group is the source of truth for its own membership —
-but keeps its qualified identity: the Workspace administers no account
+Workspace itself, so directory members carry it as their verified
+email; the viewer's email is attested by the userinfo endpoint's own
+verified flag. Belonging to a group proves membership, not identity: a
+group member outside the directory belongs to the group like any other
+— the group is the source of truth for its own membership — but keeps
+its qualified identity, because the Workspace administers no account
 for that address and attests nothing about it.
 
 Credentials come from OPENAPPA_GOOGLE_WORKSPACE_TOKEN: an OAuth2 access
@@ -88,15 +89,26 @@ def viewer_members(call):
     return [claims]
 
 
-def full_members(call):
+def directory_users(call):
+    """Every account the Workspace itself administers, live and reachable."""
     return [
-        claims_of(user["primaryEmail"])
+        user
         for user in paginated(call, f"{DIRECTORY_ROOT}/users", "users", customer="my_customer", maxResults=500)
         if not user.get("suspended") and not user.get("archived")
     ]
 
 
+def full_members(call):
+    return [claims_of(user["primaryEmail"]) for user in directory_users(call)]
+
+
 def group_members(call, address):
+    # Membership proves that someone belongs to the group. Only a directory
+    # account proves that this Workspace administers their email identity, and
+    # the API's own member `type` does not draw that line: its EXTERNAL value
+    # is documented as unused, so an outside auditor arrives as an ordinary
+    # USER. One directory pass answers the question the type cannot.
+    administered = {user["primaryEmail"] for user in directory_users(call)}
     members = []
     visited = {address}
     queue = [address]
@@ -104,19 +116,17 @@ def group_members(call, address):
         group_url = f"{DIRECTORY_ROOT}/groups/{urllib.parse.quote(queue.pop(0), safe='')}/members"
         for member in paginated(call, group_url, "members", maxResults=200):
             match member.get("type"):
-                case "USER" if member.get("status") != "SUSPENDED":
-                    members.append(claims_of(member["email"]))
-                case "USER":
+                case "USER" | "EXTERNAL" if member.get("status") == "SUSPENDED":
                     pass
-                # A member outside the Workspace belongs to the group — the
-                # group is the source of truth for its own membership — but
-                # the Workspace administers no account for that address, so
-                # the member keeps its qualified identity and merges with no
-                # other provider's reader.
-                case "EXTERNAL" if member.get("status") != "SUSPENDED":
-                    members.append({"id": f"google-workspace:{member['email']}"})
-                case "EXTERNAL":
-                    pass
+                case "USER" | "EXTERNAL":
+                    email = member["email"]
+                    # A member the directory does not administer belongs to the
+                    # group like any other, but the Workspace attests nothing
+                    # about their address: they keep their qualified identity
+                    # and merge with no other provider's reader.
+                    members.append(
+                        claims_of(email) if email in administered else {"id": f"google-workspace:{email}"}
+                    )
                 case "GROUP":
                     nested = member["email"]
                     if nested not in visited:

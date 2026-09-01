@@ -32,6 +32,11 @@ def fixture_api(responses):
     return call
 
 
+def empty_directory():
+    """A directory pass reporting no administered account."""
+    return (f"{DIRECTORY}/users", {"customer": "my_customer", "maxResults": 500}, {"users": []})
+
+
 class SelectorTests(unittest.TestCase):
     def test_viewer_carries_its_email_only_when_verified(self):
         call = fixture_api([(USERINFO, {}, {"email": "alice@corp.com", "email_verified": True})])
@@ -83,12 +88,19 @@ class SelectorTests(unittest.TestCase):
         call = fixture_api(
             [
                 (
+                    f"{DIRECTORY}/users",
+                    {"customer": "my_customer", "maxResults": 500},
+                    {"users": [{"primaryEmail": "alice@corp.com"}, {"primaryEmail": "bob@corp.com"}]},
+                ),
+                (
                     finance_url,
                     {"maxResults": 200},
                     {
                         "members": [
                             {"type": "USER", "email": "alice@corp.com", "status": "ACTIVE"},
-                            {"type": "EXTERNAL", "email": "auditor@consulting.com"},
+                            # Google's own EXTERNAL type is documented as unused,
+                            # so an outside member arrives as an ordinary USER.
+                            {"type": "USER", "email": "auditor@consulting.com"},
                             {"type": "USER", "email": "gone@corp.com", "status": "SUSPENDED"},
                             {"type": "GROUP", "email": "leads@corp.com"},
                         ]
@@ -112,23 +124,55 @@ class SelectorTests(unittest.TestCase):
             {
                 "members": [
                     {"id": "google-workspace:alice@corp.com", "verified_email": "alice@corp.com"},
-                    # An external member belongs to the group but the
-                    # Workspace attests no account for that address.
+                    # The auditor belongs to the group, but no directory
+                    # account administers that address, so nothing is attested.
                     {"id": "google-workspace:auditor@consulting.com"},
                     {"id": "google-workspace:bob@corp.com", "verified_email": "bob@corp.com"},
                 ]
             },
         )
 
+    def test_a_group_member_the_directory_does_not_administer_is_never_attested(self):
+        # Same address, same member type, two Workspaces: only the one that
+        # administers the account attests it.
+        url = f"{DIRECTORY}/groups/finance%40corp.com/members"
+        listing = {"members": [{"type": "USER", "email": "alice@corp.com"}]}
+
+        outside = fixture_api([empty_directory(), (url, {"maxResults": 200}, listing)])
+        self.assertEqual(
+            AUDIENCE_SOURCE.answer(outside, {"selector": "group/finance@corp.com"}),
+            {"members": [{"id": "google-workspace:alice@corp.com"}]},
+        )
+
+        administered = fixture_api(
+            [
+                (
+                    f"{DIRECTORY}/users",
+                    {"customer": "my_customer", "maxResults": 500},
+                    {"users": [{"primaryEmail": "alice@corp.com"}]},
+                ),
+                (url, {"maxResults": 200}, listing),
+            ]
+        )
+        self.assertEqual(
+            AUDIENCE_SOURCE.answer(administered, {"selector": "group/finance@corp.com"}),
+            {"members": [{"id": "google-workspace:alice@corp.com", "verified_email": "alice@corp.com"}]},
+        )
+
     def test_an_unexpandable_group_member_is_a_failure_not_an_under_report(self):
         url = f"{DIRECTORY}/groups/everyone%40corp.com/members"
-        call = fixture_api([(url, {"maxResults": 200}, {"members": [{"type": "CUSTOMER", "id": "C123"}]})])
+        call = fixture_api(
+            [
+                empty_directory(),
+                (url, {"maxResults": 200}, {"members": [{"type": "CUSTOMER", "id": "C123"}]}),
+            ]
+        )
         with self.assertRaises(RuntimeError):
             AUDIENCE_SOURCE.answer(call, {"selector": "group/everyone@corp.com"})
 
     def test_an_unknown_group_is_a_failure_not_an_empty_answer(self):
         url = f"{DIRECTORY}/groups/typo%40corp.com/members"
-        call = fixture_api([(url, {"maxResults": 200}, AUDIENCE_SOURCE.NotFound(url))])
+        call = fixture_api([empty_directory(), (url, {"maxResults": 200}, AUDIENCE_SOURCE.NotFound(url))])
         with self.assertRaises(AUDIENCE_SOURCE.NotFound):
             AUDIENCE_SOURCE.answer(call, {"selector": "group/typo@corp.com"})
 

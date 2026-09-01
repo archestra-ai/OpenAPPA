@@ -16,10 +16,12 @@ Google's OpenID userinfo and Admin SDK Directory APIs:
 - `google-workspace:group/<group-address>` — one Workspace group.
   Nested groups are expanded, and a member outside the Workspace
   belongs to the group like any other: the group is the source of truth
-  for its own membership, whatever the member's email domain. That
-  member keeps its qualified identity, since the Workspace administers
-  no account for the address and so attests nothing about it. Feeds
-  `[[audience.group]]` entries.
+  for its own membership, whatever the member's email domain. Being in
+  a group proves membership, not identity, so a member is claimed with
+  a verified address only where the directory administers their
+  account; everyone else keeps a qualified identity and merges with no
+  other provider's reader. Reading a group therefore also reads the
+  directory once. Feeds `[[audience.group]]` entries.
 
 It also answers the member lookup that canonicalizes a
 `google-workspace:<address>` reader. A Workspace account's primary
