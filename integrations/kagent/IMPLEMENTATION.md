@@ -181,6 +181,35 @@ Harness.spec.workload.image = appa-kagent-adk-go@sha256:…
                            ▼  POST $APPA_RUNTIME_URL/hook
 ```
 
+## Quickstart option
+
+The quickstart is optional and orthogonal to everything above — same plugins, same wire, same codec, same adapter images. Skipping it changes nothing. It exists so one operator can gate one agent in minutes, with no separate `appa-runtime` deployment.
+
+`appa-kagent-quickstart` is one image that bundles both runtime layers and `appa-runtime` itself. The entrypoint starts `appa-runtime` on `127.0.0.1:8787` with a packaged example policy, points `APPA_RUNTIME_URL` at it, and execs the runtime that matches the rendered config. The pod keeps the stock args, port, and readiness contract. Point `controller.agentImage` at it on v0.9.12 (python agents), or both image values on the v0.10 release candidates.
+
+```text
+quickstart — one pod, nothing else to deploy
+
+helm controller.agentImage = appa-kagent-quickstart
+     (v0.10: also controller.goAgentImage)
+        ▼
+┌─ agent pod ───────────────────────────────────────────┐
+│  entrypoint: start appa-runtime on 127.0.0.1:8787,    │
+│  then exec the runtime the rendered config matches    │
+│                                                       │
+│  kagent runtime (python or go) + AppaHookPlugin       │
+│    │  POST http://127.0.0.1:8787/hook                 │
+│    ▼                                                  │
+│  appa-runtime · policy · Engine · appa.db — pod-local │
+└───────────────────────────────────────────────────────┘
+```
+
+Quickstart limits:
+
+- Trajectory state and `appa.db` live in the pod and die with it.
+- A parent and a called agent run as two pods with two bundled runtimes, so their hooks land in two trajectories. Cross-workload correlation needs one `appa-runtime` that both reach.
+- One packaged example policy per image build. Real policy work moves to a deployed `appa-runtime`.
+
 ## Runtime adapters
 
 ### Python — `AppaHookPlugin` on google-adk (verified)
@@ -298,6 +327,7 @@ Each plugin emits one JSON event per callback: event kind, trajectory ids, tool 
 | 5 | Lane A end-to-end: kind cluster with the stable chart, `controller.agentImage` swap, parent-and-child scenario against one shared runtime |
 | 6 | `appa-kagent-adk-go`: adk/v2 mapping verification, the Go plugin and runtime main, both image tags |
 | 7 | Lane B end-to-end: the B1 dual-knob swap on the release-candidate chart, and B2 Harness × AgentTemplate on the Substrate path |
+| 8 | Optional: `appa-kagent-quickstart` bundled image — both runtime layers, packaged `appa-runtime`, example policy, the quickstart entrypoint |
 
 No kagent PR and no Google ADK PR is required. The optional upstream contribution (a plugin config knob) is independent and non-blocking.
 

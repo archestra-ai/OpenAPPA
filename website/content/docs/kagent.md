@@ -11,24 +11,14 @@ name: kAgent
 date: 2026-09-01
 :::
 
-[kagent](https://github.com/kagent-dev/kagent) runs LLM agents on Kubernetes. The operator creates `Agent` resources, and the kagent controller runs each declarative agent on a shared runtime image that the install configuration selects. This proposal gates those agents with OpenAPPA through that stock configuration. It does not fork, patch, or vendor kagent or Google ADK.
-
-`appa-adapter-kagent` is the adapter: the codec inside `appa-runtime` that parses this integration's `/hook` requests and renders the decisions that answer them. The agent side ships one runtime image per kagent runtime: `appa-kagent-adk` for the python runtime and `appa-kagent-adk-go` for the Go runtime. Each extends kagent's published runtime image for that runtime with a small entrypoint and one ADK plugin. The plugin maps ADK callbacks to the eight `appa-runtime` `/hook` events and enforces the returned decisions inside the ADK dispatch loop. `appa-runtime` stays a separate process. It owns policy, the Engine, consults, remedy plans, trajectory state, and `appa.db`. Policy semantics stay in [How it works](/how-it-works) and [Policy contracts](/contracts).
+[kagent](https://github.com/kagent-dev/kagent) runs LLM agents on Kubernetes. This proposal gates every declarative kagent agent with OpenAPPA through one install setting: the runtime image. No kagent fork, no Google ADK fork, no agent changes.
 
 Two stock surfaces carry the whole integration:
 
-- kagent's runtime-image install settings select the image that runs every declarative agent, per runtime. Naming the OpenAPPA images there is ordinary install configuration.
-- Both kagent runtimes are Google ADK, and each registers plugins through its ADK's official plugin API. kagent registers its own plugins there, and the adapter plugin registers beside them.
+- kagent's runtime-image settings name the image that runs every declarative agent. Point them at the OpenAPPA images: `appa-kagent-adk` for the python runtime, `appa-kagent-adk-go` for the Go runtime.
+- Both runtimes take plugins through Google ADK's official plugin API. The OpenAPPA images register one — `AppaHookPlugin` — which maps ADK callbacks to the eight `appa-runtime` hook events and enforces the answered `HookDecision`.
 
-The [implementation plan](https://github.com/archestra-ai/OpenAPPA/blob/main/integrations/kagent/IMPLEMENTATION.md) pins the exact source baselines and backs every claim on this page with code evidence.
-
-## Overview
-
-- The platform operator points the runtime-image settings at the OpenAPPA images. Every declarative agent — python and Go runtime alike — rolls onto them. No CRD edits, no agent changes.
-- `APPA_RUNTIME_URL` arrives as a baked image default, or per agent through the agent's deployment env.
-- Inside each agent pod, the image's entrypoint rebuilds the compiled agent from the mounted config — the same steps as the stock entrypoint — and registers `AppaHookPlugin`.
-- Each gated ADK callback becomes one `/hook` request to the shared `appa-runtime`. The plugin enforces the returned `HookDecision` where the callback fires: it can deny a tool call with feedback the model reads, replace a tool result, or substitute a child's return.
-- Hooks fail closed. When the runtime is unreachable or answers outside the contract, the gated action does not run.
+`appa-runtime` owns the decisions: policy, the Engine, remedy plans, and trajectory state, as [How it works](/how-it-works) and [Policy contracts](/contracts) define them.
 
 ## Highlights
 
@@ -53,15 +43,13 @@ kagent controller — stock, unmodified
 └──────────────────────────┬────────────────────────────┘
                            │  POST /hook · fail closed
                            ▼
-┌─ appa-runtime · one shared service ───────────────────┐
+┌─ appa-runtime ────────────────────────────────────────┐
 │  policy · Engine · consults · remedy plans ·          │
 │  trajectory state · appa.db                           │
 └───────────────────────────────────────────────────────┘
 ```
 
-The agent exists in the pod only as mounted configuration. No developer code and no per-agent image exists there, so one generic image serves every declarative agent.
-
-All gated pods of one deployment report to one shared `appa-runtime`. A parent and each agent it calls run as separate workloads, and their hooks must reach the same runtime to correlate into one trajectory.
+The agent exists in the pod only as mounted configuration. One generic image therefore serves every declarative agent, and the rollout is one install-setting change.
 
 ### One image per runtime wraps the stock runtime
 
@@ -90,9 +78,7 @@ entrypoint flow — the stock calls, one delta:
             plugins=plugins).build()   ─▶ serve A2A
 ```
 
-The stock entrypoint performs the identical sequence with a closed plugin list. The plugin list handed to ADK becomes its plugin manager, so one registration covers the root agent, every sub-agent, and every tool. Google ADK stays an unmodified dependency, and the image keeps the stock runtime contract: the same args, the same serving port, the same readiness endpoint.
-
-The Go runtime gets the same treatment. `appa-kagent-adk-go` is a runtime main built on kagent's public Go packages that registers the Go `AppaHookPlugin` through the Go ADK's plugin API — the registration point kagent itself uses. Both images emit the same wire to `appa-runtime`.
+The entrypoint replays the stock startup and appends one plugin to the list ADK already accepts. That one registration covers the root agent, every sub-agent, and every tool. The Go image does the same through the Go ADK's plugin API.
 
 ### Callback-to-hook mapping
 
@@ -165,30 +151,23 @@ end       completion and after a pre-run halt; the
               [7] SpawnResult.
 ```
 
-The enforcement comes from ADK's own plugin contract, verified in the pinned google-adk sources:
+The load-bearing enforcement points, proven in the pinned ADK sources:
 
-- A dict returned from `before_tool_callback` skips execution and becomes the function response the model reads — `DenyCall` with feedback. The deny dict also flows through `after_tool_callback`, so the plugin recognizes its own deny payload and does not report it twice.
-- A non-None return from `after_tool_callback` replaces the result the model sees — `ReplaceOutput`.
-- `on_user_message_callback` fires before the runner appends the message to session history, so a `Block` on `Prompt` is a pre-append barrier.
-- An agent declares another agent as a tool, and kagent dispatches it as an ordinary ADK tool — so the tool-call gate is also the spawn gate.
-
-Each called agent runs in its own pod with its own plugin instance. The child side classifies the delegated entry and feeds `ChildStart` and the child `TurnEnd`. The parent side feeds the spawn `ToolCall` and `SpawnResult`. Both report to the one shared runtime.
+- A deny returned from the before-tool callback skips execution and becomes the function response the model reads.
+- The user-message callback fires before the session append, so a blocked prompt never lands in stored history.
+- An agent called as a tool crosses the same gate as any tool call, and its return is substituted on the parent side.
 
 ### Fail-closed rules
 
-1. An unreachable `/hook` endpoint, or a response outside the contract, blocks the gated action. The plugin raises, and ADK aborts the invocation.
-2. A mounted config with a field the entrypoint does not support refuses to start, and the pod stays unready. The stock config parser ignores unknown fields — the adapter must not inherit that silence.
-3. The model and emission callbacks feed no event, but they still hold the action when the `/hook` channel is down.
-4. When the pinned ADK version defines no error-turn callback, a turn that dies on an unhandled error emits no `TurnEnd`. The model-error and tool-error callbacks catch the common failures earlier. For the rest, `appa-runtime` recovery classifies the open dispatch as `Indeterminate` at the next admitted event, and the next `Prompt` fails closed if the runtime is down.
+1. An unreachable `/hook`, or an answer outside the contract, blocks the gated action.
+2. A config field the entrypoint does not support refuses to start. The stock parser's silence is not inherited.
+3. The model and emission callbacks feed no event, but they still hold when the `/hook` channel is down.
+4. When the pinned ADK has no error-turn callback, `appa-runtime` recovery closes the turn at the next admitted event.
 
-### Scope and limits
+### Scope
 
-- Covered: declarative agents on both runtimes — the python runtime through `appa-kagent-adk`, and the Go runtime through `appa-kagent-adk-go`. The implementation plan names the delivery knob per release line and each runtime's verification status.
-- Not covered: BYO agents (per-agent images whose authors add the one plugin line themselves, in either language) and kagent's sandbox kinds.
-- `SessionStart` is a first-invocation proxy. A session that is created but never invoked emits nothing, and also flows nothing.
-- The entrypoint replays the stock entrypoint's behavior instead of calling it, because upstream has no plugin configuration knob. Each upstream release therefore costs one small equivalence re-check. A one-field upstream contribution would remove the duplication.
-- Forward path: kagent's release-candidate line replaces the Agent controller with a `Harness` × `AgentTemplate` model, where the same adapter image lands in the Harness's required workload-image field. The implementation plan covers both lanes in full.
+Covered: declarative agents on both runtimes. Not covered: BYO agents and kagent's sandbox kinds.
 
 ## Implementation plan
 
-The [kagent implementation plan](https://github.com/archestra-ai/OpenAPPA/blob/main/integrations/kagent/IMPLEMENTATION.md) pins the source baselines, defines the artifacts, the entrypoint and plugin specification, the runtime-side codec, both delivery lanes with their rollout procedures, trajectory identity, and the verification matrix — with code evidence for every claim.
+The [kagent implementation plan](https://github.com/archestra-ai/OpenAPPA/blob/main/integrations/kagent/IMPLEMENTATION.md) carries the rest: source baselines, the target matrix, per-version mapping tables, both delivery lanes, the quickstart option, and the verification matrix. Code evidence backs every claim there.
