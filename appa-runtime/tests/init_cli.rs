@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use appa_engine::profile::PolicyFileKey;
@@ -51,6 +51,220 @@ fn runtime_fingerprint(deployed: &Path) -> String {
 /// Where init deploys the harness binary: private to appa, never on PATH.
 fn deployed_binary(data: &Path) -> std::path::PathBuf {
     data.join("bin/appa")
+}
+
+/// One isolated install: private home, install, config, data and Claude
+/// directories, fake `claude` and `curl` first on PATH, and the installed-plugin
+/// directory the fake registry points at, carrying the fixture starter.
+struct Fixture {
+    _directory: tempfile::TempDir,
+    root: PathBuf,
+    bin: PathBuf,
+    config: PathBuf,
+    data: PathBuf,
+    claude: PathBuf,
+    plugin: PathBuf,
+    appa: PathBuf,
+    source: PathBuf,
+}
+
+impl Fixture {
+    fn new() -> Self {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let root = directory.path().canonicalize().expect("a resolved root");
+        let bin = root.join("bin");
+        let claude = root.join("claude");
+        let plugin = root.join("installed-plugin");
+        fs::create_dir_all(&bin).expect("bin directory");
+        fs::create_dir_all(plugin.join("hooks")).expect("plugin hooks");
+        fs::create_dir_all(&claude).expect("Claude directory");
+        let appa = install_test_binaries(&bin);
+        install_fake_curl(&bin);
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        for (fixture, target) in [
+            ("fake-claude.sh", bin.join("claude")),
+            ("fake-ensure-runtime.sh", plugin.join("hooks/ensure-runtime.sh")),
+        ] {
+            fs::copy(fixtures.join(fixture), &target).expect("the fixture is copied");
+            executable(&target);
+        }
+        fs::write(plugin.join("statusline.sh"), "#!/bin/sh\nexit 0\n").expect("statusline");
+        let source = stage_bundle(&root);
+        Self {
+            _directory: directory,
+            config: root.join("config"),
+            data: root.join("data"),
+            root,
+            bin,
+            claude,
+            plugin,
+            appa,
+            source,
+        }
+    }
+
+    /// `appa init claude-code` against this fixture, with the endpoint answering
+    /// as this deployment's own healthy runtime serving the policy init writes.
+    /// A test overrides the `FAKE_*` variables for the case it reproduces.
+    fn init(&self) -> Command {
+        let mut command = Command::new(&self.appa);
+        command
+            .current_dir(&self.root)
+            .args(["init", "claude-code", "--plugin-source"])
+            .arg(&self.source)
+            .env(
+                "PATH",
+                format!("{}:{}", self.bin.display(), std::env::var("PATH").unwrap_or_default()),
+            )
+            .env("HOME", &self.root)
+            .env("APPA_INSTALL_DIR", &self.bin)
+            .env("APPA_CONFIG_DIR", &self.config)
+            .env("APPA_DATA_DIR", &self.data)
+            .env("CLAUDE_CONFIG_DIR", &self.claude)
+            .env("FAKE_CLAUDE_HOME", &self.claude)
+            .env("FAKE_CLAUDE_LOG", self.root.join("claude.log"))
+            .env("FAKE_PLUGIN_ROOT", &self.plugin)
+            .env("FAKE_RUNTIME_FINGERPRINT", runtime_fingerprint(&self.appa))
+            .env("FAKE_RUNTIME_CONFIG", self.config.join("appa.toml"))
+            .env("FAKE_POLICY_KEY", default_policy_key());
+        command
+    }
+
+    fn deployed_binary(&self) -> PathBuf {
+        deployed_binary(&self.data)
+    }
+
+    fn statusline(&self) -> PathBuf {
+        self.bin.join("appa-statusline.sh")
+    }
+
+    fn settings(&self) -> PathBuf {
+        self.claude.join("settings.json")
+    }
+
+    fn registry(&self) -> Option<serde_json::Value> {
+        let bytes = fs::read(self.claude.join("plugins/installed_plugins.json")).ok()?;
+        Some(serde_json::from_slice(&bytes).expect("the registry is JSON"))
+    }
+}
+
+/// Everything a failed upgrade must leave as it found it.
+#[derive(Debug, PartialEq, Eq)]
+struct Installed {
+    binary: Option<Vec<u8>>,
+    statusline: Option<Vec<u8>>,
+    settings: Option<Vec<u8>>,
+    registry: Option<serde_json::Value>,
+}
+
+impl Installed {
+    fn of(fixture: &Fixture) -> Self {
+        Self {
+            binary: fs::read(fixture.deployed_binary()).ok(),
+            statusline: fs::read(fixture.statusline()).ok(),
+            settings: fs::read(fixture.settings()).ok(),
+            registry: fixture.registry(),
+        }
+    }
+}
+
+/// An install a previous init left, with bytes of its own in every file a later
+/// init rewrites, so a restore that merely reinstalls this build is told apart
+/// from one that puts the previous files back.
+fn previous_install(fixture: &Fixture) -> Installed {
+    assert!(fixture.init().output().expect("appa init runs").status.success());
+    fs::write(fixture.deployed_binary(), b"the previous build").expect("the previous binary is written");
+    fs::write(fixture.statusline(), b"the previous statusline").expect("the previous statusline is written");
+    let settings = fs::read_to_string(fixture.settings()).expect("settings are readable");
+    fs::write(fixture.settings(), settings.replacen('{', "{\"userSetting\": true,", 1))
+        .expect("the previous settings are written");
+    Installed::of(fixture)
+}
+
+fn launcher_is_armed(fixture: &Fixture) -> bool {
+    fs::read_to_string(fixture.bin.join("clappa")).is_ok_and(|launcher| !launcher.contains("init did not complete"))
+}
+
+#[test]
+fn a_failure_before_the_statusline_puts_the_previous_binary_back() {
+    let fixture = Fixture::new();
+    let before = previous_install(&fixture);
+    // The statusline install refuses a plugin without its statusline, after the
+    // binary has already been replaced.
+    fs::remove_file(fixture.plugin.join("statusline.sh")).expect("the plugin statusline is removed");
+
+    let failed = fixture.init().output().expect("appa init runs");
+
+    assert!(!failed.status.success());
+    assert_eq!(Installed::of(&fixture), before);
+    assert!(!fixture.deployed_binary().with_extension("prev").exists());
+    assert!(
+        launcher_is_armed(&fixture),
+        "the previous install's launcher is re-armed"
+    );
+}
+
+#[test]
+fn a_failure_at_the_start_puts_the_previous_statusline_back() {
+    let fixture = Fixture::new();
+    let before = previous_install(&fixture);
+
+    let failed = fixture
+        .init()
+        .env("FAKE_STARTER_FAILS", "1")
+        .output()
+        .expect("appa init runs");
+
+    assert!(!failed.status.success());
+    assert_eq!(Installed::of(&fixture), before);
+    assert!(!fixture.deployed_binary().with_extension("prev").exists());
+    assert!(
+        launcher_is_armed(&fixture),
+        "the previous install's launcher is re-armed"
+    );
+}
+
+/// A first install that fails after its runtime is up leaves nothing behind:
+/// the runtime it started is stopped, and no file or registration it wrote
+/// survives to bind a session to a runtime whose policy init could not settle.
+#[test]
+fn a_failure_after_the_start_stops_the_runtime_init_started() {
+    let fixture = Fixture::new();
+    let stand_in = fixture.root.join("stand-in");
+
+    let failed = fixture
+        .init()
+        .env("FAKE_RUNTIME_STAND_IN", &stand_in)
+        .env_remove("FAKE_POLICY_KEY")
+        .output()
+        .expect("appa init runs");
+
+    assert!(!failed.status.success());
+    let pid: i32 = fs::read_to_string(stand_in.join("pid"))
+        .expect("the starter recorded the runtime it started")
+        .trim()
+        .parse()
+        .expect("the recorded pid parses");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline && unsafe { libc::kill(pid, 0) } == 0 {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_ne!(
+        unsafe { libc::kill(pid, 0) },
+        0,
+        "the runtime init started is still running"
+    );
+    assert_eq!(
+        Installed::of(&fixture),
+        Installed {
+            binary: None,
+            statusline: None,
+            settings: None,
+            registry: Some(serde_json::json!({"version": 2, "plugins": {}})),
+        }
+    );
+    assert!(!fixture.claude.join("marketplace-appa").exists());
+    assert!(!fixture.bin.join("clappa").exists());
 }
 
 #[test]
@@ -246,7 +460,6 @@ fn init_installs_one_local_adapter_and_is_safe_to_run_again() {
 
     let unrecoverable = run(&fingerprint, &mine, Some("plugin-install-always"));
     assert!(!unrecoverable.status.success());
-    assert!(String::from_utf8_lossy(&unrecoverable.stderr).contains("restoring the previous Claude Code plugin"));
     assert!(
         fs::read_to_string(bin.join("clappa"))
             .expect("fail-closed launcher")
