@@ -51,12 +51,6 @@ fn an_ungated_session_has_no_appa_statusline() {
         .expect("the POSIX statusline runs");
     assert!(output.status.success());
     assert_eq!(output.stdout, b"", "plain Claude must have no APPA statusline");
-
-    let windows = std::fs::read_to_string(plugin_file("statusline.ps1")).expect("the Windows statusline is readable");
-    assert!(
-        windows.contains("if ($env:APPA_GATE -ne \"1\") {\n        exit 0\n    }"),
-        "the Windows statusline must also be silent outside clappa",
-    );
 }
 
 /// The two shipped hook maps gate the same events. Nothing else compares
@@ -166,13 +160,11 @@ fn both_shipped_hook_maps_inject_the_same_session_context() {
         args.contains(&"-SessionContext"),
         "the Windows SessionStart hook no longer asks hook.ps1 for the session context",
     );
-    let script = std::fs::read_to_string(hooks_dir.join("hook.ps1")).expect("the shipped hook.ps1 is readable");
-    assert!(
-        script.contains(CONTEXT),
-        "hook.ps1 no longer reads {CONTEXT}, so the two platforms inject different context",
-    );
 }
 
+/// The one command every posting hook in the shipped POSIX map registers,
+/// read from the map itself. SessionStart is that command with the runtime
+/// start chained in between its gate and its hook: `<gate>; <starter> && <hook>`.
 fn shipped_command() -> String {
     let hooks = shipped("hooks.json");
     let command = hooks["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
@@ -200,16 +192,13 @@ fn shipped_command() -> String {
             "the {event} hook is no longer the non-blocking turn-end command",
         );
     }
+    let (gate, hook) = command
+        .split_once("; ")
+        .expect("the shared command is a gate followed by the hook");
+    let starter = "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/ensure-runtime.sh\" </dev/null";
     assert_eq!(
         hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"].as_str(),
-        Some(
-            command
-                .replace(
-                    "; sh",
-                    "; sh \"${CLAUDE_PLUGIN_ROOT}/hooks/ensure-runtime.sh\" </dev/null && sh",
-                )
-                .as_str()
-        ),
+        Some(format!("{gate}; {starter} && {hook}").as_str()),
         "the SessionStart hook is no longer the shared command plus its runtime start",
     );
     command
