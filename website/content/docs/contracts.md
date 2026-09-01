@@ -47,9 +47,9 @@ OpenAPPA ships a built-in audience chain:
 
 **`self` ⊆ `internal` ⊆ `public`**
 
-`self` is the deployment's operating human. `internal` is the organization. `public` is the unrestricted state. The chain is fixed — a policy maps sources into its levels but never adds levels. Beyond the chain, `[[audience.group]]` declares named audiences (`@finance`), composed from the same sources.
+`self` is the deployment's configured operating principal — whoever its credentials represent, which need not be a person. `internal` is the organization. `public` is the unrestricted state. The chain is fixed — a policy maps sources into its levels but never adds levels. Beyond the chain, `[[audience.group]]` declares named audiences (`@finance`), composed from the same sources.
 
-A symbolic audience is a named reader set, and it stays symbolic: a label holds `internal ∩ [alice]` or `internal ∩ @finance` without expanding either name. When a decision needs actual membership — a `contains` or `within` comparison — OpenAPPA consults the configured sources for exactly the sets that decision reads, pins the answers to that one act, and records them with it. An act accepts only that evidence: an answer neither inherited from the record the act continues nor requested by its own reads is refused, live and at replay. Replay reads the pinned answers and never consults a source. Directory changes apply to the next act; they never rewrite a label.
+A symbolic audience is a named reader set, and it stays symbolic: a label holds `internal ∩ [alice]` or `internal ∩ @finance` without expanding either name. When a decision needs actual membership — a `contains` or `within` comparison — OpenAPPA consults the configured sources for exactly the sets that decision reads, pins the answers to that one act, and records them with it. An act accepts only that evidence: an answer neither inherited from the record the act continues nor requested by its own reads is refused, live and at replay. Replay reads the pinned answers and never consults a source. A pinned answer is inherited by the acts that continue the same record — the remedy plan or approval it opened — so directory changes apply to the next independent decision; they never rewrite a label.
 
 #### Audience sources
 
@@ -93,7 +93,7 @@ Provider identities differ: `google-workspace:alice@corp.com`, `slack:U012345`, 
 implementation = "verified-email"      # the shipped default
 ```
 
-`verified-email` is deterministic and network-free. A member with a verified email becomes `email:<address>`; a member without one keeps its provider-qualified ID. It trusts only claims the source marks verified and applies only conservative normalization (domain case only — no dot removal, no `+suffix` stripping, no alias folding), so a personal GitHub email and a corporate Workspace email stay distinct principals. Explicit aliasing is what a custom implementation is for:
+`verified-email` is deterministic and network-free. A member with a verified email becomes that address; a member without one keeps its provider-qualified ID. The address is the principal itself, so a reader written as an address — in a policy, in a tool argument, or in an annotation — is the same reader the directory's verified claim resolves to, and an ordinary email recipient matches the directory member who holds that address. It trusts only claims the source marks verified and applies only conservative normalization (domain case only — no dot removal, no `+suffix` stripping, no alias folding), so a personal GitHub email and a corporate Workspace email stay distinct principals. Explicit aliasing is what a custom implementation is for:
 
 ```toml
 [identity]
@@ -104,7 +104,7 @@ A custom implementation answers one principal per member, is pinned per act like
 
 #### Bindings and failure
 
-The deployment binds each referenced provider under `[externals.audience.<provider>]`, and a custom identity implementation under `[externals.identity.<name>]`, each to an HTTP endpoint or a local command; no builtin serves either kind. [Externals](#externals) has the envelope. An audience consult's declaration is the provider's selector templates; its artifact is one selector (`{"selector": "user-group/oncall"}`, answered `{"members": [{"id": "slack:U1", "verified_email": "a@corp.com"}, ...]}` — an empty list is a complete answer) or one member lookup (`{"member": "slack:U1"}`, answered `{"claims": {...}}` or `{"claims": null}`). An identity consult's artifact is one member's claims, answered `{"principal": "email:a@corp.com"}`.
+The deployment binds each referenced provider under `[externals.audience.<provider>]`, and a custom identity implementation under `[externals.identity.<name>]`, each to an HTTP endpoint or a local command; no builtin serves either kind. [Externals](#externals) has the envelope. An audience consult's declaration is the provider's selector templates; its artifact is one selector (`{"selector": "user-group/oncall"}`, answered `{"members": [{"id": "slack:U1", "verified_email": "a@corp.com"}, ...]}` — an empty list is a complete answer) or one member lookup (`{"member": "slack:U1"}`, answered `{"claims": {...}}` or `{"claims": null}`). An identity consult's artifact is one member's claims, answered `{"principal": "a@corp.com"}`.
 
 Any source or identity failure — timeout, network error, invalid answer — halts the act with an operational error and records nothing to the log. A failed consult is never a policy decision.
 

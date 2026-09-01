@@ -1000,9 +1000,9 @@ mod tests {
         }
 
         assert_eq!(
-            PrincipalAnswer::from_wire(&serde_json::json!({"principal": "email:a@corp.com"})),
+            PrincipalAnswer::from_wire(&serde_json::json!({"principal": "a@corp.com"})),
             Some(PrincipalAnswer {
-                principal: "email:a@corp.com".to_string()
+                principal: "a@corp.com".to_string()
             })
         );
         for malformed in [

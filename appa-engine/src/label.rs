@@ -38,17 +38,28 @@ impl Trust {
 /// intersect and compare readers exactly, so equality is exact string equality; a
 /// provider-qualified reader (`slack:U012345`) is canonicalized to its principal by the
 /// deployment's identity implementation *before* it reaches a comparison, and the pinned
-/// principal is what an audience holds. Four spellings are reserved and never readers:
-/// `public` (the universal audience state), `self` and `internal` (the built-in chain),
-/// and any leading `@` (a group reference). The constructor cannot enforce that, so the
-/// rule is [`is_literal`](ReaderId::is_literal), applied on every ingress that builds a
-/// reader set: registry declarations at load, annotation answers, and membership answers.
+/// principal is what an audience holds. An email address is that principal already: a
+/// reader written as one denotes the same person a verified-email claim resolves to, so
+/// `alice@corp.com` in a policy, in a tool argument, and behind a directory's verified
+/// claim are one reader. Four spellings are reserved and never readers: `public` (the
+/// universal audience state), `self` and `internal` (the built-in chain), and any leading
+/// `@` (a group reference). The constructor cannot enforce that, so the rule is
+/// [`is_literal`](ReaderId::is_literal), applied on every ingress that builds a reader set:
+/// registry declarations at load, annotation answers, and membership answers.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ReaderId(String);
 
 impl ReaderId {
+    /// Build a reader, normalized so that one identity has one spelling: an address keeps
+    /// its local part exactly and lowercases its domain, because a domain is
+    /// case-insensitive and a local part is not. Every other spelling is untouched — no
+    /// dot folding, no `+suffix` stripping, no alias folding.
     pub fn new(id: impl Into<String>) -> Self {
-        ReaderId(id.into())
+        let id: String = id.into();
+        match address_parts(&id) {
+            Some((local, domain)) => ReaderId(format!("{local}@{}", domain.to_lowercase())),
+            None => ReaderId(id),
+        }
     }
 
     pub fn as_str(&self) -> &str {
@@ -74,14 +85,27 @@ impl ReaderId {
             .map(|(provider, _)| provider)
     }
 
-    /// A reader that denotes itself under *every* deployment: it has no provider prefix any
-    /// source could own, or it lives in the reserved `email:` principal namespace, which no
-    /// source may register. Only stable readers may participate in permanent
-    /// canonicalization's exact intersection — a qualified reader's meaning is an
-    /// operation-pinned principal, and canonical label equality must never depend on it.
+    /// A reader that denotes itself under *every* deployment: it carries no provider prefix
+    /// a source could own. Email principals qualify — an address holds no `:` — which is
+    /// why a directory's verified claim and a policy-written address compare directly. Only
+    /// stable readers may participate in permanent canonicalization's exact intersection: a
+    /// qualified reader's meaning is an operation-pinned principal, and canonical label
+    /// equality must never depend on it.
     fn is_stable(&self) -> bool {
-        self.provider_prefix().is_none_or(|provider| provider == "email")
+        self.provider_prefix().is_none()
     }
+}
+
+/// The local part and domain of a reader written as one address: exactly one `@`, neither
+/// side empty, no whitespace or control character. Deliberately shape-only — it decides how
+/// a reader is *spelled*, never whether an address exists or who owns it.
+pub(crate) fn address_parts(id: &str) -> Option<(&str, &str)> {
+    let (local, domain) = id.split_once('@')?;
+    let malformed = local.is_empty()
+        || domain.is_empty()
+        || domain.contains('@')
+        || id.chars().any(|c| c.is_whitespace() || c.is_control());
+    (!malformed).then_some((local, domain))
 }
 
 /// A built-in chain audience below `public`: `self` ⊆ `internal` ⊆ `public`. The chain is
@@ -90,8 +114,9 @@ impl ReaderId {
 /// constraint, exactly as it is for reader sets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ChainAudience {
-    /// The innermost audience: the deployment's operating human, extensionally the union of
-    /// the configured `viewer` sources.
+    /// The innermost audience: the deployment's configured operating principal — whoever its
+    /// credentials represent, which need not be a person — extensionally the union of the
+    /// configured `viewer` sources.
     Self_,
     /// The organization: extensionally the union of the configured `internal` sources, the
     /// members of `self`, and every group declared `within` either.
@@ -969,7 +994,7 @@ mod tests {
             reader_set_strategy(),
             reader_set_strategy(),
             prop::option::of(prop_oneof![Just(ChainAudience::Self_), Just(ChainAudience::Internal)]),
-            prop_oneof![Just(ReaderId::new("a")), Just(ReaderId::new("email:u1@corp.example")),],
+            prop_oneof![Just(ReaderId::new("a")), Just(ReaderId::new("u1@corp.example")),],
         )
             .prop_map(
                 |(self_members, extra_internal, finance, legal, eng, finance_within, principal)| {
@@ -1167,7 +1192,7 @@ mod tests {
             assert!(!ReaderId::new(reserved).is_literal());
             assert!(Clause::new([], [], [reader(reserved)]).is_err());
         }
-        assert!(ReaderId::new("email:alice@corp.com").is_literal());
+        assert!(ReaderId::new("alice@corp.com").is_literal());
         assert!(ReaderId::new("slack:U012345").is_literal());
         assert!(ReaderId::new("Self").is_literal(), "reserved spellings are exact");
     }
@@ -1240,7 +1265,7 @@ mod tests {
             Trust::new(1),
             Audience::of_clauses([clause([ChainAudience::Internal], [], [])]),
         );
-        let alice = DeclaredAudience::restricted([reader("email:alice@corp.com")]);
+        let alice = DeclaredAudience::restricted([reader("alice@corp.com")]);
         match internal_label.covers(&alice, &MembershipContext::new(&nothing, &providers, &unanswered)) {
             Evaluation::Needs(MembershipNeeded { needed }) => {
                 assert_eq!(needed, vec![SymbolicAtom::Chain(ChainAudience::Internal)]);
@@ -1249,7 +1274,7 @@ mod tests {
         }
         let answered = Expansions::new([(
             SymbolicAtom::Chain(ChainAudience::Internal),
-            BTreeSet::from([reader("email:alice@corp.com")]),
+            BTreeSet::from([reader("alice@corp.com")]),
         )]);
         assert_eq!(
             internal_label.covers(&alice, &MembershipContext::new(&nothing, &providers, &answered)),
@@ -1275,7 +1300,7 @@ mod tests {
         let recipient = DeclaredAudience::restricted([reader("slack:U012345")]);
         let unanswered = Expansions::new([(
             SymbolicAtom::Chain(ChainAudience::Internal),
-            BTreeSet::from([reader("email:alice@corp.com")]),
+            BTreeSet::from([reader("alice@corp.com")]),
         )]);
         match internal_label.covers(&recipient, &MembershipContext::new(&nothing, &providers, &unanswered)) {
             Evaluation::Needs(MembershipNeeded { needed }) => {
@@ -1286,11 +1311,11 @@ mod tests {
         let answered = Expansions::new([
             (
                 SymbolicAtom::Chain(ChainAudience::Internal),
-                BTreeSet::from([reader("email:alice@corp.com")]),
+                BTreeSet::from([reader("alice@corp.com")]),
             ),
             (
                 SymbolicAtom::Reader(reader("slack:U012345")),
-                BTreeSet::from([reader("email:alice@corp.com")]),
+                BTreeSet::from([reader("alice@corp.com")]),
             ),
         ]);
         assert_eq!(
@@ -1322,10 +1347,10 @@ mod tests {
         let ab = Audience::restricted([reader("a"), reader("b")]);
         let bc = Audience::restricted([reader("b"), reader("c")]);
         assert_eq!(ab.combine(&bc), Audience::restricted([reader("b")]));
-        let email = Audience::restricted([reader("email:a@x.example"), reader("b")]);
+        let email = Audience::restricted([reader("a@x.example"), reader("b")]);
         assert_eq!(
-            email.combine(&Audience::restricted([reader("email:a@x.example")])),
-            Audience::restricted([reader("email:a@x.example")]),
+            email.combine(&Audience::restricted([reader("a@x.example")])),
+            Audience::restricted([reader("a@x.example")]),
             "the email principal namespace is reserved, hence stable and mergeable"
         );
 
@@ -1380,7 +1405,7 @@ mod tests {
             Trust::new(1),
             Audience::of_clauses([
                 clause([ChainAudience::Internal], [], []),
-                clause([], ["finance"], ["email:audit@corp.example"]),
+                clause([], ["finance"], ["audit@corp.example"]),
             ]),
         );
         let bytes = serde_json::to_string(&label).expect("a label serializes");

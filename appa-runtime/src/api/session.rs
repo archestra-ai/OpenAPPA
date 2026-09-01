@@ -1747,7 +1747,7 @@ requires = { audience = { contains = ["@team"] } }
 delta = {}
 
 [policy.deployment]
-starting_label = { audience = ["email:alice@corp.example"] }
+starting_label = { audience = ["alice@corp.example"] }
 "#;
         let text = format!(
             "[policy]\n{policy}\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n[externals.audience.slack]\nurl = \"{source}\"\n"

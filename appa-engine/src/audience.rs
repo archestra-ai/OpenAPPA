@@ -223,29 +223,22 @@ pub fn folded_claims(evidence: &AudienceEvidence) -> Result<BTreeMap<String, Mem
 }
 
 /// The conservative `verified-email` normalization, shipped and deterministic: a member with
-/// a well-formed verified email becomes `email:<local>@<lowercased-domain>`; a member
-/// without one keeps its provider-qualified id. Nothing merges identities beyond exact
-/// verified-email equality: no dot folding, no `+suffix` stripping, no alias folding, and
-/// the local part keeps its case. A malformed claimed email is an invalid answer, never a
-/// silent fallback.
+/// a well-formed verified email becomes that address, which is the principal itself — the
+/// same reader a policy or a tool argument names by writing the address. A member without
+/// one keeps its provider-qualified id. Nothing merges identities beyond exact address
+/// equality: no dot folding, no `+suffix` stripping, no alias folding, and the local part
+/// keeps its case ([`ReaderId::new`] lowercases only the domain). A malformed claimed email
+/// is an invalid answer, never a silent fallback.
 pub fn verified_email_principal(claims: &MemberClaims) -> Result<ReaderId, EvidenceRefusal> {
     match &claims.verified_email {
         None => Ok(ReaderId::new(claims.id.clone())),
-        Some(email) => {
-            let malformed = || EvidenceRefusal::MalformedEmail {
+        Some(email) => match crate::label::address_parts(email) {
+            Some(_) => Ok(ReaderId::new(email.clone())),
+            None => Err(EvidenceRefusal::MalformedEmail {
                 id: claims.id.clone(),
                 email: email.clone(),
-            };
-            let (local, domain) = email.split_once('@').ok_or_else(malformed)?;
-            if local.is_empty()
-                || domain.is_empty()
-                || domain.contains('@')
-                || email.chars().any(|c| c.is_whitespace() || c.is_control())
-            {
-                return Err(malformed());
-            }
-            Ok(ReaderId::new(format!("email:{}@{}", local, domain.to_lowercase())))
-        }
+            }),
+        },
     }
 }
 
@@ -863,7 +856,7 @@ mod tests {
             verified_email_principal(&gw).unwrap(),
             verified_email_principal(&slack).unwrap()
         );
-        assert_eq!(verified_email_principal(&gw).unwrap().as_str(), "email:alice@corp.com");
+        assert_eq!(verified_email_principal(&gw).unwrap().as_str(), "alice@corp.com");
 
         // A personal email stays a different principal — no corporate guessing.
         let github = member("github:alice", Some("alice@gmail.com"));
@@ -885,7 +878,7 @@ mod tests {
             verified_email_principal(&member("x:1", Some("Alice@CORP.com")))
                 .unwrap()
                 .as_str(),
-            "email:Alice@corp.com"
+            "Alice@corp.com"
         );
         assert_ne!(
             verified_email_principal(&member("x:1", Some("a.lice@corp.com"))).unwrap(),
@@ -900,6 +893,20 @@ mod tests {
         for bad in ["nodomain", "two@at@signs", "@corp.com", "alice@", "a b@corp.com"] {
             assert!(verified_email_principal(&member("x:1", Some(bad))).is_err(), "{bad}");
         }
+
+        // An address is the principal itself: a reader written as one — by a policy, by a
+        // tool argument, by an annotation — is the reader the verified claim resolves to,
+        // so an ordinary email recipient meets the directory member who holds that address.
+        assert_eq!(verified_email_principal(&gw).unwrap(), ReaderId::new("alice@corp.com"));
+        // The reader ingress folds domain case the same way, so one identity has one
+        // spelling wherever it is written.
+        assert_eq!(
+            ReaderId::new("Alice@CORP.com"),
+            verified_email_principal(&member("x:1", Some("Alice@corp.com"))).unwrap()
+        );
+        // Nothing else is touched: a qualified id and an opaque reader stay as written.
+        assert_eq!(ReaderId::new("slack:U1").as_str(), "slack:U1");
+        assert_eq!(ReaderId::new("Insider").as_str(), "Insider");
     }
 
     #[test]
@@ -1022,20 +1029,20 @@ mod tests {
         // The two viewer accounts collapse to one principal: union dedups.
         assert_eq!(
             expansions.members(&SymbolicAtom::Chain(ChainAudience::Self_)),
-            Some(&BTreeSet::from([reader("email:me@corp.com")]))
+            Some(&BTreeSet::from([reader("me@corp.com")]))
         );
         // internal ⊇ self ∪ own sources ∪ finance (within): the auditor is internal.
         assert_eq!(
             expansions.members(&SymbolicAtom::Chain(ChainAudience::Internal)),
             Some(&BTreeSet::from([
-                reader("email:auditor@consulting.com"),
-                reader("email:bob@corp.com"),
-                reader("email:me@corp.com"),
+                reader("auditor@consulting.com"),
+                reader("bob@corp.com"),
+                reader("me@corp.com"),
             ]))
         );
         assert_eq!(
             expansions.members(&SymbolicAtom::Group(GroupRef::Named(GroupName::new("finance")))),
-            Some(&BTreeSet::from([reader("email:auditor@consulting.com")]))
+            Some(&BTreeSet::from([reader("auditor@consulting.com")]))
         );
     }
 
@@ -1189,10 +1196,10 @@ mod tests {
                 .expect("the selector is answered")
                 .clone()
         };
-        assert_eq!(members("viewer"), BTreeSet::from([ReaderId::new("email:a@corp.com")]));
+        assert_eq!(members("viewer"), BTreeSet::from([ReaderId::new("a@corp.com")]));
         assert_eq!(
             members("full-members"),
-            BTreeSet::from([ReaderId::new("email:a@corp.com"), ReaderId::new("slack:U2")]),
+            BTreeSet::from([ReaderId::new("a@corp.com"), ReaderId::new("slack:U2")]),
             "the folded claim seats one principal for the id everywhere it occurs"
         );
 
@@ -1251,7 +1258,7 @@ mod tests {
         let expansions = registry.expansions(&evidence).unwrap();
         assert_eq!(
             expansions.members(&SymbolicAtom::Reader(ReaderId::new("slack:U012345"))),
-            Some(&BTreeSet::from([ReaderId::new("email:alice@corp.com")]))
+            Some(&BTreeSet::from([ReaderId::new("alice@corp.com")]))
         );
         assert_eq!(
             expansions.members(&SymbolicAtom::Reader(ReaderId::new("slack:UGONE"))),

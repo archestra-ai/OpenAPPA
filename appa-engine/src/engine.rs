@@ -10019,7 +10019,7 @@ mod tests {
                 sanitizers: vec![input_sanitizer(
                     "redact",
                     &["insider"],
-                    &["insider", "partner", "email:partner@corp.com"],
+                    &["insider", "partner", "partner@corp.com"],
                 )],
                 audience: slack_groups(&["team"]),
             },
@@ -11595,7 +11595,7 @@ mod tests {
     }
 
     fn corp_reader(local: &str) -> ReaderId {
-        ReaderId::new(format!("email:{local}@corp.com"))
+        ReaderId::new(format!("{local}@corp.com"))
     }
 
     #[test]

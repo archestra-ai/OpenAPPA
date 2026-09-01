@@ -24,7 +24,7 @@ from = ["slack:user-group/nobody"]
 
 [[policy.tool]]
 name = "read_hr"
-delta = { audience = ["email:alice@corp.example", "email:bob@corp.example"] }
+delta = { audience = ["alice@corp.example", "bob@corp.example"] }
 
 [[policy.tool]]
 name = "send"
@@ -35,7 +35,7 @@ delta = {}
 
 [[policy.tool]]
 name = "send_capped"
-requires = { audience = { within = ["email:alice@corp.example", "@team"] } }
+requires = { audience = { within = ["alice@corp.example", "@team"] } }
 effects = ["egress"]
 delta = {}
 
@@ -312,10 +312,10 @@ async fn public_and_literal_arguments_never_consult_the_source() {
         HookDecision::DenyCall { .. }
     ));
     assert_eq!(
-        propose(&runtime, send("email:alice@corp.example")).await,
+        propose(&runtime, send("alice@corp.example")).await,
         HookDecision::AllowCall { spawn: None }
     );
-    ran(&runtime, send("email:alice@corp.example")).await;
+    ran(&runtime, send("alice@corp.example")).await;
     assert!(matches!(
         propose(&runtime, send("mallory")).await,
         HookDecision::DenyCall { .. }

@@ -63,14 +63,14 @@ const TERMS = {
   "[[audience.group]]":
     "One configured named audience: its bare name (mentioned as @name), an optional within assertion into a built-in audience, and the from selectors that supply its members. Multiple sources are unioned.",
   "[audience.self]":
-    "The mapping of the built-in self audience: the viewer selectors of the configured sources. self is the deployment's operating human.",
+    "The mapping of the built-in self audience: the viewer selectors of the configured sources. self is the deployment's configured operating principal — whoever the credentials represent.",
   "[audience.internal]":
     "The mapping of the built-in internal audience: full-membership collections, and for GitHub only explicitly selected organizations. Multiple sources are unioned.",
-  self: "The innermost built-in audience: the deployment's operating human, extensionally the union of the configured viewer sources.",
+  self: "The innermost built-in audience: the deployment's configured operating principal — whoever the credentials represent, which need not be a person — extensionally the union of the configured viewer sources.",
   "[identity]":
     "The deployment's one identity implementation, canonicalizing each provider-reported member to one principal before exact reader comparison. The shipped verified-email is deterministic and network-free; a custom name binds under [externals.identity.<name>].",
   "verified-email":
-    "The shipped identity implementation: a member with a verified email becomes email:<address> under conservative normalization (domain case only); a member without one keeps its provider-qualified ID. Deterministic and network-free.",
+    "The shipped identity implementation: a member with a verified email becomes that address under conservative normalization (domain case only); a member without one keeps its provider-qualified ID. The address is the principal, so a reader written as an address is the same reader the verified claim resolves to. Deterministic and network-free.",
   inputs:
     "The values an annotator reads, each mapped from $tool_call on its declaration. Without an explicit mapping, the annotator reads the complete tool call: name, description when declared, and arguments.",
   ranks:

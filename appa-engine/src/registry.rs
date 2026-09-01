@@ -389,10 +389,6 @@ pub enum LoadError {
     MalformedAudienceProvider(String),
     #[error("named audience name {0:?} is malformed: a name is non-empty, written bare, and holds no `:`")]
     MalformedNamedAudience(String),
-    #[error(
-        "audience source provider name \"email\" is reserved: the identity implementation owns the `email:` principal namespace"
-    )]
-    ReservedAudienceProvider,
     #[error("named audience @{0} is configured more than once")]
     DuplicateNamedAudience(String),
     #[error("named audience @{0} lists no sources")]
@@ -1293,16 +1289,13 @@ pub(crate) fn check_rank(
     }
 }
 
-/// Validate the audience configuration and index it: providers registered once, the identity
-/// principal namespace reserved, named audiences unique and sourced, and every configured
+/// Validate the audience configuration and index it: providers registered once, named
+/// audiences unique and sourced, and every configured
 /// selector owned by a registered source. A static typo dies here, at load — only a
 /// dynamically supplied reference can fail operationally.
 fn validated_audience_registry(config: &AudienceConfig) -> Result<AudienceRegistry, LoadError> {
     let mut providers = BTreeSet::new();
     for source in &config.sources {
-        if source.provider == "email" {
-            return Err(LoadError::ReservedAudienceProvider);
-        }
         // A provider name with a `:` makes one member id qualified under two providers, a
         // leading `@` makes its members non-literal readers, and an empty name owns no
         // namespace at all. The one qualification rule (`ReaderId::provider_prefix`) stays
