@@ -113,7 +113,7 @@ pub(crate) fn bound_candidate(
     raw_digest: RawResultDigest,
     body: ValueBody,
     context: &MembershipContext<'_>,
-) -> Result<(crate::authority::Transition, DerivedCandidate, SanitizerLineage), AdmitError> {
+) -> Result<(DerivedCandidate, SanitizerLineage), AdmitError> {
     if views.bound_sanitizer(dispatch) != Some(sanitizer) {
         return Err(AdmitError::SanitizerBindingMismatch);
     }
@@ -128,7 +128,6 @@ pub(crate) fn bound_candidate(
     let receiving = views.receiving_bound(dispatch).ok_or(AdmitError::NotOpen)?;
     let residual = confined_residual(receiving, &derived);
     Ok((
-        registered.transition.applied(),
         DerivedCandidate::Result {
             dispatch: dispatch.clone(),
             source: raw_digest,
@@ -230,7 +229,7 @@ pub(crate) fn admit_result(
             sanitizer,
             raw_digest,
         } => {
-            let (transition, derived, lineage) = bound_candidate(
+            let (derived, lineage) = bound_candidate(
                 registry, views, dispatch, &contract, &sanitizer, raw_digest, body, context,
             )?;
             let DerivedCandidate::Result { value, residual, .. } = &derived else {
@@ -245,10 +244,7 @@ pub(crate) fn admit_result(
                 Fact::CandidateDerived {
                     trajectory: trajectory.clone(),
                     subject: crate::basis::SubjectKey::ConfinedResult(dispatch.clone()),
-                    via: crate::candidate::DerivedVia {
-                        name: sanitizer,
-                        transition,
-                    },
+                    sanitizer,
                     derived,
                     lineage,
                     evidence: evidence.clone(),

@@ -78,11 +78,9 @@ pub(crate) struct RecordedOffer {
     pub(crate) end: Option<OfferEnd>,
 }
 
-/// The live derived candidate of one subject, with the transformer that claimed it and the chain
-/// that produced it.
+/// The live derived candidate of one subject, with the chain that produced it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RecordedCandidate {
-    pub(crate) via: crate::candidate::DerivedVia,
     pub(crate) derived: DerivedCandidate,
     pub(crate) lineage: SanitizerLineage,
     /// The pinned audience evidence the hop that derived this candidate consumed: what a
@@ -515,7 +513,6 @@ impl Projection {
                 }
                 Fact::CandidateDerived {
                     subject,
-                    via,
                     derived,
                     lineage,
                     evidence,
@@ -524,7 +521,6 @@ impl Projection {
                     candidates.insert(
                         subject.clone(),
                         RecordedCandidate {
-                            via: via.clone(),
                             derived: derived.clone(),
                             lineage: lineage.clone(),
                             evidence: match derived {
@@ -1180,12 +1176,6 @@ impl Views<'_> {
     /// stage plans from it, and a successor replaces it.
     pub(crate) fn candidate(&self, subject: &SubjectKey) -> Option<&DerivedCandidate> {
         self.projection.candidates.get(subject).map(|held| &held.derived)
-    }
-
-    /// The transformer this subject's live candidate claims: the sanitizer hop that
-    /// derived it. The crossing paths branch on it.
-    pub(crate) fn candidate_via(&self, subject: &SubjectKey) -> Option<&crate::candidate::DerivedVia> {
-        self.projection.candidates.get(subject).map(|held| &held.via)
     }
 
     /// Where this call subject's candidate stands: the label its substituted bytes

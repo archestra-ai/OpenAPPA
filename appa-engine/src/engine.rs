@@ -5,7 +5,7 @@ use thiserror::Error;
 use crate::admit::{self, AdmitError, ResultAdmission};
 use crate::audience::AudienceEvidence;
 use crate::branch::{self, BranchError};
-use crate::candidate::{CallStage, ConfinedFrom, DerivedCandidate, DerivedVia, SanitizerLineage};
+use crate::candidate::{CallStage, ConfinedFrom, DerivedCandidate, SanitizerLineage};
 use crate::check::{self, CheckOutcome, Narrowing, RawBlock};
 use crate::contract::ToolAnnotation;
 use crate::execute::{self, PlanError};
@@ -768,10 +768,7 @@ impl Engine {
         facts.push(Fact::CandidateDerived {
             trajectory: views.trajectory().clone(),
             subject: crate::basis::SubjectKey::Return(id.clone()),
-            via: DerivedVia {
-                name: name.clone(),
-                transition: registered.transition.applied(),
-            },
+            sanitizer: name.clone(),
             derived: DerivedCandidate::Return {
                 source: digest,
                 from: ConfinedFrom::Bound,
@@ -790,7 +787,6 @@ impl Engine {
                 ReturnDerivation::Sanitized {
                     sanitizer: name.clone(),
                     raw_digest: digest,
-                    transition: registered.transition.applied(),
                 },
                 None,
                 act.pinned(),
@@ -1241,7 +1237,7 @@ impl Engine {
                         if let Some(registered) = self.registry.sanitizer(&sanitizer) {
                             require_atoms(act, registered.needed_atoms(self.registry.audience().providers()))?;
                         }
-                        let (transition, candidate, lineage) = crate::admit::bound_candidate(
+                        let (candidate, lineage) = crate::admit::bound_candidate(
                             &self.registry,
                             &views,
                             dispatch,
@@ -1281,10 +1277,7 @@ impl Engine {
                             Fact::CandidateDerived {
                                 trajectory: views.trajectory().clone(),
                                 subject: crate::basis::SubjectKey::ConfinedResult(dispatch.clone()),
-                                via: DerivedVia {
-                                    name: sanitizer,
-                                    transition,
-                                },
+                                sanitizer,
                                 derived: candidate,
                                 lineage,
                                 evidence: act.pinned(),
@@ -2313,10 +2306,7 @@ impl Engine {
         facts.push(Fact::CandidateDerived {
             trajectory: views.trajectory().clone(),
             subject: crate::basis::SubjectKey::ConfinedResult(dispatch.clone()),
-            via: crate::candidate::DerivedVia {
-                name: sanitizer.clone(),
-                transition: registered.transition.applied(),
-            },
+            sanitizer: sanitizer.clone(),
             derived: DerivedCandidate::Result {
                 dispatch: dispatch.clone(),
                 source: source_digest,
@@ -2503,16 +2493,11 @@ impl Engine {
                     .last()
                     .expect("a return candidate's lineage names the sanitizer that derived it")
                     .clone();
-                let subject = crate::basis::SubjectKey::Return(id.clone());
-                let Some(crate::candidate::DerivedVia { transition, .. }) = views.candidate_via(&subject) else {
-                    return Err(TransitionError::SanitizerUnapplicable);
-                };
                 (
                     value,
                     ReturnDerivation::Sanitized {
                         sanitizer,
                         raw_digest: pending.digest,
-                        transition: transition.clone(),
                     },
                 )
             }
@@ -2588,10 +2573,7 @@ impl Engine {
         facts.push(Fact::CandidateDerived {
             trajectory: views.trajectory().clone(),
             subject: crate::basis::SubjectKey::Return(id.clone()),
-            via: DerivedVia {
-                name: sanitizer.clone(),
-                transition: registered.transition.applied(),
-            },
+            sanitizer: sanitizer.clone(),
             derived: DerivedCandidate::Return {
                 source: source_digest,
                 from: ConfinedFrom::Offer(execution.offer),
@@ -2610,7 +2592,6 @@ impl Engine {
                 ReturnDerivation::Sanitized {
                     sanitizer: sanitizer.clone(),
                     raw_digest: pending.digest,
-                    transition: registered.transition.applied(),
                 },
                 None,
                 act.pinned(),
@@ -2748,10 +2729,7 @@ impl Engine {
         facts.push(Fact::CandidateDerived {
             trajectory: trajectory.clone(),
             subject: recorded.subject.clone(),
-            via: DerivedVia {
-                name: sanitizer.clone(),
-                transition: registered.transition.applied(),
-            },
+            sanitizer: sanitizer.clone(),
             derived,
             lineage,
             evidence: under.pinned(),
@@ -14680,6 +14658,89 @@ mod tests {
             assert_eq!(identity(&forward), identity(&backward));
         }
 
+        fn declassify_to(to: DeclaredAudience) -> crate::authority::Sanitizer {
+            crate::authority::Sanitizer {
+                name: SanitizerName::new("declassify"),
+                on: crate::authority::SanitizerPoints {
+                    input: false,
+                    output: true,
+                },
+                transition: crate::authority::DeclaredTransition::Audience {
+                    from_includes: DeclaredAudience::restricted([]),
+                    to,
+                },
+                scope: crate::authority::Scope::default(),
+                hint: None,
+            }
+        }
+
+        /// A sanitized return, derived and merged, then read back from its wire form.
+        fn sanitized_return_log(e: &Engine) -> Vec<Fact> {
+            let child = TrajectoryId::new("child");
+            let log = spawn_family(e, None, &child);
+            let body = ValueBody::new("what I found");
+            let submitted = e
+                .handle(
+                    &viewing(e, &log),
+                    child_report_with(&log, &child, &body, vec![], no_answers()),
+                )
+                .expect("the submission stands");
+            let log = [log, appended_facts(submitted)].concat();
+            let evidence = vec![Evidence::Sanitizer {
+                sanitizer: SanitizerName::new("declassify"),
+                source: RawResultDigest::of(body.as_str().as_bytes()),
+                derived: ValueBody::new("clean"),
+            }];
+            let derived = e
+                .handle(
+                    &viewing(e, &log),
+                    child_report_with(&log, &child, &body, evidence, no_answers()),
+                )
+                .expect("the derivation stands as the candidate");
+            let log = [log, appended_facts(derived)].concat();
+            let wire = serde_json::to_string(&log).expect("facts serialize");
+            serde_json::from_str(&wire).expect("facts deserialize")
+        }
+
+        /// A derivation record names its sanitizer and the transition it applied is the
+        /// registry's: the same policy replays the record from its wire form, and a policy
+        /// whose sanitizer transitions differ is another policy, refused as a whole.
+        #[test]
+        fn a_sanitizers_transition_is_policy_identity_not_a_records_claim() {
+            let identity = |cfg: &RegistryConfig| {
+                let profile = crate::profile::DeploymentProfile::declare(crate::profile::covering_declaration(cfg))
+                    .expect("the covering declaration declares");
+                crate::profile::identity_of(
+                    cfg,
+                    &ReturnPolicy::Sanitized(SanitizerName::new("declassify")),
+                    &profile,
+                )
+            };
+            // A public `to` narrows nothing, so the derivation merges in one act.
+            let to_public = returning_with_sources(vec![declassify_to(DeclaredAudience::Public)]);
+            let to_alice = returning_with_sources(vec![declassify_to(DeclaredAudience::restricted([corp_reader(
+                "alice",
+            )]))]);
+            assert_ne!(identity(&to_public), identity(&to_alice));
+
+            let policy = ReturnPolicy::Sanitized(SanitizerName::new("declassify"));
+            let e = open_engine_returning(to_public, policy.clone());
+            let log = sanitized_return_log(&e);
+            assert!(log.iter().any(|fact| matches!(
+                fact,
+                Fact::ChildReturn {
+                    derivation: ReturnDerivation::Sanitized { .. },
+                    ..
+                }
+            )));
+            assert_eq!(e.validate_replay(&log), Ok(()));
+            assert_ne!(
+                open_engine_returning(to_alice, policy).validate_replay(&log),
+                Ok(()),
+                "a changed transition is another policy"
+            );
+        }
+
         fn child_report_with(
             log: &[Fact],
             child: &TrajectoryId,
@@ -14761,22 +14822,10 @@ mod tests {
             );
             let acceptance = stage.offers[0].0;
             let facts = appended_facts(derived);
-            let Some(via) = facts.iter().find_map(|fact| match fact {
-                Fact::CandidateDerived { via, .. } => Some(via.clone()),
-                _ => None,
-            }) else {
-                panic!("the derivation stands as the candidate")
-            };
-            assert_eq!(
-                via,
-                DerivedVia {
-                    name: SanitizerName::new("declassify"),
-                    transition: crate::authority::Transition::Audience {
-                        from_includes: DeclaredAudience::restricted([]),
-                        to: symbolic("team"),
-                    },
-                }
-            );
+            assert!(facts.iter().any(|fact| matches!(
+                fact,
+                Fact::CandidateDerived { sanitizer, .. } if sanitizer == &SanitizerName::new("declassify")
+            )));
             let log = [log, facts].concat();
             assert_eq!(e.validate_replay(&log), Ok(()));
 

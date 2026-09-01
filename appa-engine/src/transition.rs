@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::audience::AudienceEvidence;
-use crate::candidate::{CallStage, ConfinedFrom, DerivedCandidate, DerivedVia, SanitizerLineage};
+use crate::candidate::{CallStage, ConfinedFrom, DerivedCandidate, SanitizerLineage};
 use crate::check::{CheckOutcome, Gap, Narrowing};
 use crate::contract::ToolAnnotation;
 use crate::engine::Engine;
@@ -1205,11 +1205,11 @@ impl<'a> Sequence<'a> {
             Fact::CandidateDerived {
                 trajectory,
                 subject,
-                via,
+                sanitizer,
                 derived,
                 lineage,
                 evidence,
-            } => self.candidate_derived(trajectory, subject, via, derived, lineage, evidence)?,
+            } => self.candidate_derived(trajectory, subject, sanitizer, derived, lineage, evidence)?,
             Fact::CandidateAccepted {
                 trajectory,
                 subject,
@@ -2682,10 +2682,7 @@ impl<'a> Sequence<'a> {
         sanitizer: &SanitizerName,
         derivation: &ReturnDerivation,
     ) -> Result<Label, TransitionRefusal> {
-        let ReturnDerivation::Sanitized {
-            raw_digest, transition, ..
-        } = derivation
-        else {
+        let ReturnDerivation::Sanitized { raw_digest, .. } = derivation else {
             return Err(TransitionRefusal::ReturnPolicyMismatch);
         };
         let subject = crate::basis::SubjectKey::Return(id.clone());
@@ -2699,13 +2696,6 @@ impl<'a> Sequence<'a> {
         let lineage = views.lineage(&subject);
         if lineage.names().last() != Some(sanitizer) {
             return Err(TransitionRefusal::ReturnRecordMismatch);
-        }
-        let derived_at = match views.candidate_via(&subject) {
-            Some(DerivedVia { transition, .. }) => transition,
-            _ => return Err(TransitionRefusal::ReturnRecordMismatch),
-        };
-        if derived_at != transition {
-            return Err(TransitionRefusal::SanitizerUnapplicable);
         }
         Ok(candidate.label.clone())
     }
@@ -2964,24 +2954,17 @@ impl<'a> Sequence<'a> {
         &mut self,
         trajectory: &TrajectoryId,
         subject: &crate::basis::SubjectKey,
-        via: &DerivedVia,
+        sanitizer: &SanitizerName,
         derived: &DerivedCandidate,
         lineage: &SanitizerLineage,
         evidence: &AudienceEvidence,
     ) -> Result<(), TransitionRefusal> {
         let expansions = self.recorded_expansions(evidence)?;
-        let DerivedVia {
-            name: sanitizer,
-            transition,
-        } = via;
         let registered = self
             .engine
             .registry()
             .sanitizer(sanitizer)
             .ok_or_else(|| TransitionRefusal::UnknownSanitizer(sanitizer.as_str().to_string()))?;
-        if registered.transition.applied() != *transition {
-            return Err(TransitionRefusal::SanitizerUnapplicable);
-        }
         let (dispatch, source, from, value, residual) = match derived {
             DerivedCandidate::Call {
                 source,

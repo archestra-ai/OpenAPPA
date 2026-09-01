@@ -794,8 +794,8 @@ impl RuntimeEngine {
             Fact::OutputSanitizerBound { sanitizer, .. } => AuditEvent::SanitizerBound {
                 sanitizer: terminal_safe(sanitizer.as_str()),
             },
-            Fact::CandidateDerived { via, .. } => AuditEvent::Sanitized {
-                sanitizer: terminal_safe(via.name.as_str()),
+            Fact::CandidateDerived { sanitizer, .. } => AuditEvent::Sanitized {
+                sanitizer: terminal_safe(sanitizer.as_str()),
             },
             Fact::ChildReturn { value, derivation, .. } => AuditEvent::ChildReturn {
                 sanitizer: match derivation {
