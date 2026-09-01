@@ -33,7 +33,8 @@ class AgentSummary:
     agent: str
     episodes: int
     errors: int
-    provider_errors: int  # the subset of `errors` the model provider caused, not the harness
+    provider_errors: int  # episodes lost to a provider that could not be reached in time
+    harness_errors: int  # every other error: the harness, the runtime, or a provider that answered unusably
     budget_finalized: int
     utility_passed: int
     utility_total: int
@@ -59,6 +60,7 @@ def summarize(results: list[EpisodeResult]) -> list[AgentSummary]:
                 episodes=len(episodes),
                 errors=sum(1 for r in episodes if r.error),
                 provider_errors=sum(1 for r in episodes if r.terminal_status == "provider_failed"),
+                harness_errors=sum(1 for r in episodes if r.error and r.terminal_status != "provider_failed"),
                 budget_finalized=sum(1 for r in episodes if r.terminal_status == "budget_finalized"),
                 utility_passed=sum(utility),
                 utility_total=len(utility),

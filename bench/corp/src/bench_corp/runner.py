@@ -55,11 +55,18 @@ _TERMINAL_STATUSES = {
     "completed",
     "budget_finalized",
     "provider_failed",
+    "provider_rejected",
     "runtime_refused",
     "cancelled",
     "budget_exhausted",
 }
-_FAILED_TERMINAL_STATUSES = {"provider_failed", "runtime_refused", "cancelled", "budget_exhausted"}
+_FAILED_TERMINAL_STATUSES = {
+    "provider_failed",
+    "provider_rejected",
+    "runtime_refused",
+    "cancelled",
+    "budget_exhausted",
+}
 
 
 def _count(pattern: re.Pattern[str], text: str) -> int:
