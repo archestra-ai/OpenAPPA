@@ -828,6 +828,19 @@ samp {
   color: inherit;
 }
 
+/* ```text blocks are box-drawing diagrams. The Plex Mono webfont ships
+   a latin subset with no U+2500 box-drawing glyphs, so their rails fall
+   back to a font with different metrics, and the default 1.6 leading
+   opens gaps between the │ glyphs. Diagrams get the system mono stack —
+   whose box glyphs span the full line box — and tighter leading;
+   command snippets keep the site font and the roomier default. */
+.prose pre code.language-text {
+  display: block;
+  font-family: ui-monospace, "Cascadia Mono", Menlo, Consolas,
+    "DejaVu Sans Mono", monospace;
+  line-height: 1.15;
+}
+
 .battery-figure {
   width: 100%;
   max-width: 45rem;
