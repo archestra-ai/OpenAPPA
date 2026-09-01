@@ -1880,9 +1880,8 @@ impl RuntimeEngine {
                 }),
             }
         }
-        // A lookup's `selector` slot carries the qualified member it canonicalizes.
         for spec in &primitives.lookups {
-            match act.gathered.lookups.get(spec.selector.as_str()) {
+            match act.gathered.lookups.get(spec.member.as_str()) {
                 Some((_, Some(_))) => {}
                 Some((_, None)) => {
                     // The member can be a reader a delta wrote that the model never saw.
@@ -1893,7 +1892,7 @@ impl RuntimeEngine {
                 }
                 None => requests.push(ExternalRequest::MemberLookup {
                     provider: spec.provider.clone(),
-                    member: spec.selector.clone(),
+                    member: spec.member.clone(),
                     templates: self.templates_of(&spec.provider),
                 }),
             }

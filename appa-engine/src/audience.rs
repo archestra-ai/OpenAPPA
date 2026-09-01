@@ -419,18 +419,19 @@ pub enum Unroutable {
     UnmappedChain(ChainAudience),
 }
 
+/// One member lookup to perform: the qualified member and the provider that owns it.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct LookupSpec {
+    pub provider: String,
+    pub member: String,
+}
+
 /// The primitive requests one round must answer: which selectors to consult and which member
 /// lookups to perform. Identity inputs are derived from the claims those answers carry.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NeededPrimitives {
     pub selectors: BTreeSet<SelectorSpec>,
-    pub lookups: BTreeSet<SelectorSpec>,
-}
-
-impl NeededPrimitives {
-    pub fn is_empty(&self) -> bool {
-        self.selectors.is_empty() && self.lookups.is_empty()
-    }
+    pub lookups: BTreeSet<LookupSpec>,
 }
 
 impl AudienceRegistry {
@@ -561,9 +562,9 @@ impl AudienceRegistry {
                     if !self.providers.contains_key(provider) {
                         return Err(Unroutable::UnknownProvider(provider.to_string()));
                     }
-                    needed.lookups.insert(SelectorSpec {
+                    needed.lookups.insert(LookupSpec {
                         provider: provider.to_string(),
-                        selector: reader.as_str().to_string(),
+                        member: reader.as_str().to_string(),
                     });
                 }
             }
@@ -743,9 +744,9 @@ impl AudienceRegistry {
             }
         }
         for lookup in &evidence.lookups {
-            let spec = SelectorSpec {
+            let spec = LookupSpec {
                 provider: lookup.provider.clone(),
-                selector: lookup.member.clone(),
+                member: lookup.member.clone(),
             };
             if !requested.lookups.contains(&spec) && !inherited.lookups.contains(lookup) {
                 return Err(EvidenceRefusal::UnrequestedEvidence { entry: lookup.entry() });

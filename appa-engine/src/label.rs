@@ -472,22 +472,25 @@ impl DeclaredAudience {
         DeclaredAudience::Union(clause)
     }
 
-    pub(crate) fn symbolic_atoms(&self) -> Box<dyn Iterator<Item = SymbolicAtom> + '_> {
+    fn clause(&self) -> Option<&Clause> {
         match self {
-            DeclaredAudience::Public => Box::new(std::iter::empty()),
-            DeclaredAudience::Union(clause) => Box::new(clause.symbolic_atoms()),
+            DeclaredAudience::Public => None,
+            DeclaredAudience::Union(clause) => Some(clause),
         }
+    }
+
+    pub(crate) fn symbolic_atoms(&self) -> impl Iterator<Item = SymbolicAtom> + '_ {
+        self.clause().into_iter().flat_map(Clause::symbolic_atoms)
     }
 
     /// See [`Clause::needed_atoms`].
     pub(crate) fn needed_atoms<'a>(
         &'a self,
         providers: &'a BTreeSet<String>,
-    ) -> Box<dyn Iterator<Item = SymbolicAtom> + 'a> {
-        match self {
-            DeclaredAudience::Public => Box::new(std::iter::empty()),
-            DeclaredAudience::Union(clause) => Box::new(clause.needed_atoms(providers)),
-        }
+    ) -> impl Iterator<Item = SymbolicAtom> + 'a {
+        self.clause()
+            .into_iter()
+            .flat_map(move |clause| clause.needed_atoms(providers))
     }
 }
 
