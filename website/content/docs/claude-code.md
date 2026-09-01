@@ -1,6 +1,6 @@
 ---
 title: Claude Code
-category: Integration
+category: Integrations
 order: 5
 description: Start with one protected Claude Code session, then carry the same policy boundary across your agents.
 ---
