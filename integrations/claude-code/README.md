@@ -39,10 +39,10 @@ receives it, in the `Agent` tool's result.
 
 This flow needs the `claude` command, `curl`, and Cargo when building from a checkout.
 
-`appa init` installs one bundle: the plugin belonging to the running binary's
-own release, and that binary. Each build knows the SHA-256 of its release's
-plugin artifact and accepts no other bytes, so version X can never install
-version Y's plugin. The result does not depend on the working directory.
+`appa init` installs one bundle: the plugin belonging to the running binary and
+that binary. Release builds carry an immutable tag and artifact digest; clean
+checkout builds carry an immutable commit and plugin-tree digest. The result
+does not depend on the working directory.
 
 From a release binary, that digest is baked in. The artifact is downloaded once,
 verified against the digest before anything outside a temporary file changes,
@@ -52,16 +52,20 @@ and cached, so a later init needs no network:
 appa init claude-code
 ```
 
-A build from a checkout has no baked-in digest, because the digest exists only
-once a release has published the artifact. Such a build refuses to download and
-requires an explicit source: stage the bundle from the same checkout and name it.
+A clean checkout build downloads the source archive for its exact commit,
+stages the marketplace tree, and verifies the digest baked at compilation. A
+build with local plugin changes uses that exact checkout and verifies that it
+has not changed since compilation.
 
 ```sh
 cargo install --path appa-runtime --force
-plugin=$(mktemp -d)/bundle
-sh scripts/appa-stage-plugin-bundle.sh "$plugin"
-appa init claude-code --plugin-source "$plugin"
+appa init claude-code
 ```
+
+Init reports each slow phase on stderr. If another installed APPA build owns
+the runtime endpoint, init identifies its process and asks `Stop it and
+continue? [Y/n]` before sending any signal. It never offers to stop an
+unidentified listener or another user's process.
 
 Init installs `clappa` beside `appa` so the short command works in later examples.
 
@@ -151,12 +155,14 @@ was installed again after this runtime started; the next protected
 session start replaces the process, and so does running the starter
 by hand.
 
-The default policy names only Claude Code's built-in tools. APPA blocks every
-installed MCP tool until the policy names it. Start `clappa` and run
-`/appa-guide init` from that protected session. It inventories MCP
-servers, proposes one policy entry per tool, and marks which tools read data
-that must stay in the session or send data outward. It asks once about servers
-it cannot judge. You review the complete proposal before it writes anything.
+The default policy names Claude Code's built-in tools and sends every other
+tool through a bounded, fail-closed Claude annotator. That compatibility net
+keeps a newly installed MCP tool usable, but it is not a substitute for a
+reviewed connector contract. Start `clappa` and run `/appa-guide init` from
+that protected session. It inventories MCP servers, proposes exact policy
+entries or maintained batteries, and marks which tools read data that must
+stay in the session or send data outward. It asks once about servers it cannot
+judge. You review the complete proposal before it writes anything.
 
 For development from a source checkout, run the runtime on its own port
 so an installed runtime on 8787 is untouched, and point a session at it

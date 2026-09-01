@@ -54,6 +54,10 @@ rig-agent = { version = "0.42", default-features = false }
 # Depended on only to name the crypto provider; see the workspace manifest.
 rustls = { workspace = true }
 
+[build-dependencies]
+sha2 = { workspace = true }
+tar = "0.4"
+
 [dev-dependencies]
 # The fail points the orchestration tests drive. A dev-dependency, so they are
 # absent from the binary.

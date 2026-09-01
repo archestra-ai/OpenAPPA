@@ -57,10 +57,8 @@ impl Adapter {
 enum Harness {
     /// Install this build's Claude Code plugin and initialize its local deployment.
     ClaudeCode {
-        /// Development override: a marketplace root to deploy instead of this
-        /// build's own release plugin. Without it, init installs only the
-        /// plugin artifact whose digest this binary was built with.
-        #[arg(long)]
+        /// Developer override: a staged marketplace root to deploy.
+        #[arg(long, hide = true)]
         plugin_source: Option<String>,
     },
 }

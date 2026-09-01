@@ -48,8 +48,13 @@ fn deployment(policy_extra: &str, externals_extra: &str) -> Runtime {
     let (before_deployment, after_deployment) = policy
         .split_once(deployment)
         .expect("the example carries the context-controlling deployment");
+    // These tests exercise trajectory binding, not the default's model-backed
+    // compatibility fallback. Keep their recorded Bash and Read calls
+    // deterministic.
+    let tools = "[[policy.tool]]\nname = \"Bash\"\ndelta = {}\n\
+                 [[policy.tool]]\nname = \"Read\"\ndelta = {}\n";
     let text = format!(
-        "{before_deployment}{deployment}{policy_extra}\n{after_deployment}[externals]{externals}\n{externals_extra}"
+        "{before_deployment}{deployment}{policy_extra}\n{tools}{after_deployment}[externals]{externals}\n{externals_extra}"
     );
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let path = dir.path().join("appa.toml");

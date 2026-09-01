@@ -1,9 +1,12 @@
 # Example deployment for protecting a Claude Code session.
 #
-# Every built-in tool of the harness is named: a tool the policy does
-# not name is refused before it runs. A named tool without a `delta` key restricts
-# nothing, the same statement as `delta = {}`: the result's label is the
-# combination of its sources, unchanged.
+# The stable built-in tools of the harness are named. Bash and Read deliberately
+# reach the bounded Claude fallback at the end of this file unless the optional
+# Claude Code battery supplies their exact annotators. Any other tool the policy
+# does not name gets the same per-call fallback until `/appa-guide init` gives it
+# an exact contract. A named tool without a `delta` key restricts nothing, the
+# same statement as `delta = {}`: the result's label is the combination of its
+# sources, unchanged.
 #
 # Tools that bring outside content into the session — the web tools —
 # carry `delta = { trust = "suspicious" }` instead: their results
@@ -36,10 +39,6 @@ delta = {}
 
 [[policy.tool]]
 name = "Artifact"
-delta = {}
-
-[[policy.tool]]
-name = "Bash"
 delta = {}
 
 [[policy.tool]]
@@ -112,10 +111,6 @@ delta = {}
 
 [[policy.tool]]
 name = "PushNotification"
-delta = {}
-
-[[policy.tool]]
-name = "Read"
 delta = {}
 
 [[policy.tool]]
@@ -206,6 +201,22 @@ delta = { trust = "suspicious" }
 [[policy.tool]]
 name = "WebSearch"
 delta = { trust = "suspicious" }
+
+# Compatibility net for tools installed after this policy was generated. Exact
+# declarations always win over the wildcard, including declarations supplied by
+# connector batteries. The mandate is deliberately closed to this deployment's
+# two trust ranks, its one private audience, HITL, and no effects.
+[[policy.annotator]]
+name = "claude-code.undeclared-tool"
+builtin = "claude-code"
+ranks = ["suspicious", "trusted"]
+audiences = ["private"]
+marks = ["hitl"]
+effects = []
+
+[[policy.tool]]
+name = "*"
+annotator = "claude-code.undeclared-tool"
 
 # The deployment controls what a subagent starts from: the harness gives
 # every subagent exactly the prompt the parent's spawn call carried, and

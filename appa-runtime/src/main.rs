@@ -217,8 +217,12 @@ async fn binary_fingerprint(State(state): State<AppState>) -> Result<String, axu
     state
         .executable
         .as_ref()
-        .map(|executable| executable.digest.clone())
+        .map(|executable| binary_fingerprint_answer(&executable.digest, std::process::id()))
         .ok_or(axum::http::StatusCode::NOT_FOUND)
+}
+
+fn binary_fingerprint_answer(digest: &str, pid: u32) -> String {
+    format!("{digest} {pid}")
 }
 
 fn health_answer(stale: bool, pid: u32) -> String {
@@ -362,6 +366,12 @@ mod tests {
             DEFAULT_CONFIG
         );
         Config::load(&path).expect("the embedded default config validates");
+        assert!(
+            DEFAULT_CONFIG.contains("name = \"claude-code.undeclared-tool\"")
+                && DEFAULT_CONFIG.contains("name = \"*\"")
+                && DEFAULT_CONFIG.contains("annotator = \"claude-code.undeclared-tool\""),
+            "a fresh Claude Code deployment carries its explicit compatibility fallback"
+        );
 
         fs::write(&path, "existing deployment").expect("existing config is replaced by the test");
         assert!(!ensure_default_config(&path).expect("existing config is preserved"));
@@ -434,6 +444,11 @@ mod tests {
 
         fs::remove_file(&path).expect("the executable is removed");
         assert!(replaced(&path));
+    }
+
+    #[test]
+    fn the_binary_fingerprint_names_the_process_that_serves_it() {
+        assert_eq!(binary_fingerprint_answer("abc123", 41), "abc123 41");
     }
 
     #[test]

@@ -859,10 +859,7 @@ impl Session {
                             }
                             _ => tracing::debug!(annotator, ?reason, "an annotation consult produced no answer"),
                         }
-                        return Err(EventError::AnnotationRefused {
-                            annotator: annotator.clone(),
-                            reason: reason.diagnostic(),
-                        });
+                        return Err(EventError::annotation_refused(annotator.clone(), reason.diagnostic()));
                     }
                 };
                 ExternalEvidence::Annotation {

@@ -8,7 +8,7 @@ it.
 
 | Battery | Covers | Externals |
 | --- | --- | --- |
-| `claude-code/` | `Bash`, `Read`, and every tool the policy does not name in a Claude Code session | The Claude Code model annotates Bash calls and every tool the wildcard covers; `read-sensitivity.py` labels file contents |
+| `claude-code/` | `Bash` and `Read` in a Claude Code session | The Claude Code model annotates Bash calls; `read-sensitivity.py` labels file contents |
 | `slack/` | the claude.ai Slack connector, all 19 tools: read, search, send, canvases | none |
 | `github/` | the GitHub MCP server's default tool sets: profile, repositories, issues, pull requests, users (44 tools) | none |
 | `grain/` | the Grain MCP server: meetings, transcripts, notes, deals, clips, stories, collections, workspace admin (49 tools) | none |
