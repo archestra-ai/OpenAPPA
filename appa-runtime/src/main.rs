@@ -362,6 +362,12 @@ mod tests {
             DEFAULT_CONFIG
         );
         Config::load(&path).expect("the embedded default config validates");
+        assert!(
+            DEFAULT_CONFIG.contains("name = \"claude-code.undeclared-tool\"")
+                && DEFAULT_CONFIG.contains("name = \"*\"")
+                && DEFAULT_CONFIG.contains("annotator = \"claude-code.undeclared-tool\""),
+            "a fresh Claude Code deployment carries its explicit compatibility fallback"
+        );
 
         fs::write(&path, "existing deployment").expect("existing config is replaced by the test");
         assert!(!ensure_default_config(&path).expect("existing config is preserved"));

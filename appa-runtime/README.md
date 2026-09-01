@@ -24,14 +24,12 @@ install -m 755 appa ~/.local/bin/
 appa init claude-code
 ```
 
-A build from a checkout has no such digest, refuses to download, and requires an
-explicit source:
+A build from a checkout carries its exact Git commit and plugin-tree digest, so
+the same command works there too:
 
 ```sh
 cargo install --path appa-runtime --force
-plugin=$(mktemp -d)/bundle
-sh scripts/appa-stage-plugin-bundle.sh "$plugin"
-appa init claude-code --plugin-source "$plugin"
+appa init claude-code
 ```
 
 The result does not depend on the working directory. It replaces an existing APPA plugin instead of stacking

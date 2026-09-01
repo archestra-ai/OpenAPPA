@@ -5,6 +5,13 @@
 # differing is how a foreign runtime arriving mid-install is reproduced.
 set -eu
 
+case "$*" in
+  *"/health"*)
+    printf 'ok\n'
+    exit 0
+    ;;
+esac
+
 if [ -n "${FAKE_CURL_CALLS:-}" ]; then
   count=$(( $(cat "$FAKE_CURL_CALLS" 2>/dev/null || echo 0) + 1 ))
   printf '%s' "$count" >"$FAKE_CURL_CALLS"

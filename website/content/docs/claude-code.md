@@ -13,21 +13,18 @@ You need Cargo, Claude Code, and `curl`.
 
 ```sh
 cargo install --path appa-runtime --force
-plugin=$(mktemp -d)/bundle
-sh scripts/appa-stage-plugin-bundle.sh "$plugin"
-appa init claude-code --plugin-source "$plugin"
+appa init claude-code
 ```
 
 Initialization installs `clappa` beside `appa` so the short command works below.
 
 The native `appa` command installs the runtime, the matching Claude Code
-plugin, the statusline, and `clappa`, a protected way to start Claude Code. Each
-build accepts exactly one plugin artifact: a release binary knows the digest of
-its own release's artifact and downloads it, and a build from a checkout has no
-such digest and is given the bundle staged from that checkout. Init replaces an
-existing APPA installation instead of stacking another hook set. It preserves an
-existing policy and custom statusline. It does not replace `claude` or change how
-ordinary sessions start.
+plugin, the statusline, and `clappa`, a protected way to start Claude Code. A
+release binary resolves its plugin from its baked tag and artifact digest; a
+checkout build resolves it from its baked commit and plugin-tree digest. Init
+replaces an existing APPA installation instead of stacking another hook set. It
+preserves an existing policy and custom statusline. It does not replace `claude`
+or change how ordinary sessions start.
 
 ## 1. Teach OpenAPPA about your tools
 
@@ -44,6 +41,8 @@ clappa
 ```
 
 The skill inspects the MCP servers and tools available to Claude Code. It uses their declared purpose to identify what they read and which actions can send data outside the session. When a data boundary is unclear, it asks you one focused question.
+
+Before this sync, a fresh installation routes unnamed tools through a bounded Claude annotator. The fallback fails closed and keeps newly installed tools from becoming an immediate configuration outage; exact contracts and maintained batteries produced by the skill take precedence over it.
 
 It begins with `appa describe`, which reports the current config,
 included batteries, policy tools, referenced groups, and membership wiring.

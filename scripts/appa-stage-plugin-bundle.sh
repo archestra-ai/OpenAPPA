@@ -45,6 +45,12 @@ cp -- "$repo/integrations/claude-code/live-gate-check.py" ./live-gate-check.py
 mkdir -p -- ./website/content/docs
 cp -- "$repo/website/content/docs/contracts.md" ./website/content/docs/contracts.md
 
+# Generated Python caches are not plugin source. A developer may have them in a
+# checkout, while a GitHub source archive and a clean release runner never do;
+# excluding them keeps all three staging paths byte-identical.
+find . -type d -name __pycache__ -prune -exec rm -rf -- {} +
+find . -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
+
 # Modes are applied by init when it materializes a deployment; these are for
 # anyone who unpacks the archive by hand.
 find . -type d -exec chmod 755 {} +

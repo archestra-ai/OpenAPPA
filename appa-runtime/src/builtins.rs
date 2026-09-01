@@ -419,13 +419,7 @@ pub(crate) async fn run_claude_code(
         .stderr(Stdio::null())
         .kill_on_drop(true);
     command.as_std_mut().process_group(0);
-    // No APPA secret or wiring variable reaches the model: the child needs its own
-    // credentials and HOME, never this runtime's bearer tokens.
-    for (key, _) in std::env::vars_os() {
-        if key.to_string_lossy().starts_with("APPA_") {
-            command.env_remove(key);
-        }
-    }
+    isolate_claude_environment(&mut command);
     tracing::debug!("claude consult starts");
     let child = command.spawn().map_err(|_| {
         tracing::warn!(command = %backend.command.display(), "the claude executable did not start");
@@ -460,10 +454,28 @@ pub(crate) async fn run_claude_code(
     let status = process.terminate_and_reap().await?;
     if !status.success() {
         tracing::debug!(code = ?status.code(), "claude exited without an answer");
-        return Err(NoAnswerReason::Transport);
+        return Err(NoAnswerReason::NonSuccess {
+            status: status.code().and_then(|code| u16::try_from(code).ok()).unwrap_or(0),
+        });
     }
     let envelope: ClaudeResultEnvelope = serde_json::from_slice(&output).map_err(|_| NoAnswerReason::Malformed)?;
     envelope.structured_output.ok_or(NoAnswerReason::Malformed)
+}
+
+#[cfg(unix)]
+fn isolate_claude_environment(command: &mut tokio::process::Command) {
+    // Claude Code marks its own process tree and refuses to start a nested CLI
+    // while that marker is present. This consult is deliberately isolated,
+    // tool-less, and non-persistent, so it is safe and necessary to clear the
+    // harness marker before launching it.
+    command.env_remove("CLAUDECODE");
+    // No APPA secret or wiring variable reaches the model: the child needs its own
+    // credentials and HOME, never this runtime's bearer tokens.
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("APPA_") {
+            command.env_remove(key);
+        }
+    }
 }
 
 /// The builtin is a local process under a process group this platform lacks; the
@@ -480,6 +492,50 @@ pub(crate) async fn run_claude_code(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_claude_consult_clears_the_parent_session_marker() {
+        let mut command = tokio::process::Command::new("claude");
+        command.env("CLAUDECODE", "1");
+        isolate_claude_environment(&mut command);
+        assert!(
+            command
+                .as_std()
+                .get_envs()
+                .any(|(name, value)| name == "CLAUDECODE" && value.is_none()),
+            "the nested-session marker is explicitly removed"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_claude_nonzero_exit_keeps_its_status() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let fake = dir.path().join("fake-claude");
+        std::fs::write(&fake, "#!/bin/sh\ncat > /dev/null\nexit 7\n").expect("the fake writes");
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("the fake is executable");
+        let backend = ClaudeCodeBackend {
+            command: fake,
+            model: "m".to_string(),
+            timeout: std::time::Duration::from_secs(5),
+            max_body_bytes: 65_536,
+        };
+        let prompt = ModelPrompt {
+            system: "rule".to_string(),
+            input: "{}".to_string(),
+            schema: serde_json::json!({"type": "object"}),
+        };
+
+        assert_eq!(
+            backend
+                .consult(&prompt, tokio::time::Instant::now() + std::time::Duration::from_secs(5))
+                .await,
+            Err(NoAnswerReason::NonSuccess { status: 7 })
+        );
+    }
 
     /// A helper the CLI leaves running — here a backgrounded `sleep` that keeps the
     /// CLI's stdout open, whose pid the fake records — neither stalls the answer nor

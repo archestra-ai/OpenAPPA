@@ -1524,7 +1524,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         // shell can take over a second to start, and that is not the failure under test.
         assert_eq!(
             run(fake_claude(dir.path(), "exit 7"), 5000, 1024).await,
-            Err(NoAnswerReason::Transport)
+            Err(NoAnswerReason::NonSuccess { status: 7 })
         );
         assert_eq!(
             run(fake_claude(dir.path(), "sleep 1"), 20, 1024).await,

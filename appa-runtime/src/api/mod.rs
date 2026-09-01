@@ -178,8 +178,12 @@ pub(crate) enum EventError {
     PolicyUnavailable(String),
     #[error("engine invariant breach: {0}")]
     EngineInvariant(String),
-    #[error("annotator={annotator} error={reason}")]
-    AnnotationRefused { annotator: String, reason: String },
+    #[error("annotator={annotator} error={reason}{next_action}")]
+    AnnotationRefused {
+        annotator: String,
+        reason: String,
+        next_action: &'static str,
+    },
     #[error("tool {tool} is not declared in this policy and no wildcard covers it; the call is refused before it runs")]
     UndeclaredTool { tool: String },
     #[error("storage failure: {0}")]
@@ -187,6 +191,19 @@ pub(crate) enum EventError {
 }
 
 impl EventError {
+    fn annotation_refused(annotator: String, reason: String) -> Self {
+        let next_action = if annotator == "claude-code.undeclared-tool" {
+            "; this tool has no exact policy contract; run /appa-guide init to sync installed MCP tools"
+        } else {
+            ""
+        };
+        Self::AnnotationRefused {
+            annotator,
+            reason,
+            next_action,
+        }
+    }
+
     /// Whether this failure is the deployment's problem rather than
     /// something the model or the harness can act on. An operational
     /// failure refuses wherever it happens, so the harness fails closed
@@ -992,6 +1009,19 @@ mod deployment_tests {
 
     use super::*;
     use crate::config::{AnnotatorImplementation, Endpoint, ExternalBindings, LlmBinding, LlmProvider};
+
+    #[test]
+    fn the_undeclared_tool_fallback_refusal_names_the_recovery_action() {
+        let fallback = EventError::annotation_refused(
+            "claude-code.undeclared-tool".to_string(),
+            "non_success status=1".to_string(),
+        )
+        .to_string();
+        assert!(fallback.contains("run /appa-guide init"), "{fallback}");
+
+        let exact = EventError::annotation_refused("bash-classifier".to_string(), "timeout".to_string()).to_string();
+        assert!(!exact.contains("/appa-guide init"), "{exact}");
+    }
 
     /// A deployment with no `[externals.annotators]` bindings: the policy under test names
     /// `builtin = "claude-code"` on the declarations it wants answered by Claude Code.

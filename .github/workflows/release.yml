@@ -199,7 +199,7 @@ jobs:
       contents: read # Required by the reusable workflow to check out the release tag.
     uses: ./.github/workflows/build-appa-runtime-binaries.yml
     with:
-      source_ref: ${{ needs.release-please.outputs.tag_name }}
+      release_ref: ${{ needs.release-please.outputs.tag_name }}
       expected_version: ${{ needs.release-please.outputs.version }}
       plugin_sha256: ${{ needs.plugin-artifact.outputs.sha256 }}
 

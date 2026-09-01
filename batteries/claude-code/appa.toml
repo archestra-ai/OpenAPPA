@@ -40,6 +40,8 @@ name = "claude-code.undeclared-tool"
 builtin = "claude-code"
 ranks = ["suspicious", "trusted"]
 audiences = ["private"]
+marks = ["hitl"]
+effects = []
 
 [[policy.tool]]
 name = "*"

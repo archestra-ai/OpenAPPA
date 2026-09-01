@@ -44,6 +44,16 @@ fn deployed_binary(data: &Path) -> std::path::PathBuf {
 }
 
 #[test]
+fn the_plugin_source_override_is_hidden_from_normal_help() {
+    let output = Command::new(env!("CARGO_BIN_EXE_appa"))
+        .args(["init", "claude-code", "--help"])
+        .output()
+        .expect("appa help runs");
+    assert!(output.status.success());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("plugin-source"));
+}
+
+#[test]
 fn init_installs_one_local_adapter_and_is_safe_to_run_again() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let bin = directory.path().join("bin");

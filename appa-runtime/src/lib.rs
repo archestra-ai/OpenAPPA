@@ -18,3 +18,4 @@ mod elicit;
 mod engine;
 mod external;
 mod llm;
+mod plugin_layout;
