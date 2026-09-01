@@ -1,14 +1,10 @@
 #[path = "src/plugin_layout.rs"]
 mod plugin_layout;
 
-use std::collections::BTreeMap;
 use std::env;
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-use sha2::{Digest, Sha256};
 
 fn main() {
     println!("cargo:rerun-if-env-changed=APPA_PLUGIN_SHA256");
@@ -47,7 +43,7 @@ fn main() {
         repository
     };
     plugin_layout::stage_repository(identity_source, &staged).expect("stage the plugin source for build identity");
-    let digest = canonical_tree_digest(&staged).expect("digest the staged plugin source");
+    let digest = plugin_layout::canonical_tree_digest(&staged).expect("digest the staged plugin source");
     println!("cargo:rustc-env=APPA_PLUGIN_TREE_SHA256={}", hex(&digest));
 
     if let Some(reference) = release {
@@ -195,66 +191,4 @@ fn watch_git_identity(repository: &Path) {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-fn canonical_tree_digest(root: &Path) -> std::io::Result<[u8; 32]> {
-    let mut entries = BTreeMap::<String, Option<PathBuf>>::new();
-    collect(root, root, &mut entries)?;
-    let mut hasher = Sha256::new();
-    for (relative, absolute) in entries {
-        absorb(&mut hasher, relative.as_bytes());
-        match absolute {
-            None => {
-                hasher.update(*b"d");
-                absorb(&mut hasher, &[]);
-            }
-            Some(path) => {
-                hasher.update(*b"f");
-                let mut file = fs::File::open(path)?;
-                let length = file.metadata()?.len();
-                hasher.update(length.to_be_bytes());
-                let mut buffer = [0u8; 64 * 1024];
-                loop {
-                    let read = file.read(&mut buffer)?;
-                    if read == 0 {
-                        break;
-                    }
-                    hasher.update(&buffer[..read]);
-                }
-            }
-        }
-    }
-    Ok(hasher.finalize().into())
-}
-
-fn absorb(hasher: &mut Sha256, bytes: &[u8]) {
-    hasher.update((bytes.len() as u64).to_be_bytes());
-    hasher.update(bytes);
-}
-
-fn collect(root: &Path, directory: &Path, entries: &mut BTreeMap<String, Option<PathBuf>>) -> std::io::Result<()> {
-    for entry in fs::read_dir(directory)? {
-        let entry = entry?;
-        let absolute = entry.path();
-        let relative = absolute.strip_prefix(root).map_err(std::io::Error::other)?;
-        let portable = relative
-            .components()
-            .map(|component| component.as_os_str().to_str())
-            .collect::<Option<Vec<_>>>()
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "plugin path is not UTF-8"))?
-            .join("/");
-        let kind = entry.file_type()?;
-        if kind.is_dir() {
-            entries.insert(portable, None);
-            collect(root, &absolute, entries)?;
-        } else if kind.is_file() {
-            entries.insert(portable, Some(absolute));
-        } else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("{} is neither a regular file nor a directory", absolute.display()),
-            ));
-        }
-    }
-    Ok(())
 }

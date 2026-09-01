@@ -17,8 +17,13 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+pub use crate::plugin_layout::stage_repository;
+use crate::plugin_layout::{
+    EntryKind, MAX_ENTRIES, MAX_UNCOMPRESSED_BYTES, TreeDigestError, absorb_field, canonical_tree_digest, walk,
+};
+
 /// Files and directories every plugin source must carry, in the marketplace-root
-/// shape `scripts/appa-stage-plugin-bundle.sh` produces. One validator serves
+/// shape `plugin_layout::stage_repository` produces. One validator serves
 /// both source resolution and the reuse check on an existing deployment.
 const REQUIRED_FILES: [&str; 8] = [
     ".claude-plugin/marketplace.json",
@@ -410,140 +415,24 @@ impl Endpoint {
 // Canonical digests
 // ---------------------------------------------------------------------------
 
-/// Every length prefix in both digests is an unsigned 64-bit big-endian integer
-/// followed immediately by exactly that many bytes. Naive concatenation would be
-/// ambiguous, and both digests name deployment directories, so the encoding is
-/// observable identity and is pinned rather than left to the implementation.
-fn absorb_field(hasher: &mut Sha256, bytes: &[u8]) {
-    hasher.update((bytes.len() as u64).to_be_bytes());
-    hasher.update(bytes);
-}
-
-const KIND_FILE: u8 = b'f';
-const KIND_DIRECTORY: u8 = b'd';
-
-type StagedEntry = (String, u8, PathBuf);
-
-/// The identity of a plugin source that has no release digest of its own.
-///
-/// Computed over the staged tree after staging and **before** rendering, so it
-/// never depends on the paths being rendered into it. Without this, editing a
-/// file in a `--plugin-source` tree and re-running init would reuse the
-/// existing deployment and never reach Claude.
+/// The identity of a plugin source that has no release digest of its own:
+/// the canonical tree digest `build.rs` bakes in, over the staged tree and
+/// before rendering. Without this, editing a file in a `--plugin-source` tree
+/// and re-running init would reuse the existing deployment and never reach
+/// Claude.
 pub fn canonical_source_digest(root: &Path) -> Result<PluginDigest, PluginBundleError> {
-    let entries = walk(root)?;
-
-    let mut hasher = Sha256::new();
-    for (relative, kind, absolute) in entries {
-        absorb_field(&mut hasher, relative.as_bytes());
-        hasher.update([kind]);
-        if kind == KIND_DIRECTORY {
-            absorb_field(&mut hasher, &[]);
-        } else {
-            absorb_file(&mut hasher, &absolute)?;
-        }
-    }
-    Ok(PluginDigest::from_hasher(hasher))
+    Ok(PluginDigest(canonical_tree_digest(root)?))
 }
 
-/// The tree in canonical order, refused if it exceeds the source bounds.
-fn walk(root: &Path) -> Result<Vec<StagedEntry>, PluginBundleError> {
-    let mut entries = Vec::new();
-    collect_entries(root, root, &mut entries)?;
-    if entries.len() > MAX_ENTRIES {
-        return Err(PluginBundleError::OversizedSource {
-            path: root.to_path_buf(),
-            reason: format!("it holds more than {MAX_ENTRIES} entries"),
-        });
-    }
-    let mut total = 0u64;
-    for (_, kind, absolute) in &entries {
-        if *kind != KIND_FILE {
-            continue;
-        }
-        let length = fs::metadata(absolute)
-            .map_err(|source| PluginBundleError::ReadSource {
-                path: absolute.clone(),
-                source,
-            })?
-            .len();
-        total = total.saturating_add(length);
-        if total > MAX_UNCOMPRESSED_BYTES {
-            return Err(PluginBundleError::OversizedSource {
-                path: root.to_path_buf(),
-                reason: format!("it holds more than {MAX_UNCOMPRESSED_BYTES} bytes"),
-            });
+impl From<TreeDigestError> for PluginBundleError {
+    fn from(error: TreeDigestError) -> Self {
+        match error {
+            TreeDigestError::Read { path, source } => Self::ReadSource { path, source },
+            TreeDigestError::UnportablePath { path } => Self::UnportablePath { path },
+            TreeDigestError::UnsupportedEntry { path } => Self::UnsupportedEntry { path },
+            TreeDigestError::Oversized { path, reason } => Self::OversizedSource { path, reason },
         }
     }
-    // Bytewise on the UTF-8 path bytes, never locale collation.
-    entries.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
-    Ok(entries)
-}
-
-/// A file's length prefix and then its bytes, streamed.
-///
-/// The length comes from the file's own metadata and exactly that many bytes are
-/// absorbed, so the encoding stays the length-prefixed one the digest is defined
-/// as, without holding a whole file in memory.
-fn absorb_file(hasher: &mut Sha256, path: &Path) -> Result<(), PluginBundleError> {
-    use std::io::Read;
-
-    let read = |source: std::io::Error| PluginBundleError::ReadSource {
-        path: path.to_path_buf(),
-        source,
-    };
-    let mut file = fs::File::open(path).map_err(read)?;
-    let length = file.metadata().map_err(read)?.len();
-    hasher.update(length.to_be_bytes());
-
-    let mut remaining = length;
-    let mut buffer = [0u8; 64 * 1024];
-    while remaining > 0 {
-        let wanted = remaining.min(buffer.len() as u64) as usize;
-        let filled = file.read(&mut buffer[..wanted]).map_err(read)?;
-        if filled == 0 {
-            return Err(PluginBundleError::OversizedSource {
-                path: path.to_path_buf(),
-                reason: "it changed size while being read".to_owned(),
-            });
-        }
-        hasher.update(&buffer[..filled]);
-        remaining -= filled as u64;
-    }
-    Ok(())
-}
-
-fn collect_entries(root: &Path, directory: &Path, entries: &mut Vec<StagedEntry>) -> Result<(), PluginBundleError> {
-    let read = fs::read_dir(directory).map_err(|source| PluginBundleError::ReadSource {
-        path: directory.to_path_buf(),
-        source,
-    })?;
-    for entry in read {
-        let entry = entry.map_err(|source| PluginBundleError::ReadSource {
-            path: directory.to_path_buf(),
-            source,
-        })?;
-        let absolute = entry.path();
-        let relative = absolute
-            .strip_prefix(root)
-            .map_err(|_| PluginBundleError::UnportablePath { path: absolute.clone() })?;
-        let portable = portable_relative_path(relative)?;
-        // Symlinks and special files are refused here exactly as in extraction:
-        // the bundle is regular files and directories.
-        let kind = entry.file_type().map_err(|source| PluginBundleError::ReadSource {
-            path: absolute.clone(),
-            source,
-        })?;
-        if kind.is_dir() {
-            entries.push((portable, KIND_DIRECTORY, absolute.clone()));
-            collect_entries(root, &absolute, entries)?;
-        } else if kind.is_file() {
-            entries.push((portable, KIND_FILE, absolute));
-        } else {
-            return Err(PluginBundleError::UnsupportedEntry { path: absolute });
-        }
-    }
-    Ok(())
 }
 
 /// Everything a deployment's identity depends on beyond the source bytes.
@@ -585,13 +474,6 @@ fn path_identity(path: &Path) -> Result<&str, PluginBundleError> {
 // ---------------------------------------------------------------------------
 // Materialization
 // ---------------------------------------------------------------------------
-
-/// Caps on what a plugin source may be, whichever way it arrives. The bundle is
-/// a few hundred small text files; these bound a hostile archive or a
-/// development checkout that has accumulated a large generated directory,
-/// without being tight enough to constrain the real one.
-const MAX_ENTRIES: usize = 4096;
-const MAX_UNCOMPRESSED_BYTES: u64 = 64 * 1024 * 1024;
 
 /// The generated file every deployed shell surface sources.
 const PATHS_SH: &str = "plugin/hooks/appa-paths.sh";
@@ -645,11 +527,9 @@ pub fn materialize(
                 copy_tree(source, &incoming)?
             }
             Population::Repository { root, .. } => {
-                crate::plugin_layout::stage_repository(root, &incoming).map_err(|error| {
-                    PluginBundleError::StageRepository {
-                        path: root.to_path_buf(),
-                        reason: error.to_string(),
-                    }
+                stage_repository(root, &incoming).map_err(|error| PluginBundleError::StageRepository {
+                    path: root.to_path_buf(),
+                    reason: error.to_string(),
                 })?;
             }
             Population::Archive(archive) => extract_archive(archive, &incoming)?,
@@ -971,10 +851,11 @@ fn render_endpoint(root: &Path, endpoint_url: &str) -> Result<(), PluginBundleEr
     if endpoint_url == DEFAULT_ENDPOINT_URL {
         return Ok(());
     }
-    for (_, kind, absolute) in walk(root)? {
-        if kind != KIND_FILE {
+    for entry in walk(root)? {
+        if entry.kind != EntryKind::File {
             continue;
         }
+        let absolute = entry.absolute;
         let bytes = fs::read(&absolute).map_err(|source| PluginBundleError::ReadSource {
             path: absolute.clone(),
             source,
@@ -1215,11 +1096,9 @@ pub fn ensure_commit_archive(
     extract_archive(source.path(), &repository_container)?;
     let repository = single_directory(&repository_container)?;
     let bundle = workspace.path().join("bundle");
-    crate::plugin_layout::stage_repository(&repository, &bundle).map_err(|error| {
-        PluginBundleError::StageRepository {
-            path: repository.clone(),
-            reason: error.to_string(),
-        }
+    stage_repository(&repository, &bundle).map_err(|error| PluginBundleError::StageRepository {
+        path: repository.clone(),
+        reason: error.to_string(),
     })?;
     validate_tree(&bundle, TreeShape::Source)?;
     let actual = canonical_source_digest(&bundle)?;
@@ -1418,17 +1297,6 @@ mod tests {
         for value in ["", "abc", &"z".repeat(64), &"a".repeat(63), &"a".repeat(65)] {
             assert!(PluginDigest::parse(value).is_err(), "accepted {value:?}");
         }
-    }
-
-    #[test]
-    fn portable_path_uses_forward_slashes() {
-        let relative: PathBuf = ["plugin", "hooks", "hooks.json"].iter().collect();
-        assert_eq!(portable_relative_path(&relative).unwrap(), "plugin/hooks/hooks.json");
-    }
-
-    #[test]
-    fn portable_path_refuses_traversal_components() {
-        assert!(portable_relative_path(Path::new("../escape")).is_err());
     }
 
     fn sample_tree(root: &Path) {
@@ -1694,7 +1562,7 @@ mod tests {
     fn build_time_and_runtime_repository_staging_have_one_tree_identity() {
         let repository = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let staged = tempfile::tempdir().unwrap();
-        crate::plugin_layout::stage_repository(repository, staged.path()).unwrap();
+        stage_repository(repository, staged.path()).unwrap();
 
         let runtime = canonical_source_digest(staged.path()).unwrap();
         let compiled = PluginDigest::parse(env!("APPA_PLUGIN_TREE_SHA256")).unwrap();
@@ -1714,7 +1582,7 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success());
-        crate::plugin_layout::stage_repository(repository, &mapped).unwrap();
+        stage_repository(repository, &mapped).unwrap();
 
         assert_eq!(
             canonical_source_digest(&scripted).unwrap(),

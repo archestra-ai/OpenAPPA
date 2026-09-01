@@ -23,15 +23,10 @@ pub fn repo_root() -> PathBuf {
 }
 
 /// The marketplace root a developer passes to `--plugin-source`, staged into
-/// `into` by the same script the release runs.
+/// `into` by the same mapping the build and init use.
 pub fn stage_bundle(into: &Path) -> PathBuf {
     let staged = into.join("plugin-source");
-    let status = std::process::Command::new("sh")
-        .arg(repo_root().join("scripts/appa-stage-plugin-bundle.sh"))
-        .arg(&staged)
-        .status()
-        .expect("the staging script runs");
-    assert!(status.success(), "the staging script failed");
+    appa_runtime::plugin_bundle::stage_repository(&repo_root(), &staged).expect("the checkout stages");
     staged
 }
 
