@@ -285,14 +285,14 @@ impl Engine {
             EngineEvent::ExecuteOffer(execution) => {
                 let views = projection.view(&execution.trajectory);
                 match views.offer(&execution.offer) {
-                    Some(offer) => (execution.audience.inheriting(&offer.evidence), offer.evidence.clone()),
+                    Some(offer) => (execution.audience.inheriting(&offer.evidence)?, offer.evidence.clone()),
                     None => (execution.audience.clone(), AudienceEvidence::default()),
                 }
             }
             EngineEvent::Outcome(report) => {
                 let views = projection.view(report.dispatch.trajectory());
                 match views.dispatch_evidence(&report.dispatch) {
-                    Some(pinned) => (report.audience.inheriting(pinned), pinned.clone()),
+                    Some(pinned) => (report.audience.inheriting(pinned)?, pinned.clone()),
                     None => (report.audience.clone(), AudienceEvidence::default()),
                 }
             }
@@ -1643,8 +1643,11 @@ impl Engine {
         if recorded.evidence != batch.audience {
             return Err(TransitionError::BatchIdentityConflict);
         }
-        act.inherit(&recorded.evidence);
-        let under = self.act_evidence(act.evidence.inheriting(&recorded.evidence), AudienceEvidence::default())?;
+        act.inherit(&recorded.evidence)?;
+        let under = self.act_evidence(
+            act.evidence.inheriting(&recorded.evidence)?,
+            AudienceEvidence::default(),
+        )?;
         let follow_up = self.decided_follow_up(views, batch, &proposals, &recorded.released, &under)?;
         act.expansions.absorb_reads(&under.expansions);
         Ok(Some(EngineDecision {
@@ -1752,6 +1755,7 @@ impl Engine {
         .map_err(|refusal| match refusal {
             ComposeRefusal::Malformed(error) => TransitionError::Call(error),
             ComposeRefusal::MembershipNeeded(needed) => TransitionError::from(needed),
+            ComposeRefusal::Evidence(refusal) => TransitionError::ForeignEvidence(refusal),
         })?;
 
         let released: Vec<Released> = composed
@@ -1996,8 +2000,8 @@ impl Engine {
             .map(|(position, call)| {
                 let subject = subject_at(position);
                 let pinned = views.candidate_evidence(&subject);
-                act.inherit(&pinned);
-                let under = self.act_evidence(act.evidence.inheriting(&pinned), AudienceEvidence::default())?;
+                act.inherit(&pinned)?;
+                let under = self.act_evidence(act.evidence.inheriting(&pinned)?, AudienceEvidence::default())?;
                 Ok((views.standing_call(&subject).unwrap_or(call), under))
             })
             .collect::<Result<_, TransitionError>>()?;
@@ -2815,8 +2819,8 @@ impl Engine {
             // The candidate may stand under another contract than the offer was planned on; the
             // atoms that contract reads were pinned by the hop that derived it.
             let pinned = views.candidate_evidence(&recorded.subject);
-            act.inherit(&pinned);
-            let under = self.act_evidence(act.evidence.inheriting(&pinned), AudienceEvidence::default())?;
+            act.inherit(&pinned)?;
+            let under = self.act_evidence(act.evidence.inheriting(&pinned)?, AudienceEvidence::default())?;
             let reblocked = self.reblocked(views, recorded, execution, &under)?;
             act.expansions.absorb_reads(&under.expansions);
             return Ok(match reblocked {
@@ -3630,6 +3634,7 @@ impl ComposingBatch<'_> {
 pub(crate) enum ComposeRefusal {
     Malformed(EngineError),
     MembershipNeeded(crate::label::MembershipNeeded),
+    Evidence(crate::audience::EvidenceRefusal),
 }
 
 /// One act's audience reading: the merged pinned evidence its records persist, the
@@ -3668,10 +3673,10 @@ impl ActEvidence {
     /// Count `pins` — entries a record this act continues already pinned — as inherited, so
     /// the operation-scope test excuses them. Interior mutability: overlay contexts built
     /// mid-decision discover pins the act-building event could not name.
-    fn inherit(&self, pins: &AudienceEvidence) {
-        let mut inherited = self.inherited.borrow_mut();
-        let merged = inherited.inheriting(pins);
-        *inherited = merged;
+    fn inherit(&self, pins: &AudienceEvidence) -> Result<(), crate::audience::EvidenceRefusal> {
+        let merged = self.inherited.borrow().inheriting(pins)?;
+        *self.inherited.borrow_mut() = merged;
+        Ok(())
     }
 }
 
@@ -3742,12 +3747,15 @@ pub(crate) fn compose_batch<'a>(
             let spends = if singleton { approval(&views, call) } else { None };
             let under = match spends.and_then(|offer| views.approval(&offer)) {
                 Some(prepared) => {
-                    act.inherit(&prepared.evidence);
-                    let merged = act.evidence.inheriting(&prepared.evidence);
+                    act.inherit(&prepared.evidence).map_err(ComposeRefusal::Evidence)?;
+                    let merged = act
+                        .evidence
+                        .inheriting(&prepared.evidence)
+                        .map_err(ComposeRefusal::Evidence)?;
                     let expansions = registry
                         .audience()
                         .expansions(&merged)
-                        .expect("two validated evidence sets merge into a validated one");
+                        .map_err(ComposeRefusal::Evidence)?;
                     std::borrow::Cow::Owned(ActEvidence::validated(merged, expansions))
                 }
                 None => std::borrow::Cow::Borrowed(act),
@@ -11991,6 +11999,93 @@ mod tests {
         );
     }
 
+    fn wide_as_reported() -> Vec<crate::audience::MemberClaims> {
+        vec![
+            slack_member("slack:UA", Some("alice@corp.com")),
+            slack_member("slack:UC", Some("carol@other.com")),
+        ]
+    }
+
+    /// The officer's approval, armed over `wide` reported as alice and an outsider, for a
+    /// proposal whose own evidence the test supplies: the spend reads that evidence under the
+    /// approval's pins.
+    fn spending_under_pins(fresh: crate::audience::AudienceEvidence) -> Result<EngineDecision, TransitionError> {
+        let officer = crate::authority::Authority {
+            name: AuthorityName::new("officer"),
+            mandate: crate::authority::Mandate {
+                reader_ceiling: Some(DeclaredAudience::literal(Audience::public())),
+                ..crate::authority::Mandate::default()
+            },
+            scope: crate::authority::Scope::default(),
+            hint: None,
+        };
+        let alice = Audience::restricted([corp_reader("alice")]);
+        let e = audience_engine(vec![officer], known(TRUSTED, alice.clone()));
+        let opening = vec![opened(&e)];
+        let pinned = source_evidence(vec![user_group("wide", wide_as_reported())]);
+        let blocked = appended_facts(
+            e.handle(
+                &viewing(&e, &opening),
+                evidenced_batch("b1", vec![send_to("@wide")], pinned),
+            )
+            .expect("the batch decides"),
+        );
+        let (offer, plan) = opened_offers(&blocked)[0].clone();
+        let log = [opening, blocked].concat();
+        let approved = appended_facts(
+            execute_offer(
+                &e,
+                &log,
+                offer,
+                OfferOutcome::Approved(evidence_for(offer, &plan, "send", partial(TRUSTED, alice))),
+            )
+            .expect("the officer's ruling arms the call"),
+        );
+        let log = [log, approved].concat();
+        e.handle(&viewing(&e, &log), evidenced_batch("b2", vec![send_to("@wide")], fresh))
+    }
+
+    /// A fresh answer for a key the approval pinned is read under the pin: the same answer
+    /// again is fine, a different one is a contradiction the spend refuses — never an entry
+    /// silently dropped in favour of the pin.
+    #[test]
+    fn a_spend_refuses_a_fresh_answer_that_contradicts_a_pinned_key() {
+        let same = source_evidence(vec![user_group("wide", wide_as_reported())]);
+        assert!(
+            spending_under_pins(same).is_ok(),
+            "restating the pin is not a contradiction"
+        );
+        let contradicting = source_evidence(vec![user_group(
+            "wide",
+            vec![slack_member("slack:UB", Some("bob@corp.com"))],
+        )]);
+        assert!(matches!(
+            spending_under_pins(contradicting),
+            Err(TransitionError::ForeignEvidence(
+                crate::audience::EvidenceRefusal::ContradictedPin { .. }
+            ))
+        ));
+    }
+
+    /// Two admissible evidence sets can still disagree once merged — the pinned selector and
+    /// a fresh one report the same member under different verified addresses. The spend
+    /// refuses the merged reading as it refuses any other conflicting claim.
+    #[test]
+    fn a_spend_refuses_a_merged_reading_whose_claims_conflict() {
+        let conflicting = source_evidence(vec![user_group(
+            "narrow",
+            vec![slack_member("slack:UA", Some("mallory@other.com"))],
+        )]);
+        assert_eq!(
+            spending_under_pins(conflicting).err(),
+            Some(TransitionError::ForeignEvidence(
+                crate::audience::EvidenceRefusal::ConflictingClaims {
+                    id: "slack:UA".to_string()
+                }
+            ))
+        );
+    }
+
     #[test]
     fn replay_refuses_a_provider_admission_no_act_declared() {
         let e = batch_engine();
@@ -14219,11 +14314,28 @@ mod tests {
             );
             assert_eq!(
                 routes(source_evidence(vec![
-                    user_group("board", vec![slack_member("slack:UA", Some("alice@corp.com"))]),
-                    user_group("team", vec![slack_member("slack:UA", Some("alice@corp.com"))]),
+                    user_group("board", vec![]),
+                    user_group("team", vec![])
                 ])),
                 recorded,
-                "fresh answers that would lift the cap change nothing: the answers the block consumed stand"
+                "restating the answers the block consumed reads them once"
+            );
+            assert!(
+                matches!(
+                    e.recovery_routes(
+                        &view,
+                        &subject,
+                        &source_evidence(vec![user_group(
+                            "team",
+                            vec![slack_member("slack:UA", Some("alice@corp.com"))]
+                        )]),
+                        RouteDepth::ONE
+                    ),
+                    Err(crate::route::RouteError::Evidence(
+                        crate::audience::EvidenceRefusal::ContradictedPin { .. }
+                    ))
+                ),
+                "a fresh answer that would lift the cap contradicts the answer the block consumed"
             );
             assert!(matches!(
                 e.recovery_routes(

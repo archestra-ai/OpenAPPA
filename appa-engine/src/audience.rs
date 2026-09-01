@@ -115,34 +115,63 @@ impl AudienceEvidence {
     }
 
     /// This act's evidence read under an earlier record's pins: the pinned entries come
-    /// first and win, and only answers for keys the pins do not hold are added. A chain of
-    /// operations over one value reads each primitive under one answer.
-    pub fn inheriting(&self, pinned: &AudienceEvidence) -> AudienceEvidence {
+    /// first, an answer restating a pin is that one entry, and an answer for a key the pins
+    /// hold with different content is a contradiction the operation refuses. Nothing here
+    /// dedups the act's own entries: two answers for one key stay two, for validation to
+    /// refuse. A chain of operations over one value reads each primitive under one answer.
+    pub fn inheriting(&self, pinned: &AudienceEvidence) -> Result<AudienceEvidence, EvidenceRefusal> {
         let mut merged = pinned.clone();
         for claims in &self.sources {
-            let held = merged
+            let held = pinned
                 .sources
                 .iter()
-                .any(|entry| entry.provider == claims.provider && entry.selector == claims.selector);
-            if !held {
-                merged.sources.push(claims.clone());
+                .find(|entry| entry.provider == claims.provider && entry.selector == claims.selector);
+            match held {
+                None => merged.sources.push(claims.clone()),
+                Some(entry) if entry == claims => {}
+                Some(_) => return Err(EvidenceRefusal::ContradictedPin { entry: claims.entry() }),
             }
         }
         for lookup in &self.lookups {
-            let held = merged
+            let held = pinned
                 .lookups
                 .iter()
-                .any(|entry| entry.provider == lookup.provider && entry.member == lookup.member);
-            if !held {
-                merged.lookups.push(lookup.clone());
+                .find(|entry| entry.provider == lookup.provider && entry.member == lookup.member);
+            match held {
+                None => merged.lookups.push(lookup.clone()),
+                Some(entry) if entry == lookup => {}
+                Some(_) => return Err(EvidenceRefusal::ContradictedPin { entry: lookup.entry() }),
             }
         }
         for mapping in &self.identity {
-            if !merged.identity.iter().any(|entry| entry.id == mapping.id) {
-                merged.identity.push(mapping.clone());
+            match pinned.identity.iter().find(|entry| entry.id == mapping.id) {
+                None => merged.identity.push(mapping.clone()),
+                Some(entry) if entry == mapping => {}
+                Some(_) => return Err(EvidenceRefusal::ContradictedPin { entry: mapping.entry() }),
             }
         }
-        merged
+        Ok(merged)
+    }
+}
+
+impl SourceClaims {
+    /// The entry as a refusal names it.
+    fn entry(&self) -> String {
+        format!("source {}:{}", self.provider, self.selector)
+    }
+}
+
+impl MemberLookup {
+    /// The entry as a refusal names it.
+    fn entry(&self) -> String {
+        format!("lookup {}", self.member)
+    }
+}
+
+impl IdentityMapping {
+    /// The entry as a refusal names it.
+    fn entry(&self) -> String {
+        format!("identity mapping for {}", self.id)
     }
 }
 
@@ -185,6 +214,8 @@ pub enum EvidenceRefusal {
     UnroutableLookup { provider: String, member: String },
     #[error("evidence entry {entry} is neither an inherited pin nor requested by this operation")]
     UnrequestedEvidence { entry: String },
+    #[error("evidence entry {entry} contradicts the answer an earlier record of this chain pinned")]
+    ContradictedPin { entry: String },
 }
 
 /// One operation-wide claim per provider id, folded across every occurrence the evidence
@@ -711,9 +742,7 @@ impl AudienceRegistry {
                 selector: claims.selector.clone(),
             };
             if !requested.selectors.contains(&spec) && !inherited.sources.contains(claims) {
-                return Err(EvidenceRefusal::UnrequestedEvidence {
-                    entry: format!("source {}:{}", claims.provider, claims.selector),
-                });
+                return Err(EvidenceRefusal::UnrequestedEvidence { entry: claims.entry() });
             }
         }
         for lookup in &evidence.lookups {
@@ -722,9 +751,7 @@ impl AudienceRegistry {
                 selector: lookup.member.clone(),
             };
             if !requested.lookups.contains(&spec) && !inherited.lookups.contains(lookup) {
-                return Err(EvidenceRefusal::UnrequestedEvidence {
-                    entry: format!("lookup {}", lookup.member),
-                });
+                return Err(EvidenceRefusal::UnrequestedEvidence { entry: lookup.entry() });
             }
         }
         // An identity mapping is requested only through a member the admitted evidence
@@ -748,9 +775,7 @@ impl AudienceRegistry {
                 IdentityImplementation::VerifiedEmail => false,
             };
             if !requested && !inherited.identity.contains(mapping) {
-                return Err(EvidenceRefusal::UnrequestedEvidence {
-                    entry: format!("identity mapping for {}", mapping.id),
-                });
+                return Err(EvidenceRefusal::UnrequestedEvidence { entry: mapping.entry() });
             }
         }
         Ok(())

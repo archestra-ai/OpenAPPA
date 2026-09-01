@@ -1955,6 +1955,9 @@ fn refusal_class(refusal: &appa_engine::audience::EvidenceRefusal) -> String {
         EvidenceRefusal::UnrequestedEvidence { .. } => {
             "evidence beyond this operation's inherited pins and its own asks".to_string()
         }
+        EvidenceRefusal::ContradictedPin { .. } => {
+            "an answer that contradicts the one an earlier record of this chain pinned".to_string()
+        }
     }
 }
 
