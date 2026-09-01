@@ -210,7 +210,7 @@ impl ExternalServices {
             command: config.claude_code.command.clone(),
             #[cfg(unix)]
             model: config.claude_code.model.clone(),
-            timeout: config.claude_code.timeout.unwrap_or(config.timeout),
+            timeout: config.claude_code.timeout,
             #[cfg(unix)]
             max_body_bytes: config.max_body_bytes,
         };

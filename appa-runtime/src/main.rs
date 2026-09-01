@@ -213,16 +213,31 @@ async fn health(State(state): State<AppState>) -> String {
     health_answer(stale, std::process::id())
 }
 
+/// The policy this process serves, so an install can tell whether a runtime it left
+/// running still answers under the configuration on disk. Read-only: reloading is the
+/// caller's separate, deliberate step.
+async fn policy_key(State(state): State<AppState>) -> String {
+    state.runtime.serving_policy_key()
+}
+
+/// Which deployment answers here: the build, the process, and the configuration it serves.
+///
+/// The build alone does not identify a deployment. Two installs of one build are
+/// byte-identical, so an install that compared digests alone would take another
+/// deployment's runtime for its own. The configuration path is what separates them.
 async fn binary_fingerprint(State(state): State<AppState>) -> Result<String, axum::http::StatusCode> {
     state
         .executable
         .as_ref()
-        .map(|executable| binary_fingerprint_answer(&executable.digest, std::process::id()))
+        .map(|executable| binary_fingerprint_answer(&executable.digest, std::process::id(), &state.config))
         .ok_or(axum::http::StatusCode::NOT_FOUND)
 }
 
-fn binary_fingerprint_answer(digest: &str, pid: u32) -> String {
-    format!("{digest} {pid}")
+/// The first line's fields are read positionally, so the configuration follows the first
+/// newline and runs to the end of the answer. A path may hold spaces and, on Unix, newlines;
+/// taking the whole remainder verbatim keeps either from being mistaken for a field break.
+fn binary_fingerprint_answer(digest: &str, pid: u32, config: &Path) -> String {
+    format!("{digest} {pid}\n{}", config.display())
 }
 
 fn health_answer(stale: bool, pid: u32) -> String {
@@ -328,6 +343,7 @@ async fn serve(args: Args) -> ExitCode {
     let app = axum::Router::new()
         .route("/health", get(health))
         .route("/binary-fingerprint", get(binary_fingerprint))
+        .route("/policy-key", get(policy_key))
         .route("/status", get(status))
         .route("/hook", post(hook))
         .route("/reload", post(reload))
@@ -341,7 +357,10 @@ async fn serve(args: Args) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    tracing::info!(listen = %args.listen, "appa-runtime serving /hook, /mcp, /status, /reload, /health, and /binary-fingerprint");
+    tracing::info!(
+        listen = %args.listen,
+        "appa-runtime serving /hook, /mcp, /status, /reload, /health, /binary-fingerprint, and /policy-key"
+    );
     match axum::serve(listener, app).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -447,8 +466,12 @@ mod tests {
     }
 
     #[test]
-    fn the_binary_fingerprint_names_the_process_that_serves_it() {
-        assert_eq!(binary_fingerprint_answer("abc123", 41), "abc123 41");
+    fn the_binary_fingerprint_names_the_deployment_that_serves_it() {
+        // The configuration is on its own line so a path holding spaces stays one value.
+        assert_eq!(
+            binary_fingerprint_answer("abc123", 41, Path::new("/home/user/Application Support/appa.toml")),
+            "abc123 41\n/home/user/Application Support/appa.toml"
+        );
     }
 
     #[test]
