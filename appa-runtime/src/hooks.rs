@@ -192,7 +192,7 @@ fn control_call(runtime: &Runtime, actor: &Actor, call: &ProposedCall) -> HookDe
         }
         _ => {
             tracing::debug!(trajectory = %acting.0, "control tool refused: no such offer here");
-            deny("[appa] this offer no longer stands; re-propose the call".to_string())
+            deny("this offer no longer stands; re-propose the call".to_string())
         }
     }
 }
@@ -242,8 +242,13 @@ fn fold(error: EventError, family: fn(String) -> HookDecision) -> HookDecision {
     }
 }
 
+/// A refusal of this dispatcher's own that the model will read names APPA
+/// once, here, so a session can tell a runtime refusal from its harness's;
+/// a block is marked by the adapter's withheld-result rendering instead.
 fn deny(feedback: String) -> HookDecision {
-    HookDecision::DenyCall { feedback }
+    HookDecision::DenyCall {
+        feedback: format!("[appa] {feedback}"),
+    }
 }
 
 fn block(reason: String) -> HookDecision {
@@ -572,6 +577,23 @@ mod tests {
             (200, serde_json::json!({}))
         );
         assert!(!closed_as_unknown(&runtime));
+    }
+
+    /// Every refusal of the dispatcher's own that reaches the model on the
+    /// deny wire names APPA, whichever event error produced it.
+    #[tokio::test]
+    async fn a_deny_of_the_dispatchers_own_names_appa() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let released = hook(&runtime, &bash_call("sleep 30")).await;
+        assert_eq!(released.1["hookSpecificOutput"]["permissionDecision"], "allow");
+
+        let denied = hook(&runtime, &bash_call("ls")).await;
+        assert_eq!(denied.1["hookSpecificOutput"]["permissionDecision"], "deny");
+        let reason = denied.1["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .expect("a deny carries its reason");
+        assert!(reason.starts_with("[appa] "), "the deny reads: {reason}");
     }
 
     #[tokio::test]
