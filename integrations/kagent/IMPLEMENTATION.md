@@ -38,7 +38,7 @@ Go-runtime agents on v0.9.12 are no cell: that tree has no Go-image knob and a v
 No kagent fork and no Google ADK fork, in either runtime:
 
 - **Python runtime**: `KAgentApp(plugins=[...])` is a public constructor parameter of the published `kagent-adk` package ([v0.9.12 _a2a.py#L63](https://github.com/kagent-dev/kagent/blob/v0.9.12/python/packages/kagent-adk/src/kagent/adk/_a2a.py#L63)), forwarded into ADK's plugin manager. kagent registers its own plugins through it ([cli.py#L69-L79](https://github.com/kagent-dev/kagent/blob/v0.9.12/python/packages/kagent-adk/src/kagent/adk/cli.py#L69-L79)). The stock entrypoint's plugin list is closed and no config adds to it, so the adapter image carries its own entrypoint that makes the same public calls and appends one plugin.
-- **Go runtime**: kagent's Go runtime is Google's official Go ADK. On the release-candidate line it registers plugins through the ADK v2 plugin API — kagent's own runner adapter passes `runner.PluginConfig{Plugins: ...}` ([v0.10.0-rc4 go/adk/pkg/runner/adapter.go#L93-L111](https://github.com/kagent-dev/kagent/blob/v0.10.0-rc4/go/adk/pkg/runner/adapter.go#L93-L111)) — but the list is compiled in, with no config knob. The Go adapter is therefore a replacement runtime main built on kagent's public `go/adk` packages that registers `AppaHookPlugin` (Go) in that list.
+- **Go runtime**: kagent's Go runtime is Google's official Go ADK. On the release-candidate line it registers plugins through the ADK v2 plugin API — kagent's own runner adapter passes `runner.PluginConfig{Plugins: ...}` ([v0.10.0-rc4 go/adk/pkg/runner/adapter.go#L93-L111](https://github.com/kagent-dev/kagent/blob/v0.10.0-rc4/go/adk/pkg/runner/adapter.go#L93-L111)) — but the list is compiled in, with no config knob. The Go adapter is therefore a replacement runtime main built on kagent's public `go/adk` packages that registers `AppaPluginKagent` (Go) in that list.
 - Delivery is always an image reference the operator already controls. The lanes below name the knob per tree.
 
 Both plugins hold no policy state. They serialize callback moments into wire events, send them to `APPA_RUNTIME_URL`, and enforce the answered `HookDecision`. `appa-runtime` owns policy, the Engine, consults, remedy plans, trajectory state, recovery semantics, and `appa.db`.
@@ -73,7 +73,7 @@ helm controller.agentImage = appa-kagent-adk
 │                                                       │
 │  entrypoint.py                                        │
 │    AgentConfig.model_validate — refuse unknown fields │
-│    KAgentApp(plugins=[ ..stock.., AppaHookPlugin ])   │
+│    KAgentApp(plugins=[ ..stock.., AppaPluginKagent ]) │
 │  kagent-adk 0.3.0 · google-adk 1.31.1 · 12 callbacks  │
 └──────────────────────────┬────────────────────────────┘
                            ▼  POST $APPA_RUNTIME_URL/hook
@@ -97,7 +97,7 @@ helm controller.agentImage = appa-kagent-adk
 ┌─ agent pod · runtime: python ─────────────────────────┐
 │  args, /config Secret, readiness — as cell A-py       │
 │  entrypoint.py                                        │
-│    KAgentApp(plugins=[ ..stock.., AppaHookPlugin ])   │
+│    KAgentApp(plugins=[ ..stock.., AppaPluginKagent ]) │
 │  google-adk 2.8.0 · 14 callbacks                      │
 └──────────────────────────┬────────────────────────────┘
                            ▼  POST $APPA_RUNTIME_URL/hook
@@ -117,7 +117,7 @@ helm controller.goAgentImage = appa-kagent-adk-go
 │                                                       │
 │  main: rebuild the agent from the rendered config,    │
 │    then runner.PluginConfig{Plugins:                  │
-│      [ ..stock.., AppaHookPlugin ]}                   │
+│      [ ..stock.., AppaPluginKagent ]}                 │
 │  adk/v2 v2.1.0 · 12 callbacks · no error-turn cb      │
 └──────────────────────────┬────────────────────────────┘
                            ▼  POST $APPA_RUNTIME_URL/hook
@@ -175,7 +175,7 @@ Harness.spec.workload.image = appa-kagent-adk-go@sha256:…
 │  go main reads KAGENT_CONFIG_JSON — the go-shaped     │
 │    config, in-process sub_agents included — then      │
 │    registers runner.PluginConfig{Plugins:             │
-│      [ ..stock.., AppaHookPlugin ]}                   │
+│      [ ..stock.., AppaPluginKagent ]}                 │
 │  adk/v2 v2.2.0 · plugin set identical to v2.1.0       │
 └──────────────────────────┬────────────────────────────┘
                            ▼  POST $APPA_RUNTIME_URL/hook
@@ -185,7 +185,7 @@ Harness.spec.workload.image = appa-kagent-adk-go@sha256:…
 
 The quickstart is optional and orthogonal to everything above — same plugins, same wire, same codec, same adapter images. Skipping it changes nothing. It exists so one operator can gate one agent in minutes, with no separate `appa-runtime` deployment.
 
-`appa-kagent-quickstart` is one image that bundles both runtime layers and `appa-runtime` itself. The entrypoint starts `appa-runtime` on `127.0.0.1:8787` with a packaged example policy, points `APPA_RUNTIME_URL` at it, and execs the runtime that matches the rendered config. The pod keeps the stock args, port, and readiness contract. Point `controller.agentImage` at it on v0.9.12 (python agents), or both image values on the v0.10 release candidates.
+`appa-kagent-quickstart` is one image that bundles both runtime layers and `appa-runtime` itself. The entrypoint starts `appa-runtime` on `127.0.0.1:8787` with a packaged example policy, points `APPA_RUNTIME_URL` at it, and execs the runtime that matches the rendered config. The pod keeps the stock args, port, and readiness contract, and the bundled runtime serves `/mcp` too, so remedy plans execute the same way. Point `controller.agentImage` at it on v0.9.12 (python agents), or both image values on the v0.10 release candidates.
 
 ```text
 quickstart — one pod, nothing else to deploy
@@ -197,7 +197,7 @@ helm controller.agentImage = appa-kagent-quickstart
 │  entrypoint: start appa-runtime on 127.0.0.1:8787,    │
 │  then exec the runtime the rendered config matches    │
 │                                                       │
-│  kagent runtime (python or go) + AppaHookPlugin       │
+│  kagent runtime (python or go) + AppaPluginKagent     │
 │    │  POST http://127.0.0.1:8787/hook                 │
 │    ▼                                                  │
 │  appa-runtime · policy · Engine · appa.db — pod-local │
@@ -212,7 +212,7 @@ Quickstart limits:
 
 ## Runtime adapters
 
-### Python — `AppaHookPlugin` on google-adk (verified)
+### Python — `AppaPluginKagent` on google-adk (verified)
 
 The plugin implements google-adk `BasePlugin`. Each gated callback sends one wire event to `POST $APPA_RUNTIME_URL/hook` and enforces the decision that comes back. A transport failure or a non-contract response raises, and ADK wraps the exception and aborts the invocation (`plugin_manager.py`: 288-305 in 1.31.1, 316-322 in 2.8.0). One mapping table per locked ADK version follows. Wheel citations name paths and lines inside that version's wheel.
 
@@ -225,6 +225,7 @@ The 1.31.1 wheel defines 12 lifecycle callbacks (`base_plugin.py` lines 114, 136
 | `on_user_message_callback`, first invocation of a fresh session | `SessionStart` | `Refuse` raises before `Prompt` is sent | `runners.py` 1537-1541 |
 | `on_user_message_callback` | `Prompt` | `Block` raises pre-append, so the bytes never land in session history | fires before the append: `runners.py` 1537 then 1550-1556 |
 | `before_tool_callback` | `ToolCall{spawn}` | `DenyCall{feedback}`: return a dict — ADK skips execution, and the dict becomes the function response the model reads. `Refuse` raises. | `functions.py` 509-534, 588-592 |
+| `before_tool_callback` on `execute_remedy_plan` | `ToolCall` | `PassControl`: return None — the call passes through to the runtime's own `/mcp`, which spends the hook's vouch | `functions.py` 509-534 |
 | `after_tool_callback` | `ToolResult` | `ReplaceOutput{output}`: return a dict — it replaces the result the model sees. `Block` raises. The plugin recognizes its own deny dicts here (a denied call flows through this callback too) and reports them once. | `functions.py` 547-576 |
 | `on_tool_error_callback` | `ToolResult` with `Failure` outcome | return a dict to convert, or re-raise. Does not fire for a `before_tool_callback` raise — a `Refuse` stays terminal. | `functions.py` 535-545 |
 | `before_tool_callback` on an agent tool | `ToolCall{spawn:true}` | as `ToolCall`. The plugin holds the `AllowCall{spawn}` binding for the child scope | `functions.py` 509-534 |
@@ -247,6 +248,7 @@ The 2.8.0 wheel defines 14 lifecycle callbacks: the twelve above at the same `ba
 | `on_user_message_callback`, first invocation of a fresh session | `SessionStart` | `Refuse` raises before `Prompt` is sent | `runners.py` 677 |
 | `on_user_message_callback` | `Prompt` | `Block` raises pre-append: the callback runs at 677, the session append at 705-708 | `runners.py` 677, 705-708 |
 | `before_tool_callback` | `ToolCall{spawn}` | `DenyCall{feedback}`: the returned dict skips execution and becomes the function response the model reads. `Refuse` raises. | `functions.py` 611-622 |
+| `before_tool_callback` on `execute_remedy_plan` | `ToolCall` | `PassControl`: return None — the call passes through to the runtime's own `/mcp`, which spends the hook's vouch | `functions.py` 611-622 |
 | `after_tool_callback` | `ToolResult` | `ReplaceOutput{output}`: the returned dict replaces the result. Deny dicts are self-recognized and reported once. | `functions.py` 652-656 |
 | `on_tool_error_callback` | `ToolResult` with `Failure` outcome | return a dict to convert, or re-raise | `functions.py` 544-563, 595, 641 |
 | `before_tool_callback` on an agent tool | `ToolCall{spawn:true}` | as `ToolCall`, holding the `AllowCall{spawn}` binding | `functions.py` 611-622 |
@@ -264,14 +266,15 @@ Entrypoint (python image), in order:
 
 1. Parse the mounted or env-delivered config with a strict schema, and refuse unknown fields with an unready exit.
 2. Validate with `AgentConfig.model_validate` and build the factory over `to_agent`.
-3. Rebuild the stock plugin list with the stock conditions (STS token propagation, LLM passthrough), then append `AppaHookPlugin(APPA_RUNTIME_URL)`.
-4. Construct `KAgentApp(...)`, call `.build()`, and serve on the controller-given host and port — the same calls as [cli.py#L88-L101](https://github.com/kagent-dev/kagent/blob/v0.9.12/python/packages/kagent-adk/src/kagent/adk/cli.py#L88-L101).
+3. Rebuild the stock plugin list with the stock conditions (STS token propagation, LLM passthrough), then append `AppaPluginKagent(APPA_RUNTIME_URL)`.
+4. Append the reserved-tool toolset: a `McpToolset` over streamable HTTP at `$APPA_RUNTIME_URL/mcp` (see [Remedy-plan execution](#remedy-plan-execution)).
+5. Construct `KAgentApp(...)`, call `.build()`, and serve on the controller-given host and port — the same calls as [cli.py#L88-L101](https://github.com/kagent-dev/kagent/blob/v0.9.12/python/packages/kagent-adk/src/kagent/adk/cli.py#L88-L101).
 
-### Go — `AppaHookPlugin` on the Go ADK (design, verification pending)
+### Go — `AppaPluginKagent` on the Go ADK (design, verification pending)
 
-The Go adapter is a small runtime main, module `appa-kagent-adk-go`, that imports kagent's public `go/adk` packages, constructs the same agent the stock Go runtime builds from the rendered config, and registers the Go `AppaHookPlugin` through the ADK v2 plugin API — the registration point kagent itself uses ([rc4 adapter.go#L93-L111](https://github.com/kagent-dev/kagent/blob/v0.10.0-rc4/go/adk/pkg/runner/adapter.go#L93-L111)). It emits the same adapter wire as the python plugin.
+The Go adapter is a small runtime main, module `appa-kagent-adk-go`, that imports kagent's public `go/adk` packages, constructs the same agent the stock Go runtime builds from the rendered config, and registers the Go `AppaPluginKagent` through the ADK v2 plugin API — the registration point kagent itself uses ([rc4 adapter.go#L93-L111](https://github.com/kagent-dev/kagent/blob/v0.10.0-rc4/go/adk/pkg/runner/adapter.go#L93-L111)). It emits the same adapter wire as the python plugin, and it appends the reserved-tool toolset at construction.
 
-The build composes upstream, and does not fork it. `appa-kagent-adk-go` is a separate Go module with one runtime main. Its `go.mod` requires the `github.com/kagent-dev/kagent/go` module, which exports the `go/adk` packages, and `google.golang.org/adk/v2` — pinned, fetched unmodified from the module proxy, locked by `go.sum`. `go build` links `AppaHookPlugin` into one static binary, and the image ships that binary under the stock args, port, and readiness contract. Go compiles the plugin list in, so the Go image adds its plugin at build time, where the python image adds its plugin at container start. The mapping verification also confirms that every construction call the main needs is exported — the module imports no kagent `internal/` package.
+The build composes upstream, and does not fork it. `appa-kagent-adk-go` is a separate Go module with one runtime main. Its `go.mod` requires the `github.com/kagent-dev/kagent/go` module, which exports the `go/adk` packages, and `google.golang.org/adk/v2` — pinned, fetched unmodified from the module proxy, locked by `go.sum`. `go build` links `AppaPluginKagent` into one static binary, and the image ships that binary under the stock args, port, and readiness contract. Go compiles the plugin list in, so the Go image adds its plugin at build time, where the python image adds its plugin at container start. The mapping verification also confirms that every construction call the main needs is exported — the module imports no kagent `internal/` package.
 
 #### adk/v2 v2.1.0 and v2.2.0 — cells B1-go and B2-go (design)
 
@@ -281,6 +284,7 @@ The plugin surface is the same at both tags, so one table serves both cells. A `
 |---|---|---|---|
 | `OnUserMessageCallback` | `SessionStart`, then `Prompt` | fires before the session append, and a returned error aborts the run | [plugin.go#L161](https://github.com/google/adk-go/blob/v2.1.0/plugin/plugin.go#L161) |
 | `BeforeToolCallback` | `ToolCall{spawn}` | a non-nil map skips execution and reaches the model as the function response | [llmagent.go#L390](https://github.com/google/adk-go/blob/v2.1.0/agent/llmagent/llmagent.go#L390) |
+| `BeforeToolCallback` on `execute_remedy_plan` | `ToolCall` | `PassControl`: return a nil map — the call passes through to the runtime's own `/mcp` | [llmagent.go#L390](https://github.com/google/adk-go/blob/v2.1.0/agent/llmagent/llmagent.go#L390) |
 | `AfterToolCallback` | `ToolResult` — `SpawnResult` on an agent tool | a non-nil map replaces the result the model sees | [llmagent.go#L399](https://github.com/google/adk-go/blob/v2.1.0/agent/llmagent/llmagent.go#L399) |
 | `OnToolErrorCallback` | `ToolResult` with `Failure` outcome | a map converts the error, and a returned error stays terminal | [llmagent.go#L405](https://github.com/google/adk-go/blob/v2.1.0/agent/llmagent/llmagent.go#L405) |
 | `BeforeAgentCallback` | `ChildStart` | a returned `Content` ends the child before its body runs | [agent.go#L129](https://github.com/google/adk-go/blob/v2.1.0/agent/agent.go#L129) |
@@ -291,9 +295,34 @@ The plugin surface is the same at both tags, so one table serves both cells. A `
 
 Verification status: the python tables are proven against their pinned wheels. The go table is design — its behavior column is the proof obligation against the locked `adk/v2` before the Go image ships. The Go runtime also serves Foundry-model agents, which the compiler ties to the Go runtime. Deliverables: both tags (`<tag>` and `<tag>-full`, the variant kagent resolves for agents with skills or `executeCodeBlocks`).
 
+## Remedy-plan execution
+
+A blocked call answers with feedback that quotes an offer id. The offered plan executes through `execute_remedy_plan` — the engine's reserved MCP tool, runtime-provided and identical for every harness, served at `$APPA_RUNTIME_URL/mcp` from process start ([appa-runtime/src/mcp.rs](../../appa-runtime/src/mcp.rs)). The runtime refuses a call no hook vouched for, and executing the act spends the vouch.
+
+Delivery is one more construction delta in each entrypoint. The python entrypoint appends a `McpToolset` over streamable HTTP at `$APPA_RUNTIME_URL/mcp` — the same classes kagent-adk itself uses for CRD MCP tools ([v0.9.12 types.py#L223](https://github.com/kagent-dev/kagent/blob/v0.9.12/python/packages/kagent-adk/src/kagent/adk/types.py#L223)). The go main appends the toolset from [`tool/mcptoolset`](https://github.com/google/adk-go/tree/v2.1.0/tool/mcptoolset). `AppaPluginKagent` answers the reserved tool's `ToolCall` hook with `PassControl` and lets the call pass — the dedicated row in each mapping table above.
+
+Coverage per plan element ([appa-engine/src/plan.rs](../../appa-engine/src/plan.rs)):
+
+| Plan element | On kagent |
+|---|---|
+| `Authorize(authority)` | Executes engine-side during the offer. Human review: below. |
+| `Accept(narrowing)` | Executes engine-side. The narrowed call redispatches through the normal gate. |
+| `Sanitize(sanitizer)` | Executes engine-side, and the sanitized result returns through the mapped after-tool path. |
+| `Derive(sanitizer)` | Executes engine-side — the progress hop. |
+| `Redispatch` | Needs no id and no reserved tool. The agent calls the named tool, and the normal `ToolCall` gate applies. |
+| fork advice | Advice, never a remedy. The spawn gate is already mapped. |
+
+### Human review
+
+The Claude Code channel does not transplant. `appa-runtime` consults its human authority through MCP elicitation inside the still-open `execute_remedy_plan` call ([appa-runtime/src/elicit.rs](../../appa-runtime/src/elicit.rs)), and a kagent pod's MCP client has no person on it. google-adk 1.31.1 has no elicitation support. 2.8.0 takes an `elicitation_callback` a pod could only answer programmatically — the replacement elicit.rs warns against. `tool/mcptoolset` shows no elicitation surface at either adk/v2 tag.
+
+kagent carries its own human channel, wired end to end at v0.9.12. `requireApproval` in the Agent CRD flows into the compiled config ([adk_api_translator.go#L1053-L1066](https://github.com/kagent-dev/kagent/blob/v0.9.12/go/core/internal/controller/translator/agent/adk_api_translator.go#L1053-L1066)). ADK supports `require_confirmation` on tools — `McpTool` included — at both pinned versions (1.31.1 `mcp_tool.py` 136, 291; 2.8.0 `mcp_tool.py` 186). The A2A executor suspends the run, surfaces the request to the caller, and resumes with the decision ([_agent_executor.py#L348-L421](https://github.com/kagent-dev/kagent/blob/v0.9.12/python/packages/kagent-adk/src/kagent/adk/_agent_executor.py#L348-L421)). The caller is the kagent UI, the CLI, or an upstream A2A client. kagent also strips the confirmation parts from the model's view ([types.py#L16](https://github.com/kagent-dev/kagent/blob/v0.9.12/python/packages/kagent-adk/src/kagent/adk/types.py#L16)) — the same isolation the elicitation channel keeps.
+
+Design: gate `execute_remedy_plan` with `require_confirmation`, scoped by its `Callable` form to offers whose plan needs a person. The approval then rides kagent's stock suspend/resume flow. One decision stays open before this ships: kagent approves before execution, where the elicitation consult answers during it. Whether the stock approval stands as the authority's proof — or a kagent-shaped authority channel gets its own name — is settled with the spec, not here. Until it is settled, a plan that names a human review stands unexecuted: no answer grants nothing, and the offer stands.
+
 ## Wire and codec
 
-Each plugin emits one JSON event per callback: event kind, trajectory ids, tool name, raw argument bytes, outcome, and value fields — the data the matching `HookEvent` variant needs. The `appa-adapter-kagent` Rust crate parses this wire into `HookEvent` and renders each `HookDecision` into the response the plugins enforce, through the `Codec` contract of `appa-runtime-api` (`parse`, `render`). The wire carries no policy meaning. Raw tool arguments cross as spelled, and the Engine canonicalizes them. One wire and one codec serve both runtime images.
+Each plugin emits one JSON event per callback: event kind, trajectory ids, tool name, raw argument bytes, outcome, and value fields — the data the matching `HookEvent` variant needs. The `appa-adapter-kagent` Rust crate parses this wire into `HookEvent` and renders each `HookDecision` into the response the plugins enforce, through the `Codec` contract of `appa-runtime-api` (`parse`, `render`). The wire carries no policy meaning. Raw tool arguments cross as spelled, and the Engine canonicalizes them. The reserved tool crosses as spelled too — `execute_remedy_plan` — so the runtime recognizes its own tool and binds the vouch. One wire and one codec serve both runtime images.
 
 ## Trajectory identity
 
@@ -309,6 +338,7 @@ Each plugin emits one JSON event per callback: event kind, trajectory ids, tool 
 | No callback at ADK session creation | all | `SessionStart` synthesizes at first invocation, sent before `Prompt`. A never-invoked session emits nothing and flows nothing. |
 | No error-turn callback in google-adk 1.31.1 | A-py | Earlier error callbacks plus `Indeterminate` classification at recovery. Closed on the lane B python cells by google-adk 2.8.0's error callbacks. |
 | No error-turn callback in adk/v2 | B1-go, B2-go | v2.1.0 and v2.2.0 define no run-error and no agent-error callback. Recovery classifies the open dispatch `Indeterminate`, as on cell A-py. |
+| Human review on remedy plans | all | The elicitation channel needs an interactive MCP client the pod lacks. The designed route is `require_confirmation` on the reserved tool over kagent's stock approval flow — its standing as the authority's proof is an open decision, settled with the spec. Until then such plans stand unexecuted, and no answer grants nothing. |
 | Go-runtime agents on stable | A / go | No Go-image knob and a v1 Go ADK in v0.9.12: flip those agents to `runtime: python` (one field), or adopt lane B. |
 | Go mapping unproven | B / go | Verify against the locked `adk/v2` before shipping the Go image. Until then the Go lane is design, not a claim. |
 | CRD in-process `sub_agents` on the python runtime | B2 / python | The entrypoint refuses the config instead of dropping children. The Go adapter consumes them natively once verified. |
@@ -321,11 +351,11 @@ Each plugin emits one JSON event per callback: event kind, trajectory ids, tool 
 | PR | Change |
 |---|---|
 | 1 | `appa-adapter-kagent` Rust codec crate: wire parse to `HookEvent`, decision render, `Adapter` enum variant, unit tests against recorded wire fixtures |
-| 2 | `appa-kagent-adk` Python package: `AppaHookPlugin` with the callback table, per-ADK deltas, fail-closed transport, liveness gates, deny-dict self-recognition |
-| 3 | Python entrypoint: strict config schema and refusal rules, stock plugin parity, both config deliveries, the controller args contract |
+| 2 | `appa-kagent-adk` Python package: `AppaPluginKagent` with the callback table, per-ADK deltas, fail-closed transport, liveness gates, deny-dict self-recognition, `PassControl` pass-through |
+| 3 | Python entrypoint: strict config schema and refusal rules, stock plugin parity, both config deliveries, the controller args contract, the reserved-tool toolset |
 | 4 | Python OCI image with pinned base digest, SBOM, and provenance |
 | 5 | Lane A end-to-end: kind cluster with the stable chart, `controller.agentImage` swap, parent-and-child scenario against one shared runtime |
-| 6 | `appa-kagent-adk-go`: adk/v2 mapping verification, the Go plugin and runtime main, both image tags |
+| 6 | `appa-kagent-adk-go`: adk/v2 mapping verification, the Go plugin and runtime main, both image tags, the reserved-tool toolset |
 | 7 | Lane B end-to-end: the B1 dual-knob swap on the release-candidate chart, and B2 Harness × AgentTemplate on the Substrate path |
 | 8 | Optional: `appa-kagent-quickstart` bundled image — both runtime layers, packaged `appa-runtime`, example policy, the quickstart entrypoint |
 
@@ -340,6 +370,7 @@ Adapter tests (per runtime):
 - Replace path: `ReplaceOutput` and `ChildReturn` substitution at the after-tool point.
 - Pre-append barrier: a blocked `Prompt` leaves no trace in session history.
 - Fail closed: runtime down at each callback blocks the action, and liveness gates hold model and emission callbacks.
+- Pass through: the reserved `execute_remedy_plan` call proceeds untouched on `PassControl`, and the runtime refuses an unvouched `/mcp` call.
 - Startup refusal: missing `APPA_RUNTIME_URL`, unknown config fields, `sub_agents` on the python runtime.
 - Args contract: the entrypoints accept the controller's args and answer readiness at the stock endpoint.
 - No link from the codec crate to `appa-runtime` or `appa-engine`, and no policy state in either plugin.
@@ -355,5 +386,7 @@ End-to-end tests:
 - Lane B1: both image knobs swapped on the release-candidate chart — a python agent and a go agent gated side by side.
 - Lane B2: `AgentTemplate` × `Harness` on the Substrate path — admission by selector, `KAGENT_CONFIG_JSON` delivery, the env-var cap respected.
 - Cross-workload trajectory: parent and delegated child against one shared runtime — one trajectory, `ChildStart` and `SpawnResult` correlated.
+- Remedy execution per plan element: accept-narrowing, authorize with a stock authority, sanitize, derive hop, and redispatch — each on a gated agent, with the vouch spent once per act.
+- Human review: `require_confirmation` suspends the reserved call, an approval from the A2A client executes it, and a decline leaves the offer standing.
 - Crash window: kill the agent workload between `ToolCall` and `ToolResult`, then make sure the runtime reports the dispatch `Indeterminate`.
 - Error-turn window per cell: on cell A-py and both go cells, force an unhandled model failure and make sure recovery closes the turn at the next admitted event. On the lane B python cells, make sure the error callbacks feed the failure `TurnEnd`s.

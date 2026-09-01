@@ -16,7 +16,7 @@ date: 2026-09-01
 Two stock surfaces carry the whole integration:
 
 - kagent's runtime-image settings name the image that runs every declarative agent. Point them at the OpenAPPA images: `appa-kagent-adk` for the python runtime, `appa-kagent-adk-go` for the Go runtime.
-- Both runtimes take plugins through Google ADK's official plugin API. The OpenAPPA images register one — `AppaHookPlugin` — which maps ADK callbacks to the eight `appa-runtime` hook events and enforces the answered `HookDecision`.
+- Both runtimes take plugins through Google ADK's official plugin API. The OpenAPPA images register one — `AppaPluginKagent` — which maps ADK callbacks to the eight `appa-runtime` hook events and enforces the answered `HookDecision`.
 
 `appa-runtime` owns the decisions: policy, the Engine, remedy plans, and trajectory state, as [How it works](/how-it-works) and [Policy contracts](/contracts) define them.
 
@@ -39,7 +39,7 @@ kagent controller — stock, unmodified
 │           config.json + agent-card.json               │
 │                                                       │
 │  entrypoint ─▶ KAgentApp(plugins=[ ..stock..,         │
-│                AppaHookPlugin ]) ─▶ serve A2A         │
+│                AppaPluginKagent ]) ─▶ serve A2A       │
 └──────────────────────────┬────────────────────────────┘
                            │  POST /hook · fail closed
                            ▼
@@ -57,10 +57,10 @@ The agent exists in the pod only as mounted configuration. One generic image the
 ┌─ appa-kagent-adk image ───────────────────────────────┐
 │                                                       │
 │  OpenAPPA layer — two files                           │
-│    entrypoint.py        replays the stock entrypoint  │
-│                         steps and accepts the same    │
-│                         args the controller sends     │
-│    appa_hook_plugin.py  ADK BasePlugin ─▶ POST /hook  │
+│    entrypoint.py          replays the stock entrypoint│
+│                           steps and accepts the same  │
+│                           args the controller sends   │
+│    appa_plugin_kagent.py  ADK BasePlugin ─▶ POST /hook│
 │                                                       │
 ├─ base: kagent's published runtime image · unmodified ─┤
 │    kagent runtime lib   its CLI present, not PID 1    │
@@ -73,7 +73,7 @@ entrypoint flow — the stock calls, one delta:
   cfg = AgentConfig.model_validate(config.json)
                              # refuse unknown fields
   plugins  = [ ..stock plugins.. ]
-  plugins += [ AppaHookPlugin(APPA_RUNTIME_URL) ]  ◀ delta
+  plugins += [ AppaPluginKagent(APPA_RUNTIME_URL) ]  ◀ delta
   KAgentApp(root_agent, card, url, name,
             plugins=plugins).build()   ─▶ serve A2A
 ```
@@ -156,6 +156,30 @@ The load-bearing enforcement points, proven in the pinned ADK sources:
 - A deny returned from the before-tool callback skips execution and becomes the function response the model reads.
 - The user-message callback fires before the session append, so a blocked prompt never lands in stored history.
 - An agent called as a tool crosses the same gate as any tool call, and its return is substituted on the parent side.
+
+### Remedy plans stay executable
+
+A block is not a dead end. The blocking feedback quotes an offer id, and the agent executes the offered plan through `execute_remedy_plan` — the reserved tool `appa-runtime` itself serves. The images inject it at agent construction, beside `AppaPluginKagent`, so every declarative agent carries it with zero agent changes.
+
+```text
+tool call blocked ─▶ the feedback quotes an offer id
+        │
+        ▼
+execute_remedy_plan(offer_id)
+        │   the reserved appa-runtime tool, injected
+        │   at agent construction beside the plugin
+        ▼
+ToolCall hook  ◀ PassControl — vouched, the call
+        │      passes through to appa-runtime
+        ▼
+the offered plan executes:
+   Authorize · Accept · Sanitize · Derive
+a Redispatch plan names a tool instead — the agent
+calls it itself, through the normal gate
+```
+
+- Human review rides kagent's stock approval flow: the run suspends, the A2A caller — the kagent UI or an upstream client — decides, and the run resumes. No answer grants nothing, and the offer stands.
+- Every remedy call crosses the same hook gate as any tool call.
 
 ### Fail-closed rules
 
