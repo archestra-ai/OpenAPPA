@@ -3,7 +3,7 @@ title: kAgent
 nav_title: kAgent
 category: Integrations
 order: 6
-description: Proposal for OpenAPPA on kagent — an ADK plugin delivered through the kagent runtime-image settings, with no kagent or Google ADK fork.
+description: OpenAPPA on kagent — gate every declarative agent through one runtime-image setting, with no kagent or Google ADK fork.
 ---
 
 :::proposal
@@ -18,7 +18,7 @@ Two stock surfaces carry the whole integration:
 - The kagent runtime-image settings name the image that runs every declarative agent. Point them at the OpenAPPA images: `appa-kagent-adk` for the python runtime, `appa-kagent-adk-go` for the Go runtime.
 - Both runtimes take plugins through the official Google ADK plugin API. The OpenAPPA images register one — `AppaPluginKagent` — which maps ADK callbacks to the eight `appa-runtime` hook events and enforces the answered `HookDecision`.
 
-`appa-runtime` owns the decisions: policy, the Engine, remedy plans, and trajectory state, as [How it works](/how-it-works) and [Policy contracts](/contracts) define them.
+`appa-runtime` owns the decisions: policy, the Engine, remedy plans, and trajectory state. [How it works](/how-it-works) and [Policy contracts](/contracts) define them.
 
 ## Highlights
 
@@ -155,11 +155,11 @@ The load-bearing enforcement points, proven in the pinned ADK sources:
 
 - A deny returned from the before-tool callback skips execution and becomes the function response the model reads.
 - The user-message callback fires before the session append, so a blocked prompt never lands in stored history.
-- An agent called as a tool crosses the same gate as any tool call, and the parent side substitutes its return.
+- An agent called as a tool crosses the same gate as any tool call. The parent side substitutes its return.
 
 ### Every gated call runs under one contract
 
-The policy produces the contract for a tool call in one of two ways: a static declaration, or a registered annotator that answers it per call. The consult happens inside the tool gate, on the runtime side — kagent never sees it. A wildcard annotator covers the tools the policy never names. That posture fits a kagent fleet, where CRD-declared toolsets produce a long tail of tools.
+The policy produces the contract for a tool call in one of two ways. It is either a static declaration or a registered annotator that answers per call. The consult happens inside the tool gate, on the runtime side, and kagent never sees it. A wildcard annotator covers the tools the policy never names. That posture fits a kagent fleet, where CRD-declared toolsets produce a long tail of tools.
 
 ### Remedy plans stay executable
 
@@ -182,7 +182,7 @@ a Redispatch plan names a tool instead — the agent
 calls it itself, through the normal gate
 ```
 
-- Human review rides the stock kagent approval flow: the run suspends, the A2A caller — the kagent UI or an upstream client — decides, and the run resumes. No answer grants nothing, and the offer stands.
+- Human review rides the stock kagent approval flow. The run suspends, the A2A caller decides, and the run resumes. The caller is the kagent UI or an upstream client. No answer grants nothing, and the offer stands.
 - Every remedy call crosses the same hook gate as any tool call.
 
 ### Fail-closed rules
@@ -198,4 +198,4 @@ Covered: declarative agents on both runtimes. Not covered: BYO agents and the ka
 
 ## Implementation plan
 
-The [kagent implementation plan](https://github.com/archestra-ai/OpenAPPA/blob/main/integrations/kagent/IMPLEMENTATION.md) carries the rest: source baselines, the target matrix, per-version mapping tables, both delivery lanes, the quickstart option, and the verification matrix. Code evidence backs every claim there.
+The [kagent implementation plan](https://github.com/archestra-ai/OpenAPPA/blob/main/integrations/kagent/IMPLEMENTATION.md) carries the rest. It covers source baselines, the target matrix, per-version mapping tables, both delivery lanes, the quickstart option, and the verification matrix. Code evidence backs every claim there.
