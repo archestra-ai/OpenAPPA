@@ -13,9 +13,25 @@ Stable release — the lane users install today:
 Release-candidate line — mid-cutover, in two observed states:
 
 - Tag [`v0.10.0-rc4`](https://github.com/kagent-dev/kagent/releases/tag/v0.10.0-rc4) (`af84a618`, 2026-08-26): still the v1alpha2 `Agent` → Deployment controller, plus the `controller.goAgentImage` value. Go ADK: `google.golang.org/adk/v2 v2.1.0` ([go.mod#L50](https://github.com/kagent-dev/kagent/blob/v0.10.0-rc4/go/go.mod#L50)). The workspace lock resolves google-adk 2.8.0.
-- Main at [`52cc4de2`](https://github.com/kagent-dev/kagent/commit/52cc4de2a044a5062d10c4f189d863937c1bb0f9) (2026-09-01): the v1alpha2 Agent controller is deleted, and agents are `v1alpha3` `AgentTemplate` × `Harness` pairs compiled to Substrate Actors. Go ADK: `google.golang.org/adk/v2 v2.2.0`.
+- Main at [`52cc4de2`](https://github.com/kagent-dev/kagent/commit/52cc4de2a044a5062d10c4f189d863937c1bb0f9) (2026-09-01): the v1alpha2 Agent controller is deleted, and agents are `v1alpha3` `AgentTemplate` × `Harness` pairs compiled to Substrate Actors. Go ADK: `google.golang.org/adk/v2 v2.2.0`. Python lock: google-adk 2.8.0 ([uv.lock#L1118-L1119](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/python/uv.lock#L1118-L1119)).
+
+The `adk/v2` plugin surface is the same at both tags: `plugin/plugin.go` matches byte for byte between [v2.1.0](https://github.com/google/adk-go/blob/v2.1.0/plugin/plugin.go) and [v2.2.0](https://github.com/google/adk-go/blob/v2.2.0/plugin/plugin.go), and every callback signature matches.
 
 OpenAPPA: `appa-runtime-api` hook vocabulary (`appa-runtime-api/src/lib.rs`) and the `appa-runtime` `/hook` endpoint (`appa-runtime/src/main.rs`).
+
+## Target matrix
+
+Five cells. Every diagram, mapping table, and end-to-end test in this plan names its cell.
+
+| Cell | kagent | Runtime | ADK lock | Delivery knob | Image |
+|---|---|---|---|---|---|
+| A-py | v0.9.12 | python (CRD default) | google-adk 1.31.1 | helm `controller.agentImage` | `appa-kagent-adk` |
+| B1-py | v0.10.0-rc4 | python (opt-in — the default flips to go) | google-adk 2.8.0 | helm `controller.agentImage` | `appa-kagent-adk` |
+| B1-go | v0.10.0-rc4 | go (default) | adk/v2 v2.1.0 | helm `controller.goAgentImage` | `appa-kagent-adk-go` + `-full` |
+| B2-py | main `52cc4de2` | python | google-adk 2.8.0 | `Harness.spec.workload.image` | `appa-kagent-adk` |
+| B2-go | main `52cc4de2` | go | adk/v2 v2.2.0 | `Harness.spec.workload.image` | `appa-kagent-adk-go` |
+
+Go-runtime agents on v0.9.12 are no cell: that tree has no Go-image knob and a v1 Go ADK without the plugin API. The gaps table names the workaround.
 
 ## Architecture decision
 
@@ -42,13 +58,70 @@ Runtime contract the python image must keep — the controller sets container ar
 - Read `config.json` and `agent-card.json` from the per-agent Secret mounted at `/config` ([manifest_builder.go#L243](https://github.com/kagent-dev/kagent/blob/v0.9.12/go/core/internal/controller/translator/agent/manifest_builder.go#L243)).
 - Serve A2A on port 8080 and answer readiness at `/.well-known/agent-card.json` ([manifest_builder.go#L532](https://github.com/kagent-dev/kagent/blob/v0.9.12/go/core/internal/controller/translator/agent/manifest_builder.go#L532)).
 
+```text
+cell A-py — kagent v0.9.12 · python · google-adk 1.31.1
+
+helm controller.agentImage = appa-kagent-adk
+  │  rendered into the controller ConfigMap as
+  │  IMAGE_REGISTRY / IMAGE_REPOSITORY / IMAGE_TAG
+  ▼  one Deployment + Service per declarative Agent
+┌─ agent pod · runtime: python (the CRD default) ───────┐
+│  image  appa-kagent-adk                               │
+│  args   --host <bind> --port 8080 --filepath /config  │
+│  mount  Secret → /config: config.json, agent-card     │
+│  ready  GET /.well-known/agent-card.json              │
+│                                                       │
+│  entrypoint.py                                        │
+│    AgentConfig.model_validate — refuse unknown fields │
+│    KAgentApp(plugins=[ ..stock.., AppaHookPlugin ])   │
+│  kagent-adk 0.3.0 · google-adk 1.31.1 · 12 callbacks  │
+└──────────────────────────┬────────────────────────────┘
+                           ▼  POST $APPA_RUNTIME_URL/hook
+```
+
 Rollout: one `helm upgrade` re-renders every declarative python agent onto the adapter image, cluster-wide, with no double-run hazard. Staged rollout: `spec.declarative.deployment.imageRegistry` overrides the registry component per agent ([agent_types.go#L392](https://github.com/kagent-dev/kagent/blob/v0.9.12/go/api/v1alpha2/agent_types.go#L392)) — point pilot agents at a registry that serves the adapter image under the stock repository path. `APPA_RUNTIME_URL` arrives as a baked image default or per agent via `spec.declarative.deployment.env` ([agent_types.go#L443-L445](https://github.com/kagent-dev/kagent/blob/v0.9.12/go/api/v1alpha2/agent_types.go#L443-L445)).
 
 ### Lane B — release-candidate line
 
 Two observed states, one adapter story:
 
-**B1 — the current release candidates (v1alpha2 `Agent` → Deployment, both image knobs).** Same Deployment path as lane A, with three differences. The runtime default flips to `go` ([rc4 agent_types.go#L235-L241](https://github.com/kagent-dev/kagent/blob/v0.10.0-rc4/go/api/v1alpha2/agent_types.go#L235-L241)). `controller.goAgentImage.{registry,repository,tag}` exists beside `controller.agentImage` ([rc4 controller-configmap.yaml#L28](https://github.com/kagent-dev/kagent/blob/v0.10.0-rc4/helm/kagent/templates/controller-configmap.yaml#L28), [app.go#L226](https://github.com/kagent-dev/kagent/blob/v0.10.0-rc4/go/core/pkg/app/app.go#L226)). And agents with skills or `executeCodeBlocks` resolve a `<tag>-full` Go-image variant, so the Go adapter publishes both tags. Point both values at the matching images and every declarative agent is gated — python agents by `appa-kagent-adk`, go agents by `appa-kagent-adk-go`. Foundry-model agents require the Go runtime by compiler validation ([rc4 compiler.go#L224-L227](https://github.com/kagent-dev/kagent/blob/v0.10.0-rc4/go/core/internal/controller/translator/agent/compiler.go#L224-L227)). The Go adapter covers them, because it is a Go ADK runtime.
+**B1 — the current release candidates (v1alpha2 `Agent` → Deployment, both image knobs).** Same Deployment path as lane A, with three differences. The runtime default flips to `go` ([rc4 agent_types.go#L235-L241](https://github.com/kagent-dev/kagent/blob/v0.10.0-rc4/go/api/v1alpha2/agent_types.go#L235-L241)). `controller.goAgentImage.{registry,repository,tag}` exists beside `controller.agentImage` ([rc4 controller-configmap.yaml#L28](https://github.com/kagent-dev/kagent/blob/v0.10.0-rc4/helm/kagent/templates/controller-configmap.yaml#L28), [app.go#L226](https://github.com/kagent-dev/kagent/blob/v0.10.0-rc4/go/core/pkg/app/app.go#L226)). And agents with skills or `executeCodeBlocks` resolve a `<tag>-full` Go-image variant, so the Go adapter publishes both tags. Point both values at the matching images and every declarative agent is gated — python agents by `appa-kagent-adk`, go agents by `appa-kagent-adk-go`. Foundry-model agents require the Go runtime by compiler validation ([rc4 compiler.go#L224-L227](https://github.com/kagent-dev/kagent/blob/v0.10.0-rc4/go/core/internal/controller/translator/agent/compiler.go#L224-L227)). The Go adapter covers them, because it is a Go ADK runtime. The args and readiness contract stays lane A's, and both runtimes receive the same args ([rc4 deployments.go#L176-L181](https://github.com/kagent-dev/kagent/blob/v0.10.0-rc4/go/core/internal/controller/translator/agent/deployments.go#L176-L181), [manifest_builder.go#L569](https://github.com/kagent-dev/kagent/blob/v0.10.0-rc4/go/core/internal/controller/translator/agent/manifest_builder.go#L569)).
+
+```text
+cell B1-py — kagent v0.10.0-rc4 · python · google-adk 2.8.0
+
+helm controller.agentImage = appa-kagent-adk
+  │  the same ConfigMap IMAGE_* path as cell A-py;
+  │  the CRD default runtime is now go, so python
+  ▼  agents carry runtime: python explicitly
+┌─ agent pod · runtime: python ─────────────────────────┐
+│  args, /config Secret, readiness — as cell A-py       │
+│  entrypoint.py                                        │
+│    KAgentApp(plugins=[ ..stock.., AppaHookPlugin ])   │
+│  google-adk 2.8.0 · 14 callbacks                      │
+└──────────────────────────┬────────────────────────────┘
+                           ▼  POST $APPA_RUNTIME_URL/hook
+```
+
+```text
+cell B1-go — kagent v0.10.0-rc4 · go · adk/v2 v2.1.0
+
+helm controller.goAgentImage = appa-kagent-adk-go
+  │  ConfigMap GO_IMAGE_REGISTRY / _REPOSITORY / _TAG;
+  │  skills or executeCodeBlocks resolve <tag>-full;
+  ▼  Foundry-model agents compile onto this runtime
+┌─ agent pod · runtime: go (the rc default) ────────────┐
+│  image  appa-kagent-adk-go — one static binary        │
+│  args   --host <bind> --port 8080 --filepath /config  │
+│  ready  GET /.well-known/agent-card.json              │
+│                                                       │
+│  main: rebuild the agent from the rendered config,    │
+│    then runner.PluginConfig{Plugins:                  │
+│      [ ..stock.., AppaHookPlugin ]}                   │
+│  adk/v2 v2.1.0 · 12 callbacks · no error-turn cb      │
+└──────────────────────────┬────────────────────────────┘
+                           ▼  POST $APPA_RUNTIME_URL/hook
+```
 
 **B2 — main (v1alpha3 `AgentTemplate` × `Harness` → Substrate Actor).** The Harness names the runtime image directly and selects which templates it runs:
 
@@ -68,16 +141,84 @@ spec:
 
 - `workload.image` is required and digest-pinned ([harness_types.go#L34-L40](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/go/api/v1alpha3/harness_types.go#L34-L40)). `spec.env` carries `APPA_RUNTIME_URL`, with Secret refs available.
 - Pairing: the controller matches each `AgentTemplate` against every same-namespace Harness selector and reconciles one Actor per pair ([collections.go#L85-L102](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/go/core/v2/controller/collections.go#L85-L102)). Rollout is "move the label match", never "add a second match" — a template matched by two Harnesses runs twice. Make old and new selectors disjoint.
-- Config arrives as `KAGENT_CONFIG_JSON` / `KAGENT_AGENT_CARD_JSON` env ([actor_template.go#L43-L44](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/go/core/v2/substrate/actor_template.go#L43-L44)). The python entrypoint's `materialize_from_env` handles both deliveries and is a no-op on the Deployment path. The Substrate path caps an Actor at 32 total env vars ([actor_template.go#L50-L52](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/go/core/v2/substrate/actor_template.go#L50-L52)), and the adapter needs one.
+- Config arrives as `KAGENT_CONFIG_JSON` / `KAGENT_AGENT_CARD_JSON` env ([actor_template.go#L43-L44](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/go/core/v2/substrate/actor_template.go#L43-L44)). The python entrypoint's `materialize_from_env` handles both deliveries and is a no-op on the Deployment path. The Actor serves on port 8081 ([actor_template.go#L74](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/go/core/v2/substrate/actor_template.go#L74)). The Substrate path caps an Actor at 32 total env vars ([actor_template.go#L50-L52](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/go/core/v2/substrate/actor_template.go#L50-L52)), and the adapter needs one.
 - Prerequisites: helm `controller.substrate.enabled=true`, the `ate-system` install, and a `WorkerPool` — the stock Substrate-path requirements.
 - Templates whose compiled config carries in-process `sub_agents` ([kagent/compiler.go#L172](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/go/core/v2/translator/kagent/compiler.go#L172)) refuse at the python entrypoint (stock parsing drops them silently — the adapter must not). Out-of-process (`Dedicated`) sub-agent tools are rejected upstream ([compiler.go#L149-L151](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/go/core/v2/translator/compiler.go#L149-L151)). The Go adapter consumes the Go-shaped config natively and carries these topologies once its mapping verifies.
 - Re-verify this sub-lane against the first release that ships v1alpha3 before acting on it.
+
+```text
+cell B2-py — kagent main 52cc4de2 · python · google-adk 2.8.0
+
+Harness.spec.workload.image = appa-kagent-adk@sha256:…
+  │  allowedAgentTemplates selector ∧ same-namespace
+  │  AgentTemplate ─▶ one Substrate Actor per pair
+  ▼  (keep old and new selectors disjoint)
+┌─ Substrate Actor · serves on port 8081 ───────────────┐
+│  env  KAGENT_CONFIG_JSON · KAGENT_AGENT_CARD_JSON     │
+│       APPA_RUNTIME_URL from Harness spec.env          │
+│       cap: 32 env vars total, the adapter adds one    │
+│                                                       │
+│  entrypoint.py materialize_from_env → the A-py flow   │
+│    refuses configs with compiled sub_agents           │
+│  google-adk 2.8.0 · 14 callbacks                      │
+└──────────────────────────┬────────────────────────────┘
+                           ▼  POST $APPA_RUNTIME_URL/hook
+```
+
+```text
+cell B2-go — kagent main 52cc4de2 · go · adk/v2 v2.2.0
+
+Harness.spec.workload.image = appa-kagent-adk-go@sha256:…
+  │  pairing and env delivery as cell B2-py
+  ▼
+┌─ Substrate Actor · serves on port 8081 ───────────────┐
+│  go main reads KAGENT_CONFIG_JSON — the go-shaped     │
+│    config, in-process sub_agents included — then      │
+│    registers runner.PluginConfig{Plugins:             │
+│      [ ..stock.., AppaHookPlugin ]}                   │
+│  adk/v2 v2.2.0 · plugin set identical to v2.1.0       │
+└──────────────────────────┬────────────────────────────┘
+                           ▼  POST $APPA_RUNTIME_URL/hook
+```
+
+## Quickstart option
+
+The quickstart is optional and orthogonal to everything above — same plugins, same wire, same codec, same adapter images. Skipping it changes nothing. It exists so one operator can gate one agent in minutes, with no separate `appa-runtime` deployment.
+
+`appa-kagent-quickstart` is one image that bundles both runtime layers and `appa-runtime` itself. The entrypoint starts `appa-runtime` on `127.0.0.1:8787` with a packaged example policy, points `APPA_RUNTIME_URL` at it, and execs the runtime that matches the rendered config. The pod keeps the stock args, port, and readiness contract. Point `controller.agentImage` at it on v0.9.12 (python agents), or both image values on the v0.10 release candidates.
+
+```text
+quickstart — one pod, nothing else to deploy
+
+helm controller.agentImage = appa-kagent-quickstart
+     (v0.10: also controller.goAgentImage)
+        ▼
+┌─ agent pod ───────────────────────────────────────────┐
+│  entrypoint: start appa-runtime on 127.0.0.1:8787,    │
+│  then exec the runtime the rendered config matches    │
+│                                                       │
+│  kagent runtime (python or go) + AppaHookPlugin       │
+│    │  POST http://127.0.0.1:8787/hook                 │
+│    ▼                                                  │
+│  appa-runtime · policy · Engine · appa.db — pod-local │
+└───────────────────────────────────────────────────────┘
+```
+
+Quickstart limits:
+
+- Trajectory state and `appa.db` live in the pod and die with it.
+- A parent and a called agent run as two pods with two bundled runtimes, so their hooks land in two trajectories. Cross-workload correlation needs one `appa-runtime` that both reach.
+- One packaged example policy per image build. Real policy work moves to a deployed `appa-runtime`.
 
 ## Runtime adapters
 
 ### Python — `AppaHookPlugin` on google-adk (verified)
 
-The plugin implements google-adk `BasePlugin`. The 1.31.1 wheel defines 12 lifecycle callbacks (`base_plugin.py` lines 114, 136, 155, 174, 198, 217, 233, 253, 272, 297, 321, 348). Each gated callback sends one wire event to `POST $APPA_RUNTIME_URL/hook` and enforces the decision that comes back. A transport failure or a non-contract response raises, and ADK wraps the exception and aborts the invocation (`plugin_manager.py` 288-305).
+The plugin implements google-adk `BasePlugin`. Each gated callback sends one wire event to `POST $APPA_RUNTIME_URL/hook` and enforces the decision that comes back. A transport failure or a non-contract response raises, and ADK wraps the exception and aborts the invocation (`plugin_manager.py`: 288-305 in 1.31.1, 316-322 in 2.8.0). One mapping table per locked ADK version follows. Wheel citations name paths and lines inside that version's wheel.
+
+#### google-adk 1.31.1 — cell A-py
+
+The 1.31.1 wheel defines 12 lifecycle callbacks (`base_plugin.py` lines 114, 136, 155, 174, 198, 217, 233, 253, 272, 297, 321, 348).
 
 | ADK callback | HookEvent | Enforcement at the callback | 1.31.1 wheel evidence |
 |---|---|---|---|
@@ -95,10 +236,29 @@ The plugin implements google-adk `BasePlugin`. The 1.31.1 wheel defines 12 lifec
 
 `ChildEnd` is unfed by design. Return substitution is enforceable only where the parent receives the value, so returns cross at `SpawnResult`.
 
-Per-ADK differences the plugin handles:
+1.31.1 notes: no error-turn callback exists — `on_run_error_callback` and `on_agent_error_callback` are absent from the wheel — and `after_run_callback` is skipped when a run dies on an unhandled error (`runners.py` 949-954, no `finally`). The model-error and tool-error callbacks catch the common failures earlier, and `appa-runtime` recovery classifies the rest `Indeterminate` at the next admitted event. An `AgentTool` child runs under a fresh child Runner that inherits the parent's plugin list, so coverage continues there.
 
-- **google-adk 1.31.1 (stable lane)**: no `on_run_error_callback` and no `on_agent_error_callback` (absent from the wheel), and `after_run_callback` is skipped when a run dies on an unhandled error (`runners.py` 949-954, no `finally`). The model-error and tool-error callbacks catch the common failures earlier. For the rest, `appa-runtime` recovery classifies the open dispatch as `Indeterminate` at the next admitted event. An `AgentTool` child runs under a fresh child Runner that inherits the parent's plugin list, so coverage continues there.
-- **google-adk 2.8.0 (release-candidate lane lock)**: both error callbacks exist — the plugin feeds `TurnEnd` (root failure) from `on_run_error_callback` and `TurnEnd` (child failure) from `on_agent_error_callback`, closing the error-turn gap on that lane. Sub-agents re-enter `run_async`, so `before/after_agent_callback` fire per child directly.
+#### google-adk 2.8.0 — cells B1-py and B2-py
+
+The 2.8.0 wheel defines 14 lifecycle callbacks: the twelve above at the same `base_plugin.py` lines, plus `on_agent_error_callback` (374) and `on_run_error_callback` (394). The shared rows keep the 1.31.1 semantics, re-verified at the 2.8.0 sites:
+
+| ADK callback | HookEvent | Enforcement at the callback | 2.8.0 wheel evidence |
+|---|---|---|---|
+| `on_user_message_callback`, first invocation of a fresh session | `SessionStart` | `Refuse` raises before `Prompt` is sent | `runners.py` 677 |
+| `on_user_message_callback` | `Prompt` | `Block` raises pre-append: the callback runs at 677, the session append at 705-708 | `runners.py` 677, 705-708 |
+| `before_tool_callback` | `ToolCall{spawn}` | `DenyCall{feedback}`: the returned dict skips execution and becomes the function response the model reads. `Refuse` raises. | `functions.py` 611-622 |
+| `after_tool_callback` | `ToolResult` | `ReplaceOutput{output}`: the returned dict replaces the result. Deny dicts are self-recognized and reported once. | `functions.py` 652-656 |
+| `on_tool_error_callback` | `ToolResult` with `Failure` outcome | return a dict to convert, or re-raise | `functions.py` 544-563, 595, 641 |
+| `before_tool_callback` on an agent tool | `ToolCall{spawn:true}` | as `ToolCall`, holding the `AllowCall{spawn}` binding | `functions.py` 611-622 |
+| `before_agent_callback` (sub-agent) | `ChildStart` | a returned `Content` ends the child before its body runs. Sub-agents re-enter `run_async`, so this fires per child. | `base_agent.py` 320, 382 |
+| `after_tool_callback` on the agent-tool return | `SpawnResult` | `ChildReturn{value}` or `ReplaceOutput` substitution | `functions.py` 652-656 |
+| `on_agent_error_callback` | `TurnEnd` (child, `Failure`) | observe — the error still propagates | `base_agent.py` 632 |
+| `on_run_error_callback` | `TurnEnd` (root, `Failure`) | observe — ADK treats the callback as notification and suppresses anything it raises, so this point cannot hold | `runners.py` 96-108, 786-790 |
+| `after_run_callback` | `TurnEnd` (root) | observe — also fires after a `before_run` halt | `runners.py` 791 |
+| `before_run_callback` | none | pass through — `Prompt` already gates the same bytes | `base_plugin.py` 136 |
+| `before_model_callback`, `after_model_callback`, `on_model_error_callback`, `on_event_callback` | none | liveness gates: raise when the `/hook` channel is down, pass otherwise | `base_plugin.py` 233, 253, 272, 155 |
+
+The two error rows close the error-turn gap on the lane B python cells. The gap stays open on the go cells, because adk/v2 has no error-turn callback (the go table below).
 
 Entrypoint (python image), in order:
 
@@ -113,7 +273,23 @@ The Go adapter is a small runtime main, module `appa-kagent-adk-go`, that import
 
 The build composes upstream, and does not fork it. `appa-kagent-adk-go` is a separate Go module with one runtime main. Its `go.mod` requires the `github.com/kagent-dev/kagent/go` module, which exports the `go/adk` packages, and `google.golang.org/adk/v2` — pinned, fetched unmodified from the module proxy, locked by `go.sum`. `go build` links `AppaHookPlugin` into one static binary, and the image ships that binary under the stock args, port, and readiness contract. Go compiles the plugin list in, so the Go image adds its plugin at build time, where the python image adds its plugin at container start. The mapping verification also confirms that every construction call the main needs is exported — the module imports no kagent `internal/` package.
 
-Verification status: the callback-to-hook mapping above is proven for the python plugin against its pinned google-adk versions. The Go mapping must be proven the same way against `google.golang.org/adk/v2` at the locked version (v2.1.0 on rc4, v2.2.0 on main) before the Go image ships: which plugin callbacks exist, whether a before-tool return skips execution and reaches the model as the function response, whether an after-tool return replaces the result, and where the user message crosses into session state. The Go runtime also serves Foundry-model agents, which the compiler ties to the Go runtime. Deliverables: both tags (`<tag>` and `<tag>-full`, the variant kagent resolves for agents with skills or `executeCodeBlocks`).
+#### adk/v2 v2.1.0 and v2.2.0 — cells B1-go and B2-go (design)
+
+The plugin surface is the same at both tags, so one table serves both cells. A `plugin.Plugin` exposes 12 callbacks through its accessors ([plugin/plugin.go#L113-L158](https://github.com/google/adk-go/blob/v2.1.0/plugin/plugin.go#L113-L158)). No run-error and no agent-error callback exists, so the error-turn gap of google-adk 1.31.1 applies to the go cells too. Signature references are v2.1.0 — v2.2.0 shifts the `llmagent.go` lines by two and changes nothing in the set.
+
+| Go callback | HookEvent | Behavior to verify before the image ships | Signature |
+|---|---|---|---|
+| `OnUserMessageCallback` | `SessionStart`, then `Prompt` | fires before the session append, and a returned error aborts the run | [plugin.go#L161](https://github.com/google/adk-go/blob/v2.1.0/plugin/plugin.go#L161) |
+| `BeforeToolCallback` | `ToolCall{spawn}` | a non-nil map skips execution and reaches the model as the function response | [llmagent.go#L390](https://github.com/google/adk-go/blob/v2.1.0/agent/llmagent/llmagent.go#L390) |
+| `AfterToolCallback` | `ToolResult` — `SpawnResult` on an agent tool | a non-nil map replaces the result the model sees | [llmagent.go#L399](https://github.com/google/adk-go/blob/v2.1.0/agent/llmagent/llmagent.go#L399) |
+| `OnToolErrorCallback` | `ToolResult` with `Failure` outcome | a map converts the error, and a returned error stays terminal | [llmagent.go#L405](https://github.com/google/adk-go/blob/v2.1.0/agent/llmagent/llmagent.go#L405) |
+| `BeforeAgentCallback` | `ChildStart` | a returned `Content` ends the child before its body runs | [agent.go#L129](https://github.com/google/adk-go/blob/v2.1.0/agent/agent.go#L129) |
+| `AfterAgentCallback` | `TurnEnd` (in-process child) | fires once per sub-agent scope | [agent.go#L137](https://github.com/google/adk-go/blob/v2.1.0/agent/agent.go#L137) |
+| `AfterRunCallback` | `TurnEnd` (root) | nothing — the signature returns no value, observation only | [plugin.go#L165](https://github.com/google/adk-go/blob/v2.1.0/plugin/plugin.go#L165) |
+| `BeforeRunCallback` | none | liveness gate — `Prompt` already gates the same bytes | [plugin.go#L163](https://github.com/google/adk-go/blob/v2.1.0/plugin/plugin.go#L163) |
+| `BeforeModelCallback`, `AfterModelCallback`, `OnModelErrorCallback`, `OnEventCallback` | none | liveness gates | [llmagent.go#L366-L378](https://github.com/google/adk-go/blob/v2.1.0/agent/llmagent/llmagent.go#L366-L378), [plugin.go#L167](https://github.com/google/adk-go/blob/v2.1.0/plugin/plugin.go#L167) |
+
+Verification status: the python tables are proven against their pinned wheels. The go table is design — its behavior column is the proof obligation against the locked `adk/v2` before the Go image ships. The Go runtime also serves Foundry-model agents, which the compiler ties to the Go runtime. Deliverables: both tags (`<tag>` and `<tag>-full`, the variant kagent resolves for agents with skills or `executeCodeBlocks`).
 
 ## Wire and codec
 
@@ -131,7 +307,8 @@ Each plugin emits one JSON event per callback: event kind, trajectory ids, tool 
 | Gap | Lane / runtime | Handling |
 |---|---|---|
 | No callback at ADK session creation | all | `SessionStart` synthesizes at first invocation, sent before `Prompt`. A never-invoked session emits nothing and flows nothing. |
-| No error-turn callback in google-adk 1.31.1 | A / python | Earlier error callbacks plus `Indeterminate` classification at recovery. Closed on lane B by google-adk 2.8.0's error callbacks. |
+| No error-turn callback in google-adk 1.31.1 | A-py | Earlier error callbacks plus `Indeterminate` classification at recovery. Closed on the lane B python cells by google-adk 2.8.0's error callbacks. |
+| No error-turn callback in adk/v2 | B1-go, B2-go | v2.1.0 and v2.2.0 define no run-error and no agent-error callback. Recovery classifies the open dispatch `Indeterminate`, as on cell A-py. |
 | Go-runtime agents on stable | A / go | No Go-image knob and a v1 Go ADK in v0.9.12: flip those agents to `runtime: python` (one field), or adopt lane B. |
 | Go mapping unproven | B / go | Verify against the locked `adk/v2` before shipping the Go image. Until then the Go lane is design, not a claim. |
 | CRD in-process `sub_agents` on the python runtime | B2 / python | The entrypoint refuses the config instead of dropping children. The Go adapter consumes them natively once verified. |
@@ -150,6 +327,7 @@ Each plugin emits one JSON event per callback: event kind, trajectory ids, tool 
 | 5 | Lane A end-to-end: kind cluster with the stable chart, `controller.agentImage` swap, parent-and-child scenario against one shared runtime |
 | 6 | `appa-kagent-adk-go`: adk/v2 mapping verification, the Go plugin and runtime main, both image tags |
 | 7 | Lane B end-to-end: the B1 dual-knob swap on the release-candidate chart, and B2 Harness × AgentTemplate on the Substrate path |
+| 8 | Optional: `appa-kagent-quickstart` bundled image — both runtime layers, packaged `appa-runtime`, example policy, the quickstart entrypoint |
 
 No kagent PR and no Google ADK PR is required. The optional upstream contribution (a plugin config knob) is independent and non-blocking.
 
@@ -178,4 +356,4 @@ End-to-end tests:
 - Lane B2: `AgentTemplate` × `Harness` on the Substrate path — admission by selector, `KAGENT_CONFIG_JSON` delivery, the env-var cap respected.
 - Cross-workload trajectory: parent and delegated child against one shared runtime — one trajectory, `ChildStart` and `SpawnResult` correlated.
 - Crash window: kill the agent workload between `ToolCall` and `ToolResult`, then make sure the runtime reports the dispatch `Indeterminate`.
-- Error-turn window per lane: on lane A, force an unhandled model failure and make sure recovery closes the turn at the next admitted event. On lane B, make sure the error callbacks feed the failure `TurnEnd`s.
+- Error-turn window per cell: on cell A-py and both go cells, force an unhandled model failure and make sure recovery closes the turn at the next admitted event. On the lane B python cells, make sure the error callbacks feed the failure `TurnEnd`s.
