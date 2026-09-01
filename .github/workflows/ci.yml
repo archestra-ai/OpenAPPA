@@ -41,7 +41,7 @@ jobs:
 
       - name: Test battery externals
         run: |
-          for dir in $(dirname batteries/*/test_*.py | sort -u); do
+          for dir in $(dirname batteries/test_*.py batteries/*/test_*.py | sort -u); do
             python3 -m unittest discover -s "$dir" -p 'test_*.py'
           done
 
