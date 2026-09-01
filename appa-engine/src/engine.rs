@@ -634,7 +634,7 @@ impl Engine {
                     digest: RawResultDigest::of(body.as_str().as_bytes()),
                     body,
                     policy: ReturnPolicy::Raw,
-                    evidence: act.pinned(),
+                    evidence: act.pinned().clone(),
                 });
                 let (batch, staged) = self.pending_stage(
                     view,
@@ -704,7 +704,7 @@ impl Engine {
             digest,
             body: body.clone(),
             policy: ReturnPolicy::Sanitized(name.clone()),
-            evidence: act.pinned(),
+            evidence: act.pinned().clone(),
         });
         if name.is_attest_schema() {
             let receiving = views.current_label().clone();
@@ -776,7 +776,7 @@ impl Engine {
                 residual: residual.clone(),
             },
             lineage: lineage.clone(),
-            evidence: act.pinned(),
+            evidence: act.pinned().clone(),
         });
         let Some(residual) = residual else {
             // The derivation narrows nothing: candidate and merge land atomically.
@@ -789,7 +789,7 @@ impl Engine {
                     raw_digest: digest,
                 },
                 None,
-                act.pinned(),
+                act.pinned().clone(),
             ));
             return Ok(EngineDecision {
                 append: Some(self.decided(view, return_act(child), facts)?),
@@ -845,7 +845,7 @@ impl Engine {
             fork: fork.clone(),
             digest,
             reason: reason.clone(),
-            evidence: act.pinned(),
+            evidence: act.pinned().clone(),
         });
         Ok(EngineDecision {
             append: Some(self.decided(view, return_act(child), facts)?),
@@ -1280,7 +1280,7 @@ impl Engine {
                                 sanitizer,
                                 derived: candidate,
                                 lineage,
-                                evidence: act.pinned(),
+                                evidence: act.pinned().clone(),
                             },
                             act,
                         );
@@ -1692,7 +1692,7 @@ impl Engine {
                             batch: batch.id.clone(),
                             position: position as u32,
                             effects: contract.emits.clone(),
-                            evidence: act.pinned(),
+                            evidence: act.pinned().clone(),
                         },
                     }
                 })
@@ -1762,7 +1762,7 @@ impl Engine {
             // The act's own pinned answers: batch payload, compared on repeat. A release that
             // spends an approval reads under the approval's pins too, but those are the
             // approval record's — replay re-merges them from it.
-            evidence: act.pinned(),
+            evidence: act.pinned().clone(),
         });
         facts.extend(composed.iter().flatten().flat_map(|release| release.facts.clone()));
         // What this decision moves, derived before the offers that have to record where it lands.
@@ -1947,7 +1947,7 @@ impl Engine {
                 subject: subject.clone(),
                 plan: executable.clone(),
                 basis,
-                evidence: under.pinned(),
+                evidence: under.pinned().clone(),
             });
         }
         (block_id, ids, facts)
@@ -2312,7 +2312,7 @@ impl Engine {
                 residual,
             },
             lineage,
-            evidence: act.pinned(),
+            evidence: act.pinned().clone(),
         });
         if staged {
             let (batch, confined) = self.staged(
@@ -2510,7 +2510,7 @@ impl Engine {
             value,
             derivation,
             Some(residual),
-            act.pinned(),
+            act.pinned().clone(),
         ));
         Ok(EngineDecision {
             append: Some(self.decided(view, crate::basis::DecidedAct::Offer(execution.offer), facts)?),
@@ -2578,7 +2578,7 @@ impl Engine {
                 residual: residual.clone(),
             },
             lineage: lineage.clone(),
-            evidence: act.pinned(),
+            evidence: act.pinned().clone(),
         });
         let Some(residual) = residual else {
             // The successor owes nothing: candidate and merge land atomically.
@@ -2591,7 +2591,7 @@ impl Engine {
                     raw_digest: pending.digest,
                 },
                 None,
-                act.pinned(),
+                act.pinned().clone(),
             ));
             return Ok(EngineDecision {
                 append: Some(self.decided(view, crate::basis::DecidedAct::Offer(execution.offer), facts)?),
@@ -2729,7 +2729,7 @@ impl Engine {
             sanitizer: sanitizer.clone(),
             derived,
             lineage,
-            evidence: under.pinned(),
+            evidence: under.pinned().clone(),
         });
         let staged = Sequence::advance_of(self, view, &facts);
         let act = crate::basis::DecidedAct::Offer(execution.offer);
@@ -3113,7 +3113,7 @@ impl Engine {
                 .collect(),
             sanitizer: recorded.plan.sanitizer().cloned(),
             basis: views.basis_after(&advance, &subject),
-            evidence: act.pinned(),
+            evidence: act.pinned().clone(),
         });
         let batch = self.declaring(crate::basis::DecidedAct::Offer(execution.offer), advance, facts);
         Ok(EngineDecision {
@@ -3439,7 +3439,7 @@ fn approved_release(
         authority: given.authority.clone(),
         covers: given.covers.clone(),
         reviewed: given.reviewed.clone(),
-        evidence: act.pinned(),
+        evidence: act.pinned().clone(),
     }));
     if let Some(sanitizer) = &approval.sanitizer {
         facts.push(Fact::OutputSanitizerBound {
@@ -3450,7 +3450,7 @@ fn approved_release(
             contribution: crate::plan::bound_contribution(registry, contract, sanitizer, &context)
                 .expect("the compose gate answers a spent approval's sanitizer atoms")
                 .expect("a prepared approval binds an output sanitizer enumeration found applicable"),
-            evidence: act.pinned(),
+            evidence: act.pinned().clone(),
         });
     }
     facts
@@ -3565,7 +3565,7 @@ pub(crate) fn opened_dispatch(
         receiving: current.clone(),
         proposed_effects: contract.emits.clone(),
         annotation: call.annotation().cloned(),
-        evidence: act.pinned(),
+        evidence: act.pinned().clone(),
         subject,
     };
     (dispatch, fact)
@@ -3632,8 +3632,8 @@ impl ActEvidence {
     }
 
     /// The evidence a record of this act pins.
-    pub(crate) fn pinned(&self) -> AudienceEvidence {
-        self.ledger.borrow().evidence().clone()
+    pub(crate) fn pinned(&self) -> std::cell::Ref<'_, AudienceEvidence> {
+        std::cell::Ref::map(self.ledger.borrow(), crate::audience::ActLedger::evidence)
     }
 
     /// The act's pinned answers merged with `fresh`, read without snapshotting them first.
@@ -3833,7 +3833,7 @@ pub(crate) fn compose_batch<'a>(
                 consumes,
                 prepares_fork,
                 facts,
-                evidence: under.pinned(),
+                evidence: under.pinned().clone(),
             }
         };
         if position + 1 < proposals.len() || refused {
