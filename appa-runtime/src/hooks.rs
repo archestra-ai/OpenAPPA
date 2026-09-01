@@ -40,12 +40,10 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             Err(error) => refuse(error.to_string()),
         },
         HookEvent::Prompt { actor, .. } => {
-            match on_actor(runtime, &actor, |session| async move {
-                session.on_prompt();
-                Ok(())
-            })
-            .await
-            {
+            // A prompt gates the new turn, so a close that failed blocks
+            // it: the call is still open and the first proposal would
+            // refuse anyway, with less to say about why.
+            match on_actor(runtime, &actor, |session| async move { session.on_prompt().await }).await {
                 Ok(()) => HookDecision::Ack,
                 Err(error) => fold(error, block),
             }
@@ -409,6 +407,43 @@ mod tests {
             &serde_json::to_vec(&propose("echo hi")).expect("re-serializes"),
         )
         .await;
+        assert_eq!(freed.1["hookSpecificOutput"]["permissionDecision"], "allow");
+    }
+
+    /// The user pressed Esc while the command ran: Claude Code sends no
+    /// outcome hook for the call and no `Stop` hook for the turn. The
+    /// next prompt is the first hook to arrive, and it frees the call.
+    #[tokio::test]
+    async fn the_next_prompt_frees_a_call_an_interrupt_left_open() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let propose = |command: &str| {
+            serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "session_id": "s1",
+                "tool_name": "Bash",
+                "tool_input": {"command": command},
+            })
+        };
+        let released = call_hook(
+            &runtime,
+            &serde_json::to_vec(&propose("ping -c 30 127.0.0.1")).expect("re-serializes"),
+        )
+        .await;
+        assert_eq!(released.1["hookSpecificOutput"]["permissionDecision"], "allow");
+
+        // Interrupted: neither PostToolUse nor Stop arrives.
+        let prompt = serde_json::json!({
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": "s1",
+            "prompt": "never mind, list the files",
+        });
+        assert_eq!(
+            call_hook(&runtime, &serde_json::to_vec(&prompt).expect("re-serializes")).await,
+            (200, serde_json::json!({})),
+        );
+
+        let freed = call_hook(&runtime, &serde_json::to_vec(&propose("ls")).expect("re-serializes")).await;
         assert_eq!(freed.1["hookSpecificOutput"]["permissionDecision"], "allow");
     }
 
