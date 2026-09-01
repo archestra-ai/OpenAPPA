@@ -21,8 +21,12 @@ case "$*" in
     exit 0
     ;;
   *"/reload"*)
-    # The shape the real handler answers with.
-    printf '{"policy_key":"%s","policy_identity":"fake","changed":true}\n' "${FAKE_POLICY_KEY:-}"
+    # A successful reload, which is all init reads: the body is not consumed, so
+    # the fixture invents none. FAKE_RELOADS, when set, records that init got
+    # this far.
+    if [ -n "${FAKE_RELOADS:-}" ]; then
+      printf 'reload\n' >>"$FAKE_RELOADS"
+    fi
     exit 0
     ;;
 esac

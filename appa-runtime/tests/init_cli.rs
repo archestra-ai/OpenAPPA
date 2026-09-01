@@ -260,6 +260,70 @@ fn init_installs_one_local_adapter_and_is_safe_to_run_again() {
     );
 }
 
+/// A runtime of this deployment that survived the install keeps serving the policy it
+/// loaded at startup, and only the install can notice. Nothing here is interactive, so the
+/// reconcile reloads rather than asks.
+#[test]
+fn init_reloads_a_surviving_runtime_that_serves_an_older_policy() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let bin = directory.path().join("bin");
+    let config = directory.path().join("config");
+    let data = directory.path().join("data");
+    let claude = directory.path().join("claude");
+    let plugin = directory.path().join("installed-plugin");
+    fs::create_dir_all(&bin).expect("bin directory");
+    fs::create_dir_all(plugin.join("hooks")).expect("plugin hooks");
+    fs::create_dir_all(&claude).expect("Claude directory");
+    let appa = install_test_binaries(&bin);
+    install_fake_curl(&bin);
+    let source = stage_bundle(directory.path());
+    let fingerprint = runtime_fingerprint(&appa);
+
+    let fake_claude = bin.join("claude");
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-claude.sh"),
+        &fake_claude,
+    )
+    .expect("fake claude is copied");
+    executable(&fake_claude);
+    let starter = plugin.join("hooks/ensure-runtime.sh");
+    fs::write(&starter, "#!/bin/sh\nexit 0\n").expect("fake starter");
+    executable(&starter);
+    fs::write(plugin.join("statusline.sh"), "#!/bin/sh\nexit 0\n").expect("statusline");
+
+    let reloads = directory.path().join("reloads");
+    let output = Command::new(appa)
+        .current_dir(directory.path())
+        .args(["init", "claude-code", "--plugin-source"])
+        .arg(&source)
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default()),
+        )
+        .env("HOME", directory.path())
+        .env("APPA_INSTALL_DIR", &bin)
+        .env("APPA_CONFIG_DIR", &config)
+        .env("APPA_DATA_DIR", &data)
+        .env("CLAUDE_CONFIG_DIR", &claude)
+        .env("FAKE_CLAUDE_HOME", &claude)
+        .env("FAKE_CLAUDE_LOG", directory.path().join("claude.log"))
+        .env("FAKE_PLUGIN_ROOT", &plugin)
+        .env("FAKE_RUNTIME_FINGERPRINT", fingerprint)
+        .env("FAKE_RUNTIME_CONFIG", config.join("appa.toml"))
+        // This deployment's own runtime, serving a policy that is not the file init
+        // wrote: the one state a reload is for.
+        .env("FAKE_POLICY_KEY", "a-policy-this-init-did-not-compose")
+        .env("FAKE_RELOADS", &reloads)
+        .output()
+        .expect("appa init runs");
+
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        reloads.exists(),
+        "a diverged runtime of this deployment must be reloaded, not left serving its older policy",
+    );
+}
+
 #[test]
 fn init_keeps_a_custom_statusline() {
     let directory = tempfile::tempdir().expect("temporary directory");
