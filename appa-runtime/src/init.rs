@@ -62,11 +62,6 @@ pub enum InitError {
         path: PathBuf,
         message: String,
     },
-    #[error(
-        "the runtime at {endpoint} serves another deployment's configuration, not {path}; \
-         stop that process, or give this deployment an endpoint of its own, and rerun init"
-    )]
-    ForeignDeployment { endpoint: String, path: PathBuf },
     #[error(transparent)]
     PluginBundle(#[from] PluginBundleError),
     #[error("{operation}; restoring the previous Claude Code plugin also failed: {recovery}")]
@@ -107,13 +102,8 @@ impl ConfigOutcome {
 enum RuntimeOutcome {
     /// Serving the configuration this init validated, with nothing to reconcile.
     Healthy,
-    /// Serving an older policy until it was reloaded, at the user's word, and the key it
-    /// installed proves the file it read was this one.
+    /// Serving an older policy until it was reloaded, at the user's word.
     Reloaded,
-    /// Reloaded, but this init cannot compose the file's key and so cannot say the
-    /// responder read it. Never reported as a plain reload: an unchecked claim about which
-    /// policy is serving is the fault this reconcile exists to remove.
-    ReloadedUnconfirmed,
     /// Still serving an older policy, because the user declined the reload.
     OlderPolicy,
 }
@@ -123,7 +113,6 @@ impl RuntimeOutcome {
         match self {
             RuntimeOutcome::Healthy => "healthy",
             RuntimeOutcome::Reloaded => "healthy (policy reloaded)",
-            RuntimeOutcome::ReloadedUnconfirmed => "healthy (reloaded; serving policy unconfirmed)",
             RuntimeOutcome::OlderPolicy => "healthy (serving an older policy)",
         }
     }
@@ -264,7 +253,7 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
     clear_stale_endpoint(&endpoint)?;
     //    A healthy runtime from another build is stopped only after an explicit
     //    confirmation and only when it identifies a same-user appa pid.
-    clear_foreign_endpoint(&appa, &endpoint)?;
+    clear_foreign_endpoint(&appa, &config, &endpoint)?;
 
     // 5. Snapshot for recovery and disarm the launcher.
     let launcher_dir = appa.parent().unwrap_or(&paths.install_dir);
@@ -285,7 +274,7 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
         .and_then(|plugin_root| {
             install_statusline(&plugin_root, &paths)?;
             progress("starting the runtime");
-            start_runtime(&plugin_root, &deployed_appa, &endpoint)
+            start_runtime(&plugin_root, &deployed_appa, &config, &endpoint)
         })
         //    The runtime this plugin is bound to must also be serving this
         //    deployment's policy, so the reconcile is inside the transaction:
@@ -1467,7 +1456,7 @@ fn install_statusline(plugin_root: &Path, paths: &DeploymentPaths) -> Result<(),
     Ok(())
 }
 
-fn start_runtime(plugin_root: &Path, runtime: &Path, endpoint: &Endpoint) -> Result<(), InitError> {
+fn start_runtime(plugin_root: &Path, runtime: &Path, config: &Path, endpoint: &Endpoint) -> Result<(), InitError> {
     #[cfg(windows)]
     let mut command = {
         let starter = plugin_root.join("hooks/hook.ps1");
@@ -1499,7 +1488,7 @@ fn start_runtime(plugin_root: &Path, runtime: &Path, endpoint: &Endpoint) -> Res
         .output()
         .map_err(|error| InitError::Starter(error.to_string()))?;
     if output.status.success() {
-        return verify_runtime_binary(runtime, endpoint);
+        return verify_runtime_deployment(runtime, config, endpoint);
     }
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
     Err(InitError::Starter(if stderr.is_empty() {
@@ -1705,7 +1694,12 @@ fn terminate_appa_pid(pid: i32) -> Result<(), InitError> {
     powershell(&command, [("APPA_STALE_PID", pid.to_string())]).map(drop)
 }
 
-fn endpoint_owner(binary: &Path, endpoint: &Endpoint) -> Result<EndpointOwner, InitError> {
+/// Who owns the endpoint: this deployment, another one, or a process that will not say.
+///
+/// A deployment is a build *and* the configuration it serves. Comparing builds alone makes
+/// every install of one build look like the same deployment, which is how an install ends
+/// up reloading, and reporting on, a runtime that is not its own.
+fn endpoint_owner(binary: &Path, config: &Path, endpoint: &Endpoint) -> Result<EndpointOwner, InitError> {
     let expected = Sha256::digest(fs::read(binary).map_err(|source| InitError::InstallRuntime {
         path: binary.to_path_buf(),
         source,
@@ -1723,14 +1717,19 @@ fn endpoint_owner(binary: &Path, endpoint: &Endpoint) -> Result<EndpointOwner, I
         return Ok(EndpointOwner::Unidentified);
     }
     let answer = String::from_utf8_lossy(&output.stdout);
-    Ok(classify_endpoint_owner(&expected, &answer))
+    Ok(classify_endpoint_owner(&expected, config, &answer))
 }
 
-fn classify_endpoint_owner(expected: &str, answer: &str) -> EndpointOwner {
-    let mut fields = answer.split_whitespace();
+/// A process is this deployment only when it names both this build and this configuration.
+/// Anything else — a different build, a different config, or an answer that names no
+/// config at all — is another deployment, to be stopped before this install proceeds.
+fn classify_endpoint_owner(expected: &str, config: &Path, answer: &str) -> EndpointOwner {
+    let mut lines = answer.lines();
+    let mut fields = lines.next().unwrap_or_default().split_whitespace();
     let actual = fields.next().unwrap_or_default();
     let pid = fields.next().and_then(positive_pid);
-    if actual == expected {
+    let serves = lines.next().unwrap_or_default().trim();
+    if actual == expected && !serves.is_empty() && Path::new(serves) == config {
         EndpointOwner::Deployment
     } else {
         EndpointOwner::Foreign { pid }
@@ -1751,7 +1750,7 @@ fn confirm_stop_with(
 ) -> Result<bool, InitError> {
     write!(
         output,
-        "appa: a different appa build (pid {pid}) owns {}. Stop it and continue? [Y/n] ",
+        "appa: another appa deployment (pid {pid}) owns {}. Stop it and continue? [Y/n] ",
         endpoint.url()
     )
     .and_then(|()| output.flush())
@@ -1779,22 +1778,23 @@ fn confirm_stop_with(
 /// eligible only when the APPA identity response names a same-user `appa`
 /// process and the user confirms the stop. The identity is checked again
 /// immediately before signalling to close the prompt-to-kill race.
-fn clear_foreign_endpoint(binary: &Path, endpoint: &Endpoint) -> Result<(), InitError> {
-    match endpoint_owner(binary, endpoint)? {
+fn clear_foreign_endpoint(binary: &Path, config: &Path, endpoint: &Endpoint) -> Result<(), InitError> {
+    match endpoint_owner(binary, config, endpoint)? {
         EndpointOwner::Deployment | EndpointOwner::Unidentified => Ok(()),
         EndpointOwner::Foreign { pid: None } => Err(InitError::RuntimeIdentity {
             endpoint: endpoint.url().to_owned(),
-            message: "a different appa build owns this endpoint, but this older runtime does not identify its pid; stop it and rerun init"
+            message: "another appa deployment owns this endpoint, but that runtime does not identify its pid; stop it and rerun init"
                 .to_owned(),
         }),
         EndpointOwner::Foreign { pid: Some(pid) } => {
-            clear_confirmed_foreign_with(binary, endpoint, pid, confirm_stop)
+            clear_confirmed_foreign_with(binary, config, endpoint, pid, confirm_stop)
         }
     }
 }
 
 fn clear_confirmed_foreign_with(
     binary: &Path,
+    config: &Path,
     endpoint: &Endpoint,
     pid: i32,
     confirm: impl FnOnce(i32, &Endpoint) -> Result<bool, InitError>,
@@ -1810,10 +1810,10 @@ fn clear_confirmed_foreign_with(
     if !confirm(pid, endpoint)? {
         return Err(InitError::RuntimeIdentity {
             endpoint: endpoint.url().to_owned(),
-            message: format!("a different appa build (pid {pid}) still owns this endpoint; init cancelled"),
+            message: format!("another appa deployment (pid {pid}) still owns this endpoint; init cancelled"),
         });
     }
-    match endpoint_owner(binary, endpoint)? {
+    match endpoint_owner(binary, config, endpoint)? {
         EndpointOwner::Unidentified => return Ok(()),
         EndpointOwner::Deployment => return Ok(()),
         EndpointOwner::Foreign { pid: Some(current) } if current == pid => {}
@@ -1868,17 +1868,8 @@ fn reconcile_policy(
     // indistinguishably. The key it installed is what proves which file it read: reporting
     // a reload this init did not cause would be exactly the untrue receipt the reconcile
     // exists to remove.
-    let installed = reload_policy(endpoint, config)?;
-    match composed {
-        ComposedPolicy::Key(key) if *key == installed => Ok(RuntimeOutcome::Reloaded),
-        ComposedPolicy::Key(_) => Err(InitError::ForeignDeployment {
-            endpoint: endpoint.url().to_owned(),
-            path: config.to_path_buf(),
-        }),
-        // Without a key of its own this init has nothing to check the answer against, so
-        // it reports the reload it caused and claims nothing about whose file was read.
-        ComposedPolicy::Unknowable => Ok(RuntimeOutcome::ReloadedUnconfirmed),
-    }
+    reload_policy(endpoint, config)?;
+    Ok(RuntimeOutcome::Reloaded)
 }
 
 /// Why a serving runtime may not be answering under the file this init validated, or
@@ -1912,12 +1903,12 @@ fn serving_policy_key(endpoint: &Endpoint) -> Option<String> {
     (!key.is_empty()).then_some(key)
 }
 
-/// Ask the running runtime to serve the configuration on disk, and answer with the policy
-/// key it installed.
+/// Ask the running runtime to serve the configuration on disk.
 ///
-/// The runtime validates the file again before it swaps: a refusal here is a fault worth
-/// naming, not a receipt footnote, because the deployment keeps serving the older policy.
-fn reload_policy(endpoint: &Endpoint, config: &Path) -> Result<String, InitError> {
+/// The endpoint's owner is this deployment by the time this runs, so the reload reads this
+/// deployment's file. The runtime validates it again before it swaps: a refusal here is a
+/// fault worth naming, not a receipt footnote, because the older policy keeps serving.
+fn reload_policy(endpoint: &Endpoint, config: &Path) -> Result<(), InitError> {
     let refused = |message: String| InitError::ReloadRefused {
         endpoint: endpoint.url().to_owned(),
         path: config.to_path_buf(),
@@ -1931,11 +1922,7 @@ fn reload_policy(endpoint: &Endpoint, config: &Path) -> Result<String, InitError
     if !output.status.success() {
         return Err(refused(String::from_utf8_lossy(&output.stderr).trim().to_owned()));
     }
-    let answer = String::from_utf8_lossy(&output.stdout);
-    serde_json::from_str::<Value>(&answer)
-        .ok()
-        .and_then(|body| Some(body.get("policy_key")?.as_str()?.to_owned()))
-        .ok_or_else(|| refused(format!("the reload named no policy key: {}", answer.trim())))
+    Ok(())
 }
 
 /// A terminal is asked; anything else reloads. A script that just wrote a config wants it
@@ -1984,8 +1971,9 @@ fn confirm_reload_with(
     Ok(matches!(answer.trim().to_ascii_lowercase().as_str(), "" | "y" | "yes"))
 }
 
-fn verify_runtime_binary(runtime: &Path, endpoint: &Endpoint) -> Result<(), InitError> {
-    match endpoint_owner(runtime, endpoint)? {
+/// The endpoint answers for this deployment: this build, serving this configuration.
+fn verify_runtime_deployment(runtime: &Path, config: &Path, endpoint: &Endpoint) -> Result<(), InitError> {
+    match endpoint_owner(runtime, config, endpoint)? {
         EndpointOwner::Deployment => Ok(()),
         EndpointOwner::Unidentified => Err(InitError::RuntimeIdentity {
             endpoint: endpoint.url().to_owned(),
@@ -1993,7 +1981,7 @@ fn verify_runtime_binary(runtime: &Path, endpoint: &Endpoint) -> Result<(), Init
         }),
         EndpointOwner::Foreign { .. } => Err(InitError::RuntimeIdentity {
             endpoint: endpoint.url().to_owned(),
-            message: "a different appa build is answering; stop that process and rerun init".to_owned(),
+            message: "another appa deployment is answering; stop that process and rerun init".to_owned(),
         }),
     }
 }
@@ -2134,14 +2122,36 @@ mod tests {
     }
 
     #[test]
-    fn runtime_identity_accepts_old_answers_but_only_new_answers_name_a_process() {
-        assert_eq!(classify_endpoint_owner("same", "same 42"), EndpointOwner::Deployment);
+    fn only_this_build_serving_this_config_is_this_deployment() {
+        let mine = Path::new("/home/user/config/appa.toml");
         assert_eq!(
-            classify_endpoint_owner("same", "different 42"),
+            classify_endpoint_owner("same", mine, "same 42\n/home/user/config/appa.toml"),
+            EndpointOwner::Deployment
+        );
+        // The build alone never settles it: one build serves as many deployments as there
+        // are configurations, and each is a stranger to the others.
+        assert_eq!(
+            classify_endpoint_owner("same", mine, "same 42\n/home/other/config/appa.toml"),
+            EndpointOwner::Foreign { pid: Some(42) }
+        );
+        // A path with spaces is one path, not two fields.
+        let spaced = Path::new("/home/user/Application Support/appa.toml");
+        assert_eq!(
+            classify_endpoint_owner("same", spaced, "same 42\n/home/user/Application Support/appa.toml"),
+            EndpointOwner::Deployment
+        );
+        assert_eq!(
+            classify_endpoint_owner("same", mine, "different 42\n/home/user/config/appa.toml"),
+            EndpointOwner::Foreign { pid: Some(42) }
+        );
+        // An answer that names no configuration cannot claim to be this deployment, and
+        // one that names no pid cannot be stopped without one.
+        assert_eq!(
+            classify_endpoint_owner("same", mine, "same 42"),
             EndpointOwner::Foreign { pid: Some(42) }
         );
         assert_eq!(
-            classify_endpoint_owner("same", "different"),
+            classify_endpoint_owner("same", mine, "different"),
             EndpointOwner::Foreign { pid: None }
         );
     }
@@ -2243,45 +2253,6 @@ mod tests {
     }
 
     #[test]
-    fn a_reload_that_installed_another_deployments_policy_is_never_reported_as_this_one() {
-        // Two answers, in the order a reconcile asks for them: the endpoint serves a
-        // different key, and the reload it is then given installs a third — what a
-        // same-build runtime of another deployment does, because `/reload` reads its own
-        // configuration path and not the one init names.
-        let (endpoint, asked) = recorded_answers(vec![
-            "another-deployment".to_string(),
-            r#"{"policy_key":"another-deployment-reloaded","policy_identity":"x","changed":true}"#.to_string(),
-        ]);
-        let config = PathBuf::from("/home/user/config/appa.toml");
-        let outcome = reconcile_policy(&endpoint, &config, &ComposedPolicy::Key("this-deployment".to_string()));
-        assert!(
-            matches!(outcome, Err(InitError::ForeignDeployment { .. })),
-            "got {outcome:?}"
-        );
-        assert_eq!(
-            asked.lock().expect("the request recorder is never poisoned").as_slice(),
-            [
-                "GET /policy-key HTTP/1.1".to_string(),
-                "POST /reload HTTP/1.1".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn a_reload_this_init_cannot_check_is_never_reported_as_a_plain_reload() {
-        let (endpoint, _asked) = recorded_answers(vec![
-            "whatever-is-serving".to_string(),
-            r#"{"policy_key":"whatever-was-installed","policy_identity":"x","changed":true}"#.to_string(),
-        ]);
-        let config = PathBuf::from("/home/user/config/appa.toml");
-        assert_eq!(
-            reconcile_policy(&endpoint, &config, &ComposedPolicy::Unknowable).expect("the reconcile completes"),
-            RuntimeOutcome::ReloadedUnconfirmed,
-            "a config this init cannot compose leaves the answer uncheckable, and the receipt says so"
-        );
-    }
-
-    #[test]
     fn a_reload_that_installed_this_deployments_policy_is_reported_as_reloaded() {
         let (endpoint, _asked) = recorded_answers(vec![
             "older".to_string(),
@@ -2307,7 +2278,8 @@ mod tests {
         fs::write(&candidate, "a different candidate build").expect("the candidate binary exists");
         let endpoint = health_answers(vec![format!("different-fingerprint {pid}")]);
 
-        clear_confirmed_foreign_with(&candidate, &endpoint, pid, |approved_pid, _| {
+        let config = directory.path().join("appa.toml");
+        clear_confirmed_foreign_with(&candidate, &config, &endpoint, pid, |approved_pid, _| {
             assert_eq!(approved_pid, pid);
             Ok(true)
         })

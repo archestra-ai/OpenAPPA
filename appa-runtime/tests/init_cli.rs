@@ -85,7 +85,10 @@ fn init_installs_one_local_adapter_and_is_safe_to_run_again() {
 
     let log = directory.path().join("claude.log");
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
-    let run = |reported_fingerprint: &str, fail_once: Option<&str>| {
+    let mine = config.join("appa.toml");
+    // What the runtime already owning the endpoint claims to be: a build, and the
+    // configuration it serves. Either one differing makes it another deployment.
+    let run = |reported_fingerprint: &str, reported_config: &Path, fail_once: Option<&str>| {
         let mut command = Command::new(&appa);
         // Run from a directory that holds no marketplace: default resolution
         // must not consult the working directory, and an explicit source is an
@@ -103,14 +106,15 @@ fn init_installs_one_local_adapter_and_is_safe_to_run_again() {
             .env("FAKE_CLAUDE_HOME", &claude)
             .env("FAKE_CLAUDE_LOG", &log)
             .env("FAKE_PLUGIN_ROOT", &plugin)
-            .env("FAKE_RUNTIME_FINGERPRINT", reported_fingerprint);
+            .env("FAKE_RUNTIME_FINGERPRINT", reported_fingerprint)
+            .env("FAKE_RUNTIME_CONFIG", reported_config);
         if let Some(failure) = fail_once {
             command.env("FAKE_CLAUDE_FAIL_ONCE", failure);
         }
         command.output().expect("appa init runs")
     };
 
-    let first = run(&fingerprint, None);
+    let first = run(&fingerprint, &mine, None);
     assert!(first.status.success(), "{}", String::from_utf8_lossy(&first.stderr));
     let first_stderr = String::from_utf8_lossy(&first.stderr);
     for phase in [
@@ -148,7 +152,7 @@ fn init_installs_one_local_adapter_and_is_safe_to_run_again() {
             .is_some_and(|command| command.ends_with("appa-statusline.sh"))
     );
 
-    let second = run(&fingerprint, None);
+    let second = run(&fingerprint, &mine, None);
     assert!(second.status.success(), "{}", String::from_utf8_lossy(&second.stderr));
     assert!(String::from_utf8_lossy(&second.stdout).contains("(kept)"));
 
@@ -176,7 +180,7 @@ fn init_installs_one_local_adapter_and_is_safe_to_run_again() {
     fs::copy(&appa, bin.join("appa-runtime")).expect("legacy runtime is restored for the failed-upgrade fixture");
     executable(&bin.join("appa-runtime"));
     for failure in ["marketplace-add", "plugin-install"] {
-        let failed = run(&fingerprint, Some(failure));
+        let failed = run(&fingerprint, &mine, Some(failure));
         assert!(!failed.status.success(), "the injected {failure} failure must surface");
         let registry: serde_json::Value = serde_json::from_slice(
             &fs::read(claude.join("plugins/installed_plugins.json")).expect("restored plugin registry"),
@@ -204,31 +208,41 @@ fn init_installs_one_local_adapter_and_is_safe_to_run_again() {
     }
 
     // A foreign runtime already owning the endpoint is refused before Claude is
-    // touched at all, so the installation it would have replaced is still the
-    // one that is registered and running.
-    let before = fs::read_to_string(&log).expect("Claude invocation log");
-    let wrong_runtime = run("not-this-build", None);
-    assert!(!wrong_runtime.status.success());
-    assert!(String::from_utf8_lossy(&wrong_runtime.stderr).contains("different appa build"));
-    let after = fs::read_to_string(&log).expect("Claude invocation log");
-    assert_eq!(
-        after.lines().count() - before.lines().count(),
-        after
-            .lines()
-            .skip(before.lines().count())
-            .filter(|line| line.starts_with("plugin marketplace list"))
-            .count(),
-        "a refused endpoint must not reach a single mutating claude call: {}",
-        &after[before.len()..],
-    );
-    assert!(
-        !fs::read_to_string(bin.join("clappa"))
-            .expect("launcher")
-            .contains("init did not complete"),
-        "a refused endpoint must leave the working launcher armed",
-    );
+    // touched at all, so the installation it would have replaced is still the one
+    // that is registered and running. Another build is one way to be foreign; this
+    // build serving another deployment's configuration is the other, and it is the
+    // one a digest alone cannot see.
+    for (build, serving) in [
+        ("not-this-build", mine.as_path()),
+        (fingerprint.as_str(), Path::new("/somewhere/else/appa.toml")),
+    ] {
+        let before = fs::read_to_string(&log).expect("Claude invocation log");
+        let refused = run(build, serving, None);
+        assert!(
+            !refused.status.success(),
+            "a runtime claiming build {build} at {} must be refused",
+            serving.display()
+        );
+        let after = fs::read_to_string(&log).expect("Claude invocation log");
+        assert_eq!(
+            after.lines().count() - before.lines().count(),
+            after
+                .lines()
+                .skip(before.lines().count())
+                .filter(|line| line.starts_with("plugin marketplace list"))
+                .count(),
+            "a refused endpoint must not reach a single mutating claude call: {}",
+            &after[before.len()..],
+        );
+        assert!(
+            !fs::read_to_string(bin.join("clappa"))
+                .expect("launcher")
+                .contains("init did not complete"),
+            "a refused endpoint must leave the working launcher armed",
+        );
+    }
 
-    let unrecoverable = run(&fingerprint, Some("plugin-install-always"));
+    let unrecoverable = run(&fingerprint, &mine, Some("plugin-install-always"));
     assert!(!unrecoverable.status.success());
     assert!(String::from_utf8_lossy(&unrecoverable.stderr).contains("restoring the previous Claude Code plugin"));
     assert!(
@@ -238,7 +252,7 @@ fn init_installs_one_local_adapter_and_is_safe_to_run_again() {
         "a failed rollback must leave clappa refusing to launch an unprotected session",
     );
 
-    let repaired = run(&fingerprint, None);
+    let repaired = run(&fingerprint, &mine, None);
     assert!(
         repaired.status.success(),
         "{}",
@@ -296,6 +310,7 @@ fn init_keeps_a_custom_statusline() {
         .env("FAKE_CLAUDE_LOG", directory.path().join("claude.log"))
         .env("FAKE_PLUGIN_ROOT", &plugin)
         .env("FAKE_RUNTIME_FINGERPRINT", fingerprint)
+        .env("FAKE_RUNTIME_CONFIG", config.join("appa.toml"))
         .output()
         .expect("appa init runs");
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
@@ -354,6 +369,8 @@ fn relative_directory_overrides_are_rendered_absolute() {
         .env("FAKE_CLAUDE_LOG", root.join("claude.log"))
         .env("FAKE_PLUGIN_ROOT", &plugin)
         .env("FAKE_RUNTIME_FINGERPRINT", fingerprint)
+        // The deployment the answering runtime claims: this init's own config.
+        .env("FAKE_RUNTIME_CONFIG", root.join("config/appa.toml"))
         .output()
         .expect("appa init runs");
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
@@ -435,17 +452,14 @@ fn a_runtime_that_fails_verification_after_the_switch_undoes_it() {
         // The preflight sees this build; everything after it sees a stranger.
         .env("FAKE_CURL_CALLS", root.join("curl-calls"))
         .env("FAKE_RUNTIME_FINGERPRINT", runtime_fingerprint(&appa))
+        .env("FAKE_RUNTIME_CONFIG", root.join("config/appa.toml"))
         .env("FAKE_RUNTIME_FINGERPRINT_LATER", "not-this-build")
         .output()
         .expect("appa init runs");
 
     assert!(
         !output.status.success(),
-        "verification against a foreign runtime must fail init",
-    );
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("different appa build"),
-        "{}",
+        "verification against a foreign runtime must fail init: {}",
         String::from_utf8_lossy(&output.stderr),
     );
 
