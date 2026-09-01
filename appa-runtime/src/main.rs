@@ -233,8 +233,9 @@ async fn binary_fingerprint(State(state): State<AppState>) -> Result<String, axu
         .ok_or(axum::http::StatusCode::NOT_FOUND)
 }
 
-/// The configuration goes on its own line: a path may hold spaces, and the first line's
-/// fields are read positionally.
+/// The first line's fields are read positionally, so the configuration follows the first
+/// newline and runs to the end of the answer. A path may hold spaces and, on Unix, newlines;
+/// taking the whole remainder verbatim keeps either from being mistaken for a field break.
 fn binary_fingerprint_answer(digest: &str, pid: u32, config: &Path) -> String {
     format!("{digest} {pid}\n{}", config.display())
 }

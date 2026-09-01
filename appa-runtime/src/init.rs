@@ -1724,11 +1724,13 @@ fn endpoint_owner(binary: &Path, config: &Path, endpoint: &Endpoint) -> Result<E
 /// Anything else — a different build, a different config, or an answer that names no
 /// config at all — is another deployment, to be stopped before this install proceeds.
 fn classify_endpoint_owner(expected: &str, config: &Path, answer: &str) -> EndpointOwner {
-    let mut lines = answer.lines();
-    let mut fields = lines.next().unwrap_or_default().split_whitespace();
+    let (identity, rest) = answer.split_once('\n').unwrap_or((answer, ""));
+    let mut fields = identity.split_whitespace();
     let actual = fields.next().unwrap_or_default();
     let pid = fields.next().and_then(positive_pid);
-    let serves = lines.next().unwrap_or_default().trim();
+    // Everything after the first newline is the path, less the one the transport appends:
+    // a config path may itself hold a newline, and splitting again would truncate it.
+    let serves = rest.strip_suffix('\n').unwrap_or(rest);
     if actual == expected && !serves.is_empty() && Path::new(serves) == config {
         EndpointOwner::Deployment
     } else {
@@ -2133,6 +2135,18 @@ mod tests {
         let spaced = Path::new("/home/user/Application Support/appa.toml");
         assert_eq!(
             classify_endpoint_owner("same", spaced, "same 42\n/home/user/Application Support/appa.toml"),
+            EndpointOwner::Deployment
+        );
+        // On Unix a directory name may hold a newline, so the path is read as the whole
+        // remainder of the answer the runtime composes — and a transport that appends a
+        // newline of its own does not turn one deployment into a stranger.
+        let newlined = Path::new("/home/user/two\nlines/appa.toml");
+        assert_eq!(
+            classify_endpoint_owner("same", newlined, "same 42\n/home/user/two\nlines/appa.toml"),
+            EndpointOwner::Deployment
+        );
+        assert_eq!(
+            classify_endpoint_owner("same", mine, "same 42\n/home/user/config/appa.toml\n"),
             EndpointOwner::Deployment
         );
         assert_eq!(
