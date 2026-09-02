@@ -38,6 +38,7 @@ jobs:
       should_publish: ${{ steps.resolve.outputs.should_publish }}
       tag_name: ${{ steps.resolve.outputs.tag_name }}
       version: ${{ steps.resolve.outputs.version }}
+      source_commit: ${{ steps.resolve.outputs.source_commit }}
     steps:
       # Create releases before calculating the next release PR. A draft release
       # needs its forced tag to exist before Release Please can anchor that calculation.
@@ -76,10 +77,16 @@ jobs:
               echo "::error::${tag_name} is not a draft release"
               exit 1
             fi
+            source_commit=$(gh api "repos/${GH_REPO}/commits/${tag_name}" --jq '.sha')
+            if [[ ! "$source_commit" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::${tag_name} did not resolve to a commit"
+              exit 1
+            fi
             {
               echo "should_publish=true"
               echo "version=${INPUT_VERSION}"
               echo "tag_name=${tag_name}"
+              echo "source_commit=${source_commit}"
             } >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -88,6 +95,7 @@ jobs:
             echo "should_publish=${ACTION_RELEASE_CREATED:-false}"
             echo "version=${ACTION_VERSION}"
             echo "tag_name=${ACTION_TAG_NAME}"
+            echo "source_commit=${GITHUB_SHA}"
           } >> "$GITHUB_OUTPUT"
 
   release-pr:
@@ -163,12 +171,20 @@ jobs:
       - name: Checkout project
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # The same ref the binaries are built from. `github.sha` would be the
-          # commit that triggered this run, which is not the release tag when
-          # publishing an existing release.
-          ref: ${{ needs.release-please.outputs.tag_name }}
+          ref: ${{ github.sha }}
           persist-credentials: false
           fetch-depth: 1
+
+      - name: Verify and checkout release source
+        env:
+          RELEASE_REF: ${{ needs.release-please.outputs.tag_name }}
+          SOURCE_COMMIT: ${{ needs.release-please.outputs.source_commit }}
+        run: |
+          git fetch --no-tags origin \
+            "refs/tags/${RELEASE_REF}:refs/tags/${RELEASE_REF}"
+          test "$(git rev-parse "${RELEASE_REF}^{commit}")" = "$SOURCE_COMMIT"
+          git checkout --detach "$SOURCE_COMMIT"
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
 
       - name: Package the plugin
         id: package
@@ -197,10 +213,11 @@ jobs:
       - release-please
       - plugin-artifact
     permissions:
-      contents: read # Required to check out the source commit and verify its release tag.
+      contents: read # Required to verify and check out the release tag.
     uses: ./.github/workflows/build-appa-runtime-binaries.yml
     with:
       release_ref: ${{ needs.release-please.outputs.tag_name }}
+      source_commit: ${{ needs.release-please.outputs.source_commit }}
       expected_version: ${{ needs.release-please.outputs.version }}
       plugin_sha256: ${{ needs.plugin-artifact.outputs.sha256 }}
 
@@ -220,9 +237,20 @@ jobs:
       - name: Checkout release source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.release-please.outputs.tag_name }}
+          ref: ${{ github.sha }}
           persist-credentials: false
           fetch-depth: 1
+
+      - name: Verify and checkout release source
+        env:
+          RELEASE_REF: ${{ needs.release-please.outputs.tag_name }}
+          SOURCE_COMMIT: ${{ needs.release-please.outputs.source_commit }}
+        run: |
+          git fetch --no-tags origin \
+            "refs/tags/${RELEASE_REF}:refs/tags/${RELEASE_REF}"
+          test "$(git rev-parse "${RELEASE_REF}^{commit}")" = "$SOURCE_COMMIT"
+          git checkout --detach "$SOURCE_COMMIT"
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
 
       - name: Download release archives
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
