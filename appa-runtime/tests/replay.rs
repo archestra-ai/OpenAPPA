@@ -18,8 +18,6 @@ use axum::routing::post;
 
 const EXTERNALS: &str = "\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n";
 
-const PATH_PARAMS: &str = r#"{ type = "object", properties = { path = { type = "string" } }, required = ["path"] }"#;
-
 /// A deployment over the given `[policy]` body and any `[externals.*]` bindings after the
 /// shared root settings.
 fn runtime(dir: &tempfile::TempDir, policy: &str, bindings: &str) -> Runtime {
@@ -49,12 +47,11 @@ fn taken(kind: OfferKind) -> StepOutcome {
     StepOutcome::Passed { taken: Some(kind) }
 }
 
-/// An email must reach its recipient; a deploy needs a backup that never comes.
+/// An email leaves the company; a deploy needs a backup that never comes.
 const ALLOW_AND_DENY_POLICY: &str = r#"
 [[policy.tool]]
 name = "Email"
-parameters = { type = "object", properties = { to = { type = "string" } }, required = ["to"] }
-requires = { audience = { contains = ["$to"] } }
+requires = { audience = { contains = ["public"] } }
 delta = {}
 
 [[policy.tool]]
@@ -82,29 +79,27 @@ async fn one_allow_and_one_deny_pass() {
     assert_eq!(summary.exit_code(), std::process::ExitCode::SUCCESS);
 }
 
-/// HR reads narrow the audience to `hr`; any other read restricts nothing; an email must
-/// reach its recipient.
-fn narrowing_policy() -> String {
-    format!(
-        r#"
+/// HR reads narrow the audience to `hr`; any other read restricts nothing; an email leaves
+/// the company; a post reaches HR.
+const NARROWING_POLICY: &str = r#"
 [[policy.tool]]
 name = "Read(path:/hr/*)"
-parameters = {PATH_PARAMS}
-delta = {{ audience = ["hr"] }}
+delta = { audience = ["hr"] }
 
 [[policy.tool]]
 name = "Read"
-parameters = {PATH_PARAMS}
-delta = {{}}
+delta = {}
 
 [[policy.tool]]
 name = "Email"
-parameters = {{ type = "object", properties = {{ to = {{ type = "string" }} }}, required = ["to"] }}
-requires = {{ audience = {{ contains = ["$to"] }} }}
-delta = {{}}
-"#
-    )
-}
+requires = { audience = { contains = ["public"] } }
+delta = {}
+
+[[policy.tool]]
+name = "Post"
+requires = { audience = { contains = ["hr"] } }
+delta = {}
+"#;
 
 /// The trace the command exists for: a read narrows the trajectory, and the email that was
 /// fine before it is denied after it. The read is allowed the way the model gets it allowed,
@@ -112,11 +107,11 @@ delta = {{}}
 #[tokio::test]
 async fn a_narrowing_read_denies_the_later_email() {
     let dir = tempfile::tempdir().expect("a temp dir");
-    let runtime = runtime(&dir, &narrowing_policy(), "");
+    let runtime = runtime(&dir, NARROWING_POLICY, "");
     let traces = [
         trace(
             "leak.appa",
-            "Read {\n  path: \"/hr/salaries.csv\"\n}\nexpect allow\n\nEmail {\n  to: \"x@other.com\"\n}\nexpect deny\n\nEmail {\n  to: \"hr\"\n}\nexpect allow\n",
+            "Read {\n  path: \"/hr/salaries.csv\"\n}\nexpect allow\n\nEmail {\n  to: \"x@other.com\"\n}\nexpect deny\n\nPost {\n  text: \"reviewed\"\n}\nexpect allow\n",
         ),
         trace("no-read.appa", "Email {\n  to: \"x@other.com\"\n}\nexpect allow\n"),
     ];
@@ -176,29 +171,23 @@ async fn an_authority_offer_is_taken_as_approved() {
 
 /// HR reads narrow the audience; an export needs `public`; the redactor is the declared
 /// way from `hr` to `public`.
-fn redaction_policy() -> String {
-    format!(
-        r#"
+const REDACTION_POLICY: &str = r#"
 [[policy.tool]]
 name = "Read(path:/hr/*)"
-parameters = {PATH_PARAMS}
-delta = {{ audience = ["hr"] }}
+delta = { audience = ["hr"] }
 
 [[policy.tool]]
 name = "Export"
-parameters = {{ type = "object", properties = {{ body = {{ type = "string" }} }}, required = ["body"] }}
-requires = {{ audience = {{ contains = ["public"] }} }}
-delta = {{}}
+requires = { audience = { contains = ["public"] } }
+delta = {}
 
 [[policy.sanitizer]]
 name = "redactor"
 on = ["tool_input"]
 
 [policy.sanitizer.permits]
-audience = {{ from = ["hr"], to = ["public"] }}
-"#
-    )
-}
+audience = { from = ["hr"], to = ["public"] }
+"#;
 
 const REDACTOR_BINDING: &str = "\n[externals.sanitizers.redactor]\nbuiltin = \"redact-email\"\n";
 
@@ -207,7 +196,7 @@ const REDACTOR_BINDING: &str = "\n[externals.sanitizers.redactor]\nbuiltin = \"r
 #[tokio::test]
 async fn a_sanitizer_offer_is_taken_with_the_value_unchanged() {
     let dir = tempfile::tempdir().expect("a temp dir");
-    let runtime = runtime(&dir, &redaction_policy(), REDACTOR_BINDING);
+    let runtime = runtime(&dir, REDACTION_POLICY, REDACTOR_BINDING);
     let traces = [trace(
         "export.appa",
         "Read {\n  path: \"/hr/salaries.csv\"\n}\nexpect allow\n\nExport {\n  body: \"salaries\"\n}\nexpect sanitizer\n\nExport {\n  body: \"again\"\n}\nexpect sanitizer\n",
@@ -223,34 +212,28 @@ async fn a_sanitizer_offer_is_taken_with_the_value_unchanged() {
     );
 }
 
-/// A read that restricts nothing; an email must reach its recipient; a deploy needs a
-/// backup that never comes.
-fn mismatch_policy() -> String {
-    format!(
-        r#"
+/// A read that restricts nothing; an email leaves the company; a deploy needs a backup
+/// that never comes.
+const MISMATCH_POLICY: &str = r#"
 [[policy.tool]]
 name = "Read"
-parameters = {PATH_PARAMS}
-delta = {{}}
+delta = {}
 
 [[policy.tool]]
 name = "Email"
-parameters = {{ type = "object", properties = {{ to = {{ type = "string" }} }}, required = ["to"] }}
-requires = {{ audience = {{ contains = ["$to"] }} }}
-delta = {{}}
+requires = { audience = { contains = ["public"] } }
+delta = {}
 
 [[policy.tool]]
 name = "Deploy"
-requires = {{ effects = {{ contains = ["backup.completed"] }} }}
-delta = {{}}
-"#
-    )
-}
+requires = { effects = { contains = ["backup.completed"] } }
+delta = {}
+"#;
 
 #[tokio::test]
 async fn a_mismatch_stops_its_file_and_the_other_files_still_run() {
     let dir = tempfile::tempdir().expect("a temp dir");
-    let runtime = runtime(&dir, &mismatch_policy(), "");
+    let runtime = runtime(&dir, MISMATCH_POLICY, "");
     let traces = [
         trace(
             "wrong.appa",
@@ -316,7 +299,7 @@ async fn an_undeclared_tool_cannot_run_and_is_never_a_deny() {
 #[tokio::test]
 async fn files_do_not_share_trajectory_state() {
     let dir = tempfile::tempdir().expect("a temp dir");
-    let runtime = runtime(&dir, &narrowing_policy(), "");
+    let runtime = runtime(&dir, NARROWING_POLICY, "");
     let narrowing =
         "Read {\n  path: \"/hr/salaries.csv\"\n}\nexpect allow\n\nEmail {\n  to: \"x@other.com\"\n}\nexpect deny\n";
     let fresh = "Email {\n  to: \"x@other.com\"\n}\nexpect allow\n";
@@ -338,7 +321,6 @@ name = "classifier"
 
 [[policy.tool]]
 name = "fetch"
-parameters = { type = "object", properties = { url = { type = "string" } }, required = ["url"] }
 annotator = "classifier"
 
 [[policy.tool]]

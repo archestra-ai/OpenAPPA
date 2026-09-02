@@ -1,5 +1,11 @@
-# The page lowers trust to `suspicious`. A command needs `trusted`, so it is
+# Before the fetch, the trajectory is `trusted` and the command runs. The page
+# lowers trust to `suspicious`. A command needs `trusted`, so the next one is
 # denied. Writing a file has no trust requirement and still runs.
+Bash {
+  command: "ls -la"
+}
+expect allow
+
 WebFetch {
   url: "https://example.com/setup-guide"
 }
