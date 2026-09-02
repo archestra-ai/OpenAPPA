@@ -12,6 +12,11 @@ it rewrites the email's arguments before dispatch and moves the value to `public
 - `email-without-hr.appa`: a read outside `/hr/` restricts nothing, and the email runs
   as is.
 
+`private` is a plain reader name, the spelling the shipped batteries use. This example
+does not use the built-in `internal` audience: a sanitizer's `from` needs the members of
+the audience it moves from, and `internal` has members only when an `[audience.internal]`
+source is bound. Without one the engine answers that the call was not checked.
+
 The deployment binds the redactor to the shipped `redact-email` builtin. The replay does
 not call it: its stand-in returns the arguments unchanged, and the engine records the
 pass through the sanitizer the same way.

@@ -1,6 +1,10 @@
 # Private data may leave the company only through the redactor. Reading HR
 # makes the trajectory private; an outside email needs `public`; the sanitizer
 # is the declared way from one to the other.
+#
+# `private` is a plain reader name here, not the built-in `internal`: a
+# sanitizer's `from` needs the members of the audience it moves from, and
+# `internal` has members only when an `[audience.internal]` source is bound.
 
 [policy]
 version = 2

@@ -1,4 +1,4 @@
-# Nothing private was read: the trajectory is still public, and the email leaves.
+# Nothing restricted was read: the trajectory is still public, and the email leaves.
 Email {
   to: "x@other.com"
   subject: "hello"

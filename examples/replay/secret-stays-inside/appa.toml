@@ -1,6 +1,10 @@
-# Reading the HR directory makes the trajectory private. From then on, nothing
-# may leave the company: a sink that needs the `public` audience is blocked,
-# and a sink that stays inside is still fine.
+# Reading the HR directory restricts the trajectory to the organization, the
+# built-in `internal` audience. From then on, nothing may leave the company: a
+# sink that needs the `public` audience is blocked, and a sink that stays inside
+# is still fine.
+#
+# No `[audience.internal]` source is declared, so `internal` is a symbol: labels
+# compare against it, and no real address is ever inside it.
 
 [policy]
 version = 2
@@ -8,7 +12,7 @@ version = 2
 [[policy.tool]]
 name = "Read(path:/hr/*)"
 parameters = { type = "object", properties = { path = { type = "string" } }, required = ["path"] }
-delta = { audience = ["private"] }
+delta = { audience = ["internal"] }
 
 [[policy.tool]]
 name = "Read"
@@ -22,11 +26,11 @@ parameters = { type = "object", properties = { to = { type = "string" }, subject
 requires = { audience = { contains = ["public"] } }
 delta = {}
 
-# A channel post stays inside: `private` is enough.
+# A channel post reaches the organization: the trajectory must still reach it.
 [[policy.tool]]
 name = "PostToChannel"
 parameters = { type = "object", properties = { channel = { type = "string" }, text = { type = "string" } }, required = ["channel"] }
-requires = { audience = { contains = ["private"] } }
+requires = { audience = { contains = ["internal"] } }
 delta = {}
 
 [externals]

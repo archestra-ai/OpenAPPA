@@ -10,7 +10,7 @@ Add `-v` to see every step. `cargo test -p appa --test replay` runs all of them.
 
 | Example | What it pins |
 |---|---|
-| [secret-stays-inside](secret-stays-inside/) | Reading HR data makes the trajectory private; an email may then not leave, a channel post still may. |
+| [secret-stays-inside](secret-stays-inside/) | Reading HR data restricts the trajectory to the built-in `internal` audience; an email may then not leave, a channel post still may. |
 | [untrusted-web-content](untrusted-web-content/) | Fetched web content lowers trust; a shell command may then not run. |
 | [backup-before-deploy](backup-before-deploy/) | A deploy needs a recorded backup; a migration runs once. |
 | [push-only-to-the-org](push-only-to-the-org/) | Three `Bash` contracts chosen by the command text; a non-org push needs a person. |
