@@ -12,8 +12,8 @@ use crate::fact::{
 use crate::label::Label;
 use crate::names::{AuthorityName, SanitizerName};
 use crate::value::{
-    CanonicalDigest, ChildReturnId, DispatchId, ForkId, LabeledValue, Provenance, RawResultDigest, ResolvedCall,
-    ToolName, TrajectoryId, ValueId,
+    CanonicalDigest, ChildReturnId, DispatchId, ForkId, LabeledValue, Provenance, ResolvedCall, ToolName, TrajectoryId,
+    ValueId,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,7 +29,6 @@ pub(crate) struct PreparedFork {
     pub(crate) parent: TrajectoryId,
     pub(crate) snapshot: ForkSnapshot,
     pub(crate) return_policy: ReturnPolicy,
-    pub(crate) shape: Option<crate::shape::ReturnShape>,
     denials: BTreeMap<CanonicalDigest, BTreeSet<AuthorityName>>,
 }
 
@@ -108,6 +107,7 @@ pub(crate) struct PreparedApproval {
     pub(crate) acceptance: Option<crate::check::Narrowing>,
     pub(crate) rulings: Vec<crate::execute::AuthorityEvidence>,
     pub(crate) sanitizer: Option<crate::names::SanitizerName>,
+    pub(crate) return_policy: Option<ReturnPolicy>,
     pub(crate) basis: crate::basis::PolicyBasis,
     /// The pinned audience evidence the approval was prepared under: its consumption
     /// releases under it.
@@ -118,36 +118,6 @@ pub(crate) struct PreparedApproval {
 struct ReturnedChild {
     id: ChildReturnId,
     value: LabeledValue,
-}
-
-/// One durable child submission in custody: the raw handoff a `ReturnSubmitted` record
-/// transferred, held here for the return lifecycle alone — the parent's label fold never reads it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SubmittedReturn {
-    pub(crate) fork: ForkId,
-    pub(crate) parent: TrajectoryId,
-    pub(crate) digest: RawResultDigest,
-    body: Option<crate::value::ValueBody>,
-    pub(crate) policy: ReturnPolicy,
-    /// The parent's established bound pinned at the submission fold step: every
-    /// candidate of this return measures its residual here, never against the live fold.
-    pub(crate) receiving: Label,
-}
-
-impl SubmittedReturn {
-    /// The raw bytes in custody. Every reader runs on a pending return — established by
-    /// [`Views::pending_return`] or an uncrossed-branch guard — where custody still holds them.
-    pub(crate) fn body(&self) -> &crate::value::ValueBody {
-        self.body
-            .as_ref()
-            .expect("custody holds the raw bytes until the crossing consumes them")
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RejectedReturn {
-    pub(crate) digest: RawResultDigest,
-    pub(crate) reason: crate::fact::ReturnRejection,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -171,8 +141,8 @@ pub struct Projection {
     bound: BTreeMap<ForkId, TrajectoryId>,
     fork_of: BTreeMap<TrajectoryId, ForkId>,
     child_returns: Vec<ReturnedChild>,
-    submitted_returns: BTreeMap<ChildReturnId, SubmittedReturn>,
-    rejected_returns: BTreeMap<ChildReturnId, RejectedReturn>,
+    /// The label each resumed child last inherited from its parent, folded beside its fork seed.
+    resumed: BTreeMap<TrajectoryId, Label>,
     ended: BTreeSet<TrajectoryId>,
     bound_sanitizers: BTreeMap<DispatchId, SanitizerName>,
     /// The live derived candidate of each subject that has one. A successful hop
@@ -238,8 +208,7 @@ impl Projection {
             bound: BTreeMap::new(),
             fork_of: BTreeMap::new(),
             child_returns: Vec::new(),
-            submitted_returns: BTreeMap::new(),
-            rejected_returns: BTreeMap::new(),
+            resumed: BTreeMap::new(),
             ended: BTreeSet::new(),
             bound_sanitizers: BTreeMap::new(),
             candidates: BTreeMap::new(),
@@ -270,10 +239,6 @@ impl Projection {
     /// Fold one record into every view. The one fold: replay, cache rebuild, and the advance of a
     /// held view all reach the log through this function, so no second fold can drift from it.
     pub(crate) fn fold(&mut self, fact: &Fact) {
-        let pinned_receiving: Option<Label> = match fact {
-            Fact::ReturnSubmitted { parent, .. } => Some(self.fold_for(parent)),
-            _ => None,
-        };
         let Projection {
             revision: _,
             values,
@@ -293,8 +258,7 @@ impl Projection {
             bound,
             fork_of,
             child_returns,
-            submitted_returns,
-            rejected_returns,
+            resumed,
             ended,
             bound_sanitizers,
             candidates,
@@ -368,6 +332,7 @@ impl Projection {
                     acceptance,
                     rulings,
                     sanitizer,
+                    return_policy,
                     basis,
                     evidence,
                 } => {
@@ -380,6 +345,7 @@ impl Projection {
                             acceptance: acceptance.clone(),
                             rulings: rulings.clone(),
                             sanitizer: sanitizer.clone(),
+                            return_policy: return_policy.clone(),
                             basis: *basis,
                             evidence: evidence.clone(),
                         },
@@ -495,7 +461,7 @@ impl Projection {
                 } => {
                     accepted_narrowings.insert(dispatch.clone(), narrowing.clone());
                 }
-                Fact::Ruling { .. } | Fact::ChildReturnAcceptance { .. } => {}
+                Fact::Ruling { .. } => {}
                 Fact::Denial {
                     trajectory,
                     digest,
@@ -542,7 +508,6 @@ impl Projection {
                     fork,
                     snapshot,
                     return_policy,
-                    shape,
                 } => {
                     prepared.insert(
                         fork.clone(),
@@ -550,7 +515,6 @@ impl Projection {
                             parent: trajectory.clone(),
                             snapshot: snapshot.clone(),
                             return_policy: return_policy.clone(),
-                            shape: shape.clone(),
                             denials: denials.get(trajectory).cloned().unwrap_or_default(),
                         },
                     );
@@ -565,54 +529,24 @@ impl Projection {
                     }
                 }
                 Fact::ChildReturn { id, value, .. } => {
-                    ended.insert(id.child().clone());
                     child_returns.push(ReturnedChild {
                         id: id.clone(),
                         value: value.clone(),
                     });
                     candidates.remove(&SubjectKey::Return(id.clone()));
-                    if let Some(submitted) = submitted_returns.get_mut(id) {
-                        submitted.body = None;
-                    }
-                }
-                Fact::ReturnSubmitted {
-                    id,
-                    fork,
-                    parent,
-                    digest,
-                    body,
-                    policy,
-                    ..
-                } => {
-                    ended.insert(id.child().clone());
-                    submitted_returns.insert(
-                        id.clone(),
-                        SubmittedReturn {
-                            fork: fork.clone(),
-                            parent: parent.clone(),
-                            digest: *digest,
-                            body: Some(body.clone()),
-                            policy: policy.clone(),
-                            receiving: pinned_receiving
-                                .clone()
-                                .expect("a submission's receiving bound was read above"),
-                        },
-                    );
-                }
-                Fact::ReturnRejected { id, digest, reason, .. } => {
-                    ended.insert(id.child().clone());
-                    rejected_returns.insert(
-                        id.clone(),
-                        RejectedReturn {
-                            digest: *digest,
-                            reason: reason.clone(),
-                        },
-                    );
                 }
                 Fact::Boundary { trajectory, kind } => match kind {
                     BoundaryKind::Merge { .. } => {}
                     BoundaryKind::VoidReturn => {
                         ended.insert(trajectory.clone());
+                    }
+                    BoundaryKind::Resume { seed } => {
+                        resumed.insert(trajectory.clone(), seed.clone());
+                        let occurrence = child_returns
+                            .iter()
+                            .filter(|returned| returned.id.child() == trajectory)
+                            .count() as u32;
+                        candidates.remove(&SubjectKey::Return(ChildReturnId::new(trajectory.clone(), occurrence)));
                     }
                 },
             }
@@ -678,6 +612,9 @@ impl Projection {
 
     fn fold_for(&self, trajectory: &TrajectoryId) -> Label {
         let mut fold = self.opened_base(trajectory);
+        if let Some(seed) = self.resumed.get(trajectory) {
+            fold.fold(seed);
+        }
         for (_, label) in self.basis_sources(trajectory) {
             fold.fold(label);
         }
@@ -1025,16 +962,6 @@ impl Views<'_> {
             .map(|prepared| &prepared.return_policy)
     }
 
-    /// The structured-return shape the child's fork froze: every non-void submission
-    /// validates against exactly this stored form. `None` for an unshaped or unforked child.
-    pub(crate) fn return_shape_of(&self, child: &TrajectoryId) -> Option<&crate::shape::ReturnShape> {
-        self.projection
-            .fork_of
-            .get(child)
-            .and_then(|fork| self.projection.prepared.get(fork))
-            .and_then(|prepared| prepared.shape.as_ref())
-    }
-
     pub(crate) fn child_return(&self, id: &ChildReturnId) -> Option<&LabeledValue> {
         self.projection
             .child_returns
@@ -1043,8 +970,18 @@ impl Views<'_> {
             .map(|returned| &returned.value)
     }
 
-    /// How many values `child` has already returned. Nonzero refuses a further return (a child
-    /// returns at most once); the count also mints the crossing's occurrence.
+    /// The value `child` crossed most recently, if any: a stop repeating it is a replay of that
+    /// crossing, never a second one.
+    pub(crate) fn latest_return(&self, child: &TrajectoryId) -> Option<&LabeledValue> {
+        self.projection
+            .child_returns
+            .iter()
+            .rev()
+            .find(|returned| returned.id.child() == child)
+            .map(|returned| &returned.value)
+    }
+
+    /// How many values `child` has already returned — the occurrence its next crossing mints.
     pub(crate) fn returns_by(&self, child: &TrajectoryId) -> u32 {
         self.projection
             .child_returns
@@ -1053,30 +990,12 @@ impl Views<'_> {
             .count() as u32
     }
 
-    /// Has this branch ended its errand? True after its one value crossing, its void
-    /// terminal, a durable submission that transferred custody, or a terminal
-    /// rejection. The one replay-derived ended-branch predicate: an ended branch is
-    /// closed to new turns, further returns, and forking, and every gate reads this — never the
-    /// raw counts.
+    /// Has this branch ended its errand by its void terminal? A value crossing ends nothing:
+    /// a child returns again after the parent addresses it again. The one replay-derived
+    /// ended-branch predicate: an ended branch is closed to new turns, further returns, and
+    /// forking, and every gate reads this — never the raw counts.
     pub fn has_ended(&self, branch: &TrajectoryId) -> bool {
         self.projection.ended.contains(branch)
-    }
-
-    pub(crate) fn submitted_return(&self, id: &ChildReturnId) -> Option<&SubmittedReturn> {
-        self.projection.submitted_returns.get(id)
-    }
-
-    /// The submission still awaiting its crossing: submitted, and no crossing of this identity
-    /// has consumed it yet. The return lifecycle plans and validates against exactly this.
-    pub(crate) fn pending_return(&self, id: &ChildReturnId) -> Option<&SubmittedReturn> {
-        if self.child_return(id).is_some() {
-            return None;
-        }
-        self.projection.submitted_returns.get(id)
-    }
-
-    pub(crate) fn rejected_return(&self, id: &ChildReturnId) -> Option<&RejectedReturn> {
-        self.projection.rejected_returns.get(id)
     }
 
     /// The fork that opened this child through the two-stage binding. `None` for a
@@ -1182,12 +1101,6 @@ impl Views<'_> {
         self.projection.candidates.get(subject).map(|held| &held.derived)
     }
 
-    /// The transformer this subject's live candidate claims: the sanitizer hop that
-    /// derived it. The crossing paths branch on it.
-    pub(crate) fn candidate_via(&self, subject: &SubjectKey) -> Option<&crate::candidate::DerivedVia> {
-        self.projection.candidates.get(subject).map(|held| &held.via)
-    }
-
     /// Where this call subject's candidate stands: the label its substituted bytes
     /// carry and the sanitizers its chain has spent. A subject no hop has touched stands at the
     /// origin, so a first proposal and an unspent chain read alike.
@@ -1198,19 +1111,19 @@ impl Views<'_> {
     /// What the call this subject stands for is to its deployment: the one proposal its batch's
     /// decision marked as the context-controlled spawn, or an ordinary call. A subject
     /// of no decided batch — a stage that is not a call's — is ordinary.
-    pub(crate) fn call_role(&self, subject: &SubjectKey) -> crate::plan::CallRole {
+    pub(crate) fn call_role(&self, subject: &SubjectKey) -> crate::check::CallRole {
         match subject {
             SubjectKey::Call { batch, position, .. }
                 if self.decided_batch(batch).is_some_and(|decided| {
                     decided.spawn == Some(crate::transition::SpawnMark::at(*position as usize))
                 }) =>
             {
-                crate::plan::CallRole::MarkedSpawn
+                crate::check::CallRole::MarkedSpawn
             }
             SubjectKey::Call { .. }
             | SubjectKey::Approval(_)
             | SubjectKey::ConfinedResult(_)
-            | SubjectKey::Return(_) => crate::plan::CallRole::Ordinary,
+            | SubjectKey::Return(_) => crate::check::CallRole::Ordinary,
         }
     }
 
@@ -1449,8 +1362,10 @@ mod tests {
                 trajectory: traj(parent),
                 fork: fork.clone(),
                 snapshot,
-                return_policy: ReturnPolicy::Raw,
-                shape: None,
+                return_policy: ReturnPolicy {
+                    floor: Label::top(),
+                    sanitizer: None,
+                },
             },
             Fact::ForkOpened {
                 trajectory: traj(child),
