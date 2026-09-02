@@ -1,0 +1,14 @@
+# Inbound email is `untrusted`, the lowest rank. Both sinks are denied.
+ReadInboundEmail {}
+expect allow
+
+PostToSlack {
+  channel: "#eng"
+  text: "forwarding"
+}
+expect deny
+
+RunCommand {
+  command: "make release"
+}
+expect deny

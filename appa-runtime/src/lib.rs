@@ -8,6 +8,7 @@ pub mod hooks;
 pub mod init;
 pub mod mcp;
 pub mod plugin_bundle;
+pub mod replay;
 #[path = "main.rs"]
 pub mod runtime_cli;
 pub mod tls;

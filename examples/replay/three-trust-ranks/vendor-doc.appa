@@ -1,0 +1,15 @@
+# The vendor document lowers trust to `vendor`. A command needs `internal` and
+# is denied. A Slack post needs only `vendor` and is allowed.
+ReadVendorDoc {}
+expect allow
+
+RunCommand {
+  command: "make release"
+}
+expect deny
+
+PostToSlack {
+  channel: "#eng"
+  text: "vendor notes attached"
+}
+expect allow

@@ -1,0 +1,18 @@
+# The HR file narrows the audience to `hr`. An outside recipient is denied; the
+# HR team itself is still reachable.
+Read {
+  path: "/hr/salaries.csv"
+}
+expect allow
+
+Email {
+  to: "x@other.com"
+  subject: "salaries"
+}
+expect deny
+
+Email {
+  to: "hr"
+  subject: "salaries"
+}
+expect allow

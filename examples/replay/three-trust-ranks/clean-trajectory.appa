@@ -1,0 +1,11 @@
+# Nothing lowered trust: the trajectory is `internal`, and both sinks run.
+RunCommand {
+  command: "make test"
+}
+expect allow
+
+PostToSlack {
+  channel: "#eng"
+  text: "tests green"
+}
+expect allow

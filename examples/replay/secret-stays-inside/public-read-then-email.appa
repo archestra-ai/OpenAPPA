@@ -1,0 +1,11 @@
+# A file outside `/hr/` carries no restriction, so the email still goes anywhere.
+Read {
+  path: "/docs/readme.md"
+}
+expect allow
+
+Email {
+  to: "x@other.com"
+  subject: "readme"
+}
+expect allow

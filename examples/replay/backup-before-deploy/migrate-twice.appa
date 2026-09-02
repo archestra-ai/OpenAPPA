@@ -1,0 +1,7 @@
+# The first migration records `migration.applied`. The second is denied because
+# that effect is already in the trajectory.
+Migrate {}
+expect allow
+
+Migrate {}
+expect deny

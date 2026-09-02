@@ -1,0 +1,5 @@
+# The first contract matches: an organization push needs nothing more.
+Bash {
+  command: "git push https://github.com/archestra-ai/website main"
+}
+expect allow

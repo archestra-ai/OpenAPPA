@@ -1,0 +1,33 @@
+# Three contracts for one tool, chosen by the command's text. A push to the
+# organization is allowed. Any other push needs a person's sign-off, which a
+# replay cannot give, so it is denied. Every other command is allowed.
+
+[policy]
+version = 2
+
+[[policy.tool]]
+name = "Bash(command:git push https://github.com/archestra-ai/*)"
+parameters = { type = "object", properties = { command = { type = "string" } }, required = ["command"] }
+delta = {}
+
+[[policy.tool]]
+name = "Bash(command:git push *)"
+parameters = { type = "object", properties = { command = { type = "string" } }, required = ["command"] }
+requires = { attention = ["hitl"] }
+delta = {}
+
+[[policy.tool]]
+name = "Bash"
+parameters = { type = "object", properties = { command = { type = "string" } }, required = ["command"] }
+delta = {}
+
+[[policy.authority]]
+name = "hitl"
+hint = "Ask the person running this session."
+
+[policy.authority.permits]
+attention = ["hitl"]
+
+[externals]
+timeout_ms = 2000
+max_body_bytes = 65536

@@ -25,8 +25,11 @@ one at the repository root:
   plus the `--modules-dir` loader over the `appa-builtin` ABI crate at
   the repo root), and the engine boundary (`src/engine.rs`, which
   translates and presents every engine decision; `api/mod.rs` and
-  `api/session.rs` also name `appa-engine`). It keeps no durable state
-  of its own beside the log.
+  `api/session.rs` also name `appa-engine`), and `appa replay`
+  (`src/replay.rs`: trace files parsed into typed hook events and run
+  through the dispatcher over an in-memory log; the shipped traces live
+  in `examples/replay/` at the repository root). It keeps no durable
+  state of its own beside the log.
 
 The Claude Code plugin, the marketplace manifest, and the example
 policies are not code and live in `integrations/claude-code/` at the

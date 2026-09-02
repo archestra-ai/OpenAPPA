@@ -563,6 +563,28 @@ impl RuntimeEngine {
     }
 
     /// Which trajectory pursues this offer.
+    /// Whom taking this offer involves, read without taking it: nobody (the plain narrowing
+    /// acceptance), an authority, or a sanitizer. `None` for an offer that no longer stands.
+    /// `appa replay` reads it to take the offer a trace expects, the way the model would.
+    pub(crate) fn offer_kind(
+        &self,
+        view: &EngineView,
+        trajectory: &TrajectoryId,
+        offer: &OfferId,
+    ) -> Option<crate::api::OfferKind> {
+        let engine_offer = parse_offer(offer)?;
+        match self
+            .engine
+            .offer_consults(view, &engine_id(trajectory), &engine_offer)
+            .ok()?
+        {
+            OfferConsult::Accept => Some(crate::api::OfferKind::Accept),
+            OfferConsult::Authorities { .. } => Some(crate::api::OfferKind::Authority),
+            OfferConsult::Rewrite { .. } | OfferConsult::Sanitizer { .. } => Some(crate::api::OfferKind::Sanitizer),
+            OfferConsult::Stale | OfferConsult::Replay(_) => None,
+        }
+    }
+
     pub(crate) fn offer_pursuer(&self, view: &EngineView, offer: &OfferId) -> Option<TrajectoryId> {
         let engine_offer = parse_offer(offer)?;
         let surfaced = view.offer_trajectory(&engine_offer)?.clone();

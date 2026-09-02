@@ -1,0 +1,5 @@
+# Nothing from outside is in the trajectory yet: the command runs.
+Bash {
+  command: "ls -la"
+}
+expect allow

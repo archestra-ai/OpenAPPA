@@ -18,7 +18,7 @@ pub(crate) use session::{LateOpen, Session, is_control_tool};
 use crate::config::Config;
 use crate::elicit::Elicitation;
 use crate::engine::{EngineRefusal, Liveness, PolicyEngine, RuntimeEngine};
-use crate::external::{ConsultGates, ExternalServices};
+use crate::external::{ConsultGates, ExternalServices, RemedyParties};
 use appa_eventlog::{Backend, Log, LogStore};
 
 /// One remedy offer as it is quoted and carried.
@@ -81,6 +81,15 @@ pub enum RemedyOutcome {
     Declined { feedback: String },
     NoAnswer { feedback: String },
     Refused { detail: String },
+}
+
+/// Whom taking an offer involves: nobody but the model (the plain narrowing acceptance), an
+/// authority's ruling, or a sanitizer's rewrite of the value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum OfferKind {
+    Accept,
+    Authority,
+    Sanitizer,
 }
 
 /// What happens to the child's final message: delivered to the parent,
@@ -269,6 +278,7 @@ impl Deployment {
         config: Config,
         modules: &crate::builtins::ModuleRegistry,
         gates: ConsultGates,
+        parties: RemedyParties,
     ) -> Result<Deployment, OpenError> {
         let policy = compile_policy(&config)?;
         validate_deployment(&policy, &config.externals)?;
@@ -276,8 +286,20 @@ impl Deployment {
             .annotators()
             .filter_map(|(name, binding)| binding.builtin.map(|builtin| (name.as_str().to_string(), builtin)))
             .collect();
-        let externals = ExternalServices::new(config.externals.clone(), modules, annotator_builtins, gates)
+        let mut externals = ExternalServices::new(config.externals.clone(), modules, annotator_builtins, gates)
             .map_err(|error| OpenError::Modules(error.to_string()))?;
+        if parties == RemedyParties::StandIn {
+            let registry = policy.engine().registry();
+            externals.stand_in_for_remedies(
+                registry
+                    .authorities()
+                    .iter()
+                    .map(|authority| authority.name.as_str().to_string()),
+                registry
+                    .sanitizers()
+                    .map(|sanitizer| sanitizer.name.as_str().to_string()),
+            );
+        }
         Ok(Deployment {
             config,
             resident: RuntimeEngine::from_policy(&policy),
@@ -418,12 +440,29 @@ impl Runtime {
     /// a policy this deployment cannot honor is refused before
     /// anything opens.
     pub fn open(config: Config, db: PathBuf, modules: Option<PathBuf>) -> Result<Runtime, OpenError> {
+        Runtime::open_with(config, Backend::Sqlite { path: db }, modules, RemedyParties::AsBound)
+    }
+
+    /// The deployment `appa replay` runs: the same session and engine over a log that lives
+    /// only as long as this value, with every authority and sanitizer answered in process —
+    /// approve, and the body unchanged — as if the bound party had. Annotators, audience
+    /// sources, and identity stay bound as configured. Nothing of the run survives the process.
+    pub fn open_in_memory(config: Config, modules: Option<PathBuf>) -> Result<Runtime, OpenError> {
+        Runtime::open_with(config, Backend::Memory, modules, RemedyParties::StandIn)
+    }
+
+    fn open_with(
+        config: Config,
+        backend: Backend,
+        modules: Option<PathBuf>,
+        parties: RemedyParties,
+    ) -> Result<Runtime, OpenError> {
         let modules =
             crate::builtins::load(modules.as_deref()).map_err(|error| OpenError::Modules(error.to_string()))?;
         let gates = ConsultGates::per_runtime();
-        let deployment = Deployment::load(config, &modules, gates.clone())?;
+        let deployment = Deployment::load(config, &modules, gates.clone(), parties)?;
         gates.serve_llm(deployment.config.externals.llm_bound());
-        let store = LogStore::open(Backend::Sqlite { path: db }).map_err(|error| match error {
+        let store = LogStore::open(backend).map_err(|error| match error {
             appa_eventlog::OpenError::Damaged { path, detail } => OpenError::Damaged(format!("{path}: {detail}")),
             error @ appa_eventlog::OpenError::ForeignSchema { .. } => OpenError::Damaged(error.to_string()),
             error => OpenError::Storage(error.to_string()),
@@ -461,7 +500,12 @@ impl Runtime {
     /// learns where a configuration came from, so an embedding host
     /// reloads a composed policy the same way.
     pub fn reload(&self, config: Config) -> Result<Reloaded, OpenError> {
-        let deployment = Deployment::load(config, &self.inner.modules, self.inner.gates.clone())?;
+        let deployment = Deployment::load(
+            config,
+            &self.inner.modules,
+            self.inner.gates.clone(),
+            RemedyParties::AsBound,
+        )?;
         let identity = deployment.resident().identity_hex();
         let deployment = Arc::new(deployment);
         // The gate's bound and the serving snapshot change as one transition under the
@@ -659,6 +703,18 @@ impl Runtime {
                 detail: error.to_string(),
             },
         }
+    }
+
+    /// What taking a quoted offer in this root's family would consult, or `None` for an
+    /// offer that no longer stands.
+    pub(crate) fn offer_kind(&self, root: &TrajectoryId, quoted: &OfferId) -> Option<OfferKind> {
+        let log = self.inner.log(root).ok()?;
+        let offer = crate::engine::resolve_rendered(&log, quoted)?;
+        let deployment = self.inner.deployment();
+        let policy = self.inner.resolve_policy(&deployment, &log).ok()?;
+        let view = policy.engine().rebuild_view(&log).ok()?;
+        let pursuer = policy.engine().offer_pursuer(&view, &offer)?;
+        policy.engine().offer_kind(&view, &pursuer, &offer)
     }
 
     /// The canonical identity a quoted id names in this family, and the
@@ -1095,7 +1151,12 @@ mod deployment_tests {
     }
 
     fn load(config: Config) -> Result<Deployment, OpenError> {
-        Deployment::load(config, &crate::builtins::ModuleRegistry::empty(), test_permits())
+        Deployment::load(
+            config,
+            &crate::builtins::ModuleRegistry::empty(),
+            test_permits(),
+            RemedyParties::AsBound,
+        )
     }
 
     #[test]
@@ -1112,7 +1173,15 @@ mod deployment_tests {
                 annotator = "classifier"
             "#,
         );
-        assert!(Deployment::load(tool_level, &crate::builtins::ModuleRegistry::empty(), test_permits()).is_ok());
+        assert!(
+            Deployment::load(
+                tool_level,
+                &crate::builtins::ModuleRegistry::empty(),
+                test_permits(),
+                RemedyParties::AsBound
+            )
+            .is_ok()
+        );
     }
 
     #[test]

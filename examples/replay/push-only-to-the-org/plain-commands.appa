@@ -1,0 +1,17 @@
+# The bare `Bash` contract takes every command the two push selectors do not
+# match. A push with a remote name instead of a URL still matches the second
+# selector, so it still needs sign-off.
+Bash {
+  command: "git status"
+}
+expect allow
+
+Bash {
+  command: "git push origin main"
+}
+expect authority
+
+Bash {
+  command: "ls"
+}
+expect allow

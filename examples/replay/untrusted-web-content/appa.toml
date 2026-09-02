@@ -1,0 +1,26 @@
+# Web content is written by someone outside the session. Once it is in the
+# trajectory, a command may not run: a page could carry an instruction the
+# model would follow.
+
+[policy]
+version = 2
+
+[[policy.tool]]
+name = "WebFetch"
+parameters = { type = "object", properties = { url = { type = "string" } }, required = ["url"] }
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "Bash"
+parameters = { type = "object", properties = { command = { type = "string" } }, required = ["command"] }
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "Write"
+parameters = { type = "object", properties = { file_path = { type = "string" }, content = { type = "string" } }, required = ["file_path"] }
+delta = {}
+
+[externals]
+timeout_ms = 2000
+max_body_bytes = 65536

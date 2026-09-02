@@ -1,0 +1,6 @@
+# The backup records `backup.completed`; the deploy finds it.
+Backup {}
+expect allow
+
+Deploy {}
+expect allow

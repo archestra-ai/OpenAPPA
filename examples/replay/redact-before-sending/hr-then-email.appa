@@ -1,0 +1,20 @@
+# The HR read narrows the audience to `hr`. The email needs `public`, so it is
+# blocked, and the offer names the redactor. The replay stands in for the
+# sanitizer, the email runs with its arguments rewritten, and the trajectory
+# stays at `hr`: the next email needs the redactor again.
+Read {
+  path: "/hr/salaries.csv"
+}
+expect allow
+
+Email {
+  to: "x@other.com"
+  body: "see attached"
+}
+expect sanitizer
+
+Email {
+  to: "y@other.com"
+  body: "and this"
+}
+expect sanitizer

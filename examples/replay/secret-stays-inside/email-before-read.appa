@@ -1,0 +1,6 @@
+# Nothing sensitive was read: the audience is still public, so any recipient is fine.
+Email {
+  to: "x@other.com"
+  subject: "hello"
+}
+expect allow
