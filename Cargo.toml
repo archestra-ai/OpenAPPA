@@ -20,7 +20,7 @@ exclude = ["bench/corp-systems"]
 [workspace.package]
 edition = "2024"
 publish = false
-version = "0.6.1"
+version = "0.7.0"
 
 [workspace.lints.rust]
 dead_code = "deny"
