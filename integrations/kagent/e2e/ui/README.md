@@ -35,7 +35,7 @@ externals on the runtime's loopback, and the UI port-forwarded
 
 ```sh
 cd integrations/kagent/e2e/ui
-APPA_UI_E2E=1 uv run --with playwright --with "pytest>=8" pytest -v .
+APPA_UI_E2E=1 uv run --with playwright --with "pytest>=8" --with pytest-rerunfailures pytest -v .
 ```
 
 Real model turns run tens of seconds each; the whole matrix takes

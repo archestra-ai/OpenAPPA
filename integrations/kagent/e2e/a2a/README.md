@@ -34,5 +34,5 @@ once in eight runs to miss the match. A person never answers that fast.
 
 ```sh
 cd integrations/kagent/e2e/a2a
-APPA_A2A_E2E=1 uv run --with "pytest>=8" pytest -v .
+APPA_A2A_E2E=1 uv run --with "pytest>=8" --with pytest-rerunfailures pytest -v .
 ```

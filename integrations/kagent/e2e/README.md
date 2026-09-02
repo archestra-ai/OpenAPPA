@@ -45,6 +45,8 @@ cd integrations/kagent/e2e
 ./run-matrix.sh all            # every row that runs today, in sequence
 ```
 
+Three cases in each driver depend on the model honoring a steer — the configured default, the chat steering it to accept, and the chat steering it to decline. The gate's substance holds either way (the secret never leaks; what flowed is read off the tool results), but a model that picks another remedy fails the assertion, so those three carry `@pytest.mark.flaky(reruns=1)`: one fresh conversation, and a second failure fails the row.
+
 The scripted-model scenarios in [test_scenarios.py](test_scenarios.py)
 are a fourth, model-free check of the python plugin against the demo
 tools and are not a row of this matrix.

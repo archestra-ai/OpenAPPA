@@ -21,8 +21,8 @@ row() {
   esac
   echo "== kagent v0.9.12 · $runtime ($agent) · $driver"
   case "$driver" in
-    ui)  (cd ui  && APPA_UI_E2E=1  APPA_AGENT=$agent uv run --with playwright --with "pytest>=8" pytest -v .) ;;
-    a2a) (cd a2a && APPA_A2A_E2E=1 APPA_A2A_URL=$url uv run --with "pytest>=8" pytest -v .) ;;
+    ui)  (cd ui  && APPA_UI_E2E=1  APPA_AGENT=$agent uv run --with playwright --with "pytest>=8" --with pytest-rerunfailures pytest -v .) ;;
+    a2a) (cd a2a && APPA_A2A_E2E=1 APPA_A2A_URL=$url uv run --with "pytest>=8" --with pytest-rerunfailures pytest -v .) ;;
     *) echo "unknown driver: $driver (ui|a2a)" >&2; exit 2 ;;
   esac
 }
