@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.7.0...v0.7.1) (2026-09-02)
+
+
+### Bug Fixes
+
+* **release:** make packaged runtime verification portable ([#155](https://github.com/archestra-ai/OpenAPPA/issues/155)) ([903fd5b](https://github.com/archestra-ai/OpenAPPA/commit/903fd5b7ce18144a0507ccda53d4302ba255da92))
+
 ## [0.7.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.6.1...v0.7.0) (2026-09-02)
 
 
