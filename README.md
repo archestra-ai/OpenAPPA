@@ -64,9 +64,15 @@ The Claude Code plugin is a playground for the model, not the product. It is the
 fastest way to watch a policy make a decision on real work:
 
 ```sh
-cargo install --path appa-runtime --force
-appa init claude-code
+curl -fsSL https://openappa.com/install.sh | sh
+~/.local/bin/appa init claude-code
 ```
+
+The installer verifies the checksum of the release binary for Linux or macOS
+and places it in `~/.local/bin`. Windows users unpack the zip from the
+[releases page](https://github.com/archestra-ai/OpenAPPA/releases). From a
+checkout, `cargo install --path appa-runtime --force` builds the binary
+instead.
 
 A release binary resolves the plugin from its baked release tag and digest. A
 clean checkout build resolves the plugin from its baked Git commit and verifies

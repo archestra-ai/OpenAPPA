@@ -9,12 +9,20 @@ OpenAPPA is designed for multiple agent surfaces. **Claude Code is simply the fi
 
 ## Install the Claude Code demo
 
-You need Cargo, Claude Code, and `curl`.
+You need Claude Code and `curl`.
 
 ```sh
-cargo install --path appa-runtime --force
-appa init claude-code
+curl -fsSL https://openappa.com/install.sh | sh
+~/.local/bin/appa init claude-code
 ```
+
+The installer downloads the release binary for your Linux or macOS machine,
+verifies its checksum, and places `appa` in `~/.local/bin`. It prints a hint
+when that directory is not on your `PATH`. Set `APPA_VERSION` to a release tag
+to install that release instead of the latest one. On Windows, unpack the zip
+from the [releases page](https://github.com/archestra-ai/OpenAPPA/releases)
+and run `appa init claude-code` from it. From a checkout, `cargo install --path
+appa-runtime --force` builds the binary instead of downloading one.
 
 Initialization prints progress while it resolves the matching plugin, updates
 Claude Code, and starts the runtime. If a different APPA build already owns the
@@ -145,8 +153,8 @@ claude plugin uninstall appa-runtime
 claude plugin marketplace remove appa
 pkill -f 'appa runtime'
 rm -rf ~/.local/share/appa/bin ~/.local/share/appa/deployments ~/.local/share/appa/cache
-rm -f ~/.cargo/bin/clappa ~/.local/bin/appa-statusline.sh
-cargo uninstall appa
+rm -f ~/.local/bin/appa ~/.local/bin/clappa ~/.local/bin/appa-statusline.sh
+rm -f ~/.cargo/bin/clappa && cargo uninstall appa   # checkout builds only
 
 # drop the statusline entry appa init wrote, and keep one of your own:
 jq 'if (.statusLine.command? // "") | test("appa-statusline") then del(.statusLine) else . end' \

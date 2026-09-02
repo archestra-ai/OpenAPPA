@@ -30,14 +30,18 @@ jobs:
             integrations/claude-code/plugin/hooks/hook.sh \
             integrations/claude-code/plugin/hooks/appa-paths.sh \
             integrations/claude-code/plugin/statusline.sh \
-            scripts/appa-stage-plugin-bundle.sh
+            scripts/appa-stage-plugin-bundle.sh \
+            scripts/appa-install.sh \
+            scripts/appa-install-test.sh
 
       - name: Lint plugin shell scripts
         run: |
           shellcheck -x -s sh integrations/claude-code/plugin/hooks/ensure-runtime.sh \
             integrations/claude-code/plugin/hooks/hook.sh \
             integrations/claude-code/plugin/hooks/appa-paths.sh \
-            scripts/appa-stage-plugin-bundle.sh
+            scripts/appa-stage-plugin-bundle.sh \
+            scripts/appa-install.sh \
+            scripts/appa-install-test.sh
 
       # The Windows hook implementation had no check of any kind until a
       # review found a fail-open bug in it. `pwsh` is preinstalled on the
@@ -82,6 +86,26 @@ jobs:
             integrations/claude-code/plugin/.claude-plugin/plugin.json)
           test "$cargo_version" = "$version"
           test "$plugin_version" = "$version"
+
+  installer-checks:
+    name: Installer Checks (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      # The installer runs with whatever sh, tar, curl and digest tool the
+      # user's platform ships, so its cases run on each supported one.
+      - name: Installer cases
+        run: sh scripts/appa-install-test.sh
 
   rust-checks:
     name: Rust Checks
