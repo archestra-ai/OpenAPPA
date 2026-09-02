@@ -2,24 +2,22 @@
 title: Validation
 category: Operations
 order: 8
-description: Checking a policy holds before agents run against it.
+description: Check that policy changes keep your security rules.
 ---
 
-`appa replay` runs trace files against a policy and checks the decision of every tool call. No tool runs, no harness is involved, and nothing is written to disk. Every decision comes from the same session and engine that serve a live harness.
+To help you make sure your configuration behaves as intended, OpenAPPA ships the
+`appa replay` CLI tool. It tests a [policy file](/contracts) against a trace file. The
+trace contains a sequence of tool calls and the expected decision for each call. Replay
+checks these decisions but does not run the tools.
 
-```sh
-appa replay --config appa.toml traces/
-```
+## Start with an example
 
-Each path is a trace file or a directory. A directory contributes its `.appa` files. Add `-v` to print every step.
+This trace reads an HR file. It then checks that the data cannot go to an external email
+address. The data can still go to the HR email address.
 
-## Trace files
+Create `secret-stays-inside.appa`:
 
-One file is one trajectory. The file name is the case name. The steps are tool calls in order, each followed by the decision it must get.
-
-```
-# leak-by-email.appa
-
+```text
 Read {
   path: "/hr/salaries.csv"
 }
@@ -27,57 +25,211 @@ expect allow
 
 Email {
   to: "x@other.com"
-  subject: "hi"
 }
+expect deny
+
+Email {
+  to: "hr@archestra.ai"
+}
+expect allow
+```
+
+Create `appa.toml` in the same directory:
+
+```toml
+[policy]
+version = 2
+
+[[policy.tool]]
+name = "Read(path:/hr/*)"
+delta = { audience = ["hr@archestra.ai"] }
+
+[[policy.tool]]
+name = "Email"
+parameters = { type = "object", properties = { to = { type = "string" } }, required = ["to"] }
+requires = { audience = { contains = ["$to"] } }
+delta = {}
+
+[externals]
+timeout_ms = 2000
+max_body_bytes = 65536
+```
+
+The `Read` rule limits the data to `hr@archestra.ai`. The `Email` rule uses the `to`
+value from each call. It allows the email only if the recipient can receive the data.
+
+These rules use an [audience](/contracts#audiences). An audience states who can receive
+data. See [Tools](/contracts#tools) for all tool rule options.
+
+Run the test:
+
+```sh
+appa replay --config appa.toml secret-stays-inside.appa
+```
+
+The command exits with code `0` when all three decisions match the trace.
+
+## Configuration
+
+Use `--config` to select the policy file. Then add one or more trace files or directories:
+
+```sh
+appa replay --config appa.toml first.appa second.appa
+```
+
+A directory adds the `.appa` files directly inside that directory:
+
+```sh
+appa replay --config appa.toml traces/
+```
+
+Each trace file is one test case. Calls in one file run in order and share the same data
+limits. A new file starts a new test case.
+
+Add `-v` to show every call:
+
+```sh
+appa replay -v --config appa.toml traces/
+```
+
+## Trace syntax
+
+A call starts with the tool name. Put its arguments between `{` and `}`. Put one argument
+on each line. Each value must be valid JSON. This means that a text value needs double
+quotes.
+
+```text
+Email {
+  to: "person@example.com"
+  subject: "Status report"
+}
+expect allow
+```
+
+Use `{}` when a call has no arguments:
+
+```text
+Backup {}
+expect allow
+```
+
+Write the expected result immediately after each call. A line that starts with `#` is a
+comment.
+
+Replay reports a syntax error when:
+
+- an argument occurs more than one time;
+- a value is not valid JSON;
+- a call has no `expect` line.
+
+The error includes the file name and line number.
+
+## Expected results
+
+### `allow`
+
+Use `allow` when the policy must allow the call.
+
+```text
+Backup {}
+expect allow
+```
+
+A read can reduce the trust level or the audience for later calls. APPA normally asks the
+model to accept this change. Replay accepts the change for an `allow` step. See
+[Labels only move one way](/how-it-works#labels-only-move-one-way) for an explanation of
+these data limits.
+
+### `deny`
+
+Use `deny` when the policy must block the call and must not offer another way to run it.
+
+```text
+Deploy {}
 expect deny
 ```
 
-- A step is one tool name, one argument block, and one `expect` line.
-- One argument per line, `name: value`. The value is one JSON value, sent to the engine as written.
-- `Tool {}` is a call with no arguments.
-- A line that starts with `#` is a comment.
-- A repeated argument, a value that is not JSON, or a missing `expect` is a syntax error. The error names the file and line.
+### `authority`
 
-## The four expectations
+Use `authority` when the policy must require approval from an
+[authority](/contracts#authorities).
 
-| `expect` | Passes when |
-|---|---|
-| `allow` | The call runs as proposed, or the only thing in the way is the plain narrowing acceptance. |
-| `authority [name]` | The call is blocked and the offer names an authority. With a name, that authority. |
-| `sanitizer [name]` | The call is blocked and the offer names a sanitizer. With a name, that sanitizer. |
-| `deny` | The call is blocked and nothing is offered. |
-
-APPA never narrows a trajectory on its own. A call whose result would narrow it is blocked with the offer to accept that change. The model takes the offer and proposes the call again. The replay does the same for an `allow` step, through the runtime's own remedy path. With `-v` the step shows `(after accepting the narrowing)`.
-
-For `authority` and `sanitizer` the replay takes the offer too, and stands in for the party the runtime would ask. Every authority approves. Every sanitizer returns the value unchanged. The engine records the approval or the pass through the sanitizer the same way it records a real one, so the trace continues from the state the remedy would have produced. The bound authority or sanitizer is not called.
-
-A mismatch names what the block offered, party included: `got authority hitl, want deny`. A block that offers more than one kind lists them: `got authority hitl|sanitizer redactor`.
-
-After a call is released the replay reports an empty successful output. That is when the contract's `delta` lands on the trajectory label and its `effects` are recorded, so the next step sees the narrowed trajectory.
-
-Annotators, audience sources, and identity implementations bound in the configuration are consulted as in production. A consult that fails makes the step a run failure, never a deny.
-
-## Output and exit codes
-
-Passing steps print nothing. A step that did not pass prints one line. Each file prints `ok` or `FAIL`. The last line is the summary.
-
-```
-leak-by-email.appa:9: Email: got allow, want deny
-FAIL  leak-by-email.appa
-ok    push-to-fork.appa
-2 files: 1 ok, 1 failed, 0 could not run
+```text
+Publish {}
+expect authority
 ```
 
-A step that mismatches ends its file. The steps after it would run against a state the file did not assume. The other files still run.
+You can require one named authority:
 
-| Exit | Meaning |
+```text
+Publish {}
+expect authority security-team
+```
+
+Replay does not contact the configured authority. It gives approval and continues the
+test case.
+
+### `sanitizer`
+
+Use `sanitizer` when the policy must require a [sanitizer](/contracts#sanitizers).
+
+```text
+Email {
+  to: "person@example.com"
+}
+expect sanitizer
+```
+
+You can require one named sanitizer:
+
+```text
+Email {
+  to: "person@example.com"
+}
+expect sanitizer remove-secrets
+```
+
+Replay does not call the configured sanitizer. It continues with the same value. This
+checks that the policy requires the sanitizer. It does not test how the sanitizer changes
+the value.
+
+## Calls during replay
+
+Replay never runs a tool from the trace. When the policy allows a call, replay records an
+empty successful result. It also records the effects from the
+[tool rule](/contracts#tools). The next call can then check those effects.
+
+Replay does not call [authorities](/contracts#authorities) or
+[sanitizers](/contracts#sanitizers). It uses the test behavior described above.
+
+Replay does call configured [annotators](/contracts#annotators). An annotator provides a
+rule for a proposed tool call, so replay needs its answer to make the real policy decision.
+Replay also calls configured [audience services](/contracts#audience-sources) and
+[identity services](/contracts#identity) when a decision needs them.
+
+If one of these services fails, replay reports that the call could not run. It does not
+report a policy denial.
+
+## Results and exit codes
+
+Replay prints `ok` for a test case when all decisions match. If a decision does not match,
+replay prints the file name, line number, actual result, and expected result.
+
+```text
+secret-stays-inside.appa:6: Email: got allow, want deny
+FAIL  secret-stays-inside.appa
+1 file: 0 ok, 1 failed, 0 could not run
+```
+
+A wrong result stops the current test case. Other test cases continue.
+
+| Exit code | Meaning |
 |---|---|
-| 0 | Every step of every file passed. |
-| 1 | A step got a different decision than it expected. |
-| 2 | A step could not run, or a file or the configuration was refused. |
+| `0` | All expected results matched. |
+| `1` | One or more results did not match. |
+| `2` | Replay could not complete one or more calls. |
 
-A step cannot run when the tool is not declared, an external consult fails, or the runtime refuses the event. Exit 2 wins over exit 1: the result is incomplete.
+## More examples
 
-## Examples
-
-The repository ships six policies with their traces under `examples/tests/`. Each directory has a README that says what every step pins and why.
+See the [replay examples on GitHub](https://github.com/archestra-ai/OpenAPPA/tree/main/examples/tests)
+for policies that test audiences, trust levels, approval, sanitizers, and recorded effects.
