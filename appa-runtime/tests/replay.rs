@@ -395,7 +395,7 @@ async fn a_bound_annotator_decides_the_step() {
 }
 
 fn example_dirs() -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = std::fs::read_dir(repo_root().join("examples/replay"))
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(repo_root().join("examples/tests"))
         .expect("the examples directory is readable")
         .map(|entry| entry.expect("a directory entry").path())
         .filter(|path| path.is_dir())
@@ -435,7 +435,7 @@ async fn every_shipped_example_passes() {
 /// broken setup.
 #[test]
 fn the_command_exits_0_1_and_2() {
-    let example = repo_root().join("examples/replay/backup-before-deploy");
+    let example = repo_root().join("examples/tests/backup-before-deploy");
     let config = example.join("appa.toml");
     let appa = env!("CARGO_BIN_EXE_appa");
 

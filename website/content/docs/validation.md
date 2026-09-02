@@ -80,4 +80,4 @@ A step cannot run when the tool is not declared, an external consult fails, or t
 
 ## Examples
 
-The repository ships six policies with their traces under `examples/replay/`. Each directory has a README that says what every step pins and why.
+The repository ships six policies with their traces under `examples/tests/`. Each directory has a README that says what every step pins and why.

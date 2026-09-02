@@ -3,7 +3,7 @@
 Each directory has one policy and one test case. Run one with:
 
 ```sh
-appa replay --config examples/replay/secret-stays-inside/appa.toml examples/replay/secret-stays-inside
+appa replay --config examples/tests/secret-stays-inside/appa.toml examples/tests/secret-stays-inside
 ```
 
 Add `-v` to see every step. `cargo test -p appa --test replay` runs all of them.
