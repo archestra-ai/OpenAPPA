@@ -10,16 +10,6 @@ Bash {
 expect authority
 
 Bash {
-  command: "git status"
-}
-expect allow
-
-Bash {
   command: "git push origin main"
 }
 expect authority
-
-Bash {
-  command: "ls"
-}
-expect allow

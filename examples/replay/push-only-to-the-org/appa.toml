@@ -1,6 +1,5 @@
-# Three contracts for one tool, chosen by the command's text. A push to the
-# organization is allowed. Any other push needs a person's sign-off, which a
-# replay cannot give, so it is denied. Every other command is allowed.
+# Two rules use the command text. A push to the organization is allowed. Any
+# other push needs approval.
 
 [policy]
 version = 2
@@ -12,10 +11,6 @@ delta = {}
 [[policy.tool]]
 name = "Bash(command:git push *)"
 requires = { attention = ["hitl"] }
-delta = {}
-
-[[policy.tool]]
-name = "Bash"
 delta = {}
 
 [[policy.authority]]
