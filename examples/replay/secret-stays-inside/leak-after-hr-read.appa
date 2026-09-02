@@ -1,5 +1,5 @@
-# The HR file narrows the audience to `hr`. An outside recipient is denied; the
-# HR team itself is still reachable.
+# The HR file makes the trajectory private. The email is denied: it needs
+# `public`. The channel post is still allowed: it needs only `private`.
 Read {
   path: "/hr/salaries.csv"
 }
@@ -11,8 +11,8 @@ Email {
 }
 expect deny
 
-Email {
-  to: "hr"
-  subject: "salaries"
+PostToChannel {
+  channel: "#hr"
+  text: "salaries reviewed"
 }
 expect allow

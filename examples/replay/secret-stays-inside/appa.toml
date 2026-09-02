@@ -1,5 +1,6 @@
-# Reading the HR directory narrows the trajectory to the HR audience. From then
-# on, an email may go only to a recipient inside that audience.
+# Reading the HR directory makes the trajectory private. From then on, nothing
+# may leave the company: a sink that needs the `public` audience is blocked,
+# and a sink that stays inside is still fine.
 
 [policy]
 version = 2
@@ -7,19 +8,25 @@ version = 2
 [[policy.tool]]
 name = "Read(path:/hr/*)"
 parameters = { type = "object", properties = { path = { type = "string" } }, required = ["path"] }
-delta = { audience = ["hr"] }
+delta = { audience = ["private"] }
 
 [[policy.tool]]
 name = "Read"
 parameters = { type = "object", properties = { path = { type = "string" } }, required = ["path"] }
 delta = {}
 
-# `$to` is the call's own recipient: it must be inside the audience the
-# trajectory may still reach.
+# An email leaves the company: the trajectory must still be public.
 [[policy.tool]]
 name = "Email"
-parameters = { type = "object", properties = { to = { type = "string" }, subject = { type = "string" }, body = { type = "string" } }, required = ["to"] }
-requires = { audience = { contains = ["$to"] } }
+parameters = { type = "object", properties = { to = { type = "string" }, subject = { type = "string" } }, required = ["to"] }
+requires = { audience = { contains = ["public"] } }
+delta = {}
+
+# A channel post stays inside: `private` is enough.
+[[policy.tool]]
+name = "PostToChannel"
+parameters = { type = "object", properties = { channel = { type = "string" }, text = { type = "string" } }, required = ["channel"] }
+requires = { audience = { contains = ["private"] } }
 delta = {}
 
 [externals]

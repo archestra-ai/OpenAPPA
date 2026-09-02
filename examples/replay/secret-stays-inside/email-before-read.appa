@@ -1,4 +1,4 @@
-# Nothing sensitive was read: the audience is still public, so any recipient is fine.
+# Nothing private was read: the trajectory is still public, and the email leaves.
 Email {
   to: "x@other.com"
   subject: "hello"

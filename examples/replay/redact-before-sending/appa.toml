@@ -1,6 +1,6 @@
-# HR data may leave the company only through the redactor. Reading HR narrows
-# the audience to `hr`; an outside email needs `public`; the sanitizer is the
-# declared way from one to the other.
+# Private data may leave the company only through the redactor. Reading HR
+# makes the trajectory private; an outside email needs `public`; the sanitizer
+# is the declared way from one to the other.
 
 [policy]
 version = 2
@@ -8,7 +8,7 @@ version = 2
 [[policy.tool]]
 name = "Read(path:/hr/*)"
 parameters = { type = "object", properties = { path = { type = "string" } }, required = ["path"] }
-delta = { audience = ["hr"] }
+delta = { audience = ["private"] }
 
 [[policy.tool]]
 name = "Read"
@@ -21,14 +21,14 @@ parameters = { type = "object", properties = { to = { type = "string" }, body = 
 requires = { audience = { contains = ["public"] } }
 delta = {}
 
-# Rewrites the email's arguments before dispatch and moves the value from the
-# `hr` audience to `public`.
+# Rewrites the email's arguments before dispatch and moves the value from
+# `private` to `public`.
 [[policy.sanitizer]]
 name = "redactor"
 on = ["tool_input"]
 
 [policy.sanitizer.permits]
-audience = { from = ["hr"], to = ["public"] }
+audience = { from = ["private"], to = ["public"] }
 
 [externals]
 timeout_ms = 2000
