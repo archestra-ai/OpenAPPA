@@ -584,8 +584,20 @@ impl RuntimeEngine {
             .ok()?
         {
             OfferConsult::Accept => Some(crate::api::OfferKind::Accept),
-            OfferConsult::Authorities { .. } => Some(crate::api::OfferKind::Authority),
-            OfferConsult::Rewrite { .. } | OfferConsult::Sanitizer { .. } => Some(crate::api::OfferKind::Sanitizer),
+            OfferConsult::Authorities { required, .. } => {
+                let mut names: Vec<String> = required
+                    .iter()
+                    .map(|requirement| requirement.authority.as_str().to_string())
+                    .collect();
+                names.sort();
+                names.dedup();
+                Some(crate::api::OfferKind::Authority { names })
+            }
+            OfferConsult::Rewrite { sanitizer, .. } | OfferConsult::Sanitizer { sanitizer, .. } => {
+                Some(crate::api::OfferKind::Sanitizer {
+                    name: sanitizer.as_str().to_string(),
+                })
+            }
             OfferConsult::Stale | OfferConsult::Replay(_) => None,
         }
     }

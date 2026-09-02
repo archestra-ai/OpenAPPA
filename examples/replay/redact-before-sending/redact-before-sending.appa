@@ -19,10 +19,10 @@ Email {
   to: "x@other.com"
   body: "see attached"
 }
-expect sanitizer
+expect sanitizer redactor
 
 Email {
   to: "y@other.com"
   body: "and this"
 }
-expect sanitizer
+expect sanitizer redactor

@@ -142,29 +142,40 @@ name = "approver"
 attention = ["signoff"]
 "#;
 
+fn approver() -> OfferKind {
+    OfferKind::Authority {
+        names: vec!["approver".into()],
+    }
+}
+
 /// A call that needs a person: the block offers the authority, the stand-in approves, and
-/// the trace goes on. Expecting `deny` there is a mismatch that names the offer.
+/// the trace goes on. The expectation may name the authority. Expecting `deny` or another
+/// name there is a mismatch that names the offer.
 #[tokio::test]
 async fn an_authority_offer_is_taken_as_approved() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let runtime = runtime(&dir, ATTENTION_POLICY, "");
     let traces = [
         trace("wipe.appa", "Wipe {}\nexpect authority\n\nDeploy {}\nexpect deny\n"),
+        trace("wipe-named.appa", "Wipe {}\nexpect authority approver\n"),
         trace("wipe-denied.appa", "Wipe {}\nexpect deny\n"),
+        trace("wipe-other.appa", "Wipe {}\nexpect authority cto\n"),
     ];
     let reports = run(&runtime, &traces).await;
-    assert_eq!(
-        outcomes(&reports[0]),
-        vec![(1, &taken(OfferKind::Authority)), (4, &PASSED)]
-    );
+    assert_eq!(outcomes(&reports[0]), vec![(1, &taken(approver())), (4, &PASSED)]);
+    assert_eq!(outcomes(&reports[1]), vec![(1, &taken(approver()))]);
     assert!(matches!(
-        &reports[1].steps[0].outcome,
+        &reports[2].steps[0].outcome,
         StepOutcome::Mismatch { got: Got::Blocked(kinds), want: Expect::Deny, .. }
-            if kinds == &BTreeSet::from([OfferKind::Authority])
+            if kinds == &BTreeSet::from([approver()])
     ));
     let (text, _) = rendered(&reports);
     assert!(
-        text.contains("wipe-denied.appa:1: Wipe: got authority, want deny\n"),
+        text.contains("wipe-denied.appa:1: Wipe: got authority approver, want deny\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("wipe-other.appa:1: Wipe: got authority approver, want authority cto\n"),
         "{text}"
     );
 }
@@ -199,15 +210,18 @@ async fn a_sanitizer_offer_is_taken_with_the_value_unchanged() {
     let runtime = runtime(&dir, REDACTION_POLICY, REDACTOR_BINDING);
     let traces = [trace(
         "export.appa",
-        "Read {\n  path: \"/hr/salaries.csv\"\n}\nexpect allow\n\nExport {\n  body: \"salaries\"\n}\nexpect sanitizer\n\nExport {\n  body: \"again\"\n}\nexpect sanitizer\n",
+        "Read {\n  path: \"/hr/salaries.csv\"\n}\nexpect allow\n\nExport {\n  body: \"salaries\"\n}\nexpect sanitizer\n\nExport {\n  body: \"again\"\n}\nexpect sanitizer redactor\n",
     )];
     let reports = run(&runtime, &traces).await;
+    let redactor = OfferKind::Sanitizer {
+        name: "redactor".into(),
+    };
     assert_eq!(
         outcomes(&reports[0]),
         vec![
             (1, &taken(OfferKind::Accept)),
-            (6, &taken(OfferKind::Sanitizer)),
-            (11, &taken(OfferKind::Sanitizer)),
+            (6, &taken(redactor.clone())),
+            (11, &taken(redactor)),
         ]
     );
 }

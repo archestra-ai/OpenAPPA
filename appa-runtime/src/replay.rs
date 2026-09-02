@@ -33,32 +33,39 @@ use crate::api::{OfferId, OfferKind, RemedyOutcome, Runtime, is_control_tool};
 use crate::config::Config;
 use crate::hooks;
 
-/// The decision a step must get.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The decision a step must get. `Authority` and `Sanitizer` may name the party the offer
+/// must involve; unnamed, any party of that kind passes.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expect {
     Allow,
     Deny,
-    Authority,
-    Sanitizer,
+    Authority(Option<String>),
+    Sanitizer(Option<String>),
+}
+
+impl fmt::Display for Expect {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Expect::Allow => f.write_str("allow"),
+            Expect::Deny => f.write_str("deny"),
+            Expect::Authority(None) => f.write_str("authority"),
+            Expect::Authority(Some(name)) => write!(f, "authority {name}"),
+            Expect::Sanitizer(None) => f.write_str("sanitizer"),
+            Expect::Sanitizer(Some(name)) => write!(f, "sanitizer {name}"),
+        }
+    }
 }
 
 impl Expect {
-    fn as_str(self) -> &'static str {
-        match self {
-            Expect::Allow => "allow",
-            Expect::Deny => "deny",
-            Expect::Authority => "authority",
-            Expect::Sanitizer => "sanitizer",
-        }
-    }
-
-    /// The offer this expectation takes when the call is blocked, if any.
-    fn takes(self) -> Option<OfferKind> {
-        match self {
-            Expect::Allow => Some(OfferKind::Accept),
-            Expect::Authority => Some(OfferKind::Authority),
-            Expect::Sanitizer => Some(OfferKind::Sanitizer),
-            Expect::Deny => None,
+    /// Whether a blocked call's offer is the one this expectation takes.
+    fn takes(&self, kind: &OfferKind) -> bool {
+        match (self, kind) {
+            (Expect::Allow, OfferKind::Accept) => true,
+            (Expect::Authority(None), OfferKind::Authority { .. }) => true,
+            (Expect::Authority(Some(name)), OfferKind::Authority { names }) => names.contains(name),
+            (Expect::Sanitizer(None), OfferKind::Sanitizer { .. }) => true,
+            (Expect::Sanitizer(Some(name)), OfferKind::Sanitizer { name: offered }) => name == offered,
+            _ => false,
         }
     }
 }
@@ -96,9 +103,9 @@ pub struct SyntaxError {
 }
 
 /// Parse one trace file. The grammar is strict and line-oriented: a step is `Tool {`, one
-/// `key: <JSON value>` per line, `}`, then `expect allow`, `expect deny`, `expect authority`,
-/// or `expect sanitizer`. Blank lines and lines whose first character is `#` are skipped
-/// anywhere.
+/// `key: <JSON value>` per line, `}`, then `expect allow`, `expect deny`,
+/// `expect authority [name]`, or `expect sanitizer [name]`. Blank lines and lines whose first
+/// character is `#` are skipped anywhere.
 pub fn parse(path: &Path, text: &str) -> Result<Trace, SyntaxError> {
     let mut parser = Parser {
         path,
@@ -131,7 +138,7 @@ enum State {
     },
 }
 
-const EXPECT_WORDS: &str = "`expect allow`, `expect deny`, `expect authority`, or `expect sanitizer`";
+const EXPECT_WORDS: &str = "`expect allow`, `expect deny`, `expect authority [name]`, or `expect sanitizer [name]`";
 
 impl Parser<'_> {
     fn error(&self, line: usize, detail: impl Into<String>) -> SyntaxError {
@@ -234,8 +241,10 @@ impl Parser<'_> {
         let expect = match line.split_whitespace().collect::<Vec<_>>().as_slice() {
             ["expect", "allow"] => Expect::Allow,
             ["expect", "deny"] => Expect::Deny,
-            ["expect", "authority"] => Expect::Authority,
-            ["expect", "sanitizer"] => Expect::Sanitizer,
+            ["expect", "authority"] => Expect::Authority(None),
+            ["expect", "authority", name] if is_identifier(name) => Expect::Authority(Some(name.to_string())),
+            ["expect", "sanitizer"] => Expect::Sanitizer(None),
+            ["expect", "sanitizer", name] if is_identifier(name) => Expect::Sanitizer(Some(name.to_string())),
             _ => {
                 return Err(self.error(
                     number,
@@ -301,12 +310,12 @@ impl fmt::Display for Got {
             Got::Allowed => f.write_str("allow"),
             Got::Blocked(kinds) if kinds.is_empty() => f.write_str("deny"),
             Got::Blocked(kinds) => {
-                let words: Vec<&str> = kinds
+                let words: Vec<String> = kinds
                     .iter()
                     .map(|kind| match kind {
-                        OfferKind::Accept => "allow",
-                        OfferKind::Authority => "authority",
-                        OfferKind::Sanitizer => "sanitizer",
+                        OfferKind::Accept => "allow".to_string(),
+                        OfferKind::Authority { names } => format!("authority {}", names.join("+")),
+                        OfferKind::Sanitizer { name } => format!("sanitizer {name}"),
                     })
                     .collect();
                 f.write_str(&words.join("|"))
@@ -406,7 +415,7 @@ async fn run_trace(runtime: &Runtime, trace: &Trace) -> TraceReport {
         report.steps.push(StepReport {
             line: step.line,
             tool: step.tool.clone(),
-            expect: step.expect,
+            expect: step.expect.clone(),
             outcome,
         });
         if ended {
@@ -428,22 +437,19 @@ async fn run_step(runtime: &Runtime, actor: &Actor, step: &Step) -> StepOutcome 
         },
         Proposed::Denied { feedback } => {
             let offers = offers_in(runtime, actor, &feedback);
-            let kinds: BTreeSet<OfferKind> = offers.iter().map(|(kind, _)| *kind).collect();
+            let kinds: BTreeSet<OfferKind> = offers.into_iter().map(|(kind, _)| kind).collect();
             (Got::Blocked(kinds), Some(feedback))
         }
         Proposed::CannotRun(detail) => return StepOutcome::CannotRun(detail),
     };
-    match (&got, step.expect) {
+    match (&got, &step.expect) {
         (Got::Allowed, Expect::Allow) => StepOutcome::Passed { taken: None },
-        (Got::Blocked(kinds), expect) if kinds.is_empty() && expect == Expect::Deny => {
-            StepOutcome::Passed { taken: None }
-        }
-        (Got::Blocked(kinds), expect) if expect.takes().is_some_and(|kind| kinds.contains(&kind)) => {
-            let kind = expect.takes().expect("checked above");
+        (Got::Blocked(kinds), Expect::Deny) if kinds.is_empty() => StepOutcome::Passed { taken: None },
+        (Got::Blocked(kinds), expect) if kinds.iter().any(|kind| expect.takes(kind)) => {
             let feedback = feedback.as_deref().expect("a block carries its feedback");
-            let (_, offer) = offers_in(runtime, actor, feedback)
+            let (kind, offer) = offers_in(runtime, actor, feedback)
                 .into_iter()
-                .find(|(offered, _)| *offered == kind)
+                .find(|(offered, _)| expect.takes(offered))
                 .expect("the kind was read from these offers");
             match take_offer(runtime, actor, offer).await {
                 Ok(()) => StepOutcome::Passed { taken: Some(kind) },
@@ -452,7 +458,7 @@ async fn run_step(runtime: &Runtime, actor: &Actor, step: &Step) -> StepOutcome 
         }
         _ => StepOutcome::Mismatch {
             got,
-            want: step.expect,
+            want: step.expect.clone(),
             feedback,
         },
     }
@@ -562,12 +568,12 @@ impl fmt::Display for Summary {
     }
 }
 
-fn taken_note(taken: Option<OfferKind>) -> &'static str {
+fn taken_note(taken: Option<&OfferKind>) -> String {
     match taken {
-        None => "",
-        Some(OfferKind::Accept) => " (after accepting the narrowing)",
-        Some(OfferKind::Authority) => " (after the authority approved)",
-        Some(OfferKind::Sanitizer) => " (after the sanitizer rewrote it)",
+        None => String::new(),
+        Some(OfferKind::Accept) => " (after accepting the narrowing)".to_string(),
+        Some(OfferKind::Authority { names }) => format!(" (after {} approved)", names.join(" and ")),
+        Some(OfferKind::Sanitizer { name }) => format!(" (after {name} rewrote it)"),
     }
 }
 
@@ -589,13 +595,13 @@ pub fn render(reports: &[TraceReport], verbose: bool, out: &mut impl Write) -> s
                         writeln!(
                             out,
                             "ok    {path}:{line} {tool} {}{}",
-                            step.expect.as_str(),
-                            taken_note(*taken)
+                            step.expect,
+                            taken_note(taken.as_ref())
                         )?;
                     }
                 }
                 StepOutcome::Mismatch { got, want, feedback } => {
-                    writeln!(out, "{path}:{line}: {tool}: got {got}, want {}", want.as_str())?;
+                    writeln!(out, "{path}:{line}: {tool}: got {got}, want {want}")?;
                     for text in feedback.iter().flat_map(|feedback| feedback.lines()) {
                         writeln!(out, "    {text}")?;
                     }
@@ -744,27 +750,31 @@ mod tests {
     #[test]
     fn a_trace_parses_into_steps_with_verbatim_arguments() {
         let trace = parsed(
-            "# a comment\n\nRead {\n  path: \"/etc/secrets\"\n}\nexpect allow\n\nEmail {\n  to: \"x@other.com\"\n  count: 2\n  tags: [\"a\", \"b\"]\n}\nexpect sanitizer\n\nList {}\nexpect authority\n\nDrop {}\nexpect deny\n",
+            "# a comment\n\nRead {\n  path: \"/etc/secrets\"\n}\nexpect allow\n\nEmail {\n  to: \"x@other.com\"\n  count: 2\n  tags: [\"a\", \"b\"]\n}\nexpect sanitizer redactor\n\nList {}\nexpect authority\n\nDrop {}\nexpect deny\n\nWipe {}\nexpect authority hitl\n",
         )
         .expect("the trace parses");
-        assert_eq!(trace.steps.len(), 4);
+        assert_eq!(trace.steps.len(), 5);
         let read = &trace.steps[0];
-        assert_eq!((read.line, read.tool.as_str(), read.expect), (3, "Read", Expect::Allow));
+        assert_eq!(
+            (read.line, read.tool.as_str(), &read.expect),
+            (3, "Read", &Expect::Allow)
+        );
         assert_eq!(read.arguments.get(), r#"{"path":"/etc/secrets"}"#);
         let email = &trace.steps[1];
         assert_eq!(
-            (email.line, email.tool.as_str(), email.expect),
-            (8, "Email", Expect::Sanitizer)
+            (email.line, email.tool.as_str(), &email.expect),
+            (8, "Email", &Expect::Sanitizer(Some("redactor".into())))
         );
         assert_eq!(
             email.arguments.get(),
             r#"{"to":"x@other.com","count":2,"tags":["a", "b"]}"#
         );
         assert_eq!(
-            (trace.steps[2].arguments.get(), trace.steps[2].expect),
-            ("{}", Expect::Authority)
+            (trace.steps[2].arguments.get(), &trace.steps[2].expect),
+            ("{}", &Expect::Authority(None))
         );
         assert_eq!(trace.steps[3].expect, Expect::Deny);
+        assert_eq!(trace.steps[4].expect, Expect::Authority(Some("hitl".into())));
     }
 
     #[test]
@@ -810,8 +820,16 @@ mod tests {
         assert_eq!(Got::Allowed.to_string(), "allow");
         assert_eq!(Got::Blocked(BTreeSet::new()).to_string(), "deny");
         assert_eq!(
-            Got::Blocked(BTreeSet::from([OfferKind::Sanitizer, OfferKind::Authority])).to_string(),
-            "authority|sanitizer"
+            Got::Blocked(BTreeSet::from([
+                OfferKind::Sanitizer {
+                    name: "redactor".into()
+                },
+                OfferKind::Authority {
+                    names: vec!["cto".into(), "hitl".into()]
+                },
+            ]))
+            .to_string(),
+            "authority cto+hitl|sanitizer redactor"
         );
         assert_eq!(Got::Blocked(BTreeSet::from([OfferKind::Accept])).to_string(), "allow");
     }
@@ -859,7 +877,9 @@ mod tests {
                         tool: "Email".into(),
                         expect: Expect::Deny,
                         outcome: StepOutcome::Mismatch {
-                            got: Got::Blocked(BTreeSet::from([OfferKind::Sanitizer])),
+                            got: Got::Blocked(BTreeSet::from([OfferKind::Sanitizer {
+                                name: "redactor".into(),
+                            }])),
                             want: Expect::Deny,
                             feedback: None,
                         },
@@ -872,9 +892,11 @@ mod tests {
                 steps: vec![StepReport {
                     line: 1,
                     tool: "Bash".into(),
-                    expect: Expect::Authority,
+                    expect: Expect::Authority(Some("hitl".into())),
                     outcome: StepOutcome::Passed {
-                        taken: Some(OfferKind::Authority),
+                        taken: Some(OfferKind::Authority {
+                            names: vec!["hitl".into()],
+                        }),
                     },
                 }],
             },
@@ -883,7 +905,7 @@ mod tests {
         let summary = render(&reports, false, &mut out).expect("renders");
         assert_eq!(
             String::from_utf8(out).expect("utf-8"),
-            "leak.appa:8: Email: got sanitizer, want deny\nFAIL  leak.appa\nok    push.appa\n2 files: 1 ok, 1 failed, 0 could not run\n"
+            "leak.appa:8: Email: got sanitizer redactor, want deny\nFAIL  leak.appa\nok    push.appa\n2 files: 1 ok, 1 failed, 0 could not run\n"
         );
         assert_eq!(summary.exit_code(), ExitCode::from(1));
 
@@ -891,6 +913,6 @@ mod tests {
         render(&reports, true, &mut out).expect("renders");
         let text = String::from_utf8(out).expect("utf-8");
         assert!(text.starts_with("ok    leak.appa:3 Read allow (after accepting the narrowing)\n"));
-        assert!(text.contains("ok    push.appa:1 Bash authority (after the authority approved)\n"));
+        assert!(text.contains("ok    push.appa:1 Bash authority hitl (after hitl approved)\n"));
     }
 }

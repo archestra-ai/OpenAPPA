@@ -83,13 +83,13 @@ pub enum RemedyOutcome {
     Refused { detail: String },
 }
 
-/// Whom taking an offer involves: nobody but the model (the plain narrowing acceptance), an
-/// authority's ruling, or a sanitizer's rewrite of the value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// Whom taking an offer involves: nobody but the model (the plain narrowing acceptance), the
+/// named authorities' rulings, or the named sanitizer's rewrite of the value.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum OfferKind {
     Accept,
-    Authority,
-    Sanitizer,
+    Authority { names: Vec<String> },
+    Sanitizer { name: String },
 }
 
 /// What happens to the child's final message: delivered to the parent,

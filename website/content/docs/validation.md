@@ -43,15 +43,15 @@ expect deny
 | `expect` | Passes when |
 |---|---|
 | `allow` | The call runs as proposed, or the only thing in the way is the plain narrowing acceptance. |
-| `authority` | The call is blocked and the offer names an authority. |
-| `sanitizer` | The call is blocked and the offer names a sanitizer. |
+| `authority [name]` | The call is blocked and the offer names an authority. With a name, that authority. |
+| `sanitizer [name]` | The call is blocked and the offer names a sanitizer. With a name, that sanitizer. |
 | `deny` | The call is blocked and nothing is offered. |
 
 APPA never narrows a trajectory on its own. A call whose result would narrow it is blocked with the offer to accept that change. The model takes the offer and proposes the call again. The replay does the same for an `allow` step, through the runtime's own remedy path. With `-v` the step shows `(after accepting the narrowing)`.
 
 For `authority` and `sanitizer` the replay takes the offer too, and stands in for the party the runtime would ask. Every authority approves. Every sanitizer returns the value unchanged. The engine records the approval or the pass through the sanitizer the same way it records a real one, so the trace continues from the state the remedy would have produced. The bound authority or sanitizer is not called.
 
-A mismatch names what the block offered: `got authority, want deny`. A block that offers more than one kind lists them: `got authority|sanitizer`.
+A mismatch names what the block offered, party included: `got authority hitl, want deny`. A block that offers more than one kind lists them: `got authority hitl|sanitizer redactor`.
 
 After a call is released the replay reports an empty successful output. That is when the contract's `delta` lands on the trajectory label and its `effects` are recorded, so the next step sees the narrowed trajectory.
 

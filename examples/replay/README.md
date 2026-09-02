@@ -22,8 +22,8 @@ A test case lists tool calls in order. Each call has one expected result.
 | `expect` | Passes when |
 |---|---|
 | `allow` | the call runs; the replay accepts a lower trust level or a smaller reader group when needed |
-| `authority` | the call needs approval; the replay gives approval |
-| `sanitizer` | the call needs the sanitizer; the replay uses it without changing the value |
+| `authority [name]` | the call needs approval, from that authority if named; the replay gives approval |
+| `sanitizer [name]` | the call needs the sanitizer, that one if named; the replay uses it without changing the value |
 | `deny` | the call does not run |
 
 No real tool runs. An allowed call completes with an empty result.
