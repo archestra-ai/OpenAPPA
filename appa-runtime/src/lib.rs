@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod config;
+mod default_config;
 pub mod describe;
 pub mod hook_client;
 pub mod hooks;

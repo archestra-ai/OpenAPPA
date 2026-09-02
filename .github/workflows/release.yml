@@ -134,9 +134,10 @@ jobs:
       - name: Update release PR
         if: ${{ steps.release-pr.outputs.prs_created == 'true' }}
         env:
-          RELEASE_BRANCH: ${{ fromJSON(steps.release-pr.outputs.pr).headBranchName }}
+          RELEASE_PR: ${{ steps.release-pr.outputs.pr }}
           RELEASE_PUSH_TOKEN: ${{ github.token }}
         run: |
+          release_branch=$(jq -er '.headBranchName' <<<"$RELEASE_PR")
           if git diff --quiet; then
             exit 0
           fi
@@ -146,7 +147,7 @@ jobs:
           git commit -m "chore: synchronize release version"
           git -c credential.helper= \
             -c 'credential.helper=!f() { test "$1" = get && printf "%s\n" "username=x-access-token" "password=$RELEASE_PUSH_TOKEN"; }; f' \
-            push origin "HEAD:${RELEASE_BRANCH}"
+            push origin "HEAD:${release_branch}"
 
   plugin-artifact:
     name: Build the plugin artifact

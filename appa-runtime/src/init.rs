@@ -12,14 +12,13 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::config::{Config, ConfigError};
+use crate::default_config;
 use crate::plugin_bundle::{self, Deployment, Endpoint, PluginBundleError, PluginSource, Population};
 use crate::runtime_cli::{Adapter, refuse_unobservable_returns};
 
 const MARKETPLACE: &str = "appa";
 const PLUGIN: &str = "appa-runtime@appa";
 const RECOVERY_PREFIX: &str = ".appa-init-recovery-";
-const DEFAULT_CONFIG: &str = include_str!("../../integrations/claude-code/examples/claude-code.appa.toml");
-
 #[derive(Debug, Error)]
 pub enum InitError {
     #[error("cannot find the current executable: {0}")]
@@ -816,7 +815,10 @@ fn create_default_config(path: &Path) -> Result<ConfigOutcome, InitError> {
             });
         }
     };
-    if let Err(source) = file.write_all(DEFAULT_CONFIG.as_bytes()).and_then(|()| file.sync_all()) {
+    if let Err(source) = file
+        .write_all(default_config::text().as_bytes())
+        .and_then(|()| file.sync_all())
+    {
         drop(file);
         discard_file(path);
         return Err(InitError::WriteFile {
@@ -829,7 +831,7 @@ fn create_default_config(path: &Path) -> Result<ConfigOutcome, InitError> {
 
 /// The policy version this build's default config declares.
 fn template_policy_version() -> i64 {
-    policy_version(DEFAULT_CONFIG).expect("the bundled default config declares an integer policy version")
+    policy_version(&default_config::text()).expect("the bundled default config declares an integer policy version")
 }
 
 /// The `[policy] version` of one config's own text, before any include composes.
@@ -2367,7 +2369,10 @@ mod tests {
         }
 
         assert_eq!(answer_rewrite(&config, "y\n").0, ConfigOutcome::Rewritten);
-        assert_eq!(fs::read_to_string(&config).ok(), Some(DEFAULT_CONFIG.to_string()));
+        assert_eq!(
+            fs::read_to_string(&config).ok(),
+            Some(default_config::text().into_owned())
+        );
         assert_eq!(fs::read_to_string(&backup).ok(), Some(authored));
         verify_config(&config).expect("the rewritten config composes");
     }
@@ -2384,7 +2389,10 @@ mod tests {
         let (outcome, prompt) = answer_rewrite(&config, "y\n");
         assert!(prompt.is_empty(), "no offer is made");
         assert_eq!(outcome, ConfigOutcome::Kept);
-        assert_eq!(fs::read_to_string(&config).ok(), Some(DEFAULT_CONFIG.to_string()));
+        assert_eq!(
+            fs::read_to_string(&config).ok(),
+            Some(default_config::text().into_owned())
+        );
         assert!(!directory.path().join("appa.toml.bak").exists());
     }
 

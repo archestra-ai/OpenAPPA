@@ -18,10 +18,9 @@ use sha2::{Digest, Sha256};
 
 use crate::api::{Reloaded, Runtime};
 use crate::config::Config;
+use crate::default_config;
 use crate::{hooks, mcp};
 use appa_runtime_api::Codec;
-
-const DEFAULT_CONFIG: &str = include_str!("../../integrations/claude-code/examples/claude-code.appa.toml");
 
 fn ensure_default_config(path: &Path) -> io::Result<bool> {
     let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
@@ -29,7 +28,10 @@ fn ensure_default_config(path: &Path) -> io::Result<bool> {
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
         Err(error) => return Err(error),
     };
-    if let Err(error) = file.write_all(DEFAULT_CONFIG.as_bytes()).and_then(|()| file.sync_all()) {
+    if let Err(error) = file
+        .write_all(default_config::text().as_bytes())
+        .and_then(|()| file.sync_all())
+    {
         drop(file);
         let _ = fs::remove_file(path);
         return Err(error);
@@ -382,7 +384,7 @@ mod tests {
         assert!(ensure_default_config(&path).expect("default config is created"));
         assert_eq!(
             fs::read_to_string(&path).expect("default config is readable"),
-            DEFAULT_CONFIG
+            default_config::text()
         );
         Config::load(&path).expect("the embedded default config validates");
 
