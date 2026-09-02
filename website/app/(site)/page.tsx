@@ -1,8 +1,8 @@
 import { notFound } from "next/navigation";
 
 import { DocContent } from "@/components/DocContent";
-import { Logo } from "@/components/Logo";
 import { DocShell } from "@/components/DocShell";
+import { SpellItButton } from "@/components/SpellItButton";
 import { generateTableOfContents, getDocBySlug } from "@/lib/docs";
 
 export default function HomePage() {
@@ -15,12 +15,11 @@ export default function HomePage() {
     <DocShell toc={toc}>
       <div className="landing">
         <div className="hero">
-          <h1>
-            {/* Fluid: the lockup shrinks to fit a phone instead of wrapping
-                the mascot onto a line of its own. 36px is the design size. */}
-            <Logo height="clamp(15px, calc((100vw - 64px) / 15), 36px)" />
-          </h1>
+          {/* Title as text, not the lockup: the header already carries the
+              wordmark, and two of them stacked read as a duplicate. */}
+          <h1>{doc.title}</h1>
           <p className="tagline">{doc.description}</p>
+          <SpellItButton />
         </div>
         <DocContent content={doc.content} />
       </div>
