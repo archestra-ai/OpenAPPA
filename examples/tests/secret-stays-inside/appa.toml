@@ -1,11 +1,11 @@
-# A file in /hr/ is for the HR group only.
+# A file in /hr/ can go only to the HR email address.
 
 [policy]
 version = 2
 
 [[policy.tool]]
 name = "Read(path:/hr/*)"
-delta = { audience = ["hr"] }
+delta = { audience = ["hr@archestra.ai"] }
 
 [[policy.tool]]
 name = "Read"
