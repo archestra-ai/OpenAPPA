@@ -18,7 +18,7 @@ pub(crate) use session::{LateOpen, Session, is_control_tool};
 use crate::config::Config;
 use crate::elicit::Elicitation;
 use crate::engine::{EngineRefusal, Liveness, PolicyEngine, RuntimeEngine};
-use crate::external::{ConsultGates, ExternalServices, RemedyParties};
+use crate::external::{ConsultGates, ExternalServices};
 use appa_eventlog::{Backend, Log, LogStore};
 
 /// One remedy offer as it is quoted and carried.
@@ -278,7 +278,6 @@ impl Deployment {
         config: Config,
         modules: &crate::builtins::ModuleRegistry,
         gates: ConsultGates,
-        parties: RemedyParties,
     ) -> Result<Deployment, OpenError> {
         let policy = compile_policy(&config)?;
         validate_deployment(&policy, &config.externals)?;
@@ -286,25 +285,28 @@ impl Deployment {
             .annotators()
             .filter_map(|(name, binding)| binding.builtin.map(|builtin| (name.as_str().to_string(), builtin)))
             .collect();
-        let mut externals = ExternalServices::new(config.externals.clone(), modules, annotator_builtins, gates)
+        let externals = ExternalServices::new(config.externals.clone(), modules, annotator_builtins, gates)
             .map_err(|error| OpenError::Modules(error.to_string()))?;
-        if parties == RemedyParties::StandIn {
-            let registry = policy.engine().registry();
-            externals.stand_in_for_remedies(
-                registry
-                    .authorities()
-                    .iter()
-                    .map(|authority| authority.name.as_str().to_string()),
-                registry
-                    .sanitizers()
-                    .map(|sanitizer| sanitizer.name.as_str().to_string()),
-            );
-        }
         Ok(Deployment {
             config,
             resident: RuntimeEngine::from_policy(&policy),
             externals,
         })
+    }
+
+    /// Answer every authority and sanitizer the policy declares in process — approve, and
+    /// the body unchanged — as if the bound party had. `appa replay`'s deployment only.
+    fn stand_in_for_remedies(&mut self) {
+        let registry = self.resident.registry();
+        self.externals.stand_in_for_remedies(
+            registry
+                .authorities()
+                .iter()
+                .map(|authority| authority.name.as_str().to_string()),
+            registry
+                .sanitizers()
+                .map(|sanitizer| sanitizer.name.as_str().to_string()),
+        );
     }
 
     fn resident(&self) -> PolicyEngine<'_> {
@@ -330,6 +332,49 @@ pub struct Reloaded {
 
 pub struct Runtime {
     inner: Arc<Inner>,
+}
+
+/// Everything `open` and `open_in_memory` share before the log is chosen: the modules, the
+/// consult gates, and the deployment compiled from the configuration.
+struct Prepared {
+    modules: crate::builtins::ModuleRegistry,
+    gates: ConsultGates,
+    deployment: Deployment,
+}
+
+impl Prepared {
+    fn new(config: Config, modules: Option<PathBuf>) -> Result<Prepared, OpenError> {
+        let modules =
+            crate::builtins::load(modules.as_deref()).map_err(|error| OpenError::Modules(error.to_string()))?;
+        let gates = ConsultGates::per_runtime();
+        let deployment = Deployment::load(config, &modules, gates.clone())?;
+        gates.serve_llm(deployment.config.externals.llm_bound());
+        Ok(Prepared {
+            modules,
+            gates,
+            deployment,
+        })
+    }
+
+    fn assemble(self, backend: Backend) -> Result<Runtime, OpenError> {
+        let store = LogStore::open(backend).map_err(|error| match error {
+            appa_eventlog::OpenError::Damaged { path, detail } => OpenError::Damaged(format!("{path}: {detail}")),
+            error @ appa_eventlog::OpenError::ForeignSchema { .. } => OpenError::Damaged(error.to_string()),
+            error => OpenError::Storage(error.to_string()),
+        })?;
+        Ok(Runtime {
+            inner: Arc::new(Inner {
+                deployment: std::sync::RwLock::new(Arc::new(self.deployment)),
+                retired: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+                store,
+                modules: self.modules,
+                executing: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+                permits: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+                prompted: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+                gates: self.gates,
+            }),
+        })
+    }
 }
 
 struct Inner {
@@ -440,7 +485,8 @@ impl Runtime {
     /// a policy this deployment cannot honor is refused before
     /// anything opens.
     pub fn open(config: Config, db: PathBuf, modules: Option<PathBuf>) -> Result<Runtime, OpenError> {
-        Runtime::open_with(config, Backend::Sqlite { path: db }, modules, RemedyParties::AsBound)
+        let prepared = Prepared::new(config, modules)?;
+        prepared.assemble(Backend::Sqlite { path: db })
     }
 
     /// The deployment `appa replay` runs: the same session and engine over a log that lives
@@ -448,37 +494,9 @@ impl Runtime {
     /// approve, and the body unchanged — as if the bound party had. Annotators, audience
     /// sources, and identity stay bound as configured. Nothing of the run survives the process.
     pub fn open_in_memory(config: Config, modules: Option<PathBuf>) -> Result<Runtime, OpenError> {
-        Runtime::open_with(config, Backend::Memory, modules, RemedyParties::StandIn)
-    }
-
-    fn open_with(
-        config: Config,
-        backend: Backend,
-        modules: Option<PathBuf>,
-        parties: RemedyParties,
-    ) -> Result<Runtime, OpenError> {
-        let modules =
-            crate::builtins::load(modules.as_deref()).map_err(|error| OpenError::Modules(error.to_string()))?;
-        let gates = ConsultGates::per_runtime();
-        let deployment = Deployment::load(config, &modules, gates.clone(), parties)?;
-        gates.serve_llm(deployment.config.externals.llm_bound());
-        let store = LogStore::open(backend).map_err(|error| match error {
-            appa_eventlog::OpenError::Damaged { path, detail } => OpenError::Damaged(format!("{path}: {detail}")),
-            error @ appa_eventlog::OpenError::ForeignSchema { .. } => OpenError::Damaged(error.to_string()),
-            error => OpenError::Storage(error.to_string()),
-        })?;
-        Ok(Runtime {
-            inner: Arc::new(Inner {
-                deployment: std::sync::RwLock::new(Arc::new(deployment)),
-                retired: std::sync::Mutex::new(std::collections::BTreeMap::new()),
-                store,
-                modules,
-                executing: std::sync::Mutex::new(std::collections::BTreeSet::new()),
-                permits: std::sync::Mutex::new(std::collections::BTreeMap::new()),
-                prompted: std::sync::Mutex::new(std::collections::BTreeSet::new()),
-                gates,
-            }),
-        })
+        let mut prepared = Prepared::new(config, modules)?;
+        prepared.deployment.stand_in_for_remedies();
+        prepared.assemble(Backend::Memory)
     }
 
     /// The policy file key the serving deployment answers under. An install compares it
@@ -500,12 +518,7 @@ impl Runtime {
     /// learns where a configuration came from, so an embedding host
     /// reloads a composed policy the same way.
     pub fn reload(&self, config: Config) -> Result<Reloaded, OpenError> {
-        let deployment = Deployment::load(
-            config,
-            &self.inner.modules,
-            self.inner.gates.clone(),
-            RemedyParties::AsBound,
-        )?;
+        let deployment = Deployment::load(config, &self.inner.modules, self.inner.gates.clone())?;
         let identity = deployment.resident().identity_hex();
         let deployment = Arc::new(deployment);
         // The gate's bound and the serving snapshot change as one transition under the
@@ -1151,12 +1164,7 @@ mod deployment_tests {
     }
 
     fn load(config: Config) -> Result<Deployment, OpenError> {
-        Deployment::load(
-            config,
-            &crate::builtins::ModuleRegistry::empty(),
-            test_permits(),
-            RemedyParties::AsBound,
-        )
+        Deployment::load(config, &crate::builtins::ModuleRegistry::empty(), test_permits())
     }
 
     #[test]
@@ -1173,15 +1181,7 @@ mod deployment_tests {
                 annotator = "classifier"
             "#,
         );
-        assert!(
-            Deployment::load(
-                tool_level,
-                &crate::builtins::ModuleRegistry::empty(),
-                test_permits(),
-                RemedyParties::AsBound
-            )
-            .is_ok()
-        );
+        assert!(Deployment::load(tool_level, &crate::builtins::ModuleRegistry::empty(), test_permits()).is_ok());
     }
 
     #[test]

@@ -101,15 +101,7 @@ enum Backend {
     Llm(LlmBackend),
     /// `appa replay`'s stand-in for the parties a remedy consults: every authority
     /// approves, every sanitizer returns the body unchanged. No configuration can name it;
-    /// only [`RemedyParties::StandIn`] installs it, over whatever the deployment bound.
-    StandIn,
-}
-
-/// Who answers an authority or sanitizer consult: the parties the deployment binds, or
-/// the replay's in-process stand-in that answers as if they had.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RemedyParties {
-    AsBound,
+    /// only `Runtime::open_in_memory` installs it, over whatever the deployment bound.
     StandIn,
 }
 

@@ -563,6 +563,11 @@ impl RuntimeEngine {
     }
 
     /// Which trajectory pursues this offer.
+    /// The compiled policy this engine decides under.
+    pub(crate) fn registry(&self) -> &appa_engine::registry::Registry {
+        self.engine.registry()
+    }
+
     /// Whom taking this offer involves, read without taking it: nobody (the plain narrowing
     /// acceptance), an authority, or a sanitizer. `None` for an offer that no longer stands.
     /// `appa replay` reads it to take the offer a trace expects, the way the model would.
