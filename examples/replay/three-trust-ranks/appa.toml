@@ -15,13 +15,11 @@ delta = { trust = "untrusted" }
 
 [[policy.tool]]
 name = "RunCommand"
-parameters = { type = "object", properties = { command = { type = "string" } }, required = ["command"] }
 requires = { trust = "internal" }
 delta = {}
 
 [[policy.tool]]
 name = "PostToSlack"
-parameters = { type = "object", properties = { channel = { type = "string" }, text = { type = "string" } }, required = ["channel"] }
 requires = { trust = "vendor" }
 delta = {}
 

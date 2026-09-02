@@ -11,17 +11,14 @@ version = 2
 
 [[policy.tool]]
 name = "Read(path:/hr/*)"
-parameters = { type = "object", properties = { path = { type = "string" } }, required = ["path"] }
 delta = { audience = ["private"] }
 
 [[policy.tool]]
 name = "Read"
-parameters = { type = "object", properties = { path = { type = "string" } }, required = ["path"] }
 delta = {}
 
 [[policy.tool]]
 name = "Email"
-parameters = { type = "object", properties = { to = { type = "string" }, body = { type = "string" } }, required = ["to", "body"] }
 requires = { audience = { contains = ["public"] } }
 delta = {}
 

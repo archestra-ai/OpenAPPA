@@ -11,25 +11,21 @@ version = 2
 
 [[policy.tool]]
 name = "Read(path:/hr/*)"
-parameters = { type = "object", properties = { path = { type = "string" } }, required = ["path"] }
 delta = { audience = ["internal"] }
 
 [[policy.tool]]
 name = "Read"
-parameters = { type = "object", properties = { path = { type = "string" } }, required = ["path"] }
 delta = {}
 
 # An email leaves the company: the trajectory must still be public.
 [[policy.tool]]
 name = "Email"
-parameters = { type = "object", properties = { to = { type = "string" }, subject = { type = "string" } }, required = ["to"] }
 requires = { audience = { contains = ["public"] } }
 delta = {}
 
 # A channel post reaches the organization: the trajectory must still reach it.
 [[policy.tool]]
 name = "PostToChannel"
-parameters = { type = "object", properties = { channel = { type = "string" }, text = { type = "string" } }, required = ["channel"] }
 requires = { audience = { contains = ["internal"] } }
 delta = {}
 

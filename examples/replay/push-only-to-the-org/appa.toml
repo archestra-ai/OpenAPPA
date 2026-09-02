@@ -7,18 +7,15 @@ version = 2
 
 [[policy.tool]]
 name = "Bash(command:git push https://github.com/archestra-ai/*)"
-parameters = { type = "object", properties = { command = { type = "string" } }, required = ["command"] }
 delta = {}
 
 [[policy.tool]]
 name = "Bash(command:git push *)"
-parameters = { type = "object", properties = { command = { type = "string" } }, required = ["command"] }
 requires = { attention = ["hitl"] }
 delta = {}
 
 [[policy.tool]]
 name = "Bash"
-parameters = { type = "object", properties = { command = { type = "string" } }, required = ["command"] }
 delta = {}
 
 [[policy.authority]]
