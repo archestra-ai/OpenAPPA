@@ -7,9 +7,11 @@ use std::process::{Command, Stdio};
 use axum::Router;
 use axum::routing::post;
 
-/// The hooks that report a finished turn. Every blocking outcome on one
-/// of these means "do not stop", so none of them may carry one.
-const TURN_ENDS: [&str; 3] = ["Stop", "StopFailure", "SubagentStop"];
+/// The hooks that report the root actor's finished turn. Every blocking
+/// outcome on one of these means "do not stop", so none of them may carry
+/// one. SubagentStop is not one: it checks the subagent's final message and
+/// blocks like a tool hook.
+const TURN_ENDS: [&str; 2] = ["Stop", "StopFailure"];
 
 fn turn_end_command() -> &'static str {
     "[ \"${APPA_GATE:-}\" = 1 ] || exit 0; sh \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.sh\" --turn-end || exit 0"
@@ -126,13 +128,43 @@ fn both_shipped_hook_maps_inject_the_same_session_context() {
     );
 }
 
+/// hook.ps1 decides its blocking outcome and deadline from its own turn-end
+/// list, so that list must name exactly the events the POSIX map runs with
+/// --turn-end. The assertion reads the array, not the surrounding prose.
+#[test]
+fn the_windows_script_names_the_same_turn_ends() {
+    let script = std::fs::read_to_string(plugin_file("hooks/hook.ps1")).expect("the shipped hook.ps1 is readable");
+    let line = script
+        .lines()
+        .find(|line| line.starts_with("$turnEnds = @("))
+        .expect("hook.ps1 declares $turnEnds as an array literal");
+    let inner = line
+        .strip_prefix("$turnEnds = @(")
+        .and_then(|rest| rest.strip_suffix(')'))
+        .expect("the $turnEnds literal closes on the same line");
+    let mut declared: Vec<&str> = inner.split(',').map(|item| item.trim().trim_matches('"')).collect();
+    declared.sort_unstable();
+    let mut expected = TURN_ENDS.to_vec();
+    expected.sort_unstable();
+    assert_eq!(
+        declared, expected,
+        "hook.ps1 treats a different set of events as turn ends"
+    );
+}
+
 fn shipped_command() -> String {
     let hooks = shipped("hooks.json");
     let command = hooks["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
         .as_str()
         .expect("the PreToolUse hook carries a command")
         .to_string();
-    for event in ["UserPromptSubmit", "PostToolUse", "SubagentStart", "PostToolUseFailure"] {
+    for event in [
+        "UserPromptSubmit",
+        "PostToolUse",
+        "SubagentStart",
+        "SubagentStop",
+        "PostToolUseFailure",
+    ] {
         let entry = &hooks["hooks"][event][0]["hooks"][0]["command"];
         assert_eq!(
             entry.as_str(),
@@ -141,8 +173,8 @@ fn shipped_command() -> String {
         );
     }
     // A turn end decides nothing, and blocking this hook holds the actor
-    // in a turn it has finished, so these three never carry the blocking
-    // exit and never print an answer.
+    // in a turn it has finished, so these never carry the blocking exit
+    // and never print an answer.
     for event in TURN_ENDS {
         let entry = hooks["hooks"][event][0]["hooks"][0]["command"]
             .as_str()

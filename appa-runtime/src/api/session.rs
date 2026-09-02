@@ -146,6 +146,14 @@ const REPLAY_LIMIT: u32 = 8;
 /// healthy deployment; it bounds the blast radius of a gathering bug or a hostile external.
 const RESOLUTION_ROUNDS: u32 = 8;
 
+/// The outcome that closes a substituted release the harness never ran:
+/// the child proposed past it, or ended without running it.
+fn unrun_substitution() -> ToolOutcome {
+    ToolOutcome::Failure {
+        message: "the harness did not run the substituted call".to_string(),
+    }
+}
+
 fn fresh_entropy() -> OfferNonce {
     OfferNonce(rand::random::<[u8; 32]>())
 }
@@ -334,10 +342,7 @@ impl Session {
             }
             Standing::Abandoned(open) => open,
         };
-        let outcome = ToolOutcome::Failure {
-            message: "the harness did not run the substituted call".to_string(),
-        };
-        self.abandon_open(&outcome).await?;
+        self.abandon_open(&unrun_substitution()).await?;
         tracing::debug!(
             trajectory = %self.trajectory.0,
             dispatch = ?open.id,
@@ -603,13 +608,28 @@ impl Session {
         }
     }
 
-    /// The child finished. Its final message is its only return
-    /// channel and is checked before it may cross to the parent;
-    /// `None` returns no value. The return names the
-    /// fork that opened the child, recovered from the log. A child
-    /// with a call still open does not end: the end is refused, and the same
-    /// end crosses once the call's outcome is reported (`ChildDispatchOpen`).
+    /// The child finished its turn and returns `value`; `None` returns no
+    /// value. The return is the child's only channel to the parent and is
+    /// checked before it may cross; it names the fork that opened the
+    /// child, recovered from the log.
+    ///
+    /// A call the child still has open got no outcome hook and never
+    /// will, so it closes first, as the child's turn end would close it:
+    /// an ordinary release as unreported, a substituted release the
+    /// harness declined to run as abandoned — the child ended its turn
+    /// without running it, which is the same abandonment as proposing
+    /// past it.
+    ///
+    /// A child that already returned replays instead of ending again: the
+    /// value it returned crosses nothing twice and answers as it did, any
+    /// other value is refused. A harness may deliver the same stop more
+    /// than once; a second, different return would be a second crossing,
+    /// which a child never has.
     pub async fn on_child_end(&self, value: Option<String>) -> Result<ChildReturnDecision, EventError> {
+        if self.liveness()? == Liveness::Ended {
+            return self.replay_child_end(value);
+        }
+        self.settle_open_call().await?;
         let child = self.trajectory.clone();
         let decision = self
             .drive_with_evidence(
@@ -629,6 +649,69 @@ impl Session {
             .await?;
 
         return_decision(decision)
+    }
+
+    /// The return of a child that already ended, decided by the engine's
+    /// own replay of the log: the recorded value again is the recorded
+    /// crossing, appended nowhere; another value is `ChildAlreadyReturned`.
+    /// Enters nothing — the entering guard would refuse the ended branch
+    /// before the engine could compare.
+    fn replay_child_end(&self, value: Option<String>) -> Result<ChildReturnDecision, EventError> {
+        let child = self.trajectory.clone();
+        let log = self.inner.log(&self.root)?;
+        let policy = self.inner.resolve_policy(&self.deployment, &log)?;
+        let decision = self
+            .drive(&policy, Some(log), false, |_| {
+                Ok(EngineEvent::ChildReturn {
+                    child: child.clone(),
+                    value: value.clone(),
+                    evidence: Vec::new(),
+                    entropy: fresh_entropy(),
+                })
+            })
+            .map_err(|error| match error {
+                EventError::TrajectoryEnded => EventError::ChildAlreadyReturned,
+                other => other,
+            })?;
+        return_decision(decision)
+    }
+
+    /// Close whatever call this child still has open before it returns.
+    /// A substituted release stands until the harness runs it or the
+    /// model proposes past it; a child that ends has done neither and
+    /// abandons it. Any other open release got no outcome hook and closes
+    /// as unreported, exactly as a turn end closes it.
+    async fn settle_open_call(&self) -> Result<(), EventError> {
+        let log = self.inner.log(&self.root)?;
+        let policy = self.inner.resolve_policy(&self.deployment, &log)?;
+        let view = policy.engine().rebuild_view(&log).map_err(EventError::from)?;
+        if let Some(open) = policy.engine().substituted_release(&view, &self.trajectory) {
+            self.abandon_open(&unrun_substitution()).await?;
+            tracing::debug!(
+                trajectory = %self.trajectory.0,
+                dispatch = ?open.id,
+                tool = %open.tool,
+                "substituted call abandoned at the child's end"
+            );
+            return Ok(());
+        }
+        if let Some(open) = policy.engine().open_dispatches(&view, &self.trajectory).pop() {
+            self.abandon_open(&ToolOutcome::Indeterminate).await?;
+            tracing::debug!(
+                trajectory = %self.trajectory.0,
+                dispatch = ?open.id,
+                tool = %open.tool,
+                "call closed as unreported at the child's end"
+            );
+        }
+        Ok(())
+    }
+
+    fn liveness(&self) -> Result<Liveness, EventError> {
+        let log = self.inner.log(&self.root)?;
+        let policy = self.inner.resolve_policy(&self.deployment, &log)?;
+        let view = policy.engine().rebuild_view(&log).map_err(EventError::from)?;
+        Ok(policy.engine().liveness(&view, &self.trajectory))
     }
 
     fn cap_outcome(&self, outcome: ToolOutcome) -> ToolOutcome {
@@ -2772,7 +2855,7 @@ confined_child_return = true
     }
 
     #[tokio::test]
-    async fn a_duplicate_sanitized_return_reads_as_an_ended_child() {
+    async fn a_duplicate_sanitized_return_replays_the_sanitized_crossing() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let url = stub(serde_json::json!({"body": "scrubbed"})).await;
         let runtime = Runtime::open(sanitized_config(Some(&url)), dir.path().join("appa.db"), None)
@@ -2789,12 +2872,20 @@ confined_child_return = true
             .await
             .expect("the sanitized return crosses");
 
-        let error = child
+        let before = runtime.log_basis(&root());
+
+        let replayed = child
             .on_child_end(Some("raw with pii".to_string()))
             .await
-            .expect_err("the duplicate meets an ended child");
-        assert!(matches!(error, EventError::TrajectoryEnded), "got {error:?}",);
-        assert!(!error.is_operational());
+            .expect("the duplicate replays the recorded crossing");
+        assert_eq!(
+            replayed,
+            crate::api::ChildReturnDecision::Returned {
+                value: "scrubbed".to_string()
+            },
+            "the sanitizer is not consulted again; the recorded crossing answers",
+        );
+        assert_eq!(runtime.log_basis(&root()), before, "the replay appended nothing");
     }
 
     #[tokio::test]
@@ -3729,6 +3820,54 @@ context_control = true
         assert!(runtime.live(&root(), &child("c1")).is_ok(), "the child stays live");
     }
 
+    /// A harness that launches the subagent and returns at once reports
+    /// the launch as the spawn call's ordinary tool result. That closes
+    /// the spawn like any call; the child, bound at its start, runs on
+    /// and returns through its own end.
+    #[tokio::test]
+    async fn a_launch_acknowledgement_closes_the_spawn_and_the_child_returns_on_its_own() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        release_spawn(&mut session, fetch(serde_json::json!({"a": 1}))).await;
+        let child_session = session
+            .on_child_start(child("c1"), SpawnRef::InFlight)
+            .expect("the child opens");
+
+        let decision = session
+            .on_tool_result(
+                fetch(serde_json::json!({"a": 1})),
+                ToolOutcome::Success {
+                    body: OutcomeBody::Available("launched".to_string()),
+                },
+            )
+            .await
+            .expect("the launch acknowledgement is an ordinary result");
+        assert_eq!(decision, ToolResultDecision::Keep);
+        assert!(!dispatch_open(&runtime, &root()), "the spawn dispatch closed");
+        assert!(runtime.live(&root(), &child("c1")).is_ok(), "the child stays live");
+
+        session
+            .on_tool_call(fetch(serde_json::json!({"a": 3})), false)
+            .await
+            .expect("the parent proposes while the child runs");
+        let returned = child_session
+            .on_child_end(Some("done".to_string()))
+            .await
+            .expect("the child's end crosses");
+        assert_eq!(
+            returned,
+            ChildReturnDecision::Returned {
+                value: "done".to_string()
+            }
+        );
+        assert!(matches!(
+            runtime.live(&root(), &child("c1")),
+            Err(EventError::TrajectoryEnded)
+        ));
+    }
+
     #[tokio::test]
     async fn a_spawn_result_for_an_ended_child_replays_the_same_message_and_refuses_another() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
@@ -3948,8 +4087,12 @@ context_control = true
             .expect("the parent proposes again");
     }
 
+    /// A subagent that stops with a call released and unreported gets no
+    /// outcome hook for it; its end closes the call as unreported, as
+    /// its turn end would, and the return is judged on what the child
+    /// admitted.
     #[tokio::test]
-    async fn a_child_with_a_running_call_does_not_end_until_its_outcome_is_reported() {
+    async fn a_childs_end_closes_its_unreported_call_and_returns() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
@@ -3959,37 +4102,79 @@ context_control = true
             .on_tool_call(fetch(serde_json::json!({"a": 2})), false)
             .await
             .expect("the child's call releases");
-        let before = runtime.log_basis(&root());
+        assert!(dispatch_open(&runtime, &child("c1")), "the child's dispatch is open");
 
-        for value in [Some("done".to_string()), None] {
-            let error = child_session
-                .on_child_end(value)
-                .await
-                .expect_err("a child with a call open does not end");
-            assert!(matches!(error, EventError::ChildDispatchOpen), "got {error:?}");
-            assert!(!error.is_operational());
-        }
-        assert_eq!(runtime.log_basis(&root()), before, "the refusal appended nothing");
-        assert!(dispatch_open(&runtime, &child("c1")), "the child's dispatch stays open");
-        assert!(runtime.live(&root(), &child("c1")).is_ok(), "the child stays live");
-
-        child_session
-            .on_tool_result(
-                fetch(serde_json::json!({"a": 2})),
-                ToolOutcome::Success {
-                    body: OutcomeBody::Available("fetched".to_string()),
-                },
-            )
-            .await
-            .expect("the outcome closes the dispatch");
-        child_session
+        let decision = child_session
             .on_child_end(Some("done".to_string()))
             .await
-            .expect("with nothing in flight the same end crosses");
+            .expect("the end closes the call and crosses");
+        assert_eq!(
+            decision,
+            ChildReturnDecision::Returned {
+                value: "done".to_string()
+            }
+        );
+        assert!(
+            runtime.log_facts(&root()).iter().any(|fact| matches!(
+                fact,
+                appa_engine::fact::Fact::DispatchClosed {
+                    trajectory,
+                    outcome: appa_engine::fact::CloseOutcome::Indeterminate,
+                    ..
+                } if trajectory.as_str() == child("c1").0
+            )),
+            "the child's call closed as unreported",
+        );
+        assert!(
+            !dispatch_open(&runtime, &child("c1")),
+            "nothing stays open on the child"
+        );
         assert!(matches!(
             runtime.live(&root(), &child("c1")),
             Err(EventError::TrajectoryEnded)
         ));
+    }
+
+    /// A harness may deliver the same stop twice. The recorded return
+    /// answers again without a second crossing; any other return is a
+    /// second crossing, which a child never has.
+    #[tokio::test]
+    async fn a_second_end_of_a_returned_child_replays_the_same_value_and_refuses_another() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let child_session = open_child(&mut session, fetch(serde_json::json!({"a": 1})), child("c1")).await;
+        child_session
+            .on_child_end(Some("done".to_string()))
+            .await
+            .expect("the first end crosses");
+        let before = runtime.log_basis(&root());
+
+        let decision = child_session
+            .on_child_end(Some("done".to_string()))
+            .await
+            .expect("the same end answers again");
+        assert_eq!(
+            decision,
+            ChildReturnDecision::Returned {
+                value: "done".to_string()
+            }
+        );
+        assert_eq!(runtime.log_basis(&root()), before, "the replay appended nothing");
+
+        for value in [Some("something else".to_string()), None] {
+            let error = child_session
+                .on_child_end(value)
+                .await
+                .expect_err("a different return does not cross");
+            assert!(matches!(error, EventError::ChildAlreadyReturned), "got {error:?}");
+            assert!(
+                !error.is_operational(),
+                "the refusal blocks the stop rather than failing it"
+            );
+        }
+        assert_eq!(runtime.log_basis(&root()), before, "the refusals appended nothing");
     }
 
     /// The harness refused the released call at its permission prompt,
@@ -4093,10 +4278,10 @@ context_control = true
         assert_eq!(runtime.log_facts(&root()).len(), settled, "no fact is appended");
     }
 
-    /// A child carries its own dispatches, and one left open holds the
-    /// child's return at the boundary.
+    /// A child carries its own dispatches; its turn end closes one it
+    /// abandoned, so a later end finds nothing to close.
     #[tokio::test]
-    async fn a_child_turn_end_closes_its_abandoned_call_so_the_child_can_end() {
+    async fn a_child_turn_end_closes_its_abandoned_call_before_the_child_ends() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
@@ -4107,25 +4292,30 @@ context_control = true
             .await
             .expect("the child's call releases");
 
-        let error = child_session
-            .on_child_end(Some("done".to_string()))
-            .await
-            .expect_err("a child with a call still open does not end");
-        assert!(matches!(error, EventError::ChildDispatchOpen), "got {error:?}");
-
         child_session
             .on_turn_end()
             .await
             .expect("the child's turn end closes it");
         assert!(runtime.open_dispatches(&root(), &child("c1")).is_empty());
+        let closed = runtime.log_facts(&root()).len();
         child_session
             .on_child_end(Some("done".to_string()))
             .await
             .expect("with nothing in flight the child ends");
+        assert!(
+            runtime.log_facts(&root())[closed..]
+                .iter()
+                .all(|fact| !matches!(fact, appa_engine::fact::Fact::DispatchClosed { .. })),
+            "the end had nothing left to close",
+        );
     }
 
+    /// A substituted release stands until the harness runs it or the
+    /// child proposes past it. A child that stops has done neither: its
+    /// end abandons the substitute exactly as proposing past it would,
+    /// and the return is judged on what the child admitted.
     #[tokio::test]
-    async fn a_child_with_an_untaken_substituted_release_does_not_end() {
+    async fn a_childs_end_abandons_its_untaken_substituted_release_and_returns() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(
             substituting_config(SUBSTITUTED_SEND_FORKING, None),
@@ -4145,33 +4335,29 @@ context_control = true
             "the child has a substituted release standing"
         );
 
-        let error = child_session
+        child_session
             .on_child_end(Some("done".to_string()))
             .await
-            .expect_err("a child with a substituted release standing does not end");
-        assert!(matches!(error, EventError::ChildDispatchOpen), "got {error:?}");
-        assert!(runtime.live(&root(), &child("c1")).is_ok(), "the child stays live");
-
-        assert_eq!(
-            child_session
-                .on_tool_call(send(REDACTED_BODY), false)
-                .await
-                .expect("the substituted call is handed over"),
-            ToolCallDecision::Allow { spawn: None },
-        );
-        child_session
-            .on_tool_result(
-                send(REDACTED_BODY),
-                ToolOutcome::Success {
-                    body: OutcomeBody::Unavailable,
-                },
-            )
-            .await
-            .expect("the substituted call's outcome closes its dispatch");
+            .expect("the end abandons the substitute and returns");
         assert!(
-            child_session.on_child_end(Some("done".to_string())).await.is_ok(),
-            "with the release settled the child ends"
+            runtime.substituted_release(&root(), &child("c1")).is_none(),
+            "the substitute no longer stands"
         );
+        assert!(
+            runtime.log_facts(&root()).iter().any(|fact| matches!(
+                fact,
+                appa_engine::fact::Fact::DispatchClosed {
+                    trajectory,
+                    outcome: appa_engine::fact::CloseOutcome::Failure,
+                    ..
+                } if trajectory.as_str() == child("c1").0
+            )),
+            "the substituted call closed as abandoned",
+        );
+        assert!(matches!(
+            runtime.live(&root(), &child("c1")),
+            Err(EventError::TrajectoryEnded)
+        ));
     }
 
     #[tokio::test]

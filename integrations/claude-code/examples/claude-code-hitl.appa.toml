@@ -39,13 +39,12 @@ version = 2
 
 # Starting a subagent is this harness's spawn: the deployment controls the
 # child's context (`[policy.deployment]` below), so the subagent runs as a
-# child trajectory and its final message is checked where the parent
-# receives it. A background subagent (`run_in_background = true`) reports
-# its result outside the parent's tool result, where nothing can be
-# checked, so the call is refused as invalid.
+# child trajectory. Its final message is checked when the subagent stops:
+# a message that may not cross keeps the subagent running until it
+# returns one that may. A sanitized (substituted) return is not available
+# on this harness.
 [[policy.tool]]
 name = "Agent"
-parameters = { type = "object", additionalProperties = true, properties = { run_in_background = { type = "boolean", const = false } } }
 delta = {}
 
 [[policy.tool]]
@@ -171,7 +170,6 @@ delta = {}
 # `Task` is the earlier name of `Agent`: the same spawn, the same contract.
 [[policy.tool]]
 name = "Task"
-parameters = { type = "object", additionalProperties = true, properties = { run_in_background = { type = "boolean", const = false } } }
 delta = {}
 
 [[policy.tool]]

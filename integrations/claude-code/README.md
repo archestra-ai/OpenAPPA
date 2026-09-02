@@ -15,9 +15,10 @@ action unless the process answers yes. The hooks fail closed: while the
 process is down, every action in a protected session is blocked —
 silence never means yes. A subagent started with the `Agent` tool runs
 as a child of the session: its own tool calls are checked the same way,
-and its final
-message is checked — and rewritten or withheld — where the parent
-receives it, in the `Agent` tool's result.
+and its final message is checked when the subagent stops. A stop whose
+message may not cross is refused, and the subagent keeps running until
+it returns an admissible message; the parent then receives that message
+unchanged.
 
 ## What is here
 
@@ -29,8 +30,8 @@ receives it, in the `Agent` tool's result.
   `claude plugin marketplace add` points at this directory.
 - `examples/claude-code.appa.toml` — a complete starting policy: every
   built-in Claude Code tool released with the neutral annotation, web
-  tool results marked suspicious, subagents run as children of the
-  session and background subagents refused.
+  tool results marked suspicious, and subagents run as children of the
+  session.
 - `examples/claude-code-hitl.appa.toml` — the same plus GitHub MCP
   tools, with issue writes requiring a human sign-off served over MCP
   elicitation.

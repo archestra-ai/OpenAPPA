@@ -82,47 +82,48 @@ impl Adapter {
     }
 }
 
-pub(crate) fn refuse_unobservable_returns(adapter: Adapter, policy: &toml::Value) -> Result<(), String> {
+/// On Claude Code a subagent's final message reaches the parent through
+/// a channel no hook can rewrite: the stop hook can only let it cross
+/// or keep the subagent running. A deployment whose policy would put
+/// something else in the parent's hands — a confined return, or a
+/// return sanitizer — cannot be enforced here and is refused before it
+/// serves, rather than silently degrading to a block.
+pub(crate) fn refuse_unsubstitutable_returns(adapter: Adapter, policy: &toml::Value) -> Result<(), String> {
     match adapter {
         Adapter::ClaudeCode => {
-            let controls_context = policy
-                .get("deployment")
-                .and_then(|deployment| deployment.get("context_control"))
-                .and_then(toml::Value::as_bool)
-                .unwrap_or(false);
-            if !controls_context {
+            let deployment = |key: &str| {
+                policy
+                    .get("deployment")
+                    .and_then(|deployment| deployment.get(key))
+                    .and_then(toml::Value::as_bool)
+                    .unwrap_or(false)
+            };
+            if !deployment("context_control") {
                 return Ok(());
             }
-            let tools = policy
-                .get("tool")
-                .and_then(toml::Value::as_array)
-                .map(Vec::as_slice)
-                .unwrap_or_default();
-            for tool in tools {
-                let Some(name) = tool.get("name").and_then(toml::Value::as_str) else {
-                    continue;
-                };
-                if (name == "Agent" || name == "Task") && !pins_foreground(tool) {
-                    return Err(format!(
-                        "this deployment controls the subagent's context, and its `{name}` tool does not pin \
-                        `run_in_background` to `false` (`parameters.properties.run_in_background.const = false`): a \
-                        background subagent returns where no hook can check it. Pin the argument, as the shipped \
-                        examples do."
-                    ));
-                }
+            if deployment("confined_child_return") {
+                return Err(
+                    "this deployment sets `deployment.confined_child_return`, but on Claude Code a \
+                    subagent's return cannot be replaced by the fork's view: the runtime can only let the \
+                    return cross or keep the subagent running. Remove the setting."
+                        .to_string(),
+                );
+            }
+            let sanitizes = policy
+                .get("child")
+                .and_then(|child| child.get("return_sanitizer"))
+                .is_some();
+            if sanitizes {
+                return Err(
+                    "this deployment declares `[policy.child] return_sanitizer`, but on Claude Code a \
+                    subagent's return cannot be replaced by a sanitized one: the runtime can only let the \
+                    return cross or keep the subagent running. Remove the sanitizer."
+                        .to_string(),
+                );
             }
             Ok(())
         }
     }
-}
-
-fn pins_foreground(tool: &toml::Value) -> bool {
-    tool.get("parameters")
-        .and_then(|parameters| parameters.get("properties"))
-        .and_then(|properties| properties.get("run_in_background"))
-        .and_then(|argument| argument.get("const"))
-        .and_then(toml::Value::as_bool)
-        == Some(false)
 }
 
 fn log_level(verbose: u8) -> &'static str {
@@ -247,7 +248,7 @@ fn health_answer(stale: bool, pid: u32) -> String {
 async fn reload(State(state): State<AppState>) -> Result<axum::Json<Reloaded>, (axum::http::StatusCode, String)> {
     let config = Config::load(&state.config)
         .map_err(|error| (axum::http::StatusCode::UNPROCESSABLE_ENTITY, error.to_string()))?;
-    refuse_unobservable_returns(state.adapter, config.policy_file().value())
+    refuse_unsubstitutable_returns(state.adapter, config.policy_file().value())
         .map_err(|refusal| (axum::http::StatusCode::UNPROCESSABLE_ENTITY, refusal))?;
     match state.runtime.reload(config) {
         Ok(reloaded) => Ok(axum::Json(reloaded)),
@@ -321,7 +322,7 @@ async fn serve(args: Args) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    if let Err(refusal) = refuse_unobservable_returns(args.adapter, config.policy_file().value()) {
+    if let Err(refusal) = refuse_unsubstitutable_returns(args.adapter, config.policy_file().value()) {
         eprintln!("appa runtime: {refusal}");
         return ExitCode::FAILURE;
     }
@@ -409,30 +410,41 @@ mod tests {
     }
 
     #[test]
-    fn a_context_controlling_deployment_must_pin_its_subagents_to_the_foreground() {
+    fn a_context_controlling_deployment_may_not_substitute_a_subagents_return() {
         let examples = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../integrations/claude-code/examples");
         for name in ["claude-code.appa.toml", "claude-code-hitl.appa.toml"] {
             let path = examples.join(name);
             let config = Config::load(&path).unwrap_or_else(|error| panic!("{name} does not load: {error}"));
             let policy = config.policy_file().value();
             assert!(
-                refuse_unobservable_returns(Adapter::ClaudeCode, policy).is_ok(),
+                refuse_unsubstitutable_returns(Adapter::ClaudeCode, policy).is_ok(),
                 "{name}"
             );
-            let mut unpinned = policy.clone();
-            for tool in unpinned["tool"].as_array_mut().expect("the tools table") {
-                if tool["name"].as_str() == Some("Task") {
-                    tool.as_table_mut().expect("a tool table").remove("parameters");
-                }
-            }
+
+            let mut confined = policy.clone();
+            confined["deployment"]
+                .as_table_mut()
+                .expect("the deployment is a table")
+                .insert("confined_child_return".to_string(), toml::Value::Boolean(true));
             assert!(
-                refuse_unobservable_returns(Adapter::ClaudeCode, &unpinned).is_err(),
-                "{name}"
+                refuse_unsubstitutable_returns(Adapter::ClaudeCode, &confined).is_err(),
+                "{name}: a confined return has no channel on this harness"
             );
-            unpinned["deployment"]["context_control"] = toml::Value::Boolean(false);
+
+            let mut sanitized = policy.clone();
+            sanitized
+                .as_table_mut()
+                .expect("the policy is a table")
+                .insert("child".to_string(), toml::toml! { return_sanitizer = "scrub" }.into());
             assert!(
-                refuse_unobservable_returns(Adapter::ClaudeCode, &unpinned).is_ok(),
-                "{name}"
+                refuse_unsubstitutable_returns(Adapter::ClaudeCode, &sanitized).is_err(),
+                "{name}: a sanitized return has no channel on this harness"
+            );
+
+            sanitized["deployment"]["context_control"] = toml::Value::Boolean(false);
+            assert!(
+                refuse_unsubstitutable_returns(Adapter::ClaudeCode, &sanitized).is_ok(),
+                "{name}: without context control there are no child returns to substitute"
             );
         }
     }

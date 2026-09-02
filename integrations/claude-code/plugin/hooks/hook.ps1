@@ -170,10 +170,11 @@ if (-not $protected) {
     exit 0
 }
 
-# The hooks that report a finished turn. They decide nothing, so they
-# never block, and they take the shorter deadline: a turn end waits on
-# no evidence round trip.
-$turnEnds = @("Stop", "StopFailure", "SubagentStop")
+# The hooks that report the root actor's finished turn. They decide
+# nothing, so they never block, and they take the shorter deadline: a
+# turn end waits on no evidence round trip. SubagentStop is not one of
+# them: it checks the subagent's final message and blocks like a tool hook.
+$turnEnds = @("Stop", "StopFailure")
 
 try {
     $payload = [Console]::In.ReadToEnd()
@@ -199,10 +200,10 @@ try {
     [Console]::Out.Write([string]$response.Content)
 } catch {
     $failure = $_.Exception.Message
-    # A turn end decides nothing, and every blocking outcome on these
-    # hooks means "do not stop", which would hold the actor in a turn it
-    # has finished. A runtime that does not answer costs a call left
-    # open, which the next turn end closes.
+    # Stop and StopFailure decide nothing, and every blocking outcome on
+    # these hooks means "do not stop", which would hold the actor in a
+    # turn it has finished. A runtime that does not answer costs a call
+    # left open, which the next turn end closes.
     if ($null -ne $hookInput -and $turnEnds -contains $hookInput.hook_event_name) {
         [Console]::Error.WriteLine("OpenAPPA runtime did not answer the turn end: $failure")
         exit 0

@@ -43,7 +43,11 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             // A prompt gates the new turn, so a close that failed blocks
             // it: the call is still open and the first proposal would
             // refuse anyway, with less to say about why.
-            match on_actor(runtime, &actor, |session| async move { session.on_prompt().await }).await {
+            match on_actor(runtime, &actor, MissingStart::Refuse, |session| async move {
+                session.on_prompt().await
+            })
+            .await
+            {
                 Ok(()) => HookDecision::Ack,
                 Err(error) => fold(error, block),
             }
@@ -54,7 +58,11 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             // turn" on this hook, which would hold the harness in a turn
             // it has finished; a close that failed leaves the call open
             // and the next proposal refuses on its own.
-            if let Err(error) = on_actor(runtime, &actor, |session| async move { session.on_turn_end().await }).await {
+            if let Err(error) = on_actor(runtime, &actor, MissingStart::Refuse, |session| async move {
+                session.on_turn_end().await
+            })
+            .await
+            {
                 tracing::warn!(root = %actor.root.0, %error, "the turn end closed no abandoned call");
             }
             runtime.release_vouches(&actor);
@@ -64,7 +72,7 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             if is_control_tool(&call.tool) {
                 return control_call(runtime, &actor, &call);
             }
-            match on_actor(runtime, &actor, |session| {
+            match on_actor(runtime, &actor, MissingStart::OpenLate, |session| {
                 let call = call.clone();
                 async move { session.on_tool_call(call, spawn).await }
             })
@@ -80,7 +88,7 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
                 tracing::debug!(trajectory = %actor.root.0, "control tool outcome absorbed");
                 return HookDecision::Ack;
             }
-            match on_actor(runtime, &actor, |session| {
+            match on_actor(runtime, &actor, MissingStart::Refuse, |session| {
                 let (call, outcome) = (call.clone(), outcome.clone());
                 async move { session.on_tool_result(call, outcome).await }
             })
@@ -98,7 +106,7 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             value,
         } => {
             let said = value.clone();
-            match on_actor(runtime, &actor, |session| {
+            match on_actor(runtime, &actor, MissingStart::Refuse, |session| {
                 let (call, outcome, child, value) = (call.clone(), outcome.clone(), child.clone(), value.clone());
                 async move { session.on_spawn_result(call, outcome, child, value).await }
             })
@@ -120,8 +128,12 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             }
         }
         HookEvent::ChildEnd { root, child, value } => {
+            // The subagent's return is checked here and blocked when it
+            // may not cross; a block keeps the subagent running until it
+            // returns something that may. A child the family never saw
+            // start is blocked too: its return has no fork to cross on.
             let said = value.clone();
-            match on_child(runtime, &root, &child, |session| {
+            match on_child(runtime, &root, &child, MissingStart::Refuse, |session| {
                 let value = value.clone();
                 async move { session.on_child_end(value).await }
             })
@@ -187,12 +199,29 @@ fn quoted_offer(call: &ProposedCall) -> Option<OfferId> {
     Some(OfferId(arguments.get("offer_id")?.as_str()?.to_string()))
 }
 
-async fn on_actor<T, Run>(runtime: &Runtime, actor: &Actor, event: impl Fn(Session) -> Run) -> Result<T, EventError>
+/// What a child's event does when the family has not opened that child.
+/// A subagent's first tool call can overtake its start hook, so the
+/// call opens the child against the one spawn in flight. Every other
+/// event of an unopened child is refused: a return or a turn end claims
+/// nothing a missing start could supply, and opening a child on its end
+/// would let a stop the family never saw start cross a value.
+#[derive(Clone, Copy)]
+enum MissingStart {
+    OpenLate,
+    Refuse,
+}
+
+async fn on_actor<T, Run>(
+    runtime: &Runtime,
+    actor: &Actor,
+    missing_start: MissingStart,
+    event: impl Fn(Session) -> Run,
+) -> Result<T, EventError>
 where
     Run: Future<Output = Result<T, EventError>>,
 {
     match &actor.child {
-        Some(child) => on_child(runtime, &actor.root, child, event).await,
+        Some(child) => on_child(runtime, &actor.root, child, missing_start, event).await,
         None => event(open_or_reopen(runtime, &actor.root)?).await,
     }
 }
@@ -201,21 +230,29 @@ async fn on_child<T, Run>(
     runtime: &Runtime,
     root: &TrajectoryId,
     child: &TrajectoryId,
+    missing_start: MissingStart,
     event: impl Fn(Session) -> Run,
 ) -> Result<T, EventError>
 where
     Run: Future<Output = Result<T, EventError>>,
 {
     let root_session = open_or_reopen(runtime, root)?;
-    match event(runtime.session(root, child)?).await {
-        Err(EventError::SpawnNotTaken) => match root_session.open_late(child.clone())? {
-            LateOpen::Opened => {
-                tracing::debug!(root = %root.0, child = %child.0, "a child event arrived before its start: opened the child late");
-                event(runtime.session(root, child)?).await
+    match (event(runtime.session(root, child)?).await, missing_start) {
+        (Err(EventError::SpawnNotTaken), MissingStart::OpenLate) => {
+            // `AlreadyOpen` means the start hook landed between the two
+            // attempts; the event now finds its child, so it is not
+            // refused for a race the harness has already resolved.
+            match root_session.open_late(child.clone())? {
+                LateOpen::Opened => {
+                    tracing::debug!(root = %root.0, child = %child.0, "a child event arrived before its start: opened the child late");
+                }
+                LateOpen::AlreadyOpen => {
+                    tracing::debug!(root = %root.0, child = %child.0, "the child's start landed while its event was in flight");
+                }
             }
-            LateOpen::AlreadyOpen => Err(EventError::SpawnNotTaken),
-        },
-        outcome => outcome,
+            event(runtime.session(root, child)?).await
+        }
+        (outcome, _) => outcome,
     }
 }
 

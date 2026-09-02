@@ -150,6 +150,8 @@ pub(crate) enum EventError {
     TrajectoryEnded,
     #[error("the child has a call still open; report its outcome before the child ends")]
     ChildDispatchOpen,
+    #[error("[appa] this subagent already returned; a second, different return cannot cross")]
+    ChildAlreadyReturned,
     #[error("no trajectory with this id exists")]
     UnknownTrajectory,
     #[error("a trajectory with this id already exists")]
@@ -227,6 +229,7 @@ impl EventError {
             | EventError::SubstitutionAbandoned { .. }
             | EventError::TrajectoryEnded
             | EventError::ChildDispatchOpen
+            | EventError::ChildAlreadyReturned
             | EventError::UnknownTrajectory
             | EventError::TrajectoryExists
             | EventError::UnknownDispatch

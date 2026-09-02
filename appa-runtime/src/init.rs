@@ -13,7 +13,7 @@ use thiserror::Error;
 
 use crate::config::{Config, ConfigError};
 use crate::plugin_bundle::{self, Deployment, Endpoint, PluginBundleError, PluginSource, Population};
-use crate::runtime_cli::{Adapter, refuse_unobservable_returns};
+use crate::runtime_cli::{Adapter, refuse_unsubstitutable_returns};
 
 const MARKETPLACE: &str = "appa";
 const PLUGIN: &str = "appa-runtime@appa";
@@ -1043,7 +1043,7 @@ fn verify_config(path: &Path) -> Result<ComposedPolicy, InitError> {
             });
         }
     };
-    refuse_unobservable_returns(Adapter::ClaudeCode, config.policy_file().value()).map_err(|reason| {
+    refuse_unsubstitutable_returns(Adapter::ClaudeCode, config.policy_file().value()).map_err(|reason| {
         InitError::UnusableConfig {
             path: path.to_path_buf(),
             reason,
@@ -2482,12 +2482,13 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let config = config_declaring(
             directory.path(),
-            "[policy.deployment]\ncontext_control = true\n[[policy.tool]]\nname = \"Agent\"\ndelta = {}\n",
+            "[policy.deployment]\ncontext_control = true\nconfined_child_return = true\n\
+             [[policy.tool]]\nname = \"Agent\"\ndelta = {}\n",
         );
 
         assert!(
             matches!(verify_config(&config), Err(InitError::UnusableConfig { .. })),
-            "a subagent that can return unobserved must stop init, as it stops the runtime"
+            "a return the runtime cannot substitute must stop init, as it stops the runtime"
         );
     }
 
