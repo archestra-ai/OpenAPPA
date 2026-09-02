@@ -133,6 +133,31 @@ jobs:
       - name: Rust tests
         run: cargo test --workspace --locked
 
+  replay-examples:
+    name: Replay Examples
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Setup Rust
+        run: rustup show
+
+      # Every directory under examples/tests is one policy and one trace file.
+      # The test suite pins them too; this runs the command line end to end,
+      # the way a policy author would, and fails on the first example that
+      # does not pass.
+      - name: Replay the shipped examples
+        run: |
+          cargo build --locked --package appa
+          for dir in examples/tests/*/; do
+            ./target/debug/appa replay --config "${dir}appa.toml" "$dir"
+          done
+
   macos-deployment-checks:
     name: macOS Deployment Checks
     runs-on: macos-15

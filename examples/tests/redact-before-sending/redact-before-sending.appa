@@ -1,0 +1,28 @@
+# A public read is safe. HR data must go through the redactor before an email.
+Read {
+  path: "/docs/handbook.md"
+}
+expect allow
+
+Email {
+  to: "x@other.com"
+  body: "the handbook"
+}
+expect allow
+
+Read {
+  path: "/hr/salaries.csv"
+}
+expect allow
+
+Email {
+  to: "x@other.com"
+  body: "see attached"
+}
+expect sanitizer redactor
+
+Email {
+  to: "y@other.com"
+  body: "and this"
+}
+expect sanitizer redactor
