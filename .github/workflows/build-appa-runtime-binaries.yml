@@ -287,6 +287,11 @@ jobs:
             if ($hostile -match "development build" -or $hostile -match "127\.0\.0\.1:9") {
               throw "the released binary honoured a debug-only seam: $hostile"
             }
+            # The plugin asset is uploaded only after every matrix job passes,
+            # so this probe normally exits non-zero on the first publication
+            # attempt. Its output is the assertion; do not let the expected
+            # native exit code become the PowerShell step's exit code.
+            $global:LASTEXITCODE = 0
           } finally {
             $process.Refresh()
             if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
