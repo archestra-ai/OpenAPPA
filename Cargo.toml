@@ -8,6 +8,7 @@ members = [
     "appa-eventlog",
     "appa-policy",
     "appa-adapter-claude-code",
+    "appa-adapter-kagent",
     "appa-runtime-api",
     "appa-runtime",
     "appa-runtime/tests/fixtures/module-bad",

@@ -98,6 +98,7 @@ async fn propose(runtime: &Arc<Runtime>, within: Option<&TrajectoryId>, call: Pr
             actor: actor(within),
             call,
             spawn: false,
+            ruling: None,
         },
     )
     .await
@@ -131,6 +132,7 @@ async fn open_child(runtime: &Arc<Runtime>, spawn: ProposedCall) -> HookDecision
             actor: actor(None),
             call: spawn,
             spawn: true,
+            ruling: None,
         },
     )
     .await;

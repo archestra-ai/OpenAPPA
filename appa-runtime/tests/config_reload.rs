@@ -94,6 +94,7 @@ async fn propose_notes(runtime: &Arc<Runtime>, root: &TrajectoryId) -> HookDecis
             actor: actor(root),
             call: notes(),
             spawn: false,
+            ruling: None,
         },
     )
     .await;

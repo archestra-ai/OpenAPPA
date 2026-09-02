@@ -475,10 +475,11 @@ async fn propose(runtime: &Runtime, actor: &Actor, call: ProposedCall) -> Propos
         actor: actor.clone(),
         call: call.clone(),
         spawn: false,
+        ruling: None,
     };
     match hooks::handle(runtime, event).await {
         HookDecision::AllowCall { .. } => Proposed::Allowed(call),
-        HookDecision::DenyCall { feedback } => Proposed::Denied { feedback },
+        HookDecision::DenyCall { feedback, .. } => Proposed::Denied { feedback },
         HookDecision::Refuse { detail } => Proposed::CannotRun(detail),
         other => Proposed::CannotRun(format!("the call answered {other:?}")),
     }

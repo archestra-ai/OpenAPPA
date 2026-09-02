@@ -98,6 +98,18 @@ pub struct ReleasedCall {
 pub struct Feedback {
     pub text: String,
     pub offers: Vec<OfferId>,
+    /// Every authority an offered plan would consult, with the review a person would read.
+    /// The engine lists them all; the session keeps the ones whose backend is a person.
+    pub review: Vec<PendingReview>,
+}
+
+/// One authority an offered plan consults, and the review as a person reads it — the
+/// same text the elicitation channel shows, rendered from the consult artifact alone.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingReview {
+    pub offer: OfferId,
+    pub authority: String,
+    pub text: String,
 }
 
 /// One external consult the session must resolve before the same semantic
@@ -484,6 +496,14 @@ pub struct RuntimeEngine {
 }
 
 impl RuntimeEngine {
+    /// Whether the policy writes a contract for this tool's exact name. The wildcard does not
+    /// count: it covers a name at a proposal, and a spawn under `SpawnCoverage::Declared` needs
+    /// the name written.
+    pub(crate) fn names_tool(&self, tool: &str) -> bool {
+        let name = appa_engine::value::ToolName::new(tool);
+        self.engine.registry().classify(&name) == Some(appa_engine::registry::ToolKind::Declared)
+    }
+
     /// The one constructor: both halves — the decision core and the consult input
     /// mapping — come from the same compiled policy, so an engine can never carry
     /// another policy's mapping.
@@ -1004,18 +1024,57 @@ impl RuntimeEngine {
     }
 
     fn block_delivery(&self, block: &CoreBlocked) -> Feedback {
-        let (text, offers) = self.rendered_block(block);
-        Feedback { text, offers }
+        let (text, offers, review) = self.rendered_block(block);
+        Feedback { text, offers, review }
     }
 
-    fn rendered_block(&self, block: &CoreBlocked) -> (String, Vec<OfferId>) {
+    fn rendered_block(&self, block: &CoreBlocked) -> (String, Vec<OfferId>, Vec<PendingReview>) {
         let offers: Vec<(OfferId, PlanId)> = block
             .offers
             .iter()
             .map(|(offer, plan)| (offer_id(offer), *plan))
             .collect();
         let text = block_feedback(&block.block, &offers, self.engine.registry().trust_chain());
-        (text, offers.into_iter().map(|(offer, _)| offer).collect())
+        let review = self.pending_reviews(block, &offers);
+        (text, offers.into_iter().map(|(offer, _)| offer).collect(), review)
+    }
+
+    /// The reviews the offered plans would raise: for each plan element that consults an
+    /// authority, the consult artifact rendered as the person reads it. Built here, at the
+    /// block, so a harness with its own review channel can show it before the execution.
+    fn pending_reviews(&self, block: &CoreBlocked, offers: &[(OfferId, PlanId)]) -> Vec<PendingReview> {
+        let registry = self.engine.registry();
+        let chain = registry.trust_chain();
+        let mut reviews = Vec::new();
+        for plan in &block.block.plans {
+            let RemedyPlan::Executable(plan) = plan else {
+                continue;
+            };
+            let Some((offer, _)) = offers.iter().find(|(_, planned)| *planned == plan.id) else {
+                continue;
+            };
+            for requirement in &plan.required {
+                let Some(registered) = registry.authority(&requirement.authority) else {
+                    continue;
+                };
+                let declaration = AuthorityDeclaration::of(registered, chain);
+                let artifact = AuthorityArtifact {
+                    tool: block.call.tool().as_str().to_string(),
+                    arguments: block.call.arguments().clone(),
+                    requirements: requirement
+                        .covers
+                        .iter()
+                        .map(|gap| Requirement::of(gap, chain))
+                        .collect(),
+                };
+                reviews.push(PendingReview {
+                    offer: offer.clone(),
+                    authority: requirement.authority.as_str().to_string(),
+                    text: crate::elicit::review_text(requirement.authority.as_str(), &declaration, &artifact),
+                });
+            }
+        }
+        reviews
     }
 
     fn tool_outcome(
@@ -1295,7 +1354,7 @@ impl RuntimeEngine {
     }
 
     fn offer_block_delivery(&self, block: &CoreBlocked) -> Presentation {
-        let (feedback, offers) = self.rendered_block(block);
+        let (feedback, offers, _) = self.rendered_block(block);
         Presentation::Blocked { feedback, offers }
     }
 
@@ -2114,6 +2173,7 @@ fn deny_next(text: String) -> Next {
         feedback: vec![Feedback {
             text,
             offers: Vec::new(),
+            review: Vec::new(),
         }],
     }
 }

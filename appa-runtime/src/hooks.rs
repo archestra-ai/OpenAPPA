@@ -1,7 +1,7 @@
 //! The hook dispatcher: one typed `HookEvent` in, one `HookDecision`
 //! out.
 
-use appa_runtime_api::{Actor, Codec, HookDecision, HookEvent, ParseRefusal, ProposedCall, TrajectoryId};
+use appa_runtime_api::{Actor, Codec, HookDecision, HookEvent, ParseRefusal, ProposedCall, Ruling, TrajectoryId};
 
 use crate::api::{
     ChildReturnDecision, EventError, LateOpen, OfferId, Runtime, Session, SpawnResultDecision, ToolCallDecision,
@@ -62,7 +62,12 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             runtime.release_vouches(&actor);
             HookDecision::Ack
         }
-        HookEvent::ToolCall { actor, call, spawn } => {
+        HookEvent::ToolCall {
+            actor,
+            call,
+            spawn,
+            ruling,
+        } => {
             if runtime.take_prompted(&actor) {
                 // The first proposal after a prompt that no turn end preceded:
                 // the user interrupted the previous turn, and whatever it left
@@ -77,7 +82,7 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
                 runtime.release_vouches(&actor);
             }
             if is_control_tool(&call.tool) {
-                return control_call(runtime, &actor, &call);
+                return control_call(runtime, &actor, &call, ruling);
             }
             match on_actor(runtime, &actor, |session| {
                 let call = call.clone();
@@ -86,7 +91,7 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             .await
             {
                 Ok(ToolCallDecision::Allow { spawn }) => HookDecision::AllowCall { spawn },
-                Ok(ToolCallDecision::Deny { feedback }) => HookDecision::DenyCall { feedback },
+                Ok(ToolCallDecision::Deny { feedback, review }) => HookDecision::DenyCall { feedback, review },
                 Err(error) => fold(error, deny),
             }
         }
@@ -178,7 +183,7 @@ fn open_or_reopen(runtime: &Runtime, root: &appa_runtime_api::TrajectoryId) -> R
     }
 }
 
-fn control_call(runtime: &Runtime, actor: &Actor, call: &ProposedCall) -> HookDecision {
+fn control_call(runtime: &Runtime, actor: &Actor, call: &ProposedCall, ruling: Option<Ruling>) -> HookDecision {
     let Some(quoted) = quoted_offer(call) else {
         tracing::debug!(trajectory = %actor.root.0, "control tool quotes no offer id");
         return HookDecision::PassControl;
@@ -186,7 +191,7 @@ fn control_call(runtime: &Runtime, actor: &Actor, call: &ProposedCall) -> HookDe
     let acting = actor.child.clone().unwrap_or_else(|| actor.root.clone());
     match runtime.resolve_in(&actor.root, &quoted) {
         Some((_, pursuer)) if pursuer == acting => {
-            runtime.vouch(&quoted, actor);
+            runtime.vouch(&quoted, actor, ruling);
             tracing::debug!(trajectory = %acting.0, "control tool names an offer this trajectory pursues");
             HookDecision::PassControl
         }
@@ -248,6 +253,7 @@ fn fold(error: EventError, family: fn(String) -> HookDecision) -> HookDecision {
 fn deny(feedback: String) -> HookDecision {
     HookDecision::DenyCall {
         feedback: format!("[appa] {feedback}"),
+        review: Vec::new(),
     }
 }
 
@@ -491,7 +497,7 @@ mod tests {
             child: None,
         };
         let quoted = OfferId("offer-1".to_string());
-        runtime.vouch(&quoted, &actor);
+        runtime.vouch(&quoted, &actor, None);
 
         // Interrupted: neither PostToolUse nor Stop arrives.
         assert_eq!(hook(&runtime, &prompt()).await, (200, serde_json::json!({})));
@@ -849,6 +855,7 @@ mod tests {
                     arguments: crate::api::raw(serde_json::json!({"prompt": "look it up"})),
                 },
                 spawn: true,
+                ruling: None,
             },
         )
         .await;
@@ -938,6 +945,7 @@ mod tests {
                 },
                 call: call(),
                 spawn: false,
+                ruling: None,
             },
         )
         .await;
@@ -963,6 +971,7 @@ mod tests {
                     arguments: crate::api::raw(serde_json::json!({"prompt": "look it up"})),
                 },
                 spawn: true,
+                ruling: None,
             },
         )
         .await;
@@ -983,6 +992,7 @@ mod tests {
                     arguments: crate::api::raw(serde_json::json!({"command": "ls"})),
                 },
                 spawn: false,
+                ruling: None,
             },
         )
         .await;
@@ -1020,6 +1030,7 @@ mod tests {
                     arguments: crate::api::raw(serde_json::json!({"command": "ls"})),
                 },
                 spawn: false,
+                ruling: None,
             },
         )
         .await;

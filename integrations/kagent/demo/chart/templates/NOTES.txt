@@ -1,0 +1,25 @@
+OpenAPPA on kagent — the demo is installing into namespace {{ .Release.Namespace }}.
+
+Open the dashboard:
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/kagent-ui 8080:8080
+  http://localhost:8080/agents/{{ .Release.Namespace }}/cluster-ops/chat
+
+The cluster-ops agent opens with the showcase chats already there — every
+demo case, as it ran: the exfiltration ask that leaks nothing, the agent
+taking a sanitized remedy on its own, the chat steering it to accept the
+change or to decline, a forged offer, the on-call approval, the annotator,
+the release window, the remote change board approving, denying and
+staying silent, delegation, and gated ingress. Run your own from the
+same page.
+
+{{- if and (not .Values.openai.apiKey) (not .Values.openai.existingSecret) }}
+
+No model key was given. Add it in the dashboard: Models → {{ .Values.modelConfig.name }}
+→ Edit → API Key → Save Changes. The agent and runtime pods start as
+soon as that Secret exists. (Or: helm upgrade ... --set openai.apiKey=...)
+{{- end }}
+
+Prerequisite (once per cluster): kagent 0.9.12 installed with its agent
+image set to the OpenAPPA runtime image, so every declarative agent is
+gated — see the chart README.

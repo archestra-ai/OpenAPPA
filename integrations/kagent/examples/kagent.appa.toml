@@ -1,0 +1,117 @@
+# Example deployment for a gated kagent cluster-ops agent.
+#
+# The packaged policy of the quickstart image, and the reference shape
+# for a kagent policy file. It names the demo toolset of a cluster-ops
+# agent: in-cluster reads, two suspicious ingress tools, one outward
+# sink with a requirement, one effectful action behind human approval,
+# and the two synthetic tools the entrypoint gates route out-of-band
+# flows through. A tool the policy does not name is refused at the
+# `ToolCall` hook — add a wildcard annotator before pointing a long
+# tail of CRD toolsets at this file.
+#
+# It names no agent: on kagent an agent called as a tool runs as a child
+# only under a contract that names it, wildcard or not, so delegation to
+# another Agent is off until a `[[policy.tool]]` entry names that agent by
+# its wire spelling (`<namespace>__NS__<name>`, hyphens as underscores).
+#
+# The policy runs without model keys: it declares no sanitizer and no
+# model-builtin annotator, so every decision is structural.
+
+[policy]
+version = 2
+
+# --- in-cluster reads that stay inside the session ---
+
+[[policy.tool]]
+name = "list_pods"
+delta = {}
+
+[[policy.tool]]
+name = "read_configmap"
+delta = {}
+
+# Secret material stays with operators: results carry the ops audience,
+# and a sink that publishes wider cannot receive them undeclared.
+[[policy.tool]]
+name = "read_secret"
+delta = { audience = ["ops"] }
+
+# --- ingress authored outside the session ---
+
+# Logs carry whatever the workloads printed — including text written to
+# steer an agent that reads them.
+[[policy.tool]]
+name = "get_pod_logs"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "check_status_page"
+delta = { trust = "suspicious" }
+
+# --- the outward sink ---
+
+# A status update publishes to everyone: the flow must be readable by
+# everyone and must not derive from an untrusted source.
+[[policy.tool]]
+name = "post_status_update"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["public"] }
+
+# --- an effectful action behind a person ---
+
+[[policy.tool]]
+name = "restart_deployment"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["human-approval"]
+
+# --- kagent's own built-in tool ---
+
+# The stock runtime appends ask_user to every declarative agent: it
+# surfaces a question to the human caller and returns the answer. The
+# question flows to the operator the reply already reaches.
+[[policy.tool]]
+name = "ask_user"
+delta = {}
+
+# --- the entrypoint's synthetic tools ---
+
+# Code execution and the memory write-back cross the tool gate under
+# these names (the appa-kagent-adk entrypoint wraps both).
+[[policy.tool]]
+name = "appa_code_execution"
+delta = {}
+
+[[policy.tool]]
+name = "appa_memory_persist"
+delta = {}
+
+# The A2A call to a delegated agent carries exactly the request the
+# spawn call spelled, so the runtime checks the child's return as a
+# branch of the parent.
+[policy.deployment]
+context_control = true
+
+# The human behind `human-approval`. On kagent the plugin asks the
+# person through the stock approval flow (Approve/Reject) and returns
+# the ruling with the control call; no answer grants nothing, and the
+# offer stands.
+[[policy.authority]]
+name = "oncall"
+hint = "Ask the on-call lead through the kagent approval flow."
+
+[policy.authority.permits]
+attention = ["human-approval"]
+
+[externals]
+timeout_ms = 5000
+review_timeout_ms = 600000
+max_body_bytes = 65536
+
+[externals.authorities.oncall]
+builtin = "hitl"
