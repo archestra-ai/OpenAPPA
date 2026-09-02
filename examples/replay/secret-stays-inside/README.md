@@ -1,20 +1,10 @@
 # secret-stays-inside
 
-Reading a file under `/hr/` restricts the trajectory to the organization:
-`delta = { audience = ["internal"] }`. `internal` is one of the three built-in audiences,
-`self ⊆ internal ⊆ public`. Two sinks read the audience. `Email` leaves the company and
-requires `public`. `PostToChannel` reaches the organization and requires `internal`, which
-a public trajectory also satisfies.
+Reading a file under `/hr/` limits the data to `hr`. After this read, an email can go
+only to a person in `hr`.
 
-- `email-before-read.appa`: nothing restricted was read, the trajectory is still public,
-  and the email is allowed.
-- `leak-after-hr-read.appa`: the read is allowed after the model accepts the narrowing.
-  The email is denied: the trajectory no longer reaches `public`. The channel post is
-  allowed.
-- `public-read-then-email.appa`: a file outside `/hr/` selects the bare `Read` contract,
-  whose `delta = {}` restricts nothing, so the email still leaves.
+`Email` uses the `to` value from the email. It checks that the recipient can read the
+data: `requires = { audience = { contains = ["$to"] } }`.
 
-The policy declares no `[audience.internal]` source. `internal` then stays a symbol:
-labels compare against it, and no real address is inside it. A deployment that binds a
-source, for example `from = ["slack:full-members"]`, gives it members, and a recipient
-written as an address can then be found inside it.
+- `secret-stays-inside.appa`: an email to `x@other.com` is allowed before the read. The HR
+  read is allowed. An email to `x@other.com` is denied. An email to `hr` is allowed.

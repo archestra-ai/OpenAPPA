@@ -1,3 +1,0 @@
-# No backup was recorded, so the deploy is denied.
-Deploy {}
-expect deny

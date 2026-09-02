@@ -1,0 +1,39 @@
+# The trust level starts at internal, then drops to vendor and untrusted.
+RunCommand {
+  command: "make test"
+}
+expect allow
+
+PostToSlack {
+  channel: "#eng"
+  text: "tests green"
+}
+expect allow
+
+ReadVendorDoc {}
+expect allow
+
+RunCommand {
+  command: "make release"
+}
+expect deny
+
+PostToSlack {
+  channel: "#eng"
+  text: "vendor notes attached"
+}
+expect allow
+
+ReadInboundEmail {}
+expect allow
+
+PostToSlack {
+  channel: "#eng"
+  text: "forwarding"
+}
+expect deny
+
+RunCommand {
+  command: "make release"
+}
+expect deny

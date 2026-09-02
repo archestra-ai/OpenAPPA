@@ -1,17 +1,14 @@
 # three-trust-ranks
 
-A custom trust chain, lowest first: `trust_chain = ["untrusted", "vendor", "internal"]`.
-A trajectory starts at the top rank. Content lowers it to the rank of its source. A
-sink requires at least its declared rank.
+This example has three trust levels: `untrusted`, `vendor`, and `internal`. New content
+can lower the trust level. Some actions need a minimum level.
 
-| Tool | Contract |
+| Action | Result |
 |---|---|
-| `ReadVendorDoc` | `delta = { trust = "vendor" }` |
-| `ReadInboundEmail` | `delta = { trust = "untrusted" }` |
-| `RunCommand` | `requires = { trust = "internal" }` |
-| `PostToSlack` | `requires = { trust = "vendor" }` |
+| `ReadVendorDoc` | Sets the trust level to `vendor`. |
+| `ReadInboundEmail` | Sets the trust level to `untrusted`. |
+| `RunCommand` | Needs `internal`. |
+| `PostToSlack` | Needs `vendor`. |
 
-- `clean-trajectory.appa`: nothing lowered trust, and both sinks run.
-- `vendor-doc.appa`: the document lowers trust to `vendor`. The command is denied. The
-  Slack post is allowed, because `vendor` meets its requirement.
-- `inbound-email.appa`: the email lowers trust to `untrusted`. Both sinks are denied.
+- `three-trust-ranks.appa`: both actions are allowed at the start. Vendor content blocks a
+  command but allows a Slack post. An inbound email then blocks both actions.

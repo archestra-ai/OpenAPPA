@@ -1,6 +1,4 @@
-# Before the fetch, the trajectory is `trusted` and the command runs. The page
-# lowers trust to `suspicious`. A command needs `trusted`, so the next one is
-# denied. Writing a file has no trust requirement and still runs.
+# A web page can lower trust. Commands then stop, but writing a file is safe.
 Bash {
   command: "ls -la"
 }

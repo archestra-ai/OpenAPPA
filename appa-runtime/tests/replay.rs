@@ -438,7 +438,7 @@ fn the_command_exits_0_1_and_2() {
         String::from_utf8_lossy(&green.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&green.stdout).ends_with("3 files: 3 ok, 0 failed, 0 could not run\n"),
+        String::from_utf8_lossy(&green.stdout).ends_with("1 file: 1 ok, 0 failed, 0 could not run\n"),
         "{}",
         String::from_utf8_lossy(&green.stdout)
     );

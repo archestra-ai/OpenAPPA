@@ -1,0 +1,15 @@
+# A deploy needs a backup. A migration can run one time.
+Deploy {}
+expect deny
+
+Backup {}
+expect allow
+
+Deploy {}
+expect allow
+
+Migrate {}
+expect allow
+
+Migrate {}
+expect deny

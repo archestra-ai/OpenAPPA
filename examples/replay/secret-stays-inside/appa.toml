@@ -1,32 +1,20 @@
-# Reading the HR directory restricts the trajectory to the organization, the
-# built-in `internal` audience. From then on, nothing may leave the company: a
-# sink that needs the `public` audience is blocked, and a sink that stays inside
-# is still fine.
-#
-# No `[audience.internal]` source is declared, so `internal` is a symbol: labels
-# compare against it, and no real address is ever inside it.
+# A file in /hr/ is for the HR group only.
 
 [policy]
 version = 2
 
 [[policy.tool]]
 name = "Read(path:/hr/*)"
-delta = { audience = ["internal"] }
+delta = { audience = ["hr"] }
 
 [[policy.tool]]
 name = "Read"
 delta = {}
 
-# An email leaves the company: the trajectory must still be public.
 [[policy.tool]]
 name = "Email"
-requires = { audience = { contains = ["public"] } }
-delta = {}
-
-# A channel post reaches the organization: the trajectory must still reach it.
-[[policy.tool]]
-name = "PostToChannel"
-requires = { audience = { contains = ["internal"] } }
+parameters = { type = "object", properties = { to = { type = "string" } }, required = ["to"] }
+requires = { audience = { contains = ["$to"] } }
 delta = {}
 
 [externals]

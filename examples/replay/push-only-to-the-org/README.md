@@ -1,18 +1,10 @@
 # push-only-to-the-org
 
-Three contracts for one tool, chosen by the `command` argument. The engine tries them in
-policy order and takes the first whose selector matches.
+The command text selects one of three rules.
 
-1. `Bash(command:git push https://github.com/archestra-ai/*)`: a push to the
-   organization needs nothing more.
-2. `Bash(command:git push *)`: any other push requires fresh `hitl` attention from the
-   person running the session.
-3. `Bash`: every other command.
+1. A push to the organization is allowed.
+2. Any other push needs approval.
+3. Other commands are allowed.
 
-- `push-to-the-org.appa`: the first contract matches, allowed.
-- `push-elsewhere.appa`: the second contract matches. The call is blocked and the offer
-  names the `hitl` authority, so the step is `expect authority`. The replay stands in for
-  the person and approves, and the push runs.
-- `plain-commands.appa`: `git status` and `ls` take the bare contract and are allowed.
-  `git push origin main` has no URL but still matches `git push *`, so it needs the
-  authority too.
+- `push-only-to-the-org.appa`: an organization push is allowed. Other pushes need
+  approval. `git status` and `ls` are allowed.
