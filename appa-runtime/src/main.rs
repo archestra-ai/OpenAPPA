@@ -74,12 +74,23 @@ fn require_loopback(addr: &SocketAddr) -> Result<(), String> {
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum Adapter {
     ClaudeCode,
+    Kagent,
 }
 
 impl Adapter {
+    /// kagent's spawns are other agents called as tools: a child runs only under a contract
+    /// that names the agent. Claude Code's `Task` keeps the wildcard's cover.
+    fn spawn_coverage(self) -> crate::api::SpawnCoverage {
+        match self {
+            Adapter::ClaudeCode => crate::api::SpawnCoverage::Wildcard,
+            Adapter::Kagent => crate::api::SpawnCoverage::Declared,
+        }
+    }
+
     fn codec(self) -> Codec {
         match self {
             Adapter::ClaudeCode => appa_adapter_claude_code::codec(),
+            Adapter::Kagent => appa_adapter_kagent::codec(),
         }
     }
 }
@@ -115,6 +126,12 @@ pub(crate) fn refuse_unobservable_returns(adapter: Adapter, policy: &toml::Value
             }
             Ok(())
         }
+        // Every kagent child return crosses at the parent's after-tool
+        // callback, where the plugin substitutes it — kagent has no
+        // background-spawn argument, and A2A push delivery is not wired
+        // in the covered releases. No policy shape makes a return
+        // unobservable, so there is nothing to refuse.
+        Adapter::Kagent => Ok(()),
     }
 }
 
@@ -328,7 +345,7 @@ async fn serve(args: Args) -> ExitCode {
         return ExitCode::FAILURE;
     }
     let runtime = match Runtime::open(config, args.db, args.modules_dir) {
-        Ok(runtime) => Arc::new(runtime),
+        Ok(runtime) => Arc::new(runtime.with_spawn_coverage(args.adapter.spawn_coverage())),
         Err(error) => {
             eprintln!("appa runtime: {error}");
             return ExitCode::FAILURE;

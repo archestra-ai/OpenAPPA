@@ -44,10 +44,23 @@ impl ExactCall {
     }
 }
 
+/// One trajectory's standing to run the offer it quoted at the control
+/// tool's hook, with the person's ruling its harness attached, if any.
+#[derive(Debug, Clone, PartialEq)]
+struct Vouch {
+    actor: Actor,
+    ruling: Option<appa_runtime_api::Ruling>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ToolCallDecision {
-    Allow { spawn: Option<SpawnBinding> },
-    Deny { feedback: String },
+    Allow {
+        spawn: Option<SpawnBinding>,
+    },
+    Deny {
+        feedback: String,
+        review: Vec<appa_runtime_api::Review>,
+    },
 }
 
 /// What the adapter gives the harness as the tool output. `Keep`: use
@@ -188,6 +201,10 @@ pub(crate) enum EventError {
     },
     #[error("tool {tool} is not declared in this policy and no wildcard covers it; the call is refused before it runs")]
     UndeclaredTool { tool: String },
+    #[error(
+        "delegation to {tool} is not declared by the policy: an agent runs as a child only under a contract that names it, and the wildcard covers no spawn"
+    )]
+    UndeclaredSpawn { tool: String },
     #[error("storage failure: {0}")]
     Storage(String),
 }
@@ -235,6 +252,7 @@ impl EventError {
             | EventError::NotAChild
             | EventError::SpawnNotTaken
             | EventError::SpawnAmbiguous
+            | EventError::UndeclaredSpawn { .. }
             | EventError::BindingMismatch => false,
         }
     }
@@ -310,13 +328,27 @@ pub struct Runtime {
     inner: Arc<Inner>,
 }
 
+/// Which contract may release a spawn — a call that opens a child trajectory.
+///
+/// `Declared`: only a contract written for the tool's name; the wildcard, which covers
+/// every ordinary call the policy does not write, covers no spawn. An agent the policy never
+/// names is denied before it runs, with the reason as the model's feedback. `Wildcard`: the
+/// wildcard covers a spawn as it covers any call. The harness adapter picks: kagent's spawns
+/// are other agents called as tools, and a child trajectory is not something a per-call
+/// annotation can stand for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpawnCoverage {
+    Declared,
+    Wildcard,
+}
+
 struct Inner {
     deployment: std::sync::RwLock<Arc<Deployment>>,
     retired: std::sync::Mutex<std::collections::BTreeMap<String, Arc<RuntimeEngine>>>,
     store: LogStore,
     modules: crate::builtins::ModuleRegistry,
     executing: std::sync::Mutex<std::collections::BTreeSet<String>>,
-    permits: std::sync::Mutex<std::collections::BTreeMap<String, Vec<Actor>>>,
+    permits: std::sync::Mutex<std::collections::BTreeMap<String, Vec<Vouch>>>,
     /// Trajectories a prompt reached since their turn last settled. Claude Code sends no
     /// `Stop` hook for a turn the user interrupted, so the prompt is the only sign the
     /// previous turn is over; the next tool call or turn end settles what it left behind.
@@ -324,6 +356,8 @@ struct Inner {
     /// The gates every process-costing consult of this runtime passes; deployment reloads
     /// clone them, so old and new snapshots contend on the same permits.
     gates: ConsultGates,
+    /// `true` under [`SpawnCoverage::Declared`]: set once, before the runtime is shared.
+    named_spawns: std::sync::atomic::AtomicBool,
 }
 
 /// The trajectory an actor's events belong to: the child when the harness names one.
@@ -331,7 +365,27 @@ pub(crate) fn acting_trajectory(actor: &Actor) -> &TrajectoryId {
     actor.child.as_ref().unwrap_or(&actor.root)
 }
 
+impl Runtime {
+    /// Settle which contracts may release a spawn. Called once by the binary, for the
+    /// adapter it serves, before the runtime is shared; the default is `Wildcard`.
+    pub fn with_spawn_coverage(self, coverage: SpawnCoverage) -> Runtime {
+        self.inner.named_spawns.store(
+            coverage == SpawnCoverage::Declared,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self
+    }
+}
+
 impl Inner {
+    pub(super) fn spawn_coverage(&self) -> SpawnCoverage {
+        if self.named_spawns.load(std::sync::atomic::Ordering::Relaxed) {
+            SpawnCoverage::Declared
+        } else {
+            SpawnCoverage::Wildcard
+        }
+    }
+
     fn deployment(&self) -> Arc<Deployment> {
         Arc::clone(
             &self
@@ -438,6 +492,7 @@ impl Runtime {
                 permits: std::sync::Mutex::new(std::collections::BTreeMap::new()),
                 prompted: std::sync::Mutex::new(std::collections::BTreeSet::new()),
                 gates,
+                named_spawns: std::sync::atomic::AtomicBool::new(false),
             }),
         })
     }
@@ -612,7 +667,7 @@ impl Runtime {
 
     /// Execute one surfaced remedy offer by its id.
     pub async fn execute_remedy(&self, acting: &Actor, offer: OfferId) -> RemedyOutcome {
-        self.remedy(acting, offer, None).await
+        self.remedy(acting, offer, None, None).await
     }
 
     /// The whole act: resolve the quoted id inside the acting trajectory's
@@ -623,6 +678,7 @@ impl Runtime {
         acting: &Actor,
         quoted: OfferId,
         elicitation: Option<&Elicitation>,
+        ruling: Option<appa_runtime_api::Ruling>,
     ) -> RemedyOutcome {
         let unknown = || RemedyOutcome::Refused {
             detail: "no live offer with this id exists".to_string(),
@@ -649,7 +705,7 @@ impl Runtime {
                 };
             }
         };
-        match session.on_remedy(offer, elicitation).await {
+        match session.on_remedy(offer, elicitation, ruling).await {
             Ok(RemedyDecision::Authorized { call }) => RemedyOutcome::Authorized { call: call.proposed() },
             Ok(RemedyDecision::Substituted { call }) => RemedyOutcome::Substituted { call: call.proposed() },
             Ok(RemedyDecision::Returned { value }) => RemedyOutcome::Returned { value },
@@ -674,20 +730,30 @@ impl Runtime {
     }
 
     /// Record that this trajectory quoted this offer id, for the request
-    /// that runs it.
-    pub(crate) fn vouch(&self, quoted: &OfferId, acting: &Actor) {
+    /// that runs it. `ruling` is a person's answer the harness obtained
+    /// through its own review channel; it rides the vouch and is spent
+    /// with it, so it can answer exactly the execution it was given for.
+    pub(crate) fn vouch(&self, quoted: &OfferId, acting: &Actor, ruling: Option<appa_runtime_api::Ruling>) {
         let mut permits = self.inner.permits.lock().expect("the permit mutex is never poisoned");
         let holders = permits.entry(quoted.0.clone()).or_default();
-        if !holders.contains(acting) {
-            holders.push(acting.clone());
+        match holders.iter_mut().find(|holder| holder.actor == *acting) {
+            Some(holder) => holder.ruling = ruling,
+            None => holders.push(Vouch {
+                actor: acting.clone(),
+                ruling,
+            }),
         }
     }
 
-    /// The trajectory vouched for this quoted id, taken once.
-    pub(crate) fn take_vouched(&self, quoted: &OfferId) -> Option<Actor> {
+    /// The trajectory vouched for this quoted id, taken once, with the
+    /// ruling its harness attached.
+    pub(crate) fn take_vouched(&self, quoted: &OfferId) -> Option<(Actor, Option<appa_runtime_api::Ruling>)> {
         let mut permits = self.inner.permits.lock().expect("the permit mutex is never poisoned");
         let mut holders = permits.remove(&quoted.0)?;
-        (holders.len() == 1).then(|| holders.remove(0))
+        (holders.len() == 1).then(|| {
+            let vouch = holders.remove(0);
+            (vouch.actor, vouch.ruling)
+        })
     }
 
     /// Drop every vouch this actor still holds. A vouch is recorded when the actor
@@ -698,7 +764,7 @@ impl Runtime {
     pub(crate) fn release_vouches(&self, acting: &Actor) {
         let mut permits = self.inner.permits.lock().expect("the permit mutex is never poisoned");
         permits.retain(|_, holders| {
-            holders.retain(|holder| holder != acting);
+            holders.retain(|holder| holder.actor != *acting);
             !holders.is_empty()
         });
     }
@@ -731,7 +797,7 @@ impl Runtime {
         let Some(holders) = permits.get_mut(&quoted.0) else {
             return;
         };
-        holders.retain(|holder| holder != acting);
+        holders.retain(|holder| holder.actor != *acting);
         if holders.is_empty() {
             permits.remove(&quoted.0);
         }
@@ -1479,14 +1545,14 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         };
         let quoted = OfferId("offer-1".to_string());
 
-        runtime.vouch(&quoted, &actor);
+        runtime.vouch(&quoted, &actor, None);
         assert_eq!(
             runtime.take_vouched(&quoted),
-            Some(actor.clone()),
+            Some((actor.clone(), None)),
             "a standing vouch is what the tool takes"
         );
 
-        runtime.vouch(&quoted, &actor);
+        runtime.vouch(&quoted, &actor, None);
         crate::hooks::handle(&runtime, appa_runtime_api::HookEvent::TurnEnd { actor: actor.clone() }).await;
         assert_eq!(
             runtime.take_vouched(&quoted),

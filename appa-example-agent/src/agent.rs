@@ -410,6 +410,7 @@ impl Run<'_> {
             actor: self.actor(frame),
             call: proposed.clone(),
             spawn: self.marks_spawn(&proposed),
+            ruling: None,
         };
         match hooks::handle(&self.agent.runtime, event).await {
             HookDecision::AllowCall { spawn } => self.run_released(frame, &id, proposed, spawn).await,
@@ -679,6 +680,7 @@ impl Run<'_> {
             actor: self.actor(frame),
             call: call.clone(),
             spawn: self.marks_spawn(&call),
+            ruling: None,
         };
         match hooks::handle(&self.agent.runtime, event).await {
             HookDecision::AllowCall { spawn } => self.run_released(frame, id, call, spawn).await,

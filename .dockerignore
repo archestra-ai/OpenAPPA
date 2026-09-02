@@ -3,6 +3,9 @@
 target
 **/target
 website
+# The appa runtime's build.rs stages this one doc into the plugin's
+# build identity, so a release build of `appa` needs it in-context.
+!website/content/docs/contracts.md
 paper
 docs
 demo/*/world/**/.DS_Store

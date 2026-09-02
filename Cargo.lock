@@ -87,6 +87,7 @@ name = "appa"
 version = "0.7.1"
 dependencies = [
  "appa-adapter-claude-code",
+ "appa-adapter-kagent",
  "appa-builtin",
  "appa-engine",
  "appa-eventlog",
@@ -120,6 +121,16 @@ dependencies = [
 
 [[package]]
 name = "appa-adapter-claude-code"
+version = "0.7.1"
+dependencies = [
+ "appa-runtime-api",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "appa-adapter-kagent"
 version = "0.7.1"
 dependencies = [
  "appa-runtime-api",

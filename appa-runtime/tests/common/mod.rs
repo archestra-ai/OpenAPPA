@@ -86,6 +86,7 @@ pub async fn propose(runtime: &Arc<Runtime>, call: ProposedCall) -> HookDecision
             actor: actor(),
             call,
             spawn: false,
+            ruling: None,
         },
     )
     .await

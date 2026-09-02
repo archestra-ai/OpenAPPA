@@ -43,12 +43,14 @@ enum Command {
 #[derive(Clone, Copy, clap::ValueEnum)]
 enum Adapter {
     ClaudeCode,
+    Kagent,
 }
 
 impl Adapter {
     fn as_str(self) -> &'static str {
         match self {
             Self::ClaudeCode => "claude-code",
+            Self::Kagent => "kagent",
         }
     }
 }

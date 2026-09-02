@@ -20,6 +20,7 @@ COPY appa-policy appa-policy
 COPY appa-runtime appa-runtime
 COPY appa-runtime-api appa-runtime-api
 COPY appa-adapter-claude-code appa-adapter-claude-code
+COPY appa-adapter-kagent appa-adapter-kagent
 COPY appa-builtin appa-builtin
 COPY appa-eventlog appa-eventlog
 COPY bench bench

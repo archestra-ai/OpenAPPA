@@ -276,6 +276,7 @@ fn parse(body: &[u8]) -> Result<Option<HookEvent>, ParseRefusal> {
                     actor: event.actor(),
                     call,
                     spawn,
+                    ruling: None,
                 }))
             }
             None => Err(malformed("PreToolUse without a tool call")),
@@ -676,6 +677,7 @@ mod tests {
                     arguments: raw(serde_json::json!({"command": "ls"})),
                 },
                 spawn: false,
+                ruling: None,
             })),
         );
     }
@@ -971,6 +973,7 @@ mod tests {
                 arguments: raw(serde_json::json!({"command": "ls"})),
             },
             spawn: false,
+            ruling: None,
         }
     }
 
@@ -1003,6 +1006,7 @@ mod tests {
                 &event,
                 &HookDecision::DenyCall {
                     feedback: "blocked: the recipient cannot read this".to_string(),
+                    review: Vec::new(),
                 }
             ),
             serde_json::json!({
