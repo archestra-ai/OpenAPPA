@@ -5,12 +5,10 @@ order: 8
 description: Check that policy changes keep your security rules.
 ---
 
-Use `appa replay` to make sure that your configuration behaves as intended. It reads a
-[policy file](/contracts) and a trace file. The trace file contains a sequence of tool
-calls. After each call, it states the expected decision. For example, it can state that
-APPA must allow or deny an email.
-
-Replay checks the decisions but does not run the tools.
+To help you make sure your configuration behaves as intended, OpenAPPA ships the
+`appa replay` CLI tool. It tests a [policy file](/contracts) against a trace file. The
+trace contains a sequence of tool calls and the expected decision for each call. Replay
+checks these decisions but does not run the tools.
 
 ## Start with an example
 
