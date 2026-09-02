@@ -44,6 +44,7 @@ done
 cat > "$work/server.py" <<'EOF'
 import functools
 import http.server
+import socketserver
 import sys
 
 root, port_file, tag = sys.argv[1:4]
@@ -69,9 +70,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         pass
 
 
-server = http.server.HTTPServer(
-    ("127.0.0.1", 0), functools.partial(Handler, directory=root)
-)
+class Server(http.server.HTTPServer):
+    # HTTPServer.server_bind resolves the bound host with getfqdn, which can
+    # stall for a long time on macOS runners. The name is never used here.
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
+server = Server(("127.0.0.1", 0), functools.partial(Handler, directory=root))
 with open(port_file, "w") as handle:
     handle.write(str(server.server_port))
 server.serve_forever()
@@ -80,9 +87,10 @@ python3 "$work/server.py" "$work/site" "$work/port" "$tag" &
 server_pid=$!
 for _ in 1 2 3 4 5 6 7 8 9 10; do
   [ -s "$work/port" ] && break
+  kill -0 "$server_pid" 2>/dev/null || { echo "release server exited" >&2; exit 1; }
   sleep 1
 done
-[ -s "$work/port" ] || { echo "release server did not start" >&2; exit 1; }
+[ -s "$work/port" ] || { echo "release server did not start within 10s" >&2; exit 1; }
 origin=http://127.0.0.1:$(cat "$work/port")
 
 failures=0
