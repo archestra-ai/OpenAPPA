@@ -29,8 +29,8 @@
   --bg-weak-hover: hsl(42, 15%, 93%);
   --bg-strong: hsl(30, 8%, 12%);
 
-  --text: hsl(30, 5%, 26%);
-  --text-weak: hsl(32, 3%, 54%);
+  --text: hsl(30, 6%, 14%);
+  --text-weak: hsl(32, 4%, 40%);
   --text-strong: hsl(30, 8%, 11%);
   --text-inverted: hsl(40, 25%, 99%);
 
@@ -40,7 +40,7 @@
 
   --border: hsl(36, 8%, 79%);
   --border-weak: hsl(38, 8%, 86%);
-  --icon: hsl(32, 4%, 51%);
+  --icon: hsl(32, 4%, 44%);
 
   /* accent — one interactive hue: links, active nav, focus (AA on --bg) */
   --accent: hsl(151, 55%, 28%);
@@ -57,7 +57,7 @@
   --info-bg: hsl(215, 55%, 93%);
 
   /* syntax — neutrals carry structure, hue only where it informs */
-  --syn-comment: hsl(32, 3%, 54%);
+  --syn-comment: hsl(32, 4%, 44%);
   --syn-keyword: hsl(30, 8%, 11%);
   --syn-string: hsl(151, 45%, 30%);
   --syn-number: hsl(36, 75%, 34%);
@@ -109,14 +109,14 @@
   --bg-weak-hover: hsl(30, 5%, 15%);
   --bg-strong: hsl(40, 12%, 92%);
 
-  --text: hsl(35, 7%, 80%);
-  --text-weak: hsl(33, 4%, 50%);
+  --text: hsl(35, 8%, 88%);
+  --text-weak: hsl(33, 5%, 62%);
   --text-strong: hsl(40, 12%, 93%);
   --text-inverted: hsl(30, 6%, 8%);
 
   --border: hsl(30, 4%, 30%);
   --border-weak: hsl(30, 4%, 21%);
-  --icon: hsl(32, 4%, 46%);
+  --icon: hsl(32, 4%, 56%);
 
   --accent: hsl(146, 45%, 62%);
   --accent-hover: hsl(146, 52%, 72%);
@@ -130,7 +130,7 @@
   --info: hsl(212, 55%, 65%);
   --info-bg: hsl(215, 30%, 14%);
 
-  --syn-comment: hsl(33, 4%, 50%);
+  --syn-comment: hsl(33, 5%, 60%);
   --syn-keyword: hsl(40, 12%, 93%);
   --syn-string: hsl(146, 42%, 63%);
   --syn-number: hsl(40, 68%, 63%);
@@ -146,7 +146,6 @@ body {
   color: var(--text);
   font-size: 14px;
   line-height: 1.7;
-  -webkit-font-smoothing: antialiased;
 }
 
 /* code is always mono, whatever the surrounding face */
@@ -682,7 +681,7 @@ samp {
    Prose (rendered markdown)
    ———————————————————————————————————————————————— */
 .prose {
-  font-size: 15px;
+  font-size: 16px;
 }
 
 /* Anchor targets stop below the sticky header instead of underneath it. */
