@@ -206,6 +206,7 @@ delta = { trust = "suspicious" }
 # declarations always win over the wildcard, including declarations supplied by
 # connector batteries. The mandate is deliberately closed to this deployment's
 # two trust ranks, its one private audience, HITL, and no effects.
+# APPA-UNIX-FALLBACK-BEGIN
 [[policy.annotator]]
 name = "claude-code.undeclared-tool"
 builtin = "claude-code"
@@ -217,6 +218,7 @@ effects = []
 [[policy.tool]]
 name = "*"
 annotator = "claude-code.undeclared-tool"
+# APPA-UNIX-FALLBACK-END
 
 # The deployment controls what a subagent starts from: the harness gives
 # every subagent exactly the prompt the parent's spawn call carried, and
