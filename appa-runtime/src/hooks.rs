@@ -40,13 +40,14 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             Err(error) => refuse(error.to_string()),
         },
         HookEvent::Prompt { actor, .. } => {
-            // A prompt gates the new turn, so a close that failed blocks
-            // it: the call is still open and the first proposal would
-            // refuse anyway, with less to say about why.
-            match on_actor(runtime, &actor, |session| async move { session.on_prompt().await }).await {
-                Ok(()) => HookDecision::Ack,
-                Err(error) => fold(error, block),
-            }
+            // The prompt text is not an engine event: nothing is reported,
+            // nothing is recorded, and offer freshness stays the engine's
+            // judgment. The prompt is only noted as the sign that the
+            // previous turn is over; a queued message arrives here while
+            // its turn's call still runs, so the call is settled at the
+            // first proposal of the new turn, when that result is in.
+            runtime.note_prompt(&actor);
+            HookDecision::Ack
         }
         HookEvent::TurnEnd { actor } => {
             // A turn end gates nothing, so it answers `Ack` whatever
@@ -54,6 +55,7 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             // turn" on this hook, which would hold the harness in a turn
             // it has finished; a close that failed leaves the call open
             // and the next proposal refuses on its own.
+            runtime.take_prompted(&actor);
             if let Err(error) = on_actor(runtime, &actor, |session| async move { session.on_turn_end().await }).await {
                 tracing::warn!(root = %actor.root.0, %error, "the turn end closed no abandoned call");
             }
@@ -61,6 +63,19 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             HookDecision::Ack
         }
         HookEvent::ToolCall { actor, call, spawn } => {
+            if runtime.take_prompted(&actor) {
+                // The first proposal after a prompt that no turn end preceded:
+                // the user interrupted the previous turn, and whatever it left
+                // open is settled before this turn's first call, control tools
+                // included, so a vouch this turn records is never released here.
+                if let Err(error) =
+                    on_actor(runtime, &actor, |session| async move { session.on_turn_end().await }).await
+                {
+                    runtime.note_prompt(&actor);
+                    return fold(error, deny);
+                }
+                runtime.release_vouches(&actor);
+            }
             if is_control_tool(&call.tool) {
                 return control_call(runtime, &actor, &call);
             }
@@ -177,7 +192,7 @@ fn control_call(runtime: &Runtime, actor: &Actor, call: &ProposedCall) -> HookDe
         }
         _ => {
             tracing::debug!(trajectory = %acting.0, "control tool refused: no such offer here");
-            deny("[appa] this offer no longer stands; re-propose the call".to_string())
+            deny("this offer no longer stands; re-propose the call".to_string())
         }
     }
 }
@@ -227,8 +242,13 @@ fn fold(error: EventError, family: fn(String) -> HookDecision) -> HookDecision {
     }
 }
 
+/// A refusal of this dispatcher's own that the model will read names APPA
+/// once, here, so a session can tell a runtime refusal from its harness's;
+/// a block is marked by the adapter's withheld-result rendering instead.
 fn deny(feedback: String) -> HookDecision {
-    HookDecision::DenyCall { feedback }
+    HookDecision::DenyCall {
+        feedback: format!("[appa] {feedback}"),
+    }
 }
 
 fn block(reason: String) -> HookDecision {
@@ -410,41 +430,170 @@ mod tests {
         assert_eq!(freed.1["hookSpecificOutput"]["permissionDecision"], "allow");
     }
 
-    /// The user pressed Esc while the command ran: Claude Code sends no
-    /// outcome hook for the call and no `Stop` hook for the turn. The
-    /// next prompt is the first hook to arrive, and it frees the call.
-    #[tokio::test]
-    async fn the_next_prompt_frees_a_call_an_interrupt_left_open() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_runtime(&dir);
-        let propose = |command: &str| {
-            serde_json::json!({
-                "hook_event_name": "PreToolUse",
-                "session_id": "s1",
-                "tool_name": "Bash",
-                "tool_input": {"command": command},
-            })
-        };
-        let released = call_hook(
-            &runtime,
-            &serde_json::to_vec(&propose("ping -c 30 127.0.0.1")).expect("re-serializes"),
-        )
-        .await;
-        assert_eq!(released.1["hookSpecificOutput"]["permissionDecision"], "allow");
+    fn bash_call(command: &str) -> serde_json::Value {
+        serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "s1",
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+        })
+    }
 
-        // Interrupted: neither PostToolUse nor Stop arrives.
-        let prompt = serde_json::json!({
+    fn bash_result(command: &str) -> serde_json::Value {
+        serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "session_id": "s1",
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+            "tool_response": {"stdout": "done"},
+        })
+    }
+
+    fn prompt() -> serde_json::Value {
+        serde_json::json!({
             "hook_event_name": "UserPromptSubmit",
             "session_id": "s1",
             "prompt": "never mind, list the files",
-        });
+        })
+    }
+
+    async fn hook(runtime: &Runtime, body: &serde_json::Value) -> (u16, serde_json::Value) {
+        call_hook(runtime, &serde_json::to_vec(body).expect("re-serializes")).await
+    }
+
+    fn closed_as_unknown(runtime: &Runtime) -> bool {
+        runtime
+            .audit(&appa_runtime_api::TrajectoryId("cc:s1".to_string()))
+            .expect("the audit reads")
+            .iter()
+            .any(|entry| {
+                matches!(
+                    &entry.event,
+                    crate::engine::AuditEvent::Closed {
+                        outcome: crate::engine::DispatchOutcome::Unknown
+                    }
+                )
+            })
+    }
+
+    /// The user pressed Esc while the command ran: Claude Code sends no
+    /// outcome hook for the call and no `Stop` hook for the turn. The
+    /// next prompt is the first hook to arrive; the new turn's first
+    /// proposal closes the call as unreported and releases.
+    #[tokio::test]
+    async fn the_first_call_after_a_prompt_frees_a_call_an_interrupt_left_open() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let released = hook(&runtime, &bash_call("ping -c 30 127.0.0.1")).await;
+        assert_eq!(released.1["hookSpecificOutput"]["permissionDecision"], "allow");
+        let actor = Actor {
+            root: appa_runtime_api::TrajectoryId("cc:s1".to_string()),
+            child: None,
+        };
+        let quoted = OfferId("offer-1".to_string());
+        runtime.vouch(&quoted, &actor);
+
+        // Interrupted: neither PostToolUse nor Stop arrives.
+        assert_eq!(hook(&runtime, &prompt()).await, (200, serde_json::json!({})));
+        assert!(!closed_as_unknown(&runtime), "the prompt itself records nothing");
+
+        let freed = hook(&runtime, &bash_call("ls")).await;
+        assert_eq!(freed.1["hookSpecificOutput"]["permissionDecision"], "allow");
+        assert!(closed_as_unknown(&runtime), "the interrupted call closed as unreported");
         assert_eq!(
-            call_hook(&runtime, &serde_json::to_vec(&prompt).expect("re-serializes")).await,
-            (200, serde_json::json!({})),
+            runtime.take_vouched(&quoted),
+            None,
+            "the interrupted turn's vouch is released"
         );
 
-        let freed = call_hook(&runtime, &serde_json::to_vec(&propose("ls")).expect("re-serializes")).await;
+        let late = hook(&runtime, &bash_result("ping -c 30 127.0.0.1")).await;
+        assert_eq!(late.1["decision"], "block", "a result for the closed call is refused");
+    }
+
+    /// The user typed while the command ran: Claude Code queues the message
+    /// and fires the prompt hook at once, then reports the command's
+    /// outcome when it finishes. The result must land on the still-open
+    /// call, and the next turn's first proposal then releases freely.
+    #[tokio::test]
+    async fn a_prompt_queued_behind_a_running_call_keeps_its_result() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let released = hook(&runtime, &bash_call("sleep 30")).await;
+        assert_eq!(released.1["hookSpecificOutput"]["permissionDecision"], "allow");
+
+        assert_eq!(hook(&runtime, &prompt()).await, (200, serde_json::json!({})));
+        assert_eq!(
+            hook(&runtime, &bash_result("sleep 30")).await,
+            (200, serde_json::json!({})),
+            "the running call's result lands on its open dispatch",
+        );
+        assert!(!closed_as_unknown(&runtime), "nothing was closed as unreported");
+
+        let next = hook(&runtime, &bash_call("ls")).await;
+        assert_eq!(next.1["hookSpecificOutput"]["permissionDecision"], "allow");
+        assert!(!closed_as_unknown(&runtime));
+        let repeated = hook(&runtime, &bash_result("sleep 30")).await;
+        assert_eq!(
+            repeated.1["decision"], "block",
+            "a second report of the same result is refused"
+        );
+    }
+
+    /// A prompt writes nothing, so a store that refuses every append still
+    /// acknowledges it; the failure surfaces at the proposal that needs the
+    /// close, and the mark survives for the next proposal.
+    #[tokio::test]
+    async fn a_prompt_acknowledges_over_a_store_that_cannot_append() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let released = hook(&runtime, &bash_call("ping -c 30 127.0.0.1")).await;
+        assert_eq!(released.1["hookSpecificOutput"]["permissionDecision"], "allow");
+        runtime.store().fail_commit_after(0);
+
+        assert_eq!(hook(&runtime, &prompt()).await, (200, serde_json::json!({})));
+
+        let (status, _) = hook(&runtime, &bash_call("ls")).await;
+        assert_eq!(status, 409, "the close the proposal needs is an operational refusal");
+        runtime.store().fail_commit_after(u64::MAX - 1);
+        let freed = hook(&runtime, &bash_call("ls")).await;
         assert_eq!(freed.1["hookSpecificOutput"]["permissionDecision"], "allow");
+        assert!(closed_as_unknown(&runtime));
+    }
+
+    /// A turn end settles the prompt's mark too: a proposal in the turn
+    /// after a normally ended one closes nothing.
+    #[tokio::test]
+    async fn a_turn_end_settles_the_prompt_mark() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        assert_eq!(hook(&runtime, &prompt()).await, (200, serde_json::json!({})));
+        let stop = serde_json::json!({"hook_event_name": "Stop", "session_id": "s1"});
+        assert_eq!(hook(&runtime, &stop).await, (200, serde_json::json!({})));
+
+        let released = hook(&runtime, &bash_call("sleep 30")).await;
+        assert_eq!(released.1["hookSpecificOutput"]["permissionDecision"], "allow");
+        assert_eq!(
+            hook(&runtime, &bash_result("sleep 30")).await,
+            (200, serde_json::json!({}))
+        );
+        assert!(!closed_as_unknown(&runtime));
+    }
+
+    /// Every refusal of the dispatcher's own that reaches the model on the
+    /// deny wire names APPA, whichever event error produced it.
+    #[tokio::test]
+    async fn a_deny_of_the_dispatchers_own_names_appa() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let released = hook(&runtime, &bash_call("sleep 30")).await;
+        assert_eq!(released.1["hookSpecificOutput"]["permissionDecision"], "allow");
+
+        let denied = hook(&runtime, &bash_call("ls")).await;
+        assert_eq!(denied.1["hookSpecificOutput"]["permissionDecision"], "deny");
+        let reason = denied.1["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .expect("a deny carries its reason");
+        assert!(reason.starts_with("[appa] "), "the deny reads: {reason}");
     }
 
     #[tokio::test]
@@ -882,12 +1031,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_runtime(&dir);
         runtime.store().fail_commit_after(0);
-        let prompt = serde_json::json!({
-            "hook_event_name": "UserPromptSubmit",
-            "session_id": "s1",
-            "prompt": "read the report",
-        });
-        let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&prompt).expect("serializes")).await;
+        let (status, answer) = hook(&runtime, &bash_call("ls")).await;
         assert_eq!(status, 409, "the harness must fail closed on a storage failure");
         assert!(
             answer.get("error").is_some(),

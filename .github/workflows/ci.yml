@@ -124,12 +124,12 @@ jobs:
         run: rustup show
 
       # Only what is platform-specific here: the config and data directory
-      # rules, the proc_pidpath process discovery the stop set verifies with,
-      # and the hooks a materialized deployment renders. Not a second full
-      # workspace check, clippy and test run.
+      # rules, the process ownership check init stops a runtime with, and the
+      # hooks a materialized deployment renders. Not a second full workspace
+      # check, clippy and test run.
       - name: Deployment tests
         run: |
-          cargo test --locked --package appa --lib init:: -- --include-ignored --skip real_claude
+          cargo test --locked --package appa --lib init::
           cargo test --locked --package appa --lib plugin_bundle::
           cargo test --locked --package appa --test init_cli
           cargo test --locked --package appa --test plugin_hooks

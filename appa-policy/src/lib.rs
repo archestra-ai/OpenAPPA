@@ -17,9 +17,10 @@ use appa_engine::contract::{
 use appa_engine::engine::Engine;
 use appa_engine::fact::ReturnPolicy;
 use appa_engine::fact::{EffectKind, EffectSet};
-use appa_engine::label::{Audience, ChainAudience, Clause, DeclaredAudience, GroupRef, Label, ReaderId, Trust};
+use appa_engine::label::{Audience, ChainAudience, Clause, DeclaredAudience, Label, ReaderId, Trust};
 use appa_engine::names::{
-    AnnotatorName, AuthorityName, GroupName, IdentityImplementationName, MarkName, SanitizerName, SurfaceName, TagName,
+    AnnotatorName, AudienceArgument, AuthorityName, GroupName, IdentityImplementationName, MarkName, SanitizerName,
+    SurfaceName, TagName,
 };
 use appa_engine::params::ToolParameters;
 use appa_engine::profile::{
@@ -1169,15 +1170,6 @@ fn parse_declared_audience(list: &[String], context: &str) -> Result<DeclaredAud
         context: context.to_string(),
         reason,
     };
-    if list.iter().any(|r| r == "public") {
-        return if list.len() == 1 {
-            Ok(DeclaredAudience::Public)
-        } else {
-            Err(refused(
-                "`public` is the whole universe and cannot be combined with other entries".to_string(),
-            ))
-        };
-    }
     if list.is_empty() {
         return Err(refused("empty reader set".to_string()));
     }
@@ -1190,20 +1182,23 @@ fn parse_declared_audience(list: &[String], context: &str) -> Result<DeclaredAud
     let mut groups = Vec::new();
     let mut readers = Vec::new();
     for entry in list {
-        if let Some(level) = ChainAudience::parse(entry) {
-            if chain.replace(level).is_some() {
+        match AudienceArgument::parse(entry) {
+            Some(AudienceArgument::Public) if list.len() == 1 => return Ok(DeclaredAudience::Public),
+            Some(AudienceArgument::Public) => {
                 return Err(refused(
-                    "two built-in audiences in one union: the outer one already contains the inner".to_string(),
+                    "`public` is the whole universe and cannot be combined with other entries".to_string(),
                 ));
             }
-            continue;
-        }
-        match entry.strip_prefix('@') {
-            Some(mention) => match GroupRef::parse(mention) {
-                Some(group) => groups.push(group),
-                None => return Err(refused(format!("`@{mention}` names no audience"))),
-            },
-            None => readers.push(ReaderId::new(entry)),
+            Some(AudienceArgument::Chain(level)) => {
+                if chain.replace(level).is_some() {
+                    return Err(refused(
+                        "two built-in audiences in one union: the outer one already contains the inner".to_string(),
+                    ));
+                }
+            }
+            Some(AudienceArgument::Group(group)) => groups.push(group),
+            Some(AudienceArgument::Reader(reader)) => readers.push(reader),
+            None => return Err(refused(format!("`{entry}` names no audience"))),
         }
     }
     Clause::new(chain, groups, readers)
@@ -1278,6 +1273,7 @@ fn parse_points(tokens: &[String], name: &str) -> Result<SanitizerPoints, Config
 #[cfg(test)]
 mod tests {
     use super::*;
+    use appa_engine::label::GroupRef;
 
     const DECLARATIONS: &str = r#"
 version = 2

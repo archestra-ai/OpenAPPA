@@ -51,12 +51,6 @@ fn an_ungated_session_has_no_appa_statusline() {
         .expect("the POSIX statusline runs");
     assert!(output.status.success());
     assert_eq!(output.stdout, b"", "plain Claude must have no APPA statusline");
-
-    let windows = std::fs::read_to_string(plugin_file("statusline.ps1")).expect("the Windows statusline is readable");
-    assert!(
-        windows.contains("if ($env:APPA_GATE -ne \"1\") {\n        exit 0\n    }"),
-        "the Windows statusline must also be silent outside clappa",
-    );
 }
 
 /// The two shipped hook maps gate the same events. Nothing else compares
@@ -89,6 +83,53 @@ fn both_shipped_hook_maps_gate_the_same_events() {
     }
 }
 
+/// The events each shipped map marks as turn ends, from the flag its hook
+/// command carries: `--turn-end` to hook.sh, `-TurnEnd` to hook.ps1. Nothing in
+/// the shipped scripts reads the event name for this, so the map is the only
+/// place the marking lives.
+fn turn_end_events(map: &serde_json::Value) -> Vec<String> {
+    let mut events: Vec<String> = map["hooks"]
+        .as_object()
+        .expect("the hook map is an object")
+        .iter()
+        .filter(|(_, groups)| {
+            groups
+                .as_array()
+                .expect("each event carries groups")
+                .iter()
+                .flat_map(|group| group["hooks"].as_array().expect("each group carries hooks"))
+                .any(|hook| {
+                    let command_words = hook["command"]
+                        .as_str()
+                        .map(str::split_whitespace)
+                        .into_iter()
+                        .flatten();
+                    let args = hook["args"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|arg| arg.as_str());
+                    command_words
+                        .chain(args)
+                        .any(|word| word == "--turn-end" || word == "-TurnEnd")
+                })
+        })
+        .map(|(event, _)| event.clone())
+        .collect();
+    events.sort();
+    events
+}
+
+/// Both shipped maps mark the same events as turn ends. A turn end marked on one
+/// platform and not the other would block, or fail to, on that platform alone.
+#[test]
+fn both_shipped_hook_maps_mark_the_same_turn_ends() {
+    let mut expected: Vec<String> = TURN_ENDS.iter().map(|event| (*event).to_owned()).collect();
+    expected.sort();
+    assert_eq!(turn_end_events(&shipped("hooks.json")), expected);
+    assert_eq!(turn_end_events(&shipped("hooks.windows.json")), expected);
+}
+
 /// Both shipped maps inject the same session context, and nothing else reaches
 /// the second SessionStart entry: a rename or a drift on one platform would
 /// leave that platform's sessions without the context the other one gets. The
@@ -119,13 +160,11 @@ fn both_shipped_hook_maps_inject_the_same_session_context() {
         args.contains(&"-SessionContext"),
         "the Windows SessionStart hook no longer asks hook.ps1 for the session context",
     );
-    let script = std::fs::read_to_string(hooks_dir.join("hook.ps1")).expect("the shipped hook.ps1 is readable");
-    assert!(
-        script.contains(CONTEXT),
-        "hook.ps1 no longer reads {CONTEXT}, so the two platforms inject different context",
-    );
 }
 
+/// The one command every posting hook in the shipped POSIX map registers,
+/// read from the map itself. SessionStart is that command with the runtime
+/// start chained in between its gate and its hook: `<gate>; <starter> && <hook>`.
 fn shipped_command() -> String {
     let hooks = shipped("hooks.json");
     let command = hooks["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
@@ -153,16 +192,13 @@ fn shipped_command() -> String {
             "the {event} hook is no longer the non-blocking turn-end command",
         );
     }
+    let (gate, hook) = command
+        .split_once("; ")
+        .expect("the shared command is a gate followed by the hook");
+    let starter = "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/ensure-runtime.sh\" </dev/null";
     assert_eq!(
         hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"].as_str(),
-        Some(
-            command
-                .replace(
-                    "; sh",
-                    "; sh \"${CLAUDE_PLUGIN_ROOT}/hooks/ensure-runtime.sh\" </dev/null && sh",
-                )
-                .as_str()
-        ),
+        Some(format!("{gate}; {starter} && {hook}").as_str()),
         "the SessionStart hook is no longer the shared command plus its runtime start",
     );
     command

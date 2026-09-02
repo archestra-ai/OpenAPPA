@@ -229,21 +229,18 @@ impl BlockContext {
             .ok_or(RouteError::UnknownSubject)?
             .into_owned();
 
-        // The supplied answers must be admissible on their own — a duplicate or unroutable
-        // claim refuses loudly here, before recorded pins shadow it silently.
-        registry.audience().expansions(answers)?;
         let mut evidence = answers.clone();
         if let Some((_, offers)) = views.pending_block(subject) {
             for (offer, _) in &offers {
                 if let Some(recorded) = views.offer(offer) {
-                    evidence = evidence.inheriting(&recorded.evidence);
+                    evidence = evidence.inheriting(&recorded.evidence)?;
                 }
             }
         }
-        evidence = evidence.inheriting(&decided.evidence);
+        evidence = evidence.inheriting(&decided.evidence)?;
         // A candidate an input hop derived may stand under another contract than the proposal;
         // the atoms that contract reads were pinned by the hop.
-        evidence = evidence.inheriting(&views.candidate_evidence(subject));
+        evidence = evidence.inheriting(views.candidate_evidence(subject))?;
         let expansions = registry.audience().expansions(&evidence)?;
 
         let stage = views.call_stage(subject);
@@ -489,7 +486,7 @@ impl<'a> Search<'a> {
             let mut unanswered: Vec<SymbolicAtom> =
                 plan::block_atoms(self.registry, &context.contract, &eval, context.role)
                     .into_iter()
-                    .filter(|atom| self.context.expansions.members(atom).is_none())
+                    .filter(|atom| !self.context.expansions.answered(atom))
                     .collect();
             if !unanswered.is_empty() {
                 unanswered.sort();

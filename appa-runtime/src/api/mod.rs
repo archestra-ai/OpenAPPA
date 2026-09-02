@@ -140,7 +140,7 @@ pub enum OpenError {
 /// as a deny.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum EventError {
-    #[error("[appa] a call is already outstanding; propose one call at a time")]
+    #[error("a call is already outstanding; propose one call at a time")]
     CallOutstanding,
     #[error(
         "the substituted {tool} call did not run and is now closed; propose your call again (a substituted call needs a fresh offer)"
@@ -317,9 +317,18 @@ struct Inner {
     modules: crate::builtins::ModuleRegistry,
     executing: std::sync::Mutex<std::collections::BTreeSet<String>>,
     permits: std::sync::Mutex<std::collections::BTreeMap<String, Vec<Actor>>>,
+    /// Trajectories a prompt reached since their turn last settled. Claude Code sends no
+    /// `Stop` hook for a turn the user interrupted, so the prompt is the only sign the
+    /// previous turn is over; the next tool call or turn end settles what it left behind.
+    prompted: std::sync::Mutex<std::collections::BTreeSet<String>>,
     /// The gates every process-costing consult of this runtime passes; deployment reloads
     /// clone them, so old and new snapshots contend on the same permits.
     gates: ConsultGates,
+}
+
+/// The trajectory an actor's events belong to: the child when the harness names one.
+pub(crate) fn acting_trajectory(actor: &Actor) -> &TrajectoryId {
+    actor.child.as_ref().unwrap_or(&actor.root)
 }
 
 impl Inner {
@@ -427,6 +436,7 @@ impl Runtime {
                 modules,
                 executing: std::sync::Mutex::new(std::collections::BTreeSet::new()),
                 permits: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+                prompted: std::sync::Mutex::new(std::collections::BTreeSet::new()),
                 gates,
             }),
         })
@@ -691,6 +701,29 @@ impl Runtime {
             holders.retain(|holder| holder != acting);
             !holders.is_empty()
         });
+    }
+
+    /// A prompt reached this actor. Nothing is recorded: the mark lives in memory and is
+    /// consumed by the actor's next tool call or turn end, whichever comes first. A
+    /// restarted runtime forgets it and the next proposal refuses until a turn end closes
+    /// the abandoned call.
+    pub(crate) fn note_prompt(&self, acting: &Actor) {
+        let mut prompted = self
+            .inner
+            .prompted
+            .lock()
+            .expect("the prompted mutex is never poisoned");
+        prompted.insert(acting_trajectory(acting).0.clone());
+    }
+
+    /// Whether a prompt reached this actor since its turn last settled. Consumed once.
+    pub(crate) fn take_prompted(&self, acting: &Actor) -> bool {
+        let mut prompted = self
+            .inner
+            .prompted
+            .lock()
+            .expect("the prompted mutex is never poisoned");
+        prompted.remove(acting_trajectory(acting).0.as_str())
     }
 
     fn spend_vouch(&self, quoted: &OfferId, acting: &Actor) {

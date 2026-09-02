@@ -185,31 +185,13 @@ impl Session {
         &self.trajectory
     }
 
-    /// The user submitted a prompt. The prompt text is not an engine
-    /// event: nothing is reported to the engine, nothing is recorded,
-    /// and offer freshness stays the engine's judgment — a stale offer
-    /// declines at execution by live re-plan.
-    ///
-    /// The prompt is still the second signal that the previous turn is
-    /// over. Claude Code sends no `Stop` hook for a turn the user
-    /// interrupted, so a call left open by that turn would reach here
-    /// unclosed and refuse the first proposal of the new turn. The
-    /// prompt closes it exactly as the turn end would have.
-    pub async fn on_prompt(&self) -> Result<(), EventError> {
-        self.close_unreported("the prompt").await
-    }
-
-    /// The actor finished a turn. A call still open here got no outcome
+    /// The actor's turn is over. A call still open here got no outcome
     /// hook and will never get one: Claude Code reports none for a call
-    /// refused at its permission prompt. Left open it refuses every
-    /// later proposal as a second call in flight, for the life of the
-    /// trajectory.
-    pub async fn on_turn_end(&self) -> Result<(), EventError> {
-        self.close_unreported("the turn end").await
-    }
-
-    /// Close the call the previous turn left open. Two hooks reach
-    /// here: the turn end, and the next prompt when no turn end came.
+    /// refused at its permission prompt, and none for a turn the user
+    /// interrupted. Left open it refuses every later proposal as a
+    /// second call in flight, for the life of the trajectory. Two
+    /// hooks reach here: the turn end, and the first tool call after a
+    /// prompt that no turn end preceded.
     ///
     /// The close is `Indeterminate`, not a failure. What the runtime
     /// observed is the absence of a report, which does not say whether
@@ -221,9 +203,9 @@ impl Session {
     ///
     /// Not an engine event when nothing is carried, which is every
     /// ordinary turn: the view is read, no fact is appended.
-    async fn close_unreported(&self, at: &'static str) -> Result<(), EventError> {
+    pub async fn on_turn_end(&self) -> Result<(), EventError> {
         let Some(open) = self.carried_call()? else {
-            tracing::debug!(trajectory = %self.trajectory.0, at, "no call outstanding");
+            tracing::debug!(trajectory = %self.trajectory.0, "no call outstanding");
             return Ok(());
         };
         self.abandon_open(&ToolOutcome::Indeterminate).await?;
@@ -231,7 +213,6 @@ impl Session {
             trajectory = %self.trajectory.0,
             dispatch = ?open.id,
             tool = %open.tool,
-            at,
             "call closed as unreported",
         );
         Ok(())
@@ -700,7 +681,7 @@ impl Session {
                 },
                 _ => return Ok(decision),
             }
-            if evidence == carried {
+            if evidence.len() == carried.len() {
                 return Err(EventError::UnexpectedDecision);
             }
         }
@@ -4295,58 +4276,6 @@ context_control = true
             Runtime::open(config_with(FETCH_AND_SEND, None), path, None),
             Err(OpenError::Damaged(_)),
         ));
-    }
-
-    #[tokio::test]
-    async fn a_prompt_records_nothing() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_runtime(&dir);
-        let session = runtime.create_session(root()).expect("a fresh id opens");
-        session.on_prompt().await.expect("a prompt with nothing open acks");
-        assert!(only_the_opening(&runtime));
-    }
-
-    /// The user interrupted the turn: the call got no outcome hook and
-    /// the turn got no `Stop` hook. The next prompt closes the call, so
-    /// the new turn's first proposal releases.
-    #[tokio::test]
-    async fn a_prompt_closes_a_call_an_interrupted_turn_left_open() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
-            .expect("the deployment opens");
-        let session = runtime.create_session(root()).expect("a fresh id opens");
-        session
-            .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
-            .await
-            .expect("the call releases");
-        assert!(matches!(
-            session.on_tool_call(fetch(serde_json::json!({"a": 2})), false).await,
-            Err(EventError::CallOutstanding),
-        ));
-
-        session.on_prompt().await.expect("the prompt closes it");
-
-        assert!(runtime.open_dispatches(&root(), &root()).is_empty());
-        assert!(
-            runtime
-                .audit(&root())
-                .expect("the audit reads")
-                .iter()
-                .any(|entry| matches!(
-                    &entry.event,
-                    crate::engine::AuditEvent::Closed {
-                        outcome: crate::engine::DispatchOutcome::Unknown
-                    }
-                )),
-            "the unreported dispatch closed as unknown, not as a run that failed"
-        );
-        assert_eq!(
-            session
-                .on_tool_call(fetch(serde_json::json!({"a": 2})), false)
-                .await
-                .expect("the new turn proposes freely"),
-            ToolCallDecision::Allow { spawn: None },
-        );
     }
 
     #[tokio::test]

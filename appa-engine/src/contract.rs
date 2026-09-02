@@ -48,11 +48,8 @@ impl Delta {
     }
 
     /// The symbolic atoms this delta writes into the label.
-    pub fn symbolic_atoms(&self) -> Box<dyn Iterator<Item = SymbolicAtom> + '_> {
-        match &self.audience {
-            Some(audience) => audience.symbolic_atoms(),
-            None => Box::new(std::iter::empty()),
-        }
+    pub(crate) fn symbolic_atoms(&self) -> impl Iterator<Item = SymbolicAtom> + '_ {
+        self.audience.iter().flat_map(DeclaredAudience::symbolic_atoms)
     }
 }
 
@@ -105,13 +102,13 @@ pub enum AudienceRequirement {
 }
 
 impl AudienceRequirement {
-    /// The symbolic atoms this requirement writes: a static recipient set's and a cap's. A
-    /// placeholder's atoms are the call's, read when its argument is.
-    pub fn symbolic_atoms(&self) -> Box<dyn Iterator<Item = SymbolicAtom> + '_> {
+    /// The audience this requirement writes: a static recipient set or a cap. A
+    /// placeholder's audience is the call's, read when its argument is.
+    pub(crate) fn declared(&self) -> Option<&DeclaredAudience> {
         match self {
-            AudienceRequirement::Includes(RecipientSpec::Static(recipients)) => recipients.symbolic_atoms(),
-            AudienceRequirement::Cap(cap) => cap.symbolic_atoms(),
-            AudienceRequirement::Includes(RecipientSpec::Placeholder(_)) => Box::new(std::iter::empty()),
+            AudienceRequirement::Includes(RecipientSpec::Static(recipients)) => Some(recipients),
+            AudienceRequirement::Cap(cap) => Some(cap),
+            AudienceRequirement::Includes(RecipientSpec::Placeholder(_)) => None,
         }
     }
 }
@@ -183,12 +180,6 @@ impl ToolAnnotation {
         self.delta.output_label()
     }
 
-    /// The symbolic atoms this annotation writes: its delta's, its static recipients' and
-    /// its cap's. Load validation routes each one; a placeholder's atoms ride the call.
-    pub fn symbolic_atoms(&self) -> impl Iterator<Item = SymbolicAtom> + '_ {
-        annotation_atoms(&self.delta, &self.requires)
-    }
-
     /// Every atom evaluating this annotation may ask for beyond a placeholder's: the atoms of
     /// its audience requirements, and — only where a requirement compares the committed label
     /// extensionally — its delta's, plus each written reader whose provider prefix names a
@@ -209,11 +200,12 @@ impl ToolAnnotation {
             })
             .into_iter()
             .flatten();
-        delta.chain(requirements.iter().flat_map(move |requirement| match requirement {
-            AudienceRequirement::Includes(RecipientSpec::Static(recipients)) => recipients.needed_atoms(providers),
-            AudienceRequirement::Cap(cap) => cap.needed_atoms(providers),
-            AudienceRequirement::Includes(RecipientSpec::Placeholder(_)) => Box::new(std::iter::empty()),
-        }))
+        delta.chain(
+            requirements
+                .iter()
+                .filter_map(AudienceRequirement::declared)
+                .flat_map(move |declared| declared.needed_atoms(providers)),
+        )
     }
 }
 
@@ -224,7 +216,8 @@ fn annotation_atoms<'a>(delta: &'a Delta, requires: &'a Requires) -> impl Iterat
         requires
             .audience_requirements()
             .iter()
-            .flat_map(AudienceRequirement::symbolic_atoms),
+            .filter_map(AudienceRequirement::declared)
+            .flat_map(DeclaredAudience::symbolic_atoms),
     )
 }
 

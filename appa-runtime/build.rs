@@ -1,14 +1,10 @@
 #[path = "src/plugin_layout.rs"]
 mod plugin_layout;
 
-use std::collections::BTreeMap;
 use std::env;
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-use sha2::{Digest, Sha256};
 
 fn main() {
     println!("cargo:rerun-if-env-changed=APPA_PLUGIN_SHA256");
@@ -47,13 +43,14 @@ fn main() {
         repository
     };
     plugin_layout::stage_repository(identity_source, &staged).expect("stage the plugin source for build identity");
-    let digest = canonical_tree_digest(&staged).expect("digest the staged plugin source");
+    let digest = plugin_layout::canonical_tree_digest(&staged).expect("digest the staged plugin source");
     println!("cargo:rustc-env=APPA_PLUGIN_TREE_SHA256={}", hex(&digest));
 
     if let Some(reference) = release {
         assert!(!reference.trim().is_empty(), "APPA_RELEASE_REF must not be empty");
+        let digest = release_plugin_digest();
         println!("cargo:rustc-env=APPA_RELEASE_REF={reference}");
-        println!("cargo:rustc-env=APPA_PLUGIN_SOURCE_KIND=release");
+        println!("cargo:rustc-env=APPA_PLUGIN_SHA256={digest}");
         return;
     }
 
@@ -67,6 +64,24 @@ fn main() {
             println!("cargo:rustc-env=APPA_PLUGIN_SOURCE_ROOT={}", repository.display());
         }
     }
+}
+
+/// The SHA-256 of the release plugin archive this build accepts, as 64 hex
+/// characters. A release binary resolves its plugin from nothing else, so a
+/// release build without it is refused here rather than at someone's install.
+fn release_plugin_digest() -> String {
+    let Some(digest) = env::var("APPA_PLUGIN_SHA256").ok() else {
+        panic!(
+            "a release build (APPA_RELEASE_REF is set) requires APPA_PLUGIN_SHA256, \
+             the SHA-256 of the release plugin archive"
+        );
+    };
+    let digest = digest.trim().to_owned();
+    assert!(
+        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "APPA_PLUGIN_SHA256 must be 64 hexadecimal characters, got {digest:?}"
+    );
+    digest
 }
 
 fn plugin_is_dirty(repository: &Path) -> bool {
@@ -176,66 +191,4 @@ fn watch_git_identity(repository: &Path) {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-fn canonical_tree_digest(root: &Path) -> std::io::Result<[u8; 32]> {
-    let mut entries = BTreeMap::<String, Option<PathBuf>>::new();
-    collect(root, root, &mut entries)?;
-    let mut hasher = Sha256::new();
-    for (relative, absolute) in entries {
-        absorb(&mut hasher, relative.as_bytes());
-        match absolute {
-            None => {
-                hasher.update(*b"d");
-                absorb(&mut hasher, &[]);
-            }
-            Some(path) => {
-                hasher.update(*b"f");
-                let mut file = fs::File::open(path)?;
-                let length = file.metadata()?.len();
-                hasher.update(length.to_be_bytes());
-                let mut buffer = [0u8; 64 * 1024];
-                loop {
-                    let read = file.read(&mut buffer)?;
-                    if read == 0 {
-                        break;
-                    }
-                    hasher.update(&buffer[..read]);
-                }
-            }
-        }
-    }
-    Ok(hasher.finalize().into())
-}
-
-fn absorb(hasher: &mut Sha256, bytes: &[u8]) {
-    hasher.update((bytes.len() as u64).to_be_bytes());
-    hasher.update(bytes);
-}
-
-fn collect(root: &Path, directory: &Path, entries: &mut BTreeMap<String, Option<PathBuf>>) -> std::io::Result<()> {
-    for entry in fs::read_dir(directory)? {
-        let entry = entry?;
-        let absolute = entry.path();
-        let relative = absolute.strip_prefix(root).map_err(std::io::Error::other)?;
-        let portable = relative
-            .components()
-            .map(|component| component.as_os_str().to_str())
-            .collect::<Option<Vec<_>>>()
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "plugin path is not UTF-8"))?
-            .join("/");
-        let kind = entry.file_type()?;
-        if kind.is_dir() {
-            entries.insert(portable, None);
-            collect(root, &absolute, entries)?;
-        } else if kind.is_file() {
-            entries.insert(portable, Some(absolute));
-        } else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("{} is neither a regular file nor a directory", absolute.display()),
-            ));
-        }
-    }
-    Ok(())
 }
