@@ -1,0 +1,27 @@
+[project]
+name = "appa-shellrisk"
+version = "0.1.0"
+description = "Evaluate OpenAPPA model consults on ShellRisk-Bench"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp>=1.26,<2",
+]
+
+[project.scripts]
+appa-shellrisk = "appa_shellrisk.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.16"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/appa_shellrisk"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
