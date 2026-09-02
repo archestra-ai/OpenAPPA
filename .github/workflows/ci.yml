@@ -290,3 +290,66 @@ jobs:
 
       - name: AgentThreatBench tests
         run: uv run --project bench/agentthreatbench pytest bench/agentthreatbench/tests
+
+  kagent-python-checks:
+    name: kagent Python Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+
+      - name: appa-kagent-adk lint
+        run: |
+          uv run --project integrations/kagent/appa-kagent-adk ruff check integrations/kagent/appa-kagent-adk/src integrations/kagent/appa-kagent-adk/tests
+          uv run --project integrations/kagent/appa-kagent-adk ruff format --check integrations/kagent/appa-kagent-adk/src integrations/kagent/appa-kagent-adk/tests
+
+      - name: appa-kagent-adk tests, locked lane
+        run: uv run --project integrations/kagent/appa-kagent-adk pytest integrations/kagent/appa-kagent-adk/tests
+
+      # The stable kagent v0.9.12 lane: the pinned kagent-adk with its own
+      # resolution (google-adk 1.31.1, a2a-sdk 0.3.x). The entrypoint tests
+      # run only here; they skip on the bare lane above.
+      - name: appa-kagent-adk tests, kagent v0.9.12 lane
+        run: >
+          uv run --project integrations/kagent/appa-kagent-adk
+          --with "kagent-adk @ git+https://github.com/kagent-dev/kagent@v0.9.12#subdirectory=python/packages/kagent-adk"
+          --with "a2a-sdk>=0.3.23,<0.4" --with "google-adk==1.31.1" --with "mcp>=1.25,<2"
+          pytest integrations/kagent/appa-kagent-adk/tests
+
+  kagent-go-checks:
+    name: kagent Go Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: integrations/kagent/appa-kagent-adk-go
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: integrations/kagent/appa-kagent-adk-go/go.mod
+          cache-dependency-path: integrations/kagent/appa-kagent-adk-go/go.sum
+
+      - name: gofmt
+        run: test -z "$(gofmt -l .)"
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...
