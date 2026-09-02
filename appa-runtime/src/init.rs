@@ -54,7 +54,7 @@ pub enum InitError {
     MissingPluginFile(PathBuf),
     #[error("the installed Claude plugin could not start `appa runtime`: {0}")]
     Starter(String),
-    #[error("the runtime at {endpoint} is not this installed build: {message}")]
+    #[error("a different Appa runtime is already running at {endpoint}; {message}")]
     RuntimeIdentity { endpoint: String, message: String },
     #[error("the appa runtime (pid {pid}) still answers {endpoint} after being stopped; stop it and rerun init")]
     RuntimeSurvived { pid: i32, endpoint: String },
@@ -841,6 +841,21 @@ fn policy_version(text: &str) -> Option<i64> {
         .as_integer()
 }
 
+/// Find a backup name without replacing an earlier backup.
+fn available_backup_path(path: &Path) -> PathBuf {
+    let backup = path.with_extension("toml.bak");
+    if !backup.exists() {
+        return backup;
+    }
+    for number in 1.. {
+        let candidate = path.with_extension(format!("toml.bak.{number}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!("an unsigned integer always has another value")
+}
+
 /// Offer to replace a config authored against an older policy model.
 ///
 /// The config is the user's, and init keeps it across every upgrade. A policy
@@ -874,12 +889,12 @@ fn offer_config_rewrite_with(
         Some(found) if found < template => {}
         _ => return Ok(ConfigOutcome::Kept),
     }
-    let backup = path.with_extension("toml.bak");
+    let backup = available_backup_path(path);
     let rewrite = Confirmation {
         question: format!(
-            "appa: {} was authored against an older policy model than this build writes.\n\
-             Rewrite it from this build's default? Your file, its include lines and every edit\n\
-             in it, is kept only at {}, replacing whatever is there.",
+            "appa: {} uses an older policy format. This version of Appa uses policy version {template}.\n\
+             Replace it with the new default policy? Your existing file will be backed up to {},\n\
+             without replacing any existing backup.",
             friendly_path(path),
             friendly_path(&backup),
         ),
@@ -892,13 +907,27 @@ fn offer_config_rewrite_with(
     if rewrite.ask(input, output).map_err(prompt)? == Answer::No {
         return Ok(ConfigOutcome::Kept);
     }
+    // Reserve this unused name before moving the user's file. `rename` can replace a
+    // destination, so reserving it makes that replacement safe and prevents an
+    // existing backup from being lost.
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&backup)
+        .map_err(|source| InitError::WriteFile {
+            path: backup.clone(),
+            source,
+        })?;
     // The original moves aside whole, so nothing here can leave a half-written
     // policy in place: the new file is written under `create_new` and removed
     // again if that write fails, and a failure puts the original back.
-    fs::rename(path, &backup).map_err(|source| InitError::WriteFile {
-        path: backup.clone(),
-        source,
-    })?;
+    if let Err(source) = fs::rename(path, &backup) {
+        discard_file(&backup);
+        return Err(InitError::WriteFile {
+            path: backup.clone(),
+            source,
+        });
+    }
     match create_default_config(path) {
         Ok(_) => Ok(ConfigOutcome::Rewritten),
         Err(written) => match fs::rename(&backup, path) {
@@ -1937,7 +1966,7 @@ fn verify_runtime_deployment(runtime: &Path, config: &Path, endpoint: &Endpoint)
         EndpointOwner::Deployment { pid } => Ok(pid),
         EndpointOwner::Unidentified => Err(InitError::RuntimeIdentity {
             endpoint: endpoint.url().to_owned(),
-            message: "the answering process exposes no binary fingerprint; stop it and rerun init".to_owned(),
+            message: "stop it, then run `appa init` again.".to_owned(),
         }),
         EndpointOwner::Foreign { .. } => Err(InitError::RuntimeIdentity {
             endpoint: endpoint.url().to_owned(),
