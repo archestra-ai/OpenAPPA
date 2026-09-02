@@ -83,6 +83,15 @@ pub enum RemedyOutcome {
     Refused { detail: String },
 }
 
+/// Whom taking an offer involves: nobody but the model (the plain narrowing acceptance), the
+/// named authorities' rulings, or the named sanitizer's rewrite of the value.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum OfferKind {
+    Accept,
+    Authority { names: Vec<String> },
+    Sanitizer { name: String },
+}
+
 /// What happens to the child's final message: delivered to the parent,
 /// nothing returned, or delivery stopped. The child
 /// is finished, so `feedback` goes to the parent as the spawn call's
@@ -285,6 +294,21 @@ impl Deployment {
         })
     }
 
+    /// Answer every authority and sanitizer the policy declares in process — approve, and
+    /// the body unchanged — as if the bound party had. `appa replay`'s deployment only.
+    fn stand_in_for_remedies(&mut self) {
+        let registry = self.resident.registry();
+        self.externals.stand_in_for_remedies(
+            registry
+                .authorities()
+                .iter()
+                .map(|authority| authority.name.as_str().to_string()),
+            registry
+                .sanitizers()
+                .map(|sanitizer| sanitizer.name.as_str().to_string()),
+        );
+    }
+
     fn resident(&self) -> PolicyEngine<'_> {
         PolicyEngine::Resident(&self.resident)
     }
@@ -308,6 +332,49 @@ pub struct Reloaded {
 
 pub struct Runtime {
     inner: Arc<Inner>,
+}
+
+/// Everything `open` and `open_in_memory` share before the log is chosen: the modules, the
+/// consult gates, and the deployment compiled from the configuration.
+struct Prepared {
+    modules: crate::builtins::ModuleRegistry,
+    gates: ConsultGates,
+    deployment: Deployment,
+}
+
+impl Prepared {
+    fn new(config: Config, modules: Option<PathBuf>) -> Result<Prepared, OpenError> {
+        let modules =
+            crate::builtins::load(modules.as_deref()).map_err(|error| OpenError::Modules(error.to_string()))?;
+        let gates = ConsultGates::per_runtime();
+        let deployment = Deployment::load(config, &modules, gates.clone())?;
+        gates.serve_llm(deployment.config.externals.llm_bound());
+        Ok(Prepared {
+            modules,
+            gates,
+            deployment,
+        })
+    }
+
+    fn assemble(self, backend: Backend) -> Result<Runtime, OpenError> {
+        let store = LogStore::open(backend).map_err(|error| match error {
+            appa_eventlog::OpenError::Damaged { path, detail } => OpenError::Damaged(format!("{path}: {detail}")),
+            error @ appa_eventlog::OpenError::ForeignSchema { .. } => OpenError::Damaged(error.to_string()),
+            error => OpenError::Storage(error.to_string()),
+        })?;
+        Ok(Runtime {
+            inner: Arc::new(Inner {
+                deployment: std::sync::RwLock::new(Arc::new(self.deployment)),
+                retired: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+                store,
+                modules: self.modules,
+                executing: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+                permits: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+                prompted: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+                gates: self.gates,
+            }),
+        })
+    }
 }
 
 struct Inner {
@@ -418,28 +485,18 @@ impl Runtime {
     /// a policy this deployment cannot honor is refused before
     /// anything opens.
     pub fn open(config: Config, db: PathBuf, modules: Option<PathBuf>) -> Result<Runtime, OpenError> {
-        let modules =
-            crate::builtins::load(modules.as_deref()).map_err(|error| OpenError::Modules(error.to_string()))?;
-        let gates = ConsultGates::per_runtime();
-        let deployment = Deployment::load(config, &modules, gates.clone())?;
-        gates.serve_llm(deployment.config.externals.llm_bound());
-        let store = LogStore::open(Backend::Sqlite { path: db }).map_err(|error| match error {
-            appa_eventlog::OpenError::Damaged { path, detail } => OpenError::Damaged(format!("{path}: {detail}")),
-            error @ appa_eventlog::OpenError::ForeignSchema { .. } => OpenError::Damaged(error.to_string()),
-            error => OpenError::Storage(error.to_string()),
-        })?;
-        Ok(Runtime {
-            inner: Arc::new(Inner {
-                deployment: std::sync::RwLock::new(Arc::new(deployment)),
-                retired: std::sync::Mutex::new(std::collections::BTreeMap::new()),
-                store,
-                modules,
-                executing: std::sync::Mutex::new(std::collections::BTreeSet::new()),
-                permits: std::sync::Mutex::new(std::collections::BTreeMap::new()),
-                prompted: std::sync::Mutex::new(std::collections::BTreeSet::new()),
-                gates,
-            }),
-        })
+        let prepared = Prepared::new(config, modules)?;
+        prepared.assemble(Backend::Sqlite { path: db })
+    }
+
+    /// The deployment `appa replay` runs: the same session and engine over a log that lives
+    /// only as long as this value, with every authority and sanitizer answered in process —
+    /// approve, and the body unchanged — as if the bound party had. Annotators, audience
+    /// sources, and identity stay bound as configured. Nothing of the run survives the process.
+    pub fn open_in_memory(config: Config, modules: Option<PathBuf>) -> Result<Runtime, OpenError> {
+        let mut prepared = Prepared::new(config, modules)?;
+        prepared.deployment.stand_in_for_remedies();
+        prepared.assemble(Backend::Memory)
     }
 
     /// The policy file key the serving deployment answers under. An install compares it
@@ -659,6 +716,18 @@ impl Runtime {
                 detail: error.to_string(),
             },
         }
+    }
+
+    /// What taking a quoted offer in this root's family would consult, or `None` for an
+    /// offer that no longer stands.
+    pub(crate) fn offer_kind(&self, root: &TrajectoryId, quoted: &OfferId) -> Option<OfferKind> {
+        let log = self.inner.log(root).ok()?;
+        let offer = crate::engine::resolve_rendered(&log, quoted)?;
+        let deployment = self.inner.deployment();
+        let policy = self.inner.resolve_policy(&deployment, &log).ok()?;
+        let view = policy.engine().rebuild_view(&log).ok()?;
+        let pursuer = policy.engine().offer_pursuer(&view, &offer)?;
+        policy.engine().offer_kind(&view, &pursuer, &offer)
     }
 
     /// The canonical identity a quoted id names in this family, and the

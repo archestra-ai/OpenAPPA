@@ -99,6 +99,18 @@ enum Backend {
     Hitl,
     ClaudeCode(ClaudeCodeBackend),
     Llm(LlmBackend),
+    /// `appa replay`'s stand-in for the parties a remedy consults: every authority
+    /// approves, every sanitizer returns the body unchanged. No configuration can name it;
+    /// only `Runtime::open_in_memory` installs it, over whatever the deployment bound.
+    StandIn,
+}
+
+fn stand_in_answer(consult: &Consult) -> Result<serde_json::Value, NoAnswerReason> {
+    match &consult.body {
+        ConsultBody::Authority { .. } => Ok(serde_json::json!({ "ruling": "approve" })),
+        ConsultBody::Sanitizer { artifact, .. } => Ok(serde_json::json!({ "body": artifact.body })),
+        _ => Err(NoAnswerReason::Unregistered),
+    }
 }
 
 fn kind_of(section: Section) -> ConsultKind {
@@ -307,12 +319,31 @@ impl ExternalServices {
                 Some(prompt) => llm.consult(&prompt).await,
                 None => Err(NoAnswerReason::Unregistered),
             },
+            Backend::StandIn => stand_in_answer(consult),
         };
         match answered {
             Ok(answer) => ConsultOutcome::Answer(answer),
             Err(reason) => {
                 tracing::debug!(kind = kind.wire_name(), name, ?reason, "the consult produced no answer");
                 ConsultOutcome::NoAnswer(reason)
+            }
+        }
+    }
+
+    /// Answer every named authority and sanitizer in process, as if the bound party had:
+    /// approve, and the body unchanged. Binding or not, each name is covered.
+    pub(crate) fn stand_in_for_remedies(
+        &mut self,
+        authorities: impl IntoIterator<Item = String>,
+        sanitizers: impl IntoIterator<Item = String>,
+    ) {
+        for (kind, names) in [
+            (ConsultKind::Authority, authorities.into_iter().collect::<Vec<_>>()),
+            (ConsultKind::Sanitizer, sanitizers.into_iter().collect::<Vec<_>>()),
+        ] {
+            let table = self.backends.entry(kind).or_default();
+            for name in names {
+                table.insert(name, Backend::StandIn);
             }
         }
     }

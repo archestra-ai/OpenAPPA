@@ -1,0 +1,26 @@
+# Two history checks. A deploy needs a completed backup earlier in the
+# trajectory. A migration may run once: a second one is denied while the first
+# is recorded.
+
+[policy]
+version = 2
+
+[[policy.tool]]
+name = "Backup"
+effects = ["backup.completed"]
+delta = {}
+
+[[policy.tool]]
+name = "Deploy"
+requires = { effects = { contains = ["backup.completed"] } }
+delta = {}
+
+[[policy.tool]]
+name = "Migrate"
+effects = ["migration.applied"]
+requires = { effects = { excludes = ["migration.applied"] } }
+delta = {}
+
+[externals]
+timeout_ms = 2000
+max_body_bytes = 65536
