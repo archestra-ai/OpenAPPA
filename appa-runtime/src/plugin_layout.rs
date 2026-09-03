@@ -190,7 +190,7 @@ pub fn walk(root: &Path) -> Result<Vec<StagedEntry>, TreeDigestError> {
 /// A staged relative path as the canonical digest encodes it: UTF-8 with `/`
 /// separators on every platform. The bundle is ASCII filenames, so a path that
 /// cannot be spelled this way is refused rather than normalized.
-pub fn portable_relative_path(relative: &Path) -> Result<String, TreeDigestError> {
+fn portable_relative_path(relative: &Path) -> Result<String, TreeDigestError> {
     let unportable = || TreeDigestError::UnportablePath {
         path: relative.to_path_buf(),
     };
