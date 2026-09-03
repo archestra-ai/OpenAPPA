@@ -7,12 +7,14 @@ import { getAllDocs, type DocPage } from "@/lib/docs";
 
 /* Content backing the MCP server (app/mcp/route.ts) and /llms.txt: read from
    the content/docs *.md files on every call — nothing is cached or prebaked —
-   with figure directives replaced by one-line text stand-ins and pages sliced
+   with visual directives replaced by text stand-ins and pages sliced
    into sections for targeted reads and full-text search. The docs menu is the
    catalog: only pages that appear in it (title + category frontmatter) are
    served. */
 
-const FIGURE_DESCRIPTIONS: Record<string, string> = {
+const DIRECTIVE_DESCRIPTIONS: Record<string, string> = {
+  "battery-catalog":
+    "- [Slack](/battery-slack) — rules for 19 Slack tools, with audiences from Slack users and groups.\n- [Claude Code tools](/battery-claude-code) — rules for Claude Code's Bash and Read tools.\n- [GitHub](/battery-github) — rules for 44 repository, issue, pull request, and user tools.\n- [Grain](/battery-grain) — rules for 49 meeting, transcript, deal, and admin tools.\n- [Google Workspace](/battery-google-workspace) — uses your Workspace directory and groups to build audiences.\n- [Add your own](/write-a-battery) — create and submit policy for an MCP server.",
   "fig-claude-code-hooks":
     "[Animated figure: a protected Claude Code session sends each hook event to OpenAPPA; one tool call comes back allowed, one comes back blocked with safer options.]",
   "fig-connected-agent":
@@ -32,7 +34,7 @@ const FIGURE_DESCRIPTIONS: Record<string, string> = {
 };
 
 function stripDirectives(markdown: string): string {
-  return markdown.replace(/^:::([a-z-]+):::$/gm, (_, name: string) => FIGURE_DESCRIPTIONS[name] ?? "");
+  return markdown.replace(/^:::([a-z-]+):::$/gm, (_, name: string) => DIRECTIVE_DESCRIPTIONS[name] ?? "");
 }
 
 export interface DocSection {

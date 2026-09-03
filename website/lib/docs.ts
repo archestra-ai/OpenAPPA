@@ -13,6 +13,7 @@ export interface DocFrontMatter {
   category: string;
   order?: number;
   description?: string;
+  sidebar?: boolean;
 }
 
 export interface DocPage {
@@ -23,6 +24,7 @@ export interface DocPage {
   description: string;
   content: string;
   proposal: boolean;
+  sidebar: boolean;
 }
 
 export interface TocItem {
@@ -51,6 +53,7 @@ export function getAllDocs(): DocPage[] {
       description: fm.description ?? "",
       content,
       proposal: PROPOSAL_OPEN.test(content.trimStart().split("\n", 1)[0]),
+      sidebar: fm.sidebar ?? true,
     };
   });
   return docs.sort((a, b) => a.order - b.order || a.title.localeCompare(b.title));
@@ -63,6 +66,7 @@ export function getDocBySlug(slug: string): DocPage | undefined {
 export function getDocsByCategory(): DocCategory[] {
   const categories: DocCategory[] = [];
   for (const doc of getAllDocs()) {
+    if (!doc.sidebar) continue;
     let category = categories.find((c) => c.name === doc.category);
     if (!category) {
       category = { name: doc.category, docs: [] };

@@ -7,6 +7,7 @@ import rehypeSlug from "rehype-slug";
 import remarkGfm from "remark-gfm";
 
 import { AdvisorySignup } from "@/components/AdvisorySignup";
+import { BatteryCatalog } from "@/components/BatteryCatalog";
 import { BenchmarkHighlight } from "@/components/BenchmarkHighlight";
 import { BrandAssets } from "@/components/BrandKit";
 import {
@@ -34,6 +35,7 @@ import { termDefinition } from "@/lib/terms";
    the mapped component in place. */
 const DIRECTIVES: Record<string, () => ReactNode> = {
   "advisory-signup": () => <AdvisorySignup />,
+  "battery-catalog": () => <BatteryCatalog />,
   "battery-rule-order": () => <BatteryRuleOrderFigure />,
   "benchmark-highlight": () => <BenchmarkHighlight />,
   "brand-assets": () => <BrandAssets />,
