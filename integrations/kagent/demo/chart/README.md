@@ -45,6 +45,9 @@ Leave `openai.apiKey` unset to paste the key in the dashboard instead
 | `mocks.approvalWindowSeconds` | `25` | How long the change board waits for a ruling. |
 | `seed.enabled` | `true` | Replay the showcase chats after install. |
 | `agents.go.enabled` | `true` | Also run `cluster-ops-go`, the same agent on kagent's go runtime (needs the `golang-adk` image beside the python one). |
+| `guide.enabled` | `true` | Install the `appa-guide` agent: the routing skill over the kagent tool server's k8s tools, gated by the shared runtime. |
+| `guide.skill.git.*` | this repo, `main`, `integrations/appa-guide` | Where kagent clones the canonical skill. Claude packaging stages the same directory into its plugin. The cluster must reach the repo (or a fork). |
+| `guide.toolServer` | `kagent-tool-server` | The RemoteMCPServer serving the `k8s_*` tools. |
 
 kagent compiles an agent that calls another agent as a tool only once
 that agent exists, and it does not retry on its own when the child
@@ -63,6 +66,8 @@ agents (cluster-ops, log-analyst) ──APPA_RUNTIME_URL──▶ Service appa-r
                                                         └─ mocks             127.0.0.1:8081 — annotator, release window,
                                                                               change board (+ Service appa-demo-mocks)
 demo-tools (Deployment + RemoteMCPServer) ◀── the agents' MCP tools
+appa-guide Agent ── appa-guide skill (gitRefs) + kagent-tool-server k8s tools
+                    ──APPA_RUNTIME_URL──▶ the shared runtime (HITL on apply)
 seed Job (post-install) ──▶ kagent-controller /api/sessions, /api/tasks
 ```
 

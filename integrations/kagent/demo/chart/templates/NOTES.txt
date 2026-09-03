@@ -4,6 +4,9 @@ Open the dashboard:
 
   kubectl -n {{ .Release.Namespace }} port-forward svc/kagent-ui 8080:8080
   http://localhost:8080/agents/{{ .Release.Namespace }}/cluster-ops/chat
+{{- if .Values.guide.enabled }}
+  http://localhost:8080/agents/{{ .Release.Namespace }}/appa-guide/chat
+{{- end }}
 
 The cluster-ops agent opens with the showcase chats already there — every
 demo case, as it ran: the exfiltration ask that leaks nothing, the agent

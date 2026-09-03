@@ -1034,6 +1034,15 @@ samp {
   border: 1px solid var(--border-weak);
   padding: 6px 12px;
   text-align: left;
+  vertical-align: top;
+}
+
+/* Keep identifiers intact in tables. The table wrapper provides horizontal
+   scrolling when an identifier is wider than the available viewport. */
+.prose td code {
+  overflow-wrap: normal;
+  word-break: normal;
+  white-space: nowrap;
 }
 
 .prose th {
@@ -2310,6 +2319,101 @@ samp {
   display: block;
   width: 100%;
   height: auto;
+}
+
+/* Runtime overview — host, fail-closed bridge, and policy runtime. */
+.runtime-overview-figure {
+  width: 100%;
+  margin: 1.5rem 0 2rem;
+}
+
+.runtime-overview-figure svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  font-family: var(--font-mono);
+}
+
+.rof-panel {
+  fill: var(--bg);
+  stroke: var(--border);
+  stroke-width: 1.2;
+}
+
+.rof-panel-bridge {
+  fill: var(--bg-weak);
+  stroke: var(--accent-border);
+}
+
+.rof-title {
+  fill: var(--text-strong);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.rof-agent-title {
+  fill: var(--text-strong);
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.rof-subtitle,
+.rof-card-detail,
+.rof-rail-label {
+  fill: var(--text-weak);
+  font-size: 12px;
+}
+
+.rof-card {
+  fill: var(--bg-weak);
+  stroke: var(--border-weak);
+  stroke-width: 1;
+}
+
+.rof-panel-bridge .rof-card {
+  fill: var(--bg);
+}
+
+.rof-card-title {
+  fill: var(--text-strong);
+  font-size: 13.5px;
+  font-weight: 500;
+}
+
+.rof-fail-closed circle {
+  fill: var(--accent);
+}
+
+.rof-fail-closed text {
+  fill: var(--accent);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.rof-rail,
+.rof-remedy-rail {
+  fill: none;
+  stroke: var(--icon);
+  stroke-width: 1.25;
+}
+
+.rof-rail-accent {
+  stroke: var(--accent);
+}
+
+.rof-remedy-rail {
+  stroke: var(--border);
+}
+
+.rof-remedy-chip {
+  fill: var(--bg);
+  stroke: var(--border-weak);
+}
+
+.rof-remedy-label {
+  fill: var(--text);
+  font-size: 12px;
+  font-weight: 500;
 }
 
 .psf-mascot {
