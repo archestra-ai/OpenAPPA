@@ -4,6 +4,7 @@ on:
   pull_request:
     types:
       - labeled
+      - synchronize
 
 permissions: {}
 
@@ -14,7 +15,10 @@ concurrency:
 jobs:
   build:
     name: Build Linux development artifacts
-    if: ${{ github.event.label.name == 'build-development-artifacts' && github.event.pull_request.head.repo.full_name == github.repository }}
+    if: >-
+      ${{ github.event.pull_request.head.repo.full_name == github.repository &&
+          ((github.event.action == 'labeled' && github.event.label.name == 'build-development-artifacts') ||
+           (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'build-development-artifacts'))) }}
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     permissions:
