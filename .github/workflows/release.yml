@@ -204,6 +204,153 @@ jobs:
       expected_version: ${{ needs.release-please.outputs.version }}
       plugin_sha256: ${{ needs.plugin-artifact.outputs.sha256 }}
 
+  # The five kagent images of this release, plus the `golang-adk` alias
+  # kagent's controller resolves. Each package needs public visibility, an
+  # organization setting made once after its first publish. The chart
+  # defaults pull anonymously.
+  publish-images:
+    name: Publish container images
+    if: ${{ needs.release-please.outputs.should_publish == 'true' }}
+    needs: release-please
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read # Required to verify and check out the release tag.
+      packages: write # Required to push the images to GitHub Packages.
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Verify and checkout release source
+        uses: ./.github/actions/verify-release-source
+        with:
+          release_ref: ${{ needs.release-please.outputs.tag_name }}
+          source_commit: ${{ needs.release-please.outputs.source_commit }}
+
+      # The quickstart compiles appa in release mode, and two of the five
+      # images pass 1.5 GB. The build needs the space the runner's
+      # preinstalled toolchains hold.
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+          sudo docker image prune --all --force
+          df -h /
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Log in to the image registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      # The quickstart builds from the repository root: its builder stage
+      # compiles appa from the workspace.
+      - name: Build and push appa-kagent-quickstart
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: integrations/kagent/appa-kagent-quickstart/Dockerfile
+          platforms: linux/amd64
+          push: true
+          provenance: true
+          sbom: true
+          tags: ghcr.io/archestra-ai/appa-kagent-quickstart:${{ needs.release-please.outputs.version }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ needs.release-please.outputs.source_commit }}
+            org.opencontainers.image.version=${{ needs.release-please.outputs.version }}
+
+      - name: Build and push appa-kagent-adk
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: integrations/kagent/appa-kagent-adk
+          platforms: linux/amd64
+          push: true
+          provenance: true
+          sbom: true
+          tags: ghcr.io/archestra-ai/appa-kagent-adk:${{ needs.release-please.outputs.version }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ needs.release-please.outputs.source_commit }}
+            org.opencontainers.image.version=${{ needs.release-please.outputs.version }}
+
+      - name: Build and push appa-kagent-adk-go
+        id: adk-go
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: integrations/kagent/appa-kagent-adk-go
+          platforms: linux/amd64
+          push: true
+          provenance: true
+          sbom: true
+          tags: ghcr.io/archestra-ai/appa-kagent-adk-go:${{ needs.release-please.outputs.version }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ needs.release-please.outputs.source_commit }}
+            org.opencontainers.image.version=${{ needs.release-please.outputs.version }}
+
+      - name: Build and push appa-demo-tools
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: integrations/kagent/demo
+          platforms: linux/amd64
+          push: true
+          provenance: true
+          sbom: true
+          tags: ghcr.io/archestra-ai/appa-demo-tools:${{ needs.release-please.outputs.version }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ needs.release-please.outputs.source_commit }}
+            org.opencontainers.image.version=${{ needs.release-please.outputs.version }}
+
+      - name: Build and push appa-demo-mocks
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: integrations/kagent/demo/mocks
+          platforms: linux/amd64
+          push: true
+          provenance: true
+          sbom: true
+          tags: ghcr.io/archestra-ai/appa-demo-mocks:${{ needs.release-please.outputs.version }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ needs.release-please.outputs.source_commit }}
+            org.opencontainers.image.version=${{ needs.release-please.outputs.version }}
+
+      # kagent's controller derives the Go runtime image from the python one:
+      # it replaces the last path segment with `golang-adk`. The alias carries
+      # that name and the digest this job pushed.
+      - name: Alias the Go image to the name kagent derives
+        env:
+          GO_DIGEST: ${{ steps.adk-go.outputs.digest }}
+          VERSION: ${{ needs.release-please.outputs.version }}
+        run: |
+          if [[ ! "$GO_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::the Go image build did not report a digest"
+            exit 1
+          fi
+          docker buildx imagetools create \
+            --tag "ghcr.io/archestra-ai/golang-adk:${VERSION}" \
+            "ghcr.io/archestra-ai/appa-kagent-adk-go@${GO_DIGEST}"
+          docker buildx imagetools inspect \
+            "ghcr.io/archestra-ai/appa-kagent-adk-go:${VERSION}"
+          docker buildx imagetools inspect \
+            "ghcr.io/archestra-ai/golang-adk:${VERSION}"
+          alias_digest=$(docker buildx imagetools inspect \
+            --format '{{.Manifest.Digest}}' \
+            "ghcr.io/archestra-ai/golang-adk:${VERSION}")
+          if [ "$alias_digest" != "$GO_DIGEST" ]; then
+            echo "::error::golang-adk resolves to ${alias_digest}, not ${GO_DIGEST}"
+            exit 1
+          fi
+
   publish-release:
     name: Publish GitHub release
     if: ${{ needs.release-please.outputs.should_publish == 'true' }}
@@ -211,6 +358,7 @@ jobs:
       - release-please
       - plugin-artifact
       - build-binaries
+      - publish-images
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
