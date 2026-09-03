@@ -20,6 +20,7 @@ import { ClaudeCodeHooksFigure } from "@/components/figures/ClaudeCodeHooksFigur
 import { ConnectedAgentFigure } from "@/components/figures/ConnectedAgentFigure";
 import { ExfiltrationFigure } from "@/components/figures/ExfiltrationFigure";
 import { GuardrailFigure } from "@/components/figures/GuardrailFigure";
+import { KagentFigure } from "@/components/figures/KagentFigure";
 import { LabelFoldFigure } from "@/components/figures/LabelFoldFigure";
 import { NegotiationFigure } from "@/components/figures/NegotiationFigure";
 import { PolicyStackFigure } from "@/components/figures/PolicyStackFigure";
@@ -64,6 +65,7 @@ const DIRECTIVES: Record<string, () => ReactNode> = {
   "fig-connected-agent": () => <ConnectedAgentFigure />,
   "fig-exfiltration": () => <ExfiltrationFigure />,
   "fig-guardrail": () => <GuardrailFigure />,
+  "fig-kagent": () => <KagentFigure />,
   "fig-label-fold": () => <LabelFoldFigure />,
   "fig-negotiation": () => <NegotiationFigure />,
   "fig-policy-stack": () => <PolicyStackFigure />,

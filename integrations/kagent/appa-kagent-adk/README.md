@@ -8,7 +8,7 @@ replays the stock kagent startup and appends the plugin. The package
 ships as the `ghcr.io/archestra-ai/appa-kagent-adk` image on top of
 kagent's published runtime image.
 
-The proposal lives at `website/content/docs/kagent.md`; the
+The operator guide lives at `website/content/docs/kagent.md`; the
 implementation plan, per-version mapping tables, and verification
 matrix live in [`../IMPLEMENTATION.md`](../IMPLEMENTATION.md). The
 adapter wire this package emits is parsed by the `appa-adapter-kagent`
