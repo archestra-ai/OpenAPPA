@@ -78,14 +78,7 @@ jobs:
           done
 
       - name: Check release versions
-        run: |
-          version=$(tr -d '\r\n' < .github/release-please/version.txt)
-          cargo_version=$(cargo metadata --locked --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.name == "appa") | .version')
-          plugin_version=$(jq -r '.version' \
-            integrations/claude-code/plugin/.claude-plugin/plugin.json)
-          test "$cargo_version" = "$version"
-          test "$plugin_version" = "$version"
+        uses: ./.github/actions/check-release-versions
 
   installer-checks:
     name: Installer Checks (${{ matrix.os }})

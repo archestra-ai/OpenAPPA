@@ -123,15 +123,9 @@ jobs:
 
       - name: Synchronize release version
         if: ${{ steps.release-pr.outputs.prs_created == 'true' }}
-        run: |
-          version=$(tr -d '\r\n' < .github/release-please/version.txt)
-          cargo update --workspace
-          cargo_version=$(cargo metadata --locked --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.name == "appa") | .version')
-          plugin_version=$(jq -r '.version' \
-            integrations/claude-code/plugin/.claude-plugin/plugin.json)
-          test "$cargo_version" = "$version"
-          test "$plugin_version" = "$version"
+        uses: ./.github/actions/check-release-versions
+        with:
+          relock: "true"
 
       - name: Update release PR
         if: ${{ steps.release-pr.outputs.prs_created == 'true' }}
@@ -170,15 +164,10 @@ jobs:
           fetch-depth: 1
 
       - name: Verify and checkout release source
-        env:
-          RELEASE_REF: ${{ needs.release-please.outputs.tag_name }}
-          SOURCE_COMMIT: ${{ needs.release-please.outputs.source_commit }}
-        run: |
-          git fetch --no-tags origin \
-            "refs/tags/${RELEASE_REF}:refs/tags/${RELEASE_REF}"
-          test "$(git rev-parse "${RELEASE_REF}^{commit}")" = "$SOURCE_COMMIT"
-          git checkout --detach "$SOURCE_COMMIT"
-          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+        uses: ./.github/actions/verify-release-source
+        with:
+          release_ref: ${{ needs.release-please.outputs.tag_name }}
+          source_commit: ${{ needs.release-please.outputs.source_commit }}
 
       - name: Package the plugin
         id: package
@@ -236,15 +225,10 @@ jobs:
           fetch-depth: 1
 
       - name: Verify and checkout release source
-        env:
-          RELEASE_REF: ${{ needs.release-please.outputs.tag_name }}
-          SOURCE_COMMIT: ${{ needs.release-please.outputs.source_commit }}
-        run: |
-          git fetch --no-tags origin \
-            "refs/tags/${RELEASE_REF}:refs/tags/${RELEASE_REF}"
-          test "$(git rev-parse "${RELEASE_REF}^{commit}")" = "$SOURCE_COMMIT"
-          git checkout --detach "$SOURCE_COMMIT"
-          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+        uses: ./.github/actions/verify-release-source
+        with:
+          release_ref: ${{ needs.release-please.outputs.tag_name }}
+          source_commit: ${{ needs.release-please.outputs.source_commit }}
 
       - name: Download release archives
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
