@@ -23,6 +23,7 @@ import { LabelFoldFigure } from "@/components/figures/LabelFoldFigure";
 import { NegotiationFigure } from "@/components/figures/NegotiationFigure";
 import { PolicyStackFigure } from "@/components/figures/PolicyStackFigure";
 import { RemedyPlanFigure } from "@/components/figures/RemedyPlanFigure";
+import { RuntimeOverviewFigure } from "@/components/figures/RuntimeOverviewFigure";
 import { TwoEndingsFigure } from "@/components/figures/TwoEndingsFigure";
 import { MascotBoard } from "@/components/MascotBoard";
 import { ProposalBlock } from "@/components/ProposalBlock";
@@ -47,6 +48,7 @@ const DIRECTIVES: Record<string, () => ReactNode> = {
   "fig-negotiation": () => <NegotiationFigure />,
   "fig-policy-stack": () => <PolicyStackFigure />,
   "fig-remedy-plan": () => <RemedyPlanFigure />,
+  "fig-runtime-overview": () => <RuntimeOverviewFigure />,
   "fig-two-endings": () => <TwoEndingsFigure />,
   "mascot-board": () => <MascotBoard />,
   "details-7pc-leak": () => (
