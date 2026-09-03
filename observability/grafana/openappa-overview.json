@@ -505,7 +505,7 @@
         "type": "tempo",
         "uid": "${traces}"
       },
-      "description": "Trace waterfall for the selected decision. Click a Trace ID above to load it here and filter the correlated logs.",
+      "description": "Trace waterfall for the selected decision. Click a Trace ID above to load it here and filter the correlated logs. Expand the appa.hook span to inspect gen_ai.tool.call.arguments when sensitive-content capture is enabled.",
       "fieldConfig": {
         "defaults": {},
         "overrides": []
