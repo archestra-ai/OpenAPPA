@@ -8,11 +8,11 @@ use crate::groups::{DeclaredAudience, Expansions};
 use crate::label::{Audience, Label, Trust};
 use crate::names::{AuthorityName, GroupName, MarkName, SanitizerName, TagName};
 
-/// Operator prose on a registered authority or sanitizer: why this entry exists, in the
-/// deployer's own words. It travels with every remedy plan naming the entity, so an agent chooses
-/// among plans on stated purpose rather than on a bare name, and a reviewer reads the intent beside
-/// the mandate. Advisory only: a hint NEVER enters a check, an enumeration, or an ordering, and it
-/// widens no mandate. The load lint bounds its length ([`crate::registry::MAX_HINT_CHARS`]).
+/// Trusted deployer prose for a registered component. An Authority or Sanitizer hint travels with
+/// every remedy plan that names the entity. Every component hint enters its consult declaration;
+/// model transports use it as instruction. Advisory only: a hint NEVER enters a check, enumeration,
+/// or ordering, and it widens no mandate. The load lint bounds its length
+/// ([`crate::registry::MAX_HINT_CHARS`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hint(String);
 

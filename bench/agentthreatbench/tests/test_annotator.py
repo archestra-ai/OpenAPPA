@@ -5,22 +5,27 @@ import pytest
 
 from appa_agentthreatbench.annotator import AnnotatorFixture
 
-DECLARATION = {
-    "inputs": ["subject"],
-    "trust_ranks": [],
-    "audiences": [],
-    "attention_marks": [],
-    "effects": [],
+TOOLS = {
+    "customer-acl": ("lookup_customer", "$tool_call.arguments.query"),
+    "message-recipient-members": ("send_message", "$tool_call.arguments.recipient"),
+    "response-recipient-members": ("respond_to_user", "$tool_call.arguments.recipient"),
 }
 
 
 def consult(name: str, subject: str) -> dict[str, object]:
+    tool, source = TOOLS.get(name, ("unknown", "$tool_call.arguments.subject"))
     return {
         "version": 1,
         "kind": "annotation",
         "name": name,
-        "declaration": DECLARATION,
-        "artifact": {"args": {"subject": subject}},
+        "declaration": {
+            "inputs": {"subject": source},
+            "trust_ranks": [],
+            "audiences": [],
+            "attention_marks": [],
+            "effects": [],
+        },
+        "artifact": {"tool": tool, "args": {"subject": subject}},
     }
 
 

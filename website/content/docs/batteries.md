@@ -112,7 +112,7 @@ On Unix systems, OpenAPPA starts the command only when the selected tool rule na
 Consult:
 
 ```json
-{"version":1,"kind":"annotation","name":"claude-code.read-sensitivity","declaration":{"inputs":[],"trust_ranks":["suspicious","trusted"],"audiences":["private"],"attention_marks":[],"effects":[]},"artifact":{"args":{"name":"Read","arguments":{"file_path":".env"}}}}
+{"version":1,"kind":"annotation","name":"claude-code.read-sensitivity","declaration":{"inputs":{},"trust_ranks":["suspicious","trusted"],"audiences":["private"],"attention_marks":[],"effects":[]},"artifact":{"tool":"Read","args":{"file_path":".env"}}}
 ```
 
 Answer:
@@ -129,7 +129,7 @@ import sys
 from pathlib import PurePath
 
 request = json.load(sys.stdin)
-file_path = request["artifact"]["args"]["arguments"]["file_path"]
+file_path = request["artifact"]["args"]["file_path"]
 audience = ["private"] if PurePath(file_path).name.startswith(".") else "public"
 
 json.dump(
@@ -145,7 +145,7 @@ json.dump(
 )
 ```
 
-`artifact.args` is the complete call: `name`, `description` when the tool declares one, and `arguments`. The `Read` rule above declares none, so the consult carries none. When the annotator maps `inputs`, the consult carries one value per mapped input instead. `declaration` is the annotator's own registration — the mandate vocabulary its answer must use. A battery annotator must check the version, `kind`, `name`, tool name, and argument types. It must exit with an error for bad input.
+The artifact always carries `tool` and the policy-declared `description`, when present. Without an `inputs` mapping, `artifact.args` is the complete argument object. With a mapping, it contains only selected values under their aliases. The declaration carries the optional `hint`, input sources, and mandate vocabulary. A battery Annotator must validate the version, `kind`, `name`, tool name, and argument types. It must exit with an error for bad input.
 
 OpenAPPA runs the command without a shell. The script path is relative to the battery config. Its folder is the working folder.
 

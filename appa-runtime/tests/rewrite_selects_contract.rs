@@ -245,8 +245,11 @@ async fn a_rewrite_into_the_public_contract_consults_its_annotator_about_the_rew
         "the public declaration's annotator is consulted once, about the rewrite"
     );
     assert_eq!(
-        consults[0]["artifact"]["args"],
-        serde_json::json!({ "name": "read_file", "arguments": { "path": "public/q3.md" } })
+        consults[0]["artifact"],
+        serde_json::json!({
+            "tool": "read_file",
+            "args": { "path": "public/q3.md" }
+        })
     );
 
     assert_eq!(
@@ -319,8 +322,11 @@ async fn a_rewrite_within_the_public_contract_is_annotated_afresh() {
         "a rewrite is a new call: the annotator is consulted about the rewritten arguments"
     );
     assert_eq!(
-        consults[1]["artifact"]["args"],
-        serde_json::json!({ "name": "read_file", "arguments": { "path": "public/q4.md" } })
+        consults[1]["artifact"],
+        serde_json::json!({
+            "tool": "read_file",
+            "args": { "path": "public/q4.md" }
+        })
     );
     assert_eq!(
         propose(&runtime, read_file("public/q4.md")).await,

@@ -145,8 +145,9 @@ pub struct SanitizerInput {
 
 #[derive(Debug, Deserialize)]
 struct AnnotatorArtifact {
-    /// Exactly what the annotator's declared inputs selected. This directory declares one
-    /// input, `to`, so that is the only key it reads.
+    /// Tool context plus exactly what the Annotator's declared inputs selected. This
+    /// directory serves `send_email` and reads its one mapped input, `to`.
+    tool: String,
     args: AnnotatorArgs,
 }
 
@@ -158,7 +159,10 @@ struct AnnotatorArgs {
 async fn annotator(
     axum::Json(request): axum::Json<Consult<AnnotatorArtifact>>,
 ) -> (StatusCode, axum::Json<serde_json::Value>) {
-    if request.version != 1 || request.name != crate::world::DIRECTORY_ANNOTATOR {
+    if request.version != 1
+        || request.name != crate::world::DIRECTORY_ANNOTATOR
+        || request.artifact.tool != "send_email"
+    {
         return (StatusCode::NOT_FOUND, axum::Json(serde_json::json!({})));
     }
 
@@ -475,6 +479,7 @@ mod tests {
             version: 1,
             name: "email-recipient-readers".to_string(),
             artifact: AnnotatorArtifact {
+                tool: "send_email".to_string(),
                 args: AnnotatorArgs { to: value.to_string() },
             },
         };
@@ -512,18 +517,21 @@ mod tests {
 
     #[tokio::test]
     async fn recipient_directory_refuses_unknown_bindings_and_other_versions() {
-        let consult = |version: u32, name: &str| Consult {
+        let consult = |version: u32, name: &str, tool: &str| Consult {
             version,
             name: name.to_string(),
             artifact: AnnotatorArtifact {
+                tool: tool.to_string(),
                 args: AnnotatorArgs {
                     to: "ap-review@corp.example".to_string(),
                 },
             },
         };
-        let (status, _) = annotator(axum::Json(consult(1, "someone-elses-annotator"))).await;
+        let (status, _) = annotator(axum::Json(consult(1, "someone-elses-annotator", "send_email"))).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
-        let (status, _) = annotator(axum::Json(consult(2, "email-recipient-readers"))).await;
+        let (status, _) = annotator(axum::Json(consult(2, "email-recipient-readers", "send_email"))).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = annotator(axum::Json(consult(1, "email-recipient-readers", "create_issue"))).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
 

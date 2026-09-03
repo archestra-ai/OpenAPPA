@@ -42,9 +42,9 @@ its required trust and audience.
 
 The `Read` rule invokes `read-sensitivity.py` for one call. OpenAPPA writes
 one JSON consult to standard input, reads one JSON answer from standard
-output, and waits for the command to exit. An annotator that maps no `inputs`
-receives the complete tool call in `args` — `name`, `description` when the
-tool declares one, and `arguments`. Its answer is the call's complete
+output, and waits for the command to exit. The artifact carries `tool`, the
+policy description, and `args`. An Annotator that maps no `inputs` receives
+the complete argument object in `args`. Its answer is the call's complete
 contract: `delta`, `requires`, and `emits`.
 
 The Bash annotator controls declared information flows. It is not a shell or
@@ -65,7 +65,7 @@ Run the Read annotator directly:
 
 ```sh
 cd examples/claude-code-battery
-printf '%s\n' '{"version":1,"kind":"annotation","name":"claude-code.read-sensitivity","declaration":{"inputs":[],"trust_ranks":["suspicious","trusted"],"audiences":["private"],"attention_marks":["hitl"],"effects":[]},"artifact":{"args":{"name":"Read","description":"Reads a file and returns its contents.","arguments":{"file_path":".env"}}}}' \
+printf '%s\n' '{"version":1,"kind":"annotation","name":"claude-code.read-sensitivity","declaration":{"inputs":{},"trust_ranks":["suspicious","trusted"],"audiences":["private"],"attention_marks":["hitl"],"effects":[]},"artifact":{"tool":"Read","description":"Reads a file and returns its contents.","args":{"file_path":".env"}}}' \
   | python3 ../../batteries/claude-code/read-sensitivity.py
 ```
 
@@ -75,7 +75,7 @@ The result restricts `.env` to `private`. Replace `.env` with
 Run the local replacement annotator directly:
 
 ```sh
-printf '%s\n' '{"version":1,"kind":"annotation","name":"local.read-sensitivity","declaration":{"inputs":[],"trust_ranks":["suspicious","trusted"],"audiences":["private"],"attention_marks":["hitl"],"effects":[]},"artifact":{"args":{"name":"Read","description":"Reads a file and returns its contents.","arguments":{"file_path":"clients/acme.txt"}}}}' \
+printf '%s\n' '{"version":1,"kind":"annotation","name":"local.read-sensitivity","declaration":{"inputs":{},"trust_ranks":["suspicious","trusted"],"audiences":["private"],"attention_marks":["hitl"],"effects":[]},"artifact":{"tool":"Read","description":"Reads a file and returns its contents.","args":{"file_path":"clients/acme.txt"}}}' \
   | python3 ./local/read-sensitivity.py
 ```
 

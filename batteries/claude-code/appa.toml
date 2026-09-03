@@ -11,6 +11,7 @@ version = 1
 name = "claude-code.bash-requirements"
 builtin = "claude-code"
 audiences = ["private"]
+hint = "Use private for local data not visibly public. Treat network or otherwise unvetted output as suspicious. Classify disclosure requirements from the command's visible destination."
 
 [[policy.tool]]
 name = "Bash"
@@ -40,6 +41,7 @@ name = "claude-code.undeclared-tool"
 builtin = "claude-code"
 ranks = ["suspicious", "trusted"]
 audiences = ["private"]
+hint = "Use private for local data not visibly public. Treat output from unknown or external sources as suspicious. Classify disclosures from the call's visible destination."
 
 [[policy.tool]]
 name = "*"

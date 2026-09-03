@@ -417,15 +417,16 @@ from pathlib import Path
 policy_path = Path(sys.argv[sys.argv.index("--policy") + 1])
 policy = tomllib.loads(policy_path.read_text())
 readers = ["cfo@northwind.example", "legal-lead@northwind.example"]
-declaration = {"inputs": ["subject"], "trust_ranks": [], "audiences": [], "attention_marks": [], "effects": []}
+def declaration(source):
+    return {"inputs": {"subject": source}, "trust_ranks": [], "audiences": [], "attention_marks": [], "effects": []}
 for request, expected in [
     (
         {
             "version": 1,
             "kind": "annotation",
             "name": "document-acl",
-            "declaration": declaration,
-            "artifact": {"args": {"subject": "project-onyx-packet.md"}},
+            "declaration": declaration("$tool_call.arguments.file"),
+            "artifact": {"tool": "read_finance", "args": {"subject": "project-onyx-packet.md"}},
         },
         {
             "version": 1,
@@ -441,8 +442,8 @@ for request, expected in [
             "version": 1,
             "kind": "annotation",
             "name": "distribution-list-members",
-            "declaration": declaration,
-            "artifact": {"args": {"subject": "onyx-steering@northwind.example"}},
+            "declaration": declaration("$tool_call.arguments.to"),
+            "artifact": {"tool": "send_email", "args": {"subject": "onyx-steering@northwind.example"}},
         },
         {
             "version": 1,

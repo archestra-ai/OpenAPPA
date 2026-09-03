@@ -37,9 +37,8 @@ class PolicyProfile:
 class AnnotatorAnswer:
     """One exact annotation consult answered by the scenario's loopback annotator.
 
-    The consult carries no tool name, so the annotator and the exact `args` it was sent are
-    the whole key. `args` is held in its canonical JSON spelling, which is what the fixture
-    compares an arriving consult against; `annotation` is the verbatim wire annotation.
+    The fixture requires the envelope's tool context, then keys the answer on the
+    Annotator and exact mapped `args`. `annotation` is the verbatim wire annotation.
     """
 
     annotator: str
@@ -181,8 +180,8 @@ def _policy_requires_of(name: str, table: dict) -> dict[str, dict[str, dict]]:
 
 @dataclass(frozen=True)
 class DeclaredAnnotator:
-    """One annotator's declaration, as the scenario's policy writes it: the input names its
-    consults carry and each mandate bound, `None` where the policy leaves it unbounded."""
+    """One Annotator declaration from the scenario policy: its input aliases and each
+    mandate bound, `None` where the policy leaves it unbounded."""
 
     inputs: frozenset[str]
     ranks: frozenset[str] | None

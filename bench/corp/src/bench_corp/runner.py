@@ -162,10 +162,12 @@ def _serve_external_fixtures(
             if isinstance(request, dict) and self.path == "/annotator":
                 kind = "annotation"
                 name = str(request.get("name", ""))
-                # The consult carries no tool name: the annotator and the exact `args` it was
-                # sent are the whole key.
                 artifact = _consult_artifact(request, "annotation", name)
-                annotation = annotation_by_request.get((name, canonical_args(artifact.get("args")))) if artifact else None
+                annotation = (
+                    annotation_by_request.get((name, canonical_args(artifact.get("args"))))
+                    if isinstance(artifact.get("tool"), str)
+                    else None
+                )
                 if annotation is not None:
                     response = {"version": 1, "answer": annotation}
             elif isinstance(request, dict) and self.path.startswith("/authority/"):

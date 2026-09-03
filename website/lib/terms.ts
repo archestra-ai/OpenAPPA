@@ -31,7 +31,7 @@ const TERMS = {
   annotation:
     "The complete concrete contract one released tool call carries: its delta, its requires, and the effects it emits. Written statically in the [[tool]] entry, or answered per call by an annotator; pinned to the exact call, so a rewrite is annotated afresh and replay never consults again.",
   "[[annotator]]":
-    "A named producer of per-call tool contracts. Its opaque non-empty name can contain dots. It declares the inputs it reads from a proposed call and its mandate — the vocabulary its answers may use — and may name a stock model transport with builtin = \"claude-code\" or \"llm\"; otherwise the deployment binds it under [externals.annotators.<name>].",
+    "A named producer of per-call tool contracts. It declares an optional policy-authored hint, an input mapping, and a mandate that bounds every answer. It may name builtin = \"claude-code\" or \"llm\"; otherwise the deployment binds it under [externals.annotators.<name>].",
   mandate:
     "The closed vocabulary an annotator's answers may use: ranks, audiences, marks, and effects. An omitted bound admits the whole policy vocabulary; public is always an admissible audience. Every transport's answer passes the same mandate validation.",
   remedy:
@@ -63,7 +63,7 @@ const TERMS = {
   "[membership]":
     "The one registration every @name group resolves through. A group mention without it is a load error. Its name binds under [externals.membership.<name>] to an endpoint or a command; no builtin serves a directory.",
   inputs:
-    "The values an annotator reads, each mapped from $tool_call on its declaration. Without an explicit mapping, the annotator reads the complete tool call: name, description when declared, and arguments.",
+    "The call data an annotator reads, expressed as an alias-to-$tool_call-source mapping. Without a mapping, artifact.args contains the complete argument object. Every artifact also carries the tool name and its policy-declared description, when present.",
   ranks:
     "In an annotator's mandate: the trust ranks its answers may write in delta.trust and requires.trust. Omitted, every rank in the trust chain.",
   audiences:
@@ -77,9 +77,9 @@ const TERMS = {
   "[externals.<kind>.<name>]":
     "One deployment binding: a registered authority or sanitizer bound to exactly one of url, command, or builtin; a membership resolver, or an annotator without a declared builtin, bound to url or command. A binding without a registration refuses the deployment, and so does an unbound sanitizer, annotator, or membership resolver; an unbound authority returns no answer.",
   declaration:
-    "The policy-authored half of a consult: the component's hint and permits, or an annotator's mandate vocabulary. The agent never writes it.",
+    "The policy-authored half of a consult: a component's hint and permits, or an annotator's hint, input mapping, and mandate vocabulary. The agent never writes it.",
   artifact:
-    "The judged half of a consult: the call and its unmet requirements, the body to rewrite, an annotator's args, or a group name. Never the trajectory.",
+    "The judged half of a consult: a call and its unmet requirements, a body to rewrite, an annotator's tool context and argument data, or a group name. Never the trajectory.",
   internal:
     "An example reader for restricted internal data. Reading internal data closes off public destinations.",
   "{public, trusted}":
@@ -103,7 +103,7 @@ const TERMS = {
   /* Authorities */
   permits:
     "What a registered component may do, declared in its own table. For an authority: which unmet requirements its rulings can clear, and how far. For a sanitizer: the one transition, on one dimension, its derivation can claim.",
-  hint: "The deployer's own account of what an authority or sanitizer is for. Carried into every remedy plan naming it, so the agent chooses on stated purpose, and into the component's consult, so a model implementation reads its charter. Advisory: it grants nothing.",
+  hint: "The deployer's trusted instruction for an authority, sanitizer, or annotator. It explains what the component covers, removes, or classifies. It enters the component's consult, and authority or sanitizer hints also enter remedy plans. Advisory: it grants nothing.",
   trust_below:
     "In an authority's permits: it can rule for a call whose trust requirement is unmet, for requirements up to this rank.",
   audience_missing:

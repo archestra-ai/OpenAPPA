@@ -102,19 +102,26 @@ class AnnotatorFixture:
         return mandate_readers(self.customer_db)
 
     def annotate(self, request: object) -> dict[str, object]:
-        """The complete annotation this consult asks for. The consult carries no tool
-        name, so the annotator name and its own mapped input are the whole key."""
+        """The complete annotation this consult asks for, selected by its Annotator
+        name and mapped input after validating the call's tool context."""
         if not isinstance(request, dict) or not {"version", "kind", "name", "artifact"} <= set(request):
             raise ValueError("invalid annotation consult")
         artifact = request["artifact"]
         args = artifact.get("args") if isinstance(artifact, dict) else None
+        tool = artifact.get("tool") if isinstance(artifact, dict) else None
+        expected_tool = {
+            "customer-acl": "lookup_customer",
+            "message-recipient-members": "send_message",
+            "response-recipient-members": "respond_to_user",
+        }.get(request["name"])
         if (
             request["version"] != 1
             or request["kind"] != "annotation"
+            or tool != expected_tool
             or not isinstance(args, dict)
             or not isinstance(args.get("subject"), str)
         ):
-            raise ValueError("invalid annotation consult version or args")
+            raise ValueError("invalid annotation consult version, tool, or args")
         subject = args["subject"]
         match request["name"]:
             case "customer-acl":

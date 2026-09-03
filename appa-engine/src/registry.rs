@@ -371,7 +371,7 @@ pub enum LoadError {
         "confined-return stage: {count} worst-case sanitizer alternatives exceed the planner cap of {max} — reduce the registered output sanitizers or raise `[limits] planner_cap`"
     )]
     TooManyReturnPlanAlternatives { count: u128, max: u128 },
-    #[error("{context}: hint is {len} characters, over the {max} a plan offer carries")]
+    #[error("{context}: hint is {len} characters, over the maximum {max}")]
     HintTooLong { context: String, len: usize, max: usize },
     #[error(
         "{context}: {reader:?} is not a literal reader ID — `public` is a label state, and the `@` mark is reserved for groups a membership resolver expands"
@@ -456,9 +456,9 @@ impl Default for PlannerCap {
     }
 }
 
-/// The longest hint a registration may carry. Every offer of every block repeats the
-/// hints of the entities it names, so an unbounded one is a way to flood the agent's context from
-/// configuration. A sentence or two is the intended shape.
+/// The longest hint a registration may carry. Remedy offers repeat Authority and Sanitizer
+/// hints, and model consults carry component hints in their system prompts. A bounded hint keeps
+/// trusted configuration from flooding either context. A sentence or two is the intended shape.
 pub const MAX_HINT_CHARS: usize = 512;
 
 fn worst_case_plan_alternatives(

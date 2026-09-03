@@ -928,7 +928,8 @@ mod tests {
             name: name.to_string(),
             body: ConsultBody::Annotation {
                 declaration: AnnotationDeclaration {
-                    inputs: vec![],
+                    hint: Some("Classify customer records for the declared audiences.".to_string()),
+                    inputs: BTreeMap::new(),
                     trust_ranks: vec!["suspicious".to_string(), "trusted".to_string()],
                     audiences: vec![
                         "public".to_string(),
@@ -938,7 +939,11 @@ mod tests {
                     attention_marks: vec!["privacy-review".to_string(), "review".to_string()],
                     effects: vec!["email".to_string()],
                 },
-                artifact: AnnotationArtifact { args },
+                artifact: AnnotationArtifact {
+                    tool: "lookup_customer".to_string(),
+                    description: Some("Looks one customer up.".to_string()),
+                    args,
+                },
             },
         }
     }
@@ -1158,6 +1163,13 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
                 .expect("stdin is one JSON request");
         assert_eq!(request["kind"], "annotation");
         assert_eq!(request["name"], "classifier");
+        assert_eq!(
+            request["declaration"]["hint"],
+            "Classify customer records for the declared audiences."
+        );
+        assert_eq!(request["declaration"]["inputs"], serde_json::json!({}));
+        assert_eq!(request["artifact"]["tool"], "lookup_customer");
+        assert_eq!(request["artifact"]["description"], "Looks one customer up.");
         assert_eq!(request["artifact"]["args"], serde_json::json!({"path": "notes.txt"}));
         assert_eq!(
             std::fs::read_to_string(dir.path().join("argument.txt")).unwrap(),

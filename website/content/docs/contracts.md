@@ -106,16 +106,17 @@ OpenAPPA selects the contract before it validates that contract's `parameters` s
 
 Every released tool call carries one complete annotation: the `delta` its result contributes, the `requires` it must meet, and the effects it emits. A `[[tool]]` entry usually writes that annotation statically. Where the right contract depends on the call itself — a file path, a recipient, a command line — the entry names a registered **annotator** instead, and the annotator answers the complete annotation for each proposed call. An annotator does not resolve `@group` membership.
 
-An `[[annotator]]` declares two things: the `inputs` it reads from a proposed call, and its **mandate** — the closed vocabulary its answers may use. A `[[tool]]` routes through it with `annotator = "<name>"`; that entry then writes no `delta`, `requires`, or `effects` of its own, because the annotator produces all three. Annotator names are opaque non-empty strings and can contain dots.
+An `[[annotator]]` declares three things. Its optional `hint` explains the policy vocabulary. Its `inputs` select call data. Its **mandate** bounds every answer. A `[[tool]]` routes through it with `annotator = "<name>"`. That tool entry writes no `delta`, `requires`, or `effects` because the annotator produces all three. Annotator names are opaque non-empty strings and can contain dots.
 
 #### Example: pass the complete call
 
-Omit `inputs` on the annotator to pass the complete tool call: its name, its description when the tool declares one, and its arguments.
+Omit `inputs` to pass the complete argument object. Every artifact also carries the tool name and its policy-declared description, when present.
 
 ```toml
 [[annotator]]
 name  = "classify-command"
 ranks = ["suspicious", "trusted"]              # The trust ranks its answers may use
+hint  = "Use suspicious for output from network or unvetted sources. Use trusted only for local computation over trusted inputs."
 
 [[tool]]
 name        = "Bash"
@@ -123,20 +124,20 @@ description = "Runs one shell command and returns its output."
 annotator   = "classify-command"
 ```
 
-The annotator receives this value as the consult's `artifact.args`:
+The annotator receives this consult artifact:
 
 ```json
 {
-  "name": "Bash",
+  "tool": "Bash",
   "description": "Runs one shell command and returns its output.",
-  "arguments": {
+  "args": {
     "command": "git push origin main",
     "timeout": 60000
   }
 }
 ```
 
-This form does not need a tool parameter schema. It does not need a `description`: a tool without one sends `name` and `arguments` only.
+This form does not need a tool parameter schema. A tool without a `description` omits that artifact field.
 
 #### Example: pass one argument
 
@@ -146,14 +147,16 @@ name      = "classify-customer"
 inputs    = { subject = "$tool_call.arguments.customer_id" }
 ranks     = ["suspicious", "trusted"]
 audiences = ["finance", "support"]             # The readers a restricted audience answer may name
+hint      = "finance may read billing records. support may read records assigned to a support case."
 
 [[tool]]
 name       = "get_customer"
+description = "Reads one customer record."
 parameters = { type = "object", properties = { customer_id = { type = "string" } }, required = ["customer_id"] }
 annotator  = "classify-customer"
 ```
 
-The annotator receives only `customer_id`, under the name `subject`. Its answer is still the complete contract for the call.
+The artifact identifies `get_customer` and carries its description. Its `args` contains only `{"subject":"..."}`. Unselected arguments do not cross the consult boundary. The answer is still the complete contract for the call.
 
 #### Example: cover the long tail with a wildcard
 
@@ -176,6 +179,8 @@ A call no declaration and no wildcard covers is refused before it runs. That ref
 
 The mandate is the vocabulary an annotator's answers may use. Every bound is optional; an omitted bound admits the whole policy vocabulary, so a reviewed mandate is written, not implied.
 
+The optional `hint` is trusted deployer instruction. It can define ranks, audiences, marks, and effects. It can also give evidence rules and complete examples. The hint is advisory and cannot expand the mandate. A hint is at most 512 characters.
+
 | Key | Bounds | Omitted |
 |---|---|---|
 | `ranks` | The trust ranks an answer may write in `delta.trust` and `requires.trust`. | Every rank in the trust chain. |
@@ -185,7 +190,7 @@ The mandate is the vocabulary an annotator's answers may use. Every bound is opt
 
 #### Rules
 
-- An annotator declares its inputs and its mandate. A tool routes through at most one, with `annotator`; that replaces the static `delta`, `requires`, and `effects`, and writing it beside any of them is a load error.
+- An annotator declares its optional hint, inputs, and mandate. A tool routes through at most one with `annotator`. That replaces static `delta`, `requires`, and `effects`; writing both forms is a load error.
 - The answer is one complete annotation. An omitted leaf is the identity: no restriction on that dimension, no requirement in that slot.
 - The answer is pinned to the exact call it annotated. A pinned recheck and a replay never consult the annotator again, and a `tool_input` rewrite is annotated afresh for its own bytes.
 - If the annotator fails or answers outside its mandate, the call does not run. The refusal is operational — the call was never judged — and nothing is appended: the call can be proposed again.
@@ -200,7 +205,7 @@ An annotator maps each declared input from the proposed call. `$tool_call` is th
 | `$tool_call.arguments` | Complete argument object |
 | `$tool_call.arguments.<name>` | One top-level argument |
 
-An annotator with no `inputs` receives `$tool_call` as its `args`. `$tool_call.description` needs a tool `description`; `$tool_call` does not, and omits the key when there is none. A single argument needs a tool parameter schema, and the schema must mark that top-level argument as required. The annotator then receives whatever JSON value the call carries under that name.
+Every annotation artifact carries the tool name and its policy-declared description, when present. With no `inputs`, `args` is the complete argument object. With an input mapping, `args` contains only the selected values under their aliases. The declaration maps each alias to its `$tool_call` source. `$tool_call.description` needs a tool `description`. A single argument needs a tool parameter schema. The schema must mark that top-level argument as required.
 
 #### Implementing an annotator
 
@@ -210,11 +215,12 @@ An annotator either carries its implementation or leaves it to the deployment. A
 [[annotator]]
 name    = "classify-call"
 builtin = "claude-code"
+hint    = "Use internal for company-only data and suspicious for data from unvetted sources."
 ```
 
 The mandate is the ceiling policy review relies on, whichever transport serves the annotator: every transport passes the same exact-shape and mandate validation before an annotation is admitted.
 
-The consult's declaration is the annotator's resolved mandate and input names; its artifact is `args`. For the one-argument example above:
+The consult declaration carries the hint, input mapping, and resolved mandate. The artifact carries tool context and selected argument data. For the one-argument example above:
 
 ```json
 {
@@ -222,26 +228,34 @@ The consult's declaration is the annotator's resolved mandate and input names; i
   "kind": "annotation",
   "name": "classify-customer",
   "declaration": {
-    "inputs": ["subject"],
+    "hint": "finance may read billing records. support may read records assigned to a support case.",
+    "inputs": { "subject": "$tool_call.arguments.customer_id" },
     "trust_ranks": ["suspicious", "trusted"],
     "audiences": ["finance", "support"],
     "attention_marks": [],
     "effects": []
   },
-  "artifact": { "args": { "subject": "cust-7" } }
+  "artifact": {
+    "tool": "get_customer",
+    "description": "Reads one customer record.",
+    "args": { "subject": "cust-7" }
+  }
 }
 ```
 
 | Key | Meaning |
 |---|---|
-| `declaration.inputs` | The declared input names. Empty when the annotator reads the complete call. |
+| `declaration.hint` | The deployer's optional instruction for policy-specific classification. It grants nothing outside the mandate. |
+| `declaration.inputs` | Each input alias and its `$tool_call` source. Empty when `args` is the complete argument object. |
 | `declaration.trust_ranks` | The mandate's trust ranks, least-trusted first. A trust value must name one of these. |
 | `declaration.audiences` | The mandate's readers. A restricted audience value may name these only. |
 | `declaration.attention_marks` | The mandate's attention marks. An attention value must name these only. |
 | `declaration.effects` | The mandate's effect kinds. An `emits` or history value must name these only. |
-| `artifact.args` | The data the input mapping selected, under the declared input names. Without a mapping, the complete call: `name`, `description` when declared, and `arguments`. |
+| `artifact.tool` | The proposed tool name. |
+| `artifact.description` | The policy-declared tool description, when present. |
+| `artifact.args` | The complete argument object, or only mapped values under their input aliases. |
 
-The consult carries nothing about the trajectory: no current label, no rank, no reader ids, no history. An annotator with mapped inputs that needs the tool name or its description reads it as an input.
+The consult carries nothing about the trajectory: no current label, no rank, no reader ids, and no history.
 
 Response, from an endpoint or a command:
 
@@ -287,8 +301,8 @@ A tool contract is short: a name, a `delta`, and often `effects` and a `[tool.re
 | **Combined Read & Release** | Single tool `share_doc(doc, recipient)` fetching and releasing in one step. | Split into `fetch_doc` (read) and `grant_doc_access` (release). | Combined tools force authorities to approve releases before content is fetched. |
 | **What an authority permits** | A wide `permits` table, such as `audience_missing = ["public"]`. | Restrict the authority's `permits` and `tags` to the minimum the desk needs. | An authority cannot rule beyond its `permits`, but a wide `permits` weakens the review gate. |
 | **Auto-Approval Wiring** | `builtin = "approve"` behind a wide `permits` — an automated yes across everything it permits. | Keep what an auto-approval authority permits narrow; reserve wide `permits` for `hitl` or a reviewed resolver. | `builtin = "approve"` creates an automated open gate for all matching actions. Keep its `permits` and `tags` minimal. |
-| **Model Judge Wiring** | `builtin = "claude-code"` or `builtin = "llm"` behind a wide `permits`, or on a sanitizer with a wide transition. | Keep a model authority's `permits` narrow and its `hint` exact; give a model sanitizer the narrowest transition its job needs. | `permits` caps what a model ruling clears and what a model derivation claims, not how well the model judged. The model sees only the declaration and the artifact, never the trajectory. |
-| **Hint Accuracy** | A `hint` describing a power the `permits` does not hold, or content the sanitizer does not remove. | Restate what the component permits in your own words: say what the entity covers, strips, or labels, and nothing more. | A hint reaches the agent with every plan naming the entity, reaches a model implementation as its charter, and grants nothing. A misleading one steers plan choice wrongly and misleads review. |
+| **Model Judge Wiring** | `builtin = "claude-code"` or `builtin = "llm"` behind a wide `permits`, transition, or Annotator mandate. | Keep `permits` and transitions narrow. Bound each Annotator mandate and give it an exact `hint`. | The declaration caps model output. It does not prove that the model classified the artifact correctly. The model never sees the trajectory. |
+| **Hint Accuracy** | A `hint` describes unavailable authority powers, incomplete sanitizer behavior, or Annotator vocabulary incorrectly. | State what the component covers, removes, or classifies. For an Annotator, define policy-specific values and the evidence that selects them. | A hint grants nothing. A misleading hint directs model judgment incorrectly and misleads policy review. |
 
 ## Tools
 
@@ -537,14 +551,14 @@ Every transport receives one JSON object per consult:
 | `version` | The consult shape. It is `1`. |
 | `kind` | `authority`, `sanitizer`, `annotation`, or `membership`. |
 | `name` | The registered name, for one service that answers for several. |
-| `declaration` | The policy's own words for this component: its `hint` and `permits`, or an annotator's mandate vocabulary. The policy author wrote it; the agent never can. |
-| `artifact` | The value under judgment: the call and its unmet requirements, the body to rewrite, an annotator's `args`, or the group name. |
+| `declaration` | The policy-authored half: a component's `hint` and `permits`, or an Annotator's hint, input mapping, and mandate. The agent never writes it. |
+| `artifact` | The judged value: a call and its unmet requirements, a body to rewrite, an Annotator's tool context and arguments, or a group name. |
 
 | Kind | `declaration` | `artifact` | `answer` |
 |---|---|---|---|
 | `authority` | `hint`, `permits` | `tool`, `arguments`, `requirements` | `ruling` (`approve` or `deny`), optional `reason` |
 | `sanitizer` | `hint`, `on`, `permits`, `parameters` (for `tool_input`) | `tool` (when known), `body` | `body` |
-| `annotation` | `inputs`, `trust_ranks`, `audiences`, `attention_marks`, `effects` | `args` | `delta`, `requires`, `emits` |
+| `annotation` | `hint`, `inputs`, `trust_ranks`, `audiences`, `attention_marks`, `effects` | `tool`, optional `description`, `args` | `delta`, `requires`, `emits` |
 | `membership` | empty | `group` | `readers` |
 
 The consult never carries the trajectory: no current label, no rank, no reader ids, no history, no user turn. A component judges the artifact against its own declaration and nothing else.
@@ -553,7 +567,7 @@ An endpoint or a command answers `{"version": 1, "answer": { … }}`. `version` 
 
 ### Model transports
 
-`claude-code` and `llm` render the same consult for a model: a fixed per-kind preamble and the `declaration` JSON as the system prompt, the `artifact` JSON as the only user turn, and an output schema built from the declaration — the `ruling` enum, an annotation's mandate vocabulary. The model answers the bare per-kind object; the artifact is treated as data, never as instructions. The prompt and the raw model output are never persisted; only the validated answer is.
+`claude-code` and `llm` render the same model consult. The system prompt contains a fixed preamble and the `declaration` JSON. The `artifact` JSON is the only user turn. The output schema comes from the declaration, including an Annotator's mandate vocabulary. The model answers the bare per-kind object. The artifact is data, never instructions. OpenAPPA does not persist the prompt or raw model output. It persists only the validated answer.
 
 A model answer can do what the kind allows any implementation: an authority's ruling stays within `permits`, an annotation within its annotator's mandate, and a sanitizer's derivation carries exactly the `permits` transition. A model sanitizer deserves a second look: `permits` caps the label the derivation claims, not the bytes the model leaves in it, so keep its transition narrow and its `hint` exact.
 

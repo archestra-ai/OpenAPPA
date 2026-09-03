@@ -5,9 +5,7 @@ use std::sync::Arc;
 
 use crate::elicit::Elicitation;
 
-use crate::consult::{
-    AnnotationAnswer, AnnotationArtifact, Consult, ConsultBody, MembershipArtifact, ReadersAnswer, SanitizerAnswer,
-};
+use crate::consult::{AnnotationAnswer, Consult, ConsultBody, MembershipArtifact, ReadersAnswer, SanitizerAnswer};
 use crate::engine::{
     AuthorityVerdict, EngineDecision, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Feedback, ForkStatus,
     Liveness, Next, OfferNonce, OpenDispatch, Presentation, engine_id,
@@ -806,13 +804,13 @@ impl Session {
                 annotator,
                 call,
                 declaration,
-                args,
+                artifact,
             } => {
                 let consult = Consult {
                     name: annotator.clone(),
                     body: ConsultBody::Annotation {
                         declaration: declaration.clone(),
-                        artifact: AnnotationArtifact { args: args.clone() },
+                        artifact: artifact.clone(),
                     },
                 };
                 let answer = match self.deployment.externals.consult(&consult, None).await {
