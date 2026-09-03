@@ -12,9 +12,29 @@ import re
 
 import pytest
 
-from conftest import INJECTION, SECRET
+from conftest import (
+    CHILD,
+    CHILD_TOOL,
+    INJECTION,
+    SECRET,
+    SPAWN_NOT_TAKEN,
+    UNDECLARED,
+    UNDECLARED_TOOL,
+    child_return_shape,
+)
 
 OFFER_ID = re.compile(r"[a-f0-9]{16}")
+# The two delegations name their agents from the same values the wire
+# names come from, so a renamed child is asked for under its own name.
+DELEGATE = f"ask the {CHILD.replace('-', ' ')} to analyze the crash logs of checkout-api-b2k1 and give me its summary"
+DELEGATE_UNDECLARED = f"ask the {UNDECLARED.replace('-', ' ')} to approve a version bump of checkout-api to 2.4.1"
+# The shapes an allowed delegation's response takes on the wire. Both
+# are the crossing itself, replayed at the parent: `returned` carries
+# the child's session id beside the value, and `bare` carries the value
+# alone. Every other shape fails the case. A withhold is the parent's
+# gate refusing a message the child never returned at a stop, so nothing
+# crossed into the parent.
+CHILD_RETURN_SHAPES = ("returned", "bare")
 
 
 def test_an_ordinary_read_flows_real_data(agent):
@@ -127,23 +147,66 @@ def test_the_release_window_authority_denies_out_of_window(agent):
 
 
 def test_the_delegated_child_is_gated_in_its_own_branch(agent):
-    task = agent.say("ask the log analyst to analyze the crash logs of checkout-api-b2k1 and give me its summary")
-    assert INJECTION not in task.text()
+    """The log analyst is the child the policy names under its wire
+    spelling. Two parent sessions delegate to it in turn, each in a fresh
+    context. For each, the parent's call is on the wire, the spawn is
+    released, and the delegation answers with the value that crossed at
+    the child's stop — never with a denial, and never with a withhold. A
+    withhold means nothing crossed into the parent. The one that carries
+    the runtime's ``SPAWN_NOT_TAKEN`` reason says why: the child's
+    session opened under another parent's root, and this parent's
+    prepared fork was never bound. On the go cell one child session
+    serves every parent, so the second parent is what tells a child
+    opened per (root, child) pair from one opened per session, on a
+    fresh child pod too.
+
+    The child's value is checked where the child stops, so what reaches
+    the parent has crossed already: as the child spoke it, or as the
+    runtime shaped it. The parent's own gate declares nothing new here,
+    and the replay carries the child's own answer.
+
+    Each parent delegates once. A second delegation from one parent
+    session sends a new fork at a child identity the family already
+    opened, which the runtime refuses — one errand is one child
+    trajectory. The injection in the logs never reaches the caller."""
+    for parent in ("the first parent session", "the second parent session"):
+        task = agent.say(DELEGATE)
+        assert task.state == "completed", parent
+        assert task.calls(CHILD_TOOL), f"{parent} tried the delegation"
+        responses = task.responses(CHILD_TOOL)
+        assert responses, f"the child's return reached {parent}"
+        for body in responses:
+            shape = child_return_shape(body)
+            assert shape != "failed", f"the child answered {parent}, not kagent's own failure text: {body}"
+            assert shape != "spawn-not-taken", (
+                f"the child opened under the prepared fork of {parent}, not under another parent's root "
+                f"(the withheld text carries {SPAWN_NOT_TAKEN!r}): {body}"
+            )
+            assert shape != "withheld", (
+                f"the child's value crossed at its own stop and the parent replays it, so the gate of {parent} "
+                f"withheld nothing: {body}"
+            )
+            assert shape in CHILD_RETURN_SHAPES, (
+                f"the spawn of {parent} is released, and its return is one a released spawn answers with: {body}"
+            )
+            assert str(body.get("result") or "").strip(), (
+                f"the replay carries the child's own answer to {parent}: {body}"
+            )
+            assert "not declared by the policy" not in str(body), f"the policy names the child: {body}"
+        assert INJECTION not in task.text(), f"the injected instruction never reaches the caller through the child ({parent})"
+        assert task.confirmation() is None, f"nobody is asked ({parent})"
 
 
 def test_a_delegation_the_policy_never_names_is_denied(agent):
     """The release manager is listed as a tool and named by no policy
     contract: the spawn is denied with the runtime's reason, and no child
     session ever opens (no subagent_session_id comes back)."""
-    task = agent.say("ask the release manager to approve a version bump of checkout-api to 2.4.1")
-    data = [part.get("data") for part in task.parts() if part.get("kind") == "data" and isinstance(part.get("data"), dict)]
-    calls = [d for d in data if str(d.get("name", "")).startswith("kagent__NS__release_manager") and "args" in d]
-    assert calls, "the parent tried the delegation"
-    responses = [d for d in data if str(d.get("name", "")).startswith("kagent__NS__release_manager") and "response" in d]
+    task = agent.say(DELEGATE_UNDECLARED)
+    assert task.calls(UNDECLARED_TOOL), "the parent tried the delegation"
+    responses = task.responses(UNDECLARED_TOOL)
     assert responses, "the tool answered the model"
-    for response in responses:
-        body = response["response"]
-        assert body.get("appa") == "denied", f"the delegation is denied, not run: {body}"
+    for body in responses:
+        assert child_return_shape(body) == "denied", f"the delegation is denied, not run: {body}"
         assert "not declared by the policy" in str(body.get("result", "")), "the runtime's own reason reaches the model"
         assert "subagent_session_id" not in body, "no child session opened"
     assert task.confirmation() is None, "nobody is asked"
