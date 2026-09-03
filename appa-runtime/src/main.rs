@@ -201,7 +201,12 @@ fn current_executable_metadata() -> io::Result<(u64, SystemTime)> {
     Ok((metadata.len(), metadata.modified()?))
 }
 
-fn binary_digest(path: &Path) -> io::Result<String> {
+/// The fingerprint a runtime serves at `/binary-fingerprint`.
+///
+/// `init` computes the same value for the binary it is about to deploy and compares
+/// the two to decide whether the process on the endpoint is its own deployment. The
+/// two sides must render the digest identically, so they share this one definition.
+pub(crate) fn binary_digest(path: &Path) -> io::Result<String> {
     let bytes = fs::read(path)?;
     let digest = Sha256::digest(bytes);
     Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())

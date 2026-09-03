@@ -45,10 +45,15 @@ fn debug_override(name: &str) -> Option<String> {
 /// Files and directories every plugin source must carry, in the marketplace-root
 /// shape `plugin_layout::stage_repository` produces. One validator serves
 /// both source resolution and the reuse check on an existing deployment.
-const REQUIRED_FILES: [&str; 8] = [
+const REQUIRED_FILES: [&str; 9] = [
     ".claude-plugin/marketplace.json",
     "plugin/.claude-plugin/plugin.json",
     "plugin/hooks/hooks.json",
+    // The starter init runs on Unix once the plugin is already in place, and the
+    // file `set_executable_modes` marks executable. Missing here is a refusal
+    // before anything is mutated; missing there is a plugin Claude points at and
+    // a runtime nothing can bring up.
+    "plugin/hooks/ensure-runtime.sh",
     // Both hook maps register a wrapper script rather than a command line, so a
     // tree carrying the map without its script registers hooks that cannot run.
     // Materialization keeps both scripts; only the inactive map is removed.
@@ -467,10 +472,15 @@ fn path_identity(path: &Path) -> Result<&str, PluginBundleError> {
 // Materialization
 // ---------------------------------------------------------------------------
 
-/// The generated file every deployed shell surface sources.
+/// The two generated files every deployed shell surface sources, one per
+/// platform. Both are written into every deployment, so a deployment made from
+/// a POSIX host still carries a current PowerShell one.
 const PATHS_SH: &str = "plugin/hooks/appa-paths.sh";
-const WINDOWS_HOOKS: &str = "plugin/hooks/hooks.windows.json";
 const PATHS_PS1: &str = "plugin/hooks/appa-paths.ps1";
+
+/// The Windows hook map. Materialization renames it over `hooks.json` on
+/// Windows and removes it everywhere else, so a deployment carries exactly one.
+const WINDOWS_HOOKS: &str = "plugin/hooks/hooks.windows.json";
 
 /// Where a deployment's bytes come from at materialization time.
 #[derive(Clone, Copy)]
@@ -605,15 +615,6 @@ pub fn materialize(
     })
 }
 
-/// Whether an existing deployment can be reused as-is.
-///
-/// Structural validation plus a byte comparison of both generated files. Both
-/// are checked on every platform, not just the one whose hooks are active here:
-/// a deployment is a single artifact, and a stale PowerShell paths file would
-/// otherwise survive every rerun performed from a POSIX host. This is
-/// deliberately not a content hash of every file: a tree whose `batteries/`
-/// contents were edited in place is not detected, and init's convergence claim
-/// is scoped to match.
 /// Remove this init's own unpublished reservation. No registered state is
 /// lost with it, so a failure is noted rather than reported over the error
 /// or the deployment the caller is already returning.
@@ -623,6 +624,15 @@ fn discard_reservation(incoming: &Path) {
     }
 }
 
+/// Whether an existing deployment can be reused as-is.
+///
+/// Structural validation plus a byte comparison of both generated files. Both
+/// are checked on every platform, not just the one whose hooks are active here:
+/// a deployment is a single artifact, and a stale PowerShell paths file would
+/// otherwise survive every rerun performed from a POSIX host. This is
+/// deliberately not a content hash of every file: a tree whose `batteries/`
+/// contents were edited in place is not detected, and init's convergence claim
+/// is scoped to match.
 fn reusable(published: &Path, plan: &DeploymentPlan) -> Result<(), String> {
     validate_tree(published, TreeShape::Deployment).map_err(|error| error.to_string())?;
     for (name, expected) in [(PATHS_SH, paths_sh(plan)), (PATHS_PS1, paths_ps1(plan))] {
