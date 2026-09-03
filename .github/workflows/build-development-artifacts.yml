@@ -60,13 +60,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           RELEASE_REF: ${{ steps.release.outputs.release_ref }}
         run: |
           gh release create "$RELEASE_REF" dist/* \
             --repo "$GITHUB_REPOSITORY" \
             --target "$HEAD_SHA" \
             --title "OpenAPPA ${RELEASE_REF}" \
-            --notes "Development artifacts for PR #${{ github.event.pull_request.number }} at ${HEAD_SHA}. Not a supported release." \
+            --notes "Development artifacts for PR #${PR_NUMBER} at ${HEAD_SHA}. Not a supported release." \
             --prerelease
 
       - name: Publish usage summary
