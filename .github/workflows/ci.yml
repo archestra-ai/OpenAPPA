@@ -572,9 +572,6 @@ jobs:
       needs.changes.outputs.e2e == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    permissions:
-      contents: read
-      models: read
     env:
       KIND_CLUSTER: appa-e2e
       KAGENT_VERSION: "0.9.12"
@@ -583,10 +580,11 @@ jobs:
       # The load leaves each image in the daemon and in the cluster node,
       # so the script drops the daemon copy.
       APPA_E2E_PRUNE_DAEMON_IMAGES: "1"
-      # One endpoint serves the agents and the policy's sanitizers. GitHub
-      # Models provides the OpenAI-compatible model through the job token.
-      APPA_E2E_MODEL: openai/gpt-4.1-mini
-      APPA_E2E_BASE_URL: https://models.github.ai/inference
+      # One endpoint serves the agents and the policy's sanitizers. This
+      # free model advertises the tools, response_format and structured
+      # outputs that the sanitizer consult needs.
+      APPA_E2E_MODEL: nvidia/nemotron-3-super-120b-a12b:free
+      APPA_E2E_BASE_URL: https://openrouter.ai/api/v1
     steps:
       - name: Checkout project
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -650,7 +648,7 @@ jobs:
 
       - name: Install kagent and the demo chart
         env:
-          OPENROUTER_API_KEY: ${{ github.token }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: bash integrations/kagent/e2e/ci/install.sh
 
       - name: Setup uv
