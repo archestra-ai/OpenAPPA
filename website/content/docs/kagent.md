@@ -17,13 +17,13 @@ controller:
   agentImage:
     registry: ghcr.io
     repository: archestra-ai/appa-kagent-quickstart
-    tag: 0.7.1 # x-release-please-version
+    tag: 0.8.0 # x-release-please-version
 
   # Go declarative runtime image
   goAgentImage:
     registry: ghcr.io
     repository: archestra-ai/appa-kagent-adk-go
-    tag: 0.7.1 # x-release-please-version
+    tag: 0.8.0 # x-release-please-version
 ```
 
 The image replaces the default kagent runtime image. It stays inert until activated with `APPA_ENABLED: "true"`:
@@ -92,7 +92,7 @@ helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --version 0.9.12 -n kagent \
   --set controller.agentImage.registry=ghcr.io \
   --set controller.agentImage.repository=archestra-ai/appa-kagent-quickstart \
-  --set controller.agentImage.tag=0.7.1 --wait # x-release-please-version
+  --set controller.agentImage.tag=0.8.0 --wait # x-release-please-version
 ```
 
 To build images from source, see [`integrations/kagent/README.md`](https://github.com/archestra-ai/OpenAPPA/blob/main/integrations/kagent/README.md).
@@ -131,7 +131,7 @@ helm upgrade kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   -n kagent --reuse-values \
   --set controller.agentImage.registry=ghcr.io \
   --set controller.agentImage.repository=archestra-ai/appa-kagent-quickstart \
-  --set controller.agentImage.tag=0.7.1 # x-release-please-version
+  --set controller.agentImage.tag=0.8.0 # x-release-please-version
 ```
 
 If you run Go agents, also set `controller.goAgentImage`:
@@ -139,7 +139,7 @@ If you run Go agents, also set `controller.goAgentImage`:
 ```sh
   --set controller.goAgentImage.registry=ghcr.io \
   --set controller.goAgentImage.repository=archestra-ai/appa-kagent-adk-go \
-  --set controller.goAgentImage.tag=0.7.1 # x-release-please-version
+  --set controller.goAgentImage.tag=0.8.0 # x-release-please-version
 ```
 
 ### 2. Write a policy that names your tools

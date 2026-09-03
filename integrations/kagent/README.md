@@ -59,7 +59,7 @@ helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --version 0.9.12 -n kagent \
   --set controller.agentImage.registry=ghcr.io \
   --set controller.agentImage.repository=archestra-ai/appa-kagent-quickstart \
-  --set controller.agentImage.tag=0.7.1 --wait # x-release-please-version
+  --set controller.agentImage.tag=0.8.0 --wait # x-release-please-version
 ```
 
 ### Gate an agent
