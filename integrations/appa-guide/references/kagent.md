@@ -53,12 +53,23 @@ apply by hand. Do not treat this as an error.
    `McpServer` reference and its `toolNames`, and each `type: Agent`
    delegation. Note agents with skills or `executeCodeBlocks`: they add
    the skill tools and code execution.
-3. Cross-check. A `toolNames` entry no server discovered has a name but
+3. Record each `Agent`'s `spec.declarative.deployment.env`. An agent
+   runs gated only when `APPA_ENABLED` reads `true` there. Unset, empty
+   or `false` serves the stock kagent runtime, and no policy applies to
+   that agent, whatever `APPA_RUNTIME_URL` says. Any other value
+   refuses the start. A gated agent reaches this policy only when its
+   `APPA_RUNTIME_URL` names the runtime you found. One that names
+   another runtime runs on that runtime's policy.
+4. Cross-check. A `toolNames` entry no server discovered has a name but
    no description; if its boundary is unclear, it belongs in the one
    ambiguity question below.
-4. Count kagent's built-in `ask_user` and the entrypoint's synthetic
-   `appa_code_execution` and `appa_memory_persist` as installed tools.
-5. Compare the installed tools with the root rules. Existing rules stay
+5. Count these as installed tools: kagent's built-in `ask_user`, and the
+   entrypoint's synthetic `appa_code_execution` and
+   `appa_memory_persist`. An agent with `spec.declarative.memory` adds
+   the memory tools `load_memory` and `save_memory`. Its memory prefetch
+   hands the model no function to call: no rule covers it, and the
+   memories it appends cross no gate.
+6. Compare the installed tools with the root rules. Existing rules stay
    in control, including rules for tools a battery would also cover.
 
 ## Wire names
@@ -110,11 +121,17 @@ Show:
 - installed tools the proposal leaves undeclared: covered by a wildcard
   entry when the config has one, refused otherwise;
 - blocked delegations;
+- every ungated agent: "`<agent>` runs ungated, and nothing in this
+  policy applies to it.";
 - every uninspected server: "`<server>` is configured, but the cluster
   has not discovered its tools.";
 - one short **OpenAPPA pieces** line;
 - **Needed for this to work** at the end, when support is missing —
-  group every missing requirement there with the concrete fix.
+  group every missing requirement there with the concrete fix. An
+  ungated agent belongs there: the fix adds `APPA_ENABLED` with the
+  value `"true"` beside `APPA_RUNTIME_URL` in that agent's
+  `spec.declarative.deployment.env`. Give the operator that change. Do
+  not apply it yourself.
 
 In read-only fallback, put the complete TOML in chat instead. Otherwise
 end with: **Approve, or tell me what to change.** Wait for the reply.
@@ -160,7 +177,9 @@ After a successful reload, give a one-to-three-sentence summary of the
 behavior now in effect: what information is private or suspicious, and
 where private information can or cannot go. Do not lead with rule
 counts, file paths, or TOML. Mention one important remaining limitation
-in one short sentence when needed.
+in one short sentence when needed. Agents left ungated are such a
+limitation: name them, because the behavior you just summarized does not
+reach them.
 
 If the config changed, add:
 

@@ -15,6 +15,10 @@ to the staged `SKILL.md`. Claude therefore needs no gated `Read` call to
 bootstrap the guide. There is no second source copy.
 
 The demo chart installs a pre-configured kagent Agent around the skill.
-The Agent supplies the kagent tool server's `k8s_*` tools and points at
-the shared APPA runtime. The skill itself remains usable from any
-kagent Agent that has those tools and permissions.
+The Agent supplies the kagent tool server's `k8s_*` tools and sets
+`APPA_ENABLED=true` beside `APPA_RUNTIME_URL`. That pair puts it behind
+the shared runtime. The skill itself remains usable from any kagent
+Agent that has those tools and permissions and sets the same pair. An
+Agent that leaves `APPA_ENABLED` unset runs ungated: the image ignores
+`APPA_RUNTIME_URL`, and its own `k8s_apply_manifest` call raises no
+Approve card.
