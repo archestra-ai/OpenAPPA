@@ -95,55 +95,6 @@ impl Adapter {
     }
 }
 
-pub(crate) fn refuse_unobservable_returns(adapter: Adapter, policy: &toml::Value) -> Result<(), String> {
-    match adapter {
-        Adapter::ClaudeCode => {
-            let controls_context = policy
-                .get("deployment")
-                .and_then(|deployment| deployment.get("context_control"))
-                .and_then(toml::Value::as_bool)
-                .unwrap_or(false);
-            if !controls_context {
-                return Ok(());
-            }
-            let tools = policy
-                .get("tool")
-                .and_then(toml::Value::as_array)
-                .map(Vec::as_slice)
-                .unwrap_or_default();
-            for tool in tools {
-                let Some(name) = tool.get("name").and_then(toml::Value::as_str) else {
-                    continue;
-                };
-                if (name == "Agent" || name == "Task") && !pins_foreground(tool) {
-                    return Err(format!(
-                        "this deployment controls the subagent's context, and its `{name}` tool does not pin \
-                        `run_in_background` to `false` (`parameters.properties.run_in_background.const = false`): a \
-                        background subagent returns where no hook can check it. Pin the argument, as the shipped \
-                        examples do."
-                    ));
-                }
-            }
-            Ok(())
-        }
-        // Every kagent child return crosses at the parent's after-tool
-        // callback, where the plugin substitutes it — kagent has no
-        // background-spawn argument, and A2A push delivery is not wired
-        // in the covered releases. No policy shape makes a return
-        // unobservable, so there is nothing to refuse.
-        Adapter::Kagent => Ok(()),
-    }
-}
-
-fn pins_foreground(tool: &toml::Value) -> bool {
-    tool.get("parameters")
-        .and_then(|parameters| parameters.get("properties"))
-        .and_then(|properties| properties.get("run_in_background"))
-        .and_then(|argument| argument.get("const"))
-        .and_then(toml::Value::as_bool)
-        == Some(false)
-}
-
 fn log_level(verbose: u8) -> &'static str {
     match verbose {
         0 => "info",
@@ -201,7 +152,12 @@ fn current_executable_metadata() -> io::Result<(u64, SystemTime)> {
     Ok((metadata.len(), metadata.modified()?))
 }
 
-fn binary_digest(path: &Path) -> io::Result<String> {
+/// The fingerprint a runtime serves at `/binary-fingerprint`.
+///
+/// `init` computes the same value for the binary it is about to deploy and compares
+/// the two to decide whether the process on the endpoint is its own deployment. The
+/// two sides must render the digest identically, so they share this one definition.
+pub(crate) fn binary_digest(path: &Path) -> io::Result<String> {
     let bytes = fs::read(path)?;
     let digest = Sha256::digest(bytes);
     Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
@@ -212,7 +168,6 @@ struct AppState {
     runtime: Arc<Runtime>,
     codec: Codec,
     config: PathBuf,
-    adapter: Adapter,
     executable: Option<ExecutableAtStart>,
 }
 
@@ -266,8 +221,6 @@ fn health_answer(stale: bool, pid: u32) -> String {
 async fn reload(State(state): State<AppState>) -> Result<axum::Json<Reloaded>, (axum::http::StatusCode, String)> {
     let config = Config::load(&state.config)
         .map_err(|error| (axum::http::StatusCode::UNPROCESSABLE_ENTITY, error.to_string()))?;
-    refuse_unobservable_returns(state.adapter, config.policy_file().value())
-        .map_err(|refusal| (axum::http::StatusCode::UNPROCESSABLE_ENTITY, refusal))?;
     match state.runtime.reload(config) {
         Ok(reloaded) => Ok(axum::Json(reloaded)),
         Err(refusal) => {
@@ -338,10 +291,6 @@ async fn serve(args: Args) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    if let Err(refusal) = refuse_unobservable_returns(args.adapter, config.policy_file().value()) {
-        eprintln!("appa runtime: {refusal}");
-        return ExitCode::FAILURE;
-    }
     let runtime = match Runtime::open(config, args.db, args.modules_dir) {
         Ok(runtime) => Arc::new(runtime.with_spawn_coverage(args.adapter.spawn_coverage())),
         Err(error) => {
@@ -354,7 +303,6 @@ async fn serve(args: Args) -> ExitCode {
         runtime: Arc::clone(&runtime),
         codec: args.adapter.codec(),
         config: config_path,
-        adapter: args.adapter,
         executable: ExecutableAtStart::of_this_process(),
     };
     let app = axum::Router::new()
@@ -441,35 +389,6 @@ mod tests {
         assert!(require_loopback(&"[::1]:8787".parse().expect("parses")).is_ok());
         assert!(require_loopback(&"0.0.0.0:8787".parse().expect("parses")).is_err());
         assert!(require_loopback(&"192.168.1.10:8787".parse().expect("parses")).is_err());
-    }
-
-    #[test]
-    fn a_context_controlling_deployment_must_pin_its_subagents_to_the_foreground() {
-        let examples = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../integrations/claude-code/examples");
-        for name in ["claude-code.appa.toml", "claude-code-hitl.appa.toml"] {
-            let path = examples.join(name);
-            let config = Config::load(&path).unwrap_or_else(|error| panic!("{name} does not load: {error}"));
-            let policy = config.policy_file().value();
-            assert!(
-                refuse_unobservable_returns(Adapter::ClaudeCode, policy).is_ok(),
-                "{name}"
-            );
-            let mut unpinned = policy.clone();
-            for tool in unpinned["tool"].as_array_mut().expect("the tools table") {
-                if tool["name"].as_str() == Some("Task") {
-                    tool.as_table_mut().expect("a tool table").remove("parameters");
-                }
-            }
-            assert!(
-                refuse_unobservable_returns(Adapter::ClaudeCode, &unpinned).is_err(),
-                "{name}"
-            );
-            unpinned["deployment"]["context_control"] = toml::Value::Boolean(false);
-            assert!(
-                refuse_unobservable_returns(Adapter::ClaudeCode, &unpinned).is_ok(),
-                "{name}"
-            );
-        }
     }
 
     #[test]

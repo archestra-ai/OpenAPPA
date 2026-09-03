@@ -37,7 +37,23 @@ pub async fn answer(runtime: &Runtime, codec: &Codec, body: &[u8]) -> (u16, serd
     let observation = HookObservation::from_event(&event, ToolArgumentCapture::from_env());
     let span = hook_span(&observation);
     async move {
-        let decision = handle(runtime, event.clone()).await;
+        let decision = match &event {
+            HookEvent::ToolCall { actor, call, .. } => {
+                match runtime.opened_among(&actor.root, &(codec.names_children)(actor, call)) {
+                    Ok(Some(child)) => {
+                        tracing::debug!(
+                            root = %actor.root.0,
+                            child = %child.0,
+                            "a call names a family child's transcript"
+                        );
+                        deny(NAMED_TRANSCRIPT.to_string())
+                    }
+                    Ok(None) => handle(runtime, event.clone()).await,
+                    Err(error) => refuse(error.to_string()),
+                }
+            }
+            _ => handle(runtime, event.clone()).await,
+        };
         let decision_name = decision_name(&decision);
         tracing::Span::current().record("appa.decision", decision_name);
         if matches!(decision, HookDecision::Refuse { .. }) {
@@ -190,6 +206,7 @@ fn decision_name(decision: &HookDecision) -> &'static str {
         HookDecision::Block { .. } => "block",
         HookDecision::ReplaceOutput { .. } => "replace_output",
         HookDecision::ChildReturn { .. } => "replace_child_return",
+        HookDecision::Context { .. } => "context",
         HookDecision::Refuse { .. } => "refuse",
     }
 }
@@ -207,6 +224,11 @@ fn observe_parse_refusal(kind: &'static str, elapsed_seconds: f64) {
     });
     crate::telemetry::record_hook("parse", "refuse", elapsed_seconds);
 }
+
+/// A subagent's words reach its parent through the checked return only; a call that
+/// names the file the harness keeps them in is refused before it runs.
+const NAMED_TRANSCRIPT: &str = "this call names a subagent's transcript or output file; a subagent's words \
+                                reach this session only through its checked return";
 
 /// Dispatch one typed event to its session and fold the outcome into
 /// one decision. The dispatcher holds nothing between calls; every id
@@ -237,7 +259,11 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             // it has finished; a close that failed leaves the call open
             // and the next proposal refuses on its own.
             runtime.take_prompted(&actor);
-            if let Err(error) = on_actor(runtime, &actor, |session| async move { session.on_turn_end().await }).await {
+            if let Err(error) = on_actor(runtime, &actor, MissingStart::Refuse, |session| async move {
+                session.on_turn_end().await
+            })
+            .await
+            {
                 tracing::warn!(root = %actor.root.0, %error, "the turn end closed no abandoned call");
             }
             runtime.release_vouches(&actor);
@@ -254,8 +280,10 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
                 // the user interrupted the previous turn, and whatever it left
                 // open is settled before this turn's first call, control tools
                 // included, so a vouch this turn records is never released here.
-                if let Err(error) =
-                    on_actor(runtime, &actor, |session| async move { session.on_turn_end().await }).await
+                if let Err(error) = on_actor(runtime, &actor, MissingStart::OpenLate, |session| async move {
+                    session.on_turn_end().await
+                })
+                .await
                 {
                     runtime.note_prompt(&actor);
                     return fold(error, deny);
@@ -265,14 +293,22 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             if is_control_tool(&call.tool) {
                 return control_call(runtime, &actor, &call, ruling);
             }
-            match on_actor(runtime, &actor, |session| {
+            match on_actor(runtime, &actor, MissingStart::OpenLate, |session| {
                 let call = call.clone();
                 async move { session.on_tool_call(call, spawn).await }
             })
             .await
             {
                 Ok(ToolCallDecision::Allow { spawn }) => HookDecision::AllowCall { spawn },
-                Ok(ToolCallDecision::Deny { feedback, review }) => HookDecision::DenyCall { feedback, review },
+                Ok(ToolCallDecision::Deny {
+                    feedback,
+                    offers,
+                    review,
+                }) => HookDecision::DenyCall {
+                    feedback,
+                    offers,
+                    review,
+                },
                 Err(error) => fold(error, deny),
             }
         }
@@ -281,7 +317,7 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
                 tracing::debug!(trajectory = %actor.root.0, "control tool outcome absorbed");
                 return HookDecision::Ack;
             }
-            match on_actor(runtime, &actor, |session| {
+            match on_actor(runtime, &actor, MissingStart::Refuse, |session| {
                 let (call, outcome) = (call.clone(), outcome.clone());
                 async move { session.on_tool_result(call, outcome).await }
             })
@@ -299,7 +335,7 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             value,
         } => {
             let said = value.clone();
-            match on_actor(runtime, &actor, |session| {
+            match on_actor(runtime, &actor, MissingStart::Refuse, |session| {
                 let (call, outcome, child, value) = (call.clone(), outcome.clone(), child.clone(), value.clone());
                 async move { session.on_spawn_result(call, outcome, child, value).await }
             })
@@ -311,18 +347,26 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             }
         }
         HookEvent::ChildStart { root, child, spawn } => {
+            // The child is told what its return must look like where the
+            // fork's policy shapes it; a return that crosses as spoken
+            // needs no word.
             let root = match open_or_reopen(runtime, &root) {
                 Ok(session) => session,
                 Err(error) => return refuse(error.to_string()),
             };
-            match root.on_child_start(child, spawn) {
-                Ok(_) => HookDecision::Ack,
+            match root.start_child(child, spawn) {
+                Ok((_, Some(text))) => HookDecision::Context { text },
+                Ok((_, None)) => HookDecision::Ack,
                 Err(error) => refuse(error.to_string()),
             }
         }
         HookEvent::ChildEnd { root, child, value } => {
+            // The subagent's return is checked here and blocked when it
+            // may not cross; a block keeps the subagent running until it
+            // returns what may. A child the family never saw start is
+            // blocked too: its return has no fork to cross on.
             let said = value.clone();
-            match on_child(runtime, &root, &child, |session| {
+            match on_child(runtime, &root, &child, MissingStart::Refuse, |session| {
                 let value = value.clone();
                 async move { session.on_child_end(value).await }
             })
@@ -342,11 +386,15 @@ fn outcome_decision(decision: ToolResultDecision) -> HookDecision {
     }
 }
 
+/// A crossing as spoken answers with no opinion. What crosses otherwise — the canonical
+/// form of a shaped return, a sanitizer's derivation — goes back as the value the child
+/// must return, or the harness deliver, for it to reach the parent.
 fn return_decision(said: Option<String>, decision: ChildReturnDecision) -> HookDecision {
     match decision {
         ChildReturnDecision::Returned { value } if said.as_deref() != Some(value.as_str()) => {
             HookDecision::ChildReturn { value }
         }
+        ChildReturnDecision::Staged { value } => HookDecision::ChildReturn { value },
         ChildReturnDecision::Returned { .. } | ChildReturnDecision::NoValue => HookDecision::Ack,
         ChildReturnDecision::Blocked { feedback } => block(feedback),
     }
@@ -388,12 +436,29 @@ fn quoted_offer(call: &ProposedCall) -> Option<OfferId> {
     Some(OfferId(arguments.get("offer_id")?.as_str()?.to_string()))
 }
 
-async fn on_actor<T, Run>(runtime: &Runtime, actor: &Actor, event: impl Fn(Session) -> Run) -> Result<T, EventError>
+/// What a child's event does when the family has not opened that child.
+/// A subagent's first tool call can overtake its start hook, so the
+/// call opens the child against the one spawn in flight. Every other
+/// event of an unopened child is refused: a return or a turn end claims
+/// nothing a missing start could supply, and opening a child on its end
+/// would let a stop the family never saw start cross a value.
+#[derive(Clone, Copy)]
+enum MissingStart {
+    OpenLate,
+    Refuse,
+}
+
+async fn on_actor<T, Run>(
+    runtime: &Runtime,
+    actor: &Actor,
+    missing_start: MissingStart,
+    event: impl Fn(Session) -> Run,
+) -> Result<T, EventError>
 where
     Run: Future<Output = Result<T, EventError>>,
 {
     match &actor.child {
-        Some(child) => on_child(runtime, &actor.root, child, event).await,
+        Some(child) => on_child(runtime, &actor.root, child, missing_start, event).await,
         None => event(open_or_reopen(runtime, &actor.root)?).await,
     }
 }
@@ -402,21 +467,29 @@ async fn on_child<T, Run>(
     runtime: &Runtime,
     root: &TrajectoryId,
     child: &TrajectoryId,
+    missing_start: MissingStart,
     event: impl Fn(Session) -> Run,
 ) -> Result<T, EventError>
 where
     Run: Future<Output = Result<T, EventError>>,
 {
     let root_session = open_or_reopen(runtime, root)?;
-    match event(runtime.session(root, child)?).await {
-        Err(EventError::SpawnNotTaken) => match root_session.open_late(child.clone())? {
-            LateOpen::Opened => {
-                tracing::debug!(root = %root.0, child = %child.0, "a child event arrived before its start: opened the child late");
-                event(runtime.session(root, child)?).await
+    match (event(runtime.session(root, child)?).await, missing_start) {
+        (Err(EventError::SpawnNotTaken), MissingStart::OpenLate) => {
+            // `AlreadyOpen` means the start hook landed between the two
+            // attempts; the event now finds its child, so it is not
+            // refused for a race the harness has already resolved.
+            match root_session.open_late(child.clone())? {
+                LateOpen::Opened => {
+                    tracing::debug!(root = %root.0, child = %child.0, "a child event arrived before its start: opened the child late");
+                }
+                LateOpen::AlreadyOpen => {
+                    tracing::debug!(root = %root.0, child = %child.0, "the child's start landed while its event was in flight");
+                }
             }
-            LateOpen::AlreadyOpen => Err(EventError::SpawnNotTaken),
-        },
-        outcome => outcome,
+            event(runtime.session(root, child)?).await
+        }
+        (outcome, _) => outcome,
     }
 }
 
@@ -434,6 +507,7 @@ fn fold(error: EventError, family: fn(String) -> HookDecision) -> HookDecision {
 fn deny(feedback: String) -> HookDecision {
     HookDecision::DenyCall {
         feedback: format!("[appa] {feedback}"),
+        offers: Vec::new(),
         review: Vec::new(),
     }
 }
@@ -605,6 +679,59 @@ mod tests {
         answer(runtime, &codec(), body).await
     }
 
+    fn spawn_call() -> crate::api::ProposedCall {
+        crate::api::ProposedCall {
+            tool: "Task".to_string(),
+            arguments: crate::api::raw(serde_json::json!({"prompt": "look it up"})),
+        }
+    }
+
+    /// Declare the one return route the fixture offers — as spoken, floored at the
+    /// parent's current label — for the offer the blocked spawn surfaced.
+    async fn declare_return(runtime: &Runtime, root: &TrajectoryId, offers: &[appa_runtime_api::OfferedRemedy]) {
+        let offer = offers
+            .iter()
+            .find(|offer| offer.returns == Some(appa_runtime_api::OfferedReturn::AsSpoken))
+            .expect("the menu offers the bare floor");
+        let actor = Actor {
+            root: root.clone(),
+            child: None,
+        };
+        let arguments = crate::engine::RemedyArguments {
+            label: Some(crate::engine::LabelSpelling::default()),
+            return_schema: None,
+        };
+        let outcome = runtime
+            .execute_remedy_with(&actor, OfferId(offer.id.clone()), arguments)
+            .await;
+        assert!(
+            matches!(outcome, crate::api::RemedyOutcome::Authorized { .. }),
+            "the declaration approves the spawn, got {outcome:?}"
+        );
+    }
+
+    /// The marked spawn's round trip: blocked on the return menu, declared, released.
+    async fn declared_spawn(runtime: &Runtime, root: &TrajectoryId) -> appa_runtime_api::SpawnBinding {
+        let spawn = || HookEvent::ToolCall {
+            actor: Actor {
+                root: root.clone(),
+                child: None,
+            },
+            call: spawn_call(),
+            spawn: true,
+            ruling: None,
+        };
+        let HookDecision::DenyCall { offers, .. } = handle(runtime, spawn()).await else {
+            panic!("a marked spawn blocks until its return is declared");
+        };
+        declare_return(runtime, root, &offers).await;
+        let released = handle(runtime, spawn()).await;
+        let HookDecision::AllowCall { spawn: Some(binding) } = released else {
+            panic!("the declared spawn must release with its binding, got {released:?}");
+        };
+        binding
+    }
+
     const CONTROL_TOOL_FIXTURE_NAME: &str = "mcp__plugin_appa-runtime_appa__execute_remedy_plan";
 
     fn fixtures() -> Vec<serde_json::Value> {
@@ -623,8 +750,30 @@ mod tests {
         for event in fixtures() {
             let name = event["hook_event_name"].as_str().expect("each fixture names its hook");
             let control = event["tool_name"] == CONTROL_TOOL_FIXTURE_NAME;
+            let spawn = name == "PreToolUse" && event["tool_name"] == "Agent" && event.get("agent_id").is_none();
 
             let body = serde_json::to_vec(&event).expect("the fixture re-serializes");
+            if spawn {
+                // The parent's spawn blocks on the return menu; the model declares and
+                // proposes the spawn again.
+                let (status, answer) = call_hook(&runtime, &body).await;
+                assert_eq!(status, 200, "hook {name} refused: {answer}");
+                assert_eq!(
+                    answer["hookSpecificOutput"]["permissionDecision"], "deny",
+                    "a marked spawn blocks until its return is declared"
+                );
+                let root = TrajectoryId(format!("cc:{}", event["session_id"].as_str().expect("a session id")));
+                let quoted = runtime
+                    .minted_offers(&root, &root)
+                    .into_iter()
+                    .next()
+                    .expect("the block surfaced the return declaration");
+                let offers = vec![appa_runtime_api::OfferedRemedy {
+                    id: quoted.0,
+                    returns: Some(appa_runtime_api::OfferedReturn::AsSpoken),
+                }];
+                declare_return(&runtime, &root, &offers).await;
+            }
             let (status, answer) = call_hook(&runtime, &body).await;
 
             assert_eq!(status, 200, "hook {name} refused: {answer}");
@@ -1127,25 +1276,7 @@ mod tests {
         let root = appa_runtime_api::TrajectoryId("cc:s1".to_string());
         let child = appa_runtime_api::TrajectoryId("cc:s1:a1".to_string());
 
-        let released = handle(
-            &runtime,
-            HookEvent::ToolCall {
-                actor: Actor {
-                    root: root.clone(),
-                    child: None,
-                },
-                call: crate::api::ProposedCall {
-                    tool: "Task".to_string(),
-                    arguments: crate::api::raw(serde_json::json!({"prompt": "look it up"})),
-                },
-                spawn: true,
-                ruling: None,
-            },
-        )
-        .await;
-        let HookDecision::AllowCall { spawn: Some(binding) } = released else {
-            panic!("the marked spawn must release with its binding, got {released:?}");
-        };
+        let binding = declared_spawn(&runtime, &root).await;
         assert_eq!(
             handle(
                 &runtime,
@@ -1243,26 +1374,7 @@ mod tests {
         let runtime = open_runtime(&dir);
         let root = appa_runtime_api::TrajectoryId("cc:s1".to_string());
         let child = appa_runtime_api::TrajectoryId("cc:s1:a1".to_string());
-        let released = handle(
-            &runtime,
-            HookEvent::ToolCall {
-                actor: Actor {
-                    root: root.clone(),
-                    child: None,
-                },
-                call: crate::api::ProposedCall {
-                    tool: "Task".to_string(),
-                    arguments: crate::api::raw(serde_json::json!({"prompt": "look it up"})),
-                },
-                spawn: true,
-                ruling: None,
-            },
-        )
-        .await;
-        assert!(
-            matches!(released, HookDecision::AllowCall { spawn: Some(_) }),
-            "got {released:?}"
-        );
+        declared_spawn(&runtime, &root).await;
 
         let decision = handle(
             &runtime,

@@ -7,10 +7,12 @@
 //!
 //! 1. Forum taint is terminal in a trajectory: once a root accepts the
 //!    suspicious narrowing, `create_task_tracker` never runs there.
-//! 2. A fork confines the taint: the child reads and replies, and its egress
-//!    is family history, so the untainted parent can file the ticket.
-//! 3. An hr-audience child return crosses only as the `pii-redactor`
-//!    derivation; the parent keeps its public audience and may still email.
+//! 2. A fork confines the taint: the parent declares a suspicious floor for a
+//!    return that never comes, the child reads and replies, and its egress is
+//!    family history, so the untainted parent can file the ticket.
+//! 3. A parent that declared the `pii-redactor` route at the spawn takes an
+//!    hr-audience child return only as the redacted derivation; it keeps its
+//!    public audience and may still email.
 
 mod model;
 
@@ -200,6 +202,13 @@ async fn a_fork_confines_the_taint_and_its_egress_unlocks_the_ticket() {
             "fork",
             serde_json::json!({"task": "read the thread and post the reply"}),
         )
+        // The spawn is held until the parent declares its return: as spoken,
+        // floored at suspicious, so the child may pay the forum narrowing.
+        .declares_the_return(0, serde_json::json!({"trust": "suspicious"}))
+        .calls(
+            "fork",
+            serde_json::json!({"task": "read the thread and post the reply"}),
+        )
         // The child pays the narrowing, reads, and replies.
         .calls("read_public_forum", serde_json::json!({"file": "thread.md"}))
         .pursues_first()
@@ -253,15 +262,17 @@ async fn an_hr_child_return_crosses_only_as_the_redacted_derivation() {
         // The root will not pay the hr narrowing: it still has to email.
         .calls("read_hr", serde_json::json!({"file": "alice-chen.md"}))
         .calls("fork", serde_json::json!({"task": "look up the onboarding buddy"}))
-        // The child pays it, reads, and reports what it found.
+        // The parent declares the return through `pii-redactor`, the one plan
+        // listed behind the bare floor, keeping its own label as the floor: the
+        // child may narrow only as far as the redactor lifts back.
+        .declares_the_return(1, serde_json::json!({}))
+        .calls("fork", serde_json::json!({"task": "look up the onboarding buddy"}))
+        // The child pays it, reads, and reports what it found; the return crosses
+        // as the redacted derivation.
         .calls("read_hr", serde_json::json!({"file": "alice-chen.md"}))
         .pursues_first()
         .calls("read_hr", serde_json::json!({"file": "alice-chen.md"}))
         .says("Alice's onboarding buddy is Priya Sharma (ext 4471)")
-        // The raw return would narrow the parent, so the parent takes the
-        // derivation the engine offered instead. A narrowing child return
-        // enumerates the declassifier first, ahead of the accept option.
-        .pursues_first()
         .calls(
             "send_email",
             serde_json::json!({

@@ -137,19 +137,23 @@ pub enum ProviderError {
     #[error("inference endpoint was unavailable (HTTP {code}) on the last of {attempts} attempt(s)")]
     Unavailable { code: u16, attempts: u32 },
     /// The endpoint answered with a status no retry changes: a rejected key, a bad request.
-    #[error("inference endpoint returned HTTP {code} after {attempts} attempt(s)")]
-    Status { code: u16, attempts: u32 },
+    #[error("inference endpoint returned HTTP {code}{detail} after {attempts} attempt(s)")]
+    Status { code: u16, attempts: u32, detail: String },
     #[error("inference response was oversized or malformed after {attempts} attempt(s)")]
     Malformed { attempts: u32 },
     #[error("inference response carried no choices after {attempts} attempt(s)")]
     NoChoice { attempts: u32 },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum AttemptFault {
     Timeout,
     Transport,
-    Status { code: u16, retry_after: Option<Duration> },
+    Status {
+        code: u16,
+        retry_after: Option<Duration>,
+        detail: String,
+    },
     Malformed,
     NoChoice,
 }
@@ -170,7 +174,7 @@ impl AttemptFault {
         }
     }
 
-    fn retryable(self) -> bool {
+    fn retryable(&self) -> bool {
         match self {
             AttemptFault::Timeout | AttemptFault::Transport => true,
             AttemptFault::Status { code, .. } => matches!(code, 408 | 429 | 500 | 502 | 503 | 504),
@@ -178,9 +182,9 @@ impl AttemptFault {
         }
     }
 
-    fn retry_after(self) -> Option<Duration> {
+    fn retry_after(&self) -> Option<Duration> {
         match self {
-            AttemptFault::Status { retry_after, .. } => retry_after,
+            AttemptFault::Status { retry_after, .. } => *retry_after,
             _ => None,
         }
     }
@@ -193,7 +197,7 @@ impl AttemptFault {
             },
             AttemptFault::Transport => ProviderError::Transport { attempts },
             AttemptFault::Status { code, .. } if self.retryable() => ProviderError::Unavailable { code, attempts },
-            AttemptFault::Status { code, .. } => ProviderError::Status { code, attempts },
+            AttemptFault::Status { code, detail, .. } => ProviderError::Status { code, attempts, detail },
             AttemptFault::Malformed => ProviderError::Malformed { attempts },
             AttemptFault::NoChoice => ProviderError::NoChoice { attempts },
         }
@@ -259,15 +263,29 @@ impl OpenAiCompatible {
             .await
             .map_err(|error| AttemptFault::of(&error))?;
         if !response.status().is_success() {
+            let status = response.status();
             let retry_after = response
                 .headers()
                 .get(reqwest::header::RETRY_AFTER)
                 .and_then(|value| value.to_str().ok())
                 .and_then(|value| value.trim().parse::<u64>().ok())
                 .map(Duration::from_secs);
+            let mut response = response;
+            let detail = match read_body_capped(&mut response, 512).await {
+                Ok(bytes) => {
+                    let text = String::from_utf8_lossy(&bytes).trim().to_string();
+                    if text.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {text}")
+                    }
+                }
+                Err(_) => String::new(),
+            };
             return Err(AttemptFault::Status {
-                code: response.status().as_u16(),
+                code: status.as_u16(),
                 retry_after,
+                detail,
             });
         }
 
@@ -409,8 +427,41 @@ mod tests {
             .await
             .expect_err("401 is permanent");
 
-        assert_eq!(error, ProviderError::Status { code: 401, attempts: 1 });
+        assert_eq!(
+            error,
+            ProviderError::Status {
+                code: 401,
+                attempts: 1,
+                detail: String::new()
+            }
+        );
         assert_eq!(*attempts.lock().expect("not poisoned"), 1);
+    }
+
+    #[tokio::test]
+    async fn a_status_error_carries_response_body_detail() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|| async { (axum::http::StatusCode::PAYMENT_REQUIRED, "Key credit limit exceeded") }),
+        );
+        let error = provider(app)
+            .await
+            .complete(request())
+            .await
+            .expect_err("402 is permanent");
+
+        assert_eq!(
+            error,
+            ProviderError::Status {
+                code: 402,
+                attempts: 1,
+                detail: ": Key credit limit exceeded".to_string()
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "inference endpoint returned HTTP 402: Key credit limit exceeded after 1 attempt(s)"
+        );
     }
 
     #[tokio::test]

@@ -85,23 +85,9 @@ fn release_plugin_digest() -> String {
 }
 
 fn plugin_is_dirty(repository: &Path) -> bool {
-    git(
-        repository,
-        &[
-            "status",
-            "--porcelain=v1",
-            "--untracked-files=all",
-            "--",
-            "integrations/claude-code/.claude-plugin",
-            "integrations/claude-code/plugin",
-            "integrations/claude-code/examples",
-            "batteries",
-            "integrations/claude-code/README.md",
-            "integrations/claude-code/live-gate-check.py",
-            "website/content/docs/contracts.md",
-        ],
-    )
-    .is_none_or(|output| !output.trim().is_empty())
+    let mut arguments = vec!["status", "--porcelain=v1", "--untracked-files=all", "--"];
+    arguments.extend(plugin_layout::REPOSITORY_MAPPINGS.iter().map(|(source, _)| *source));
+    git(repository, &arguments).is_none_or(|output| !output.trim().is_empty())
 }
 
 fn export_committed_repository(repository: &Path, destination: &Path) -> std::io::Result<()> {

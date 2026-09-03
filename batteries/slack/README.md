@@ -9,7 +9,7 @@ root config must define an authority named `hitl`.
 **`appa.toml`** — three groups.
 
 *Reads* — channels, threads, canvases, files, profiles, members,
-reactions, and every search. The result is private: nothing built from
+reactions, and every search. The result is `internal`: nothing built from
 it can go to a public place. Its trust is unchanged, so it can be
 summarised and posted back to Slack.
 

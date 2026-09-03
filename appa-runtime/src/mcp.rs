@@ -17,7 +17,7 @@ use rmcp::transport::streamable_http_server::StreamableHttpService;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 
-use crate::api::{OfferId, RemedyOutcome, Runtime};
+use crate::api::{LabelSpelling, OfferId, RemedyArguments, RemedyOutcome, Runtime};
 use crate::elicit::Elicitation;
 
 #[derive(Clone)]
@@ -28,6 +28,34 @@ pub struct RemedyService {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ExecuteRemedyPlanArgs {
     pub offer_id: String,
+    /// For a plan that declares a subagent's return: the lowest label this session accepts
+    /// from the return, in the policy's `delta` spelling. An omitted dimension keeps this
+    /// session's current value.
+    #[serde(default)]
+    pub label: Option<LabelArgs>,
+    /// For a plan that attests a subagent's return: the JSON schema the return must match.
+    #[serde(default)]
+    pub return_schema: Option<serde_json::Value>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct LabelArgs {
+    #[serde(default)]
+    pub trust: Option<String>,
+    #[serde(default)]
+    pub audience: Option<Vec<String>>,
+}
+
+impl From<ExecuteRemedyPlanArgs> for RemedyArguments {
+    fn from(args: ExecuteRemedyPlanArgs) -> RemedyArguments {
+        RemedyArguments {
+            label: args.label.map(|label| LabelSpelling {
+                trust: label.trust,
+                audience: label.audience,
+            }),
+            return_schema: args.return_schema,
+        }
+    }
 }
 
 #[tool_router]
@@ -37,13 +65,17 @@ impl RemedyService {
     }
 
     #[tool(description = "Execute one remedy plan by the offer id that blocking \
-                       feedback surfaced. The id must be quoted exactly.")]
+                       feedback surfaced. The id must be quoted exactly. A plan that \
+                       declares a subagent's return takes `label`, the lowest label this \
+                       session accepts from the return; a plan that attests it also takes \
+                       `return_schema`.")]
     pub async fn execute_remedy_plan(
         &self,
         Parameters(args): Parameters<ExecuteRemedyPlanArgs>,
         request: RequestContext<RoleServer>,
     ) -> CallToolResult {
-        let quoted = OfferId(args.offer_id);
+        let quoted = OfferId(args.offer_id.clone());
+        let arguments = RemedyArguments::from(args);
         // The trajectory this act belongs to was named by the hook that
         // preceded it. Without one there is nothing to serve, and guessing
         // would be choosing a trajectory for the caller.
@@ -53,7 +85,11 @@ impl RemedyService {
             });
         };
         let elicitation = Elicitation::new(request, self.runtime.review_timeout());
-        render(self.runtime.remedy(&acting, quoted, Some(&elicitation), ruling).await)
+        render(
+            self.runtime
+                .remedy(&acting, quoted, arguments, Some(&elicitation), ruling)
+                .await,
+        )
     }
 }
 

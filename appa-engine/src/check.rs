@@ -40,11 +40,25 @@ pub struct Narrowing {
 }
 
 /// The block as the check finds it — the gaps and/or a narrowing — before remedy planning.
-/// The slots are independent and may coexist.
+/// The slots are independent and may coexist. A marked spawn is blocked with both empty
+/// until its approval declares the child's return policy: that block has no gap to clear and
+/// no narrowing to settle, only the declaration to make.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RawBlock {
     pub requirement_gaps: Vec<Gap>,
     pub narrowing: Option<Narrowing>,
+}
+
+/// What the checked call is to its deployment: an ordinary tool call, or the one proposal the
+/// runtime marked as the context-controlled spawn. The mark is a property of the
+/// subject, fixed when its batch was decided, so a substituted successor keeps its predecessor's
+/// role. A marked spawn never checks to `Allow` on its own: its release spends an approval
+/// carrying the child's return policy, and until one stands it is blocked with the plans that
+/// declare one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CallRole {
+    Ordinary,
+    MarkedSpawn,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -99,6 +113,7 @@ pub(crate) fn evaluate(
     views: &Views,
     call: &ResolvedCall,
     stage: &CallStage,
+    role: CallRole,
     context: &MembershipContext<'_>,
 ) -> Result<CheckOutcome, MembershipNeeded> {
     let current = views.current_label();
@@ -111,7 +126,7 @@ pub(crate) fn evaluate(
         stage,
         context,
     )?;
-    if eval.requirement_gaps.is_empty() && eval.narrowing.is_none() {
+    if role == CallRole::Ordinary && eval.requirement_gaps.is_empty() && eval.narrowing.is_none() {
         return Ok(CheckOutcome::Allow);
     }
     Ok(CheckOutcome::Block(eval))

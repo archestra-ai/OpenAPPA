@@ -15,7 +15,6 @@ use appa_engine::contract::{
     ToolDeclaration,
 };
 use appa_engine::engine::Engine;
-use appa_engine::fact::ReturnPolicy;
 use appa_engine::fact::{EffectKind, EffectSet};
 use appa_engine::label::{Audience, ChainAudience, Clause, DeclaredAudience, Label, ReaderId, Trust};
 use appa_engine::names::{
@@ -401,39 +400,6 @@ impl Config {
             Some(cap) => PlannerCap::new(cap).ok_or(ConfigError::ZeroPlannerCap)?,
         };
 
-        let child_return = match raw.child {
-            None => ReturnPolicy::Raw,
-            Some(RawChild { return_sanitizer: None }) => {
-                return Err(ConfigError::BadImplementation {
-                    kind: "child",
-                    name: "return binding".to_string(),
-                    reason: "an empty [child] table binds nothing — configure return_sanitizer".to_string(),
-                });
-            }
-            Some(RawChild {
-                return_sanitizer: Some(sanitizer),
-            }) => {
-                let name = SanitizerName::new(sanitizer);
-                match sanitizers.iter().find(|s| s.name == name) {
-                    Some(s) if s.on.output => ReturnPolicy::Sanitized(name),
-                    Some(_) => {
-                        return Err(ConfigError::BadImplementation {
-                            kind: "child return_sanitizer",
-                            name: name.as_str().to_string(),
-                            reason: "not registered for tool output".to_string(),
-                        });
-                    }
-                    None => {
-                        return Err(ConfigError::BadImplementation {
-                            kind: "child return_sanitizer",
-                            name: name.as_str().to_string(),
-                            reason: "no such sanitizer".to_string(),
-                        });
-                    }
-                }
-            }
-        };
-
         let profile = match raw.deployment {
             Some(deployment) => deployment.convert(&trust_chain)?,
             None => ProfileDeclaration::no_coverage(&trust_chain),
@@ -451,7 +417,6 @@ impl Config {
             registry: registry_config.clone(),
             planner_cap,
             dialect: PolicyDialectVersion::new(SUPPORTED_VERSION),
-            child_return,
             profile,
         })?;
 
@@ -522,7 +487,6 @@ struct RawConfig {
     annotator: Vec<RawAnnotator>,
     audience: Option<RawAudience>,
     identity: Option<RawIdentity>,
-    child: Option<RawChild>,
     limits: Option<RawLimits>,
     deployment: Option<RawDeployment>,
 }
@@ -540,7 +504,6 @@ struct RawDeployment {
     provider_run_tools: Vec<String>,
     #[serde(default)]
     confined_results: Vec<String>,
-    confined_child_return: Option<bool>,
     #[serde(default)]
     provider_surfaces: BTreeMap<String, SurfaceMode>,
 }
@@ -607,7 +570,6 @@ impl RawDeployment {
             dispatch: self.dispatch.unwrap_or(ExecutorClass::Assumed),
             executor_exceptions,
             confined_results: self.confined_results.into_iter().map(ToolName::new).collect(),
-            confined_child_return: self.confined_child_return.unwrap_or(false),
             provider_surfaces: self
                 .provider_surfaces
                 .into_iter()
@@ -790,12 +752,6 @@ fn convert_audience(
         .filter(|source| providers.contains(&source.provider))
         .collect();
     Ok(config)
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawChild {
-    return_sanitizer: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1148,6 +1104,22 @@ struct RawTrustTransition {
 }
 
 // --- shared conversion helpers -------------------------------------------------
+
+/// One label delta in the spelling a tool's `delta` takes — a trust rank name and an audience
+/// list — for a label a runtime reads at its own boundary, such as the return floor
+/// `execute_remedy_plan` declares.
+pub fn parse_delta(
+    trust: Option<&str>,
+    audience: Option<&[String]>,
+    chain: &TrustChain,
+    context: &str,
+) -> Result<Delta, ConfigError> {
+    RawDelta {
+        trust: trust.map(str::to_string),
+        audience: audience.map(<[String]>::to_vec),
+    }
+    .convert(chain, context)
+}
 
 fn parse_trust(name: &str, chain: &TrustChain, context: &str) -> Result<Trust, ConfigError> {
     chain.rank_of(name).ok_or_else(|| ConfigError::UnknownTrustRank {

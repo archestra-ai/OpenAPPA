@@ -19,7 +19,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout project
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 1
@@ -78,14 +78,7 @@ jobs:
           done
 
       - name: Check release versions
-        run: |
-          version=$(tr -d '\r\n' < .github/release-please/version.txt)
-          cargo_version=$(cargo metadata --locked --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.name == "appa") | .version')
-          plugin_version=$(jq -r '.version' \
-            integrations/claude-code/plugin/.claude-plugin/plugin.json)
-          test "$cargo_version" = "$version"
-          test "$plugin_version" = "$version"
+        uses: ./.github/actions/check-release-versions
 
   installer-checks:
     name: Installer Checks (${{ matrix.os }})
@@ -97,7 +90,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout project
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 1
@@ -113,7 +106,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout project
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 1
@@ -139,7 +132,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout project
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 1
@@ -164,7 +157,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout project
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 1
@@ -190,7 +183,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout project
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 1
@@ -254,7 +247,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout project
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 1
@@ -276,7 +269,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout project
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 1
@@ -295,7 +288,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout project
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 1
@@ -322,7 +315,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout project
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 1
@@ -359,7 +352,7 @@ jobs:
         working-directory: integrations/kagent/appa-kagent-adk-go
     steps:
       - name: Checkout project
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 1

@@ -14,6 +14,20 @@
 # (suspicious < trusted), so a `requires = { trust = "trusted" }` sink
 # never receives them undeclared.
 #
+# Who may see a value is the built-in audience chain `self` ⊆ `internal`
+# ⊆ `public`: `self` is the person running this session, `internal` their
+# organization, `public` the unrestricted state every session starts in.
+# The tools that publish or transmit beyond this machine require `public`,
+# so a session narrowed by a battery's reads — the Claude Code battery
+# labels the requester's credentials `self`, the Slack battery labels
+# channel history `internal` — cannot reach them. The chain works without a
+# directory: `self` and `internal` are symbolic, and only a rule naming an
+# individual recipient needs a source to check them (see the end of this
+# file). Bash and Read are not named here on purpose: a name written with
+# an argument selector is declared, and a call no selector matches is
+# refused rather than sent to the `*` fallback, so their rules live in the
+# battery beside its bare `Bash` and `Read` rules.
+#
 # The built-in tool set varies by Claude Code version; regenerate the
 # list from a live session when it drifts.
 
@@ -24,21 +38,24 @@ version = 2
 
 # Starting a subagent is this harness's spawn: the deployment controls the
 # child's context (`[policy.deployment]` below), so the subagent runs as a
-# child trajectory and its final message is checked where the parent
-# receives it. A background subagent (`run_in_background = true`) reports
-# its result outside the parent's tool result, where nothing can be
-# checked, so the call is refused as invalid.
+# child trajectory. The spawn is held until the session declares what the
+# subagent's final message may carry — as it is, floored at a label, or
+# through a registered sanitizer such as `attest-schema` below — and that
+# message is checked when the subagent stops: one that may not cross keeps
+# the subagent running, with the reason or the exact text to return, until
+# it stops with one that may.
 [[policy.tool]]
 name = "Agent"
-parameters = { type = "object", additionalProperties = true, properties = { run_in_background = { type = "boolean", const = false } } }
 delta = {}
 
 [[policy.tool]]
 name = "AskUserQuestion"
 delta = {}
 
+# Publishes a page on claude.ai: a public sink.
 [[policy.tool]]
 name = "Artifact"
+requires = { audience = { contains = ["public"] } }
 delta = {}
 
 [[policy.tool]]
@@ -148,7 +165,6 @@ delta = {}
 # `Task` is the earlier name of `Agent`: the same spawn, the same contract.
 [[policy.tool]]
 name = "Task"
-parameters = { type = "object", additionalProperties = true, properties = { run_in_background = { type = "boolean", const = false } } }
 delta = {}
 
 [[policy.tool]]
@@ -193,25 +209,32 @@ delta = {}
 
 # --- tools that bring outside content into the session ---
 
-# Web pages and search results are authored outside the session.
+# Web pages and search results are authored outside the session, and the URL
+# or query itself leaves it: a public sink and an untrusted source at once.
 [[policy.tool]]
 name = "WebFetch"
+requires = { audience = { contains = ["public"] } }
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
 name = "WebSearch"
+requires = { audience = { contains = ["public"] } }
 delta = { trust = "suspicious" }
 
 # Compatibility net for tools installed after this policy was generated. Exact
 # declarations always win over the wildcard, including declarations supplied by
 # connector batteries. The mandate is deliberately closed to this deployment's
-# two trust ranks, its one private audience, HITL, and no effects.
+# two trust ranks, HITL, and no effects. An annotation names literal readers
+# only, never `self` or `internal`, and this policy names no literal reader, so
+# the annotator narrows trust and requires approval but leaves the audience
+# alone: a tool whose result is the requester's or the organization's data gets
+# a static rule above instead.
 # APPA-UNIX-FALLBACK-BEGIN
 [[policy.annotator]]
 name = "claude-code.undeclared-tool"
 builtin = "claude-code"
 ranks = ["suspicious", "trusted"]
-audiences = ["private"]
+audiences = []
 marks = ["hitl"]
 effects = []
 
@@ -219,6 +242,18 @@ effects = []
 name = "*"
 annotator = "claude-code.undeclared-tool"
 # APPA-UNIX-FALLBACK-END
+
+# The reserved builtin sanitizer of a structured subagent return. The
+# session declares a JSON schema of bounded fields when it starts the
+# subagent; a final message that matches it crosses at the session's own
+# trust instead of the rank the subagent's reads left it at. It runs in
+# the runtime itself and needs no externals entry.
+[[policy.sanitizer]]
+name = "attest-schema"
+on = ["tool_output"]
+
+[policy.sanitizer.permits]
+trust = { from = "suspicious", to = "trusted" }
 
 # The deployment controls what a subagent starts from: the harness gives
 # every subagent exactly the prompt the parent's spawn call carried, and
@@ -244,3 +279,20 @@ max_body_bytes = 65536
 
 [externals.authorities.hitl]
 builtin = "hitl"
+
+# Who `self` and `internal` are, read from a directory when a decision needs
+# actual membership: a rule naming an individual recipient
+# (`requires = { audience = { contains = ["$to"] } }`) checked against a
+# narrowed session. Without a source the chain still decides symbolically and
+# such a call is refused as unanswerable. To add one, copy the GitHub battery
+# beside this file, put the mapping under `[policy]`, and bind the source here:
+#
+#   [policy.audience.self]
+#   from = ["github:viewer"]
+#
+#   [policy.audience.internal]
+#   from = ["github:org/<your-org>/members"]
+#
+#   [externals.audience.github]
+#   command = ["python3", "batteries/github/audience-source.py"]
+#   token_env = "APPA_PROVIDER_GITHUB_TOKEN"

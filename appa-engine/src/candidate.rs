@@ -123,10 +123,10 @@ pub enum DerivedCandidate {
         value: LabeledValue,
         residual: Option<Narrowing>,
     },
+    /// A fork's sanitizer derived the child's submission once; the derivation is staged
+    /// until the child returns exactly it, and crosses then.
     Return {
         source: RawResultDigest,
-        from: ConfinedFrom,
         value: LabeledValue,
-        residual: Option<Narrowing>,
     },
 }

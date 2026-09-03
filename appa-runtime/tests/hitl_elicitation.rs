@@ -483,7 +483,7 @@ async fn the_block_carries_the_review_for_the_hitl_authority() {
         },
     )
     .await;
-    let HookDecision::DenyCall { feedback, review } = blocked else {
+    let HookDecision::DenyCall { feedback, review, .. } = blocked else {
         panic!("a tool behind an attention mark must not release unruled: {blocked:?}");
     };
     assert_eq!(

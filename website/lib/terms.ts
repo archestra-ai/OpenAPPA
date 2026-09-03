@@ -144,10 +144,10 @@ const TERMS = {
   to: "In a sanitizer's permits: the exact audience, or the exact trust rank, the derivation carries.",
   resolver:
     "The implementation answering for one registered external: the endpoint, command, builtin, or model behind an authority, sanitizer, annotator, audience source, or identity binding.",
-  "[child]": "Run configuration for child sub-executions.",
-  return_sanitizer: "Configured default sanitizer for all child sub-execution returns.",
+  return_schema:
+    "Argument of the attest-schema plan in a spawn's return declaration: the shape-bounded JSON schema the child's return must match. The child is told the shape when it starts.",
   "attest-schema":
-    "The reserved builtin sanitizer of the quarantine exit: raises trust on a child return whose structure is shape-bounded (values the schema declares and bounds — no free text) and was bound at fork, up to the parent's fork-time rank. Claims instruction-cleanliness only.",
+    "The reserved builtin sanitizer of the quarantine exit: raises trust on a child return whose structure is shape-bounded (values the schema declares and bounds — no free text) and was declared by the parent at the spawn, up to the parent's rank at that spawn. Claims instruction-cleanliness only.",
   'builtin = "redact-email"':
     "The stock in-process sanitizer that replaces every email-like token in a value with a fixed placeholder, deriving the label its permits table declares.",
 

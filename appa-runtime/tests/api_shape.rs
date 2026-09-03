@@ -106,8 +106,14 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
         HookDecision::AllowCall { spawn } => {
             let _: Option<SpawnBinding> = spawn;
         }
-        HookDecision::DenyCall { feedback, .. } => {
+        HookDecision::DenyCall { feedback, offers, .. } => {
             let _: String = feedback;
+            for offer in offers {
+                let _: (String, Option<appa_runtime_api::OfferedReturn>) = (offer.id, offer.returns);
+            }
+        }
+        HookDecision::Context { text } => {
+            let _: String = text;
         }
         HookDecision::Block { reason } => {
             let _: String = reason;
@@ -188,6 +194,9 @@ fn the_declared_audit(runtime: &Runtime, id: &TrajectoryId) {
                 let _: (Option<String>, AuditLabel) = (sanitizer, label);
             }
             AuditEvent::Merged | AuditEvent::VoidReturn => {}
+            AuditEvent::Resumed { seed } => {
+                let _: AuditLabel = seed;
+            }
         }
     }
 }

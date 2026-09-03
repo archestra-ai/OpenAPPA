@@ -1,0 +1,31 @@
+name: Check release versions
+description: >-
+  Assert the workspace and the plugin manifest carry the version release-please
+  holds. The tag and the compiled CARGO_PKG_VERSION are concatenated into the
+  plugin artifact URL every shipped binary fetches, so a disagreement between
+  them ships binaries that request a URL which does not exist.
+
+inputs:
+  relock:
+    description: Re-lock the workspace first, for the release PR that must commit it
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Check release versions
+      shell: bash
+      env:
+        RELOCK: ${{ inputs.relock }}
+      run: |
+        version=$(tr -d '\r\n' < .github/release-please/version.txt)
+        if [ "$RELOCK" = "true" ]; then
+          cargo update --workspace
+        fi
+        cargo_version=$(cargo metadata --locked --no-deps --format-version 1 \
+          | jq -r '.packages[] | select(.name == "appa") | .version')
+        plugin_version=$(jq -r '.version' \
+          integrations/claude-code/plugin/.claude-plugin/plugin.json)
+        test "$cargo_version" = "$version"
+        test "$plugin_version" = "$version"

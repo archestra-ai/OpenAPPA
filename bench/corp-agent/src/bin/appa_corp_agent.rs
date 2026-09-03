@@ -179,7 +179,7 @@ async fn main() -> anyhow::Result<()> {
         // A slow OpenRouter upstream can spend minutes on one completion, and
         // retrying a cut-off completion never helps — give each attempt room.
         OpenAiCompatible::new(
-            OpenAiConfig::openrouter(args.model.clone(), api_key).with_request_timeout(Duration::from_secs(180)),
+            OpenAiConfig::openrouter(args.model.clone(), api_key).with_request_timeout(Duration::from_secs(300)),
         ),
         ToolShim::new(format!("{origin}{}", shim::TOOLS_PATH)),
         ToolCatalogue::new(catalogue::advertised(&compiled, forking)),
@@ -242,18 +242,21 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// The typed status the benchmark reads. A provider that could not be reached,
-/// answered past the deadline, or was unavailable on every bounded attempt is
-/// `provider_failed`, which nothing in this repository can fix; a provider that
-/// answered unusably — a rejected key, a malformed body, no choices — is
-/// `provider_rejected`, a configuration or contract fault the benchmark must
-/// surface.
+/// answered past the deadline, was unavailable on every bounded attempt, or
+/// failed due to billing/quota (HTTP 402) is `provider_failed`, which nothing
+/// in this repository can fix; a provider that answered unusably — a rejected
+/// key (401), a malformed body, no choices — is `provider_rejected`, a
+/// configuration or contract fault the benchmark must surface.
 fn terminal_status(outcome: &Outcome) -> &'static str {
     use appa_example_agent::{ProviderError, StopReason};
     match outcome {
         Outcome::Answer(_) => "completed",
         Outcome::BudgetFinalized { .. } => "budget_finalized",
         Outcome::Stopped(StopReason::InferenceFailed(
-            ProviderError::Timeout { .. } | ProviderError::Transport { .. } | ProviderError::Unavailable { .. },
+            ProviderError::Timeout { .. }
+            | ProviderError::Transport { .. }
+            | ProviderError::Unavailable { .. }
+            | ProviderError::Status { code: 402, .. },
         )) => "provider_failed",
         Outcome::Stopped(StopReason::InferenceFailed(
             ProviderError::Status { .. } | ProviderError::Malformed { .. } | ProviderError::NoChoice { .. },
@@ -395,6 +398,7 @@ fn replay(entries: &[AuditEntry]) {
             }
             AuditEvent::Merged => eprintln!("appa: [{at}] merged a child return"),
             AuditEvent::VoidReturn => eprintln!("appa: [{at}] ended with a void return"),
+            AuditEvent::Resumed { seed } => eprintln!("appa: [{at}] resumed at {}/{}", seed.trust, seed.audience),
         }
     }
 }
@@ -476,8 +480,20 @@ mod tests {
             "provider_failed"
         );
         assert_eq!(
-            super::terminal_status(&stopped(ProviderError::Status { code: 401, attempts: 1 })),
+            super::terminal_status(&stopped(ProviderError::Status {
+                code: 401,
+                attempts: 1,
+                detail: String::new(),
+            })),
             "provider_rejected"
+        );
+        assert_eq!(
+            super::terminal_status(&stopped(ProviderError::Status {
+                code: 402,
+                attempts: 1,
+                detail: String::new(),
+            })),
+            "provider_failed"
         );
         assert_eq!(
             super::terminal_status(&stopped(ProviderError::Malformed { attempts: 1 })),

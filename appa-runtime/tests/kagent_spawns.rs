@@ -6,9 +6,9 @@ mod common;
 
 use std::sync::{Arc, Mutex};
 
-use appa_runtime::api::{Runtime, SpawnCoverage};
+use appa_runtime::api::{LabelSpelling, OfferId, RemedyArguments, RemedyOutcome, Runtime, SpawnCoverage};
 use appa_runtime::{config::Config, hooks};
-use appa_runtime_api::{Actor, HookDecision, HookEvent, ProposedCall};
+use appa_runtime_api::{Actor, HookDecision, HookEvent, OfferedReturn, ProposedCall};
 use axum::Router;
 use axum::extract::State;
 use axum::routing::post;
@@ -88,20 +88,51 @@ fn call(tool: &str) -> ProposedCall {
     }
 }
 
+fn acting() -> Actor {
+    Actor {
+        root: root(),
+        child: None,
+    }
+}
+
 async fn spawn(runtime: &Arc<Runtime>, tool: &str) -> HookDecision {
     hooks::handle(
         runtime,
         HookEvent::ToolCall {
-            actor: Actor {
-                root: root(),
-                child: None,
-            },
+            actor: acting(),
             call: call(tool),
             spawn: true,
             ruling: None,
         },
     )
     .await
+}
+
+/// A marked spawn is held until the parent declares the child's return; the bare
+/// declaration — as spoken, floored at the parent's label — releases it with its fork.
+async fn declare_and_release(runtime: &Arc<Runtime>, held: HookDecision, tool: &str) -> HookDecision {
+    let HookDecision::DenyCall { offers, .. } = held else {
+        panic!("a marked spawn is held on the return menu, got {held:?}");
+    };
+    let offer = offers
+        .iter()
+        .find(|offer| offer.returns == Some(OfferedReturn::AsSpoken))
+        .expect("the menu offers the return as spoken");
+    let declared = runtime
+        .execute_remedy_with(
+            &acting(),
+            OfferId(offer.id.clone()),
+            RemedyArguments {
+                label: Some(LabelSpelling::default()),
+                return_schema: None,
+            },
+        )
+        .await;
+    assert!(
+        matches!(declared, RemedyOutcome::Authorized { .. }),
+        "the declaration approves the spawn, got {declared:?}"
+    );
+    spawn(runtime, tool).await
 }
 
 #[tokio::test]
@@ -111,7 +142,7 @@ async fn under_declared_coverage_an_agent_the_policy_never_names_cannot_spawn() 
     let runtime = open(&dir, &policy(&url), SpawnCoverage::Declared).await;
 
     match spawn(&runtime, "kagent__NS__release_manager").await {
-        HookDecision::DenyCall { feedback, review } => {
+        HookDecision::DenyCall { feedback, review, .. } => {
             assert!(
                 feedback.contains("not declared by the policy"),
                 "the model reads why the delegation is denied: {feedback}"
@@ -134,10 +165,11 @@ async fn under_declared_coverage_an_agent_the_policy_never_names_cannot_spawn() 
     assert_eq!(*consults.lock().unwrap(), 1, "the wildcard annotated the ordinary call");
     ran(&runtime, call("kagent__NS__release_manager")).await;
 
-    // The agent the policy names spawns, with its fork.
+    // The agent the policy names spawns once its return is declared, with its fork.
+    let held = spawn(&runtime, "kagent__NS__log_analyst").await;
     assert!(
         matches!(
-            spawn(&runtime, "kagent__NS__log_analyst").await,
+            declare_and_release(&runtime, held, "kagent__NS__log_analyst").await,
             HookDecision::AllowCall { spawn: Some(_) }
         ),
         "a named agent releases as a spawn"
@@ -155,12 +187,17 @@ async fn under_wildcard_coverage_the_annotator_covers_a_spawn_as_any_call() {
     let (url, consults) = permissive_annotator().await;
     let runtime = open(&dir, &policy(&url), SpawnCoverage::Wildcard).await;
 
+    let held = spawn(&runtime, "kagent__NS__release_manager").await;
     assert!(
-        matches!(
-            spawn(&runtime, "kagent__NS__release_manager").await,
-            HookDecision::AllowCall { spawn: Some(_) }
-        ),
-        "the wildcard covers the spawn under the default coverage"
+        matches!(&held, HookDecision::DenyCall { offers, .. } if !offers.is_empty()),
+        "the wildcard covers the spawn under the default coverage: it is held on the return menu, got {held:?}"
     );
     assert_eq!(*consults.lock().unwrap(), 1);
+    assert!(
+        matches!(
+            declare_and_release(&runtime, held, "kagent__NS__release_manager").await,
+            HookDecision::AllowCall { spawn: Some(_) }
+        ),
+        "the declared spawn releases with its fork"
+    );
 }
