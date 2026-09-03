@@ -23,6 +23,8 @@ const DIRECTIVE_DESCRIPTIONS: Record<string, string> = {
     "[Animated figure: the same agent, on another run, pulls another client's call notes into the update — data exfiltration without any attacker.]",
   "fig-guardrail":
     "[Animated figure: the agent runs inside a policy boundary; labeled data crosses in, and outbound flows are checked against contracts before dispatch.]",
+  "fig-kagent":
+    "[Animated figure: a protected kagent agent on Kubernetes sends tool calls through the ADK plugin gate to OpenAPPA; one call is allowed, one exfiltration is blocked, and one destructive call requests operator approval.]",
   "fig-label-fold":
     "[Animated figure: labels fold as the agent reads — audience intersects, trust takes the minimum.]",
   "fig-negotiation":
