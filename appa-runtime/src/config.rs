@@ -633,6 +633,15 @@ impl Config {
             .remove("include");
 
         let root_version = policy_version(&root.policy).ok_or(ConfigError::InvalidPolicyVersion)?;
+        let root_annotators = root
+            .policy
+            .get("annotator")
+            .and_then(toml::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(declaration_name)
+            .map(str::to_owned)
+            .collect::<std::collections::BTreeSet<_>>();
         if root.appa_composed.is_some() && !root.include.is_empty() {
             return Err(ConfigError::InvalidComposedMetadata {
                 reason: "stored composition metadata cannot appear with include".to_string(),
@@ -640,6 +649,7 @@ impl Config {
         }
         let mut origins = root_command_origins(&root, &source_dir)?;
         let mut seen = std::collections::BTreeSet::new();
+        let mut replaced_annotators = std::collections::BTreeSet::new();
         for authored in &root.include {
             let include = Path::new(authored);
             if include.is_absolute() {
@@ -661,7 +671,15 @@ impl Config {
                 path: include_path.display().to_string(),
                 source,
             })?;
-            compose_include(&mut document, included, &include_path, root_version, &mut origins)?;
+            compose_include(
+                &mut document,
+                included,
+                &include_path,
+                root_version,
+                &root_annotators,
+                &mut replaced_annotators,
+                &mut origins,
+            )?;
         }
 
         let composed = toml::to_string(&document).map_err(|source| ConfigError::UnrenderablePolicy { source })?;
@@ -989,11 +1007,17 @@ fn add_composed_metadata(
     Ok(())
 }
 
+fn declaration_name(declaration: &toml::Value) -> Option<&str> {
+    declaration.as_table()?.get("name")?.as_str()
+}
+
 fn compose_include(
     root: &mut toml::Value,
     included: toml::Value,
     include_path: &Path,
     root_version: i64,
+    root_annotators: &std::collections::BTreeSet<String>,
+    replaced_annotators: &mut std::collections::BTreeSet<String>,
     origins: &mut BTreeMap<String, PathBuf>,
 ) -> Result<(), ConfigError> {
     let display = include_path.display().to_string();
@@ -1051,6 +1075,19 @@ fn compose_include(
                 path: include_path.display().to_string(),
                 field: field.clone(),
             })?;
+        if field == "annotator" {
+            // An Annotator is one named policy component, not an ordered matcher. The root
+            // may replace one included default so a deployment can own its trusted hint and
+            // mandate without editing a battery. A second included declaration with that
+            // name remains in the composed policy, where normal duplicate validation refuses
+            // it instead of silently choosing between two batteries.
+            declarations.retain(|declaration| {
+                let Some(name) = declaration_name(declaration) else {
+                    return true;
+                };
+                !(root_annotators.contains(name) && replaced_annotators.insert(name.to_string()))
+            });
+        }
         let destination = root_policy
             .entry(field.clone())
             .or_insert_with(|| toml::Value::Array(Vec::new()))
@@ -1819,6 +1856,62 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(names, ["root", "first", "second"]);
         assert!(!String::from_utf8_lossy(config.policy_file().bytes()).contains("include"));
+    }
+
+    #[test]
+    fn a_root_annotator_replaces_one_included_default() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        std::fs::write(
+            dir.path().join("appa.toml"),
+            r#"
+                include = ["battery.toml"]
+
+                [policy]
+                version = 2
+
+                [[policy.annotator]]
+                name = "battery.classifier"
+                builtin = "claude-code"
+                audiences = []
+                hint = "Classify commands for this deployment."
+
+                [externals]
+                timeout_ms = 5000
+                max_body_bytes = 65536
+            "#,
+        )
+        .expect("write root config");
+        std::fs::write(
+            dir.path().join("battery.toml"),
+            r#"
+                [policy]
+                version = 2
+
+                [[policy.annotator]]
+                name = "battery.classifier"
+                builtin = "claude-code"
+                audiences = []
+                hint = "The battery default."
+
+                [[policy.tool]]
+                name = "Bash"
+                annotator = "battery.classifier"
+            "#,
+        )
+        .expect("write included config");
+
+        let config = Config::load(&dir.path().join("appa.toml")).expect("the root replaces the battery default");
+        let annotators = config.policy_file().value()["annotator"]
+            .as_array()
+            .expect("annotator declarations");
+        assert_eq!(annotators.len(), 1);
+        assert_eq!(
+            annotators[0]["hint"].as_str(),
+            Some("Classify commands for this deployment.")
+        );
+
+        let policy = toml::to_string(config.policy_file().value()).expect("the composed policy renders");
+        appa_policy::Config::from_toml_str(&policy).expect("the composed policy has one complete Annotator");
     }
 
     /// A command's working directory is its declaring file's, in every section, and the

@@ -200,7 +200,7 @@ access.
 
 ## Customise a battery
 
-Put your rules in the root config. They run before battery rules, even when they appear below `include`.
+Define tool rules and Annotator customizations in the root config. Root tool rules run before battery rules, even when they appear below `include`. A root Annotator declaration replaces the battery declaration with the same name.
 
 ```toml
 include = [

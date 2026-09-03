@@ -39,6 +39,7 @@ mod tests {
     #[test]
     fn unix_keeps_the_undeclared_tool_fallback() {
         let config = for_platform(true);
+        assert!(config.contains("name = \"claude-code.bash-requirements\""));
         assert!(config.contains("name = \"claude-code.undeclared-tool\""));
         assert!(config.contains("name = \"*\""));
     }
@@ -46,6 +47,7 @@ mod tests {
     #[test]
     fn platforms_without_the_claude_subprocess_fail_closed_on_undeclared_tools() {
         let config = for_platform(false);
+        assert!(!config.contains("name = \"claude-code.bash-requirements\""));
         assert!(!config.contains("name = \"claude-code.undeclared-tool\""));
         assert!(!config.contains("name = \"*\""));
 

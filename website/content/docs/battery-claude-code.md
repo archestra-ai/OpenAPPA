@@ -32,4 +32,6 @@ The `Read` rules match a path as written, absolute or relative, so a hidden name
 
 The Bash annotator describes the data a command needs and returns. Neither tool isolates a command from your computer.
 
+The Bash Annotator's `hint` is its policy-specific prompt. A root `[[policy.annotator]]` declaration with the same name replaces the battery default. This lets the deployment define how to classify its shell commands without editing the battery.
+
 Use a sandbox to protect credentials and network access.

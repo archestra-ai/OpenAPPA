@@ -230,6 +230,17 @@ delta = { trust = "suspicious" }
 # alone: a tool whose result is the requester's or the organization's data gets
 # a static rule above instead.
 # APPA-UNIX-FALLBACK-BEGIN
+# Bash classification prompt for the optional Claude Code battery. Edit `hint`
+# to describe how this deployment classifies shell commands. When the battery
+# is included, this root declaration replaces the battery's Annotator, while
+# the battery continues to provide the Bash contract and credential-path rules.
+# `audiences = []` prevents the model from choosing command-output readers.
+[[policy.annotator]]
+name = "claude-code.bash-requirements"
+builtin = "claude-code"
+audiences = []
+hint = "Treat network or otherwise unvetted output as suspicious. Classify trust and attention requirements from the command's visible behavior and destination."
+
 [[policy.annotator]]
 name = "claude-code.undeclared-tool"
 builtin = "claude-code"

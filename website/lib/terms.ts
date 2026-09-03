@@ -7,7 +7,7 @@
 const TERMS = {
   version: "The policy configuration dialect version.",
   include:
-    "Policy fragments composed by the root configuration. Root declarations run first, followed by included declarations in list order. Included files cannot include more files or replace root-wide settings.",
+    "Policy fragments composed by the root configuration. Root declarations run first, followed by included declarations in list order. Included files cannot include more files or replace root-wide settings. A root [[annotator]] replaces one included Annotator with the same name.",
   trust_chain:
     "The ordered list of trust ranks, least-trusted first. Omitted, it defaults to suspicious < trusted.",
 

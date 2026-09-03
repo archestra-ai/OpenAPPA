@@ -22,8 +22,10 @@ OpenAPPA to do differently.
 - The root config is the user's source of truth. Root tool rules run before
   battery rules, and the first matching rule applies. Keep every root rule
   unless the user explicitly approves changing or removing it.
-- A battery supplies maintained defaults. Never edit a battery. Override it
-  with a root rule.
+- A battery supplies maintained defaults. Never edit a battery. Override a
+  tool contract with a root rule. Override an Annotator by repeating its
+  complete declaration in the root with the same name. Keep its implementation,
+  inputs, and mandate unless the approved behavior requires changing them.
 - Read before proposing. Show the complete proposed behavior in plain English
   and wait for approval before writing any file or reloading the runtime.
 - Make the smallest change that achieves the request. Preserve unrelated
@@ -283,13 +285,28 @@ not guess.
    beside the root config under `batteries/<name>/`, add its `appa.toml` to the
    root `include` list, and add any root support it requires. Leave an existing
    copied battery unchanged unless the user asked to refresh it.
-9. Apply only the approved root-rule changes. To change battery behavior, add
-   or edit a root rule; never modify the battery.
+9. Apply only the approved root changes. To change battery behavior, add or
+   edit a root declaration; never modify the battery.
 10. Reload and report the result as described below.
 
 For several root rules with the same tool name, order matters. Put a narrow
 argument-specific rule before its general fallback. Do not reorder unrelated
 rules.
+
+For Bash changes, distinguish exact command patterns from contextual
+classifications:
+
+- Use ordered root `Bash(command:...)` contracts for exact patterns.
+- Use the `hint` on the root `claude-code.bash-requirements` Annotator when the
+  behavior requires interpreting a command.
+
+If that Annotator exists only in the Claude Code battery, copy its complete
+declaration into the root before modifying the hint. Do not add a broad root
+`Bash` contract because it would run before the battery's credential-path
+refusals. Keep `builtin`, `inputs`, and mandate bounds unchanged unless the user
+approves changing them. A hint can select only values that the mandate admits.
+Add any Authority or other support those values need, and include it in the
+proposal.
 
 ## Reload and finish
 
