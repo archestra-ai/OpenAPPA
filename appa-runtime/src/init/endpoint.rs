@@ -10,9 +10,9 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 
 use super::config::ComposedPolicy;
+use super::paths::friendly_path;
 #[cfg(windows)]
 use super::powershell;
-use super::receipt::friendly_path;
 use super::{Answer, Confirmation, InitError};
 
 /// What this init did about the policy the running runtime serves.

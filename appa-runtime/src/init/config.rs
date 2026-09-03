@@ -7,7 +7,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
-use super::receipt::friendly_path;
+use super::paths::friendly_path;
 use super::{Answer, Confirmation, InitError};
 
 /// What this init did to the config file, as the receipt reports it.

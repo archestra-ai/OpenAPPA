@@ -3,12 +3,12 @@
 use crate::plugin_bundle::{Deployment, PluginSource};
 use std::env;
 use std::io::IsTerminal;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use super::PLUGIN;
 use super::config::ConfigOutcome;
 use super::endpoint::RuntimeOutcome;
-use super::paths::user_home;
+use super::paths::friendly_path;
 
 pub(super) fn source_label(source: &PluginSource, deployment: &Deployment) -> String {
     let origin = match source {
@@ -88,35 +88,9 @@ impl Receipt {
     }
 }
 
-pub(super) fn friendly_path(path: &Path) -> String {
-    user_home().and_then(|home| path.strip_prefix(home).ok()).map_or_else(
-        || path.display().to_string(),
-        |relative| {
-            if relative.as_os_str().is_empty() {
-                "~".to_owned()
-            } else {
-                format!("~/{}", relative.display())
-            }
-        },
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A receipt reports a path relative to the home directory it is under, so a
-    /// summary read aloud or pasted into an issue carries no account name.
-    #[test]
-    fn a_receipt_shortens_a_path_under_the_home_directory_and_leaves_others_whole() {
-        let Some(home) = user_home() else {
-            return;
-        };
-
-        assert_eq!(friendly_path(&home), "~");
-        assert_eq!(friendly_path(&home.join("config/appa.toml")), "~/config/appa.toml");
-        assert_eq!(friendly_path(Path::new("/etc/appa/appa.toml")), "/etc/appa/appa.toml");
-    }
 
     /// `Style` is the only thing that decides whether escapes are emitted, and it
     /// decides it for the whole receipt rather than per line.

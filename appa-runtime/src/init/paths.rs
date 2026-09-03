@@ -156,3 +156,36 @@ pub(super) fn same_file(left: &Path, right: &Path) -> bool {
         }
     }
 }
+
+/// A path as a receipt or a prompt shows it: relative to the home directory it
+/// is under, so what is read aloud or pasted into an issue names no account.
+pub(super) fn friendly_path(path: &Path) -> String {
+    user_home().and_then(|home| path.strip_prefix(home).ok()).map_or_else(
+        || path.display().to_string(),
+        |relative| {
+            if relative.as_os_str().is_empty() {
+                "~".to_owned()
+            } else {
+                format!("~/{}", relative.display())
+            }
+        },
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A path is reported relative to the home directory it is under, so a receipt
+    /// read aloud or pasted into an issue carries no account name.
+    #[test]
+    fn a_path_under_the_home_directory_is_shortened_and_others_are_left_whole() {
+        let Some(home) = user_home() else {
+            return;
+        };
+
+        assert_eq!(friendly_path(&home), "~");
+        assert_eq!(friendly_path(&home.join("config/appa.toml")), "~/config/appa.toml");
+        assert_eq!(friendly_path(Path::new("/etc/appa/appa.toml")), "/etc/appa/appa.toml");
+    }
+}
