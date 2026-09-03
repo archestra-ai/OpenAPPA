@@ -181,10 +181,16 @@ with `APPA_RUNTIME_URL` — the hooks, the MCP server, and the statusline
 all follow it:
 
 ```sh
+bundle=$(mktemp -d)
+rmdir "$bundle"
+scripts/appa-stage-plugin-bundle.sh "$bundle"
 cp integrations/claude-code/examples/claude-code.appa.toml appa.toml
 nohup cargo run --bin appa -- runtime --config appa.toml --db appa.db --listen 127.0.0.1:8788 >appa-runtime.log 2>&1 &
-APPA_GATE=1 APPA_RUNTIME_URL=http://127.0.0.1:8788 claude --plugin-dir integrations/claude-code/plugin
+APPA_GATE=1 APPA_RUNTIME_URL=http://127.0.0.1:8788 claude --plugin-dir "$bundle/plugin"
 ```
+
+Staging materializes the canonical `integrations/appa-guide` skill at
+Claude's required `plugin/skills/appa-guide` path.
 
 The starter leaves a runtime at a URL of your own alone, stale or not:
 after a rebuild, restart it yourself. The last command is interactive and belongs to the user: a Claude

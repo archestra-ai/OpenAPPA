@@ -1,7 +1,6 @@
 {{- if .Values.guide.enabled }}
-# The appa-guide agent: packaging around the composable appa-guide skill —
-# the Claude Code plugin's own skill package (SKILL.md router plus
-# references/{claude-code,kagent}.md), so both hosts share one skill.
+# The appa-guide agent: packaging around the canonical composable skill at
+# integrations/appa-guide (SKILL.md router plus host reference files).
 # This agent guarantees the kagent side's prerequisites: the kagent tool
 # server's k8s tools, the shared runtime as its own gate, and the model.
 # The fleet policy puts k8s_apply_manifest behind human-approval, so the

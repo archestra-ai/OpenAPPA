@@ -9,7 +9,7 @@ use common::repo_root;
 use std::fs;
 
 fn skill_dir() -> std::path::PathBuf {
-    repo_root().join("integrations/claude-code/plugin/skills/appa-guide")
+    repo_root().join("integrations/appa-guide")
 }
 
 fn read(name: &str) -> String {
@@ -102,7 +102,7 @@ fn the_kagent_chart_consumes_this_skill_package() {
     assert!(guide.contains("APPA_RUNTIME_URL"));
 
     let values = fs::read_to_string(chart.join("values.yaml")).expect("the chart values exist");
-    assert!(values.contains("integrations/claude-code/plugin/skills/appa-guide"));
+    assert!(values.contains("integrations/appa-guide"));
 
     let policy = fs::read_to_string(chart.join("files/demo.appa.toml")).expect("the demo policy exists");
     assert!(policy.contains("name = \"k8s_apply_manifest\""));
@@ -115,9 +115,11 @@ fn the_kagent_chart_consumes_this_skill_package() {
 }
 
 #[test]
-fn no_second_skill_package_exists() {
+fn the_claude_plugin_has_no_second_source_copy() {
     assert!(
-        !repo_root().join("integrations/skills").exists(),
-        "the plugin skill package is the single appa-guide; a parallel package would drift"
+        !repo_root()
+            .join("integrations/claude-code/plugin/skills/appa-guide")
+            .exists(),
+        "the Claude plugin materializes the canonical skill at staging time; a source copy would drift"
     );
 }

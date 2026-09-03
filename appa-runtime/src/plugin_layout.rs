@@ -12,9 +12,10 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-pub const REPOSITORY_MAPPINGS: [(&str, &str); 7] = [
+pub const REPOSITORY_MAPPINGS: [(&str, &str); 8] = [
     ("integrations/claude-code/.claude-plugin", ".claude-plugin"),
     ("integrations/claude-code/plugin", "plugin"),
+    ("integrations/appa-guide", "plugin/skills/appa-guide"),
     ("integrations/claude-code/examples", "examples"),
     ("batteries", "batteries"),
     ("integrations/claude-code/README.md", "README.md"),

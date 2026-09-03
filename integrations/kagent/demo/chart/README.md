@@ -46,7 +46,7 @@ Leave `openai.apiKey` unset to paste the key in the dashboard instead
 | `seed.enabled` | `true` | Replay the showcase chats after install. |
 | `agents.go.enabled` | `true` | Also run `cluster-ops-go`, the same agent on kagent's go runtime (needs the `golang-adk` image beside the python one). |
 | `guide.enabled` | `true` | Install the `appa-guide` agent: the routing skill over the kagent tool server's k8s tools, gated by the shared runtime. |
-| `guide.skill.git.*` | this repo, `main`, `integrations/claude-code/plugin/skills/appa-guide` | Where kagent clones the skill from — the same package Claude Code ships. The cluster must reach the repo (or a fork). |
+| `guide.skill.git.*` | this repo, `main`, `integrations/appa-guide` | Where kagent clones the canonical skill. Claude packaging stages the same directory into its plugin. The cluster must reach the repo (or a fork). |
 | `guide.toolServer` | `kagent-tool-server` | The RemoteMCPServer serving the `k8s_*` tools. |
 
 kagent compiles an agent that calls another agent as a tool only once

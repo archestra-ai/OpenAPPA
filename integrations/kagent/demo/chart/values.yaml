@@ -59,8 +59,8 @@ tools:
     tag: ""
     pullPolicy: IfNotPresent
 
-# The APPA guide agent: the composable appa-guide skill (the Claude Code
-# plugin's own skill package — one router, one reference per host) attached
+# The APPA guide agent: the canonical composable appa-guide skill (one
+# router, one reference per host) attached
 # through kagent git-ref skills, with the kagent tool server's k8s tools and
 # the shared runtime as its own gate. The agent is packaging; any host with
 # the same tools can run the same skill.
@@ -71,7 +71,7 @@ guide:
     git:
       url: https://github.com/archestra-ai/OpenAPPA
       ref: main
-      path: integrations/claude-code/plugin/skills/appa-guide
+      path: integrations/appa-guide
     name: appa-guide
   # The kagent tool server that serves the k8s_* tools.
   toolServer: kagent-tool-server

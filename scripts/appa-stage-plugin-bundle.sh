@@ -37,6 +37,10 @@ CDPATH='' cd -- "$outdir" || exit 1
 
 cp -R -- "$repo/integrations/claude-code/.claude-plugin" ./.claude-plugin
 cp -R -- "$repo/integrations/claude-code/plugin" ./plugin
+# appa-guide is host-neutral source. Materialize it at Claude's required
+# plugin path rather than keeping a second source copy under claude-code/.
+mkdir -p -- ./plugin/skills
+cp -R -- "$repo/integrations/appa-guide" ./plugin/skills/appa-guide
 cp -R -- "$repo/integrations/claude-code/examples" ./examples
 cp -R -- "$repo/batteries" ./batteries
 cp -- "$repo/integrations/claude-code/README.md" ./README.md
