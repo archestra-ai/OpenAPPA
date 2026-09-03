@@ -1100,7 +1100,7 @@ impl RuntimeEngine {
             .map(|(offer, plan)| (offer_id(offer), *plan))
             .collect();
         let chain = self.engine.registry().trust_chain();
-        let text = block_feedback(&block.block, &offers, chain, &label_spelling(chain, label));
+        let text = block_feedback(&block.block, &offers, chain, label);
         let review = self.pending_reviews(block, &offers);
         (text, offers.into_iter().map(|(offer, _)| offer).collect(), review)
     }
@@ -2837,15 +2837,41 @@ fn label_spelling(chain: &TrustChain, label: &Label) -> String {
     }
 }
 
-fn return_instruction(sanitizer: Option<&appa_engine::names::SanitizerName>, id: &OfferId, floor: &str) -> String {
+/// The spelling a return declaration's example needs: this trajectory's label as the
+/// `label` argument takes it, and the trust ranks a placeholder stands for.
+struct ReturnSpelling {
+    floor: String,
+    ranks: String,
+}
+
+impl ReturnSpelling {
+    fn of(chain: &TrustChain, label: &Label) -> ReturnSpelling {
+        ReturnSpelling {
+            floor: label_spelling(chain, label),
+            ranks: chain
+                .names()
+                .map(|name| format!("\"{}\"", terminal_safe(name)))
+                .collect::<Vec<_>>()
+                .join(", "),
+        }
+    }
+}
+
+fn return_instruction(
+    sanitizer: Option<&appa_engine::names::SanitizerName>,
+    id: &OfferId,
+    spelling: &ReturnSpelling,
+) -> String {
     let id = terminal_safe(&id.0);
+    let ReturnSpelling { floor, ranks } = spelling;
     match sanitizer {
         None => format!(
             "  - Declare the lowest label this session accepts from the subagent's return, then propose the spawn \
              again. The subagent starts at this session's label, now {floor}, and can accept no change below the \
              floor it is given: a subagent that must read below this session's trust needs the floor at that rank, \
              and its return may then narrow this session that far. An omitted dimension keeps its current \
-             value.\n    execute_remedy_plan(offer_id: \"{id}\", label: {{trust: \"<rank>\"}})"
+             value.\n    execute_remedy_plan(offer_id: \"{id}\", label: {{trust: \"<rank>\"}}), with <rank> one \
+             of {ranks} (lowest first)"
         ),
         Some(name) if name.is_attest_schema() => format!(
             "  - Attest the subagent's return: declare the floor and the JSON schema its return must match (a \
@@ -2861,9 +2887,9 @@ fn return_instruction(sanitizer: Option<&appa_engine::names::SanitizerName>, id:
     }
 }
 
-fn remedy_instruction(plan: &ExecutableRemedyPlan, id: &OfferId, floor: &str) -> String {
+fn remedy_instruction(plan: &ExecutableRemedyPlan, id: &OfferId, spelling: &ReturnSpelling) -> String {
     if let Some(sanitizer) = plan.return_step() {
-        return return_instruction(sanitizer, id, floor);
+        return return_instruction(sanitizer, id, spelling);
     }
     let needs_approval = !plan.required.is_empty();
     let action = match (needs_approval, plan.narrowing().is_some(), plan.sanitizer()) {
@@ -2887,7 +2913,7 @@ fn remedy_instruction(plan: &ExecutableRemedyPlan, id: &OfferId, floor: &str) ->
     )
 }
 
-fn remedy_lines(planned: &PlannedBlock, offers: &[(OfferId, PlanId)], floor: &str) -> Vec<String> {
+fn remedy_lines(planned: &PlannedBlock, offers: &[(OfferId, PlanId)], spelling: &ReturnSpelling) -> Vec<String> {
     planned
         .plans
         .iter()
@@ -2895,7 +2921,7 @@ fn remedy_lines(planned: &PlannedBlock, offers: &[(OfferId, PlanId)], floor: &st
             RemedyPlan::Executable(plan) => offers
                 .iter()
                 .find(|(_, offered)| *offered == plan.id)
-                .map(|(id, _)| remedy_instruction(plan, id, floor)),
+                .map(|(id, _)| remedy_instruction(plan, id, spelling)),
             RemedyPlan::Redispatch(redispatch) => Some(format!(
                 "  - Run {} first; it clears: {}.",
                 terminal_safe(redispatch.tool().as_str()),
@@ -2905,7 +2931,7 @@ fn remedy_lines(planned: &PlannedBlock, offers: &[(OfferId, PlanId)], floor: &st
         .collect()
 }
 
-fn block_feedback(planned: &PlannedBlock, offers: &[(OfferId, PlanId)], chain: &TrustChain, floor: &str) -> String {
+fn block_feedback(planned: &PlannedBlock, offers: &[(OfferId, PlanId)], chain: &TrustChain, label: &Label) -> String {
     let mut reasons = Vec::new();
     for gap in &planned.raw.requirement_gaps {
         reasons.push(terminal_safe(&gap_text(gap)));
@@ -2931,7 +2957,7 @@ fn block_feedback(planned: &PlannedBlock, offers: &[(OfferId, PlanId)], chain: &
     ];
     lines.extend(reasons.into_iter().map(|reason| format!("  - {reason}")));
 
-    let remedies = remedy_lines(planned, offers, floor);
+    let remedies = remedy_lines(planned, offers, &ReturnSpelling::of(chain, label));
     if !remedies.is_empty() {
         lines.push(String::new());
         lines.push("Continue:".to_string());
@@ -3387,11 +3413,15 @@ mod tests {
             (OfferId("offer-for-8".to_string()), PlanId::new(8)),
             (OfferId("offer-for-3".to_string()), PlanId::new(3)),
         ];
+        let spelling = super::ReturnSpelling {
+            floor: "{}".to_string(),
+            ranks: String::new(),
+        };
         assert_eq!(
-            remedy_lines(&planned, &offers, "{}"),
+            remedy_lines(&planned, &offers, &spelling),
             vec![
-                remedy_instruction(&plan(3), &offers[1].0, "{}"),
-                remedy_instruction(&plan(8), &offers[0].0, "{}"),
+                remedy_instruction(&plan(3), &offers[1].0, &spelling),
+                remedy_instruction(&plan(8), &offers[0].0, &spelling),
             ],
             "the plan with no offer is not shown; the rest carry their own offer"
         );

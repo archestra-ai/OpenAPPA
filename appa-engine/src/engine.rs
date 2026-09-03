@@ -11927,6 +11927,15 @@ mod tests {
                 .all(|plan| plan.executable().is_none_or(|plan| plan.narrowing().is_none())),
             "the audience dimension stays bound: no plan accepts the drop to internal"
         );
+        assert_eq!(
+            block.block.fork_advice,
+            Some(crate::plan::ForkAdvice::Narrowing {
+                standing: crate::plan::FloorStanding::Below,
+                remedies_required: false,
+                sanitized_return: false,
+            }),
+            "a trust-raising sanitizer lifts no audience drop, so no sanitized delegation is advised"
+        );
     }
 
     #[test]

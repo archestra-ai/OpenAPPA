@@ -217,8 +217,9 @@ pub enum ForkAdvice {
     /// Only requirement gaps: a child starts at the same label, so delegation clears nothing.
     SameLabel,
     /// The block narrows this trajectory. `sanitized_return` when a return sanitizer this
-    /// trajectory may declare would lift a child's return over the change; `remedies_required`
-    /// when the block also carries requirement gaps a child would have to clear.
+    /// trajectory may declare raises every dimension the change lowers, so a child's return
+    /// through it leaves this trajectory's label as it is; `remedies_required` when the block
+    /// also carries requirement gaps a child would have to clear.
     Narrowing {
         standing: FloorStanding,
         remedies_required: bool,
@@ -317,7 +318,13 @@ pub(crate) fn plan(
                 Some(_) => FloorStanding::Below,
             },
             remedies_required: !raw.requirement_gaps.is_empty(),
-            sanitized_return: return_options(registry, floor.as_ref()).iter().any(Option::is_some),
+            sanitized_return: return_options(registry, floor.as_ref())
+                .into_iter()
+                .flatten()
+                .filter_map(|name| registry.sanitizer(&name))
+                .any(|sanitizer| {
+                    Floor::new(current.clone(), Some(sanitizer.transition.applied())).holds(&narrowing.to)
+                }),
         }),
     };
     Ok(PlannedBlock {
