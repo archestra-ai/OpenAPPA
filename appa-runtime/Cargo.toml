@@ -68,6 +68,9 @@ tar = "0.4"
 # The fail points the orchestration tests drive. A dev-dependency, so they are
 # absent from the binary.
 appa-eventlog = { workspace = true, features = ["fault-injection"] }
+# The in-memory span exporter verifies the semantic attributes that leave the
+# tracing bridge, rather than only the runtime's intermediate projection.
+opentelemetry_sdk = { version = "0.32", features = ["testing", "trace"] }
 # The elicitation round trip is only real with a real client on the
 # other end: these features exist for `tests/hitl_elicitation.rs` and
 # never ship in the binary.

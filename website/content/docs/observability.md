@@ -32,6 +32,14 @@ including `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`,
 endpoint. `OTEL_METRIC_EXPORT_INTERVAL` controls the metric export interval in
 milliseconds.
 
+Tool arguments are sensitive content and are not exported by default. Set
+`OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true` to add the exact JSON
+arguments from call and result hooks to their spans as
+`gen_ai.tool.call.arguments`. The runtime does not copy them to logs or
+metrics. It exports arguments up to 32 KiB. For a larger value, the span carries
+only `appa.tool.call.arguments.size_bytes` and
+`appa.tool.call.arguments.sha256`.
+
 Use `-v` to include the runtime's decision path at debug level and `-vv` to
 include the engine algebra at trace level. Without either flag, the decision
 summary is still emitted at info level. Network export happens off the hook's
@@ -48,7 +56,7 @@ Every parsed hook is represented by an `appa.hook` span and a structured
 the log record, which lets a backend navigate from the decision trace to the
 logs produced while that decision was evaluated.
 
-The span and log attributes are:
+The span attributes are:
 
 | Attribute | Meaning |
 |---|---|
@@ -58,7 +66,14 @@ The span and log attributes are:
 | `appa.trajectory.child_id` | Child trajectory ID when the event belongs to one |
 | `gen_ai.conversation.id` | The root trajectory under the OpenTelemetry GenAI convention |
 | `gen_ai.tool.name` | Tool name on call and result hooks |
+| `gen_ai.tool.call.arguments` | Exact tool arguments when sensitive-content capture is enabled and the value is at most 32 KiB |
+| `appa.tool.call.arguments.size_bytes` | Argument size when an enabled capture exceeds 32 KiB |
+| `appa.tool.call.arguments.sha256` | Argument digest when an enabled capture exceeds 32 KiB |
 | `error.type` | Operational refusal family, when the span failed |
+
+The `hook decision` log repeats the event, decision, trajectory IDs,
+conversation ID, and tool name. It does not repeat tool arguments or their
+oversize metadata. Its trace and span IDs provide the correlation instead.
 
 The custom `appa.*` namespace is used because the OpenTelemetry registry has
 no policy-decision or agent-trajectory convention. Standard `service.*`,
@@ -79,11 +94,12 @@ unbounded time series.
 
 ## Data boundary
 
-Telemetry never includes prompt text, tool arguments, tool results, policy
-feedback, remedy text, or label values. Those values may contain the data the
-policy exists to confine. A deployment may still treat trajectory IDs and tool
-names as sensitive operational metadata and should scope access to its
-observability backend accordingly.
+Telemetry never includes prompt text, tool results, policy feedback, remedy
+text, or label values. Tool arguments are included on spans only when a
+deployment explicitly enables sensitive-content capture. Arguments can contain
+the data the policy exists to confine. Scope access to the observability backend
+and set its retention period before enabling capture. A deployment may also
+treat trajectory IDs and tool names as sensitive operational metadata.
 
 ## Local Grafana
 

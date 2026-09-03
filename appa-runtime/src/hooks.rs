@@ -4,7 +4,9 @@
 use std::time::Instant;
 
 use appa_runtime_api::{Actor, Codec, HookDecision, HookEvent, ParseRefusal, ProposedCall, Ruling, TrajectoryId};
+use sha2::{Digest, Sha256};
 use tracing::Instrument;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::api::{
     ChildReturnDecision, EventError, LateOpen, OfferId, Runtime, Session, SpawnResultDecision, ToolCallDecision,
@@ -32,18 +34,8 @@ pub async fn answer(runtime: &Runtime, codec: &Codec, body: &[u8]) -> (u16, serd
             return (409, serde_json::json!({ "error": detail }));
         }
     };
-    let observation = HookObservation::from(&event);
-    let span = tracing::info_span!(
-        "appa.hook",
-        "appa.hook.event" = observation.event,
-        "appa.trajectory.id" = %observation.root,
-        "appa.trajectory.child_id" = observation.child.as_deref().unwrap_or(""),
-        "gen_ai.conversation.id" = %observation.root,
-        "gen_ai.tool.name" = observation.tool.as_deref().unwrap_or(""),
-        "appa.decision" = tracing::field::Empty,
-        "error.type" = tracing::field::Empty,
-        "otel.status_code" = tracing::field::Empty,
-    );
+    let observation = HookObservation::from_event(&event, ToolArgumentCapture::from_env());
+    let span = hook_span(&observation);
     async move {
         let decision = handle(runtime, event.clone()).await;
         let decision_name = decision_name(&decision);
@@ -72,42 +64,122 @@ pub async fn answer(runtime: &Runtime, codec: &Codec, body: &[u8]) -> (u16, serd
     .await
 }
 
+fn hook_span(observation: &HookObservation) -> tracing::Span {
+    let span = tracing::info_span!(
+        "appa.hook",
+        "appa.hook.event" = observation.event,
+        "appa.trajectory.id" = %observation.root,
+        "appa.trajectory.child_id" = observation.child.as_deref().unwrap_or(""),
+        "gen_ai.conversation.id" = %observation.root,
+        "gen_ai.tool.name" = observation.tool.as_deref().unwrap_or(""),
+        "appa.decision" = tracing::field::Empty,
+        "error.type" = tracing::field::Empty,
+        "otel.status_code" = tracing::field::Empty,
+    );
+    match &observation.arguments {
+        ToolArguments::NotCaptured => {}
+        ToolArguments::Captured(arguments) => {
+            span.set_attribute("gen_ai.tool.call.arguments", arguments.clone());
+        }
+        ToolArguments::Omitted { size_bytes, sha256 } => {
+            span.set_attribute(
+                "appa.tool.call.arguments.size_bytes",
+                i64::try_from(*size_bytes).unwrap_or(i64::MAX),
+            );
+            span.set_attribute("appa.tool.call.arguments.sha256", sha256.clone());
+        }
+    }
+    span
+}
+
 struct HookObservation {
     event: &'static str,
     root: String,
     child: Option<String>,
     tool: Option<String>,
-}
-
-impl From<&HookEvent> for HookObservation {
-    fn from(event: &HookEvent) -> Self {
-        match event {
-            HookEvent::SessionStart { root } => Self::new("session_start", root, None, None),
-            HookEvent::Prompt { actor, .. } => Self::actor("prompt", actor, None),
-            HookEvent::TurnEnd { actor } => Self::actor("turn_end", actor, None),
-            HookEvent::ToolCall { actor, call, .. } => Self::actor("tool_call", actor, Some(&call.tool)),
-            HookEvent::ToolResult { actor, call, .. } => Self::actor("tool_result", actor, Some(&call.tool)),
-            HookEvent::ChildStart { root, child, .. } => Self::new("child_start", root, Some(child), None),
-            HookEvent::ChildEnd { root, child, .. } => Self::new("child_end", root, Some(child), None),
-            HookEvent::SpawnResult { actor, call, .. } => Self::actor("spawn_result", actor, Some(&call.tool)),
-        }
-    }
+    arguments: ToolArguments,
 }
 
 impl HookObservation {
-    fn actor(event: &'static str, actor: &Actor, tool: Option<&str>) -> Self {
-        Self::new(event, &actor.root, actor.child.as_ref(), tool)
+    fn from_event(event: &HookEvent, capture: ToolArgumentCapture) -> Self {
+        match event {
+            HookEvent::SessionStart { root } => Self::new("session_start", root, None, None, capture),
+            HookEvent::Prompt { actor, .. } => Self::actor("prompt", actor, None, capture),
+            HookEvent::TurnEnd { actor } => Self::actor("turn_end", actor, None, capture),
+            HookEvent::ToolCall { actor, call, .. } => Self::actor("tool_call", actor, Some(call), capture),
+            HookEvent::ToolResult { actor, call, .. } => Self::actor("tool_result", actor, Some(call), capture),
+            HookEvent::ChildStart { root, child, .. } => Self::new("child_start", root, Some(child), None, capture),
+            HookEvent::ChildEnd { root, child, .. } => Self::new("child_end", root, Some(child), None, capture),
+            HookEvent::SpawnResult { actor, call, .. } => Self::actor("spawn_result", actor, Some(call), capture),
+        }
     }
 
-    fn new(event: &'static str, root: &TrajectoryId, child: Option<&TrajectoryId>, tool: Option<&str>) -> Self {
+    fn actor(event: &'static str, actor: &Actor, call: Option<&ProposedCall>, capture: ToolArgumentCapture) -> Self {
+        Self::new(event, &actor.root, actor.child.as_ref(), call, capture)
+    }
+
+    fn new(
+        event: &'static str,
+        root: &TrajectoryId,
+        child: Option<&TrajectoryId>,
+        call: Option<&ProposedCall>,
+        capture: ToolArgumentCapture,
+    ) -> Self {
         Self {
             event,
             root: root.0.clone(),
             child: child.map(|id| id.0.clone()),
-            tool: tool.map(str::to_owned),
+            tool: call.map(|call| call.tool.clone()),
+            arguments: ToolArguments::from_call(call, capture),
         }
     }
 }
+
+#[derive(Clone, Copy)]
+enum ToolArgumentCapture {
+    Disabled,
+    Enabled,
+}
+
+impl ToolArgumentCapture {
+    fn from_env() -> Self {
+        let value = std::env::var(CAPTURE_TOOL_ARGUMENTS_ENV).ok();
+        Self::from_value(value.as_deref())
+    }
+
+    fn from_value(value: Option<&str>) -> Self {
+        match value {
+            Some(value) if value.eq_ignore_ascii_case("true") => Self::Enabled,
+            _ => Self::Disabled,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ToolArguments {
+    NotCaptured,
+    Captured(String),
+    Omitted { size_bytes: usize, sha256: String },
+}
+
+impl ToolArguments {
+    fn from_call(call: Option<&ProposedCall>, capture: ToolArgumentCapture) -> Self {
+        let (Some(call), ToolArgumentCapture::Enabled) = (call, capture) else {
+            return Self::NotCaptured;
+        };
+        let arguments = call.arguments.get();
+        if arguments.len() <= MAX_CAPTURED_TOOL_ARGUMENT_BYTES {
+            return Self::Captured(arguments.to_owned());
+        }
+        Self::Omitted {
+            size_bytes: arguments.len(),
+            sha256: format!("{:x}", Sha256::digest(arguments.as_bytes())),
+        }
+    }
+}
+
+const CAPTURE_TOOL_ARGUMENTS_ENV: &str = "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT";
+const MAX_CAPTURED_TOOL_ARGUMENT_BYTES: usize = 32 * 1024;
 
 fn decision_name(decision: &HookDecision) -> &'static str {
     match decision {
@@ -423,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn hook_observation_carries_identity_without_call_data() {
+    fn hook_observation_does_not_capture_call_data_without_opt_in() {
         let event = HookEvent::ToolCall {
             actor: Actor {
                 root: TrajectoryId("cc:root".to_string()),
@@ -438,12 +510,83 @@ mod tests {
             ruling: None,
         };
 
-        let observation = HookObservation::from(&event);
+        let observation = HookObservation::from_event(&event, ToolArgumentCapture::Disabled);
         assert_eq!(observation.event, "tool_call");
         assert_eq!(observation.root, "cc:root");
         assert_eq!(observation.child.as_deref(), Some("cc:child"));
         assert_eq!(observation.tool.as_deref(), Some("Write"));
-        assert!(!format!("{}{:?}", observation.root, observation.tool).contains("not telemetry"));
+        assert_eq!(observation.arguments, ToolArguments::NotCaptured);
+    }
+
+    #[test]
+    fn opted_in_tool_arguments_keep_the_harness_json_spelling() {
+        let event = tool_call("cc:root", r#"{"a":1,"a":2}"#);
+
+        let observation = HookObservation::from_event(&event, ToolArgumentCapture::Enabled);
+        assert_eq!(
+            observation.arguments,
+            ToolArguments::Captured(r#"{"a":1,"a":2}"#.to_string())
+        );
+    }
+
+    #[test]
+    fn oversized_tool_arguments_emit_only_size_and_digest_metadata() {
+        let arguments = format!(r#"{{"body":"{}"}}"#, "x".repeat(MAX_CAPTURED_TOOL_ARGUMENT_BYTES));
+        let event = HookEvent::ToolCall {
+            actor: Actor {
+                root: TrajectoryId("cc:root".to_string()),
+                child: None,
+            },
+            call: ProposedCall {
+                tool: "Write".to_string(),
+                arguments: serde_json::value::RawValue::from_string(arguments.clone()).expect("valid arguments"),
+            },
+            spawn: false,
+            ruling: None,
+        };
+
+        let observation = HookObservation::from_event(&event, ToolArgumentCapture::Enabled);
+        let ToolArguments::Omitted { size_bytes, sha256 } = observation.arguments else {
+            panic!("oversized arguments must be omitted");
+        };
+        assert_eq!(size_bytes, arguments.len());
+        assert_eq!(
+            sha256,
+            "411932b4696bf0016b1e8e068dd2f32037bab015a0b2ba26df0117b8c7b2471f"
+        );
+    }
+
+    #[test]
+    fn tool_argument_capture_requires_an_explicit_true_value() {
+        assert!(matches!(
+            ToolArgumentCapture::from_value(Some("true")),
+            ToolArgumentCapture::Enabled
+        ));
+        assert!(matches!(
+            ToolArgumentCapture::from_value(Some("TRUE")),
+            ToolArgumentCapture::Enabled
+        ));
+        for value in [None, Some(""), Some("1"), Some("false"), Some("yes")] {
+            assert!(matches!(
+                ToolArgumentCapture::from_value(value),
+                ToolArgumentCapture::Disabled
+            ));
+        }
+    }
+
+    fn tool_call(root: &str, arguments: &str) -> HookEvent {
+        HookEvent::ToolCall {
+            actor: Actor {
+                root: TrajectoryId(root.to_string()),
+                child: None,
+            },
+            call: ProposedCall {
+                tool: "Bash".to_string(),
+                arguments: serde_json::value::RawValue::from_string(arguments.to_string()).expect("valid arguments"),
+            },
+            spawn: false,
+            ruling: None,
+        }
     }
 
     #[test]
