@@ -95,6 +95,17 @@ func childStartEvent(rootID, childID, spawnBinding string) map[string]any {
 	return wire
 }
 
+// childEndEvent is the child's stop, carrying the value it returns to
+// its parent. An empty value is a child that returns nothing, and the
+// codec reads an absent one the same way.
+func childEndEvent(rootID, childID, value string) map[string]any {
+	wire := map[string]any{"event": "child_end", "root_id": rootID, "child_id": childID}
+	if value != "" {
+		wire["value"] = value
+	}
+	return wire
+}
+
 // successOutcome carries the tool response as spelled.
 func successOutcome(body any) map[string]any {
 	return map[string]any{"status": "success", "body": body}
@@ -125,19 +136,26 @@ func wireErrorf(format string, args ...any) *WireError {
 // Decision is one parsed decision envelope.
 //
 // Kind is the wire spelling (ack, allow_call, pass_control, deny_call,
-// block, replace_output, child_return, refuse); the payload field,
-// where the kind carries one, lands in the matching attribute.
+// block, replace_output, child_return, context, refuse); the payload
+// field, where the kind carries one, lands in the matching attribute.
 type Decision struct {
-	Kind         string
-	Feedback     string
-	Reason       string
-	Output       string
-	Value        string
+	Kind     string
+	Feedback string
+	Reason   string
+	Output   string
+	Value    string
+	// Text rides a context: what the harness hands the actor the event
+	// names, which at a child's start is the return contract it works
+	// under.
+	Text         string
 	Detail       string
 	SpawnBinding string
 	// Review rides a deny_call: the offers whose plans consult a human
 	// authority, with the review as the person reads it.
 	Review []Review
+	// Offers rides a deny_call: every remedy the block offers, in the
+	// order the feedback lists them.
+	Offers []Offer
 }
 
 // Review is one reviewed offer: the id the control call quotes, and the
@@ -145,6 +163,25 @@ type Decision struct {
 type Review struct {
 	OfferID string
 	Text    string
+}
+
+// The return routes an offer declares: ReturnAsSpoken crosses the child's
+// return as the child spoke it, and ReturnSanitized crosses what the
+// named sanitizer derives.
+const (
+	ReturnAsSpoken  = "as_spoken"
+	ReturnSanitized = "sanitized"
+)
+
+// Offer is one remedy a deny_call offers, for the plugin that routes one
+// itself rather than through the model's control call. OfferID is the id
+// the control call quotes. Returns is empty on an offer that declares no
+// child return, and Sanitizer names the sanitizer on the ReturnSanitized
+// route only.
+type Offer struct {
+	OfferID   string
+	Returns   string
+	Sanitizer string
 }
 
 // describe names the decision in a fail-closed message: the runtime's
@@ -166,6 +203,7 @@ var decisionPayloads = map[string]string{
 	"block":          "reason",
 	"replace_output": "output",
 	"child_return":   "value",
+	"context":        "text",
 	"refuse":         "detail",
 }
 
@@ -203,6 +241,8 @@ func parseDecision(body []byte) (Decision, error) {
 			decision.Output = value
 		case "value":
 			decision.Value = value
+		case "text":
+			decision.Text = value
 		case "detail":
 			decision.Detail = value
 		}
@@ -213,6 +253,11 @@ func parseDecision(body []byte) (Decision, error) {
 			return Decision{}, err
 		}
 		decision.Review = review
+		offers, err := parseOffers(parsed["offers"])
+		if err != nil {
+			return Decision{}, err
+		}
+		decision.Offers = offers
 	}
 	if kind == "allow_call" {
 		if binding, present := parsed["spawn_binding"]; present {
@@ -248,4 +293,53 @@ func parseReview(raw any) ([]Review, error) {
 		review = append(review, Review{OfferID: offer, Text: text})
 	}
 	return review, nil
+}
+
+// parseOffers reads a deny_call's offers; absent is none, and any other
+// shape is a *WireError — an offer the plugin cannot read would leave a
+// route unrouted, which is fail-open.
+func parseOffers(raw any) ([]Offer, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	entries, ok := raw.([]any)
+	if !ok {
+		return nil, wireErrorf("a deny_call offers list that is not a list")
+	}
+	offers := make([]Offer, 0, len(entries))
+	for _, entry := range entries {
+		fields, ok := entry.(map[string]any)
+		id, okID := fields["offer_id"].(string)
+		if !ok || !okID {
+			return nil, wireErrorf("a deny_call offer without its offer_id")
+		}
+		offer, err := parseOfferReturn(id, fields["returns"])
+		if err != nil {
+			return nil, err
+		}
+		offers = append(offers, offer)
+	}
+	return offers, nil
+}
+
+// parseOfferReturn reads one offer's return route. An absent route is an
+// offer that declares no child return.
+func parseOfferReturn(id string, raw any) (Offer, error) {
+	switch route := raw.(type) {
+	case nil:
+		return Offer{OfferID: id}, nil
+	case string:
+		if route != ReturnAsSpoken {
+			return Offer{}, wireErrorf("a deny_call offer with a return route outside the wire: %q", route)
+		}
+		return Offer{OfferID: id, Returns: ReturnAsSpoken}, nil
+	case map[string]any:
+		sanitizer, ok := route["sanitizer"].(string)
+		if !ok {
+			return Offer{}, wireErrorf("a deny_call offer with a sanitized return route that names no sanitizer")
+		}
+		return Offer{OfferID: id, Returns: ReturnSanitized, Sanitizer: sanitizer}, nil
+	default:
+		return Offer{}, wireErrorf("a deny_call offer with a return route outside the wire: %v", raw)
+	}
 }

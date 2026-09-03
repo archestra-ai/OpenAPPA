@@ -103,6 +103,17 @@ def child_start(root_id: str, child_id: str, spawn_binding: str | None = None) -
     return wire
 
 
+def child_end(root_id: str, child_id: str, value: str | None = None) -> dict[str, Any]:
+    """The child's stop, carrying the value it returns to its parent.
+
+    An absent ``value`` is a child that returns nothing, and the codec
+    reads an empty string the same way."""
+    wire: dict[str, Any] = {"event": "child_end", "root_id": root_id, "child_id": child_id}
+    if value is not None:
+        wire["value"] = value
+    return wire
+
+
 def success(body: Any) -> dict[str, Any]:
     """A success outcome carrying the tool response as spelled."""
     return {"status": "success", "body": body}
@@ -120,14 +131,37 @@ class WireError(Exception):
     """The runtime's answer left the decision contract. Fail closed."""
 
 
+RETURN_AS_SPOKEN = "as_spoken"
+"""The route of a return that crosses as the child spoke it."""
+
+RETURN_SANITIZED = "sanitized"
+"""The route of a return a registered sanitizer derives."""
+
+
+@dataclass(frozen=True)
+class Offer:
+    """One remedy a ``deny_call`` offers, for the plugin that routes one
+    itself rather than through the model's control call.
+
+    ``offer_id`` is the id ``execute_remedy_plan`` takes. ``returns`` is
+    ``None`` on an offer that declares no child return, ``as_spoken``
+    where the return crosses as the child spoke it, and ``sanitized``
+    where a sanitizer derives it. ``sanitizer`` names that sanitizer and
+    rides the ``sanitized`` route only."""
+
+    offer_id: str
+    returns: str | None = None
+    sanitizer: str | None = None
+
+
 @dataclass(frozen=True)
 class Decision:
     """One parsed decision envelope.
 
     ``kind`` is the wire spelling (``ack``, ``allow_call``,
     ``pass_control``, ``deny_call``, ``block``, ``replace_output``,
-    ``child_return``, ``refuse``); the payload field, where the kind
-    carries one, lands in the matching attribute.
+    ``child_return``, ``context``, ``refuse``); the payload field, where
+    the kind carries one, lands in the matching attribute.
     """
 
     kind: str
@@ -135,12 +169,18 @@ class Decision:
     reason: str | None = None
     output: str | None = None
     value: str | None = None
+    text: str | None = None
+    """On a ``context``: what the harness hands the actor the event
+    names — at a child's start, the return contract it works under."""
     detail: str | None = None
     spawn_binding: str | None = None
     review: tuple[tuple[str, str], ...] = ()
     """On a ``deny_call``: the offers whose plans consult a human
     authority, as ``(offer_id, text)`` — the review as the person reads
     it, which the plugin shows through kagent's confirmation."""
+    offers: tuple[Offer, ...] = ()
+    """On a ``deny_call``: every remedy the block offers, in the order
+    the feedback lists them."""
 
 
 _DECISION_PAYLOADS: dict[str, tuple[str, ...]] = {
@@ -151,6 +191,7 @@ _DECISION_PAYLOADS: dict[str, tuple[str, ...]] = {
     "block": ("reason",),
     "replace_output": ("output",),
     "child_return": ("value",),
+    "context": ("text",),
     "refuse": ("detail",),
 }
 
@@ -184,9 +225,11 @@ def parse_decision(body: bytes | str) -> Decision:
                 raise WireError("a spawn binding that is not a string")
             fields["spawn_binding"] = binding
     review: tuple[tuple[str, str], ...] = ()
+    offers: tuple[Offer, ...] = ()
     if kind == "deny_call":
         review = _parse_review(parsed.get("review"))
-    return Decision(kind=kind, review=review, **fields)
+        offers = _parse_offers(parsed.get("offers"))
+    return Decision(kind=kind, review=review, offers=offers, **fields)
 
 
 def _parse_review(raw: Any) -> tuple[tuple[str, str], ...]:
@@ -205,3 +248,33 @@ def _parse_review(raw: Any) -> tuple[tuple[str, str], ...]:
             raise WireError("a deny_call review entry without its offer_id and text")
         entries.append((offer, text))
     return tuple(entries)
+
+
+def _parse_offers(raw: Any) -> tuple[Offer, ...]:
+    """The deny's offers; absent is none, and any other shape is a
+    `WireError` — an offer the plugin cannot read would leave a route
+    unrouted, which is fail-open."""
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise WireError("a deny_call offers list that is not a list")
+    offers = []
+    for entry in raw:
+        offer = entry.get("offer_id") if isinstance(entry, dict) else None
+        if not isinstance(offer, str):
+            raise WireError("a deny_call offer without its offer_id")
+        offers.append(Offer(offer_id=offer, **_parse_offer_return(entry.get("returns"))))
+    return tuple(offers)
+
+
+def _parse_offer_return(raw: Any) -> dict[str, str]:
+    """One offer's return route, as the `Offer` fields spell it. Absent
+    is an offer that declares no child return."""
+    if raw is None:
+        return {}
+    if raw == RETURN_AS_SPOKEN:
+        return {"returns": RETURN_AS_SPOKEN}
+    sanitizer = raw.get("sanitizer") if isinstance(raw, dict) else None
+    if not isinstance(sanitizer, str):
+        raise WireError(f"a deny_call offer with a return route outside the wire: {raw!r}")
+    return {"returns": RETURN_SANITIZED, "sanitizer": sanitizer}

@@ -11,4 +11,6 @@
 {"name": "spawn_result", "parses": "event", "wire": {"event": "spawn_result", "root_id": "adk-4f6c2f1e", "tool": "billing-agent", "arguments": {"message": "total the invoices"}, "outcome": {"status": "success", "body": {"result": "the total is 42"}}, "spawned_id": "adk-9b0d11aa", "value": "the total is 42"}}
 {"name": "child_start_in_flight", "parses": "event", "wire": {"event": "child_start", "root_id": "adk-4f6c2f1e", "child_id": "adk-9b0d11aa"}}
 {"name": "child_start_bound", "parses": "event", "wire": {"event": "child_start", "root_id": "adk-4f6c2f1e", "child_id": "adk-9b0d11aa", "spawn_binding": "spawn-1"}}
+{"name": "child_end_returned", "parses": "event", "wire": {"event": "child_end", "root_id": "adk-4f6c2f1e", "child_id": "adk-9b0d11aa", "value": "the total is 42"}}
+{"name": "child_end_void", "parses": "event", "wire": {"event": "child_end", "root_id": "adk-4f6c2f1e", "child_id": "adk-9b0d11aa"}}
 {"name": "ping", "parses": "none", "wire": {"event": "ping"}}

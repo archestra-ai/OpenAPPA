@@ -28,6 +28,7 @@
 //! | `tool_result` | `tool`, `arguments`, `outcome` | `ToolResult` |
 //! | `spawn_result` | `tool`, `arguments`, `outcome`, `spawned_id`?, `value`? | `SpawnResult` |
 //! | `child_start` | `child_id`, `spawn_binding`? | `ChildStart` |
+//! | `child_end` | `child_id`, `value`? | `ChildEnd` |
 //! | `ping` | — | none — the liveness probe |
 //!
 //! Ids. `root_id` is the harness id of the root trajectory: the ADK
@@ -42,11 +43,13 @@
 //! `indeterminate`. The plugin owns the mapping from ADK callback
 //! moments to these three; the codec carries them.
 //!
-//! By design, nothing feeds `ChildEnd`: return substitution is
-//! enforceable only where the parent receives the value, so returns
-//! cross at `spawn_result`. The agent's outbound A2A reply crosses no
-//! wire event either — the plugin holds `on_event_callback` as a
-//! liveness gate, and the implemented model defines no emission event.
+//! Returns. A child's value crosses at `child_end`, which the child
+//! scope posts with its final message. An empty `value` is no value,
+//! and so is an absent one. The parent's later `spawn_result` carries
+//! that same value or none — it replays what crossed and declares
+//! nothing new. The agent's outbound A2A reply crosses no wire event.
+//! The plugin holds `on_event_callback` as a liveness gate, and the
+//! implemented model defines no emission event.
 //!
 //! Decisions render into one envelope, independent of the event:
 //!
@@ -55,12 +58,20 @@
 //! | `Ack` | `{"decision":"ack"}` |
 //! | `AllowCall` | `{"decision":"allow_call"}` (+ `spawn_binding`) |
 //! | `PassControl` | `{"decision":"pass_control"}` |
-//! | `DenyCall` | `{"decision":"deny_call","feedback":…,"review":[{"offer_id":…,"text":…}]}` |
+//! | `DenyCall` | `{"decision":"deny_call","feedback":…,"offers":[…],"review":[…]}` |
 //! | `Block` | `{"decision":"block","reason":…}` |
 //! | `ReplaceOutput` | `{"decision":"replace_output","output":…}` |
 //! | `ChildReturn` | `{"decision":"child_return","value":…}` |
 //! | `Context` | `{"decision":"context","text":…}` |
 //! | `Refuse` | `{"decision":"refuse","detail":…}` |
+//!
+//! A deny renders two lists the plugin routes without the model.
+//! `offers` names every remedy the block offers, in the order the
+//! feedback lists them. Each entry carries `offer_id`, and a plan that
+//! declares a child's return also carries `returns`: `"as_spoken"`, or
+//! `{"sanitizer":…}` for the named sanitizer. `review` names the
+//! offers whose plans consult a person, with the text that person
+//! reads.
 //!
 //! The plugin owns the ADK mechanics per callback: a `deny_call`
 //! becomes the returned dict that skips execution, a `replace_output`
@@ -72,8 +83,8 @@
 use serde::Deserialize;
 
 use appa_runtime_api::{
-    Actor, Codec, HookDecision, HookEvent, OutcomeBody, ParseRefusal, ProposedCall, Ruling, SpawnBinding, SpawnRef,
-    ToolOutcome, TrajectoryId,
+    Actor, Codec, HookDecision, HookEvent, OfferedRemedy, OfferedReturn, OutcomeBody, ParseRefusal, ProposedCall,
+    Ruling, SpawnBinding, SpawnRef, ToolOutcome, TrajectoryId,
 };
 
 pub fn codec() -> Codec {
@@ -252,9 +263,34 @@ fn parse(body: &[u8]) -> Result<Option<HookEvent>, ParseRefusal> {
             };
             Ok(Some(HookEvent::ChildStart { root, child, spawn }))
         }
+        "child_end" => {
+            let root = event.root()?;
+            let Some(child) = event.child(&root) else {
+                return Err(malformed("child_end without a child_id"));
+            };
+            Ok(Some(HookEvent::ChildEnd {
+                root,
+                child,
+                value: event.value.clone().filter(|value| !value.is_empty()),
+            }))
+        }
         other => Err(malformed(&format!(
             "an event kind outside the adapter wire: {other} — plugin and runtime versions disagree"
         ))),
+    }
+}
+
+/// One offer the block carries: the id `execute_remedy_plan` takes,
+/// and, where the plan declares a child's return, the route that
+/// return crosses. A plan that declares no return renders no
+/// `returns` field, which is how the plugin tells the two apart.
+fn offered(offer: &OfferedRemedy) -> serde_json::Value {
+    match &offer.returns {
+        None => serde_json::json!({"offer_id": offer.id}),
+        Some(OfferedReturn::AsSpoken) => serde_json::json!({"offer_id": offer.id, "returns": "as_spoken"}),
+        Some(OfferedReturn::Sanitized { sanitizer }) => {
+            serde_json::json!({"offer_id": offer.id, "returns": {"sanitizer": sanitizer}})
+        }
     }
 }
 
@@ -266,12 +302,17 @@ fn render(_event: &HookEvent, decision: &HookDecision) -> serde_json::Value {
             None => serde_json::json!({"decision": "allow_call"}),
         },
         HookDecision::PassControl => serde_json::json!({"decision": "pass_control"}),
-        HookDecision::DenyCall { feedback, review, .. } => {
+        HookDecision::DenyCall {
+            feedback,
+            offers,
+            review,
+        } => {
+            let offers: Vec<serde_json::Value> = offers.iter().map(offered).collect();
             let review: Vec<serde_json::Value> = review
                 .iter()
                 .map(|entry| serde_json::json!({"offer_id": entry.offer, "text": entry.text}))
                 .collect();
-            serde_json::json!({"decision": "deny_call", "feedback": feedback, "review": review})
+            serde_json::json!({"decision": "deny_call", "feedback": feedback, "offers": offers, "review": review})
         }
         HookDecision::Block { reason } => serde_json::json!({"decision": "block", "reason": reason}),
         HookDecision::ReplaceOutput { output } => serde_json::json!({"decision": "replace_output", "output": output}),
@@ -539,6 +580,14 @@ mod tests {
                 serde_json::json!({"event": "child_start", "root_id": "s1"}),
                 "child_start without a child_id",
             ),
+            (
+                serde_json::json!({"event": "child_end", "child_id": "c1"}),
+                "child_end without a root_id",
+            ),
+            (
+                serde_json::json!({"event": "child_end", "root_id": "s1"}),
+                "child_end without a child_id",
+            ),
         ] {
             assert_eq!(
                 parse_value(&event),
@@ -618,7 +667,12 @@ mod tests {
                     offers: Vec::new(),
                     review: Vec::new(),
                 },
-                serde_json::json!({"decision": "deny_call", "feedback": "blocked: the recipient cannot read this", "review": []}),
+                serde_json::json!({
+                    "decision": "deny_call",
+                    "feedback": "blocked: the recipient cannot read this",
+                    "offers": [],
+                    "review": [],
+                }),
             ),
             (
                 HookDecision::Block {
@@ -705,6 +759,82 @@ mod tests {
     }
 
     #[test]
+    fn a_child_end_carries_the_child_s_value() {
+        let returned = serde_json::json!({
+            "event": "child_end",
+            "root_id": "s1",
+            "child_id": "c1",
+            "value": "the total is 42",
+        });
+        assert_eq!(
+            parse_value(&returned),
+            Ok(Some(HookEvent::ChildEnd {
+                root: root(),
+                child: TrajectoryId("kagent:s1:c1".to_string()),
+                value: Some("the total is 42".to_string()),
+            })),
+        );
+        for void in [
+            serde_json::json!({"event": "child_end", "root_id": "s1", "child_id": "c1"}),
+            serde_json::json!({"event": "child_end", "root_id": "s1", "child_id": "c1", "value": ""}),
+        ] {
+            assert_eq!(
+                parse_value(&void),
+                Ok(Some(HookEvent::ChildEnd {
+                    root: root(),
+                    child: TrajectoryId("kagent:s1:c1".to_string()),
+                    value: None,
+                })),
+                "an empty value is no value",
+            );
+        }
+    }
+
+    #[test]
+    fn a_deny_renders_every_offer_with_its_return_route() {
+        let event = HookEvent::TurnEnd {
+            actor: Actor {
+                root: root(),
+                child: None,
+            },
+        };
+        let decision = HookDecision::DenyCall {
+            feedback: "blocked".to_string(),
+            offers: vec![
+                OfferedRemedy {
+                    id: "offer-1".to_string(),
+                    returns: None,
+                },
+                OfferedRemedy {
+                    id: "offer-2".to_string(),
+                    returns: Some(OfferedReturn::AsSpoken),
+                },
+                OfferedRemedy {
+                    id: "offer-3".to_string(),
+                    returns: Some(OfferedReturn::Sanitized {
+                        sanitizer: "redact-invoices".to_string(),
+                    }),
+                },
+            ],
+            review: Vec::new(),
+        };
+        assert_eq!(
+            render(&event, &decision),
+            serde_json::json!({
+                "decision": "deny_call",
+                "feedback": "blocked",
+                "offers": [
+                    {"offer_id": "offer-1"},
+                    {"offer_id": "offer-2", "returns": "as_spoken"},
+                    {"offer_id": "offer-3", "returns": {"sanitizer": "redact-invoices"}},
+                ],
+                "review": [],
+            }),
+            "the plugin routes an offer by its id and its return route",
+        );
+    }
+
+    #[test]
     fn a_deny_renders_the_reviews_for_the_plugin_s_own_channel() {
         let event = HookEvent::TurnEnd {
             actor: Actor {
@@ -725,6 +855,7 @@ mod tests {
             serde_json::json!({
                 "decision": "deny_call",
                 "feedback": "blocked",
+                "offers": [],
                 "review": [{"offer_id": "offer-1", "text": "APPA asks you to rule as the authority \"oncall\"."}],
             }),
         );
