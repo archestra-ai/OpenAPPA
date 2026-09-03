@@ -11863,6 +11863,12 @@ mod tests {
                 .all(|plan| plan.executable().is_none_or(|plan| plan.narrowing().is_none())),
             "under a floor at the parent's rank no plan accepts the drop to suspicious"
         );
+        assert_eq!(
+            block.block.fork_advice,
+            Some(crate::plan::ForkAdvice::BelowFloor { sanitized_return: true }),
+            "the child is told a grandchild under the bare floor cannot take the drop either, but one with a \
+             return sanitizer can"
+        );
 
         // Under a sanitizer that raises trust, the trust dimension is unbound: the child may
         // descend there, because the return climbs back through the sanitizer.
@@ -11890,6 +11896,13 @@ mod tests {
                 .any(|plan| plan.narrowing().is_some() && plan.sanitizer().is_none()),
             "the acceptance is offered again"
         );
+        assert_eq!(
+            block.block.fork_advice,
+            Some(crate::plan::ForkAdvice::Delegate {
+                remedies_required: false
+            }),
+            "a drop the floor permits keeps the ordinary delegation advice"
+        );
         let internal = call("read_internal", json!({ "who": "someone" }));
         let blocked = e
             .handle(
@@ -11907,6 +11920,31 @@ mod tests {
                 .iter()
                 .all(|plan| plan.executable().is_none_or(|plan| plan.narrowing().is_none())),
             "the audience dimension stays bound: no plan accepts the drop to internal"
+        );
+    }
+
+    #[test]
+    fn a_child_boxed_by_its_floor_with_no_return_sanitizer_is_told_not_to_delegate() {
+        let e = open_engine(returning_registry(vec![]));
+        let child = TrajectoryId::new("child");
+        let log = spawn_family(&e, &child);
+        let read = call("read_suspicious", json!({ "who": "someone" }));
+        let blocked = e
+            .handle(
+                &viewing(&e, &log),
+                batch_on(&child, "read", Vec::new(), vec![raw(&read)], None),
+            )
+            .expect("a narrowing read blocks");
+        let ([], [block]) = answered(&blocked) else {
+            panic!("the read blocks, got {:?}", answered(&blocked))
+        };
+        assert!(block.block.plans.is_empty(), "nothing lifts a drop below the floor");
+        assert_eq!(
+            block.block.fork_advice,
+            Some(crate::plan::ForkAdvice::BelowFloor {
+                sanitized_return: false
+            }),
+            "with no return sanitizer registered, no grandchild can take the drop either"
         );
     }
 

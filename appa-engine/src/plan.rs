@@ -207,7 +207,22 @@ pub struct PlannedBlock {
     pub plans: Vec<RemedyPlan>,
     /// Advice, never a remedy: a child begins at the same label, so a fork cures no requirement.
     /// Kept out of `plans` so the emptiness assertion stays about remedies.
-    pub fork_advice: Option<String>,
+    pub fork_advice: Option<ForkAdvice>,
+}
+
+/// Advice, never a remedy, on delegating a blocked call to a child. The planner decides which
+/// situation the block is in; the harness spells it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForkAdvice {
+    /// A child can take this narrowing and finish by returning nothing or a sanitized derivation.
+    /// `remedies_required` when the block also carries requirement gaps the child must clear.
+    Delegate { remedies_required: bool },
+    /// Only requirement gaps: a child starts at the same label, so delegation clears nothing.
+    SameLabel,
+    /// The narrowing falls below this trajectory's floor: neither it nor a child under the same
+    /// floor can accept it. `sanitized_return` when a return sanitizer this trajectory may
+    /// declare would lift a child's return over the floor.
+    BelowFloor { sanitized_return: bool },
 }
 
 impl PlannedBlock {
@@ -279,22 +294,22 @@ pub(crate) fn plan(
         needs.refuse_if_any()?;
         plans.extend(redispatches.into_iter().map(RemedyPlan::Redispatch));
     }
-    let fork_reason = match (role, &raw.narrowing, raw.requirement_gaps.is_empty()) {
-        (CallRole::MarkedSpawn, _, _) => None,
-        (_, Some(_), true) => Some(
-            "If this trajectory's harness advertises a child-session tool, delegate this call and all work that uses its result there.\nFinish there by returning nothing, or return only a sanitized derivation. Returning the raw value applies the same change to this session.",
-        ),
-        (_, Some(_), false) => Some(
-            "If this trajectory's harness advertises a child-session tool, delegate this call, its required remedies, and all work that uses its result there.\nFinish there by returning nothing, or return only a sanitized derivation. Returning the raw value applies the same change to this session.",
-        ),
-        (_, None, _) => Some(
-            "If this trajectory's harness advertises a child-session tool, handle the work there if isolation is useful.\nA child inherits the same session label, so delegation does not clear these requirements.",
-        ),
+    let fork_advice = match (role, &raw.narrowing) {
+        (CallRole::MarkedSpawn, _) => None,
+        (_, None) => Some(ForkAdvice::SameLabel),
+        (_, Some(narrowing)) => Some(match floor.as_ref().filter(|floor| !floor.holds(&narrowing.to)) {
+            Some(_) => ForkAdvice::BelowFloor {
+                sanitized_return: return_options(registry, floor.as_ref()).iter().any(Option::is_some),
+            },
+            None => ForkAdvice::Delegate {
+                remedies_required: !raw.requirement_gaps.is_empty(),
+            },
+        }),
     };
     Ok(PlannedBlock {
         raw: raw.clone(),
         plans,
-        fork_advice: fork_reason.map(str::to_string),
+        fork_advice,
     })
 }
 
@@ -3324,7 +3339,7 @@ mod tests {
         let planned = plan_of(&registry, &log, &call("wire", json!({})));
         assert!(!planned.is_curable());
         assert!(planned.plans.is_empty());
-        assert!(planned.fork_advice.is_some());
+        assert_eq!(planned.fork_advice, Some(ForkAdvice::SameLabel));
     }
 
     #[test]

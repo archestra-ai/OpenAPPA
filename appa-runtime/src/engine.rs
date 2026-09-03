@@ -49,7 +49,7 @@ use appa_engine::fact::{
 };
 use appa_engine::label::{Audience, Clause, DeclaredAudience, Label, ReaderId, SymbolicAtom, Trust};
 use appa_engine::names::MarkName;
-use appa_engine::plan::{ExecutableRemedyPlan, PlanId, PlannedBlock, RemedyPlan, RequiredRuling};
+use appa_engine::plan::{ExecutableRemedyPlan, ForkAdvice, PlanId, PlannedBlock, RemedyPlan, RequiredRuling};
 use appa_engine::profile::PolicyFileKey as EnginePolicyFileKey;
 use appa_engine::projection::Views;
 use appa_engine::registry::TrustChain;
@@ -2833,8 +2833,10 @@ fn return_instruction(sanitizer: Option<&appa_engine::names::SanitizerName>, id:
     match sanitizer {
         None => format!(
             "  - Declare the lowest label this session accepts from the subagent's return, then propose the spawn \
-             again. This session's label now is {floor}: an omitted dimension keeps it, a lower one lets the \
-             return narrow this session that far.\n    execute_remedy_plan(offer_id: \"{id}\", label: {floor})"
+             again. The subagent starts at this session's label, now {floor}, and can accept no change below the \
+             floor it is given: a subagent that must read below this session's trust needs the floor at that rank, \
+             and its return may then narrow this session that far. An omitted dimension keeps its current \
+             value.\n    execute_remedy_plan(offer_id: \"{id}\", label: {{trust: \"<rank>\"}})"
         ),
         Some(name) if name.is_attest_schema() => format!(
             "  - Attest the subagent's return: declare the floor and the JSON schema its return must match (a \
@@ -2926,16 +2928,59 @@ fn block_feedback(planned: &PlannedBlock, offers: &[(OfferId, PlanId)], chain: &
         lines.push("Continue:".to_string());
         lines.extend(remedies);
     }
-    if let Some(advice) = &planned.fork_advice {
+    if let Some(advice) = planned.fork_advice {
         lines.push(String::new());
-        lines.push(if planned.raw.narrowing.is_some() {
-            "Keep this session unchanged:".to_string()
-        } else {
-            "Alternative:".to_string()
-        });
-        lines.push(format!("  {}", advice.replace('\n', "\n  ")));
+        lines.push(fork_heading(advice).to_string());
+        lines.push(format!("  {}", fork_advice_text(advice).replace('\n', "\n  ")));
     }
     lines.join("\n")
+}
+
+fn fork_heading(advice: ForkAdvice) -> &'static str {
+    match advice {
+        ForkAdvice::Delegate { .. } => "Keep this session unchanged:",
+        ForkAdvice::SameLabel => "Alternative:",
+        ForkAdvice::BelowFloor { .. } => "Not acceptable here:",
+    }
+}
+
+fn fork_advice_text(advice: ForkAdvice) -> &'static str {
+    match advice {
+        ForkAdvice::Delegate {
+            remedies_required: false,
+        } => {
+            "If this trajectory's harness advertises a child-session tool, delegate this call and all work that uses \
+             its result there.\nFinish there by returning nothing, or return only a sanitized derivation. Returning \
+             the raw value applies the same change to this session."
+        }
+        ForkAdvice::Delegate {
+            remedies_required: true,
+        } => {
+            "If this trajectory's harness advertises a child-session tool, delegate this call, its required remedies, \
+             and all work that uses its result there.\nFinish there by returning nothing, or return only a sanitized \
+             derivation. Returning the raw value applies the same change to this session."
+        }
+        ForkAdvice::SameLabel => {
+            "If this trajectory's harness advertises a child-session tool, handle the work there if isolation is \
+             useful.\nA child inherits the same session label, so delegation does not clear these requirements."
+        }
+        ForkAdvice::BelowFloor {
+            sanitized_return: true,
+        } => {
+            "This session is a subagent, and this change falls below the floor its parent declared: this session \
+             cannot accept it, and a subagent started here under the bare floor cannot either.\nA subagent started \
+             here with a return sanitizer can: delegate this call and all work that uses its result there, and \
+             declare that sanitizer when the spawn asks for the return declaration."
+        }
+        ForkAdvice::BelowFloor {
+            sanitized_return: false,
+        } => {
+            "This session is a subagent, and this change falls below the floor its parent declared: neither this \
+             session nor any subagent started here can accept it, and no return sanitizer is registered.\nDo not \
+             start a subagent for this. Finish without this call, or return a plain note that the work needs a \
+             subagent declared with a lower floor or a return sanitizer, so the parent can start one."
+        }
+    }
 }
 
 #[cfg(test)]
