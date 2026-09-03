@@ -7,6 +7,7 @@ import rehypeSlug from "rehype-slug";
 import remarkGfm from "remark-gfm";
 
 import { AdvisorySignup } from "@/components/AdvisorySignup";
+import { BatteryCatalog } from "@/components/BatteryCatalog";
 import { BenchmarkHighlight } from "@/components/BenchmarkHighlight";
 import { BrandAssets } from "@/components/BrandKit";
 import {
@@ -34,6 +35,26 @@ import { termDefinition } from "@/lib/terms";
    the mapped component in place. */
 const DIRECTIVES: Record<string, () => ReactNode> = {
   "advisory-signup": () => <AdvisorySignup />,
+  "battery-catalog": () => <BatteryCatalog />,
+  "battery-review-checklist": () => (
+    <details className="my-5 rounded-lg border border-[var(--border)] bg-[var(--bg-weak)] px-4 py-3 text-sm text-[var(--text)]">
+      <summary className="cursor-pointer font-semibold text-[var(--text-strong)] hover:text-[var(--accent)]">
+        What should I review?
+      </summary>
+      <div className="mt-3 border-t border-[var(--border)] pt-3 leading-relaxed">
+        <p>Open the links next to each rule and check:</p>
+        <ul className="mt-2 list-disc space-y-2 pl-5">
+          <li>The battery includes every tool in the server version it names.</li>
+          <li>It identifies every tool that sends data or changes something.</li>
+          <li>Each action sends data only to the people or services you expect.</li>
+          <li>Only the right people can see each result.</li>
+          <li>Data from sources you have not checked is <code>suspicious</code>, not <code>trusted</code>.</li>
+          <li>The battery asks a person before every action that needs approval.</li>
+          <li>The agent lists every question it could not answer from the server code or docs.</li>
+        </ul>
+      </div>
+    </details>
+  ),
   "battery-rule-order": () => <BatteryRuleOrderFigure />,
   "benchmark-highlight": () => <BenchmarkHighlight />,
   "brand-assets": () => <BrandAssets />,
