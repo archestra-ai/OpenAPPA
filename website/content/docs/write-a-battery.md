@@ -33,30 +33,39 @@ This guide shows MCP server authors how to create and publish a battery for thei
 
 ## Add the battery files
 
-Create a folder under `batteries/`:
+Create one folder under `batteries/`:
 
 ```text
 batteries/
 `-- your-server/
     |-- README.md
     |-- appa.toml
-    |-- annotator.py
-    `-- test_annotator.py
+    |-- annotator.py         # optional
+    |-- audience-source.py   # optional
+    `-- test_*.py            # required for scripts
 ```
 
-`appa.toml` contains the tool contracts. Add an annotator when a contract depends on the call's arguments. Add an audience source when the service's users or groups define who can receive data.
+Only `README.md` and `appa.toml` are always required.
 
-The battery `README.md` must name the server version and list the covered tools. It must also explain each contract, script, test, and known limit.
+- **`appa.toml` — tool rules.** OpenAPPA calls each rule a tool contract. It labels the result, sets conditions for the call, and records what the tool sends or changes.
+- **`README.md` — what the battery covers.** Include the server repository and exact version, the covered tools, why each rule exists, and any known limits.
+- **`annotator.py` — an optional decision script.** Add one when a rule changes based on an argument, such as a path, channel, or recipient.
+- **`audience-source.py` — an optional people-and-group lookup.** Add one when the service decides who can receive data.
+- **`test_*.py` — offline tests.** Test every script in the battery.
 
-Add the battery config to `include` in `examples/claude-code-battery/appa.toml`. Add the Authority and audience source settings it needs.
+Update `examples/claude-code-battery/appa.toml`:
 
-The test suite loads this example to make sure all included batteries work together.
+- Add the new `appa.toml` to its `include` list.
+- If an action needs human approval, configure an Authority, OpenAPPA's approval component.
+- Configure any audience source the battery uses.
+
+The test suite loads the example to check that the batteries work together.
 
 ## Test the battery
 
-Write tests for every annotator and audience source. Use saved API responses instead of calling the real service.
+Write tests for every script. Use saved API responses instead of calling the real service.
 
-Test expected input, invalid input, provider errors, and missing data.
+Test normal input, invalid input, service errors, and missing data.
 
 Run the battery's Python tests with:
 
@@ -71,25 +80,26 @@ cargo test -p appa --test examples_load
 cargo test --workspace --locked
 ```
 
-The first command loads `examples/claude-code-battery/appa.toml` with all its batteries. CI also runs Python tests under `batteries/*/test_*.py`.
+The first command checks that the example and its batteries load together. CI also runs every `batteries/*/test_*.py` file.
 
 ## Open the pull request
 
-Open a pull request against `archestra-ai/OpenAPPA` `main`. Include:
+1. Push your branch to GitHub. Use a fork if you do not have write access.
+2. Open a pull request to the `main` branch of `archestra-ai/OpenAPPA`.
 
-- the new battery folder;
-- its `README.md`, scripts, and tests;
-- the updated `include` list in `examples/claude-code-battery/appa.toml`;
-- a battery documentation page under `website/content/docs/`;
-- a card in `website/components/BatteryCatalog.tsx`; and
-- the server repository, exact version or commit, covered tools, and test results in the pull request description.
+Check that the pull request includes:
+
+- the new battery folder, including its `README.md`, scripts, and tests;
+- the battery in the `include` list of `examples/claude-code-battery/appa.toml`;
+- a page under `website/content/docs/` and a card in `website/components/BatteryCatalog.tsx`; and
+- a description with the server repository, exact version or commit, covered tools, and test results.
 
 ## Verify the pull request
 
-The pull request is ready for review when:
+Before you submit, check that:
 
-1. Repository CI passes.
-2. Every contract uses the exact tool name and arguments from that server version.
-3. Every script passes its tests and refuses invalid input.
-4. The test that loads all batteries passes.
-5. The catalogue card opens the battery documentation page.
+1. Every contract uses the exact tool name and arguments from the named server version.
+2. Every script passes its tests and rejects invalid input.
+3. The test that loads all batteries passes.
+4. The catalogue card opens the battery documentation page.
+5. Repository CI passes.
