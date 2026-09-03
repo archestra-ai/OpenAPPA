@@ -380,6 +380,13 @@ impl Engine {
         view.views(child)?.return_policy_of(child).cloned()
     }
 
+    /// The lowest trust rank a return declaration made on this branch may set: its own floor's
+    /// trust, or the chain's bottom for a root or under a fork whose sanitizer raises trust.
+    /// A declaration below it is refused as [`plan::ReturnPolicyRefusal::FloorBelowOwn`].
+    pub fn lowest_return_trust(&self, views: &Views) -> crate::label::Trust {
+        plan::floor_of(&self.registry, views).map_or(crate::label::Trust::new(0), |floor| floor.lowest_trust())
+    }
+
     /// The return policy the fork `parent` prepared carries, before a child is bound to it: what
     /// the runtime tells the child at its start, read from the view that binds it.
     pub fn prepared_return_policy(
@@ -11863,6 +11870,15 @@ mod tests {
                 .all(|plan| plan.executable().is_none_or(|plan| plan.narrowing().is_none())),
             "under a floor at the parent's rank no plan accepts the drop to suspicious"
         );
+        assert_eq!(
+            block.block.fork_advice,
+            Some(crate::plan::ForkAdvice::Narrowing {
+                standing: crate::plan::FloorStanding::Below,
+                sanitized_return: true,
+            }),
+            "the child is told a grandchild under the bare floor cannot take the drop either, but one with a \
+             return sanitizer can"
+        );
 
         // Under a sanitizer that raises trust, the trust dimension is unbound: the child may
         // descend there, because the return climbs back through the sanitizer.
@@ -11890,6 +11906,14 @@ mod tests {
                 .any(|plan| plan.narrowing().is_some() && plan.sanitizer().is_none()),
             "the acceptance is offered again"
         );
+        assert_eq!(
+            block.block.fork_advice,
+            Some(crate::plan::ForkAdvice::Narrowing {
+                standing: crate::plan::FloorStanding::Within,
+                sanitized_return: true,
+            }),
+            "a drop the floor permits is to be accepted here, not delegated again"
+        );
         let internal = call("read_internal", json!({ "who": "someone" }));
         let blocked = e
             .handle(
@@ -11907,6 +11931,122 @@ mod tests {
                 .iter()
                 .all(|plan| plan.executable().is_none_or(|plan| plan.narrowing().is_none())),
             "the audience dimension stays bound: no plan accepts the drop to internal"
+        );
+        assert_eq!(
+            block.block.fork_advice,
+            Some(crate::plan::ForkAdvice::Narrowing {
+                standing: crate::plan::FloorStanding::Below,
+                sanitized_return: false,
+            }),
+            "a trust-raising sanitizer lifts no audience drop, so no sanitized delegation is advised"
+        );
+    }
+
+    #[test]
+    fn a_child_boxed_by_its_floor_with_no_return_sanitizer_is_told_not_to_delegate() {
+        let e = open_engine(returning_registry(vec![]));
+        let child = TrajectoryId::new("child");
+        let log = spawn_family(&e, &child);
+        let read = call("read_suspicious", json!({ "who": "someone" }));
+        let blocked = e
+            .handle(
+                &viewing(&e, &log),
+                batch_on(&child, "read", Vec::new(), vec![raw(&read)], None),
+            )
+            .expect("a narrowing read blocks");
+        let ([], [block]) = answered(&blocked) else {
+            panic!("the read blocks, got {:?}", answered(&blocked))
+        };
+        assert!(block.block.plans.is_empty(), "nothing lifts a drop below the floor");
+        assert_eq!(
+            block.block.fork_advice,
+            Some(crate::plan::ForkAdvice::Narrowing {
+                standing: crate::plan::FloorStanding::Below,
+                sanitized_return: false,
+            }),
+            "with no return sanitizer registered, no grandchild can take the drop either"
+        );
+    }
+
+    #[test]
+    fn a_return_sanitizer_that_does_not_admit_the_narrowed_value_is_no_sanitized_route() {
+        let closed_to_suspicious = crate::authority::Sanitizer {
+            transition: crate::authority::DeclaredTransition::Trust {
+                from_floor: TRUSTED,
+                to: TRUSTED,
+            },
+            ..lifting_sanitizer("trusted-only")
+        };
+        let e = open_engine(returning_registry(vec![closed_to_suspicious]));
+        let log = vec![opened(&e)];
+        let read = call("read_suspicious", json!({ "who": "someone" }));
+        let blocked = e
+            .handle(
+                &viewing(&e, &log),
+                batch_on(&traj(), "read", Vec::new(), vec![raw(&read)], None),
+            )
+            .expect("a narrowing read blocks");
+        let ([], [block]) = answered(&blocked) else {
+            panic!("the read blocks, got {:?}", answered(&blocked))
+        };
+        assert_eq!(
+            block.block.fork_advice,
+            Some(crate::plan::ForkAdvice::Narrowing {
+                standing: crate::plan::FloorStanding::Unbound,
+                sanitized_return: false,
+            }),
+            "a sanitizer whose `from` the suspicious value fails would refuse the child's return"
+        );
+
+        let e = open_engine(returning_registry(vec![lifting_sanitizer("redactor")]));
+        let log = vec![opened(&e)];
+        let blocked = e
+            .handle(
+                &viewing(&e, &log),
+                batch_on(&traj(), "read", Vec::new(), vec![raw(&read)], None),
+            )
+            .expect("a narrowing read blocks");
+        let ([], [block]) = answered(&blocked) else {
+            panic!("the read blocks, got {:?}", answered(&blocked))
+        };
+        assert_eq!(
+            block.block.fork_advice,
+            Some(crate::plan::ForkAdvice::Narrowing {
+                standing: crate::plan::FloorStanding::Unbound,
+                sanitized_return: true,
+            }),
+            "a sanitizer admitting the suspicious value and raising it back to trusted is the sanitized route"
+        );
+    }
+
+    #[test]
+    fn the_lowest_declarable_return_trust_is_the_own_floors_unless_its_sanitizer_raises_trust() {
+        let e = open_engine(returning_registry(vec![lifting_sanitizer("redactor")]));
+        let root_log = vec![opened(&e)];
+        assert_eq!(
+            e.lowest_return_trust(&viewing(&e, &root_log).views(&traj()).expect("the root is opened")),
+            SUSPICIOUS,
+            "a root is bound by no floor"
+        );
+
+        let bare = TrajectoryId::new("bare");
+        let log = [root_log.clone(), forked_child(&e, &root_log, &bare)].concat();
+        assert_eq!(
+            e.lowest_return_trust(&viewing(&e, &log).views(&bare).expect("the child is opened")),
+            TRUSTED,
+            "under the bare floor the child declares nothing below its parent's trust"
+        );
+
+        let lifted = TrajectoryId::new("lifted");
+        let policy = ReturnPolicy {
+            sanitizer: named("redactor"),
+            ..floor_policy(&e, &root_log)
+        };
+        let log = [root_log.clone(), spawn_family_at(&e, &root_log, &lifted, policy)].concat();
+        assert_eq!(
+            e.lowest_return_trust(&viewing(&e, &log).views(&lifted).expect("the child is opened")),
+            SUSPICIOUS,
+            "a trust-raising return sanitizer leaves the trust dimension unbound"
         );
     }
 

@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
 import { DocContent } from "@/components/DocContent";
@@ -34,6 +35,13 @@ export default async function DocPage({ params }: Props) {
 
   return (
     <DocShell toc={toc}>
+      {doc.breadcrumb && (
+        <nav className="doc-breadcrumb" aria-label="Breadcrumb">
+          <Link href="/available-batteries">Available batteries</Link>
+          <span aria-hidden="true">/</span>
+          <span aria-current="page">{doc.breadcrumb}</span>
+        </nav>
+      )}
       <div className="prose">
         <h1>{doc.title}</h1>
       </div>

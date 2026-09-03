@@ -49,7 +49,9 @@ use appa_engine::fact::{
 };
 use appa_engine::label::{Audience, Clause, DeclaredAudience, Label, ReaderId, SymbolicAtom, Trust};
 use appa_engine::names::MarkName;
-use appa_engine::plan::{ExecutableRemedyPlan, PlanId, PlannedBlock, RemedyPlan, RequiredRuling};
+use appa_engine::plan::{
+    ExecutableRemedyPlan, FloorStanding, ForkAdvice, PlanId, PlannedBlock, RemedyPlan, RequiredRuling,
+};
 use appa_engine::profile::PolicyFileKey as EnginePolicyFileKey;
 use appa_engine::projection::Views;
 use appa_engine::registry::TrustChain;
@@ -1021,11 +1023,11 @@ impl RuntimeEngine {
             AudienceRound::Failed(error) => return Err(proposal_refusal(error)),
         };
         let append = decision.append.map(ValidatedFactBatch::into_unsealed);
-        let then = self.deliver_proposals(decision.follow_up, &views.current_label())?;
+        let then = self.deliver_proposals(decision.follow_up, &self.return_bounds(&views))?;
         Ok(EngineDecision { append, then })
     }
 
-    fn deliver_proposals(&self, follow_up: FollowUp, label: &Label) -> Result<Next, EngineRefusal> {
+    fn deliver_proposals(&self, follow_up: FollowUp, bounds: &ReturnBounds) -> Result<Next, EngineRefusal> {
         match follow_up {
             FollowUp::Proposals {
                 released: releases,
@@ -1041,7 +1043,7 @@ impl RuntimeEngine {
                     });
                 }
                 if let Some(block) = blocked.into_iter().next() {
-                    let feedback = self.block_delivery(&block, label);
+                    let feedback = self.block_delivery(&block, bounds);
                     return Ok(Next::ModelResponse {
                         invocations: Vec::new(),
                         feedback: vec![feedback],
@@ -1063,8 +1065,8 @@ impl RuntimeEngine {
         }
     }
 
-    fn block_delivery(&self, block: &CoreBlocked, label: &Label) -> Feedback {
-        let (text, offers, review) = self.rendered_block(block, label);
+    fn block_delivery(&self, block: &CoreBlocked, bounds: &ReturnBounds) -> Feedback {
+        let (text, offers, review) = self.rendered_block(block, bounds);
         let offers = offers
             .into_iter()
             .map(|offer| {
@@ -1091,14 +1093,14 @@ impl RuntimeEngine {
         Feedback { text, offers, review }
     }
 
-    fn rendered_block(&self, block: &CoreBlocked, label: &Label) -> (String, Vec<OfferId>, Vec<PendingReview>) {
+    fn rendered_block(&self, block: &CoreBlocked, bounds: &ReturnBounds) -> (String, Vec<OfferId>, Vec<PendingReview>) {
         let offers: Vec<(OfferId, PlanId)> = block
             .offers
             .iter()
             .map(|(offer, plan)| (offer_id(offer), *plan))
             .collect();
         let chain = self.engine.registry().trust_chain();
-        let text = block_feedback(&block.block, &offers, chain, &label_spelling(chain, label));
+        let text = block_feedback(&block.block, &offers, chain, bounds);
         let review = self.pending_reviews(block, &offers);
         (text, offers.into_iter().map(|(offer, _)| offer).collect(), review)
     }
@@ -1342,10 +1344,10 @@ impl RuntimeEngine {
                 feedback: "[appa] the state changed and this offer no longer applies; re-propose the call".to_string(),
             }),
             FollowUp::Offer(OfferFollowUp::Denied { block }) => {
-                Next::PresentToModel(self.offer_block_delivery(&block, &views.current_label()))
+                Next::PresentToModel(self.offer_block_delivery(&block, &self.return_bounds(&views)))
             }
             FollowUp::Offer(OfferFollowUp::Substituted { block }) => {
-                Next::PresentToModel(self.offer_block_delivery(&block, &views.current_label()))
+                Next::PresentToModel(self.offer_block_delivery(&block, &self.return_bounds(&views)))
             }
             FollowUp::Offer(OfferFollowUp::Staged(confined)) => Next::PresentToModel(self.stage_delivery(
                 "[appa] the cleaned result still narrows this session.",
@@ -1427,9 +1429,16 @@ impl RuntimeEngine {
         AuthorityOutcome::Outcome(OfferOutcome::Approved(approvals))
     }
 
-    fn offer_block_delivery(&self, block: &CoreBlocked, label: &Label) -> Presentation {
-        let (feedback, offers, _) = self.rendered_block(block, label);
+    fn offer_block_delivery(&self, block: &CoreBlocked, bounds: &ReturnBounds) -> Presentation {
+        let (feedback, offers, _) = self.rendered_block(block, bounds);
         Presentation::Blocked { feedback, offers }
+    }
+
+    fn return_bounds(&self, views: &Views) -> ReturnBounds {
+        ReturnBounds {
+            label: views.current_label(),
+            lowest: self.engine.lowest_return_trust(views),
+        }
     }
 
     /// The return policy an offer's execution declares, where its plan ends in a return step:
@@ -1473,7 +1482,6 @@ impl RuntimeEngine {
                 .unwrap_or(current.audience),
         };
         let sanitizer = match step {
-            None => None,
             Some(name) if name.is_attest_schema() => {
                 let Some(schema) = &arguments.return_schema else {
                     return Err(
@@ -1486,6 +1494,14 @@ impl RuntimeEngine {
                     .map_err(|error| format!("`return_schema` does not compile to a return shape: {error}"))?;
                 Some(ReturnSanitizer::Attest(shape))
             }
+            _ if arguments.return_schema.is_some() => {
+                return Err(
+                    "this plan does not attest the subagent's return, so `return_schema` is not taken: declare the \
+                     attest-schema offer to attest, or omit `return_schema`"
+                        .to_string(),
+                );
+            }
+            None => None,
             Some(name) => Some(ReturnSanitizer::Named(name)),
         };
         Ok(Some(ReturnPolicy { floor, sanitizer }))
@@ -2828,19 +2844,68 @@ fn label_spelling(chain: &TrustChain, label: &Label) -> String {
     }
 }
 
-fn return_instruction(sanitizer: Option<&appa_engine::names::SanitizerName>, id: &OfferId, floor: &str) -> String {
+/// What bounds a return declaration made on a trajectory: its current label, which no floor
+/// stands above, and the lowest trust its own floor lets it declare.
+struct ReturnBounds {
+    label: Label,
+    lowest: Trust,
+}
+
+/// The spelling a return declaration's example needs: this trajectory's label as the
+/// `label` argument takes it, and the trust ranks a placeholder stands for.
+struct ReturnSpelling {
+    floor: String,
+    ranks: String,
+}
+
+impl ReturnSpelling {
+    /// Only the ranks the declaration may take are named: at or below the trajectory's trust,
+    /// and at or above the lowest its own floor permits. The unnamed top sentinel stands for
+    /// the whole chain.
+    fn of(chain: &TrustChain, bounds: &ReturnBounds) -> ReturnSpelling {
+        let ReturnBounds { label, lowest } = bounds;
+        let held = if label.trust == Trust::new(u8::MAX) {
+            chain.len()
+        } else {
+            usize::from(label.trust.rank()) + 1
+        };
+        let lowest = usize::from(lowest.rank());
+        ReturnSpelling {
+            floor: label_spelling(chain, label),
+            ranks: chain
+                .names()
+                .skip(lowest)
+                .take(held.saturating_sub(lowest))
+                .map(|name| format!("\"{}\"", terminal_safe(name)))
+                .collect::<Vec<_>>()
+                .join(", "),
+        }
+    }
+}
+
+fn return_instruction(
+    sanitizer: Option<&appa_engine::names::SanitizerName>,
+    id: &OfferId,
+    spelling: &ReturnSpelling,
+) -> String {
     let id = terminal_safe(&id.0);
+    let ReturnSpelling { floor, ranks } = spelling;
     match sanitizer {
         None => format!(
             "  - Declare the lowest label this session accepts from the subagent's return, then propose the spawn \
-             again. This session's label now is {floor}: an omitted dimension keeps it, a lower one lets the \
-             return narrow this session that far.\n    execute_remedy_plan(offer_id: \"{id}\", label: {floor})"
+             again. The subagent starts at this session's label, now {floor}, and can accept no change below the \
+             floor it is given: a subagent that must read below this session's trust needs the floor at that rank, \
+             and its return may then narrow this session that far. An omitted dimension keeps its current \
+             value.\n    execute_remedy_plan(offer_id: \"{id}\", label: {{trust: \"<rank>\"}}), with <rank> one \
+             of {ranks} (lowest first)"
         ),
         Some(name) if name.is_attest_schema() => format!(
-            "  - Attest the subagent's return: declare the floor and the JSON schema its return must match (a \
-             closed object schema; a string leaf carries `enum`, `const`, or `format`). The return crosses at the \
-             attestation's label.\n    execute_remedy_plan(offer_id: \"{id}\", label: {floor}, return_schema: \
-             {{type: \"object\", ...}})"
+            "  - Attest the subagent's return: declare the floor and the JSON schema its return must match. The \
+             schema is strict: an object lists its `properties`, every one `required`, and is closed as written \
+             (no `additionalProperties`); an integer carries `minimum` and `maximum`; a string leaf carries \
+             `enum`, `const`, or `format`, never free text. The return crosses at the attestation's \
+             label.\n    execute_remedy_plan(offer_id: \"{id}\", label: {floor}, return_schema: {{type: \
+             \"object\", ...}})"
         ),
         Some(name) => format!(
             "  - Have sanitizer {} rewrite the subagent's return before this session receives it, and declare the \
@@ -2850,9 +2915,9 @@ fn return_instruction(sanitizer: Option<&appa_engine::names::SanitizerName>, id:
     }
 }
 
-fn remedy_instruction(plan: &ExecutableRemedyPlan, id: &OfferId, floor: &str) -> String {
+fn remedy_instruction(plan: &ExecutableRemedyPlan, id: &OfferId, spelling: &ReturnSpelling) -> String {
     if let Some(sanitizer) = plan.return_step() {
-        return return_instruction(sanitizer, id, floor);
+        return return_instruction(sanitizer, id, spelling);
     }
     let needs_approval = !plan.required.is_empty();
     let action = match (needs_approval, plan.narrowing().is_some(), plan.sanitizer()) {
@@ -2876,7 +2941,7 @@ fn remedy_instruction(plan: &ExecutableRemedyPlan, id: &OfferId, floor: &str) ->
     )
 }
 
-fn remedy_lines(planned: &PlannedBlock, offers: &[(OfferId, PlanId)], floor: &str) -> Vec<String> {
+fn remedy_lines(planned: &PlannedBlock, offers: &[(OfferId, PlanId)], spelling: &ReturnSpelling) -> Vec<String> {
     planned
         .plans
         .iter()
@@ -2884,7 +2949,7 @@ fn remedy_lines(planned: &PlannedBlock, offers: &[(OfferId, PlanId)], floor: &st
             RemedyPlan::Executable(plan) => offers
                 .iter()
                 .find(|(_, offered)| *offered == plan.id)
-                .map(|(id, _)| remedy_instruction(plan, id, floor)),
+                .map(|(id, _)| remedy_instruction(plan, id, spelling)),
             RemedyPlan::Redispatch(redispatch) => Some(format!(
                 "  - Run {} first; it clears: {}.",
                 terminal_safe(redispatch.tool().as_str()),
@@ -2894,7 +2959,12 @@ fn remedy_lines(planned: &PlannedBlock, offers: &[(OfferId, PlanId)], floor: &st
         .collect()
 }
 
-fn block_feedback(planned: &PlannedBlock, offers: &[(OfferId, PlanId)], chain: &TrustChain, floor: &str) -> String {
+fn block_feedback(
+    planned: &PlannedBlock,
+    offers: &[(OfferId, PlanId)],
+    chain: &TrustChain,
+    bounds: &ReturnBounds,
+) -> String {
     let mut reasons = Vec::new();
     for gap in &planned.raw.requirement_gaps {
         reasons.push(terminal_safe(&gap_text(gap)));
@@ -2920,22 +2990,94 @@ fn block_feedback(planned: &PlannedBlock, offers: &[(OfferId, PlanId)], chain: &
     ];
     lines.extend(reasons.into_iter().map(|reason| format!("  - {reason}")));
 
-    let remedies = remedy_lines(planned, offers, floor);
+    let remedies = remedy_lines(planned, offers, &ReturnSpelling::of(chain, bounds));
     if !remedies.is_empty() {
         lines.push(String::new());
         lines.push("Continue:".to_string());
         lines.extend(remedies);
     }
-    if let Some(advice) = &planned.fork_advice {
+    if let Some(advice) = planned.fork_advice {
+        let remedies_required = !planned.raw.requirement_gaps.is_empty();
         lines.push(String::new());
-        lines.push(if planned.raw.narrowing.is_some() {
-            "Keep this session unchanged:".to_string()
-        } else {
-            "Alternative:".to_string()
-        });
-        lines.push(format!("  {}", advice.replace('\n', "\n  ")));
+        lines.push(fork_heading(advice).to_string());
+        lines.push(format!(
+            "  {}",
+            fork_advice_text(advice, remedies_required).replace('\n', "\n  ")
+        ));
     }
     lines.join("\n")
+}
+
+fn fork_heading(advice: ForkAdvice) -> &'static str {
+    match advice {
+        ForkAdvice::SameLabel => "Alternative:",
+        ForkAdvice::Narrowing {
+            standing: FloorStanding::Unbound,
+            ..
+        } => "Keep this session unchanged:",
+        ForkAdvice::Narrowing {
+            standing: FloorStanding::Within,
+            ..
+        } => "Delegation:",
+        ForkAdvice::Narrowing {
+            standing: FloorStanding::Below,
+            ..
+        } => "Not acceptable here:",
+    }
+}
+
+/// `remedies_required` when the block also carries requirement gaps a child would clear.
+fn fork_advice_text(advice: ForkAdvice, remedies_required: bool) -> String {
+    let ForkAdvice::Narrowing {
+        standing,
+        sanitized_return,
+    } = advice
+    else {
+        return "If this trajectory's harness advertises a child-session tool, handle the work there if isolation is \
+                useful.\nA child inherits the same session label, so delegation does not clear these requirements."
+            .to_string();
+    };
+    let delegated = if remedies_required {
+        "this call, its required remedies, and all work that uses its result"
+    } else {
+        "this call and all work that uses its result"
+    };
+    match (standing, sanitized_return) {
+        (FloorStanding::Unbound, true) => format!(
+            "If this trajectory's harness advertises a child-session tool, delegate {delegated} there.\nFinish there \
+             by returning nothing, or return only a sanitized derivation. Returning the raw value applies the same \
+             change to this session."
+        ),
+        (FloorStanding::Unbound, false) => format!(
+            "If this trajectory's harness advertises a child-session tool, delegate {delegated} there.\nNo \
+             registered return sanitizer carries this change back without applying it here, so finish there by \
+             returning nothing: a returned value applies the same change to this session."
+        ),
+        (FloorStanding::Within, true) => format!(
+            "This session is a subagent, and the floor its parent declared allows this change: accept it here.\nTo \
+             keep this session unchanged instead, delegate {delegated} to a further subagent declared with a \
+             return sanitizer; one declared with the bare floor would apply the same change here on its return."
+        ),
+        (FloorStanding::Within, false) => {
+            "This session is a subagent, and the floor its parent declared allows this change: accept it here.\nA \
+             further subagent's return would apply the same change to this session, so delegating gains nothing."
+                .to_string()
+        }
+        (FloorStanding::Below, true) => format!(
+            "This session is a subagent, and this change falls below the floor its parent declared: this session \
+             cannot accept it, and a subagent started here under the bare floor cannot either.\nA subagent started \
+             here with a return sanitizer can: delegate {delegated} there, and declare that sanitizer when the \
+             spawn asks for the return declaration."
+        ),
+        (FloorStanding::Below, false) => {
+            "This session is a subagent, and this change falls below the floor its parent declared: neither this \
+             session nor any subagent started here can accept it, and no registered return sanitizer carries \
+             this change back without applying it.\nDo not start a subagent for this. Finish without this call, \
+             or return a plain note that the work needs a subagent declared with a lower floor or a return \
+             sanitizer, so the parent can start one."
+                .to_string()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3309,11 +3451,15 @@ mod tests {
             (OfferId("offer-for-8".to_string()), PlanId::new(8)),
             (OfferId("offer-for-3".to_string()), PlanId::new(3)),
         ];
+        let spelling = super::ReturnSpelling {
+            floor: "{}".to_string(),
+            ranks: String::new(),
+        };
         assert_eq!(
-            remedy_lines(&planned, &offers, "{}"),
+            remedy_lines(&planned, &offers, &spelling),
             vec![
-                remedy_instruction(&plan(3), &offers[1].0, "{}"),
-                remedy_instruction(&plan(8), &offers[0].0, "{}"),
+                remedy_instruction(&plan(3), &offers[1].0, &spelling),
+                remedy_instruction(&plan(8), &offers[0].0, &spelling),
             ],
             "the plan with no offer is not shown; the rest carry their own offer"
         );

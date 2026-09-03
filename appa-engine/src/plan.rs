@@ -207,7 +207,35 @@ pub struct PlannedBlock {
     pub plans: Vec<RemedyPlan>,
     /// Advice, never a remedy: a child begins at the same label, so a fork cures no requirement.
     /// Kept out of `plans` so the emptiness assertion stays about remedies.
-    pub fork_advice: Option<String>,
+    pub fork_advice: Option<ForkAdvice>,
+}
+
+/// Advice, never a remedy, on delegating a blocked call to a child. The planner decides which
+/// situation the block is in; the harness spells it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForkAdvice {
+    /// Only requirement gaps: a child starts at the same label, so delegation clears nothing.
+    SameLabel,
+    /// The block narrows this trajectory. `sanitized_return` when a return sanitizer this
+    /// trajectory may declare takes the narrowed value and hands back one this trajectory
+    /// receives unchanged: it admits the narrowed label, and its derivation holds at the
+    /// current label on every dimension.
+    Narrowing {
+        standing: FloorStanding,
+        sanitized_return: bool,
+    },
+}
+
+/// Where a narrowing stands against the floor a fork set on this trajectory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FloorStanding {
+    /// A root: no fork bounds it, and a child can take the change in its place.
+    Unbound,
+    /// The floor permits the change: the parent declared it to be accepted here, and a child
+    /// under the same floor gains nothing.
+    Within,
+    /// The floor refuses the change here and in every child under it.
+    Below,
 }
 
 impl PlannedBlock {
@@ -279,22 +307,22 @@ pub(crate) fn plan(
         needs.refuse_if_any()?;
         plans.extend(redispatches.into_iter().map(RemedyPlan::Redispatch));
     }
-    let fork_reason = match (role, &raw.narrowing, raw.requirement_gaps.is_empty()) {
-        (CallRole::MarkedSpawn, _, _) => None,
-        (_, Some(_), true) => Some(
-            "If this trajectory's harness advertises a child-session tool, delegate this call and all work that uses its result there.\nFinish there by returning nothing, or return only a sanitized derivation. Returning the raw value applies the same change to this session.",
-        ),
-        (_, Some(_), false) => Some(
-            "If this trajectory's harness advertises a child-session tool, delegate this call, its required remedies, and all work that uses its result there.\nFinish there by returning nothing, or return only a sanitized derivation. Returning the raw value applies the same change to this session.",
-        ),
-        (_, None, _) => Some(
-            "If this trajectory's harness advertises a child-session tool, handle the work there if isolation is useful.\nA child inherits the same session label, so delegation does not clear these requirements.",
-        ),
+    let fork_advice = match (role, &raw.narrowing) {
+        (CallRole::MarkedSpawn, _) => None,
+        (_, None) => Some(ForkAdvice::SameLabel),
+        (_, Some(narrowing)) => Some(ForkAdvice::Narrowing {
+            standing: match &floor {
+                None => FloorStanding::Unbound,
+                Some(floor) if floor.holds(&narrowing.to) => FloorStanding::Within,
+                Some(_) => FloorStanding::Below,
+            },
+            sanitized_return: preserving_return_exists(registry, &current, narrowing, floor.as_ref(), context),
+        }),
     };
     Ok(PlannedBlock {
         raw: raw.clone(),
         plans,
-        fork_advice: fork_reason.map(str::to_string),
+        fork_advice,
     })
 }
 
@@ -927,6 +955,16 @@ impl Floor {
         &self.label
     }
 
+    /// The lowest trust a return declaration made under this floor may set: the floor's own
+    /// trust, or the chain's bottom where the fork's sanitizer raises trust and leaves that
+    /// dimension unbound.
+    pub(crate) fn lowest_trust(&self) -> crate::label::Trust {
+        match self.raised {
+            Some(crate::authority::Transition::Trust { .. }) => crate::label::Trust::new(0),
+            _ => self.label.trust,
+        }
+    }
+
     /// Does `label` stay at or above the floor on every dimension the floor binds? A
     /// dimension the fork's sanitizer raises is unbound: the derivation replaces it wholesale.
     pub(crate) fn holds(&self, label: &Label) -> bool {
@@ -969,6 +1007,36 @@ pub(crate) fn return_options(registry: &Registry, floor: Option<&Floor>) -> Vec<
             .map(|sanitizer| Some(sanitizer.name.clone())),
     );
     options
+}
+
+/// Does a return sanitizer this trajectory may declare take the narrowed value and hand back
+/// one `current` receives unchanged? The sanitizer must admit `narrowing.to` as its declared
+/// `from`, the reserved attestation must fit a fork seeded at `current`, and the derivation
+/// must hold at `current` on both dimensions. A route the child could declare but never
+/// cross, or one whose return still lowers this trajectory, preserves nothing. Advice costs
+/// the block no directory read: a sanitizer whose admission is undecided counts as no route,
+/// and the crossing itself reads the directory when a parent declares it anyway.
+fn preserving_return_exists(
+    registry: &Registry,
+    current: &Label,
+    narrowing: &Narrowing,
+    floor: Option<&Floor>,
+    context: &MembershipContext<'_>,
+) -> bool {
+    let unchanged = Floor::new(current.clone(), None);
+    return_options(registry, floor)
+        .into_iter()
+        .flatten()
+        .filter_map(|name| registry.sanitizer(&name))
+        .filter(|sanitizer| {
+            !sanitizer.name.is_attest_schema()
+                || attest_ceiling(&sanitizer.transition).is_some_and(|ceiling| current.meets_floor(ceiling))
+        })
+        .any(|sanitizer| {
+            sanitizer
+                .derive_output(&narrowing.to, &[], context)
+                .is_ok_and(|derived| derived.is_some_and(|derived| unchanged.holds(&derived)))
+        })
 }
 
 /// Why a parent's declared return policy is not one its spawn's plan can carry.
@@ -3324,7 +3392,7 @@ mod tests {
         let planned = plan_of(&registry, &log, &call("wire", json!({})));
         assert!(!planned.is_curable());
         assert!(planned.plans.is_empty());
-        assert!(planned.fork_advice.is_some());
+        assert_eq!(planned.fork_advice, Some(ForkAdvice::SameLabel));
     }
 
     #[test]
@@ -3358,6 +3426,14 @@ mod tests {
                 from: established(TRUSTED, Audience::public()),
                 to: established(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
             })]
+        );
+        assert_eq!(
+            planned.fork_advice,
+            Some(ForkAdvice::Narrowing {
+                standing: FloorStanding::Unbound,
+                sanitized_return: false,
+            }),
+            "a root with no return sanitizer registered is told a child can take the change, unsanitized"
         );
     }
 

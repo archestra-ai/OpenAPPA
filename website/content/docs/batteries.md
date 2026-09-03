@@ -1,11 +1,17 @@
 ---
-title: Batteries
-category: Deep Dive
-order: 4
-description: Combine OpenAPPA configs and run annotator scripts.
+title: What is a battery
+category: Batteries
+order: 6.5
+description: How batteries are structured, combined, and run.
 ---
 
 A battery is an OpenAPPA config for a set of tools, such as Claude Code or Slack. It may include small scripts that make decisions for each tool call.
+
+Most batteries are for MCP servers. A battery needs no extra format or server.
+
+## Battery structure
+
+Keep each battery and its annotator scripts together:
 
 ```text
 batteries/
@@ -14,10 +20,6 @@ batteries/
 `-- slack/
     `-- appa.toml
 ```
-
-A battery is ordinary OpenAPPA config. It needs no extra format or server.
-
-## Add batteries
 
 List batteries in the root `appa.toml`:
 
@@ -107,7 +109,9 @@ command = ["python3", "./read-attention.py"]
 
 ### Run a local annotator
 
-On Unix systems, OpenAPPA starts the command only when the selected tool rule names the annotator. It writes one JSON consult, reads one JSON answer, then waits for the script to exit. Other platforms reject the command binding when the configuration loads.
+On Unix systems, OpenAPPA starts the script when a tool call matches its rule. It sends one JSON consult, reads one JSON answer, and waits for the script to exit.
+
+Other platforms reject script commands when the config loads.
 
 Consult:
 
@@ -145,9 +149,13 @@ json.dump(
 )
 ```
 
-`artifact.args` is the complete call: `name`, `description` when the tool declares one, and `arguments`. The `Read` rule above declares none, so the consult carries none. When the annotator maps `inputs`, the consult carries one value per mapped input instead. `declaration` is the annotator's own registration — the mandate vocabulary its answer must use. A battery annotator must check the version, `kind`, `name`, tool name, and argument types. It must exit with an error for bad input.
+`artifact.args` contains the tool's `name`, `arguments`, and declared `description`. The `Read` rule above has no description, so the consult omits it.
 
-OpenAPPA runs the command without a shell. The script path is relative to the battery config. Its folder is the working folder.
+When an annotator maps `inputs`, the consult includes one Value for each input. `declaration` lists the trust ranks, audiences, attention marks, and effects that its answer may use.
+
+A battery annotator must check the version, `kind`, `name`, tool name, and argument types. It must exit with an error when the input is invalid.
+
+OpenAPPA runs the command without a shell. The script path is relative to the battery config. The battery folder is its working directory.
 
 Script changes apply on the next call. No restart is needed.
 
@@ -181,16 +189,16 @@ The Claude Code battery labels `Read` with static rules of the same shape:
 hidden paths, credential and private-key names, and system secret locations
 narrow the session to `self`, the requester; other paths keep its label.
 
-The Claude Code battery also sends each Bash call to its stock model
+The Claude Code battery also sends each Bash call to its built-in model
 annotator. The annotator produces the command's complete contract: the
 output's trust and the call's trust and attention requirements. Its mandate
 names no reader, so the audience of a command's output is the session's.
 
-This classification is not an operating-system sandbox. Bash can read files
+This check is not an operating-system sandbox. Bash can read files
 and open network connections. Use a sandbox to protect credentials and network
 access.
 
-## Customise batteries for your own setup
+## Customise a battery
 
 Put your rules in the root config. They run before battery rules, even when they appear below `include`.
 
@@ -234,11 +242,15 @@ The battery files stay unchanged.
 
 ## Audience sources
 
-This build ships one audience source per provider — `google-workspace`, `slack`, and `github` — each with a fixed set of selector templates, available with no include. A policy maps their collections into the built-in `self` and `internal` audiences and into `[[audience.group]]` entries; only providers the policy references enter the policy identity. The [Policy reference](/contracts#audiences) has the catalog, the level rules, and the consult each source answers.
+OpenAPPA includes audience sources for Google Workspace, Slack, and GitHub. You can use them without including a battery config.
+
+A policy uses these sources to build `self`, `internal`, and named group audiences. OpenAPPA contacts only the sources that the policy uses.
+
+See [Audiences](/contracts#audiences) for the available selectors and the JSON that each source receives.
 
 ## Refuse when a script fails
 
-OpenAPPA refuses the tool call when an annotator script is missing, crashes, times out, or returns bad data. The call is not judged: the refusal is operational, not a policy decision.
+OpenAPPA refuses the tool call when an annotator script is missing, crashes, times out, or returns bad data. This is an execution error, not a policy decision.
 
 The error names the annotator and the problem. It does not show the data the annotator was checking.
 
