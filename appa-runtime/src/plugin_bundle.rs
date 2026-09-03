@@ -22,6 +22,26 @@ use crate::plugin_layout::{
     EntryKind, MAX_ENTRIES, MAX_UNCOMPRESSED_BYTES, TreeDigestError, absorb_field, canonical_tree_digest, walk,
 };
 
+// ---------------------------------------------------------------------------
+// Debug-only test seams
+// ---------------------------------------------------------------------------
+
+/// The one place a debug-only seam reads the environment.
+///
+/// Three seams exist -- the endpoint, the release download base and the source
+/// archive base -- and each of them is this function. `[profile.release]` pins
+/// `debug-assertions = false`, so a shipped binary reads no environment here at
+/// all. The release workflow proves that on the packaged artifact by feeding it
+/// a malformed `APPA_ENDPOINT` and requiring it to be ignored; that single probe
+/// stands for all three seams only for as long as this is the only gate.
+fn debug_override(name: &str) -> Option<String> {
+    if cfg!(debug_assertions) {
+        env::var(name).ok()
+    } else {
+        None
+    }
+}
+
 /// Files and directories every plugin source must carry, in the marketplace-root
 /// shape `plugin_layout::stage_repository` produces. One validator serves
 /// both source resolution and the reuse check on an existing deployment.
@@ -337,11 +357,7 @@ pub const DEFAULT_ENDPOINT_URL: &str = "http://127.0.0.1:8787";
 
 impl Endpoint {
     pub fn resolve() -> Result<Self, PluginBundleError> {
-        let configured = if cfg!(debug_assertions) {
-            env::var("APPA_ENDPOINT").ok()
-        } else {
-            None
-        };
+        let configured = debug_override("APPA_ENDPOINT");
         Self::parse(configured.as_deref().unwrap_or(DEFAULT_ENDPOINT_URL))
     }
 
@@ -958,23 +974,13 @@ fn cached_archive_path(cache_dir: &Path, version: &str, digest: PluginDigest) ->
 /// builds only, and init reads it once at the boundary rather than leaving the
 /// fetch to consult the environment underneath its caller.
 pub(crate) fn release_base_url() -> String {
-    let configured = if cfg!(debug_assertions) {
-        env::var("APPA_RELEASE_BASE_URL").ok()
-    } else {
-        None
-    };
-    configured.unwrap_or_else(|| RELEASE_BASE_URL.to_owned())
+    debug_override("APPA_RELEASE_BASE_URL").unwrap_or_else(|| RELEASE_BASE_URL.to_owned())
 }
 
 /// The immutable GitHub source-archive base. Like the release test seam, the
 /// override exists only in debug builds and cannot redirect a shipped binary.
 pub(crate) fn source_archive_base_url() -> String {
-    let configured = if cfg!(debug_assertions) {
-        env::var("APPA_SOURCE_ARCHIVE_BASE_URL").ok()
-    } else {
-        None
-    };
-    configured.unwrap_or_else(|| SOURCE_ARCHIVE_BASE_URL.to_owned())
+    debug_override("APPA_SOURCE_ARCHIVE_BASE_URL").unwrap_or_else(|| SOURCE_ARCHIVE_BASE_URL.to_owned())
 }
 
 /// The verified archive for this build's release, from the cache when it is
