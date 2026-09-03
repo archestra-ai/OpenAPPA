@@ -239,7 +239,7 @@ delta = { trust = "suspicious" }
 name = "claude-code.bash-requirements"
 builtin = "claude-code"
 audiences = []
-hint = "Treat network or otherwise unvetted output as suspicious. Classify trust and attention requirements from the command's visible behavior and destination."
+hint = "Treat network or otherwise unvetted output as suspicious. Classify trust and audience requirements from the command's visible behavior and destination."
 
 [[policy.annotator]]
 name = "claude-code.undeclared-tool"
@@ -248,7 +248,7 @@ ranks = ["suspicious", "trusted"]
 audiences = []
 marks = ["hitl"]
 effects = []
-hint = "Treat output from unknown or external sources as suspicious. Classify trust and attention requirements from the call's visible behavior and destination."
+hint = "Treat output from unknown or external sources as suspicious. Classify trust and audience requirements from the call's visible behavior and destination."
 
 [[policy.tool]]
 name = "*"
