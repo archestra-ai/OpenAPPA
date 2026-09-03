@@ -47,14 +47,17 @@ export function getAllDocs(): DocPage[] {
     const raw = fs.readFileSync(path.join(DOCS_DIR, file), "utf-8");
     const { data, content } = matter(raw);
     const fm = data as DocFrontMatter;
+    // Strip release-please markers so public docs and clipboard copies stay clean,
+    // while git source files retain the markers for the release pipeline.
+    const cleanContent = content.replace(/[ \t]*#\s*x-release-please-[a-z0-9_-]+/g, "");
     return {
       slug: file.replace(/\.md$/, ""),
       title: fm.title,
       category: fm.category,
       order: fm.order ?? 999,
       description: fm.description ?? "",
-      content,
-      proposal: PROPOSAL_OPEN.test(content.trimStart().split("\n", 1)[0]),
+      content: cleanContent,
+      proposal: PROPOSAL_OPEN.test(cleanContent.trimStart().split("\n", 1)[0]),
       sidebar: fm.sidebar ?? true,
       breadcrumb: fm.breadcrumb,
     };
