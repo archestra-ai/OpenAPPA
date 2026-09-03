@@ -43,10 +43,17 @@
 //! adding the step leaves `is_curable` unchanged — acceptance was already always available for a
 //! narrowing, so the sanitizer adds alternatives, never remedies for a requirement gap.
 //!
-//! Blocked **child returns** are planned by [`return_stage`] with their own closed vocabulary —
-//! acceptance of the current residual, or one applicable helpful sanitizer hop. A return crossing
-//! has no dispatch, no gaps, and no authorities, so none of this module's tool-block machinery
-//! applies to it. The tool-output plans here mirror its shape deliberately.
+//! **A marked spawn declares its child's return policy here.** The spawn is blocked until an
+//! approval carries one, and every plan for it ends in a `Return` step: the floor the parent
+//! supplies at execution, and the sanitizer — none, the schema attestation, or one registered
+//! untagged output sanitizer — the plan names. A child return itself is never planned: it
+//! crosses at the child's stop, or is refused there, against the policy the fork recorded.
+//!
+//! **A fork's floor binds the child's remedies.** Inside a forked trajectory no plan accepts a
+//! narrowing below the floor its parent set, on the dimensions the fork's sanitizer does not
+//! raise: [`narrowing_remedies`] and [`confined_stage`] omit the acceptance, and the remaining
+//! plans stand. A grandchild's floor is declared against the child's own, so the bound is
+//! inherited down the family.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -55,7 +62,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::authority::{Authority, DeclaredTransition, Mandate, Sanitizer};
 use crate::candidate::{CallStage, SanitizerLineage};
-use crate::check::{self, Gap, Narrowing, RawBlock};
+use crate::check::{self, CallRole, Gap, Narrowing, RawBlock};
 use crate::contract::ToolAnnotation;
 use crate::fact::EffectKind;
 use crate::label::{Audience, Evaluation, Label, MembershipContext, MembershipNeeded, SymbolicAtom, WithinAssertions};
@@ -77,17 +84,20 @@ impl PlanId {
     }
 }
 
-/// One engine-side act in an executable plan. All three are atomic: `Authorize` records a ruling
+/// One engine-side act in an executable plan. All are atomic: `Authorize` records a ruling
 /// that admits the dispatch despite a gap; `Accept` records the agent's acceptance of the
-/// narrowing; `Sanitize` binds an output sanitizer to the dispatch. None edits a trajectory label —
-/// `Sanitize` changes only which value is admitted when the result comes back, and the fold does
-/// the rest.
+/// narrowing; `Sanitize` binds an output sanitizer to the dispatch; `Return` declares the
+/// child's return policy on a marked spawn — the floor is the parent's parameter at execution,
+/// the sanitizer (none, `attest-schema` over a schema the parent also supplies, or a registered
+/// output sanitizer) is the plan's. None edits a trajectory label — `Sanitize` changes only
+/// which value is admitted when the result comes back, and the fold does the rest.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RemedyStep {
     Authorize(AuthorityName),
     Accept(Narrowing),
     Sanitize(SanitizerName),
     Derive(SanitizerName),
+    Return(Option<SanitizerName>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,14 +114,24 @@ impl ExecutableRemedyPlan {
     pub fn narrowing(&self) -> Option<&Narrowing> {
         self.steps.iter().find_map(|step| match step {
             RemedyStep::Accept(narrowing) => Some(narrowing),
-            RemedyStep::Authorize(_) | RemedyStep::Sanitize(_) | RemedyStep::Derive(_) => None,
+            RemedyStep::Authorize(_) | RemedyStep::Sanitize(_) | RemedyStep::Derive(_) | RemedyStep::Return(_) => None,
         })
     }
 
     pub fn sanitizer(&self) -> Option<&SanitizerName> {
         self.steps.iter().find_map(|step| match step {
             RemedyStep::Sanitize(sanitizer) => Some(sanitizer),
-            RemedyStep::Authorize(_) | RemedyStep::Accept(_) | RemedyStep::Derive(_) => None,
+            RemedyStep::Authorize(_) | RemedyStep::Accept(_) | RemedyStep::Derive(_) | RemedyStep::Return(_) => None,
+        })
+    }
+
+    /// The return sanitizer this plan declares for a marked spawn's child, where the plan
+    /// declares a return policy at all: `Some(None)` for a bare floor, `Some(Some(name))` for
+    /// a floor behind the named sanitizer, `None` for a plan on an ordinary call.
+    pub fn return_step(&self) -> Option<Option<&SanitizerName>> {
+        self.steps.iter().find_map(|step| match step {
+            RemedyStep::Return(sanitizer) => Some(sanitizer.as_ref()),
+            RemedyStep::Authorize(_) | RemedyStep::Accept(_) | RemedyStep::Sanitize(_) | RemedyStep::Derive(_) => None,
         })
     }
 
@@ -199,16 +219,6 @@ impl PlannedBlock {
     }
 }
 
-/// What the planned call is to its deployment: an ordinary tool call, or the one proposal the
-/// runtime marked as the context-controlled spawn. The mark is a property of the
-/// subject, fixed when its batch was decided, so a substituted successor keeps its predecessor's
-/// role.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CallRole {
-    Ordinary,
-    MarkedSpawn,
-}
-
 /// Plan the remedies for a raw block. Emits the executable plans when the block clears in one
 /// atomic step, and every direct redispatch when only a prior tool call unlocks it. Both land in
 /// the one `plans` list; fork advice is separate and never a remedy.
@@ -244,6 +254,7 @@ pub(crate) fn plan(
 
     let has_committed = |kind: &EffectKind| views.has_effect(kind);
     let has_reserved = |kind: &EffectKind| views.has_reservation(kind);
+    let floor = floor_of(registry, views);
     let mut plans: Vec<RemedyPlan> = enumerate_plans(
         registry,
         contract,
@@ -253,6 +264,7 @@ pub(crate) fn plan(
         call,
         stage,
         role,
+        floor.as_ref(),
         context,
     )?
     .into_iter()
@@ -267,21 +279,22 @@ pub(crate) fn plan(
         needs.refuse_if_any()?;
         plans.extend(redispatches.into_iter().map(RemedyPlan::Redispatch));
     }
-    let fork_reason = match (&raw.narrowing, raw.requirement_gaps.is_empty()) {
-        (Some(_), true) => {
-            "If this trajectory's harness advertises a child-session tool, delegate this call and all work that uses its result there.\nFinish there by returning nothing, or return only a sanitized derivation. Returning the raw value applies the same change to this session."
-        }
-        (Some(_), false) => {
-            "If this trajectory's harness advertises a child-session tool, delegate this call, its required remedies, and all work that uses its result there.\nFinish there by returning nothing, or return only a sanitized derivation. Returning the raw value applies the same change to this session."
-        }
-        (None, _) => {
-            "If this trajectory's harness advertises a child-session tool, handle the work there if isolation is useful.\nA child inherits the same session label, so delegation does not clear these requirements."
-        }
+    let fork_reason = match (role, &raw.narrowing, raw.requirement_gaps.is_empty()) {
+        (CallRole::MarkedSpawn, _, _) => None,
+        (_, Some(_), true) => Some(
+            "If this trajectory's harness advertises a child-session tool, delegate this call and all work that uses its result there.\nFinish there by returning nothing, or return only a sanitized derivation. Returning the raw value applies the same change to this session.",
+        ),
+        (_, Some(_), false) => Some(
+            "If this trajectory's harness advertises a child-session tool, delegate this call, its required remedies, and all work that uses its result there.\nFinish there by returning nothing, or return only a sanitized derivation. Returning the raw value applies the same change to this session.",
+        ),
+        (_, None, _) => Some(
+            "If this trajectory's harness advertises a child-session tool, handle the work there if isolation is useful.\nA child inherits the same session label, so delegation does not clear these requirements.",
+        ),
     };
     Ok(PlannedBlock {
         raw: raw.clone(),
         plans,
-        fork_advice: Some(fork_reason.to_string()),
+        fork_advice: fork_reason.map(str::to_string),
     })
 }
 
@@ -299,6 +312,7 @@ pub(crate) fn enumerate_plans(
     call: &ResolvedCall,
     stage: &CallStage,
     role: CallRole,
+    floor: Option<&Floor>,
     context: &MembershipContext<'_>,
 ) -> Result<Vec<ExecutableRemedyPlan>, MembershipNeeded> {
     let block = check::evaluate_state(
@@ -310,7 +324,7 @@ pub(crate) fn enumerate_plans(
         stage,
         context,
     )?;
-    if block.requirement_gaps.is_empty() && block.narrowing.is_none() {
+    if role == CallRole::Ordinary && block.requirement_gaps.is_empty() && block.narrowing.is_none() {
         return Ok(Vec::new());
     }
 
@@ -339,23 +353,34 @@ pub(crate) fn enumerate_plans(
             current,
             contract,
             block.narrowing.as_ref(),
+            floor,
             context,
             &mut needs,
         );
+        // An ordinary call declares no return policy; a marked spawn declares exactly one.
+        let returns: Vec<Option<Option<SanitizerName>>> = match role {
+            CallRole::Ordinary => vec![None],
+            CallRole::MarkedSpawn => return_options(registry, floor).into_iter().map(Some).collect(),
+        };
         for required in assignments {
             for settlement in &settlements {
-                let mut steps: Vec<RemedyStep> = match settlement {
-                    NarrowingSettlement::Accept(narrowing) => vec![RemedyStep::Accept(narrowing.clone())],
-                    NarrowingSettlement::Nothing | NarrowingSettlement::Sanitize(_) => Vec::new(),
-                };
-                steps.extend(required.iter().map(|r| RemedyStep::Authorize(r.authority.clone())));
-                if let NarrowingSettlement::Sanitize(sanitizer) = settlement {
-                    steps.push(RemedyStep::Sanitize(sanitizer.clone()));
+                for declares in &returns {
+                    let mut steps: Vec<RemedyStep> = match settlement {
+                        NarrowingSettlement::Accept(narrowing) => vec![RemedyStep::Accept(narrowing.clone())],
+                        NarrowingSettlement::Nothing | NarrowingSettlement::Sanitize(_) => Vec::new(),
+                    };
+                    steps.extend(required.iter().map(|r| RemedyStep::Authorize(r.authority.clone())));
+                    if let NarrowingSettlement::Sanitize(sanitizer) = settlement {
+                        steps.push(RemedyStep::Sanitize(sanitizer.clone()));
+                    }
+                    if let Some(sanitizer) = declares {
+                        steps.push(RemedyStep::Return(sanitizer.clone()));
+                    }
+                    candidates.push(PlanCandidate {
+                        steps,
+                        required: required.clone(),
+                    });
                 }
-                candidates.push(PlanCandidate {
-                    steps,
-                    required: required.clone(),
-                });
             }
         }
     }
@@ -688,22 +713,27 @@ pub(crate) enum NarrowingSettlement {
     Sanitize(SanitizerName),
 }
 
-/// The ways this block's narrowing can be settled: acceptance always, then one
-/// settlement per applicable output sanitizer, in registry name order. A block with no narrowing
-/// yields one empty settlement, so the caller's cross product still produces the plain authority
-/// plans.
+/// The ways this block's narrowing can be settled: acceptance where the fork's floor
+/// permits it, then one settlement per applicable output sanitizer, in registry name order. A
+/// block with no narrowing yields one empty settlement, so the caller's cross product still
+/// produces the plain authority plans. A narrowing below the floor keeps every other plan and
+/// loses only the acceptance: the child cannot take what its parent will not receive.
 pub(crate) fn narrowing_remedies(
     registry: &Registry,
     current: &Label,
     contract: &ToolAnnotation,
     narrowing: Option<&Narrowing>,
+    floor: Option<&Floor>,
     context: &MembershipContext<'_>,
     needs: &mut NeededAtoms,
 ) -> Vec<NarrowingSettlement> {
     let Some(narrowing) = narrowing else {
         return vec![NarrowingSettlement::Nothing];
     };
-    let mut settlements = vec![NarrowingSettlement::Accept(narrowing.clone())];
+    let mut settlements = Vec::new();
+    if floor.is_none_or(|floor| floor.holds(&narrowing.to)) {
+        settlements.push(NarrowingSettlement::Accept(narrowing.clone()));
+    }
     if !registry.profile().confines_result(&contract.name) {
         return settlements;
     }
@@ -824,14 +854,18 @@ pub(crate) fn confined_hop_helps(receiving: &Label, candidate: &Label, derived: 
 }
 
 /// The next stage of one confined candidate: a progress hop for every registered output
-/// sanitizer that still helps, then acceptance of exactly the residual this candidate leaves.
+/// sanitizer that still helps, then acceptance of exactly the residual this candidate leaves
+/// where the fork's floor permits it.
 ///
-/// Total by construction once every membership read is answered: acceptance is always
-/// available, so a confined candidate is never stuck whatever the catalogue holds, and no chain
-/// is precomputed — each hop persists one candidate and this runs again from it. An undecided
-/// membership read refuses the stage with the aggregate of missing atoms instead of dropping
-/// hops. The order is presentation only; hops come first because a hop costs the trajectory
-/// nothing and acceptance costs exactly the residual.
+/// Total by construction once every membership read is answered, outside a fork: acceptance
+/// is always available there, so a confined candidate is never stuck whatever the catalogue
+/// holds, and no chain is precomputed — each hop persists one candidate and this runs again
+/// from it. Inside a fork a candidate below the floor with no helpful hop stays withheld: the
+/// child cannot take what its parent will not receive. An undecided membership read refuses the
+/// stage with the aggregate of missing atoms instead of dropping hops. The order is presentation
+/// only; hops come first because a hop costs the trajectory nothing and acceptance costs exactly
+/// the residual.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn confined_stage(
     registry: &Registry,
     contract: &ToolAnnotation,
@@ -839,6 +873,7 @@ pub(crate) fn confined_stage(
     candidate: &Label,
     residual: &Narrowing,
     lineage: &SanitizerLineage,
+    floor: Option<&Floor>,
     context: &MembershipContext<'_>,
 ) -> Result<Vec<ExecutableRemedyPlan>, MembershipNeeded> {
     let mut needs = NeededAtoms::default();
@@ -864,92 +899,149 @@ pub(crate) fn confined_stage(
         });
     }
     needs.refuse_if_any()?;
-    plans.push(ExecutableRemedyPlan {
-        id: PlanId(plans.len() as u32),
-        steps: vec![RemedyStep::Accept(residual.clone())],
-        required: Vec::new(),
-    });
+    if floor.is_none_or(|floor| floor.holds(&residual.to)) {
+        plans.push(ExecutableRemedyPlan {
+            id: PlanId(plans.len() as u32),
+            steps: vec![RemedyStep::Accept(residual.clone())],
+            required: Vec::new(),
+        });
+    }
     Ok(plans)
 }
 
-/// The next stage of one pending child return: a progress hop for
-/// every registered output sanitizer that is applicable and still helps, then acceptance of
-/// exactly the residual the candidate leaves. Total like [`confined_stage`], and planned from the
-/// candidate standing now — the submitted fold's bound, or a derived successor's label.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn return_stage(
+/// The lowest label a forked trajectory may hold and still return: its fork's floor met with
+/// its parent's current label — the parent accepts nothing cleaner than it is now — and the
+/// dimension the fork's sanitizer raises, which the floor does not bind.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Floor {
+    label: Label,
+    raised: Option<crate::authority::Transition>,
+}
+
+impl Floor {
+    pub(crate) fn new(label: Label, raised: Option<crate::authority::Transition>) -> Floor {
+        Floor { label, raised }
+    }
+
+    pub(crate) fn label(&self) -> &Label {
+        &self.label
+    }
+
+    /// Does `label` stay at or above the floor on every dimension the floor binds? A
+    /// dimension the fork's sanitizer raises is unbound: the derivation replaces it wholesale.
+    pub(crate) fn holds(&self, label: &Label) -> bool {
+        let meet = label.combine(&self.label);
+        let trust_holds =
+            matches!(self.raised, Some(crate::authority::Transition::Trust { .. })) || meet.trust == self.label.trust;
+        let audience_holds = matches!(self.raised, Some(crate::authority::Transition::Audience { .. }))
+            || meet.audience == self.label.audience;
+        trust_holds && audience_holds
+    }
+}
+
+/// The floor that binds this trajectory, or `None` for a root, which no fork bounds.
+pub(crate) fn floor_of(registry: &Registry, views: &Views) -> Option<Floor> {
+    let trajectory = views.trajectory();
+    let policy = views.return_policy_of(trajectory)?;
+    let parent = views.parent_of(trajectory)?;
+    let raised = policy
+        .sanitizer_name()
+        .and_then(|name| registry.sanitizer(&name))
+        .map(|sanitizer| sanitizer.transition.applied());
+    Some(Floor::new(policy.floor.combine(&views.branch_label(parent)), raised))
+}
+
+/// The return sanitizers a marked spawn may declare here, in registry name order behind the
+/// bare floor: the reserved attestation when it is registered, and every untagged output
+/// sanitizer. Under a floor, a sanitizer whose mandate lands below it is not offered — the
+/// grandchild's return could never cross the child.
+pub(crate) fn return_options(registry: &Registry, floor: Option<&Floor>) -> Vec<Option<SanitizerName>> {
+    let mut options = vec![None];
+    options.extend(
+        registry
+            .sanitizers()
+            .filter(|sanitizer| sanitizer.on.output && sanitizer.applies_to(&[]))
+            .filter(|sanitizer| {
+                floor.is_none_or(|floor| {
+                    Floor::new(floor.label().clone(), None).holds(&sanitizer.transition.applied().derive(floor.label()))
+                })
+            })
+            .map(|sanitizer| Some(sanitizer.name.clone())),
+    );
+    options
+}
+
+/// Why a parent's declared return policy is not one its spawn's plan can carry.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ReturnPolicyRefusal {
+    #[error("the declared return sanitizer is not the one the selected plan names")]
+    SanitizerMismatch,
+    #[error(
+        "the floor stands above this trajectory's label: a child starts at that label and cannot rise to the floor"
+    )]
+    FloorAboveLabel,
+    #[error("the floor stands below the floor this trajectory's own parent set")]
+    FloorBelowOwn,
+    #[error("the reserved attest-schema sanitizer is not registered, or its rank is above this trajectory's")]
+    AttestUnavailable,
+    #[error("the named sanitizer is not a registered untagged output sanitizer")]
+    SanitizerUnavailable,
+}
+
+/// Is `policy` the declaration `step` asks for, at this trajectory's label? The floor sits at or
+/// below the label — a child starts there and only descends — and at or above the floor this
+/// trajectory itself stands under, so a grandchild inherits the bound; an attestation needs the
+/// reserved sanitizer registered at a rank this label covers; a named sanitizer is a registered
+/// untagged output sanitizer, which is what the step offered.
+pub(crate) fn declared_return_policy(
     registry: &Registry,
     views: &Views,
-    child: &crate::value::TrajectoryId,
-    candidate: &Label,
-    body: &crate::value::ValueBody,
-    residual: &Narrowing,
-    lineage: &SanitizerLineage,
-    context: &MembershipContext<'_>,
-) -> Result<Vec<ExecutableRemedyPlan>, MembershipNeeded> {
-    let mut needs = NeededAtoms::default();
-    let mut plans: Vec<ExecutableRemedyPlan> = Vec::new();
-    if registry.profile().confines_child_return() {
-        for sanitizer in registry.sanitizers() {
-            if lineage.contains(&sanitizer.name) {
-                continue;
-            }
-            if !(sanitizer.on.output && sanitizer.applies_to(&[])) {
-                continue;
-            }
-            if sanitizer.name.is_attest_schema() && !attest_applicable(views, child, body, &sanitizer.transition) {
-                continue;
-            }
-            let helps = match sanitizer.derive_output(candidate, &[], context) {
-                Ok(derived) => derived.is_some_and(|derived| confined_hop_helps(&residual.from, candidate, &derived)),
-                Err(needed) => {
-                    needs.absorb(needed);
-                    false
-                }
-            };
-            if helps {
-                plans.push(ExecutableRemedyPlan {
-                    id: PlanId(plans.len() as u32),
-                    steps: vec![RemedyStep::Derive(sanitizer.name.clone())],
-                    required: Vec::new(),
-                });
+    step: Option<&SanitizerName>,
+    policy: &crate::fact::ReturnPolicy,
+) -> Result<(), ReturnPolicyRefusal> {
+    if policy.sanitizer_name().as_ref() != step {
+        return Err(ReturnPolicyRefusal::SanitizerMismatch);
+    }
+    let current = views.current_label();
+    if current.combine(&policy.floor) != policy.floor {
+        return Err(ReturnPolicyRefusal::FloorAboveLabel);
+    }
+    if floor_of(registry, views).is_some_and(|own| !own.holds(&policy.floor)) {
+        return Err(ReturnPolicyRefusal::FloorBelowOwn);
+    }
+    match &policy.sanitizer {
+        None => Ok(()),
+        Some(crate::fact::ReturnSanitizer::Attest(_)) => {
+            let registered = registry
+                .sanitizer(&SanitizerName::new(SanitizerName::ATTEST_SCHEMA))
+                .ok_or(ReturnPolicyRefusal::AttestUnavailable)?;
+            let ceiling = attest_ceiling(&registered.transition).ok_or(ReturnPolicyRefusal::AttestUnavailable)?;
+            match current.meets_floor(ceiling) {
+                true => Ok(()),
+                false => Err(ReturnPolicyRefusal::AttestUnavailable),
             }
         }
+        // The reserved route attests a shape: naming it without one would take the
+        // generic sanitizer path, which validates nothing.
+        Some(crate::fact::ReturnSanitizer::Named(name)) if name.is_attest_schema() => {
+            Err(ReturnPolicyRefusal::SanitizerMismatch)
+        }
+        Some(crate::fact::ReturnSanitizer::Named(name)) => match registry.sanitizer(name) {
+            Some(registered) if registered.on.output && registered.applies_to(&[]) => Ok(()),
+            _ => Err(ReturnPolicyRefusal::SanitizerUnavailable),
+        },
     }
-    needs.refuse_if_any()?;
-    plans.push(ExecutableRemedyPlan {
-        id: PlanId(plans.len() as u32),
-        steps: vec![RemedyStep::Accept(residual.clone())],
-        required: Vec::new(),
-    });
-    Ok(plans)
 }
 
-/// The preconditions of the reserved `attest-schema` builtin, checked as applicability:
-/// the fork bound a shape — every compiled shape is shape-bounded by construction —
-/// the candidate body is exactly a value that shape admits in canonical form, and the parent's
-/// fork-time trust rank covers the mandate `to`, because the answer cannot come back cleaner
-/// than the context that asked. All three are engine-held facts; no resolver variant exists.
-pub(crate) fn attest_applicable(
-    views: &Views,
-    child: &crate::value::TrajectoryId,
-    body: &crate::value::ValueBody,
-    transition: &DeclaredTransition,
-) -> bool {
-    let Some(shape) = views.return_shape_of(child) else {
-        return false;
-    };
-    // Load validation refuses an audience mandate on the reserved name.
-    let DeclaredTransition::Trust { to, .. } = transition else {
-        return false;
-    };
-    if !shape
-        .validate(body.as_str())
-        .is_ok_and(|canonical| canonical == body.as_str())
-    {
-        return false;
+/// The trust rank the reserved `attest-schema` builtin raises a return to. Its precondition is
+/// a fork-time fact: the parent's label at the fork covers this rank, because the answer cannot
+/// come back cleaner than the context that asked. Load validation refuses an audience mandate on
+/// the reserved name, so an audience transition here attests nothing.
+pub(crate) fn attest_ceiling(transition: &DeclaredTransition) -> Option<crate::label::Trust> {
+    match transition {
+        DeclaredTransition::Trust { to, .. } => Some(*to),
+        DeclaredTransition::Audience { .. } => None,
     }
-    views.fork_seed(child).is_some_and(|seed| seed.trust >= *to)
 }
 
 /// The established contribution a bound output sanitizer's first derivation would make, resolved
@@ -1080,9 +1172,10 @@ pub(crate) fn plan_atoms(
         }
     }
     for step in &plan.steps {
+        // A return declaration runs its sanitizer at the child's stop, which reads its atoms then.
         let sanitizer = match step {
             RemedyStep::Derive(sanitizer) | RemedyStep::Sanitize(sanitizer) => sanitizer,
-            RemedyStep::Accept(_) | RemedyStep::Authorize(_) => continue,
+            RemedyStep::Accept(_) | RemedyStep::Authorize(_) | RemedyStep::Return(_) => continue,
         };
         if let Some(sanitizer) = registry.sanitizer(sanitizer) {
             atoms.extend(sanitizer.needed_atoms(providers));
@@ -1106,22 +1199,6 @@ pub(crate) fn confined_stage_atoms(
         .filter(|sanitizer| sanitizer.on.output && sanitizer.applies_to(&contract.tags))
         .flat_map(|sanitizer| sanitizer.needed_atoms(providers))
         .collect()
-}
-
-/// The atoms one child return's stage reads: where the deployment
-/// confines the return, the transition of every unscoped output sanitizer the chain has not
-/// spent.
-pub(crate) fn return_stage_atoms(registry: &Registry, lineage: &SanitizerLineage) -> Vec<SymbolicAtom> {
-    let providers = registry.audience().providers();
-    let mut atoms: Vec<SymbolicAtom> = Vec::new();
-    if registry.profile().confines_child_return() {
-        for sanitizer in registry.sanitizers() {
-            if !lineage.contains(&sanitizer.name) && sanitizer.on.output && sanitizer.applies_to(&[]) {
-                atoms.extend(sanitizer.needed_atoms(providers));
-            }
-        }
-    }
-    atoms
 }
 
 fn direct_redispatches(
@@ -1250,7 +1327,14 @@ mod tests {
             .annotation_of(call)
             .expect("a test call resolves its annotation");
         let parts = crate::label::TestContext::default();
-        let raw = match check::evaluate(&contract, &views, call, &CallStage::default(), &parts.context()) {
+        let raw = match check::evaluate(
+            &contract,
+            &views,
+            call,
+            &CallStage::default(),
+            CallRole::Ordinary,
+            &parts.context(),
+        ) {
             Ok(CheckOutcome::Block(raw)) => raw,
             other => panic!("expected a block, got {other:?}"),
         };
@@ -2268,7 +2352,7 @@ mod tests {
         /// `desk` (authority, tag `mail`) reads `team`; `scrub` (input) and `redact` (output,
         /// unscoped) read `legal`; `far` (authority, tag `unrelated`), `aside` (output, tag
         /// `unrelated`) and the `note` tool's delta read `press`.
-        fn registry(confined_results: &[&str], confined_child_return: bool) -> Registry {
+        fn registry(confined_results: &[&str]) -> Registry {
             let named = |name: &str| crate::audience::NamedAudience {
                 name: GroupName::new(name),
                 within: None,
@@ -2311,7 +2395,6 @@ mod tests {
             };
             let profile = DeploymentProfile::declare(ProfileDeclaration {
                 confined_results: confined_results.iter().map(|name| ToolName::new(*name)).collect(),
-                confined_child_return,
                 ..crate::profile::covering_declaration(&config)
             })
             .expect("the gathering profile declares");
@@ -2349,8 +2432,8 @@ mod tests {
 
         #[test]
         fn a_block_reads_each_component_the_gap_it_carries_consults() {
-            let unconfined = registry(&[], false);
-            let confined = registry(&["send"], false);
+            let unconfined = registry(&[]);
+            let confined = registry(&["send"]);
             let contract = send(&unconfined);
             let collect = |registry: &Registry, raw: &RawBlock, role: CallRole| -> BTreeSet<SymbolicAtom> {
                 block_atoms(registry, &contract, raw, role).into_iter().collect()
@@ -2403,7 +2486,7 @@ mod tests {
 
         #[test]
         fn a_confined_stage_reads_the_unspent_in_scope_output_sanitizers() {
-            let registry = registry(&["send"], false);
+            let registry = registry(&["send"]);
             let contract = send(&registry);
             let collect = |lineage: &SanitizerLineage| -> BTreeSet<SymbolicAtom> {
                 confined_stage_atoms(&registry, &contract, lineage)
@@ -2419,23 +2502,8 @@ mod tests {
         }
 
         #[test]
-        fn a_child_return_reads_output_sanitizers_only_where_the_deployment_confines_it() {
-            let collect = |registry: &Registry, lineage: &SanitizerLineage| -> BTreeSet<SymbolicAtom> {
-                return_stage_atoms(registry, lineage).into_iter().collect()
-            };
-            assert_eq!(collect(&registry(&[], false), &lineage(&[])), atoms(&[]));
-            let confined = registry(&[], true);
-            assert_eq!(
-                collect(&confined, &lineage(&[])),
-                atoms(&["legal"]),
-                "only an unscoped output sanitizer applies to a return"
-            );
-            assert_eq!(collect(&confined, &lineage(&["redact"])), atoms(&[]));
-        }
-
-        #[test]
         fn a_plan_reads_its_rulings_as_far_as_their_gaps_consult_the_mandate_and_its_steps() {
-            let registry = registry(&[], false);
+            let registry = registry(&[]);
             let contract = send(&registry);
             let collect = |required: Vec<RequiredRuling>, steps: Vec<RemedyStep>| -> BTreeSet<SymbolicAtom> {
                 let plan = ExecutableRemedyPlan {
@@ -2554,6 +2622,7 @@ mod tests {
             &views,
             &proposal,
             &CallStage::default(),
+            CallRole::Ordinary,
             &unanswered.context(),
         ) {
             Ok(CheckOutcome::Block(raw)) => raw,

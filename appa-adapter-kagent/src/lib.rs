@@ -59,6 +59,7 @@
 //! | `Block` | `{"decision":"block","reason":…}` |
 //! | `ReplaceOutput` | `{"decision":"replace_output","output":…}` |
 //! | `ChildReturn` | `{"decision":"child_return","value":…}` |
+//! | `Context` | `{"decision":"context","text":…}` |
 //! | `Refuse` | `{"decision":"refuse","detail":…}` |
 //!
 //! The plugin owns the ADK mechanics per callback: a `deny_call`
@@ -76,7 +77,17 @@ use appa_runtime_api::{
 };
 
 pub fn codec() -> Codec {
-    Codec { parse, render }
+    Codec {
+        parse,
+        render,
+        names_children,
+    }
+}
+
+/// A kagent child's words reach its parent through the after-tool callback only: no
+/// file on the parent's disk holds its transcript, so no call names one.
+fn names_children(_: &Actor, _: &ProposedCall) -> Vec<TrajectoryId> {
+    Vec::new()
 }
 
 #[derive(Debug, Deserialize)]
@@ -255,7 +266,7 @@ fn render(_event: &HookEvent, decision: &HookDecision) -> serde_json::Value {
             None => serde_json::json!({"decision": "allow_call"}),
         },
         HookDecision::PassControl => serde_json::json!({"decision": "pass_control"}),
-        HookDecision::DenyCall { feedback, review } => {
+        HookDecision::DenyCall { feedback, review, .. } => {
             let review: Vec<serde_json::Value> = review
                 .iter()
                 .map(|entry| serde_json::json!({"offer_id": entry.offer, "text": entry.text}))
@@ -265,6 +276,7 @@ fn render(_event: &HookEvent, decision: &HookDecision) -> serde_json::Value {
         HookDecision::Block { reason } => serde_json::json!({"decision": "block", "reason": reason}),
         HookDecision::ReplaceOutput { output } => serde_json::json!({"decision": "replace_output", "output": output}),
         HookDecision::ChildReturn { value } => serde_json::json!({"decision": "child_return", "value": value}),
+        HookDecision::Context { text } => serde_json::json!({"decision": "context", "text": text}),
         HookDecision::Refuse { detail } => serde_json::json!({"decision": "refuse", "detail": detail}),
     }
 }
@@ -603,6 +615,7 @@ mod tests {
             (
                 HookDecision::DenyCall {
                     feedback: "blocked: the recipient cannot read this".to_string(),
+                    offers: Vec::new(),
                     review: Vec::new(),
                 },
                 serde_json::json!({"decision": "deny_call", "feedback": "blocked: the recipient cannot read this", "review": []}),
@@ -701,6 +714,7 @@ mod tests {
         };
         let decision = HookDecision::DenyCall {
             feedback: "blocked".to_string(),
+            offers: Vec::new(),
             review: vec![appa_runtime_api::Review {
                 offer: "offer-1".to_string(),
                 text: "APPA asks you to rule as the authority \"oncall\".".to_string(),

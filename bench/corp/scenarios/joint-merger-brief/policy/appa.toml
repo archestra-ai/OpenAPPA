@@ -73,7 +73,6 @@ audience = { contains = ["$to"] }
 [policy.deployment]
 context_control = true
 dispatch = "enforced"
-confined_child_return = true
 confined_results = ["search_hr", "read_hr", "create_hr", "search_finance", "read_finance", "create_finance", "send_email", "share_legal_packet"]
 
 # --- registered externals ---------------------------------------------------

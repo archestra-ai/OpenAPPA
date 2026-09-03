@@ -7,9 +7,11 @@ use std::process::{Command, Stdio};
 use axum::Router;
 use axum::routing::post;
 
-/// The hooks that report a finished turn. Every blocking outcome on one
-/// of these means "do not stop", so none of them may carry one.
-const TURN_ENDS: [&str; 3] = ["Stop", "StopFailure", "SubagentStop"];
+/// The hooks that report the root actor's finished turn. Every blocking
+/// outcome on one of these means "do not stop", so none of them may carry
+/// one. SubagentStop is not one: it checks the subagent's final message and
+/// blocks like a tool hook.
+const TURN_ENDS: [&str; 2] = ["Stop", "StopFailure"];
 
 fn turn_end_command() -> &'static str {
     "[ \"${APPA_GATE:-}\" = 1 ] || exit 0; sh \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.sh\" --turn-end || exit 0"
@@ -171,7 +173,7 @@ fn shipped_command() -> String {
         .as_str()
         .expect("the PreToolUse hook carries a command")
         .to_string();
-    for event in ["UserPromptSubmit", "PostToolUse", "SubagentStart", "PostToolUseFailure"] {
+    for event in ["PostToolUse", "SubagentStart", "SubagentStop", "PostToolUseFailure"] {
         let entry = &hooks["hooks"][event][0]["hooks"][0]["command"];
         assert_eq!(
             entry.as_str(),
@@ -180,8 +182,8 @@ fn shipped_command() -> String {
         );
     }
     // A turn end decides nothing, and blocking this hook holds the actor
-    // in a turn it has finished, so these three never carry the blocking
-    // exit and never print an answer.
+    // in a turn it has finished, so these never carry the blocking exit
+    // and never print an answer.
     for event in TURN_ENDS {
         let entry = hooks["hooks"][event][0]["hooks"][0]["command"]
             .as_str()
@@ -200,6 +202,14 @@ fn shipped_command() -> String {
         hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"].as_str(),
         Some(format!("{gate}; {starter} && {hook}").as_str()),
         "the SessionStart hook is no longer the shared command plus its runtime start",
+    );
+    // A prompt is refused while a subagent definition declares maxTurns: the
+    // scan runs before the post, under the same guard and blocking exit.
+    let scan = "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/scan-agents.sh\"";
+    assert_eq!(
+        hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"].as_str(),
+        Some(format!("{gate}; {scan} && {hook}").as_str()),
+        "the UserPromptSubmit hook is no longer the shared command plus the agent scan",
     );
     command
 }

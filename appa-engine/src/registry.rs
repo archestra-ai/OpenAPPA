@@ -228,6 +228,11 @@ impl TrustChain {
         self.ranks.get(trust.rank() as usize).map(String::as_str)
     }
 
+    /// Every rank name, lowest first.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.ranks.iter().map(String::as_str)
+    }
+
     pub fn len(&self) -> usize {
         self.ranks.len()
     }
@@ -369,10 +374,6 @@ pub enum LoadError {
         "tool {tool}: {count} worst-case alternative remedy plans exceed the planner cap of {max} — reduce the requirement entries, the competent authorities, or the clearing tools, or raise `[limits] planner_cap`"
     )]
     TooManyPlanAlternatives { tool: String, count: u128, max: u128 },
-    #[error(
-        "confined-return stage: {count} worst-case sanitizer alternatives exceed the planner cap of {max} — reduce the registered output sanitizers or raise `[limits] planner_cap`"
-    )]
-    TooManyReturnPlanAlternatives { count: u128, max: u128 },
     #[error("{context}: hint is {len} characters, over the {max} a plan offer carries")]
     HintTooLong { context: String, len: usize, max: usize },
     #[error(
@@ -403,19 +404,9 @@ pub enum LoadError {
     )]
     ConfinedProviderRun { tool: String },
     #[error(
-        "sanitizer {sanitizer} registers on tool_output but the deployment confines no application point — neither a result point nor the child-return crossing"
+        "sanitizer {sanitizer} registers on tool_output but the deployment confines no application point — neither a result point nor, under context control, a child's return"
     )]
     OutputSanitizerUncovered { sanitizer: String },
-    #[error("[child] declares a return binding but the deployment does not control child context")]
-    ChildWithoutContextControl,
-    #[error("[child] return_sanitizer names unregistered sanitizer {0}")]
-    ChildReturnSanitizerUnknown(String),
-    #[error("[child] return_sanitizer {0} is not registered for tool output")]
-    ChildReturnSanitizerNotOutput(String),
-    #[error(
-        "[child] return_sanitizer {0} declares a scope: a child return originates from no tool, so only an unscoped sanitizer can be bound to it"
-    )]
-    ChildReturnSanitizerScoped(String),
     #[error(
         "sanitizer {0} registers on tool_input with a trust transition: only the `contains` check reads an input substitution, so a trust `to` can never help a call and the sanitizer would sit inert"
     )]
@@ -478,6 +469,7 @@ pub const MAX_HINT_CHARS: usize = 512;
 fn worst_case_plan_alternatives(
     declaration: &ToolDeclaration,
     confined: bool,
+    context_control: bool,
     tools: &[&ToolDeclaration],
     authorities: &[Authority],
     sanitizers: &[Sanitizer],
@@ -633,6 +625,11 @@ fn worst_case_plan_alternatives(
         }
     };
     multiply(applicable + 1);
+    // Under context control any call may be a marked spawn, whose every plan ends in one of the
+    // return declarations: the bare floor, or the floor behind an untagged output sanitizer.
+    if context_control {
+        multiply(worst_case_return_options(sanitizers));
+    }
 
     // What the Annotator may require is unknown at load, so every candidate that emits at all,
     // and every audience-narrowing candidate, stays counted as a redispatch.
@@ -690,16 +687,11 @@ fn worst_case_confined_stage(sanitizers: &[Sanitizer], confined: bool, tags: &[T
     )
 }
 
-fn worst_case_return_stage(sanitizers: &[Sanitizer], confined: bool) -> u128 {
-    if !confined {
-        return 1;
-    }
-    1u128.saturating_add(
-        sanitizers
-            .iter()
-            .filter(|sanitizer| sanitizer.on.output && sanitizer.applies_to(&[]))
-            .count() as u128,
-    )
+fn worst_case_return_options(sanitizers: &[Sanitizer]) -> usize {
+    1 + sanitizers
+        .iter()
+        .filter(|sanitizer| sanitizer.on.output && sanitizer.applies_to(&[]))
+        .count()
 }
 
 /// The wildcard's spelling in a policy: `[[tool]] name = "*"` covers every tool call the policy
@@ -940,6 +932,7 @@ impl Registry {
             let count = worst_case_plan_alternatives(
                 declaration,
                 profile.confines_result(declaration.name()),
+                profile.context_control(),
                 &checkable_tools,
                 &config.authorities,
                 &sanitizer_list,
@@ -953,14 +946,6 @@ impl Registry {
                 });
             }
         }
-        let confined = worst_case_return_stage(&sanitizer_list, profile.confines_child_return());
-        if confined > planner_cap.0 {
-            return Err(LoadError::TooManyReturnPlanAlternatives {
-                count: confined,
-                max: planner_cap.0,
-            });
-        }
-
         // Attention names are a policy vocabulary, not an authority vocabulary. A policy may
         // deliberately use a mark as an unremediable denial (for example `blocked`) while
         // registering no authority at all. An Annotator must be able to produce those marks,
@@ -2328,12 +2313,17 @@ mod tests {
         cfg.annotators = vec![annotator("classifier")];
         cfg.tools = vec![annotated("lookup", "classifier")];
         cfg.sanitizers = (0..16).map(output_sanitizer).collect();
+        // Without context control no return declaration multiplies the menu:
         // 1 × (16 sanitizers + 1 bare release) + the declaration itself as a redispatch = 18.
+        let mut uncontrolled = crate::profile::covering_declaration(&cfg);
+        uncontrolled.context_control = false;
+        let uncontrolled =
+            crate::profile::DeploymentProfile::declare(uncontrolled).expect("the declaration normalizes");
         assert!(matches!(
-            Registry::build_covered_with_cap(cfg.clone(), PlannerCap::new(17).expect("nonzero")),
+            Registry::build(cfg.clone(), PlannerCap::new(17).expect("nonzero"), uncontrolled.clone()),
             Err(LoadError::TooManyPlanAlternatives { count: 18, max: 17, ref tool }) if tool == "lookup"
         ));
-        assert!(Registry::build_covered_with_cap(cfg, PlannerCap::new(18).expect("nonzero")).is_ok());
+        assert!(Registry::build(cfg, PlannerCap::new(18).expect("nonzero"), uncontrolled).is_ok());
     }
 
     /// An Annotated declaration's requirements exist only per call, so the lint takes the worst
@@ -2468,8 +2458,11 @@ mod tests {
         assert_eq!(PlannerCap::new(0), None);
     }
 
+    /// Under context control any call may be a marked spawn, so every tool's menu multiplies by
+    /// the return declarations: the bare floor plus each untagged output sanitizer, the reserved
+    /// attestation included. A confined result's own settlements never count the attestation.
     #[test]
-    fn the_cap_counts_the_reserved_attest_schema_only_for_the_return_stage() {
+    fn return_declarations_multiply_every_menu_only_under_context_control() {
         let lifting = |name: &str, scope: Scope| Sanitizer {
             name: SanitizerName::new(name),
             on: SanitizerPoints {
@@ -2500,16 +2493,22 @@ mod tests {
         let mut cfg = base();
         cfg.tools = declared(vec![narrowing]);
         cfg.sanitizers = vec![lifting("attest-schema", Scope::default()), scoped("s1"), scoped("s2")];
-        let cap = PlannerCap::new(3).expect("nonzero");
-        assert!(Registry::build_covered_with_cap(cfg, cap).is_ok());
-
-        let mut only_attest = base();
-        only_attest.sanitizers = vec![lifting("attest-schema", Scope::default())];
-        let tight = PlannerCap::new(1).expect("nonzero");
+        // Three settlements (bare, s1, s2) times two return declarations (bare, attest-schema).
         assert!(matches!(
-            Registry::build_covered_with_cap(only_attest, tight),
-            Err(LoadError::TooManyReturnPlanAlternatives { count: 2, max: 1 })
+            Registry::build_covered_with_cap(cfg.clone(), PlannerCap::new(5).expect("nonzero")),
+            Err(LoadError::TooManyPlanAlternatives { count: 6, max: 5, ref tool }) if tool == "wire"
         ));
+        assert!(Registry::build_covered_with_cap(cfg.clone(), PlannerCap::new(6).expect("nonzero")).is_ok());
+
+        let mut uncontrolled = crate::profile::covering_declaration(&cfg);
+        uncontrolled.context_control = false;
+        let uncontrolled =
+            crate::profile::DeploymentProfile::declare(uncontrolled).expect("the declaration normalizes");
+        assert!(matches!(
+            Registry::build(cfg.clone(), PlannerCap::new(2).expect("nonzero"), uncontrolled.clone()),
+            Err(LoadError::TooManyPlanAlternatives { count: 3, max: 2, ref tool }) if tool == "wire"
+        ));
+        assert!(Registry::build(cfg, PlannerCap::new(3).expect("nonzero"), uncontrolled).is_ok());
     }
 
     fn output_sanitizer(index: usize) -> Sanitizer {
@@ -2685,19 +2684,6 @@ mod tests {
             Registry::build_covered_with_cap(cfg, cap),
             Err(LoadError::TooManyPlanAlternatives { count: 6, max: 5, ref tool }) if tool == "wire"
         ));
-    }
-
-    #[test]
-    fn the_confined_return_stage_is_bounded_even_in_a_zero_tool_catalogue() {
-        let mut cfg = base();
-        cfg.tools = vec![];
-        cfg.sanitizers = (0..5).map(output_sanitizer).collect();
-        let cap = PlannerCap::new(4).expect("nonzero");
-        assert!(matches!(
-            Registry::build_covered_with_cap(cfg.clone(), cap),
-            Err(LoadError::TooManyReturnPlanAlternatives { count: 6, max: 4 })
-        ));
-        assert!(Registry::build_covered_with_cap(cfg, PlannerCap::new(6).expect("nonzero")).is_ok());
     }
 
     #[test]

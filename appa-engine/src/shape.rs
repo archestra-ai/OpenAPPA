@@ -98,8 +98,8 @@ pub enum ShapeError {
 
 /// Why a submitted return does not fit the fork's stored shape. Strict parsing reuses the
 /// argument scanner's rules; the schema walk rejects without coercion. The caller decides the
-/// consequence: a typed refusal that appends nothing, or the terminal rejection under a
-/// `[child]` `attest-schema` binding.
+/// consequence: a typed refusal that appends nothing, with the shape fed back to the child
+/// whose return the parent declared through `attest-schema`.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum ReturnMismatch {
     #[error("the submitted return is not one strict JSON object: {0}")]

@@ -184,6 +184,37 @@ if (-not $protected) {
     exit 0
 }
 
+# The subagent definitions in reach that declare maxTurns. Claude Code ends
+# such a subagent at its turn cap with no SubagentStop, so the return check
+# never runs and the parent receives its partial output unchecked; a prompt
+# is refused while one exists. The project and user agent directories and
+# the installed plugins' agent directories are scanned; agents passed on the
+# command line (--agents, --plugin-dir) are not.
+function Find-MaxTurnsAgents {
+    $projectDir = if ($env:CLAUDE_PROJECT_DIR) { $env:CLAUDE_PROJECT_DIR } else { (Get-Location).Path }
+    $found = @()
+    foreach ($dir in @((Join-Path $projectDir ".claude\agents"), (Join-Path $HOME ".claude\agents"))) {
+        if (-not (Test-Path -LiteralPath $dir)) {
+            continue
+        }
+        foreach ($file in Get-ChildItem -LiteralPath $dir -Filter *.md -File) {
+            if (Select-String -LiteralPath $file.FullName -Pattern '^maxTurns:' -Quiet) {
+                $found += $file.FullName
+            }
+        }
+    }
+    $plugins = Join-Path $HOME ".claude\plugins\cache"
+    if (Test-Path -LiteralPath $plugins) {
+        foreach ($file in Get-ChildItem -LiteralPath $plugins -Recurse -Filter *.md -File) {
+            if ((Split-Path -Leaf (Split-Path -Parent $file.FullName)) -eq "agents" -and
+                (Select-String -LiteralPath $file.FullName -Pattern '^maxTurns:' -Quiet)) {
+                $found += $file.FullName
+            }
+        }
+    }
+    ,$found
+}
+
 try {
     $payload = [Console]::In.ReadToEnd()
     $hookInput = $null
@@ -200,6 +231,12 @@ try {
         # stale runtime the install just replaced.
         if (-not (Start-RuntimeIfDown)) {
             throw "the runtime at $runtimeUrl is not healthy and could not be started"
+        }
+    }
+    if ($null -ne $hookInput -and $hookInput.hook_event_name -eq "UserPromptSubmit") {
+        $declaring = Find-MaxTurnsAgents
+        if ($declaring.Count -gt 0) {
+            throw "[appa] this session cannot be protected while a subagent definition declares maxTurns: Claude Code ends that subagent without the return check and hands the parent its partial output unchecked. Remove maxTurns from: $($declaring -join ', ')"
         }
     }
     $timeout = if ($TurnEnd) { 30 } else { 120 }

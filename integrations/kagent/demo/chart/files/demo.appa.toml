@@ -148,13 +148,11 @@ name = "appa_memory_persist"
 delta = {}
 
 # The runtime can withhold these tools' results and deliver a sanitized
-# derivation instead (the after-tool replacement the plugin enforces),
-# and it can substitute the delegated child's return where the parent
-# receives it — the application points the sanitizers register on.
+# derivation instead (the after-tool replacement the plugin enforces) —
+# the application point the output sanitizers register on.
 [policy.deployment]
 context_control = true
 confined_results = ["read_secret", "get_pod_logs", "check_status_page"]
-confined_child_return = true
 
 # --- the human behind human-approval ---
 

@@ -302,6 +302,8 @@ async fn a_child_runs_its_own_trajectory_and_its_final_message_crosses_back() {
     let provider = Provider::default();
     provider
         .calls("delegate", serde_json::json!({"task": "Look up Alice."}))
+        .declares_the_return()
+        .calls("delegate", serde_json::json!({"task": "Look up Alice."}))
         .calls("read_hr", serde_json::json!({"who": "alice"}))
         .says("Alice Chen is a Staff Engineer.")
         .says("The lookup says: Alice Chen is a Staff Engineer.");
@@ -320,13 +322,13 @@ async fn a_child_runs_its_own_trajectory_and_its_final_message_crosses_back() {
         1,
         "the spawn call opens a child; it is not dispatched to the host",
     );
-    let child_opening = provider.transcript(1);
+    let child_opening = provider.transcript(3);
     assert_eq!(
         child_opening.last().expect("the child gets its errand"),
         &serde_json::json!({"role": "user", "content": "Look up Alice."}),
     );
     assert_eq!(
-        provider.tool_result(3, "call_0"),
+        provider.tool_result(5, "call_2"),
         "Alice Chen is a Staff Engineer.",
         "the parent's spawn call is answered with what crossed the return channel",
     );
@@ -337,6 +339,8 @@ async fn a_child_that_says_nothing_returns_no_value() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let provider = Provider::default();
     provider
+        .calls("delegate", serde_json::json!({"task": "Do it yourself."}))
+        .declares_the_return()
         .calls("delegate", serde_json::json!({"task": "Do it yourself."}))
         .says_nothing()
         .says("The child handled it.");
@@ -352,12 +356,12 @@ async fn a_child_that_says_nothing_returns_no_value() {
 
     assert_eq!(outcome, Outcome::Answer("The child handled it.".to_string()));
     assert_eq!(
-        provider.tool_result(2, "call_0"),
+        provider.tool_result(4, "call_2"),
         "[appa] the child trajectory ended and returned no value; no child result was admitted. This does not attest that its task or side effects succeeded. Do not repeat the delegated task merely to obtain a response.",
         "a void return admits no value but still acknowledges that the child ended",
     );
     let requests = provider.requests();
-    let parent_tools = requests[2]["tools"]
+    let parent_tools = requests[4]["tools"]
         .as_array()
         .expect("the parent request advertises tools")
         .iter()
@@ -376,6 +380,8 @@ async fn an_empty_string_child_return_is_not_a_void_acknowledgement() {
     let provider = Provider::default();
     provider
         .calls("delegate", serde_json::json!({"task": "Return an empty value."}))
+        .declares_the_return()
+        .calls("delegate", serde_json::json!({"task": "Return an empty value."}))
         .says("")
         .says("The empty value crossed.");
     let host = ToolHost::default();
@@ -385,7 +391,7 @@ async fn an_empty_string_child_return_is_not_a_void_acknowledgement() {
 
     assert_eq!(outcome, Outcome::Answer("The empty value crossed.".to_string()));
     assert_eq!(
-        provider.tool_result(2, "call_0"),
+        provider.tool_result(4, "call_2"),
         "",
         "Some(\"\") remains a value return rather than being rewritten as a void acknowledgement",
     );
@@ -410,6 +416,8 @@ context_control = true
 "#;
     let provider = Provider::default();
     provider
+        .calls("delegate", serde_json::json!({"task": "Read the record here."}))
+        .declares_the_return()
         .calls("delegate", serde_json::json!({"task": "Read the record here."}))
         .calls("read_hr", serde_json::json!({"who": "alice"}))
         .says_nothing()
@@ -441,18 +449,18 @@ context_control = true
         "the root may spawn"
     );
     assert_eq!(
-        advertised(&requests[1]),
+        advertised(&requests[3]),
         vec!["read_hr".to_string(), "execute_remedy_plan".to_string()],
         "the child cannot spend a round on a spawn that the depth limit will refuse",
     );
-    let feedback = provider.tool_result(2, "call_1");
+    let feedback = provider.tool_result(4, "call_3");
     assert!(
         feedback.contains("This trajectory is at its child-depth limit; do not delegate again."),
         "the child gets truthful host capability context: {feedback}",
     );
     assert!(
         provider
-            .tool_result(3, "call_0")
+            .tool_result(5, "call_2")
             .starts_with("[appa] the child trajectory ended and returned no value"),
         "the parent gets non-sensitive completion evidence",
     );
@@ -465,6 +473,10 @@ async fn the_fork_depth_ceiling_refuses_a_spawn_below_it() {
     let delegate = || serde_json::json!({"task": "Go deeper."});
     provider
         .calls("delegate", delegate())
+        .declares_the_return()
+        .calls("delegate", delegate())
+        .calls("delegate", delegate())
+        .declares_the_return()
         .calls("delegate", delegate())
         .calls("delegate", delegate())
         .says("I could not delegate further.")
@@ -484,7 +496,7 @@ async fn the_fork_depth_ceiling_refuses_a_spawn_below_it() {
         .await;
 
     assert_eq!(outcome, Outcome::Answer("Everything is done.".to_string()));
-    let refusal = provider.tool_result(3, "call_2");
+    let refusal = provider.tool_result(7, "call_6");
     assert_eq!(
         refusal, "no child was opened: this trajectory is at its child-depth limit",
         "the third spawn sits at the ceiling and opens no child",
@@ -500,11 +512,11 @@ async fn the_fork_depth_ceiling_refuses_a_spawn_below_it() {
     };
     assert!(names(0).contains(&"delegate"), "the root may spawn");
     assert!(
-        names(1).contains(&"delegate"),
+        names(3).contains(&"delegate"),
         "depth one may spawn when the limit is two"
     );
     assert_eq!(
-        names(2),
+        names(6),
         vec!["execute_remedy_plan"],
         "the depth-two frame hides only the unavailable spawn tool",
     );
@@ -530,12 +542,8 @@ on = ["tool_output"]
 [policy.sanitizer.permits]
 audience = { from = ["internal"], to = ["public"] }
 
-[policy.child]
-return_sanitizer = "scrub"
-
 [policy.deployment]
 context_control = true
-confined_child_return = true
 "#;
     let host = ToolHost::default();
     host.answers("read_hr", "Alice Chen, SSN 4821-9930")
@@ -546,6 +554,10 @@ confined_child_return = true
     let provider = Provider::default();
     provider
         .calls("delegate", serde_json::json!({"task": "Look up Alice."}))
+        .declares_the_sanitized_return()
+        .calls("delegate", serde_json::json!({"task": "Look up Alice."}))
+        .calls("read_hr", serde_json::json!({"who": "alice"}))
+        .pursues_the_offer()
         .calls("read_hr", serde_json::json!({"who": "alice"}))
         .says("Alice Chen, SSN 4821-9930")
         .says("Understood.");
@@ -561,7 +573,7 @@ confined_child_return = true
     );
     agent.run(root(), "Find out about Alice.", Default::default()).await;
 
-    let crossed = provider.tool_result(3, "call_0");
+    let crossed = provider.tool_result(7, "call_2");
     assert_eq!(
         crossed, "Alice Chen, a staff member.",
         "the admitted return crosses, not the child's own words",
@@ -582,28 +594,51 @@ parameters = { type = "object", properties = { task = { type = "string" } } }
 name = "read_hr"
 delta = { audience = ["internal"] }
 
+[[policy.sanitizer]]
+name = "scrub"
+on = ["tool_output"]
+[policy.sanitizer.permits]
+audience = { from = ["internal"], to = ["public"] }
+
 [policy.deployment]
 context_control = true
 "#;
+    let host = ToolHost::default();
+    host.answers("read_hr", "Alice Chen, SSN 4821-9930").sanitizes_nothing();
+    let sanitizer_url = format!("{}/sanitizer", host.clone().serve().await);
+    let externals = format!("[externals.sanitizers.scrub]\nurl = \"{sanitizer_url}\"\n");
+
     let provider = Provider::default();
     provider
+        .calls("delegate", serde_json::json!({"task": "Look up Alice privately."}))
+        .declares_the_sanitized_return()
         .calls("delegate", serde_json::json!({"task": "Look up Alice privately."}))
         .calls("read_hr", serde_json::json!({"who": "alice"}))
         .pursues_the_offer()
         .calls("read_hr", serde_json::json!({"who": "alice"}))
         .says("Alice Chen, SSN 4821-9930")
         .says("The child ended; I will not repeat its work.");
-    let host = ToolHost::default();
-    host.answers("read_hr", "Alice Chen, SSN 4821-9930");
 
-    let agent = delegating(agent(runtime(&dir, policy, ""), &provider, &host, &["delegate", "read_hr"]).await);
+    let agent = delegating(
+        agent(
+            runtime(&dir, policy, &externals),
+            &provider,
+            &host,
+            &["delegate", "read_hr"],
+        )
+        .await,
+    )
+    .with_limits(Limits {
+        max_inference_rounds: 10,
+        ..Limits::default()
+    });
     let outcome = agent.run(root(), "Delegate the lookup.", Default::default()).await;
 
     assert_eq!(
         outcome,
         Outcome::Answer("The child ended; I will not repeat its work.".to_string())
     );
-    let feedback = provider.tool_result(5, "call_0");
+    let feedback = provider.tool_result(7, "call_2");
     assert!(feedback.contains("its return value was not admitted"));
     assert!(feedback.contains("This does not roll back child side effects"));
     assert!(feedback.contains("Do not repeat the delegated task merely because its return was blocked"));
@@ -618,6 +653,8 @@ async fn a_child_return_over_the_output_cap_still_crosses_whole() {
     let provider = Provider::default();
     provider
         .calls("delegate", serde_json::json!({"task": "Report in full."}))
+        .declares_the_return()
+        .calls("delegate", serde_json::json!({"task": "Report in full."}))
         .says(&long)
         .says("Got the full report.");
     let host = ToolHost::default();
@@ -627,7 +664,7 @@ async fn a_child_return_over_the_output_cap_still_crosses_whole() {
 
     assert_eq!(outcome, Outcome::Answer("Got the full report.".to_string()));
     assert_eq!(
-        provider.tool_result(2, "call_0"),
+        provider.tool_result(4, "call_2"),
         long,
         "the whole return crosses: the byte cap governs tool outputs, not the return channel",
     );
@@ -943,6 +980,8 @@ async fn budget_finalization_closes_a_child_void_and_finishes_from_the_parent() 
     let provider = Provider::default();
     provider
         .calls("delegate", serde_json::json!({"task": "Look up Alice privately."}))
+        .declares_the_return()
+        .calls("delegate", serde_json::json!({"task": "Look up Alice privately."}))
         .calls("read_hr", serde_json::json!({"who": "alice"}))
         .says("The delegated lookup ended without an admitted result.");
     let host = ToolHost::default();
@@ -950,7 +989,7 @@ async fn budget_finalization_closes_a_child_void_and_finishes_from_the_parent() 
 
     let agent = delegating(agent(runtime(&dir, FORKING, ""), &provider, &host, &["delegate", "read_hr"]).await)
         .with_limits(Limits {
-            max_inference_rounds: 3,
+            max_inference_rounds: 5,
             max_fork_depth: 1,
             ..Limits::default()
         });
@@ -962,7 +1001,7 @@ async fn budget_finalization_closes_a_child_void_and_finishes_from_the_parent() 
             answer: Some("The delegated lookup ended without an admitted result.".to_string())
         }
     );
-    let final_request = &provider.requests()[2];
+    let final_request = &provider.requests()[4];
     assert!(
         final_request.get("tools").is_none(),
         "the reserved completion has no tools"

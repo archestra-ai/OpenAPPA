@@ -6,10 +6,10 @@ use crate::admit::{self, AdmitError, ResultAdmission};
 use crate::audience::AudienceEvidence;
 use crate::branch::{self, BranchError};
 use crate::candidate::{CallStage, ConfinedFrom, DerivedCandidate, SanitizerLineage};
-use crate::check::{self, CheckOutcome, Narrowing, RawBlock};
+use crate::check::{self, CallRole, CheckOutcome, Narrowing, RawBlock};
 use crate::contract::ToolAnnotation;
 use crate::execute::{self, PlanError};
-use crate::fact::{Fact, ObservedResult, ReturnDerivation, ReturnPolicy, ReturnRejection};
+use crate::fact::{BoundaryKind, Fact, ObservedResult, ReturnDerivation, ReturnPolicy, ReturnSanitizer};
 use crate::label::{Expansions, Label, MembershipContext, SymbolicAtom};
 use crate::names::{AuthorityName, SanitizerName};
 use crate::params::{ArgumentError, CanonicalArguments};
@@ -21,8 +21,8 @@ use crate::registry::{LoadError, Registry, ToolKind};
 use crate::transition::{
     Blocked, ChildFollowUp, ChildReport, ChildSubmission, Confined, EngineDecision, EngineEvent, EngineView, Evidence,
     EvidenceRequest, FollowUp, ForkBinding, OfferExecution, OfferFollowUp, OfferOutcome, OutcomeBody, OutcomeFollowUp,
-    PendingReturnStage, ProposalBatch, Released, Sequence, Settled, SettledOutcome, SpawnMark, ToolOutcome, ToolReport,
-    TransitionError, TransitionRefusal, ValidatedFactBatch,
+    ProposalBatch, Released, Sequence, Settled, SettledOutcome, SpawnMark, ToolOutcome, ToolReport, TransitionError,
+    TransitionRefusal, ValidatedFactBatch,
 };
 use crate::value::{
     CanonicalDigest, ChildReturnId, DispatchId, ForkId, LabeledValue, Provenance, RawResultDigest, ResolvedCall,
@@ -41,8 +41,6 @@ pub enum EngineError {
     NotProviderRun(String),
     #[error("invalid call: {0}")]
     InvalidCall(ArgumentError),
-    #[error("invalid call: the marked spawn's return_schema does not compile: {0}")]
-    InvalidReturnSchema(crate::shape::ShapeError),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,14 +53,12 @@ pub enum ForkStatus {
 }
 
 /// The pure decision core, owning its static capability: the immutable registry (which carries
-/// the validated deployment profile), the deployment's immutable child-return binding, and the
-/// policy identity the durable opening binds.
+/// the validated deployment profile) and the policy identity the durable opening binds.
 #[derive(Clone, Debug)]
 pub struct Engine {
     registry: Registry,
     identity: PolicyIdentityV1,
     dialect: PolicyDialectVersion,
-    child_return: ReturnPolicy,
 }
 
 /// Where a stage is opened: the act that opens it, what that act moves, the nonce its offer ids
@@ -75,18 +71,6 @@ struct Opening<'a> {
     subject: &'a crate::basis::SubjectKey,
 }
 
-/// A refused call and the block the check produced for it — what a remedy menu is planned over.
-#[derive(Clone, Copy)]
-/// What a staged return's remedy menu is computed over: the crossing the child owes, at the
-/// label and body the stage stands on, and the sanitizer lineage that reached it.
-struct ReturnStageInput<'a> {
-    child: &'a TrajectoryId,
-    label: &'a Label,
-    body: &'a ValueBody,
-    residual: &'a Narrowing,
-    lineage: &'a SanitizerLineage,
-}
-
 impl Engine {
     /// The one validated constructor: policy and declaration validate together in one
     /// load — the structural registry lints and provider-run split, the profile-exact planner-cap
@@ -97,18 +81,16 @@ impl Engine {
             registry: config,
             planner_cap,
             dialect,
-            child_return,
             profile: declaration,
         } = policy;
         let profile = DeploymentProfile::declare(declaration.clone())?;
         let registry = Registry::build(config, planner_cap, profile)?;
-        profile::validate_coverage(&registry, &declaration, &child_return)?;
-        let identity = PolicyIdentityV1::of_registry(&registry, &child_return);
+        profile::validate_coverage(&registry, &declaration)?;
+        let identity = PolicyIdentityV1::of_registry(&registry);
         Ok(Engine {
             registry,
             identity,
             dialect,
-            child_return,
         })
     }
 
@@ -118,10 +100,6 @@ impl Engine {
 
     pub fn profile(&self) -> &DeploymentProfile {
         self.registry.profile()
-    }
-
-    pub fn child_return(&self) -> &ReturnPolicy {
-        &self.child_return
     }
 
     pub fn identity(&self) -> PolicyIdentityV1 {
@@ -367,32 +345,8 @@ impl Engine {
                     required: recorded.plan.required.clone(),
                 }),
             },
-            crate::basis::SubjectKey::Return(id) => match recorded.plan.hop() {
-                Some(sanitizer) if sanitizer.is_attest_schema() => Ok(OfferConsult::Accept),
-                Some(sanitizer) => {
-                    let (source, body) = match views.candidate(&recorded.subject) {
-                        Some(DerivedCandidate::Return { value, .. }) => (
-                            crate::value::RawResultDigest::of(value.body.as_str().as_bytes()),
-                            value.body.clone(),
-                        ),
-                        _ => {
-                            let body = views
-                                .pending_return(id)
-                                .ok_or(TransitionError::StaleOffer)?
-                                .body()
-                                .clone();
-                            (crate::value::RawResultDigest::of(body.as_str().as_bytes()), body)
-                        }
-                    };
-                    Ok(OfferConsult::Sanitizer {
-                        sanitizer: sanitizer.clone(),
-                        source,
-                        body,
-                        tool: None,
-                    })
-                }
-                None => Ok(OfferConsult::Accept),
-            },
+            // No stage stands on a return: it crosses at the child's stop or is refused there.
+            crate::basis::SubjectKey::Return(_) => Ok(OfferConsult::Stale),
             crate::basis::SubjectKey::ConfinedResult(dispatch) => match recorded.plan.hop() {
                 Some(sanitizer) => {
                     let DerivedCandidate::Result { value, .. } =
@@ -418,6 +372,44 @@ impl Engine {
     /// The fork one child was bound to, or `None` for a trajectory that never forked.
     pub fn fork_of(&self, view: &EngineView, child: &TrajectoryId) -> Option<crate::value::ForkId> {
         view.views(child)?.fork_of(child).cloned()
+    }
+
+    /// The return policy the child's fork recorded — what its parent declared at the spawn —
+    /// or `None` for a trajectory that never forked.
+    pub fn return_policy_of(&self, view: &EngineView, child: &TrajectoryId) -> Option<ReturnPolicy> {
+        view.views(child)?.return_policy_of(child).cloned()
+    }
+
+    /// The return policy the fork `parent` prepared carries, before a child is bound to it: what
+    /// the runtime tells the child at its start, read from the view that binds it.
+    pub fn prepared_return_policy(
+        &self,
+        view: &EngineView,
+        parent: &TrajectoryId,
+        fork: &crate::value::ForkId,
+    ) -> Option<ReturnPolicy> {
+        view.views(parent)?.prepared_return_policy(fork).cloned()
+    }
+
+    /// The value `child` crossed most recently: a stop or a spawn result repeating it replays
+    /// that crossing and appends nothing.
+    pub fn latest_return_of(&self, view: &EngineView, child: &TrajectoryId) -> Option<ValueBody> {
+        view.views(child)?
+            .latest_return(child)
+            .map(|returned| returned.body.clone())
+    }
+
+    /// The plan one recorded offer of `trajectory` carries, for the runtime to read what the
+    /// offer's execution must supply.
+    pub fn offer_plan(
+        &self,
+        view: &EngineView,
+        trajectory: &TrajectoryId,
+        offer: &crate::value::OfferId,
+    ) -> Option<plan::ExecutableRemedyPlan> {
+        view.views(trajectory)?
+            .offer(offer)
+            .map(|recorded| recorded.plan.clone())
     }
 
     /// Where one fork stands: never prepared, prepared and open for binding,
@@ -471,16 +463,27 @@ impl Engine {
             .clone();
         let views = view.projection().view(&parent);
         if let Some(bound) = view.projection().bound_child(&binding.fork) {
-            return if bound == &binding.child {
-                Ok(EngineDecision {
-                    append: None,
-                    follow_up: FollowUp::Fork {
-                        child: binding.child.clone(),
-                    },
-                })
-            } else {
-                Err(TransitionError::UnbindableFork)
-            };
+            if bound != &binding.child {
+                return Err(TransitionError::UnbindableFork);
+            }
+            // The same pair again is the parent addressing its child once more: the parent's
+            // label as it stands now flows into the child, and a derivation the child never
+            // echoed is dropped with the errand it belonged to.
+            if views.has_ended(&binding.child) {
+                return Err(TransitionError::BranchEnded);
+            }
+            let batch = vec![Fact::Boundary {
+                trajectory: binding.child.clone(),
+                kind: BoundaryKind::Resume {
+                    seed: views.current_label(),
+                },
+            }];
+            return Ok(EngineDecision {
+                append: Some(self.decided(view, crate::basis::DecidedAct::Binding(binding.fork.clone()), batch)?),
+                follow_up: FollowUp::Fork {
+                    child: binding.child.clone(),
+                },
+            });
         }
         if view.projection().is_opened(&binding.child) {
             return Err(TransitionError::ChildAlreadyUsed);
@@ -501,6 +504,12 @@ impl Engine {
         })
     }
 
+    /// One child's stop, judged against the policy its fork recorded. A void submission ends
+    /// the branch. A value crosses at the child's fold, or through the fork's sanitizer: an
+    /// attested body crosses in canonical form; a named sanitizer derives the submission once,
+    /// stages the derivation, and crosses it when the child returns exactly it. A stop repeating
+    /// the latest crossing is a replay and appends nothing. A return below the floor the parent
+    /// set is refused, and the child keeps it.
     fn decide_child_return(
         &self,
         view: &EngineView,
@@ -520,619 +529,193 @@ impl Engine {
             return Err(TransitionError::ReturnForkMismatch);
         }
         if views.has_ended(child) {
-            return self.ended_return(view, &views, report, act);
+            return Err(TransitionError::BranchEnded);
         }
         let body = match &report.submission {
             ChildSubmission::Void => {
                 let batch = branch::submit_void_return(&views, child).map_err(branch_refusal)?;
                 return Ok(EngineDecision {
-                    append: Some(self.decided(view, return_act(child), batch)?),
+                    append: Some(self.decided(view, return_act(&views, child), batch)?),
                     follow_up: FollowUp::Child(ChildFollowUp::Ended),
                 });
             }
-            ChildSubmission::Value { body } => match views.return_shape_of(child) {
-                Some(shape) => match shape.validate(body.as_str()) {
-                    Ok(canonical) => ValueBody::new(canonical),
-                    Err(mismatch) => {
-                        if let Some(ReturnPolicy::Sanitized(name)) = views.return_policy_of(child)
-                            && name.is_attest_schema()
-                        {
-                            return self.rejecting(
-                                view,
-                                child,
-                                &ChildReturnId::new(child.clone(), 0),
-                                &report.fork,
-                                RawResultDigest::of(body.as_str().as_bytes()),
-                                ReturnRejection::PreconditionUnmet,
-                                Vec::new(),
-                                act,
-                            );
-                        }
-                        return Err(TransitionError::ReturnShapeMismatch(mismatch));
-                    }
-                },
-                None => body.clone(),
-            },
+            ChildSubmission::Value { body } => body.clone(),
         };
-        let fork = report.fork.clone();
-        let working = std::borrow::Cow::Borrowed(projection);
-        let cast_facts: Vec<Fact> = Vec::new();
-        let views = working.view(&parent);
-        let id = ChildReturnId::new(child.clone(), 0);
         let policy = views.return_policy_of(child).ok_or(TransitionError::NotForked)?.clone();
-        match policy {
-            ReturnPolicy::Raw => self.raw_return(
-                view,
-                &views,
-                child,
-                &id,
-                &fork,
-                body,
-                cast_facts,
-                report.offer_nonce,
-                act,
-            ),
-            ReturnPolicy::Sanitized(name) => self.sanitized_return(
-                view,
-                &views,
-                child,
-                &id,
-                &fork,
-                &name,
-                body,
-                cast_facts,
-                &report.evidence,
-                report.offer_nonce,
-                act,
-            ),
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn raw_return(
-        &self,
-        view: &EngineView,
-        views: &Views,
-        child: &TrajectoryId,
-        id: &ChildReturnId,
-        fork: &ForkId,
-        body: ValueBody,
-        mut facts: Vec<Fact>,
-        nonce: crate::value::OfferNonce,
-        act: &ActEvidence,
-    ) -> Result<EngineDecision, TransitionError> {
-        match branch::submit_child_return(views, child, &body, &act.pinned()).map_err(branch_refusal)? {
-            branch::RawCrossing::Merged(crossing) => {
-                facts.extend(crossing);
+        let floor = plan::floor_of(&self.registry, &projection.view(child))
+            .expect("a forked child stands under its fork's floor");
+        let fold = views.branch_label(child);
+        let replay = |admitted: &LabeledValue| EngineDecision {
+            append: None,
+            follow_up: FollowUp::Child(ChildFollowUp::Merged {
+                admitted: admitted.body.clone(),
+            }),
+        };
+        match &policy.sanitizer {
+            None => {
+                if let Some(latest) = views.latest_return(child).filter(|latest| latest.body == body) {
+                    return Ok(replay(latest));
+                }
+                if !floor.holds(&fold) {
+                    return Err(TransitionError::ReturnBelowFloor {
+                        floor: floor.label().clone(),
+                    });
+                }
+                let facts = branch::crossing_facts(
+                    &views,
+                    child,
+                    LabeledValue::new(body.clone(), fold),
+                    ReturnDerivation::Raw,
+                    act.pinned().clone(),
+                );
                 Ok(EngineDecision {
-                    append: Some(self.decided(view, return_act(child), facts)?),
+                    append: Some(self.decided(view, return_act(&views, child), facts)?),
                     follow_up: FollowUp::Child(ChildFollowUp::Merged { admitted: body }),
                 })
             }
-            branch::RawCrossing::Narrows(narrowing) => {
-                let fold = views.branch_label(child);
-                let candidate = fold.clone();
-                let lineage = SanitizerLineage::default();
-                let menu = self.return_menu(
-                    views,
-                    ReturnStageInput {
-                        child,
-                        label: &candidate,
-                        body: &body,
-                        residual: &narrowing,
-                        lineage: &lineage,
+            Some(ReturnSanitizer::Attest(shape)) => {
+                let canonical = ValueBody::new(
+                    shape
+                        .validate(body.as_str())
+                        .map_err(TransitionError::ReturnShapeMismatch)?,
+                );
+                if let Some(latest) = views.latest_return(child).filter(|latest| latest.body == canonical) {
+                    return Ok(replay(latest));
+                }
+                let name = SanitizerName::new(SanitizerName::ATTEST_SCHEMA);
+                let registered = self
+                    .registry
+                    .sanitizer(&name)
+                    .ok_or(TransitionError::SanitizerUnapplicable)?;
+                let ceiling =
+                    plan::attest_ceiling(&registered.transition).ok_or(TransitionError::SanitizerUnapplicable)?;
+                if !views.fork_seed(child).is_some_and(|seed| seed.meets_floor(ceiling)) {
+                    return Err(TransitionError::SanitizerUnapplicable);
+                }
+                let label = registered
+                    .derive_output(&fold, &[], &self.context(act))?
+                    .ok_or(TransitionError::SanitizerUnapplicable)?;
+                if !floor.holds(&label) {
+                    return Err(TransitionError::ReturnBelowFloor {
+                        floor: floor.label().clone(),
+                    });
+                }
+                let facts = branch::crossing_facts(
+                    &views,
+                    child,
+                    LabeledValue::new(canonical.clone(), label),
+                    ReturnDerivation::Sanitized {
+                        sanitizer: name,
+                        raw_digest: RawResultDigest::of(body.as_str().as_bytes()),
                     },
-                    act,
-                )?;
-                let stage = menu;
-                facts.push(Fact::ReturnSubmitted {
-                    trajectory: child.clone(),
-                    id: id.clone(),
-                    fork: fork.clone(),
-                    parent: views.trajectory().clone(),
-                    label: fold,
-                    digest: RawResultDigest::of(body.as_str().as_bytes()),
-                    body,
-                    policy: ReturnPolicy::Raw,
-                    evidence: act.pinned().clone(),
-                });
-                let (batch, staged) = self.pending_stage(
-                    view,
-                    views,
-                    return_act(child),
-                    nonce,
-                    id,
-                    fork,
-                    candidate,
-                    narrowing,
-                    stage,
-                    facts,
-                    act,
-                )?;
+                    act.pinned().clone(),
+                );
                 Ok(EngineDecision {
-                    append: Some(batch),
-                    follow_up: FollowUp::Child(ChildFollowUp::Pending(Box::new(staged))),
+                    append: Some(self.decided(view, return_act(&views, child), facts)?),
+                    follow_up: FollowUp::Child(ChildFollowUp::Merged { admitted: canonical }),
                 })
             }
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn sanitized_return(
-        &self,
-        view: &EngineView,
-        views: &Views,
-        child: &TrajectoryId,
-        id: &ChildReturnId,
-        fork: &ForkId,
-        name: &SanitizerName,
-        body: ValueBody,
-        mut facts: Vec<Fact>,
-        evidence: &[Evidence],
-        nonce: crate::value::OfferNonce,
-        act: &ActEvidence,
-    ) -> Result<EngineDecision, TransitionError> {
-        let registered = self
-            .registry
-            .sanitizer(name)
-            .ok_or(TransitionError::SanitizerUnapplicable)?;
-        let fold = views.branch_label(child);
-        let digest = RawResultDigest::of(body.as_str().as_bytes());
-        if name.is_attest_schema() && !plan::attest_applicable(views, child, &body, &registered.transition) {
-            return self.rejecting(
-                view,
-                child,
-                id,
-                fork,
-                digest,
-                ReturnRejection::PreconditionUnmet,
-                facts,
-                act,
-            );
-        }
-        // An undecided mandate is the runtime's ask, never a rejection.
-        if registered.derive_output(&fold, &[], &self.context(act))?.is_none() {
-            return self.rejecting(view, child, id, fork, digest, ReturnRejection::MandateUnmet, facts, act);
-        }
-        // Applicability holds: custody transfers, and the branch ends.
-        facts.push(Fact::ReturnSubmitted {
-            trajectory: child.clone(),
-            id: id.clone(),
-            fork: fork.clone(),
-            parent: views.trajectory().clone(),
-            label: fold.clone(),
-            digest,
-            body: body.clone(),
-            policy: ReturnPolicy::Sanitized(name.clone()),
-            evidence: act.pinned().clone(),
-        });
-        if name.is_attest_schema() {
-            let receiving = views.current_label().clone();
-            return self.mandatory_derivation(
-                view, views, id, fork, name, &fold, receiving, digest, body, facts, nonce, act,
-            );
-        }
-        let derived = evidence.iter().find_map(|item| match item {
-            Evidence::Sanitizer {
-                sanitizer,
-                source,
-                derived,
-            } if sanitizer == name && source == &digest => Some(derived.clone()),
-            _ => None,
-        });
-        let Some(derived) = derived else {
-            return Ok(EngineDecision {
-                append: Some(self.decided(view, return_act(child), facts)?),
-                follow_up: FollowUp::Child(ChildFollowUp::Resolve(EvidenceRequest::Sanitizer {
-                    sanitizer: name.clone(),
-                    source: digest,
-                    body,
-                })),
-            });
-        };
-        // The receiving bound the submission pins at this same fold step.
-        let receiving = views.current_label().clone();
-        self.mandatory_derivation(
-            view, views, id, fork, name, &fold, receiving, digest, derived, facts, nonce, act,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn mandatory_derivation(
-        &self,
-        view: &EngineView,
-        views: &Views,
-        id: &ChildReturnId,
-        fork: &ForkId,
-        name: &SanitizerName,
-        fold: &Label,
-        receiving: Label,
-        digest: RawResultDigest,
-        derived: ValueBody,
-        mut facts: Vec<Fact>,
-        nonce: crate::value::OfferNonce,
-        act: &ActEvidence,
-    ) -> Result<EngineDecision, TransitionError> {
-        let child = id.child();
-        let registered = self
-            .registry
-            .sanitizer(name)
-            .ok_or(TransitionError::SanitizerUnapplicable)?;
-        let label = registered
-            .derive_output(fold, &[], &self.context(act))?
-            .ok_or(TransitionError::SanitizerUnapplicable)?;
-        let residual = admit::confined_residual(&receiving, &label);
-        let lineage = SanitizerLineage::default()
-            .extend(name.clone())
-            .expect("an empty lineage spends no sanitizer yet");
-        facts.push(Fact::CandidateDerived {
-            trajectory: views.trajectory().clone(),
-            subject: crate::basis::SubjectKey::Return(id.clone()),
-            sanitizer: name.clone(),
-            derived: DerivedCandidate::Return {
-                source: digest,
-                from: ConfinedFrom::Bound,
-                value: LabeledValue::new(derived.clone(), label.clone()),
-                residual: residual.clone(),
-            },
-            lineage: lineage.clone(),
-            evidence: act.pinned().clone(),
-        });
-        let Some(residual) = residual else {
-            // The derivation narrows nothing: candidate and merge land atomically.
-            facts.extend(branch::crossing_facts(
-                views,
-                child,
-                LabeledValue::new(derived.clone(), label),
-                ReturnDerivation::Sanitized {
-                    sanitizer: name.clone(),
-                    raw_digest: digest,
-                },
-                None,
-                act.pinned().clone(),
-            ));
-            return Ok(EngineDecision {
-                append: Some(self.decided(view, return_act(child), facts)?),
-                follow_up: FollowUp::Child(ChildFollowUp::Merged { admitted: derived }),
-            });
-        };
-        let menu = self.return_menu(
-            views,
-            ReturnStageInput {
-                child,
-                label: &label,
-                body: &derived,
-                residual: &residual,
-                lineage: &lineage,
-            },
-            act,
-        )?;
-        let stage = menu;
-        let (batch, staged) = self.pending_stage(
-            view,
-            views,
-            return_act(child),
-            nonce,
-            id,
-            fork,
-            label,
-            residual,
-            stage,
-            facts,
-            act,
-        )?;
-        Ok(EngineDecision {
-            append: Some(batch),
-            follow_up: FollowUp::Child(ChildFollowUp::Pending(Box::new(staged))),
-        })
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn rejecting(
-        &self,
-        view: &EngineView,
-        child: &TrajectoryId,
-        id: &ChildReturnId,
-        fork: &ForkId,
-        digest: RawResultDigest,
-        reason: ReturnRejection,
-        mut facts: Vec<Fact>,
-        act: &ActEvidence,
-    ) -> Result<EngineDecision, TransitionError> {
-        facts.push(Fact::ReturnRejected {
-            trajectory: child.clone(),
-            id: id.clone(),
-            fork: fork.clone(),
-            digest,
-            reason: reason.clone(),
-            evidence: act.pinned().clone(),
-        });
-        Ok(EngineDecision {
-            append: Some(self.decided(view, return_act(child), facts)?),
-            follow_up: FollowUp::Child(ChildFollowUp::Rejected { reason }),
-        })
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn pending_stage(
-        &self,
-        view: &EngineView,
-        views: &Views,
-        act: crate::basis::DecidedAct,
-        nonce: crate::value::OfferNonce,
-        id: &ChildReturnId,
-        fork: &ForkId,
-        label: Label,
-        residual: Narrowing,
-        stage: Vec<plan::ExecutableRemedyPlan>,
-        mut facts: Vec<Fact>,
-        evidence: &ActEvidence,
-    ) -> Result<(ValidatedFactBatch, PendingReturnStage), TransitionError> {
-        let subject = crate::basis::SubjectKey::Return(id.clone());
-        let call = views
-            .dispatch_call(fork.dispatch())
-            .ok_or(TransitionError::UnknownDispatch)?
-            .digest();
-        let advance = Sequence::advance_of(self, view, &facts);
-        let (_, offers, opened) = self.open_offers(
-            views,
-            Opening {
-                act: &act,
-                advance: &advance,
-                nonce: &nonce,
-                subject: &subject,
-            },
-            &call,
-            &stage,
-            evidence,
-        );
-        facts.extend(opened);
-        let batch = self.declaring(act, advance, facts);
-        Ok((
-            self.seal(view, batch)?,
-            PendingReturnStage {
-                id: id.clone(),
-                label,
-                residual,
-                offers,
-            },
-        ))
-    }
-
-    fn ended_return(
-        &self,
-        view: &EngineView,
-        views: &Views,
-        report: &ChildReport,
-        act: &ActEvidence,
-    ) -> Result<EngineDecision, TransitionError> {
-        let child = &report.child;
-        let id = ChildReturnId::new(child.clone(), 0);
-        let comparable = |body: &ValueBody| match views.return_shape_of(child) {
-            Some(shape) => shape.validate(body.as_str()).ok().map(ValueBody::new),
-            None => Some(body.clone()),
-        };
-        if let Some(submitted) = views.submitted_return(&id) {
-            let ChildSubmission::Value { body } = &report.submission else {
-                return Err(TransitionError::BranchEnded);
-            };
-            if comparable(body)
-                .is_none_or(|canonical| RawResultDigest::of(canonical.as_str().as_bytes()) != submitted.digest)
-            {
-                return Err(TransitionError::BranchEnded);
-            }
-            if let Some(crossed) = views.child_return(&id) {
-                return Ok(EngineDecision {
-                    append: None,
-                    follow_up: FollowUp::Child(ChildFollowUp::Merged {
-                        admitted: crossed.body.clone(),
-                    }),
-                });
-            }
-            return self.continue_pending(view, report, &id, act);
-        }
-        if let Some(rejected) = views.rejected_return(&id) {
-            let same = match &report.submission {
-                ChildSubmission::Value { body } => {
-                    RawResultDigest::of(body.as_str().as_bytes()) == rejected.digest
-                        || comparable(body).is_some_and(|canonical| {
-                            RawResultDigest::of(canonical.as_str().as_bytes()) == rejected.digest
-                        })
+            Some(ReturnSanitizer::Named(name)) => {
+                let registered = self
+                    .registry
+                    .sanitizer(name)
+                    .ok_or(TransitionError::SanitizerUnapplicable)?;
+                let id = ChildReturnId::new(child.clone(), views.returns_by(child));
+                let subject = crate::basis::SubjectKey::Return(id);
+                if let Some(DerivedCandidate::Return { source, value }) = views.candidate(&subject) {
+                    // A derivation stands: it crosses when the child says exactly it, and the
+                    // sanitizer never runs again for this errand.
+                    if value.body != body {
+                        return Ok(EngineDecision {
+                            append: None,
+                            follow_up: FollowUp::Child(ChildFollowUp::Staged {
+                                derived: value.body.clone(),
+                            }),
+                        });
+                    }
+                    let facts = branch::crossing_facts(
+                        &views,
+                        child,
+                        value.clone(),
+                        ReturnDerivation::Sanitized {
+                            sanitizer: name.clone(),
+                            raw_digest: *source,
+                        },
+                        act.pinned().clone(),
+                    );
+                    return Ok(EngineDecision {
+                        append: Some(self.decided(view, return_act(&views, child), facts)?),
+                        follow_up: FollowUp::Child(ChildFollowUp::Merged { admitted: body }),
+                    });
                 }
-                ChildSubmission::Void => false,
-            };
-            return match same {
-                true => Ok(EngineDecision {
-                    append: None,
-                    follow_up: FollowUp::Child(ChildFollowUp::Rejected {
-                        reason: rejected.reason.clone(),
-                    }),
-                }),
-                false => Err(TransitionError::BranchEnded),
-            };
-        }
-        let recorded = views.child_return(&id).cloned();
-        match (&report.submission, recorded) {
-            (ChildSubmission::Void, None) => Ok(EngineDecision {
-                append: None,
-                follow_up: FollowUp::Child(ChildFollowUp::Ended),
-            }),
-            (ChildSubmission::Value { body }, Some(crossed)) => {
-                match comparable(body).as_ref() == Some(&crossed.body) {
-                    true => Ok(EngineDecision {
-                        append: None,
-                        follow_up: FollowUp::Child(ChildFollowUp::Merged { admitted: crossed.body }),
-                    }),
-                    false => Err(TransitionError::BranchEnded),
+                if let Some(latest) = views.latest_return(child).filter(|latest| latest.body == body) {
+                    return Ok(replay(latest));
                 }
-            }
-            _ => Err(TransitionError::BranchEnded),
-        }
-    }
-
-    fn continue_pending(
-        &self,
-        view: &EngineView,
-        report: &ChildReport,
-        id: &ChildReturnId,
-        act: &ActEvidence,
-    ) -> Result<EngineDecision, TransitionError> {
-        let child = &report.child;
-        let working = std::borrow::Cow::Borrowed(view.projection());
-        let cast_facts: Vec<Fact> = Vec::new();
-        let pending = working
-            .view(child)
-            .pending_return(id)
-            .expect("the caller proved the submission pending")
-            .clone();
-        let views = working.view(&pending.parent);
-        let fold = views.branch_label(child);
-        let subject = crate::basis::SubjectKey::Return(id.clone());
-        match (&pending.policy, views.candidate(&subject).cloned()) {
-            (ReturnPolicy::Sanitized(name), None) => {
+                let digest = RawResultDigest::of(body.as_str().as_bytes());
                 let derived = report.evidence.iter().find_map(|item| match item {
                     Evidence::Sanitizer {
                         sanitizer,
                         source,
                         derived,
-                    } if sanitizer == name && source == &pending.digest => Some(derived.clone()),
+                    } if sanitizer == name && source == &digest => Some(derived.clone()),
                     _ => None,
                 });
-                match derived {
-                    None => {
-                        let append = match cast_facts.is_empty() {
-                            true => None,
-                            false => Some(self.decided(view, return_act(child), cast_facts)?),
-                        };
-                        Ok(EngineDecision {
-                            append,
-                            follow_up: FollowUp::Child(ChildFollowUp::Resolve(EvidenceRequest::Sanitizer {
-                                sanitizer: name.clone(),
-                                source: pending.digest,
-                                body: pending.body().clone(),
-                            })),
-                        })
-                    }
-                    Some(derived) => self.mandatory_derivation(
-                        view,
-                        &views,
-                        id,
-                        &pending.fork,
-                        name,
-                        &fold,
-                        pending.receiving.clone(),
-                        pending.digest,
-                        derived,
-                        cast_facts,
-                        report.offer_nonce,
-                        act,
-                    ),
-                }
-            }
-            // A candidate stands and still owes its residual: the stage as it is now.
-            (
-                _,
-                Some(DerivedCandidate::Return {
-                    value,
-                    residual: Some(residual),
-                    ..
-                }),
-            ) => self.pending_answer(
-                view,
-                &views,
-                id,
-                &pending,
-                value.label.clone(),
-                value.body.clone(),
-                residual,
-                report.offer_nonce,
-                cast_facts,
-                act,
-            ),
-            (_, Some(_)) => unreachable!("a settled return candidate crossed in its own batch"),
-            // The submitted fold itself is the raw candidate.
-            (ReturnPolicy::Raw, None) => {
-                let label = fold.clone();
-                let to = pending.receiving.combine(&label);
-                // Custody transferred only for a narrowing submission, and a fold only narrows.
-                let residual = Narrowing {
-                    from: pending.receiving.clone(),
-                    to,
+                let Some(derived) = derived else {
+                    return Ok(EngineDecision {
+                        append: None,
+                        follow_up: FollowUp::Child(ChildFollowUp::Resolve(EvidenceRequest::Sanitizer {
+                            sanitizer: name.clone(),
+                            source: digest,
+                            body,
+                        })),
+                    });
                 };
-                self.pending_answer(
-                    view,
-                    &views,
-                    id,
-                    &pending,
-                    label,
-                    pending.body().clone(),
-                    residual,
-                    report.offer_nonce,
-                    cast_facts,
-                    act,
-                )
+                // An undecided mandate is the runtime's ask, never a refusal.
+                let label = registered
+                    .derive_output(&fold, &[], &self.context(act))?
+                    .ok_or(TransitionError::SanitizerUnapplicable)?;
+                if !floor.holds(&label) {
+                    return Err(TransitionError::ReturnBelowFloor {
+                        floor: floor.label().clone(),
+                    });
+                }
+                let value = LabeledValue::new(derived.clone(), label);
+                let mut facts = vec![Fact::CandidateDerived {
+                    trajectory: parent.clone(),
+                    subject,
+                    sanitizer: name.clone(),
+                    derived: DerivedCandidate::Return {
+                        source: digest,
+                        value: value.clone(),
+                    },
+                    lineage: SanitizerLineage::default()
+                        .extend(name.clone())
+                        .expect("an empty lineage spends no sanitizer yet"),
+                    evidence: act.pinned().clone(),
+                }];
+                // A derivation equal to the submission needs no echo: it crosses now.
+                if derived == body {
+                    facts.extend(branch::crossing_facts(
+                        &views,
+                        child,
+                        value,
+                        ReturnDerivation::Sanitized {
+                            sanitizer: name.clone(),
+                            raw_digest: digest,
+                        },
+                        act.pinned().clone(),
+                    ));
+                    return Ok(EngineDecision {
+                        append: Some(self.decided(view, return_act(&views, child), facts)?),
+                        follow_up: FollowUp::Child(ChildFollowUp::Merged { admitted: derived }),
+                    });
+                }
+                Ok(EngineDecision {
+                    append: Some(self.decided(view, return_act(&views, child), facts)?),
+                    follow_up: FollowUp::Child(ChildFollowUp::Staged { derived }),
+                })
             }
         }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn pending_answer(
-        &self,
-        view: &EngineView,
-        views: &Views,
-        id: &ChildReturnId,
-        pending: &crate::projection::SubmittedReturn,
-        label: Label,
-        body: ValueBody,
-        residual: Narrowing,
-        nonce: crate::value::OfferNonce,
-        facts: Vec<Fact>,
-        act: &ActEvidence,
-    ) -> Result<EngineDecision, TransitionError> {
-        let subject = crate::basis::SubjectKey::Return(id.clone());
-        if facts.is_empty()
-            && let Some((_, offers)) = views.pending_block(&subject)
-        {
-            return Ok(EngineDecision {
-                append: None,
-                follow_up: FollowUp::Child(ChildFollowUp::Pending(Box::new(PendingReturnStage {
-                    id: id.clone(),
-                    label,
-                    residual,
-                    offers,
-                }))),
-            });
-        }
-        let lineage = views.lineage(&subject);
-        let menu = self.return_menu(
-            views,
-            ReturnStageInput {
-                child: id.child(),
-                label: &label,
-                body: &body,
-                residual: &residual,
-                lineage: &lineage,
-            },
-            act,
-        )?;
-        let stage = menu;
-        let (batch, staged) = self.pending_stage(
-            view,
-            views,
-            return_act(id.child()),
-            nonce,
-            id,
-            &pending.fork,
-            label,
-            residual,
-            stage,
-            facts,
-            act,
-        )?;
-        Ok(EngineDecision {
-            append: Some(batch),
-            follow_up: FollowUp::Child(ChildFollowUp::Pending(Box::new(staged))),
-        })
     }
 
     fn decide_outcome(
@@ -1326,32 +909,12 @@ impl Engine {
         })
     }
 
-    /// The remedy menu a staged return offers, with the group requirement raised before the menu
-    /// reads anything. A `Resolve` answer is the caller's to continue: the three callers that can
-    /// see one continue differently, so this never decides for them.
-    fn return_menu(
-        &self,
-        views: &Views,
-        stage: ReturnStageInput<'_>,
-        act: &ActEvidence,
-    ) -> Result<Vec<plan::ExecutableRemedyPlan>, TransitionError> {
-        require_atoms(act, plan::return_stage_atoms(&self.registry, stage.lineage))?;
-        Ok(plan::return_stage(
-            &self.registry,
-            views,
-            stage.child,
-            stage.label,
-            stage.body,
-            stage.residual,
-            stage.lineage,
-            &self.context(act),
-        )?)
-    }
-
     /// The remedy menu a confined result's stage offers, with the group requirement raised before
     /// the menu reads anything.
+    #[allow(clippy::too_many_arguments)]
     fn confined_menu(
         &self,
+        views: &Views,
         contract: &ToolAnnotation,
         receiving: &Label,
         label: &Label,
@@ -1360,6 +923,7 @@ impl Engine {
         act: &ActEvidence,
     ) -> Result<Vec<plan::ExecutableRemedyPlan>, TransitionError> {
         require_atoms(act, plan::confined_stage_atoms(&self.registry, contract, lineage))?;
+        let floor = plan::floor_of(&self.registry, views);
         Ok(plan::confined_stage(
             &self.registry,
             contract,
@@ -1367,6 +931,7 @@ impl Engine {
             label,
             residual,
             lineage,
+            floor.as_ref(),
             &self.context(act),
         )?)
     }
@@ -1475,7 +1040,15 @@ impl Engine {
             .ok_or(TransitionError::UnknownDispatch)?
             .clone();
         let contract = self.dispatch_contract(views, dispatch)?;
-        let stage = self.confined_menu(&contract, &receiving, &value.label, &residual, &lineage, evidence)?;
+        let stage = self.confined_menu(
+            views,
+            &contract,
+            &receiving,
+            &value.label,
+            &residual,
+            &lineage,
+            evidence,
+        )?;
         let advance = Sequence::advance_of(self, view, &facts);
         let (_, offers, opened) = self.open_offers(
             views,
@@ -1536,7 +1109,15 @@ impl Engine {
             .clone();
         let lineage = views.lineage(&subject);
         let contract = self.dispatch_contract(views, dispatch)?;
-        let stage = self.confined_menu(&contract, &receiving, &value.label, &residual, &lineage, evidence)?;
+        let stage = self.confined_menu(
+            views,
+            &contract,
+            &receiving,
+            &value.label,
+            &residual,
+            &lineage,
+            evidence,
+        )?;
         let act = crate::basis::DecidedAct::Outcome(dispatch.clone());
         let advance = crate::basis::BasisAdvance::default();
         let (_, offers, opened) = self.open_offers(
@@ -1718,7 +1299,6 @@ impl Engine {
         let admissions = Sequence::advance_of(self, view, &facts);
         let composed = compose_batch(
             &self.registry,
-            &self.child_return,
             &mut working,
             ComposingBatch {
                 trajectory: &batch.trajectory,
@@ -1770,7 +1350,7 @@ impl Engine {
         // moves nothing, so the two agree by construction.
         let advance = Sequence::advance_of(self, view, &facts);
         let final_views = working.view(&batch.trajectory);
-        let mut refused: Vec<(usize, &ResolvedCall, ToolAnnotation, RawBlock, plan::CallRole)> = Vec::new();
+        let mut refused: Vec<(usize, &ResolvedCall, ToolAnnotation, RawBlock, CallRole)> = Vec::new();
         for (position, call) in composed
             .iter()
             .enumerate()
@@ -1778,15 +1358,22 @@ impl Engine {
             .map(|(position, _)| (position, &proposals[position]))
         {
             let contract = self.validated_contract(call)?.into_owned();
-            let raw = match check::evaluate(&contract, &final_views, call, &CallStage::default(), &self.context(act))? {
+            let role = match batch.spawn == Some(SpawnMark::at(position)) {
+                true => CallRole::MarkedSpawn,
+                false => CallRole::Ordinary,
+            };
+            let raw = match check::evaluate(
+                &contract,
+                &final_views,
+                call,
+                &CallStage::default(),
+                role,
+                &self.context(act),
+            )? {
                 CheckOutcome::Block(raw) => raw,
                 CheckOutcome::Allow => {
                     unreachable!("an in-batch release only ever adds gaps to a refused sibling's block")
                 }
-            };
-            let role = match batch.spawn == Some(SpawnMark::at(position)) {
-                true => plan::CallRole::MarkedSpawn,
-                false => plan::CallRole::Ordinary,
             };
             refused.push((position, call, contract, raw, role));
         }
@@ -1846,11 +1433,6 @@ impl Engine {
                     .map_err(|error| (position, error))
             })
             .collect::<Result<_, _>>()?;
-        if let Some(mark) = batch.spawn
-            && let Some(call) = proposals.get(mark.index())
-        {
-            marked_return_shape(call).map_err(|error| (mark.index(), error))?;
-        }
         Ok(proposals)
     }
 
@@ -1922,11 +1504,9 @@ impl Engine {
                 dispatch.trajectory(),
                 crate::value::BlockId::of_candidate(nonce, dispatch, basis.subject),
             ),
-            crate::basis::SubjectKey::Return(id) => (
-                views.trajectory(),
-                crate::value::BlockId::of_return(nonce, id, basis.subject),
-            ),
-            // A prepared approval is spent by releasing its call, never by an offer of its own.
+            // A return crosses at the child's stop or is refused there; a prepared approval is
+            // spent by releasing its call. Neither carries a stage of its own.
+            crate::basis::SubjectKey::Return(_) => unreachable!("no stage stands on a return"),
             crate::basis::SubjectKey::Approval(_) => unreachable!("no stage stands on an approval"),
         };
         let mut ids = Vec::new();
@@ -2019,9 +1599,9 @@ impl Engine {
                     let candidate = (*candidate).clone();
                     let contract = self.validated_contract(&candidate)?;
                     let stage = views.call_stage(&subject);
-                    match check::evaluate(&contract, views, &candidate, &stage, &self.context(under))? {
+                    let role = views.call_role(&subject);
+                    match check::evaluate(&contract, views, &candidate, &stage, role, &self.context(under))? {
                         CheckOutcome::Block(raw) => {
-                            let role = views.call_role(&subject);
                             require_atoms(under, plan::block_atoms(&self.registry, &contract, &raw, role))?;
                             let (block_id, offers) = views.pending_block(&subject).unwrap_or_else(|| {
                                 let block_id = crate::value::BlockId::of_proposal(
@@ -2105,15 +1685,14 @@ impl Engine {
             let dispatch = dispatch.clone();
             return self.decide_confined(view, &views, execution, &recorded, &dispatch, act);
         }
-        if let crate::basis::SubjectKey::Return(id) = &recorded.subject {
-            let id = id.clone();
-            return self.decide_return(view, &views, execution, &recorded, &id, act);
+        if let crate::basis::SubjectKey::Return(_) = &recorded.subject {
+            return self.invalidated(view, execution, &recorded);
         }
         let call = self.offer_call(&views, &recorded);
         let contract = self.validated_contract(&call)?;
         let stage = views.call_stage(&recorded.subject);
         let role = views.call_role(&recorded.subject);
-        let live = match check::evaluate(&contract, &views, &call, &stage, &self.context(act))? {
+        let live = match check::evaluate(&contract, &views, &call, &stage, role, &self.context(act))? {
             CheckOutcome::Block(raw) => {
                 require_atoms(act, plan::block_atoms(&self.registry, &contract, &raw, role))?;
                 require_atoms(act, plan::plan_atoms(&self.registry, &contract, &recorded.plan))?;
@@ -2199,7 +1778,7 @@ impl Engine {
         };
         let lineage = views.lineage(&subject);
         let contract = self.dispatch_contract(views, dispatch)?;
-        let stage = self.confined_menu(&contract, &receiving, &value.label, &residual, &lineage, act)?;
+        let stage = self.confined_menu(views, &contract, &receiving, &value.label, &residual, &lineage, act)?;
         if !stage.contains(&recorded.plan) {
             return self.invalidated(view, execution, recorded);
         }
@@ -2354,283 +1933,6 @@ impl Engine {
         })
     }
 
-    fn decide_return(
-        &self,
-        view: &EngineView,
-        views: &Views,
-        execution: &OfferExecution,
-        recorded: &crate::projection::RecordedOffer,
-        id: &ChildReturnId,
-        act: &ActEvidence,
-    ) -> Result<EngineDecision, TransitionError> {
-        let subject = crate::basis::SubjectKey::Return(id.clone());
-        let Some(pending) = views.pending_return(id).cloned() else {
-            return self.invalidated(view, execution, recorded);
-        };
-        let fold = views.branch_label(id.child());
-        let lineage = views.lineage(&subject);
-        let standing = match views.candidate(&subject).cloned() {
-            Some(DerivedCandidate::Return {
-                value,
-                residual: Some(residual),
-                ..
-            }) => Some((value, residual)),
-            Some(_) => return self.invalidated(view, execution, recorded),
-            None if pending.policy == ReturnPolicy::Raw => None,
-            None => return self.invalidated(view, execution, recorded),
-        };
-        let (label, body, residual) = match &standing {
-            Some((value, residual)) => (value.label.clone(), value.body.clone(), residual.clone()),
-            None => (
-                fold.clone(),
-                pending.body().clone(),
-                Narrowing {
-                    from: pending.receiving.clone(),
-                    to: pending.receiving.combine(&fold),
-                },
-            ),
-        };
-        let menu = self.return_menu(
-            views,
-            ReturnStageInput {
-                child: id.child(),
-                label: &label,
-                body: &body,
-                residual: &residual,
-                lineage: &lineage,
-            },
-            act,
-        )?;
-        let stage = menu;
-        if !stage.contains(&recorded.plan) {
-            return self.invalidated(view, execution, recorded);
-        }
-        let mut facts = vec![Fact::OfferAccepted {
-            trajectory: recorded.trajectory.clone(),
-            offer: execution.offer,
-        }];
-        facts.extend(invalidated_siblings(
-            views,
-            &recorded.trajectory,
-            &subject,
-            execution.offer,
-        ));
-        match (&execution.outcome, recorded.plan.hop()) {
-            (OfferOutcome::Approved(evidence), Some(name)) if name.is_attest_schema() && evidence.is_empty() => {
-                let applied = Evidence::Sanitizer {
-                    sanitizer: name.clone(),
-                    source: RawResultDigest::of(body.as_str().as_bytes()),
-                    derived: body.clone(),
-                };
-                self.return_hop(
-                    view,
-                    views,
-                    execution,
-                    id,
-                    &pending,
-                    standing.as_ref().map(|(value, _)| value),
-                    &fold,
-                    &lineage,
-                    name,
-                    &applied,
-                    facts,
-                    act,
-                )
-            }
-            (OfferOutcome::Derived(evidence), Some(sanitizer)) if !sanitizer.is_attest_schema() => self.return_hop(
-                view,
-                views,
-                execution,
-                id,
-                &pending,
-                standing.as_ref().map(|(value, _)| value),
-                &fold,
-                &lineage,
-                sanitizer,
-                evidence,
-                facts,
-                act,
-            ),
-            (OfferOutcome::Approved(evidence), None) if evidence.is_empty() => self.accept_return(
-                view,
-                views,
-                execution,
-                id,
-                &pending,
-                standing.map(|(value, _)| value),
-                &fold,
-                &lineage,
-                residual,
-                facts,
-                act,
-            ),
-            _ => Err(TransitionError::PlanOutcomeMismatch),
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn accept_return(
-        &self,
-        view: &EngineView,
-        views: &Views,
-        execution: &OfferExecution,
-        id: &ChildReturnId,
-        pending: &crate::projection::SubmittedReturn,
-        candidate: Option<crate::value::LabeledValue>,
-        fold: &Label,
-        lineage: &SanitizerLineage,
-        residual: Narrowing,
-        mut facts: Vec<Fact>,
-        act: &ActEvidence,
-    ) -> Result<EngineDecision, TransitionError> {
-        let (value, derivation) = match candidate {
-            Some(value) => {
-                let sanitizer = lineage
-                    .names()
-                    .last()
-                    .expect("a return candidate's lineage names the sanitizer that derived it")
-                    .clone();
-                (
-                    value,
-                    ReturnDerivation::Sanitized {
-                        sanitizer,
-                        raw_digest: pending.digest,
-                    },
-                )
-            }
-            None => (
-                crate::value::LabeledValue::new(pending.body().clone(), fold.clone()),
-                ReturnDerivation::Raw,
-            ),
-        };
-        let admitted = value.body.clone();
-        facts.extend(branch::crossing_facts(
-            views,
-            id.child(),
-            value,
-            derivation,
-            Some(residual),
-            act.pinned().clone(),
-        ));
-        Ok(EngineDecision {
-            append: Some(self.decided(view, crate::basis::DecidedAct::Offer(execution.offer), facts)?),
-            follow_up: FollowUp::Offer(OfferFollowUp::Admitted { value: admitted }),
-        })
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn return_hop(
-        &self,
-        view: &EngineView,
-        views: &Views,
-        execution: &OfferExecution,
-        id: &ChildReturnId,
-        pending: &crate::projection::SubmittedReturn,
-        predecessor: Option<&crate::value::LabeledValue>,
-        fold: &Label,
-        lineage: &SanitizerLineage,
-        sanitizer: &SanitizerName,
-        evidence: &Evidence,
-        mut facts: Vec<Fact>,
-        act: &ActEvidence,
-    ) -> Result<EngineDecision, TransitionError> {
-        let Evidence::Sanitizer {
-            sanitizer: named,
-            source,
-            derived: body,
-        } = evidence
-        else {
-            return Err(TransitionError::EvidenceMismatch);
-        };
-        let (from_label, source_digest) = match predecessor {
-            Some(value) => (value.label.clone(), RawResultDigest::of(value.body.as_str().as_bytes())),
-            None => (fold.clone(), pending.digest),
-        };
-        if named != sanitizer || source != &source_digest {
-            return Err(TransitionError::EvidenceMismatch);
-        }
-        let registered = self
-            .registry
-            .sanitizer(sanitizer)
-            .ok_or(TransitionError::SanitizerUnapplicable)?;
-        if sanitizer.is_attest_schema() && !plan::attest_applicable(views, id.child(), body, &registered.transition) {
-            return Err(TransitionError::SanitizerUnapplicable);
-        }
-        let label = registered
-            .derive_output(&from_label, &[], &self.context(act))?
-            .ok_or(TransitionError::SanitizerUnapplicable)?;
-        if !plan::confined_hop_helps(&pending.receiving, &from_label, &label) {
-            return Err(TransitionError::SanitizerUnapplicable);
-        }
-        let lineage = lineage
-            .extend(sanitizer.clone())
-            .ok_or(TransitionError::SanitizerUnapplicable)?;
-        let residual = crate::admit::confined_residual(&pending.receiving, &label);
-        let value = crate::value::LabeledValue::new(body.clone(), label.clone());
-        facts.push(Fact::CandidateDerived {
-            trajectory: views.trajectory().clone(),
-            subject: crate::basis::SubjectKey::Return(id.clone()),
-            sanitizer: sanitizer.clone(),
-            derived: DerivedCandidate::Return {
-                source: source_digest,
-                from: ConfinedFrom::Offer(execution.offer),
-                value: value.clone(),
-                residual: residual.clone(),
-            },
-            lineage: lineage.clone(),
-            evidence: act.pinned().clone(),
-        });
-        let Some(residual) = residual else {
-            // The successor owes nothing: candidate and merge land atomically.
-            facts.extend(branch::crossing_facts(
-                views,
-                id.child(),
-                value,
-                ReturnDerivation::Sanitized {
-                    sanitizer: sanitizer.clone(),
-                    raw_digest: pending.digest,
-                },
-                None,
-                act.pinned().clone(),
-            ));
-            return Ok(EngineDecision {
-                append: Some(self.decided(view, crate::basis::DecidedAct::Offer(execution.offer), facts)?),
-                follow_up: FollowUp::Offer(OfferFollowUp::Admitted { value: body.clone() }),
-            });
-        };
-        // The stage the successor leaves. A hop lands only while its offer's basis is current,
-        // so the stage is re-planned from the candidate standing now.
-        let menu = self.return_menu(
-            views,
-            ReturnStageInput {
-                child: id.child(),
-                label: &label,
-                body,
-                residual: &residual,
-                lineage: &lineage,
-            },
-            act,
-        )?;
-        let stage = menu;
-        let (batch, staged) = self.pending_stage(
-            view,
-            views,
-            crate::basis::DecidedAct::Offer(execution.offer),
-            execution.offer_nonce,
-            id,
-            &pending.fork,
-            label,
-            residual,
-            stage,
-            facts,
-            act,
-        )?;
-        Ok(EngineDecision {
-            append: Some(batch),
-            follow_up: FollowUp::Offer(OfferFollowUp::ReturnStaged(Box::new(staged))),
-        })
-    }
-
     /// One input-substitution progress hop.
     ///
     /// The sanitizer read the engine's own canonical argument bytes and returned one complete
@@ -2702,7 +2004,8 @@ impl Engine {
         }
 
         let next = CallStage::substituting(label.clone(), lineage.clone());
-        let after = check::evaluate(&contract, views, &substituted, &next, &self.context(under))?;
+        let role = views.call_role(&recorded.subject);
+        let after = check::evaluate(&contract, views, &substituted, &next, role, &self.context(under))?;
         if !plan::substitution_helps(raw, &after) {
             return Err(TransitionError::SanitizerUnapplicable);
         }
@@ -2855,41 +2158,6 @@ impl Engine {
                 _ => Err(TransitionError::TerminalOffer),
             };
         }
-        if let crate::basis::SubjectKey::Return(id) = &recorded.subject {
-            return match (end, &execution.outcome, recorded.plan.hop()) {
-                (OfferEnd::Accepted, OfferOutcome::Derived(Evidence::Sanitizer { .. }), Some(name))
-                    if !name.is_attest_schema() =>
-                {
-                    Ok(EngineDecision {
-                        append: None,
-                        follow_up: FollowUp::Offer(self.return_repeat(views, id)),
-                    })
-                }
-                (OfferEnd::Accepted, OfferOutcome::Approved(evidence), Some(name))
-                    if name.is_attest_schema() && evidence.is_empty() =>
-                {
-                    Ok(EngineDecision {
-                        append: None,
-                        follow_up: FollowUp::Offer(self.return_repeat(views, id)),
-                    })
-                }
-                (OfferEnd::Accepted, OfferOutcome::Approved(evidence), None) if evidence.is_empty() => {
-                    Ok(EngineDecision {
-                        append: None,
-                        follow_up: FollowUp::Offer(self.return_repeat(views, id)),
-                    })
-                }
-                (OfferEnd::Invalidated, _, _) => Ok(EngineDecision {
-                    append: None,
-                    follow_up: FollowUp::Offer(OfferFollowUp::Invalidated),
-                }),
-                (OfferEnd::Accepted, OfferOutcome::Derived(_), Some(_)) => Err(TransitionError::PlanOutcomeMismatch),
-                (_, OfferOutcome::Derived(_), None)
-                | (_, OfferOutcome::Approved(_), Some(_))
-                | (OfferEnd::Accepted, OfferOutcome::Approved(_), None) => Err(TransitionError::PlanOutcomeMismatch),
-                _ => Err(TransitionError::TerminalOffer),
-            };
-        }
         if recorded.plan.hop().is_some() {
             return match (end, &execution.outcome) {
                 (OfferEnd::Accepted, OfferOutcome::Derived(Evidence::Rewrite { .. })) => Ok(EngineDecision {
@@ -2958,37 +2226,6 @@ impl Engine {
         }
     }
 
-    fn return_repeat(&self, views: &Views, id: &ChildReturnId) -> OfferFollowUp {
-        if let Some(crossed) = views.child_return(id) {
-            return OfferFollowUp::Admitted {
-                value: crossed.body.clone(),
-            };
-        }
-        let subject = crate::basis::SubjectKey::Return(id.clone());
-        match (
-            views.submitted_return(id),
-            views.candidate(&subject),
-            views.pending_block(&subject),
-        ) {
-            (
-                // Custody must still stand for the stage to be answerable from the record.
-                Some(_),
-                Some(DerivedCandidate::Return {
-                    value,
-                    residual: Some(residual),
-                    ..
-                }),
-                Some((_, offers)),
-            ) => OfferFollowUp::ReturnStaged(Box::new(PendingReturnStage {
-                id: id.clone(),
-                label: value.label.clone(),
-                residual: residual.clone(),
-                offers,
-            })),
-            _ => OfferFollowUp::Invalidated,
-        }
-    }
-
     fn reblocked(
         &self,
         views: &Views,
@@ -2999,10 +2236,11 @@ impl Engine {
         let call = self.offer_call(views, recorded);
         let contract = self.validated_contract(&call)?;
         let stage = views.call_stage(&recorded.subject);
-        let CheckOutcome::Block(raw) = check::evaluate(&contract, views, &call, &stage, &self.context(act))? else {
+        let role = views.call_role(&recorded.subject);
+        let CheckOutcome::Block(raw) = check::evaluate(&contract, views, &call, &stage, role, &self.context(act))?
+        else {
             return Ok(None);
         };
-        let role = views.call_role(&recorded.subject);
         require_atoms(act, plan::block_atoms(&self.registry, &contract, &raw, role))?;
         let (block_id, offers) = views
             .pending_block(&recorded.subject)
@@ -3080,6 +2318,15 @@ impl Engine {
         if views.current_approval(call).is_some() {
             return Err(TransitionError::ApprovalPending);
         }
+        // A marked spawn's plan declares the child's return policy the parent now supplies.
+        let return_policy = match (recorded.plan.return_step(), &execution.return_policy) {
+            (None, None) => None,
+            (Some(step), Some(policy)) => {
+                plan::declared_return_policy(&self.registry, views, step, policy)?;
+                Some(policy.clone())
+            }
+            _ => return Err(TransitionError::PlanOutcomeMismatch),
+        };
         let trajectory = &recorded.trajectory;
         let mut facts = vec![Fact::OfferAccepted {
             trajectory: trajectory.clone(),
@@ -3112,6 +2359,7 @@ impl Engine {
                 })
                 .collect(),
             sanitizer: recorded.plan.sanitizer().cloned(),
+            return_policy,
             basis: views.basis_after(&advance, &subject),
             evidence: act.pinned().clone(),
         });
@@ -3233,8 +2481,15 @@ impl Engine {
         let audience = self.registry.audience();
         let empty = Expansions::default();
         let context = MembershipContext::new(audience.within_assertions(), audience.providers(), &empty);
-        Ok(check::evaluate(&contract, views, call, &CallStage::default(), &context)
-            .expect("engine test checks read no undecided symbolic audience"))
+        Ok(check::evaluate(
+            &contract,
+            views,
+            call,
+            &CallStage::default(),
+            CallRole::Ordinary,
+            &context,
+        )
+        .expect("engine test checks read no undecided symbolic audience"))
     }
 
     /// Attach the sound remedies to a raw block: executable plans and prose recommendations. An empty
@@ -3254,25 +2509,11 @@ impl Engine {
                 contract: &contract,
                 raw,
                 stage: &CallStage::default(),
-                role: plan::CallRole::Ordinary,
+                role: CallRole::Ordinary,
             },
             &context,
         )
         .expect("engine test plans read no undecided symbolic audience"))
-    }
-
-    /// Record a child's returned value at an engine-derived label AND merge it into the direct
-    /// parent — one atomic batch, no orphanable intermediate state. A crossing that would narrow
-    /// the parent merges nothing: it comes back as [`branch::RawCrossing::Narrows`] carrying the
-    /// price, which crosses only through the parent-owned staged return. See [`crate::branch`].
-    #[cfg(test)]
-    pub(crate) fn submit_child_return(
-        &self,
-        parent: &Views,
-        child: &TrajectoryId,
-        body: ValueBody,
-    ) -> Result<branch::RawCrossing, BranchError> {
-        branch::submit_child_return(parent, child, &body, &AudienceEvidence::default())
     }
 
     fn dispatch_contract<'c>(
@@ -3498,8 +2739,9 @@ fn offer_block(
     crate::value::BlockId::of_proposal(&execution.offer_nonce, trajectory, batch, *position, &call.digest())
 }
 
-fn return_act(child: &TrajectoryId) -> crate::basis::DecidedAct {
-    crate::basis::DecidedAct::ChildReturn(ChildReturnId::new(child.clone(), 0))
+/// The act one child's stop lands under: its next crossing's identity.
+fn return_act(views: &Views, child: &TrajectoryId) -> crate::basis::DecidedAct {
+    crate::basis::DecidedAct::ChildReturn(ChildReturnId::new(child.clone(), views.returns_by(child)))
 }
 
 fn prepared_fork(views: &Views, dispatch: &DispatchId) -> Option<ForkId> {
@@ -3521,23 +2763,10 @@ fn fixed_observation(views: &Views, dispatch: &DispatchId) -> Option<ObservedRes
     })
 }
 
-/// The optional shape a marked spawn call authors: its `return_schema` argument,
-/// compiled to canonical form. Runtime transports the schema without interpreting it; only this
-/// compilation reads it. A schema that does not compile makes the marked call invalid.
-pub(crate) fn marked_return_shape(call: &ResolvedCall) -> Result<Option<crate::shape::ReturnShape>, EngineError> {
-    match call.arguments().get("return_schema") {
-        None => Ok(None),
-        Some(authored) => crate::shape::ReturnShape::compile(authored)
-            .map(Some)
-            .map_err(EngineError::InvalidReturnSchema),
-    }
-}
-
 fn branch_refusal(error: BranchError) -> TransitionError {
     match error {
         BranchError::NotDirectParent | BranchError::NotForked => TransitionError::NotForked,
         BranchError::AlreadyEnded => TransitionError::BranchEnded,
-        other => unreachable!("the child-return boundary refuses before reaching {other}"),
     }
 }
 
@@ -3707,7 +2936,6 @@ fn approval_atoms(registry: &Registry, approval: &crate::projection::PreparedApp
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn compose_batch<'a>(
     registry: &Registry,
-    child_return: &ReturnPolicy,
     working: &mut std::borrow::Cow<'a, Projection>,
     batch: ComposingBatch<'_>,
     proposals: &[ResolvedCall],
@@ -3723,13 +2951,20 @@ pub(crate) fn compose_batch<'a>(
         Vec::with_capacity(proposals.len());
     {
         let views = working.view(trajectory);
-        for call in proposals {
+        for (position, call) in proposals.iter().enumerate() {
             if contract_for_call(registry, call).is_err() {
                 // Reported as malformed by the composition below, at its position.
                 per_call.push((std::borrow::Cow::Borrowed(act), None));
                 continue;
             }
-            let spends = if singleton { approval(&views, call) } else { None };
+            // An approval declaring a child's return policy spends only at the marked spawn's
+            // position, and one declaring none only at an ordinary one.
+            let marked = spawn == Some(SpawnMark::at(position));
+            let spends = if singleton { approval(&views, call) } else { None }.filter(|offer| {
+                views
+                    .approval(offer)
+                    .is_some_and(|prepared| prepared.return_policy.is_some() == marked)
+            });
             let under = match spends.and_then(|offer| views.approval(&offer)) {
                 Some(prepared) => {
                     act.inherit(&prepared.evidence).map_err(ComposeRefusal::Evidence)?;
@@ -3778,11 +3013,16 @@ pub(crate) fn compose_batch<'a>(
                 .parameters
                 .validate(call.arguments())
                 .map_err(|error| malformed(EngineError::InvalidCall(error)))?;
+            let role = match spawn == Some(SpawnMark::at(position)) {
+                true => CallRole::MarkedSpawn,
+                false => CallRole::Ordinary,
+            };
             let consumes = match check::evaluate(
                 &contract,
                 &views,
                 call,
                 &CallStage::default(),
+                role,
                 &membership_context(registry, under),
             ) {
                 Ok(CheckOutcome::Allow) => None,
@@ -3814,15 +3054,19 @@ pub(crate) fn compose_batch<'a>(
                 ));
             }
             facts.push(opening);
-            let prepares_fork = if spawn == Some(SpawnMark::at(position)) {
-                let shape = marked_return_shape(call).map_err(ComposeRefusal::Malformed)?;
+            let prepares_fork = if role == CallRole::MarkedSpawn {
+                let return_policy = consumes
+                    .and_then(|offer| views.approval(&offer))
+                    .and_then(|prepared| prepared.return_policy.clone())
+                    .expect(
+                        "a marked spawn releases only by spending an approval that declares its child's return policy",
+                    );
                 let fork = ForkId::of(&dispatch);
                 facts.push(Fact::ForkPrepared {
                     trajectory: trajectory.clone(),
                     fork: fork.clone(),
                     snapshot: views.freeze_basis(),
-                    return_policy: child_return.clone(),
-                    shape,
+                    return_policy,
                 });
                 Some(fork)
             } else {
@@ -4079,6 +3323,7 @@ mod tests {
                             trajectory: trajectory.clone(),
                             offer,
                             outcome: OfferOutcome::Approved(Vec::new()),
+                            return_policy: None,
                             offer_nonce: nonce(),
                             audience: crate::audience::AudienceEvidence::default(),
                         }),
@@ -4128,46 +3373,136 @@ mod tests {
         dispatch
     }
 
-    fn forked_child(e: &Engine, log: &[Fact], child: &TrajectoryId) -> Vec<Fact> {
-        let view = e
-            .view(&traj(), log.to_vec(), log.len() as u64)
-            .expect("the parent view builds");
+    /// Spawn `child` from the parent at the end of `log` under `policy`: the marked spawn
+    /// blocks with its return declarations, the parent takes the one naming the policy's
+    /// sanitizer and supplies the policy, the approved spawn releases and prepares the fork,
+    /// and the child binds. Returns the facts appended after `log`.
+    fn spawn_family_at(e: &Engine, log: &[Fact], child: &TrajectoryId, policy: ReturnPolicy) -> Vec<Fact> {
         let spawn = call("spawn", json!({}));
-        let decision = e
+        let batch = |id: &str| {
+            EngineEvent::Proposals(ProposalBatch {
+                id: crate::transition::ProposalBatchId::new(format!("{id}-{}", child.as_str())),
+                trajectory: traj(),
+                provider_results: Vec::new(),
+                proposals: vec![raw(&spawn)],
+                spawn: Some(crate::transition::SpawnMark::at(0)),
+                offer_nonce: nonce(),
+                evidence: Vec::new(),
+                audience: crate::audience::AudienceEvidence::default(),
+            })
+        };
+        let so_far = |facts: &[Fact]| [log, facts].concat();
+        let blocked = e
+            .handle(&viewing(e, log), batch("spawn"))
+            .expect("a marked spawn blocks with its return declarations");
+        assert!(
+            matches!(answered(&blocked), ([], [_])),
+            "a marked spawn blocks until the parent declares its child's return policy"
+        );
+        let mut facts = appended_facts(blocked);
+        let offer = opened_offers(&facts)
+            .into_iter()
+            .find_map(|(offer, plan)| (plan.return_step() == Some(policy.sanitizer_name().as_ref())).then_some(offer))
+            .expect("the block offers the policy's declaration");
+        let approved = e
             .handle(
-                &view,
-                EngineEvent::Proposals(ProposalBatch {
-                    id: crate::transition::ProposalBatchId::new(format!("fork-{}", child.as_str())),
+                &viewing(e, &so_far(&facts)),
+                EngineEvent::ExecuteOffer(OfferExecution {
                     trajectory: traj(),
-                    provider_results: Vec::new(),
-                    proposals: vec![raw(&spawn)],
-                    spawn: Some(crate::transition::SpawnMark::at(0)),
+                    offer,
+                    outcome: OfferOutcome::Approved(Vec::new()),
+                    return_policy: Some(policy),
                     offer_nonce: nonce(),
-                    evidence: Vec::new(),
                     audience: crate::audience::AudienceEvidence::default(),
                 }),
             )
-            .expect("the marked spawn releases and prepares the fork");
-        let FollowUp::Proposals { released, .. } = &decision.follow_up else {
-            panic!("a proposal batch answers with proposals")
+            .expect("the declaration approves the spawn");
+        facts.extend(appended_facts(approved));
+        let released = e
+            .handle(&viewing(e, &so_far(&facts)), batch("spawn-approved"))
+            .expect("the approved spawn releases and prepares the fork");
+        let fork = match answered(&released) {
+            ([release], []) => release.fork.clone().expect("the marked spawn carries its fork"),
+            other => panic!("the approved spawn releases alone, got {other:?}"),
         };
-        let fork = released[0].fork.clone().expect("the marked spawn carries its fork");
-        let mut facts = decision.append.expect("the release appends").facts().to_vec();
-        let bound_at = log.len() + facts.len();
-        let prepared = e
-            .view(&traj(), [log.to_vec(), facts.clone()].concat(), bound_at as u64)
-            .expect("the prepared view builds");
+        facts.extend(appended_facts(released));
         let bound = e
             .handle(
-                &prepared,
+                &viewing(e, &so_far(&facts)),
                 EngineEvent::BindFork(crate::transition::ForkBinding {
                     fork,
                     child: child.clone(),
                 }),
             )
             .expect("the child binds to its fork");
-        facts.extend(bound.append.expect("the binding appends").facts().to_vec());
+        facts.extend(appended_facts(bound));
         facts
+    }
+
+    /// The parent declares the bare floor for the marked `spawn` it proposes under `id`: the
+    /// block's facts and the approval's, appended after `log`. The approved spawn is left for
+    /// the caller to propose again.
+    fn declared_spawn(e: &Engine, log: &[Fact], id: &str) -> Vec<Fact> {
+        let blocked = e
+            .handle(
+                &viewing(e, log),
+                spawn_batch(id, Some(crate::transition::SpawnMark::at(0))),
+            )
+            .expect("a marked spawn blocks with its return declarations");
+        let mut facts = appended_facts(blocked);
+        let (offer, _) = opened_offers(&facts)
+            .into_iter()
+            .find(|(_, plan)| plan.return_step() == Some(None))
+            .expect("the bare declaration is offered");
+        let approved = e
+            .handle(
+                &viewing(e, &[log, &facts].concat()),
+                EngineEvent::ExecuteOffer(OfferExecution {
+                    trajectory: traj(),
+                    offer,
+                    outcome: OfferOutcome::Approved(Vec::new()),
+                    return_policy: Some(floor_policy(e, log)),
+                    offer_nonce: nonce(),
+                    audience: crate::audience::AudienceEvidence::default(),
+                }),
+            )
+            .expect("the declaration approves the spawn");
+        facts.extend(appended_facts(approved));
+        facts
+    }
+
+    /// The bare declaration: the parent's current label as the floor, no sanitizer.
+    fn floor_policy(e: &Engine, log: &[Fact]) -> ReturnPolicy {
+        ReturnPolicy {
+            floor: viewing(e, log)
+                .views(&traj())
+                .expect("the parent is opened")
+                .current_label(),
+            sanitizer: None,
+        }
+    }
+
+    fn forked_child(e: &Engine, log: &[Fact], child: &TrajectoryId) -> Vec<Fact> {
+        spawn_family_at(e, log, child, floor_policy(e, log))
+    }
+
+    /// A parent opened alone, with `child` spawned under the bare declaration.
+    fn spawn_family(e: &Engine, child: &TrajectoryId) -> Vec<Fact> {
+        let log = vec![opened(e)];
+        let forked = forked_child(e, &log, child);
+        [log, forked].concat()
+    }
+
+    /// The child's stop crossing `body` at its fold: the facts appended after `log`.
+    fn crossed(e: &Engine, log: &[Fact], child: &TrajectoryId, body: &str) -> Vec<Fact> {
+        let report = child_report(
+            log,
+            child,
+            ChildSubmission::Value {
+                body: ValueBody::new(body),
+            },
+        );
+        appended_facts(e.handle(&viewing(e, log), report).expect("the return crosses"))
     }
 
     fn child_report(log: &[Fact], child: &TrajectoryId, submission: ChildSubmission) -> EngineEvent {
@@ -4182,25 +3517,16 @@ mod tests {
                 .expect("the log opened a fork for this child"),
             submission,
             evidence: Vec::new(),
-            offer_nonce: nonce(),
             audience: crate::audience::AudienceEvidence::default(),
         })
     }
 
     fn open_engine(cfg: RegistryConfig) -> Engine {
-        open_engine_returning(cfg, ReturnPolicy::Raw)
-    }
-
-    fn open_engine_at(cfg: RegistryConfig, starting: Label) -> Engine {
-        open_engine_returning_at(cfg, ReturnPolicy::Raw, starting)
-    }
-
-    fn open_engine_returning(cfg: RegistryConfig, child_return: ReturnPolicy) -> Engine {
         let starting = crate::profile::neutral_starting_label(&cfg.trust_chain);
-        open_engine_returning_at(cfg, child_return, starting)
+        open_engine_at(cfg, starting)
     }
 
-    fn open_engine_returning_at(mut cfg: RegistryConfig, child_return: ReturnPolicy, starting: Label) -> Engine {
+    fn open_engine_at(mut cfg: RegistryConfig, starting: Label) -> Engine {
         if !cfg.tools.iter().any(|tool| tool.name().as_str() == "spawn") {
             cfg.tools
                 .push(crate::contract::ToolDeclaration::Declared(plain_tool("spawn")));
@@ -4213,7 +3539,6 @@ mod tests {
             registry: cfg,
             planner_cap: crate::registry::PlannerCap::default(),
             dialect: PolicyDialectVersion::new(1),
-            child_return,
             profile,
         })
         .unwrap()
@@ -4855,14 +4180,7 @@ mod tests {
         let e = engine_at(vec![crm_tool()], known(SUSPICIOUS, internal.clone()));
         let mut branched = vec![opened(&e)];
         branched.extend(forked_child(&e, &branched.clone(), &child));
-        let crossing = e
-            .submit_child_return(
-                &Projection::build(&branched, branched.len() as u64).view(&traj()),
-                &child,
-                ValueBody::new("done"),
-            )
-            .expect("a non-narrowing return crosses");
-        let crossing = merged_crossing(crossing);
+        let crossing = crossed(&e, &branched.clone(), &child, "done");
         branched.extend(crossing);
         assert_eq!(e.validate_replay(&branched), Ok(()));
 
@@ -6417,7 +5735,7 @@ mod tests {
     }
 
     #[test]
-    fn a_child_return_ends_the_branch_once_and_a_repeat_answers_from_the_record() {
+    fn a_child_return_crosses_and_a_repeat_answers_from_the_record() {
         let internal = Audience::restricted([ReaderId::new("insider")]);
         let e = engine_at(vec![], known(SUSPICIOUS, internal.clone()));
         let child = TrajectoryId::new("child");
@@ -6434,17 +5752,26 @@ mod tests {
             merged.follow_up,
             FollowUp::Child(ChildFollowUp::Merged { admitted: body.clone() })
         );
-        let facts = merged.append.expect("the crossing appends").facts().to_vec();
-        let after = e.view(&traj(), [log.clone(), facts].concat(), 9).unwrap();
+        let crossed_log = [
+            log.clone(),
+            merged.append.expect("the crossing appends").facts().to_vec(),
+        ]
+        .concat();
+        let after = e.view(&traj(), crossed_log.clone(), crossed_log.len() as u64).unwrap();
 
         let repeat = e
             .handle(&after, report(ChildSubmission::Value { body: body.clone() }))
-            .expect("a repeat of the ending submission answers from the record");
+            .expect("a repeat of the latest crossing answers from the record");
         assert_eq!(repeat.append, None);
         assert_eq!(
             repeat.follow_up,
             FollowUp::Child(ChildFollowUp::Merged { admitted: body })
         );
+        let ended = e
+            .handle(&after, report(ChildSubmission::Void))
+            .expect("a void return ends the branch");
+        let ended_log = [crossed_log, ended.append.expect("the void appends").facts().to_vec()].concat();
+        let after = e.view(&traj(), ended_log.clone(), ended_log.len() as u64).unwrap();
         assert_eq!(
             e.handle(
                 &after,
@@ -6467,7 +5794,6 @@ mod tests {
                     fork: fork_in(&log, &child),
                     submission: ChildSubmission::Void,
                     evidence: Vec::new(),
-                    offer_nonce: nonce(),
                     audience: crate::audience::AudienceEvidence::default(),
                 })
             ),
@@ -6479,8 +5805,8 @@ mod tests {
     fn a_marked_spawn_prepares_its_fork_and_the_child_binds_to_it() {
         let e = engine(vec![plain_tool("spawn")]);
         let call = call("spawn", json!({}));
-        let records = vec![opened(&e)];
-        let view = e.view(&traj(), records.clone(), 1).unwrap();
+        let records = [vec![opened(&e)], declared_spawn(&e, &[opened(&e)], "b0")].concat();
+        let view = e.view(&traj(), records.clone(), records.len() as u64).unwrap();
         let batch = |spawn: Option<crate::transition::SpawnMark>| {
             EngineEvent::Proposals(ProposalBatch {
                 id: crate::transition::ProposalBatchId::new("b1"),
@@ -6496,23 +5822,24 @@ mod tests {
 
         let decision = e
             .handle(&view, batch(Some(crate::transition::SpawnMark::at(0))))
-            .expect("a marked spawn releases and prepares");
+            .expect("the declared marked spawn releases and prepares");
         let FollowUp::Proposals { released, .. } = &decision.follow_up else {
             panic!("a proposal batch answers with proposals")
         };
         let fork = released[0].fork.clone().expect("the release carries its fork");
         assert_eq!(fork, crate::value::ForkId::of(&released[0].dispatch));
         let facts = decision.append.clone().expect("the release appends").facts().to_vec();
+        assert!(
+            facts
+                .iter()
+                .any(|fact| matches!(fact, Fact::ProposalBatchDecided { .. }))
+        );
         assert!(matches!(
             facts.as_slice(),
-            [
-                Fact::ProposalBatchDecided { .. },
-                Fact::DispatchOpened { .. },
-                Fact::ForkPrepared { .. }
-            ]
+            [.., Fact::DispatchOpened { .. }, Fact::ForkPrepared { .. }]
         ));
         let log = [records, facts].concat();
-        let prepared = e.view(&traj(), log.clone(), 2).unwrap();
+        let prepared = e.view(&traj(), log.clone(), log.len() as u64).unwrap();
         assert_eq!(
             e.handle(&prepared, batch(None)),
             Err(crate::transition::TransitionError::BatchIdentityConflict)
@@ -6528,13 +5855,24 @@ mod tests {
         let opened = bound.append.expect("the binding appends").facts().to_vec();
         assert!(matches!(opened.as_slice(), [Fact::ForkOpened { .. }]));
 
-        let after = e.view(&traj(), [log.clone(), opened].concat(), 3).unwrap();
+        let after = e
+            .view(&traj(), [log.clone(), opened].concat(), log.len() as u64 + 1)
+            .unwrap();
         let child_views = after.views(&child).expect("the bound child is opened");
         assert_eq!(child_views.current_label(), partial(TRUSTED, Audience::public()));
         assert_eq!(child_views.parent_of(&child), Some(&traj()));
 
-        let repeat = e.handle(&after, bind(fork.clone(), child.clone())).unwrap();
-        assert_eq!(repeat.append, None);
+        let resumed = e.handle(&after, bind(fork.clone(), child.clone())).unwrap();
+        assert!(
+            matches!(
+                resumed.append.as_ref().map(ValidatedFactBatch::facts),
+                Some([Fact::Boundary {
+                    kind: crate::fact::BoundaryKind::Resume { .. },
+                    ..
+                }])
+            ),
+            "the same pair bound again is the parent addressing its child once more"
+        );
         assert_eq!(
             e.handle(&after, bind(fork.clone(), TrajectoryId::new("other"))),
             Err(crate::transition::TransitionError::UnbindableFork)
@@ -6560,7 +5898,7 @@ mod tests {
             }],
         ]
         .concat();
-        let after_run = e.view(&traj(), ran, 3).unwrap();
+        let after_run = e.view(&traj(), ran.clone(), ran.len() as u64).unwrap();
         let repeat = e
             .handle(&after_run, batch(Some(crate::transition::SpawnMark::at(0))))
             .expect("the repeat answers from the record");
@@ -6586,7 +5924,7 @@ mod tests {
             }],
         ]
         .concat();
-        let after_failure = e.view(&traj(), failed, 3).unwrap();
+        let after_failure = e.view(&traj(), failed.clone(), failed.len() as u64).unwrap();
         assert_eq!(
             e.handle(&after_failure, bind(fork, child)),
             Err(crate::transition::TransitionError::UnbindableFork)
@@ -6596,26 +5934,13 @@ mod tests {
     #[test]
     fn fork_of_answers_the_same_advanced_or_rebuilt_and_a_refused_bind_leaves_it() {
         let e = engine(vec![plain_tool("spawn")]);
-        let call = call("spawn", json!({}));
-        let records = vec![opened(&e)];
-        let mut held = e.view(&traj(), records.clone(), 1).unwrap();
+        let records = [vec![opened(&e)], declared_spawn(&e, &[opened(&e)], "b0")].concat();
+        let mut held = e.view(&traj(), records.clone(), records.len() as u64).unwrap();
         let child = TrajectoryId::new("child");
 
         let prepared = e
-            .handle(
-                &held,
-                EngineEvent::Proposals(ProposalBatch {
-                    id: crate::transition::ProposalBatchId::new("b1"),
-                    trajectory: traj(),
-                    provider_results: Vec::new(),
-                    proposals: vec![raw(&call)],
-                    spawn: Some(crate::transition::SpawnMark::at(0)),
-                    offer_nonce: nonce(),
-                    evidence: Vec::new(),
-                    audience: crate::audience::AudienceEvidence::default(),
-                }),
-            )
-            .expect("a marked spawn releases and prepares");
+            .handle(&held, spawn_batch("b1", Some(crate::transition::SpawnMark::at(0))))
+            .expect("the declared marked spawn releases and prepares");
         let FollowUp::Proposals { released, .. } = &prepared.follow_up else {
             panic!("a proposal batch answers with proposals")
         };
@@ -6658,46 +5983,38 @@ mod tests {
     #[test]
     fn a_fork_preparation_replays_only_as_its_marked_release() {
         let e = engine(vec![plain_tool("spawn")]);
-        let call = call("spawn", json!({}));
-        let records = vec![opened(&e)];
-        let view = e.view(&traj(), records.clone(), 1).unwrap();
+        let records = [vec![opened(&e)], declared_spawn(&e, &[opened(&e)], "b0")].concat();
+        let view = e.view(&traj(), records.clone(), records.len() as u64).unwrap();
         let marked = e
-            .handle(
-                &view,
-                EngineEvent::Proposals(ProposalBatch {
-                    id: crate::transition::ProposalBatchId::new("b1"),
-                    trajectory: traj(),
-                    provider_results: Vec::new(),
-                    proposals: vec![raw(&call)],
-                    spawn: Some(crate::transition::SpawnMark::at(0)),
-                    offer_nonce: nonce(),
-                    evidence: Vec::new(),
-                    audience: crate::audience::AudienceEvidence::default(),
-                }),
-            )
+            .handle(&view, spawn_batch("b1", Some(crate::transition::SpawnMark::at(0))))
             .unwrap();
         let batch = marked.append.expect("the release appends").facts().to_vec();
         assert_eq!(e.validate_replay(&[records.clone(), batch.clone()].concat()), Ok(()));
+        let prepared_at = batch
+            .iter()
+            .position(|fact| matches!(fact, Fact::ForkPrepared { .. }))
+            .expect("the release prepares the fork");
 
         let mut unmarked = batch.clone();
-        if let Fact::ProposalBatchDecided { spawn, .. } = &mut unmarked[0] {
+        let decided_at = unmarked
+            .iter()
+            .position(|fact| matches!(fact, Fact::ProposalBatchDecided { .. }))
+            .expect("the release records its decision");
+        if let Fact::ProposalBatchDecided { spawn, .. } = &mut unmarked[decided_at] {
             *spawn = None;
         }
-        assert_eq!(
-            e.validate_replay(&[records.clone(), unmarked].concat()),
-            Err(TransitionRefusal::UnbackedDecision)
+        let unmarked = e.validate_replay(&[records.clone(), unmarked].concat());
+        assert!(unmarked.is_err(), "an unmarked release backs no fork, got {unmarked:?}");
+        let mut displaced = batch.clone();
+        displaced.insert(
+            prepared_at,
+            stray_admission(&traj(), known(SUSPICIOUS, Audience::public())),
         );
-        let displaced = [
-            records.clone(),
-            vec![
-                batch[0].clone(),
-                batch[1].clone(),
-                stray_admission(&traj(), known(SUSPICIOUS, Audience::public())),
-                batch[2].clone(),
-            ],
-        ]
-        .concat();
-        assert_eq!(e.validate_replay(&displaced), Err(TransitionRefusal::UnbackedDecision));
+        let displaced = e.validate_replay(&[records, displaced].concat());
+        assert!(
+            displaced.is_err(),
+            "a preparation lands in its release's batch, got {displaced:?}"
+        );
     }
 
     #[test]
@@ -6716,7 +6033,6 @@ mod tests {
             registry: config,
             planner_cap: crate::registry::PlannerCap::default(),
             dialect: PolicyDialectVersion::new(1),
-            child_return: ReturnPolicy::Raw,
             profile: declaration,
         })
         .expect("an uncontrolled deployment opens");
@@ -6736,267 +6052,6 @@ mod tests {
                 })
             ),
             Err(crate::transition::TransitionError::SpawnUncontrolled)
-        );
-    }
-
-    fn spawn_family(e: &Engine, schema: Option<&serde_json::Value>, child: &TrajectoryId) -> Vec<Fact> {
-        let args = match schema {
-            Some(schema) => json!({ "return_schema": schema }),
-            None => json!({}),
-        };
-        let call = call("spawn", args);
-        let records = vec![opened(e)];
-        let view = e.view(&traj(), records.clone(), 1).unwrap();
-        let decision = e
-            .handle(
-                &view,
-                EngineEvent::Proposals(ProposalBatch {
-                    id: crate::transition::ProposalBatchId::new("b1"),
-                    trajectory: traj(),
-                    provider_results: Vec::new(),
-                    proposals: vec![raw(&call)],
-                    spawn: Some(crate::transition::SpawnMark::at(0)),
-                    offer_nonce: nonce(),
-                    evidence: Vec::new(),
-                    audience: crate::audience::AudienceEvidence::default(),
-                }),
-            )
-            .expect("the marked spawn releases and prepares");
-        let FollowUp::Proposals { released, .. } = &decision.follow_up else {
-            panic!("a proposal batch answers with proposals")
-        };
-        let fork = released[0].fork.clone().expect("the release carries its fork");
-        let log = [records, decision.append.expect("the release appends").facts().to_vec()].concat();
-        let prepared = e.view(&traj(), log.clone(), log.len() as u64).unwrap();
-        let bound = e
-            .handle(
-                &prepared,
-                EngineEvent::BindFork(crate::transition::ForkBinding {
-                    fork,
-                    child: child.clone(),
-                }),
-            )
-            .expect("the child binds");
-        [log, bound.append.expect("the binding appends").facts().to_vec()].concat()
-    }
-
-    #[test]
-    fn a_shaped_fork_persists_its_shape_and_gates_the_crossing() {
-        let e = engine(vec![plain_tool("spawn")]);
-        let schema = json!({
-            "type": "object",
-            "properties": {
-                "verdict": { "type": "string", "enum": ["allow", "deny"] },
-                "confidence": { "type": "integer", "minimum": 0, "maximum": 100 },
-            },
-            "required": ["verdict", "confidence"],
-        });
-        let child = TrajectoryId::new("child");
-        let log = spawn_family(&e, Some(&schema), &child);
-        let persisted = log
-            .iter()
-            .find_map(|fact| match fact {
-                Fact::ForkPrepared { shape, .. } => Some(shape.clone()),
-                _ => None,
-            })
-            .expect("the preparation records");
-        assert_eq!(
-            persisted,
-            Some(crate::shape::ReturnShape::compile(&schema).unwrap()),
-            "the preparation persists the compiled shape itself"
-        );
-
-        let view = e.view(&traj(), log.clone(), log.len() as u64).unwrap();
-        let report = |text: &str| {
-            child_report(
-                &log,
-                &child,
-                ChildSubmission::Value {
-                    body: ValueBody::new(text),
-                },
-            )
-        };
-        assert!(matches!(
-            e.handle(&view, report("free text")),
-            Err(crate::transition::TransitionError::ReturnShapeMismatch(_))
-        ));
-        assert!(matches!(
-            e.handle(&view, report(r#"{"verdict":"allow","confidence":101}"#)),
-            Err(crate::transition::TransitionError::ReturnShapeMismatch(_))
-        ));
-
-        let canonical = ValueBody::new(r#"{"confidence":97,"verdict":"allow"}"#);
-        let merged = e
-            .handle(&view, report("{ \"verdict\": \"allow\",  \"confidence\": 97 }"))
-            .expect("a conforming submission crosses");
-        assert_eq!(
-            merged.follow_up,
-            FollowUp::Child(ChildFollowUp::Merged {
-                admitted: canonical.clone()
-            })
-        );
-        let ended = [
-            log.clone(),
-            merged.append.expect("the crossing appends").facts().to_vec(),
-        ]
-        .concat();
-        let after = e.view(&traj(), ended.clone(), ended.len() as u64).unwrap();
-
-        let repeat = e
-            .handle(&after, report(r#"{"verdict": "allow", "confidence": 97}"#))
-            .expect("a repeat of the ending submission answers from the record");
-        assert_eq!(repeat.append, None);
-        assert_eq!(
-            repeat.follow_up,
-            FollowUp::Child(ChildFollowUp::Merged { admitted: canonical })
-        );
-        assert_eq!(
-            e.handle(&after, report(r#"{"verdict":"deny","confidence":3}"#)),
-            Err(crate::transition::TransitionError::BranchEnded)
-        );
-        assert_eq!(
-            e.handle(&after, report("free text")),
-            Err(crate::transition::TransitionError::BranchEnded)
-        );
-    }
-
-    #[test]
-    fn a_void_return_bypasses_the_shape_gate() {
-        let e = engine(vec![plain_tool("spawn")]);
-        let schema = json!({
-            "type": "object",
-            "properties": { "flag": { "type": "boolean" } },
-            "required": ["flag"],
-        });
-        let child = TrajectoryId::new("child");
-        let log = spawn_family(&e, Some(&schema), &child);
-        let view = e.view(&traj(), log.clone(), log.len() as u64).unwrap();
-        let ended = e
-            .handle(&view, child_report(&log, &child, ChildSubmission::Void))
-            .expect("a void return ends the shaped branch");
-        assert_eq!(ended.follow_up, FollowUp::Child(ChildFollowUp::Ended));
-        assert!(matches!(
-            ended.append.expect("the void appends").facts(),
-            [Fact::Boundary {
-                kind: crate::fact::BoundaryKind::VoidReturn,
-                ..
-            }]
-        ));
-    }
-
-    #[test]
-    fn an_uncompilable_return_schema_refuses_the_marked_batch() {
-        let e = engine(vec![plain_tool("spawn")]);
-        let free = json!({
-            "type": "object",
-            "properties": { "note": { "type": "string" } },
-            "required": ["note"],
-        });
-        let call = call("spawn", json!({ "return_schema": free }));
-        let view = e.view(&traj(), vec![opened(&e)], 1).unwrap();
-        let batch = |id: &str, spawn: Option<crate::transition::SpawnMark>| {
-            EngineEvent::Proposals(ProposalBatch {
-                id: crate::transition::ProposalBatchId::new(id),
-                trajectory: traj(),
-                provider_results: Vec::new(),
-                proposals: vec![raw(&call)],
-                spawn,
-                offer_nonce: nonce(),
-                evidence: Vec::new(),
-                audience: crate::audience::AudienceEvidence::default(),
-            })
-        };
-        let refused = e
-            .handle(&view, batch("b1", Some(crate::transition::SpawnMark::at(0))))
-            .expect("a malformed batch still answers");
-        assert!(matches!(
-            refused.follow_up,
-            FollowUp::Malformed {
-                position: 0,
-                error: EngineError::InvalidReturnSchema(_)
-            }
-        ));
-        let sealed = refused.append.map(|batch| batch.facts().to_vec()).unwrap_or_default();
-        assert!(
-            sealed
-                .iter()
-                .all(|fact| !matches!(fact, Fact::DispatchOpened { .. } | Fact::ForkPrepared { .. })),
-            "nothing releases and no fork is prepared"
-        );
-        let released = e.handle(&view, batch("b2", None)).expect("an unmarked call releases");
-        assert!(matches!(released.follow_up, FollowUp::Proposals { .. }));
-    }
-
-    #[test]
-    fn replay_holds_a_fork_to_the_shape_its_spawn_authored() {
-        let e = engine(vec![plain_tool("spawn")]);
-        let schema = json!({
-            "type": "object",
-            "properties": { "flag": { "type": "boolean" } },
-            "required": ["flag"],
-        });
-        let child = TrajectoryId::new("child");
-        let log = spawn_family(&e, Some(&schema), &child);
-        assert_eq!(e.validate_replay(&log), Ok(()));
-
-        let prepared_at = log
-            .iter()
-            .position(|fact| matches!(fact, Fact::ForkPrepared { .. }))
-            .expect("the preparation records");
-        let reshape = |base: &[Fact], shape: Option<crate::shape::ReturnShape>| {
-            let mut forged = base.to_vec();
-            let Fact::ForkPrepared { shape: stored, .. } = &mut forged[prepared_at] else {
-                unreachable!("the position was just found")
-            };
-            *stored = shape;
-            e.validate_replay(&forged)
-        };
-        assert_eq!(reshape(&log, None), Err(TransitionRefusal::ForkShapeMismatch));
-        let other = crate::shape::ReturnShape::compile(&json!({
-            "type": "object",
-            "properties": { "count": { "type": "integer", "minimum": 0, "maximum": 10 } },
-            "required": ["count"],
-        }))
-        .unwrap();
-        assert_eq!(
-            reshape(&log, Some(other.clone())),
-            Err(TransitionRefusal::ForkShapeMismatch)
-        );
-        let plain = spawn_family(&e, None, &child);
-        assert_eq!(e.validate_replay(&plain), Ok(()));
-        assert_eq!(reshape(&plain, Some(other)), Err(TransitionRefusal::ForkShapeMismatch));
-
-        let view = e.view(&traj(), log.clone(), log.len() as u64).unwrap();
-        let merged = e
-            .handle(
-                &view,
-                child_report(
-                    &log,
-                    &child,
-                    ChildSubmission::Value {
-                        body: ValueBody::new(r#"{"flag":true}"#),
-                    },
-                ),
-            )
-            .expect("a conforming submission crosses");
-        let ended = [log, merged.append.expect("the crossing appends").facts().to_vec()].concat();
-        assert_eq!(e.validate_replay(&ended), Ok(()));
-        let crossing_at = ended
-            .iter()
-            .position(|fact| matches!(fact, Fact::ChildReturn { .. }))
-            .expect("the return records its crossing");
-        let rebody = |text: &str| {
-            let mut forged = ended.clone();
-            let Fact::ChildReturn { value, .. } = &mut forged[crossing_at] else {
-                unreachable!("the position was just found")
-            };
-            *value = LabeledValue::new(ValueBody::new(text), value.label.clone());
-            e.validate_replay(&forged)
-        };
-        assert_eq!(rebody("free text"), Err(TransitionRefusal::ReturnShapeViolation));
-        assert_eq!(
-            rebody(r#"{ "flag": true }"#),
-            Err(TransitionRefusal::ReturnShapeViolation)
         );
     }
 
@@ -7291,6 +6346,7 @@ mod tests {
                 trajectory: traj(),
                 offer,
                 outcome,
+                return_policy: None,
                 offer_nonce: crate::value::OfferNonce::new([11u8; 32]),
                 audience,
             }),
@@ -8300,6 +7356,7 @@ mod tests {
                     trajectory: elsewhere,
                     offer,
                     outcome: OfferOutcome::Approved(Vec::new()),
+                    return_policy: None,
                     offer_nonce: nonce(),
                     audience: crate::audience::AudienceEvidence::default(),
                 }),
@@ -8508,6 +7565,7 @@ mod tests {
                     trajectory: traj(),
                     offer,
                     outcome: OfferOutcome::Approved(Vec::new()),
+                    return_policy: None,
                     offer_nonce: nonce(),
                     audience: crate::audience::AudienceEvidence::default(),
                 }),
@@ -8695,12 +7753,7 @@ mod tests {
         let e = engine_at(vec![], known(SUSPICIOUS, internal.clone()));
         let mut log = vec![opened(&e)];
         log.extend(forked_child(&e, &log.clone(), &child));
-        let projection = Projection::build(&log, log.len() as u64);
-        let trajectory = traj();
-        let crossing = e
-            .submit_child_return(&projection.view(&trajectory), &child, ValueBody::new("the answer"))
-            .expect("a non-narrowing crossing merges");
-        let crossing = merged_crossing(crossing);
+        let crossing = crossed(&e, &log, &child, "the answer");
         let whole = [log.clone(), crossing.clone()].concat();
         assert_eq!(e.validate_replay(&whole), Ok(()));
 
@@ -8905,7 +7958,6 @@ mod tests {
             registry: config,
             planner_cap: crate::registry::PlannerCap::default(),
             dialect: PolicyDialectVersion::new(1),
-            child_return: ReturnPolicy::Raw,
             profile: declaration,
         })
         .expect("an unconfined deployment opens");
@@ -9263,6 +8315,7 @@ mod tests {
                 &p.view(&traj()),
                 &malformed,
                 &CallStage::default(),
+                CallRole::Ordinary,
                 &parts.context(),
             )
         };
@@ -10259,7 +9312,6 @@ mod tests {
             registry: cfg,
             planner_cap: crate::registry::PlannerCap::default(),
             dialect: PolicyDialectVersion::new(1),
-            child_return: ReturnPolicy::Raw,
             profile: declaration,
         })
         .unwrap()
@@ -10524,7 +9576,7 @@ mod tests {
     }
 
     #[test]
-    fn a_fork_carries_the_deployments_child_return_binding() {
+    fn a_fork_records_the_return_policy_its_spawn_approved() {
         let cfg = RegistryConfig {
             annotators: vec![],
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
@@ -10545,42 +9597,27 @@ mod tests {
             }],
             audience: crate::audience::AudienceConfig::default(),
         };
-        let bound = ReturnPolicy::Sanitized(crate::names::SanitizerName::new("redactor"));
-        let e = Engine::open(DeploymentPolicy {
-            registry: cfg.clone(),
-            planner_cap: crate::registry::PlannerCap::default(),
-            dialect: PolicyDialectVersion::new(1),
-            child_return: bound.clone(),
-            profile: crate::profile::covering_declaration(&cfg),
-        })
-        .unwrap();
-        let view = e.view(&traj(), vec![opened(&e)], 1).unwrap();
-        let decision = e
-            .handle(
-                &view,
-                EngineEvent::Proposals(ProposalBatch {
-                    id: crate::transition::ProposalBatchId::new("b1"),
-                    trajectory: traj(),
-                    provider_results: Vec::new(),
-                    proposals: vec![raw(&call("spawn", json!({})))],
-                    spawn: Some(crate::transition::SpawnMark::at(0)),
-                    offer_nonce: nonce(),
-                    evidence: Vec::new(),
-                    audience: crate::audience::AudienceEvidence::default(),
-                }),
-            )
-            .expect("the marked spawn releases and prepares the fork");
-        let prepared = decision
-            .append
-            .expect("the release appends")
-            .facts()
+        let e = open_engine(cfg);
+        let child = TrajectoryId::new("child");
+        let log = vec![opened(&e)];
+        let policy = ReturnPolicy {
+            sanitizer: Some(ReturnSanitizer::Named(crate::names::SanitizerName::new("redactor"))),
+            ..floor_policy(&e, &log)
+        };
+        let forked = spawn_family_at(&e, &log, &child, policy.clone());
+        let prepared = forked
             .iter()
             .find_map(|fact| match fact {
                 Fact::ForkPrepared { return_policy, .. } => Some(return_policy.clone()),
                 _ => None,
             })
             .expect("the release prepares a fork");
-        assert_eq!(prepared, bound);
+        assert_eq!(prepared, policy);
+        assert_eq!(
+            e.return_policy_of(&viewing(&e, &[log.clone(), forked.clone()].concat()), &child),
+            Some(policy)
+        );
+        assert_eq!(e.validate_replay(&[log, forked].concat()), Ok(()));
     }
 
     #[test]
@@ -11266,7 +10303,8 @@ mod tests {
             "a refused spawn prepares no fork: {facts:?}"
         );
 
-        let released_spawn = e
+        let log = [log, facts].concat();
+        let quiet_pair = e
             .handle(
                 &viewing(&e, &log),
                 batch_on(
@@ -11278,10 +10316,49 @@ mod tests {
                 ),
             )
             .expect("the batch decides");
+        let (released, blocked) = answered(&quiet_pair);
+        assert_eq!(tool_names(released), ["quiet"]);
+        assert!(released[0].fork.is_none(), "the unmarked sibling prepares nothing");
+        assert_eq!(blocked_names(blocked), ["quiet"]);
+        assert!(
+            blocked[0].block.raw.requirement_gaps.is_empty(),
+            "the marked sibling waits only for its return declaration"
+        );
+        let facts = appended_facts(quiet_pair);
+        let (offer, _) = opened_offers(&facts)
+            .into_iter()
+            .find(|(_, plan)| plan.return_step() == Some(None))
+            .expect("the bare declaration is offered");
+        let log = [log, facts].concat();
+        let approved = e
+            .handle(
+                &viewing(&e, &log),
+                EngineEvent::ExecuteOffer(OfferExecution {
+                    trajectory: traj(),
+                    offer,
+                    outcome: OfferOutcome::Approved(Vec::new()),
+                    return_policy: Some(floor_policy(&e, &log)),
+                    offer_nonce: nonce(),
+                    audience: crate::audience::AudienceEvidence::default(),
+                }),
+            )
+            .expect("the declaration approves the marked quiet call");
+        let log = [log, appended_facts(approved)].concat();
+        let released_spawn = e
+            .handle(
+                &viewing(&e, &log),
+                batch_on(
+                    &traj(),
+                    "b3",
+                    Vec::new(),
+                    vec![raw(&call("quiet", json!({})))],
+                    Some(SpawnMark::at(0)),
+                ),
+            )
+            .expect("the batch decides");
         let (released, _) = answered(&released_spawn);
-        assert!(released[0].fork.is_none());
-        let fork = released[1].fork.clone().expect("the marked sibling prepared its fork");
-        assert_eq!(fork, ForkId::of(&released[1].dispatch));
+        let fork = released[0].fork.clone().expect("the marked call prepared its fork");
+        assert_eq!(fork, ForkId::of(&released[0].dispatch));
         let facts = appended_facts(released_spawn);
         assert_eq!(e.validate_replay(&[log, facts].concat()), Ok(()));
     }
@@ -12457,58 +11534,6 @@ mod tests {
         }
     }
 
-    fn pending_stage_of(decision: &EngineDecision) -> &PendingReturnStage {
-        match &decision.follow_up {
-            FollowUp::Child(ChildFollowUp::Pending(stage)) => stage,
-            other => panic!("expected a pending return stage, got {other:?}"),
-        }
-    }
-
-    fn with_fetched_page(e: &Engine, log: Vec<Fact>, child: &TrajectoryId) -> Vec<Fact> {
-        let fetch = call("fetch", json!({}));
-        let released = e
-            .handle(
-                &viewing(e, &log),
-                batch_on(child, "bf", Vec::new(), vec![raw(&fetch)], None),
-            )
-            .expect("the child's fetch releases");
-        let released = appended_facts(released);
-        let dispatch = released
-            .iter()
-            .find_map(|fact| match fact {
-                Fact::DispatchOpened {
-                    trajectory, dispatch, ..
-                } if trajectory == child => Some(dispatch.clone()),
-                _ => None,
-            })
-            .expect("the release opens the dispatch");
-        let opened = [log, released].concat();
-        let admitted = e
-            .handle(
-                &viewing(e, &opened),
-                EngineEvent::Outcome(ToolReport {
-                    dispatch,
-                    outcome: ToolOutcome::Success {
-                        body: OutcomeBody::Available(ValueBody::new("page")),
-                    },
-                    evidence: Vec::new(),
-                    offer_nonce: nonce(),
-                    audience: crate::audience::AudienceEvidence::default(),
-                }),
-            )
-            .expect("the open result admits");
-        [opened, appended_facts(admitted)].concat()
-    }
-
-    fn merged_crossing(crossing: crate::branch::RawCrossing) -> Vec<Fact> {
-        match crossing {
-            crate::branch::RawCrossing::Merged(facts) => facts,
-            crate::branch::RawCrossing::Narrows(narrowing) => {
-                panic!("expected a merged crossing, got {narrowing:?}")
-            }
-        }
-    }
-
     fn fork_in(log: &[Fact], child: &TrajectoryId) -> ForkId {
         log.iter()
             .find_map(|fact| match fact {
@@ -12532,1414 +11557,839 @@ mod tests {
         }
     }
 
-    fn return_offer(log: &[Fact], hop: bool) -> crate::value::OfferId {
-        log.iter()
-            .rev()
-            .find_map(|fact| match fact {
-                Fact::OfferOpened {
-                    offer,
-                    plan,
-                    subject: crate::basis::SubjectKey::Return(_),
-                    ..
-                } if plan.hop().is_some() == hop => Some(*offer),
-                _ => None,
-            })
-            .expect("the stage offers the plan")
-    }
-
-    fn evidenced_report(log: &[Fact], child: &TrajectoryId, body: &ValueBody, evidence: Vec<Evidence>) -> EngineEvent {
-        EngineEvent::ChildReturn(ChildReport {
-            child: child.clone(),
-            fork: fork_in(log, child),
-            submission: ChildSubmission::Value { body: body.clone() },
-            evidence,
+    fn spawn_batch(id: &str, spawn: Option<crate::transition::SpawnMark>) -> EngineEvent {
+        EngineEvent::Proposals(ProposalBatch {
+            id: crate::transition::ProposalBatchId::new(id),
+            trajectory: traj(),
+            provider_results: Vec::new(),
+            proposals: vec![raw(&call("spawn", json!({})))],
+            spawn,
             offer_nonce: nonce(),
+            evidence: Vec::new(),
             audience: crate::audience::AudienceEvidence::default(),
         })
     }
 
-    #[test]
-    fn a_narrowing_fork_return_transfers_custody_and_opens_the_parents_stage() {
-        let e = engine(vec![plain_tool("spawn"), suspicious_read(), suspicious_internal_read()]);
-        let child = TrajectoryId::new("child");
-        let internal = Audience::restricted([ReaderId::new("insider")]);
-        let mut log = spawn_family(&e, None, &child);
-        reads(&e, &mut log, &child, "read_suspicious_internal");
-        let body = ValueBody::new("what I found");
-
-        let decision = e
-            .handle(
-                &viewing(&e, &log),
-                child_report(&log, &child, ChildSubmission::Value { body: body.clone() }),
-            )
-            .expect("a narrowing fork submission transfers custody");
-        let stage = pending_stage_of(&decision).clone();
-        assert_eq!(
-            stage.residual,
-            Narrowing {
-                from: established(TRUSTED, Audience::public()),
-                to: established(SUSPICIOUS, internal.clone()),
-            }
-        );
-        assert_eq!(stage.offers.len(), 1);
-
-        let appended = appended_facts(decision);
-        let ended = [log.clone(), appended.clone()].concat();
-        assert_eq!(e.validate_replay(&ended), Ok(()));
-        let submitted = ended
+    fn return_steps(facts: &[Fact]) -> Vec<Option<SanitizerName>> {
+        let mut steps: Vec<Option<SanitizerName>> = opened_offers(facts)
             .iter()
-            .filter_map(|fact| match fact {
-                Fact::ReturnSubmitted {
-                    trajectory,
-                    fork,
-                    parent,
-                    digest,
-                    body: stored,
-                    policy,
-                    ..
-                } => Some((trajectory, fork, parent, digest, stored, policy)),
-                _ => None,
+            .map(|(_, plan)| {
+                plan.return_step()
+                    .expect("a marked spawn's plan ends in a return declaration")
+                    .cloned()
             })
-            .collect::<Vec<_>>();
-        let [(trajectory, fork, parent, digest, stored, policy)] = submitted.as_slice() else {
-            panic!("the raw payload is persisted exactly once");
-        };
-        assert_eq!((*trajectory, *parent), (&child, &traj()));
-        assert_eq!(*fork, &fork_in(&log, &child));
-        assert_eq!(*digest, &RawResultDigest::of(body.as_str().as_bytes()));
-        assert_eq!(*stored, &body);
-        assert_eq!(*policy, &ReturnPolicy::Raw);
-        assert!(appended.iter().any(|fact| matches!(fact, Fact::OfferOpened { .. })));
-        assert!(
-            appended
-                .iter()
-                .all(|fact| !matches!(fact, Fact::OfferOpened { trajectory, .. } if trajectory != &traj()))
-        );
-
-        let after = Projection::build(&ended, ended.len() as u64);
-        let parent = traj();
-        let views = after.view(&parent);
-        assert!(views.has_ended(&child));
-        assert!(views.child_return(&ChildReturnId::new(child.clone(), 0)).is_none());
-        assert_eq!(views.current_label(), established(TRUSTED, Audience::public()));
-
-        let again = e
-            .handle(
-                &viewing(&e, &ended),
-                child_report(&ended, &child, ChildSubmission::Value { body: body.clone() }),
-            )
-            .expect("the repeat answers from the record");
-        assert_eq!(again.append, None);
-        assert_eq!(pending_stage_of(&again).offers, stage.offers);
-
-        assert_eq!(
-            e.handle(
-                &viewing(&e, &ended),
-                child_report(
-                    &ended,
-                    &child,
-                    ChildSubmission::Value {
-                        body: ValueBody::new("another answer"),
-                    },
-                ),
-            ),
-            Err(TransitionError::BranchEnded)
-        );
-        assert_eq!(
-            e.handle(
-                &viewing(&e, &ended),
-                child_report(&ended, &child, ChildSubmission::Void)
-            ),
-            Err(TransitionError::BranchEnded)
-        );
+            .collect();
+        steps.sort();
+        steps
     }
 
-    #[test]
-    fn the_parents_acceptance_crosses_the_submitted_return() {
-        let e = engine(vec![plain_tool("spawn"), suspicious_read(), suspicious_internal_read()]);
-        let child = TrajectoryId::new("child");
-        let internal = Audience::restricted([ReaderId::new("insider")]);
-        let mut log = spawn_family(&e, None, &child);
-        reads(&e, &mut log, &child, "read_suspicious_internal");
-        let body = ValueBody::new("what I found");
-        let decision = e
-            .handle(
-                &viewing(&e, &log),
-                child_report(&log, &child, ChildSubmission::Value { body: body.clone() }),
-            )
-            .expect("the submission transfers custody");
-        let stage = pending_stage_of(&decision).clone();
-        let ended = [log, appended_facts(decision)].concat();
-
-        let accept = return_offer(&ended, false);
-        let crossed = execute_offer(&e, &ended, accept, OfferOutcome::Approved(vec![]))
-            .expect("the parent accepts the exact residual");
-        assert!(matches!(
-            offer_answer(&crossed),
-            OfferFollowUp::Admitted { value } if value == &body
-        ));
-        let crossing = appended_facts(crossed);
-        assert!(crossing.iter().any(|fact| matches!(
-            fact,
-            Fact::ChildReturn {
-                derivation: ReturnDerivation::Raw,
-                value,
-                ..
-            } if value.body == body && value.label == known(SUSPICIOUS, internal.clone())
-        )));
-        assert!(crossing.iter().any(|fact| matches!(
-            fact,
-            Fact::ChildReturnAcceptance { narrowing, .. } if narrowing == &stage.residual
-        )));
-        let merged = [ended, crossing].concat();
-        assert_eq!(e.validate_replay(&merged), Ok(()));
-        let views = Projection::build(&merged, merged.len() as u64);
-        assert_eq!(views.view(&traj()).current_label(), established(SUSPICIOUS, internal));
-
-        let repeat = execute_offer(&e, &merged, accept, OfferOutcome::Approved(vec![])).expect("the repeat answers");
-        assert_eq!(repeat.append, None);
-        assert!(matches!(
-            offer_answer(&repeat),
-            OfferFollowUp::Admitted { value } if value == &body
-        ));
-        assert_eq!(
-            execute_offer(
-                &e,
-                &merged,
-                accept,
-                OfferOutcome::Approved(vec![stray_evidence(accept)])
-            )
-            .map(|_| ()),
-            Err(TransitionError::PlanOutcomeMismatch),
-            "an acceptance carrying evidence is refused after the offer ends, as it is before"
-        );
-        let again = e
-            .handle(
-                &viewing(&e, &merged),
-                child_report(&merged, &child, ChildSubmission::Value { body: body.clone() }),
-            )
-            .expect("the repeat answers");
-        assert_eq!(again.append, None);
-        assert_eq!(
-            again.follow_up,
-            FollowUp::Child(ChildFollowUp::Merged { admitted: body })
-        );
+    fn named(sanitizer: &str) -> Option<ReturnSanitizer> {
+        Some(ReturnSanitizer::Named(SanitizerName::new(sanitizer)))
     }
 
-    fn return_hops(log: &[Fact]) -> Vec<SanitizerName> {
+    fn attest_shape() -> crate::shape::ReturnShape {
+        crate::shape::ReturnShape::compile(&json!({
+            "type": "object",
+            "properties": {
+                "verdict": { "type": "string", "enum": ["allow", "deny"] },
+                "confidence": { "type": "integer", "minimum": 0, "maximum": 100 },
+            },
+            "required": ["verdict", "confidence"],
+        }))
+        .expect("the fixture shape compiles")
+    }
+
+    fn report_with(log: &[Fact], child: &TrajectoryId, body: &str, evidence: Vec<Evidence>) -> EngineEvent {
+        EngineEvent::ChildReturn(ChildReport {
+            child: child.clone(),
+            fork: fork_in(log, child),
+            submission: ChildSubmission::Value {
+                body: ValueBody::new(body),
+            },
+            evidence,
+            audience: crate::audience::AudienceEvidence::default(),
+        })
+    }
+
+    fn derived_by(sanitizer: &str, source: &str, derived: &str) -> Vec<Evidence> {
+        vec![Evidence::Sanitizer {
+            sanitizer: SanitizerName::new(sanitizer),
+            source: RawResultDigest::of(source.as_bytes()),
+            derived: ValueBody::new(derived),
+        }]
+    }
+
+    fn child_returns(log: &[Fact], child: &TrajectoryId) -> Vec<LabeledValue> {
         log.iter()
             .filter_map(|fact| match fact {
-                Fact::OfferOpened {
-                    plan,
-                    subject: crate::basis::SubjectKey::Return(_),
-                    ..
-                } => plan.hop().cloned(),
+                Fact::ChildReturn { id, value, .. } if id.child() == child => Some(value.clone()),
                 _ => None,
             })
             .collect()
     }
 
     #[test]
-    fn a_return_stage_offers_only_the_output_sanitizers_that_help() {
-        let internal = Audience::restricted([ReaderId::new("insider")]);
-        let input_only = crate::authority::Sanitizer {
-            name: SanitizerName::new("input-declassify"),
-            on: crate::authority::SanitizerPoints {
-                input: true,
-                output: false,
-            },
-            transition: crate::authority::DeclaredTransition::Audience {
-                from_includes: DeclaredAudience::literal(internal.clone()),
-                to: DeclaredAudience::literal(Audience::public()),
-            },
-            scope: crate::authority::Scope::default(),
-            hint: None,
-        };
-        let sideways = crate::authority::Sanitizer {
-            name: SanitizerName::new("to-finance"),
-            on: crate::authority::SanitizerPoints {
-                input: false,
-                output: true,
-            },
-            transition: crate::authority::DeclaredTransition::Audience {
-                from_includes: DeclaredAudience::literal(internal.clone()),
-                to: DeclaredAudience::restricted([ReaderId::new("finance")]),
-            },
-            scope: crate::authority::Scope::default(),
-            hint: None,
-        };
-        let e = open_engine(returning_registry(vec![
-            lifting_sanitizer("redactor"),
-            input_only,
-            sideways,
-        ]));
-        let child = TrajectoryId::new("child");
-        let mut log = spawn_family(&e, None, &child);
-        reads(&e, &mut log, &child, "read_suspicious_internal");
-        let decision = e
-            .handle(
-                &viewing(&e, &log),
-                child_report(
-                    &log,
-                    &child,
-                    ChildSubmission::Value {
-                        body: ValueBody::new("what I found"),
-                    },
-                ),
-            )
-            .expect("the submission transfers custody");
-        assert_eq!(
-            pending_stage_of(&decision).offers.len(),
-            2,
-            "acceptance and the one hop that helps"
-        );
-        assert_eq!(
-            return_hops(&appended_facts(decision)),
-            vec![SanitizerName::new("redactor")]
-        );
-    }
-
-    #[test]
-    fn an_unconfined_child_return_stages_acceptance_alone() {
-        let cfg = returning_registry(vec![lifting_sanitizer("redactor")]);
-        let mut declaration = crate::profile::covering_declaration(&cfg);
-        declaration.confined_child_return = false;
-        let e = Engine::open(DeploymentPolicy {
-            registry: cfg,
-            planner_cap: crate::registry::PlannerCap::default(),
-            dialect: PolicyDialectVersion::new(1),
-            child_return: ReturnPolicy::Raw,
-            profile: declaration,
-        })
-        .expect("an unconfined child return opens");
-        let child = TrajectoryId::new("child");
-        let mut log = spawn_family(&e, None, &child);
-        reads(&e, &mut log, &child, "read_suspicious_internal");
-        let decision = e
-            .handle(
-                &viewing(&e, &log),
-                child_report(
-                    &log,
-                    &child,
-                    ChildSubmission::Value {
-                        body: ValueBody::new("what I found"),
-                    },
-                ),
-            )
-            .expect("the submission transfers custody");
-        assert_eq!(pending_stage_of(&decision).offers.len(), 1);
-        assert!(return_hops(&appended_facts(decision)).is_empty());
-    }
-
-    #[test]
-    fn a_merge_that_restricts_the_parent_replays_only_with_its_acceptance() {
-        let e = engine(vec![plain_tool("spawn"), suspicious_read(), suspicious_internal_read()]);
-        let child = TrajectoryId::new("child");
-        let mut log = spawn_family(&e, None, &child);
-        reads(&e, &mut log, &child, "read_suspicious_internal");
-        let decision = e
-            .handle(
-                &viewing(&e, &log),
-                child_report(
-                    &log,
-                    &child,
-                    ChildSubmission::Value {
-                        body: ValueBody::new("what I found"),
-                    },
-                ),
-            )
-            .expect("the submission transfers custody");
-        let ended = [log, appended_facts(decision)].concat();
-        let crossing = appended_facts(
-            execute_offer(&e, &ended, return_offer(&ended, false), OfferOutcome::Approved(vec![]))
-                .expect("the parent accepts the exact residual"),
-        );
-        assert_eq!(e.validate_replay(&[ended.clone(), crossing.clone()].concat()), Ok(()));
-
-        let stripped: Vec<Fact> = crossing
-            .into_iter()
-            .filter(|fact| !matches!(fact, Fact::ChildReturnAcceptance { .. }))
-            .collect();
-        assert_eq!(
-            e.validate_replay(&[ended, stripped].concat()),
-            Err(TransitionRefusal::ReturnNarrowsParent)
-        );
-    }
-
-    #[test]
-    fn an_inapplicable_sanitizer_charges_the_return_no_resolution() {
-        let mut scoped = lifting_sanitizer("scoped-lifter");
+    fn a_marked_spawn_blocks_with_one_return_declaration_per_untagged_output_sanitizer() {
+        let mut scoped = lifting_sanitizer("scoped");
         scoped.scope = crate::authority::Scope {
-            tags: vec![crate::names::TagName::new("web")],
+            tags: vec![crate::names::TagName::new("outbound")],
         };
-        let mut cfg = returning_registry(vec![scoped]);
-        // A tool the sanitizer's scope reaches, so the sanitizer is one a result could
-        // meet. A child return originates from no tool, which is what leaves it unreached.
-        cfg.tools
-            .push(crate::contract::ToolDeclaration::Declared(ToolAnnotation {
-                tags: vec![crate::names::TagName::new("web")],
-                ..open_tool("browse")
-            }));
+        let mut tagged = open_tool("post");
+        tagged.tags = vec![crate::names::TagName::new("outbound")];
+        let mut cfg = returning_registry(vec![lifting_sanitizer("redactor"), scoped]);
+        cfg.tools.push(crate::contract::ToolDeclaration::Declared(tagged));
         let e = open_engine(cfg);
-        let child = TrajectoryId::new("child");
-        let mut log = spawn_family(&e, None, &child);
-        reads(&e, &mut log, &child, "read_suspicious_internal");
-        let log = with_fetched_page(&e, log, &child);
-        let body = ValueBody::new("what I found");
-        let decision = e
+        let log = vec![opened(&e)];
+
+        let blocked = e
             .handle(
                 &viewing(&e, &log),
-                child_report(&log, &child, ChildSubmission::Value { body: body.clone() }),
+                spawn_batch("marked", Some(crate::transition::SpawnMark::at(0))),
             )
-            .expect("the submission transfers custody");
-        let stage = pending_stage_of(&decision);
-        assert_eq!(stage.offers.len(), 1, "acceptance alone — no hop, no resolution");
-        let appended = appended_facts(decision);
-        assert!(appended.iter().any(|fact| matches!(fact, Fact::ReturnSubmitted { .. })));
-        assert_eq!(e.validate_replay(&[log, appended].concat()), Ok(()));
-    }
-
-    #[test]
-    fn a_definitively_inapplicable_sanitizer_charges_the_return_no_resolution() {
-        let unreachable_from = crate::authority::Sanitizer {
-            name: SanitizerName::new("external-scrub"),
-            on: crate::authority::SanitizerPoints {
-                input: false,
-                output: true,
-            },
-            transition: crate::authority::DeclaredTransition::Audience {
-                from_includes: DeclaredAudience::restricted([ReaderId::new("external")]),
-                to: DeclaredAudience::literal(Audience::public()),
-            },
-            scope: crate::authority::Scope::default(),
-            hint: None,
+            .expect("a marked spawn blocks");
+        let ([], [block]) = answered(&blocked) else {
+            panic!("a marked spawn blocks alone, got {:?}", answered(&blocked))
         };
-        let e = open_engine(returning_registry(vec![unreachable_from]));
-        let child = TrajectoryId::new("child");
-        let mut log = spawn_family(&e, None, &child);
-        reads(&e, &mut log, &child, "read_suspicious_internal");
-        let log = with_fetched_page(&e, log, &child);
-        let body = ValueBody::new("what I found");
-        let decision = e
-            .handle(
-                &viewing(&e, &log),
-                child_report(&log, &child, ChildSubmission::Value { body: body.clone() }),
-            )
-            .expect("the submission transfers custody");
-        let stage = pending_stage_of(&decision);
-        assert_eq!(
-            stage.offers.len(),
-            1,
-            "acceptance alone — the failed `from` is not resolvable away"
+        assert!(
+            block.block.raw.requirement_gaps.is_empty() && block.block.raw.narrowing.is_none(),
+            "nothing but the declaration stands between the spawn and its release"
         );
-        let appended = appended_facts(decision);
-        assert!(appended.iter().any(|fact| matches!(fact, Fact::ReturnSubmitted { .. })));
-        assert_eq!(e.validate_replay(&[log, appended].concat()), Ok(()));
+        let facts = appended_facts(blocked);
+        assert_eq!(
+            return_steps(&facts),
+            vec![None, Some(SanitizerName::new("redactor"))],
+            "the bare floor and each untagged output sanitizer; a scoped one never reaches a return"
+        );
+        assert_eq!(e.validate_replay(&[log.clone(), facts].concat()), Ok(()));
+
+        let released = e
+            .handle(&viewing(&e, &log), spawn_batch("unmarked", None))
+            .expect("an unmarked spawn is an ordinary call");
+        assert!(matches!(answered(&released), ([release], []) if release.fork.is_none()));
     }
 
     #[test]
-    fn an_acceptance_crosses_after_the_parents_own_fold_moved() {
-        let e = engine(vec![plain_tool("spawn"), suspicious_read(), suspicious_internal_read()]);
-        let child = TrajectoryId::new("child");
+    fn a_return_declaration_is_held_to_its_plan_and_to_the_parents_label() {
         let internal = Audience::restricted([ReaderId::new("insider")]);
-        let mut log = spawn_family(&e, None, &child);
-        reads(&e, &mut log, &child, "read_suspicious_internal");
-        let body = ValueBody::new("what I found");
-        let decision = e
+        let e = open_engine_at(
+            returning_registry(vec![lifting_sanitizer("redactor")]),
+            known(SUSPICIOUS, internal.clone()),
+        );
+        let log = vec![opened(&e)];
+        let blocked = e
             .handle(
                 &viewing(&e, &log),
-                child_report(&log, &child, ChildSubmission::Value { body: body.clone() }),
+                spawn_batch("marked", Some(crate::transition::SpawnMark::at(0))),
             )
-            .expect("the submission transfers custody");
-        let stage = pending_stage_of(&decision).clone();
-        let mut ended = [log, appended_facts(decision)].concat();
-        reads(&e, &mut ended, &traj(), "read_suspicious");
-        let stale = return_offer(&ended, false);
-        assert_eq!(
-            execute_offer(&e, &ended, stale, OfferOutcome::Approved(vec![])),
-            Err(TransitionError::StaleOffer)
-        );
-        let redriven = e
-            .handle(
-                &viewing(&e, &ended),
-                EngineEvent::ChildReturn(ChildReport {
-                    child: child.clone(),
-                    fork: fork_in(&ended, &child),
-                    submission: ChildSubmission::Value { body: body.clone() },
-                    evidence: Vec::new(),
-                    offer_nonce: crate::value::OfferNonce::new([9u8; 32]),
+            .expect("a marked spawn blocks");
+        let log = [log, appended_facts(blocked)].concat();
+        let offer_for = |sanitizer: Option<&SanitizerName>| {
+            opened_offers(&log)
+                .into_iter()
+                .find_map(|(offer, plan)| (plan.return_step() == Some(sanitizer)).then_some(offer))
+                .expect("the declaration is offered")
+        };
+        let execute = |offer, return_policy| {
+            e.handle(
+                &viewing(&e, &log),
+                EngineEvent::ExecuteOffer(OfferExecution {
+                    trajectory: traj(),
+                    offer,
+                    outcome: OfferOutcome::Approved(Vec::new()),
+                    return_policy,
+                    offer_nonce: nonce(),
                     audience: crate::audience::AudienceEvidence::default(),
                 }),
             )
-            .expect("the re-drive plans the stage again under fresh entropy");
-        let restage = pending_stage_of(&redriven).clone();
-        assert_eq!(restage.residual, stage.residual);
-        assert_ne!(restage.offers[0].0, stale);
-        let ended = [ended, appended_facts(redriven)].concat();
-
-        let crossed = execute_offer(&e, &ended, restage.offers[0].0, OfferOutcome::Approved(vec![]))
-            .expect("the acceptance crosses the pinned residual over the moved fold");
-        let crossing = appended_facts(crossed);
-        assert!(crossing.iter().any(|fact| matches!(
-            fact,
-            Fact::ChildReturnAcceptance { narrowing, .. } if narrowing == &stage.residual
-        )));
-        let merged = [ended, crossing].concat();
-        assert_eq!(e.validate_replay(&merged), Ok(()));
-        let views = Projection::build(&merged, merged.len() as u64);
-        assert_eq!(views.view(&traj()).current_label(), established(SUSPICIOUS, internal));
-    }
-
-    #[test]
-    fn a_staged_sanitizer_hop_replaces_the_candidate_and_replans() {
-        let e = open_engine(returning_registry(vec![lifting_sanitizer("redactor")]));
-        let child = TrajectoryId::new("child");
-        let internal = Audience::restricted([ReaderId::new("insider")]);
-        let mut log = spawn_family(&e, None, &child);
-        reads(&e, &mut log, &child, "read_suspicious_internal");
-        let body = ValueBody::new("what I found");
-        let decision = e
-            .handle(
-                &viewing(&e, &log),
-                child_report(&log, &child, ChildSubmission::Value { body: body.clone() }),
-            )
-            .expect("the submission transfers custody");
-        assert_eq!(pending_stage_of(&decision).offers.len(), 2);
-        let ended = [log, appended_facts(decision)].concat();
-        let hop = return_offer(&ended, true);
-        let raw_digest = RawResultDigest::of(body.as_str().as_bytes());
-
-        assert_eq!(
-            execute_offer(
-                &e,
-                &ended,
-                hop,
-                OfferOutcome::Derived(Evidence::Sanitizer {
-                    sanitizer: SanitizerName::new("redactor"),
-                    source: RawResultDigest::of(b"other bytes"),
-                    derived: ValueBody::new("clean"),
-                }),
-            ),
-            Err(TransitionError::EvidenceMismatch)
-        );
-
-        let clean = ValueBody::new("clean");
-        let hopped = execute_offer(
-            &e,
-            &ended,
-            hop,
-            OfferOutcome::Derived(Evidence::Sanitizer {
-                sanitizer: SanitizerName::new("redactor"),
-                source: raw_digest,
-                derived: clean.clone(),
-            }),
-        )
-        .expect("the hop lands the successor candidate");
-        let restaged = match offer_answer(&hopped) {
-            OfferFollowUp::ReturnStaged(stage) => (**stage).clone(),
-            other => panic!("a still-narrowing successor re-stages, got {other:?}"),
         };
-        assert_eq!(restaged.label, known(TRUSTED, internal.clone()));
-        assert_eq!(
-            restaged.residual,
-            Narrowing {
-                from: established(TRUSTED, Audience::public()),
-                to: established(TRUSTED, internal.clone()),
-            }
-        );
-        assert_eq!(restaged.offers.len(), 1);
-        let staged_log = [ended, appended_facts(hopped)].concat();
-        assert_eq!(e.validate_replay(&staged_log), Ok(()));
+        let bare = offer_for(None);
+        let redacting = offer_for(Some(&SanitizerName::new("redactor")));
+        let floor = known(SUSPICIOUS, internal.clone());
 
-        let mut reforged = staged_log.clone();
-        for fact in &mut reforged {
-            if let Fact::CandidateDerived {
-                derived: DerivedCandidate::Return { from, .. },
-                ..
-            } = fact
-            {
-                *from = ConfinedFrom::Bound;
-            }
-        }
-        assert_eq!(
-            e.validate_replay(&reforged),
-            Err(TransitionRefusal::UndischargedAcceptance)
-        );
-
-        let accepted = execute_offer(&e, &staged_log, restaged.offers[0].0, OfferOutcome::Approved(vec![]))
-            .expect("the acceptance crosses the derivation");
         assert!(matches!(
-            offer_answer(&accepted),
-            OfferFollowUp::Admitted { value } if value == &clean
+            execute(bare, None),
+            Err(crate::transition::TransitionError::PlanOutcomeMismatch)
         ));
-        let crossing = appended_facts(accepted);
-        assert!(crossing.iter().any(|fact| matches!(
-            fact,
-            Fact::ChildReturn {
-                derivation: ReturnDerivation::Sanitized { sanitizer, raw_digest: recorded, .. },
-                value,
-                ..
-            } if sanitizer.as_str() == "redactor" && recorded == &raw_digest && value.body == clean
-        )));
-        let merged = [staged_log, crossing].concat();
-        assert_eq!(e.validate_replay(&merged), Ok(()));
-        assert_eq!(
-            Projection::build(&merged, merged.len() as u64)
-                .view(&traj())
-                .current_label(),
-            established(TRUSTED, internal)
+        assert!(matches!(
+            execute(
+                bare,
+                Some(ReturnPolicy {
+                    floor: floor.clone(),
+                    sanitizer: named("redactor"),
+                })
+            ),
+            Err(crate::transition::TransitionError::ReturnPolicy(
+                plan::ReturnPolicyRefusal::SanitizerMismatch
+            ))
+        ));
+        assert!(matches!(
+            execute(
+                redacting,
+                Some(ReturnPolicy {
+                    floor: floor.clone(),
+                    sanitizer: None,
+                })
+            ),
+            Err(crate::transition::TransitionError::ReturnPolicy(
+                plan::ReturnPolicyRefusal::SanitizerMismatch
+            ))
+        ));
+        assert!(
+            matches!(
+                execute(
+                    bare,
+                    Some(ReturnPolicy {
+                        floor: known(TRUSTED, internal.clone()),
+                        sanitizer: None,
+                    })
+                ),
+                Err(crate::transition::TransitionError::ReturnPolicy(
+                    plan::ReturnPolicyRefusal::FloorAboveLabel
+                ))
+            ),
+            "a child starts at its parent's label and cannot rise to a floor above it"
         );
-    }
-
-    #[test]
-    fn a_hop_that_settles_the_residual_crosses_in_its_own_batch() {
-        let e = open_engine(returning_registry(vec![lifting_sanitizer("redactor")]));
-        let child = TrajectoryId::new("child");
-        let mut log = spawn_family(&e, None, &child);
-        reads(&e, &mut log, &child, "read_suspicious");
-        let body = ValueBody::new("what I found");
-        let decision = e
-            .handle(
-                &viewing(&e, &log),
-                child_report(&log, &child, ChildSubmission::Value { body: body.clone() }),
-            )
-            .expect("the submission transfers custody");
-        let ended = [log, appended_facts(decision)].concat();
-
-        let clean = ValueBody::new("clean");
-        let hopped = execute_offer(
-            &e,
-            &ended,
-            return_offer(&ended, true),
-            OfferOutcome::Derived(Evidence::Sanitizer {
-                sanitizer: SanitizerName::new("redactor"),
-                source: RawResultDigest::of(body.as_str().as_bytes()),
-                derived: clean.clone(),
+        assert!(
+            matches!(
+                execute(
+                    bare,
+                    Some(ReturnPolicy {
+                        floor: known(SUSPICIOUS, Audience::public()),
+                        sanitizer: None,
+                    })
+                ),
+                Err(crate::transition::TransitionError::ReturnPolicy(
+                    plan::ReturnPolicyRefusal::FloorAboveLabel
+                ))
+            ),
+            "the audience dimension is held to the parent's label too"
+        );
+        let approved = execute(
+            bare,
+            Some(ReturnPolicy {
+                floor: known(SUSPICIOUS, internal),
+                sanitizer: None,
             }),
         )
-        .expect("the settling hop crosses atomically");
+        .expect("a floor at the parent's label approves the spawn");
         assert!(matches!(
-            offer_answer(&hopped),
-            OfferFollowUp::Admitted { value } if value == &clean
+            approved.follow_up,
+            FollowUp::Offer(OfferFollowUp::Approved { .. })
         ));
-        let crossing = appended_facts(hopped);
-        assert!(
-            crossing
-                .iter()
-                .all(|fact| !matches!(fact, Fact::ChildReturnAcceptance { .. }))
-        );
-        assert!(crossing.iter().any(|fact| matches!(
-            fact,
-            Fact::Boundary {
-                kind: crate::fact::BoundaryKind::Merge { .. },
-                ..
-            }
-        )));
-        assert_eq!(e.validate_replay(&[ended, crossing].concat()), Ok(()));
+        let log = [log, appended_facts(approved)].concat();
+        assert_eq!(e.validate_replay(&log), Ok(()));
     }
 
     #[test]
-    fn a_mandatory_binding_holds_custody_and_its_first_derivation_crosses() {
-        let quarantine = ReturnPolicy::Sanitized(SanitizerName::new("quarantine"));
-        let e = open_engine_returning(returning_registry(vec![lifting_sanitizer("quarantine")]), quarantine);
-        let child = TrajectoryId::new("child");
-        let mut log = spawn_family(&e, None, &child);
-        reads(&e, &mut log, &child, "read_suspicious");
-        let body = ValueBody::new("what I found");
-        let raw_digest = RawResultDigest::of(body.as_str().as_bytes());
-
-        let decision = e
+    fn an_approval_declaring_a_return_policy_spends_only_at_the_marked_spawn() {
+        let e = open_engine(returning_registry(vec![]));
+        let log = vec![opened(&e)];
+        let blocked = e
             .handle(
                 &viewing(&e, &log),
-                child_report(&log, &child, ChildSubmission::Value { body: body.clone() }),
+                spawn_batch("marked", Some(crate::transition::SpawnMark::at(0))),
             )
-            .expect("an applicable submission transfers custody");
-        let request = FollowUp::Child(ChildFollowUp::Resolve(EvidenceRequest::Sanitizer {
-            sanitizer: SanitizerName::new("quarantine"),
-            source: raw_digest,
-            body: body.clone(),
-        }));
-        assert_eq!(decision.follow_up, request);
-        let ended = [log, appended_facts(decision)].concat();
-        assert_eq!(e.validate_replay(&ended), Ok(()));
-        assert!(ended.iter().any(|fact| matches!(
-            fact,
-            Fact::ReturnSubmitted { policy, .. } if policy == &ReturnPolicy::Sanitized(SanitizerName::new("quarantine"))
-        )));
+            .expect("a marked spawn blocks");
+        let log = [log, appended_facts(blocked)].concat();
+        let (offer, _) = opened_offers(&log)
+            .into_iter()
+            .next()
+            .expect("the bare declaration is offered");
+        let approved = e
+            .handle(
+                &viewing(&e, &log),
+                EngineEvent::ExecuteOffer(OfferExecution {
+                    trajectory: traj(),
+                    offer,
+                    outcome: OfferOutcome::Approved(Vec::new()),
+                    return_policy: Some(floor_policy(&e, &log)),
+                    offer_nonce: nonce(),
+                    audience: crate::audience::AudienceEvidence::default(),
+                }),
+            )
+            .expect("the declaration approves");
+        let log = [log, appended_facts(approved)].concat();
+
+        let unmarked = e
+            .handle(&viewing(&e, &log), spawn_batch("unmarked", None))
+            .expect("an ordinary spawn releases on its own");
+        assert!(matches!(answered(&unmarked), ([release], []) if release.fork.is_none()));
+        let facts = appended_facts(unmarked);
         assert!(
-            Projection::build(&ended, ended.len() as u64)
-                .view(&traj())
-                .has_ended(&child)
+            !facts.iter().any(|fact| matches!(fact, Fact::ForkPrepared { .. })),
+            "an ordinary release prepares no fork"
+        );
+        let log = [log, facts].concat();
+
+        let marked = e
+            .handle(
+                &viewing(&e, &log),
+                spawn_batch("marked-again", Some(crate::transition::SpawnMark::at(0))),
+            )
+            .expect("the approval still stands for the marked spawn");
+        assert!(matches!(answered(&marked), ([release], []) if release.fork.is_some()));
+        let log = [log, appended_facts(marked)].concat();
+        assert_eq!(e.validate_replay(&log), Ok(()));
+
+        let again = e
+            .handle(
+                &viewing(&e, &log),
+                spawn_batch("marked-spent", Some(crate::transition::SpawnMark::at(0))),
+            )
+            .expect("a spent approval leaves the next marked spawn blocked");
+        assert!(matches!(answered(&again), ([], [_])));
+    }
+
+    #[test]
+    fn the_floor_removes_acceptances_below_it_from_the_childs_menu() {
+        let e = open_engine(returning_registry(vec![lifting_sanitizer("redactor")]));
+        let child = TrajectoryId::new("child");
+        let log = spawn_family(&e, &child);
+        let read = call("read_suspicious", json!({ "who": "someone" }));
+        let blocked = e
+            .handle(
+                &viewing(&e, &log),
+                batch_on(&child, "read", Vec::new(), vec![raw(&read)], None),
+            )
+            .expect("a narrowing read blocks");
+        let ([], [block]) = answered(&blocked) else {
+            panic!("the read blocks, got {:?}", answered(&blocked))
+        };
+        assert!(
+            block
+                .block
+                .plans
+                .iter()
+                .all(|plan| plan.executable().is_none_or(|plan| plan.narrowing().is_none())),
+            "under a floor at the parent's rank no plan accepts the drop to suspicious"
         );
 
-        let retry = e
+        // Under a sanitizer that raises trust, the trust dimension is unbound: the child may
+        // descend there, because the return climbs back through the sanitizer.
+        let parent = vec![opened(&e)];
+        let lifted = ReturnPolicy {
+            sanitizer: named("redactor"),
+            ..floor_policy(&e, &parent)
+        };
+        let log = [parent.clone(), spawn_family_at(&e, &parent, &child, lifted)].concat();
+        let blocked = e
             .handle(
-                &viewing(&e, &ended),
-                child_report(&ended, &child, ChildSubmission::Value { body: body.clone() }),
+                &viewing(&e, &log),
+                batch_on(&child, "read", Vec::new(), vec![raw(&read)], None),
             )
-            .expect("the handoff stays available");
-        assert_eq!(retry.append, None);
-        assert_eq!(retry.follow_up, request);
+            .expect("a narrowing read blocks");
+        let ([], [block]) = answered(&blocked) else {
+            panic!("the read blocks, got {:?}", answered(&blocked))
+        };
+        assert!(
+            block
+                .block
+                .plans
+                .iter()
+                .filter_map(crate::plan::RemedyPlan::executable)
+                .any(|plan| plan.narrowing().is_some() && plan.sanitizer().is_none()),
+            "the acceptance is offered again"
+        );
+        let internal = call("read_internal", json!({ "who": "someone" }));
+        let blocked = e
+            .handle(
+                &viewing(&e, &log),
+                batch_on(&child, "read-internal", Vec::new(), vec![raw(&internal)], None),
+            )
+            .expect("a narrowing read blocks");
+        let ([], [block]) = answered(&blocked) else {
+            panic!("the read blocks, got {:?}", answered(&blocked))
+        };
+        assert!(
+            block
+                .block
+                .plans
+                .iter()
+                .all(|plan| plan.executable().is_none_or(|plan| plan.narrowing().is_none())),
+            "the audience dimension stays bound: no plan accepts the drop to internal"
+        );
+    }
 
-        let clean = ValueBody::new("clean");
-        let derived = e
-            .handle(
-                &viewing(&e, &ended),
-                evidenced_report(
-                    &ended,
-                    &child,
-                    &body,
-                    vec![Evidence::Sanitizer {
-                        sanitizer: SanitizerName::new("quarantine"),
-                        source: raw_digest,
-                        derived: clean.clone(),
-                    }],
-                ),
-            )
-            .expect("the first valid derivation crosses");
+    #[test]
+    fn a_raw_return_crosses_at_the_fold_and_the_child_may_return_again() {
+        let e = open_engine(returning_registry(vec![]));
+        let child = TrajectoryId::new("child");
+        let log = spawn_family(&e, &child);
+
+        let first = e
+            .handle(&viewing(&e, &log), report_with(&log, &child, "done", vec![]))
+            .expect("a return at the fold crosses");
         assert_eq!(
-            derived.follow_up,
+            first.follow_up,
             FollowUp::Child(ChildFollowUp::Merged {
-                admitted: clean.clone()
+                admitted: ValueBody::new("done")
             })
         );
-        let crossing = appended_facts(derived);
-        assert!(crossing.iter().any(|fact| matches!(
-            fact,
-            Fact::CandidateDerived {
-                derived: DerivedCandidate::Return {
-                    from: ConfinedFrom::Bound,
+        let facts = appended_facts(first);
+        assert!(matches!(
+            facts.as_slice(),
+            [
+                Fact::ChildReturn {
+                    derivation: ReturnDerivation::Raw,
                     ..
                 },
-                ..
-            }
-        )));
-        assert!(crossing.iter().any(|fact| matches!(
-            fact,
-            Fact::ChildReturn { value, .. } if value.label == known(TRUSTED, Audience::public())
-        )));
-        let merged = [ended, crossing].concat();
-        assert_eq!(e.validate_replay(&merged), Ok(()));
-
-        let mut forged = merged.clone();
-        for fact in &mut forged {
-            if let Fact::ChildReturn { value, derivation, .. } = fact {
-                *derivation = ReturnDerivation::Raw;
-                *value = LabeledValue::new(body.clone(), known(SUSPICIOUS, Audience::public()));
-            }
-        }
-        assert_eq!(e.validate_replay(&forged), Err(TransitionRefusal::ReturnPolicyMismatch));
-    }
-
-    #[test]
-    fn a_narrowing_mandatory_derivation_enters_the_staged_pipeline() {
-        let e = open_engine_returning(
-            returning_registry(vec![lifting_sanitizer("quarantine")]),
-            ReturnPolicy::Sanitized(SanitizerName::new("quarantine")),
-        );
-        let child = TrajectoryId::new("child");
-        let internal = Audience::restricted([ReaderId::new("insider")]);
-        let mut log = spawn_family(&e, None, &child);
-        reads(&e, &mut log, &child, "read_suspicious_internal");
-        let body = ValueBody::new("what I found");
-        let decision = e
-            .handle(
-                &viewing(&e, &log),
-                child_report(&log, &child, ChildSubmission::Value { body: body.clone() }),
-            )
-            .expect("the submission transfers custody");
-        let ended = [log, appended_facts(decision)].concat();
-
-        let clean = ValueBody::new("clean");
-        let staged = e
-            .handle(
-                &viewing(&e, &ended),
-                evidenced_report(
-                    &ended,
-                    &child,
-                    &body,
-                    vec![Evidence::Sanitizer {
-                        sanitizer: SanitizerName::new("quarantine"),
-                        source: RawResultDigest::of(body.as_str().as_bytes()),
-                        derived: clean.clone(),
-                    }],
-                ),
-            )
-            .expect("the narrowing derivation stages");
-        let stage = pending_stage_of(&staged).clone();
-        assert_eq!(stage.label, known(TRUSTED, internal.clone()));
-        assert_eq!(stage.offers.len(), 1);
-        let pending = [ended, appended_facts(staged)].concat();
-        assert_eq!(e.validate_replay(&pending), Ok(()));
-
-        let accepted = execute_offer(&e, &pending, stage.offers[0].0, OfferOutcome::Approved(vec![]))
-            .expect("the acceptance crosses the confined candidate");
-        assert!(matches!(
-            offer_answer(&accepted),
-            OfferFollowUp::Admitted { value } if value == &clean
-        ));
-        let merged = [pending, appended_facts(accepted)].concat();
-        assert_eq!(e.validate_replay(&merged), Ok(()));
-        assert_eq!(
-            Projection::build(&merged, merged.len() as u64)
-                .view(&traj())
-                .current_label(),
-            established(TRUSTED, internal)
-        );
-    }
-
-    #[test]
-    fn an_unmet_mandate_rejects_the_submission_without_external_io() {
-        let picky = crate::authority::Sanitizer {
-            name: SanitizerName::new("picky"),
-            on: crate::authority::SanitizerPoints {
-                input: false,
-                output: true,
-            },
-            transition: crate::authority::DeclaredTransition::Trust {
-                from_floor: TRUSTED,
-                to: TRUSTED,
-            },
-            scope: crate::authority::Scope::default(),
-            hint: None,
-        };
-        let e = open_engine_returning(
-            returning_registry(vec![picky]),
-            ReturnPolicy::Sanitized(SanitizerName::new("picky")),
-        );
-        let child = TrajectoryId::new("child");
-        let mut log = spawn_family(&e, None, &child);
-        reads(&e, &mut log, &child, "read_suspicious");
-        let body = ValueBody::new("what I found");
-
-        let decision = e
-            .handle(
-                &viewing(&e, &log),
-                child_report(&log, &child, ChildSubmission::Value { body: body.clone() }),
-            )
-            .expect("the rejection is a decision, not an error");
-        assert_eq!(
-            decision.follow_up,
-            FollowUp::Child(ChildFollowUp::Rejected {
-                reason: ReturnRejection::MandateUnmet,
-            })
-        );
-        let appended = appended_facts(decision);
-        let [rejected @ Fact::ReturnRejected { digest, reason, .. }] = appended.as_slice() else {
-            panic!("only the typed terminal records, got {appended:?}");
-        };
-        assert_eq!(digest, &RawResultDigest::of(body.as_str().as_bytes()));
-        assert_eq!(reason, &ReturnRejection::MandateUnmet);
-        let json = serde_json::to_value(rejected).unwrap();
-        let fields = json
-            .get("ReturnRejected")
-            .and_then(serde_json::Value::as_object)
-            .expect("the record serializes under its own tag");
-        assert_eq!(
-            fields.keys().map(String::as_str).collect::<BTreeSet<_>>(),
-            BTreeSet::from(["trajectory", "id", "fork", "digest", "reason"])
-        );
-
-        let ended = [log, appended].concat();
-        assert_eq!(e.validate_replay(&ended), Ok(()));
-        let views = Projection::build(&ended, ended.len() as u64);
-        assert!(views.view(&traj()).has_ended(&child));
-        assert_eq!(
-            views.view(&traj()).current_label(),
-            established(TRUSTED, Audience::public())
-        );
-
-        let repeat = e
-            .handle(
-                &viewing(&e, &ended),
-                child_report(&ended, &child, ChildSubmission::Value { body: body.clone() }),
-            )
-            .expect("the repeat answers from the record");
-        assert_eq!(repeat.append, None);
-        assert_eq!(
-            repeat.follow_up,
-            FollowUp::Child(ChildFollowUp::Rejected {
-                reason: ReturnRejection::MandateUnmet,
-            })
-        );
-        assert_eq!(
-            e.handle(
-                &viewing(&e, &ended),
-                child_report(
-                    &ended,
-                    &child,
-                    ChildSubmission::Value {
-                        body: ValueBody::new("another answer"),
-                    },
-                ),
-            ),
-            Err(TransitionError::BranchEnded)
-        );
-
-        let mut flipped = ended;
-        for fact in &mut flipped {
-            if let Fact::ReturnRejected { reason, .. } = fact {
-                *reason = ReturnRejection::PreconditionUnmet;
-            }
-        }
-        assert_eq!(
-            e.validate_replay(&flipped),
-            Err(TransitionRefusal::ReturnRecordMismatch)
-        );
-    }
-
-    #[test]
-    fn return_custody_records_replay_only_as_produced() {
-        let e = engine(vec![plain_tool("spawn"), suspicious_read(), suspicious_internal_read()]);
-        let child = TrajectoryId::new("child");
-        let mut log = spawn_family(&e, None, &child);
-        reads(&e, &mut log, &child, "read_suspicious_internal");
-        let body = ValueBody::new("what I found");
-        let decision = e
-            .handle(
-                &viewing(&e, &log),
-                child_report(&log, &child, ChildSubmission::Value { body: body.clone() }),
-            )
-            .expect("the submission transfers custody");
-        let ended = [log, appended_facts(decision)].concat();
-        assert_eq!(e.validate_replay(&ended), Ok(()));
-
-        let mutated = |mutate: &dyn Fn(&mut Fact)| {
-            let mut forged = ended.clone();
-            for fact in &mut forged {
-                if matches!(fact, Fact::ReturnSubmitted { .. }) {
-                    mutate(fact);
+                Fact::ValueAdmitted { .. },
+                Fact::Boundary {
+                    kind: crate::fact::BoundaryKind::Merge { .. },
+                    ..
                 }
-            }
-            e.validate_replay(&forged)
+            ]
+        ));
+        let log = [log, facts].concat();
+        assert_eq!(e.validate_replay(&log), Ok(()));
+        let views = viewing(&e, &log);
+        let root = traj();
+        let parent = views.views(&root).expect("the parent is opened");
+        assert!(!parent.has_ended(&child), "a crossing ends nothing");
+        assert_eq!(parent.returns_by(&child), 1);
+
+        let replay = e
+            .handle(&viewing(&e, &log), report_with(&log, &child, "done", vec![]))
+            .expect("a repeat of the latest crossing answers from the record");
+        assert_eq!(replay.append, None);
+        assert_eq!(
+            replay.follow_up,
+            FollowUp::Child(ChildFollowUp::Merged {
+                admitted: ValueBody::new("done")
+            })
+        );
+
+        let second = e
+            .handle(&viewing(&e, &log), report_with(&log, &child, "more", vec![]))
+            .expect("a later return crosses at the next occurrence");
+        assert!(matches!(
+            second.follow_up,
+            FollowUp::Child(ChildFollowUp::Merged { .. })
+        ));
+        let log = [log, appended_facts(second)].concat();
+        assert_eq!(e.validate_replay(&log), Ok(()));
+        assert_eq!(
+            child_returns(&log, &child)
+                .iter()
+                .map(|value| value.body.as_str().to_string())
+                .collect::<Vec<_>>(),
+            vec!["done", "more"]
+        );
+
+        let ended = e
+            .handle(&viewing(&e, &log), child_report(&log, &child, ChildSubmission::Void))
+            .expect("a void return ends the branch");
+        assert_eq!(ended.follow_up, FollowUp::Child(ChildFollowUp::Ended));
+        let log = [log, appended_facts(ended)].concat();
+        assert_eq!(e.validate_replay(&log), Ok(()));
+        assert_eq!(
+            e.handle(&viewing(&e, &log), report_with(&log, &child, "late", vec![])),
+            Err(crate::transition::TransitionError::BranchEnded)
+        );
+        assert_eq!(
+            e.handle(&viewing(&e, &log), child_report(&log, &child, ChildSubmission::Void)),
+            Err(crate::transition::TransitionError::BranchEnded)
+        );
+    }
+
+    #[test]
+    fn the_reserved_route_is_declared_only_with_its_shape() {
+        let e = open_engine(returning_registry(vec![lifting_sanitizer("attest-schema")]));
+        let log = vec![opened(&e)];
+        let blocked = e
+            .handle(
+                &viewing(&e, &log),
+                spawn_batch("marked", Some(crate::transition::SpawnMark::at(0))),
+            )
+            .expect("a marked spawn blocks");
+        let log = [log, appended_facts(blocked)].concat();
+        let attest = SanitizerName::new(SanitizerName::ATTEST_SCHEMA);
+        let offer = opened_offers(&log)
+            .into_iter()
+            .find_map(|(offer, plan)| (plan.return_step() == Some(Some(&attest))).then_some(offer))
+            .expect("the attestation is offered");
+        let execute = |sanitizer| {
+            e.handle(
+                &viewing(&e, &log),
+                EngineEvent::ExecuteOffer(OfferExecution {
+                    trajectory: traj(),
+                    offer,
+                    outcome: OfferOutcome::Approved(Vec::new()),
+                    return_policy: Some(ReturnPolicy {
+                        sanitizer,
+                        ..floor_policy(&e, &log)
+                    }),
+                    offer_nonce: nonce(),
+                    audience: crate::audience::AudienceEvidence::default(),
+                }),
+            )
         };
-        assert_eq!(
-            mutated(&|fact| {
-                let Fact::ReturnSubmitted { label, .. } = fact else {
-                    unreachable!()
-                };
-                *label = partial(TRUSTED, Audience::public());
-            }),
-            Err(TransitionRefusal::ForgedLabel)
-        );
-        assert_eq!(
-            mutated(&|fact| {
-                let Fact::ReturnSubmitted { digest, .. } = fact else {
-                    unreachable!()
-                };
-                *digest = RawResultDigest::of(b"forged");
-            }),
-            Err(TransitionRefusal::ReturnRecordMismatch)
-        );
-        assert_eq!(
-            mutated(&|fact| {
-                let Fact::ReturnSubmitted { body, .. } = fact else {
-                    unreachable!()
-                };
-                *body = ValueBody::new("forged");
-            }),
-            Err(TransitionRefusal::ReturnRecordMismatch)
-        );
-        assert_eq!(
-            mutated(&|fact| {
-                let Fact::ReturnSubmitted { policy, .. } = fact else {
-                    unreachable!()
-                };
-                *policy = ReturnPolicy::Sanitized(SanitizerName::new("ghost"));
-            }),
-            Err(TransitionRefusal::ForkReturnPolicyMismatch)
-        );
-        assert_eq!(
-            mutated(&|fact| {
-                let Fact::ReturnSubmitted { parent, .. } = fact else {
-                    unreachable!()
-                };
-                *parent = TrajectoryId::new("stranger");
-            }),
-            Err(TransitionRefusal::ForeignTrajectory)
-        );
-        let submitted = ended
-            .iter()
-            .find(|fact| matches!(fact, Fact::ReturnSubmitted { .. }))
-            .cloned()
-            .expect("the custody record stands");
-        assert_eq!(
-            e.validate_replay(&[ended.clone(), vec![submitted]].concat()),
-            Err(TransitionRefusal::BranchEnded)
-        );
+
+        assert!(matches!(
+            execute(named("attest-schema")),
+            Err(crate::transition::TransitionError::ReturnPolicy(
+                plan::ReturnPolicyRefusal::SanitizerMismatch
+            ))
+        ));
+        assert!(execute(Some(ReturnSanitizer::Attest(attest_shape()))).is_ok());
     }
 
     #[test]
-    fn the_first_mandatory_derivation_is_never_an_offer() {
-        let e = open_engine_returning(
-            returning_registry(vec![lifting_sanitizer("quarantine")]),
-            ReturnPolicy::Sanitized(SanitizerName::new("quarantine")),
-        );
-        let child = TrajectoryId::new("child");
-        let mut log = spawn_family(&e, None, &child);
-        reads(&e, &mut log, &child, "read_suspicious_internal");
-        let body = ValueBody::new("what I found");
-        let decision = e
-            .handle(
-                &viewing(&e, &log),
-                child_report(&log, &child, ChildSubmission::Value { body: body.clone() }),
-            )
-            .expect("the submission transfers custody");
-        let ended = [log, appended_facts(decision)].concat();
-        let derived = e
-            .handle(
-                &viewing(&e, &ended),
-                evidenced_report(
-                    &ended,
-                    &child,
-                    &body,
-                    vec![Evidence::Sanitizer {
-                        sanitizer: SanitizerName::new("quarantine"),
-                        source: RawResultDigest::of(body.as_str().as_bytes()),
-                        derived: ValueBody::new("clean"),
-                    }],
-                ),
-            )
-            .expect("the mandatory derivation stages");
-        let staged = [ended, appended_facts(derived)].concat();
-        assert_eq!(e.validate_replay(&staged), Ok(()));
-
-        let id = ChildReturnId::new(child.clone(), 0);
-        let unopened = crate::value::OfferId::of_plan(
-            &crate::value::BlockId::of_return(&nonce(), &id, crate::basis::SubjectGeneration::ZERO),
-            0,
-            b"forged",
-        );
-        let mut reforged = staged;
-        for fact in &mut reforged {
-            if let Fact::CandidateDerived {
-                derived: DerivedCandidate::Return { from, .. },
-                ..
-            } = fact
-            {
-                *from = ConfinedFrom::Offer(unopened);
-            }
-        }
-        assert_eq!(e.validate_replay(&reforged), Err(TransitionRefusal::UnknownOffer));
-    }
-
-    fn verdict_schema() -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": { "verdict": { "type": "string", "enum": ["allow", "deny"] } },
-            "required": ["verdict"],
-        })
-    }
-
-    #[test]
-    fn a_conforming_shaped_crossing_retains_the_child_label() {
-        let e = engine(vec![plain_tool("spawn"), suspicious_read(), suspicious_internal_read()]);
-        let child = TrajectoryId::new("child");
-        let mut log = spawn_family(&e, Some(&verdict_schema()), &child);
-        reads(&e, &mut log, &child, "read_suspicious");
-        let body = ValueBody::new(r#"{"verdict":"allow"}"#);
-        let decision = e
-            .handle(
-                &viewing(&e, &log),
-                child_report(&log, &child, ChildSubmission::Value { body: body.clone() }),
-            )
-            .expect("the conforming submission transfers custody");
-        let stage = pending_stage_of(&decision).clone();
-        assert_eq!(stage.offers.len(), 1);
-        let ended = [log, appended_facts(decision)].concat();
-        let accepted = execute_offer(&e, &ended, stage.offers[0].0, OfferOutcome::Approved(vec![]))
-            .expect("the acceptance crosses the raw submission");
-        let crossing = appended_facts(accepted);
-        assert!(crossing.iter().any(|fact| matches!(
-            fact,
-            Fact::ChildReturn {
-                derivation: ReturnDerivation::Raw,
-                value,
-                ..
-            } if value.label == known(SUSPICIOUS, Audience::public()) && value.body == body
-        )));
-        let merged = [ended, crossing].concat();
-        assert_eq!(e.validate_replay(&merged), Ok(()));
-        assert_eq!(
-            Projection::build(&merged, merged.len() as u64)
-                .view(&traj())
-                .current_label(),
-            established(SUSPICIOUS, Audience::public())
-        );
-    }
-
-    #[test]
-    fn an_unshaped_fork_offers_no_attest_hop() {
+    fn an_attested_return_crosses_in_canonical_form_at_the_raised_rank() {
         let e = open_engine(returning_registry(vec![lifting_sanitizer("attest-schema")]));
         let child = TrajectoryId::new("child");
-        let mut log = spawn_family(&e, None, &child);
+        let parent = vec![opened(&e)];
+        let policy = ReturnPolicy {
+            sanitizer: Some(ReturnSanitizer::Attest(attest_shape())),
+            ..floor_policy(&e, &parent)
+        };
+        let mut log = [parent.clone(), spawn_family_at(&e, &parent, &child, policy)].concat();
+        assert_eq!(e.validate_replay(&log), Ok(()));
+        // The attestation raises trust, so the child may descend there.
         reads(&e, &mut log, &child, "read_suspicious");
-        let decision = e
+        assert_eq!(
+            viewing(&e, &log)
+                .views(&child)
+                .expect("the child is opened")
+                .current_label()
+                .trust,
+            SUSPICIOUS
+        );
+
+        assert!(matches!(
+            e.handle(&viewing(&e, &log), report_with(&log, &child, "free text", vec![])),
+            Err(crate::transition::TransitionError::ReturnShapeMismatch(_))
+        ));
+        assert!(matches!(
+            e.handle(
+                &viewing(&e, &log),
+                report_with(&log, &child, r#"{"verdict":"allow","confidence":101}"#, vec![])
+            ),
+            Err(crate::transition::TransitionError::ReturnShapeMismatch(_))
+        ));
+
+        let canonical = ValueBody::new(r#"{"confidence":97,"verdict":"allow"}"#);
+        let merged = e
             .handle(
                 &viewing(&e, &log),
-                child_report(
-                    &log,
-                    &child,
-                    ChildSubmission::Value {
-                        body: ValueBody::new("free text"),
-                    },
-                ),
+                report_with(&log, &child, "{ \"verdict\": \"allow\",  \"confidence\": 97 }", vec![]),
             )
-            .expect("the submission transfers custody");
-        assert_eq!(pending_stage_of(&decision).offers.len(), 1);
+            .expect("a conforming submission crosses");
+        assert_eq!(
+            merged.follow_up,
+            FollowUp::Child(ChildFollowUp::Merged {
+                admitted: canonical.clone()
+            })
+        );
+        let facts = appended_facts(merged);
+        assert!(matches!(
+            &facts[0],
+            Fact::ChildReturn {
+                value,
+                derivation: ReturnDerivation::Sanitized { sanitizer, .. },
+                ..
+            } if value.body == canonical && value.label.trust == TRUSTED && sanitizer.is_attest_schema()
+        ));
+        let log = [log, facts].concat();
+        assert_eq!(e.validate_replay(&log), Ok(()));
+
+        let replay = e
+            .handle(
+                &viewing(&e, &log),
+                report_with(&log, &child, r#"{"verdict": "allow", "confidence": 97}"#, vec![]),
+            )
+            .expect("a repeat of the crossing answers from the record");
+        assert_eq!(replay.append, None);
+        assert_eq!(
+            replay.follow_up,
+            FollowUp::Child(ChildFollowUp::Merged { admitted: canonical })
+        );
     }
 
     #[test]
-    fn a_shaped_fork_without_attest_follows_the_ordinary_lifecycle() {
+    fn a_named_sanitizer_stages_its_derivation_until_the_child_echoes_it() {
         let e = open_engine(returning_registry(vec![lifting_sanitizer("redactor")]));
         let child = TrajectoryId::new("child");
-        let mut log = spawn_family(&e, Some(&verdict_schema()), &child);
-        reads(&e, &mut log, &child, "read_suspicious_internal");
-        let decision = e
-            .handle(
-                &viewing(&e, &log),
-                child_report(
-                    &log,
-                    &child,
-                    ChildSubmission::Value {
-                        body: ValueBody::new(r#"{"verdict":"allow"}"#),
-                    },
-                ),
-            )
-            .expect("the conforming submission transfers custody");
-        assert_eq!(pending_stage_of(&decision).offers.len(), 2);
-    }
-
-    #[test]
-    fn an_attest_hop_derives_the_bytes_unchanged_in_engine() {
-        let e = open_engine(returning_registry(vec![lifting_sanitizer("attest-schema")]));
-        let child = TrajectoryId::new("child");
-        let internal = Audience::restricted([ReaderId::new("insider")]);
-        let mut log = spawn_family(&e, Some(&verdict_schema()), &child);
-        reads(&e, &mut log, &child, "read_suspicious_internal");
-        let body = ValueBody::new(r#"{"verdict":"allow"}"#);
-        let raw_digest = RawResultDigest::of(body.as_str().as_bytes());
-        let decision = e
-            .handle(
-                &viewing(&e, &log),
-                child_report(&log, &child, ChildSubmission::Value { body: body.clone() }),
-            )
-            .expect("the conforming submission transfers custody");
-        assert_eq!(pending_stage_of(&decision).offers.len(), 2);
-        let ended = [log, appended_facts(decision)].concat();
-        let hop = return_offer(&ended, true);
-
-        assert_eq!(
-            e.offer_consults(&viewing(&e, &ended), &traj(), &hop),
-            Ok(crate::transition::OfferConsult::Accept),
-        );
-
-        assert_eq!(
-            execute_offer(
-                &e,
-                &ended,
-                hop,
-                OfferOutcome::Derived(Evidence::Sanitizer {
-                    sanitizer: SanitizerName::new("attest-schema"),
-                    source: raw_digest,
-                    derived: body.clone(),
-                }),
-            ),
-            Err(TransitionError::PlanOutcomeMismatch)
-        );
-
-        let hopped = execute_offer(&e, &ended, hop, OfferOutcome::Approved(vec![]))
-            .expect("the engine applies the reserved builtin itself");
-        let restaged = match offer_answer(&hopped) {
-            OfferFollowUp::ReturnStaged(stage) => (**stage).clone(),
-            other => panic!("the audience residual re-stages, got {other:?}"),
+        let parent = vec![opened(&e)];
+        let policy = ReturnPolicy {
+            sanitizer: named("redactor"),
+            ..floor_policy(&e, &parent)
         };
-        assert_eq!(restaged.label, known(TRUSTED, internal.clone()));
-        assert_eq!(restaged.offers.len(), 1);
-        let staged_log = [ended, appended_facts(hopped)].concat();
-        assert_eq!(e.validate_replay(&staged_log), Ok(()));
+        let mut log = [parent.clone(), spawn_family_at(&e, &parent, &child, policy)].concat();
+        reads(&e, &mut log, &child, "read_suspicious");
 
-        assert_eq!(
-            e.offer_consults(&viewing(&e, &staged_log), &traj(), &hop),
-            Ok(crate::transition::OfferConsult::Replay(OfferOutcome::Approved(
-                Vec::new()
-            ))),
-        );
-
-        let repeat = execute_offer(&e, &staged_log, hop, OfferOutcome::Approved(vec![]))
-            .expect("the spent attest selection answers from the record");
-        assert_eq!(repeat.append, None);
-        assert!(matches!(offer_answer(&repeat), OfferFollowUp::ReturnStaged(_)));
-        assert_eq!(
-            execute_offer(
-                &e,
-                &staged_log,
-                hop,
-                OfferOutcome::Derived(Evidence::Sanitizer {
-                    sanitizer: SanitizerName::new("attest-schema"),
-                    source: raw_digest,
-                    derived: body.clone(),
-                }),
-            ),
-            Err(TransitionError::PlanOutcomeMismatch)
-        );
-
-        let accepted = execute_offer(&e, &staged_log, restaged.offers[0].0, OfferOutcome::Approved(vec![]))
-            .expect("the acceptance crosses the attested value");
+        let asked = e
+            .handle(&viewing(&e, &log), report_with(&log, &child, "raw", vec![]))
+            .expect("an underived submission asks for the derivation");
+        assert_eq!(asked.append, None);
         assert!(matches!(
-            offer_answer(&accepted),
-            OfferFollowUp::Admitted { value } if value == &body
+            asked.follow_up,
+            FollowUp::Child(ChildFollowUp::Resolve(EvidenceRequest::Sanitizer { ref sanitizer, ref body, .. }))
+                if sanitizer.as_str() == "redactor" && body.as_str() == "raw"
         ));
-        let crossing = appended_facts(accepted);
-        assert!(crossing.iter().any(|fact| matches!(
-            fact,
-            Fact::ChildReturn {
-                derivation: ReturnDerivation::Sanitized { sanitizer, raw_digest: recorded, .. },
-                value,
-                ..
-            } if sanitizer.as_str() == "attest-schema" && recorded == &raw_digest && value.body == body
-        )));
-        let merged = [staged_log, crossing].concat();
-        assert_eq!(e.validate_replay(&merged), Ok(()));
-        assert_eq!(
-            Projection::build(&merged, merged.len() as u64)
-                .view(&traj())
-                .current_label(),
-            established(TRUSTED, internal)
-        );
 
-        let mut forged = merged;
-        for fact in &mut forged {
-            if let Fact::CandidateDerived {
+        let staged = e
+            .handle(
+                &viewing(&e, &log),
+                report_with(&log, &child, "raw", derived_by("redactor", "raw", "clean")),
+            )
+            .expect("the derivation stages");
+        assert_eq!(
+            staged.follow_up,
+            FollowUp::Child(ChildFollowUp::Staged {
+                derived: ValueBody::new("clean")
+            })
+        );
+        let facts = appended_facts(staged);
+        assert!(facts.iter().any(|fact| matches!(
+            fact,
+            Fact::CandidateDerived {
+                subject: crate::basis::SubjectKey::Return(_),
                 derived: DerivedCandidate::Return { value, .. },
                 ..
-            } = fact
-            {
-                value.body = ValueBody::new(r#"{"verdict":"deny"}"#);
-            }
-        }
-        assert_eq!(e.validate_replay(&forged), Err(TransitionRefusal::ForgedLabel));
-    }
-
-    #[test]
-    fn a_tool_output_block_never_offers_the_reserved_attest_schema() {
-        let e = open_engine(RegistryConfig {
-            annotators: vec![],
-            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: declared(vec![ToolAnnotation {
-                description: Some("A test tool.".to_string()),
-                name: ToolName::new("fetch"),
-                tags: vec![],
-                delta: Delta {
-                    trust: Some(SUSPICIOUS),
-                    audience: None,
-                },
-                parameters: crate::params::ToolParameters::open(),
-                emits: EffectSet::new([EffectKind::new("web.read")]).unwrap(),
-                requires: Requires::default(),
-            }]),
-            authorities: vec![],
-            sanitizers: vec![lifting_sanitizer("redactor"), lifting_sanitizer("attest-schema")],
-            audience: crate::audience::AudienceConfig::default(),
-        });
-        let log = vec![opened(&e)];
-        let blocked = proposed(&e, &log, "b1", nonce(), call("fetch", json!({}))).expect("the batch decides");
-        let offered: Vec<_> = opened_offers(&appended_facts(blocked))
-            .into_iter()
-            .filter_map(|(_, plan)| plan.sanitizer().cloned())
-            .collect();
-        assert!(offered.contains(&SanitizerName::new("redactor")));
-        assert!(!offered.iter().any(|name| name.is_attest_schema()));
-    }
-
-    #[test]
-    fn a_fork_base_below_the_mandate_ceiling_excludes_the_attest_hop() {
-        let attest = crate::authority::Sanitizer {
-            name: SanitizerName::new("attest-schema"),
-            on: crate::authority::SanitizerPoints {
-                input: false,
-                output: true,
-            },
-            transition: crate::authority::DeclaredTransition::Trust {
-                from_floor: SUSPICIOUS,
-                to: Trust::new(2),
-            },
-            scope: crate::authority::Scope::default(),
-            hint: None,
-        };
-        let e = open_engine_at(
-            RegistryConfig {
-                annotators: vec![],
-                trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into(), "gold".into()]),
-                tools: declared(vec![plain_tool("spawn"), suspicious_read()]),
-                authorities: vec![],
-                sanitizers: vec![attest],
-                audience: crate::audience::AudienceConfig::default(),
-            },
-            known(TRUSTED, Audience::public()),
-        );
-        let child = TrajectoryId::new("child");
-        let mut log = spawn_family(&e, Some(&verdict_schema()), &child);
-        reads(&e, &mut log, &child, "read_suspicious");
-        let decision = e
-            .handle(
-                &viewing(&e, &log),
-                child_report(
-                    &log,
-                    &child,
-                    ChildSubmission::Value {
-                        body: ValueBody::new(r#"{"verdict":"allow"}"#),
-                    },
-                ),
-            )
-            .expect("the submission transfers custody");
-        assert_eq!(pending_stage_of(&decision).offers.len(), 1);
-    }
-
-    #[test]
-    fn a_child_attest_binding_crosses_the_conforming_return_in_engine() {
-        let e = open_engine_returning(
-            returning_registry(vec![lifting_sanitizer("attest-schema")]),
-            ReturnPolicy::Sanitized(SanitizerName::new("attest-schema")),
-        );
-        let child = TrajectoryId::new("child");
-        let mut log = spawn_family(&e, Some(&verdict_schema()), &child);
-        reads(&e, &mut log, &child, "read_suspicious");
-        let body = ValueBody::new(r#"{"verdict":"allow"}"#);
-        let decision = e
-            .handle(
-                &viewing(&e, &log),
-                child_report(&log, &child, ChildSubmission::Value { body: body.clone() }),
-            )
-            .expect("the applicable submission crosses");
-        assert_eq!(
-            decision.follow_up,
-            FollowUp::Child(ChildFollowUp::Merged { admitted: body.clone() })
-        );
-        let merged = [log, appended_facts(decision)].concat();
-        assert_eq!(e.validate_replay(&merged), Ok(()));
-        let views = Projection::build(&merged, merged.len() as u64);
-        assert!(views.view(&traj()).has_ended(&child));
-        assert_eq!(
-            views.view(&traj()).current_label(),
-            established(TRUSTED, Audience::public())
-        );
-        let repeat = e
-            .handle(
-                &viewing(&e, &merged),
-                child_report(&merged, &child, ChildSubmission::Value { body: body.clone() }),
-            )
-            .expect("the repeat answers from the record");
-        assert_eq!(repeat.append, None);
-        assert_eq!(
-            repeat.follow_up,
-            FollowUp::Child(ChildFollowUp::Merged { admitted: body })
-        );
-    }
-
-    #[test]
-    fn a_shape_mismatch_under_a_child_attest_binding_rejects_terminally() {
-        let e = open_engine_returning(
-            returning_registry(vec![lifting_sanitizer("attest-schema")]),
-            ReturnPolicy::Sanitized(SanitizerName::new("attest-schema")),
-        );
-        let child = TrajectoryId::new("child");
-        let mut log = spawn_family(&e, Some(&verdict_schema()), &child);
-        reads(&e, &mut log, &child, "read_suspicious");
-        let body = ValueBody::new(r#"{"verdict":"maybe"}"#);
-        let decision = e
-            .handle(
-                &viewing(&e, &log),
-                child_report(&log, &child, ChildSubmission::Value { body: body.clone() }),
-            )
-            .expect("the rejection is a decision, not an error");
-        assert_eq!(
-            decision.follow_up,
-            FollowUp::Child(ChildFollowUp::Rejected {
-                reason: ReturnRejection::PreconditionUnmet,
-            })
-        );
-        let appended = appended_facts(decision);
-        let [Fact::ReturnRejected { digest, .. }] = appended.as_slice() else {
-            panic!("only the typed terminal records, got {appended:?}");
-        };
-        assert_eq!(digest, &RawResultDigest::of(body.as_str().as_bytes()));
-        let ended = [log, appended].concat();
-        assert_eq!(e.validate_replay(&ended), Ok(()));
+            } if value.body.as_str() == "clean" && value.label.trust == TRUSTED
+        )));
         assert!(
-            Projection::build(&ended, ended.len() as u64)
-                .view(&traj())
-                .has_ended(&child)
+            !facts.iter().any(|fact| matches!(fact, Fact::ChildReturn { .. })),
+            "a derivation the child has not echoed crosses nothing"
         );
+        let log = [log, facts].concat();
+        assert_eq!(e.validate_replay(&log), Ok(()));
+        assert!(child_returns(&log, &child).is_empty(), "nothing crossed yet");
 
-        let repeat = e
-            .handle(
-                &viewing(&e, &ended),
-                child_report(&ended, &child, ChildSubmission::Value { body: body.clone() }),
-            )
-            .expect("the repeat answers from the record");
-        assert_eq!(repeat.append, None);
+        let other = e
+            .handle(&viewing(&e, &log), report_with(&log, &child, "raw again", vec![]))
+            .expect("a different stop is answered with the standing derivation");
+        assert_eq!(other.append, None);
         assert_eq!(
-            repeat.follow_up,
-            FollowUp::Child(ChildFollowUp::Rejected {
-                reason: ReturnRejection::PreconditionUnmet,
+            other.follow_up,
+            FollowUp::Child(ChildFollowUp::Staged {
+                derived: ValueBody::new("clean")
             })
         );
+
+        let echoed = e
+            .handle(&viewing(&e, &log), report_with(&log, &child, "clean", vec![]))
+            .expect("the echo crosses the derivation");
+        assert_eq!(
+            echoed.follow_up,
+            FollowUp::Child(ChildFollowUp::Merged {
+                admitted: ValueBody::new("clean")
+            })
+        );
+        let facts = appended_facts(echoed);
+        assert!(matches!(
+            &facts[0],
+            Fact::ChildReturn {
+                value,
+                derivation: ReturnDerivation::Sanitized { sanitizer, raw_digest, .. },
+                ..
+            } if value.body.as_str() == "clean"
+                && value.label.trust == TRUSTED
+                && sanitizer.as_str() == "redactor"
+                && *raw_digest == RawResultDigest::of(b"raw")
+        ));
+        let log = [log, facts].concat();
+        assert_eq!(e.validate_replay(&log), Ok(()));
+
+        // A derivation equal to its submission needs no echo.
+        let unchanged = e
+            .handle(
+                &viewing(&e, &log),
+                report_with(&log, &child, "fine", derived_by("redactor", "fine", "fine")),
+            )
+            .expect("an unchanged derivation crosses at once");
+        assert_eq!(
+            unchanged.follow_up,
+            FollowUp::Child(ChildFollowUp::Merged {
+                admitted: ValueBody::new("fine")
+            })
+        );
+        let log = [log, appended_facts(unchanged)].concat();
+        assert_eq!(e.validate_replay(&log), Ok(()));
+        assert_eq!(
+            viewing(&e, &log)
+                .views(&traj())
+                .expect("the parent is opened")
+                .returns_by(&child),
+            2
+        );
+    }
+
+    #[test]
+    fn a_return_after_a_resume_is_a_new_crossing_even_when_its_bytes_repeat() {
+        let e = open_engine(returning_registry(vec![]));
+        let child = TrajectoryId::new("child");
+        let log = spawn_family(&e, &child);
+        let first = e
+            .handle(&viewing(&e, &log), report_with(&log, &child, "done", vec![]))
+            .expect("the first return crosses");
+        let log = [log, appended_facts(first)].concat();
+        let fork = fork_in(&log, &child);
+        let resumed = e
+            .handle(
+                &viewing(&e, &log),
+                EngineEvent::BindFork(crate::transition::ForkBinding {
+                    fork,
+                    child: child.clone(),
+                }),
+            )
+            .expect("the same pair binds again as a resume");
+        let log = [log, appended_facts(resumed)].concat();
+
+        let again = e
+            .handle(&viewing(&e, &log), report_with(&log, &child, "done", vec![]))
+            .expect("the resumed child's return crosses");
+        let facts = appended_facts(again);
+        assert!(
+            matches!(
+                facts.as_slice(),
+                [
+                    Fact::ChildReturn { .. },
+                    Fact::ValueAdmitted { .. },
+                    Fact::Boundary {
+                        kind: crate::fact::BoundaryKind::Merge { .. },
+                        ..
+                    }
+                ]
+            ),
+            "a return after a resume is no replay: {facts:?}"
+        );
+        let log = [log, facts].concat();
+        assert_eq!(e.validate_replay(&log), Ok(()));
+        let views = viewing(&e, &log);
+        assert_eq!(
+            views.views(&traj()).expect("the parent is opened").returns_by(&child),
+            2
+        );
+    }
+
+    #[test]
+    fn a_resume_folds_the_parents_label_into_the_child_and_drops_its_staged_derivation() {
+        let e = open_engine(returning_registry(vec![lifting_sanitizer("redactor")]));
+        let child = TrajectoryId::new("child");
+        let parent = vec![opened(&e)];
+        let policy = ReturnPolicy {
+            sanitizer: named("redactor"),
+            ..floor_policy(&e, &parent)
+        };
+        let mut log = [parent.clone(), spawn_family_at(&e, &parent, &child, policy)].concat();
+        let staged = e
+            .handle(
+                &viewing(&e, &log),
+                report_with(&log, &child, "raw", derived_by("redactor", "raw", "clean")),
+            )
+            .expect("the derivation stages");
+        log.extend(appended_facts(staged));
+
+        // The parent narrows itself after the spawn, then addresses the child again.
+        reads(&e, &mut log, &traj(), "read_internal");
+        let internal = Audience::restricted([ReaderId::new("insider")]);
+        let fork = fork_in(&log, &child);
+        let resumed = e
+            .handle(
+                &viewing(&e, &log),
+                EngineEvent::BindFork(crate::transition::ForkBinding {
+                    fork: fork.clone(),
+                    child: child.clone(),
+                }),
+            )
+            .expect("the same pair binds again as a resume");
+        assert_eq!(resumed.follow_up, FollowUp::Fork { child: child.clone() });
+        let facts = appended_facts(resumed);
+        assert!(matches!(
+            facts.last(),
+            Some(Fact::Boundary {
+                kind: crate::fact::BoundaryKind::Resume { seed },
+                ..
+            }) if seed.audience == internal
+        ));
+        let log = [log, facts].concat();
+        assert_eq!(e.validate_replay(&log), Ok(()));
+        assert_eq!(
+            viewing(&e, &log)
+                .views(&child)
+                .expect("the child is opened")
+                .current_label()
+                .audience,
+            internal,
+            "the parent's label as it stands now flows into the child"
+        );
+
+        let echoed = e
+            .handle(&viewing(&e, &log), report_with(&log, &child, "clean", vec![]))
+            .expect("the old derivation no longer stands");
+        assert_eq!(echoed.append, None);
+        assert!(matches!(
+            echoed.follow_up,
+            FollowUp::Child(ChildFollowUp::Resolve(EvidenceRequest::Sanitizer { .. }))
+        ));
+
         assert_eq!(
             e.handle(
-                &viewing(&e, &ended),
-                child_report(
-                    &ended,
-                    &child,
-                    ChildSubmission::Value {
-                        body: ValueBody::new(r#"{"verdict":"allow"}"#),
-                    },
-                ),
+                &viewing(&e, &log),
+                EngineEvent::BindFork(crate::transition::ForkBinding {
+                    fork,
+                    child: TrajectoryId::new("stranger"),
+                }),
             ),
-            Err(TransitionError::BranchEnded)
-        );
-
-        let mut flipped = ended;
-        for fact in &mut flipped {
-            if let Fact::ReturnRejected { reason, .. } = fact {
-                *reason = ReturnRejection::MandateUnmet;
-            }
-        }
-        assert_eq!(
-            e.validate_replay(&flipped),
-            Err(TransitionRefusal::ReturnRecordMismatch)
+            Err(crate::transition::TransitionError::UnbindableFork)
         );
     }
 
     #[test]
-    fn an_unshaped_fork_under_a_child_attest_binding_rejects_the_return() {
-        let e = open_engine_returning(
-            returning_registry(vec![lifting_sanitizer("attest-schema")]),
-            ReturnPolicy::Sanitized(SanitizerName::new("attest-schema")),
-        );
+    fn a_child_stop_carries_its_parents_declared_floor_to_a_grandchild() {
+        let e = open_engine(returning_registry(vec![]));
         let child = TrajectoryId::new("child");
-        let mut log = spawn_family(&e, None, &child);
-        reads(&e, &mut log, &child, "read_suspicious");
-        let decision = e
-            .handle(
-                &viewing(&e, &log),
-                child_report(
-                    &log,
-                    &child,
-                    ChildSubmission::Value {
-                        body: ValueBody::new("free text"),
-                    },
-                ),
-            )
-            .expect("the rejection is a decision, not an error");
+        let log = spawn_family(&e, &child);
+        let floor = floor_policy(&e, &log).floor;
+        let views = viewing(&e, &log);
         assert_eq!(
-            decision.follow_up,
-            FollowUp::Child(ChildFollowUp::Rejected {
-                reason: ReturnRejection::PreconditionUnmet,
-            })
+            e.return_policy_of(&views, &child).map(|policy| policy.floor),
+            Some(floor.clone())
         );
-        let ended = [log, appended_facts(decision)].concat();
-        assert_eq!(e.validate_replay(&ended), Ok(()));
+        // The child spawning its own child may declare no floor below the one it stands under.
+        let batch = EngineEvent::Proposals(ProposalBatch {
+            id: crate::transition::ProposalBatchId::new("grandchild"),
+            trajectory: child.clone(),
+            provider_results: Vec::new(),
+            proposals: vec![raw(&call("spawn", json!({})))],
+            spawn: Some(crate::transition::SpawnMark::at(0)),
+            offer_nonce: nonce(),
+            evidence: Vec::new(),
+            audience: crate::audience::AudienceEvidence::default(),
+        });
+        let blocked = e.handle(&views, batch).expect("the child's marked spawn blocks");
+        let facts = appended_facts(blocked);
+        let (offer, _) = opened_offers(&facts)
+            .into_iter()
+            .find(|(_, plan)| plan.return_step() == Some(None))
+            .expect("the bare declaration is offered");
+        let log = [log, facts].concat();
+        let execute = |floor: Label| {
+            e.handle(
+                &viewing(&e, &log),
+                EngineEvent::ExecuteOffer(OfferExecution {
+                    trajectory: child.clone(),
+                    offer,
+                    outcome: OfferOutcome::Approved(Vec::new()),
+                    return_policy: Some(ReturnPolicy { floor, sanitizer: None }),
+                    offer_nonce: nonce(),
+                    audience: crate::audience::AudienceEvidence::default(),
+                }),
+            )
+        };
+        let below = execute(Label::new(SUSPICIOUS, floor.audience.clone()));
+        assert!(
+            matches!(
+                below,
+                Err(crate::transition::TransitionError::ReturnPolicy(
+                    plan::ReturnPolicyRefusal::FloorBelowOwn
+                ))
+            ),
+            "got {below:?}"
+        );
+        assert!(execute(floor).is_ok());
     }
 
     mod recovery_routes {
@@ -14174,7 +12624,6 @@ mod tests {
                 registry: cfg,
                 planner_cap: crate::registry::PlannerCap::default(),
                 dialect: PolicyDialectVersion::new(1),
-                child_return: ReturnPolicy::Raw,
                 profile: declaration,
             })
             .unwrap()
@@ -14646,7 +13095,7 @@ mod tests {
             let identity = |cfg: &RegistryConfig| {
                 let profile = crate::profile::DeploymentProfile::declare(crate::profile::covering_declaration(cfg))
                     .expect("the covering declaration declares");
-                crate::profile::identity_of(cfg, &ReturnPolicy::Raw, &profile)
+                crate::profile::identity_of(cfg, &profile)
             };
             let forward = config(vec![capped_send(), team_delta("read")], vec![]);
             let backward = config(vec![team_delta("read"), capped_send()], vec![]);
@@ -14679,18 +13128,17 @@ mod tests {
             }
         }
 
-        /// A sanitized return, derived and merged, then read back from its wire form.
+        /// A return declared through `declassify` at the spawn, derived, echoed and merged,
+        /// then read back from its wire form.
         fn sanitized_return_log(e: &Engine) -> Vec<Fact> {
             let child = TrajectoryId::new("child");
-            let log = spawn_family(e, None, &child);
+            let opened_log = vec![opened(e)];
+            let policy = ReturnPolicy {
+                sanitizer: Some(ReturnSanitizer::Named(SanitizerName::new("declassify"))),
+                ..floor_policy(e, &opened_log)
+            };
+            let log = [opened_log.clone(), spawn_family_at(e, &opened_log, &child, policy)].concat();
             let body = ValueBody::new("what I found");
-            let submitted = e
-                .handle(
-                    &viewing(e, &log),
-                    child_report_with(&log, &child, &body, vec![], no_answers()),
-                )
-                .expect("the submission stands");
-            let log = [log, appended_facts(submitted)].concat();
             let evidence = vec![Evidence::Sanitizer {
                 sanitizer: SanitizerName::new("declassify"),
                 source: RawResultDigest::of(body.as_str().as_bytes()),
@@ -14703,6 +13151,13 @@ mod tests {
                 )
                 .expect("the derivation stands as the candidate");
             let log = [log, appended_facts(derived)].concat();
+            let echoed = e
+                .handle(
+                    &viewing(e, &log),
+                    child_report_with(&log, &child, &ValueBody::new("clean"), vec![], no_answers()),
+                )
+                .expect("the echoed derivation crosses");
+            let log = [log, appended_facts(echoed)].concat();
             let wire = serde_json::to_string(&log).expect("facts serialize");
             serde_json::from_str(&wire).expect("facts deserialize")
         }
@@ -14715,21 +13170,15 @@ mod tests {
             let identity = |cfg: &RegistryConfig| {
                 let profile = crate::profile::DeploymentProfile::declare(crate::profile::covering_declaration(cfg))
                     .expect("the covering declaration declares");
-                crate::profile::identity_of(
-                    cfg,
-                    &ReturnPolicy::Sanitized(SanitizerName::new("declassify")),
-                    &profile,
-                )
+                crate::profile::identity_of(cfg, &profile)
             };
-            // A public `to` narrows nothing, so the derivation merges in one act.
             let to_public = returning_with_sources(vec![declassify_to(DeclaredAudience::Public)]);
             let to_alice = returning_with_sources(vec![declassify_to(DeclaredAudience::restricted([corp_reader(
                 "alice",
             )]))]);
             assert_ne!(identity(&to_public), identity(&to_alice));
 
-            let policy = ReturnPolicy::Sanitized(SanitizerName::new("declassify"));
-            let e = open_engine_returning(to_public, policy.clone());
+            let e = open_engine(to_public);
             let log = sanitized_return_log(&e);
             assert!(log.iter().any(|fact| matches!(
                 fact,
@@ -14740,7 +13189,7 @@ mod tests {
             )));
             assert_eq!(e.validate_replay(&log), Ok(()));
             assert_ne!(
-                open_engine_returning(to_alice, policy).validate_replay(&log),
+                open_engine(to_alice).validate_replay(&log),
                 Ok(()),
                 "a changed transition is another policy"
             );
@@ -14758,7 +13207,6 @@ mod tests {
                 fork: fork_in(log, child),
                 submission: ChildSubmission::Value { body: body.clone() },
                 evidence,
-                offer_nonce: nonce(),
                 audience,
             })
         }
@@ -14785,27 +13233,28 @@ mod tests {
                 scope: crate::authority::Scope::default(),
                 hint: None,
             };
-            let e = open_engine_returning(
-                returning_with_sources(vec![declassify]),
-                ReturnPolicy::Sanitized(SanitizerName::new("declassify")),
-            );
+            let e = open_engine(returning_with_sources(vec![declassify]));
             let child = TrajectoryId::new("child");
-            let log = spawn_family(&e, None, &child);
+            let opened_log = vec![opened(&e)];
+            let policy = ReturnPolicy {
+                sanitizer: Some(ReturnSanitizer::Named(SanitizerName::new("declassify"))),
+                ..floor_policy(&e, &opened_log)
+            };
+            let log = [opened_log.clone(), spawn_family_at(&e, &opened_log, &child, policy)].concat();
             let body = ValueBody::new("what I found");
             let raw_digest = RawResultDigest::of(body.as_str().as_bytes());
 
-            let submitted = e
+            let asked = e
                 .handle(
                     &viewing(&e, &log),
                     child_report_with(&log, &child, &body, vec![], no_answers()),
                 )
-                .expect("a symbolic transition target needs no answer to submit");
+                .expect("a symbolic transition target needs no answer to ask for the derivation");
+            assert_eq!(asked.append, None);
             assert!(matches!(
-                submitted.follow_up,
+                asked.follow_up,
                 FollowUp::Child(ChildFollowUp::Resolve(EvidenceRequest::Sanitizer { .. }))
             ));
-            let log = [log, appended_facts(submitted)].concat();
-            assert_eq!(e.validate_replay(&log), Ok(()));
 
             let clean = ValueBody::new("clean");
             let evidence = vec![Evidence::Sanitizer {
@@ -14813,44 +13262,45 @@ mod tests {
                 source: raw_digest,
                 derived: clean.clone(),
             }];
-            let derived = e
+            let staged = e
                 .handle(
                     &viewing(&e, &log),
                     child_report_with(&log, &child, &body, evidence, no_answers()),
                 )
                 .expect("the derivation stands as the candidate");
-            let stage = pending_stage_of(&derived);
             assert_eq!(
-                stage.label.audience,
-                symbolic("team"),
-                "the derived candidate carries the transition's audience symbolically"
+                staged.follow_up,
+                FollowUp::Child(ChildFollowUp::Staged { derived: clean.clone() })
             );
-            let acceptance = stage.offers[0].0;
-            let facts = appended_facts(derived);
+            let facts = appended_facts(staged);
             assert!(facts.iter().any(|fact| matches!(
                 fact,
                 Fact::CandidateDerived { sanitizer, .. } if sanitizer == &SanitizerName::new("declassify")
             )));
             let log = [log, facts].concat();
             assert_eq!(e.validate_replay(&log), Ok(()));
+            let subject = crate::basis::SubjectKey::Return(ChildReturnId::new(child.clone(), 0));
+            assert!(
+                matches!(
+                    viewing(&e, &log).views(&traj()).expect("the parent is opened").candidate(&subject),
+                    Some(DerivedCandidate::Return { value, .. }) if value.label.audience == symbolic("team")
+                ),
+                "the derived candidate carries the transition's audience symbolically"
+            );
 
-            let accepted = e
+            let echoed = e
                 .handle(
                     &viewing(&e, &log),
-                    EngineEvent::ExecuteOffer(OfferExecution {
-                        trajectory: traj(),
-                        offer: acceptance,
-                        outcome: OfferOutcome::Approved(Vec::new()),
-                        offer_nonce: nonce(),
-                        audience: no_answers(),
-                    }),
+                    child_report_with(&log, &child, &clean, vec![], no_answers()),
                 )
-                .expect("the parent accepts the residual");
-            assert!(matches!(
-                accepted.follow_up,
-                FollowUp::Offer(OfferFollowUp::Admitted { .. })
-            ));
-            let facts = appended_facts(accepted);
+                .expect("the child's echo of the derivation crosses it");
+            assert_eq!(
+                echoed.follow_up,
+                FollowUp::Child(ChildFollowUp::Merged {
+                    admitted: clean.clone()
+                })
+            );
+            let facts = appended_facts(echoed);
             assert!(facts.iter().any(|fact| matches!(
                 fact,
                 Fact::ChildReturn { value, .. } if value.label.audience == symbolic("team")
@@ -14860,10 +13310,10 @@ mod tests {
         }
 
         #[test]
-        fn an_accepted_child_return_seals_and_replays_with_its_pinned_answers() {
-            // The return stage reads @team to judge the sanitizer's
-            // applicability, so the submission pins the answer on its offers
-            // and the accepting act inherits it: the acceptance batch must
+        fn a_staged_derivation_seals_and_replays_with_its_pinned_answers() {
+            // Deriving the return reads @team to judge the sanitizer's
+            // applicability, so the staging act pins the answer, and the
+            // echo that crosses the derivation inherits it: both batches must
             // seal live and replay with that evidence.
             let declassify = crate::authority::Sanitizer {
                 name: SanitizerName::new("declassify"),
@@ -14878,57 +13328,89 @@ mod tests {
                 scope: crate::authority::Scope::default(),
                 hint: None,
             };
-            let cfg = returning_with_sources(vec![declassify]);
-            // Confine only the child return, so the child's own read never
-            // asks the sanitizer's atom and the stage is the one reader.
+            let mut cfg = returning_with_sources(vec![declassify]);
+            cfg.tools.push(crate::contract::ToolDeclaration::Declared(read_tool(
+                "read_member",
+                Delta {
+                    trust: None,
+                    audience: Some(DeclaredAudience::restricted([ReaderId::new("slack:U1")])),
+                },
+            )));
+            // Confine no result, so the child's own read never asks the
+            // sanitizer's atom and the derivation is the one reader.
             let mut declaration = crate::profile::covering_declaration(&cfg);
             declaration.confined_results = std::collections::BTreeSet::new();
             let e = Engine::open(DeploymentPolicy {
                 registry: cfg,
                 planner_cap: crate::registry::PlannerCap::default(),
                 dialect: PolicyDialectVersion::new(1),
-                child_return: ReturnPolicy::Raw,
                 profile: declaration,
             })
-            .expect("a return-confined deployment opens");
+            .expect("a context-controlled deployment opens");
             let child = TrajectoryId::new("child");
-            let mut log = spawn_family(&e, None, &child);
-            reads(&e, &mut log, &child, "read_suspicious_internal");
+            let opened_log = vec![opened(&e)];
+            // The declaration binds only the trust dimension, the one the sanitizer leaves alone.
+            let policy = ReturnPolicy {
+                floor: Label::new(SUSPICIOUS, Audience::public()),
+                sanitizer: Some(ReturnSanitizer::Named(SanitizerName::new("declassify"))),
+            };
+            let mut log = [opened_log.clone(), spawn_family_at(&e, &opened_log, &child, policy)].concat();
+            reads(&e, &mut log, &child, "read_member");
             let body = ValueBody::new("what I found");
-            let answers = source_evidence(vec![user_group("team", vec![slack_member("slack:U1", None)])]);
+            let clean = ValueBody::new("clean");
+            let evidence = vec![Evidence::Sanitizer {
+                sanitizer: SanitizerName::new("declassify"),
+                source: RawResultDigest::of(body.as_str().as_bytes()),
+                derived: clean.clone(),
+            }];
+            let answers = crate::audience::AudienceEvidence {
+                lookups: vec![crate::audience::MemberLookup {
+                    provider: "slack".to_string(),
+                    member: "slack:U1".to_string(),
+                    claims: Some(slack_member("slack:U1", None)),
+                }],
+                ..source_evidence(vec![user_group("team", vec![slack_member("slack:U1", None)])])
+            };
 
-            let submitted = e
+            let staged = e
                 .handle(
                     &viewing(&e, &log),
-                    child_report_with(&log, &child, &body, vec![], answers.clone()),
+                    child_report_with(&log, &child, &body, evidence, answers.clone()),
                 )
-                .expect("the answered stage opens its offers");
-            let acceptance = pending_stage_of(&submitted).offers[0].0;
-            let log = [log, appended_facts(submitted)].concat();
-            assert_eq!(e.validate_replay(&log), Ok(()));
-
-            let accepted = e
-                .handle(
-                    &viewing(&e, &log),
-                    EngineEvent::ExecuteOffer(OfferExecution {
-                        trajectory: traj(),
-                        offer: acceptance,
-                        outcome: OfferOutcome::Approved(Vec::new()),
-                        offer_nonce: nonce(),
-                        audience: no_answers(),
-                    }),
-                )
-                .expect("the acceptance inherits the offer's pinned answers and seals");
-            assert!(matches!(
-                accepted.follow_up,
-                FollowUp::Offer(OfferFollowUp::Admitted { .. })
-            ));
-            let facts = appended_facts(accepted);
+                .expect("the answered derivation stages");
+            assert_eq!(
+                staged.follow_up,
+                FollowUp::Child(ChildFollowUp::Staged { derived: clean.clone() })
+            );
+            let facts = appended_facts(staged);
             assert!(
                 facts
                     .iter()
-                    .any(|fact| matches!(fact, Fact::ChildReturn { evidence, .. } if *evidence == answers)),
-                "the crossing carries the inherited answers"
+                    .any(|fact| matches!(fact, Fact::CandidateDerived { evidence, .. } if *evidence == answers)),
+                "the staging pins the answers it read"
+            );
+            let log = [log, facts].concat();
+            assert_eq!(e.validate_replay(&log), Ok(()));
+
+            let echoed = e
+                .handle(
+                    &viewing(&e, &log),
+                    child_report_with(&log, &child, &clean, vec![], no_answers()),
+                )
+                .expect("the echo crosses the staged derivation without reading again");
+            assert_eq!(
+                echoed.follow_up,
+                FollowUp::Child(ChildFollowUp::Merged {
+                    admitted: clean.clone()
+                })
+            );
+            let facts = appended_facts(echoed);
+            assert!(
+                facts.iter().any(|fact| matches!(
+                    fact,
+                    Fact::ChildReturn { value, .. } if value.body == clean && value.label.audience == Audience::public()
+                )),
+                "the crossing carries the derivation at the sanitizer's audience"
             );
             let log = [log, facts].concat();
             assert_eq!(e.validate_replay(&log), Ok(()));
