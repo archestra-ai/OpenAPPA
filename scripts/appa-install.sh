@@ -73,10 +73,24 @@ else
     *) fail "unexpected redirect for the latest release: $latest" ;;
   esac
 fi
+# The character check comes first because `grep -q` succeeds when any single
+# line matches, so a multi-line value would otherwise pass a guard whose whole
+# job is to constrain what reaches a URL.
+case $tag in
+  *[!0-9A-Za-z.-]*) fail "not a release tag: $tag" ;;
+esac
 printf '%s\n' "$tag" | grep -Eq "$tag_pattern" || fail "not a release tag: $tag"
 
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+staged=
+cleanup() {
+  rm -rf "$work"
+  if [ -n "$staged" ]; then
+    rm -f "$staged"
+  fi
+}
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT HUP TERM
 
 # The list and the archive come from the same pinned release, never from
 # `latest`, so a release published mid-run cannot pair one with the other.
@@ -94,20 +108,44 @@ expected=${listed%% *}
 actual=$(digest "$work/$archive")
 [ "$actual" = "$expected" ] || fail "checksum mismatch for $archive"
 
-mkdir "$work/extract"
-tar -xzf "$work/$archive" -C "$work/extract"
-[ -f "$work/extract/appa" ] || fail "$archive does not contain appa"
+# The digest is published by the same host that serves the archive, so it
+# proves the download arrived intact, not that the release is honest. The Rust
+# half of this project validates every archive entry before extracting one;
+# match that here rather than rely on tar, whose treatment of `..` and absolute
+# members differs between GNU and BSD.
+entries=$(tar -tzf "$work/$archive") || fail "$archive is not a readable archive"
+[ "$(printf '%s\n' "$entries" | grep -c .)" -le 16 ] ||
+  fail "$archive holds more entries than a release archive carries"
+if ! printf '%s\n' "$entries" | while IFS= read -r entry; do
+  case $entry in
+    /* | .. | ../* | */.. | */../*) exit 1 ;;
+  esac
+done; then
+  fail "$archive holds an entry that escapes the directory it unpacks into"
+fi
+
+mkdir "$work/extract" || fail "could not create a staging directory"
+tar -xzf "$work/$archive" -C "$work/extract" || fail "could not unpack $archive"
+# A symlink would pass -f by resolving elsewhere, and that elsewhere is what
+# would be installed.
+if [ ! -f "$work/extract/appa" ] || [ -L "$work/extract/appa" ]; then
+  fail "$archive does not contain appa"
+fi
 
 # An installed appa is replaced only by one that runs here.
 version=$("$work/extract/appa" --version) ||
   fail "the $tag binary does not run on this system; Linux needs glibc 2.34 or newer"
+[ -n "$version" ] || fail "the $tag binary reported no version"
 
 # The previous appa stays in place until the new one is completely written
 # beside it, so a failed copy never leaves the directory without a working
 # binary.
-mkdir -p "$install_dir"
-install -m 755 "$work/extract/appa" "$install_dir/appa.$$.new"
-mv -f "$install_dir/appa.$$.new" "$install_dir/appa"
+mkdir -p "$install_dir" || fail "could not create $install_dir"
+staged=$install_dir/appa.$$.new
+install -m 755 "$work/extract/appa" "$staged" ||
+  fail "could not write $staged"
+mv -f "$staged" "$install_dir/appa" || fail "could not replace $install_dir/appa"
+staged=
 printf 'Installed %s to %s\n' "$version" "$install_dir/appa"
 case :${PATH:-}: in
   *":$install_dir:"*) printf 'Next: appa init claude-code\n' ;;
