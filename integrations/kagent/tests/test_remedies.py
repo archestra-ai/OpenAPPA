@@ -34,7 +34,7 @@ ROLLBACK_SILENT = "roll back the checkout-api deployment for a silent board"
 # The offer actions the runtime renders (`appa-runtime/src/engine.rs`,
 # `remedy_instruction`). A `{"remedy": ...}` turn names one of them.
 ACCEPT = "Accept this change"
-APPROVAL = "Request approval"
+APPROVAL = "Submit for approval"
 
 # The reserved call's answer when a plan releases the call
 # (`appa-runtime/src/mcp.rs`, `render`).
