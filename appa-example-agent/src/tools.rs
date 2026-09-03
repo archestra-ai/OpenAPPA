@@ -7,31 +7,24 @@ use appa_runtime_api::{OutcomeBody, ProposedCall, ToolOutcome};
 use crate::http::{HttpClient, read_body_capped};
 use crate::wire::WireTool;
 
-/// The runtime's own control tool, under the bare wire name the
-/// runtime recognizes. Runtime-provided and identical for
-/// every harness, so the agent advertises it rather than the host.
+/// Runtime control tool for executing remedies.
 pub(crate) const CONTROL_TOOL: &str = "execute_remedy_plan";
 
-/// What the model may call: the host's tools, plus the control tool
-/// the runtime provides.
+/// Host tools combined with the runtime control tool.
 #[derive(Clone, Debug)]
 pub struct ToolCatalogue {
     tools: Vec<WireTool>,
 }
 
 impl ToolCatalogue {
-    /// Build the catalogue from the host's tool schemas. The control
-    /// tool is appended here, so no host can forget it and none can
-    /// describe it differently.
+    /// Builds the catalogue with the control tool appended.
     pub fn new(tools: Vec<WireTool>) -> Self {
         let mut tools = tools;
         tools.push(control_tool_schema());
         ToolCatalogue { tools }
     }
 
-    /// Build one request's catalogue, omitting a host tool that cannot run in
-    /// the current frame. The control tool remains available: recovery is
-    /// trajectory-local and stays useful inside a child.
+    /// Builds the catalogue excluding a tool that cannot run in the current frame.
     pub(crate) fn advertised_without(&self, excluded: Option<&str>) -> Vec<WireTool> {
         self.tools
             .iter()

@@ -1507,9 +1507,7 @@ impl RuntimeEngine {
         Ok(Some(ReturnPolicy { floor, sanitizer }))
     }
 
-    /// What a starting child is told about its return: the schema an attesting fork holds it
-    /// to, or the sanitizer that rewrites it and the echo that follows. A bare floor tells the
-    /// child nothing it could act on.
+    /// Return contract context provided to a starting subagent.
     pub(crate) fn fork_return_contract(
         &self,
         view: &EngineView,
@@ -1589,9 +1587,7 @@ impl RuntimeEngine {
         }
     }
 
-    /// One child's stop. The engine decides what crosses: the value merged, the derivation
-    /// staged for the child to echo, or nothing. A stop held below the floor or outside the
-    /// fork's shape is blocked with the reason.
+    /// Handles one child's stop and decides what crosses or blocks.
     fn child_return(
         &self,
         view: &EngineView,
@@ -2668,8 +2664,7 @@ fn audience_wire(audience: &Audience) -> String {
     audience.clauses().map(clause_wire).collect::<Vec<_>>().join(" ∩ ")
 }
 
-/// One union clause's summary: the chain audience, group marks, and readers in canonical
-/// order — three entries shown, the rest counted; the empty clause is nobody.
+/// One union clause summary: up to three entries shown, remaining counted.
 fn clause_wire(clause: &Clause) -> String {
     let mut entries = crate::consult::clause_entries(clause);
     if entries.is_empty() {
@@ -2735,7 +2730,7 @@ fn gap_text(gap: &appa_engine::check::Gap, chain: &TrustChain) -> String {
                 )
             }
         },
-        // The count only, as for `includes`: a cap may read a directory group's members.
+        // Count only: a cap may read a directory group's members.
         Gap::Cap { cap } => format!("the committed readers exceed the cap of {}", declared_count(cap)),
         Gap::Prior(effect) => format!("requires a prior {} effect", effect.as_str()),
         Gap::NoPrior(effect) => format!("forbidden after a {} effect", effect.as_str()),
@@ -2787,7 +2782,7 @@ fn audience_count(audience: &Audience) -> String {
     clause_count(clause)
 }
 
-/// One clause's atom count as feedback shows it — counts only, never who.
+/// Summarizes a clause as atom counts only.
 fn clause_count(clause: &Clause) -> String {
     let symbolic = clause.groups().count() + usize::from(clause.chain().is_some());
     match (clause.readers().len(), symbolic) {
@@ -2822,9 +2817,7 @@ fn shape_feedback(mismatch: &ReturnMismatch, policy: Option<&ReturnPolicy>) -> S
     )
 }
 
-/// A label in the spelling `execute_remedy_plan` takes for a return floor. An audience that is
-/// an intersection of clauses has no one-list spelling; the trust rank alone is shown then, and
-/// the omitted dimension keeps the trajectory's current value.
+/// Formats a return floor label for `execute_remedy_plan`.
 fn label_spelling(chain: &TrustChain, label: &Label) -> String {
     let quoted = |text: &str| format!("\"{}\"", terminal_safe(text));
     let top = Trust::new((chain.len() - 1) as u8);
@@ -2853,24 +2846,20 @@ fn label_spelling(chain: &TrustChain, label: &Label) -> String {
     }
 }
 
-/// What bounds a return declaration made on a trajectory: its current label, which no floor
-/// stands above, and the lowest trust its own floor lets it declare.
+/// Trajectory bounds for a return declaration: current label and lowest allowed trust.
 struct ReturnBounds {
     label: Label,
     lowest: Trust,
 }
 
-/// The spelling a return declaration's example needs: this trajectory's label as the
-/// `label` argument takes it, and the trust ranks a placeholder stands for.
+/// Formats the example return floor label and permitted trust ranks.
 struct ReturnSpelling {
     floor: String,
     ranks: String,
 }
 
 impl ReturnSpelling {
-    /// Only the ranks the declaration may take are named: at or below the trajectory's trust,
-    /// and at or above the lowest its own floor permits. The unnamed top sentinel stands for
-    /// the whole chain.
+    /// Permitted trust ranks between lowest and current trust.
     fn of(chain: &TrustChain, bounds: &ReturnBounds) -> ReturnSpelling {
         let ReturnBounds { label, lowest } = bounds;
         let held = if label.trust == Trust::new(u8::MAX) {
@@ -3075,7 +3064,7 @@ fn fork_heading(advice: ForkAdvice) -> &'static str {
     }
 }
 
-/// `remedies_required` when the block also carries requirement gaps a child would clear.
+/// Guidance text for delegating blocked work to a subagent.
 fn fork_advice_text(advice: ForkAdvice, remedies_required: bool) -> String {
     let ForkAdvice::Narrowing {
         standing,

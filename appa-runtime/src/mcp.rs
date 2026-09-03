@@ -77,9 +77,7 @@ impl RemedyService {
     ) -> CallToolResult {
         let quoted = OfferId(args.offer_id.clone());
         let arguments = RemedyArguments::from(args);
-        // The trajectory this act belongs to was named by the hook that
-        // preceded it. Without one there is nothing to serve, and guessing
-        // would be choosing a trajectory for the caller.
+        // Requires the vouched trajectory from the preceding hook.
         let Some((acting, ruling)) = self.runtime.take_vouched(&quoted) else {
             return render(RemedyOutcome::Refused {
                 detail: "no live offer with this id exists".to_string(),
@@ -131,13 +129,12 @@ impl ServerHandler for RemedyService {
     }
 }
 
-/// The release version the CLI advertises, so an MCP client and `--version` agree.
+/// Advertised runtime version for MCP clients.
 const RUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const SESSION_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// The tower service `main` nests at `/mcp`, serving from process
-/// start.
+/// MCP service served at `/mcp`.
 pub fn service(runtime: Arc<Runtime>) -> StreamableHttpService<RemedyService, LocalSessionManager> {
     let mut sessions = LocalSessionManager::default();
     sessions.session_config.keep_alive = Some(runtime.review_timeout() + SESSION_GRACE);
