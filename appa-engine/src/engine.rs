@@ -11867,7 +11867,6 @@ mod tests {
             block.block.fork_advice,
             Some(crate::plan::ForkAdvice::Narrowing {
                 standing: crate::plan::FloorStanding::Below,
-                remedies_required: false,
                 sanitized_return: true,
             }),
             "the child is told a grandchild under the bare floor cannot take the drop either, but one with a \
@@ -11904,7 +11903,6 @@ mod tests {
             block.block.fork_advice,
             Some(crate::plan::ForkAdvice::Narrowing {
                 standing: crate::plan::FloorStanding::Within,
-                remedies_required: false,
                 sanitized_return: true,
             }),
             "a drop the floor permits is to be accepted here, not delegated again"
@@ -11931,7 +11929,6 @@ mod tests {
             block.block.fork_advice,
             Some(crate::plan::ForkAdvice::Narrowing {
                 standing: crate::plan::FloorStanding::Below,
-                remedies_required: false,
                 sanitized_return: false,
             }),
             "a trust-raising sanitizer lifts no audience drop, so no sanitized delegation is advised"
@@ -11958,7 +11955,6 @@ mod tests {
             block.block.fork_advice,
             Some(crate::plan::ForkAdvice::Narrowing {
                 standing: crate::plan::FloorStanding::Below,
-                remedies_required: false,
                 sanitized_return: false,
             }),
             "with no return sanitizer registered, no grandchild can take the drop either"

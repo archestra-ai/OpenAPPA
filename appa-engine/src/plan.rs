@@ -218,11 +218,9 @@ pub enum ForkAdvice {
     SameLabel,
     /// The block narrows this trajectory. `sanitized_return` when a return sanitizer this
     /// trajectory may declare raises every dimension the change lowers, so a child's return
-    /// through it leaves this trajectory's label as it is; `remedies_required` when the block
-    /// also carries requirement gaps a child would have to clear.
+    /// through it leaves this trajectory's label as it is.
     Narrowing {
         standing: FloorStanding,
-        remedies_required: bool,
         sanitized_return: bool,
     },
 }
@@ -317,7 +315,6 @@ pub(crate) fn plan(
                 Some(floor) if floor.holds(&narrowing.to) => FloorStanding::Within,
                 Some(_) => FloorStanding::Below,
             },
-            remedies_required: !raw.requirement_gaps.is_empty(),
             sanitized_return: return_options(registry, floor.as_ref())
                 .into_iter()
                 .flatten()
@@ -3399,7 +3396,6 @@ mod tests {
             planned.fork_advice,
             Some(ForkAdvice::Narrowing {
                 standing: FloorStanding::Unbound,
-                remedies_required: false,
                 sanitized_return: false,
             }),
             "a root with no return sanitizer registered is told a child can take the change, unsanitized"

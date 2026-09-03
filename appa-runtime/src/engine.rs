@@ -2845,11 +2845,19 @@ struct ReturnSpelling {
 }
 
 impl ReturnSpelling {
+    /// A floor never stands above the declaring trajectory, so only the ranks at or below its
+    /// trust are named; the unnamed top sentinel names the whole chain.
     fn of(chain: &TrustChain, label: &Label) -> ReturnSpelling {
+        let held = if label.trust == Trust::new(u8::MAX) {
+            chain.len()
+        } else {
+            usize::from(label.trust.rank()) + 1
+        };
         ReturnSpelling {
             floor: label_spelling(chain, label),
             ranks: chain
                 .names()
+                .take(held)
                 .map(|name| format!("\"{}\"", terminal_safe(name)))
                 .collect::<Vec<_>>()
                 .join(", "),
@@ -2874,10 +2882,12 @@ fn return_instruction(
              of {ranks} (lowest first)"
         ),
         Some(name) if name.is_attest_schema() => format!(
-            "  - Attest the subagent's return: declare the floor and the JSON schema its return must match (a \
-             closed object schema; a string leaf carries `enum`, `const`, or `format`). The return crosses at the \
-             attestation's label.\n    execute_remedy_plan(offer_id: \"{id}\", label: {floor}, return_schema: \
-             {{type: \"object\", ...}})"
+            "  - Attest the subagent's return: declare the floor and the JSON schema its return must match. The \
+             schema is strict: an object lists its `properties`, every one `required`, and is closed as written \
+             (no `additionalProperties`); an integer carries `minimum` and `maximum`; a string leaf carries \
+             `enum`, `const`, or `format`, never free text. The return crosses at the attestation's \
+             label.\n    execute_remedy_plan(offer_id: \"{id}\", label: {floor}, return_schema: {{type: \
+             \"object\", ...}})"
         ),
         Some(name) => format!(
             "  - Have sanitizer {} rewrite the subagent's return before this session receives it, and declare the \
@@ -2964,9 +2974,13 @@ fn block_feedback(planned: &PlannedBlock, offers: &[(OfferId, PlanId)], chain: &
         lines.extend(remedies);
     }
     if let Some(advice) = planned.fork_advice {
+        let remedies_required = !planned.raw.requirement_gaps.is_empty();
         lines.push(String::new());
         lines.push(fork_heading(advice).to_string());
-        lines.push(format!("  {}", fork_advice_text(advice).replace('\n', "\n  ")));
+        lines.push(format!(
+            "  {}",
+            fork_advice_text(advice, remedies_required).replace('\n', "\n  ")
+        ));
     }
     lines.join("\n")
 }
@@ -2989,10 +3003,10 @@ fn fork_heading(advice: ForkAdvice) -> &'static str {
     }
 }
 
-fn fork_advice_text(advice: ForkAdvice) -> String {
+/// `remedies_required` when the block also carries requirement gaps a child would clear.
+fn fork_advice_text(advice: ForkAdvice, remedies_required: bool) -> String {
     let ForkAdvice::Narrowing {
         standing,
-        remedies_required,
         sanitized_return,
     } = advice
     else {
