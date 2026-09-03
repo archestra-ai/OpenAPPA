@@ -11865,7 +11865,11 @@ mod tests {
         );
         assert_eq!(
             block.block.fork_advice,
-            Some(crate::plan::ForkAdvice::BelowFloor { sanitized_return: true }),
+            Some(crate::plan::ForkAdvice::Narrowing {
+                standing: crate::plan::FloorStanding::Below,
+                remedies_required: false,
+                sanitized_return: true,
+            }),
             "the child is told a grandchild under the bare floor cannot take the drop either, but one with a \
              return sanitizer can"
         );
@@ -11898,10 +11902,12 @@ mod tests {
         );
         assert_eq!(
             block.block.fork_advice,
-            Some(crate::plan::ForkAdvice::Delegate {
-                remedies_required: false
+            Some(crate::plan::ForkAdvice::Narrowing {
+                standing: crate::plan::FloorStanding::Within,
+                remedies_required: false,
+                sanitized_return: true,
             }),
-            "a drop the floor permits keeps the ordinary delegation advice"
+            "a drop the floor permits is to be accepted here, not delegated again"
         );
         let internal = call("read_internal", json!({ "who": "someone" }));
         let blocked = e
@@ -11941,8 +11947,10 @@ mod tests {
         assert!(block.block.plans.is_empty(), "nothing lifts a drop below the floor");
         assert_eq!(
             block.block.fork_advice,
-            Some(crate::plan::ForkAdvice::BelowFloor {
-                sanitized_return: false
+            Some(crate::plan::ForkAdvice::Narrowing {
+                standing: crate::plan::FloorStanding::Below,
+                remedies_required: false,
+                sanitized_return: false,
             }),
             "with no return sanitizer registered, no grandchild can take the drop either"
         );

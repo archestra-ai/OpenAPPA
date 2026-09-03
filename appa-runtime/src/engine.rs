@@ -49,7 +49,9 @@ use appa_engine::fact::{
 };
 use appa_engine::label::{Audience, Clause, DeclaredAudience, Label, ReaderId, SymbolicAtom, Trust};
 use appa_engine::names::MarkName;
-use appa_engine::plan::{ExecutableRemedyPlan, ForkAdvice, PlanId, PlannedBlock, RemedyPlan, RequiredRuling};
+use appa_engine::plan::{
+    ExecutableRemedyPlan, FloorStanding, ForkAdvice, PlanId, PlannedBlock, RemedyPlan, RequiredRuling,
+};
 use appa_engine::profile::PolicyFileKey as EnginePolicyFileKey;
 use appa_engine::projection::Views;
 use appa_engine::registry::TrustChain;
@@ -1473,7 +1475,6 @@ impl RuntimeEngine {
                 .unwrap_or(current.audience),
         };
         let sanitizer = match step {
-            None => None,
             Some(name) if name.is_attest_schema() => {
                 let Some(schema) = &arguments.return_schema else {
                     return Err(
@@ -1486,6 +1487,14 @@ impl RuntimeEngine {
                     .map_err(|error| format!("`return_schema` does not compile to a return shape: {error}"))?;
                 Some(ReturnSanitizer::Attest(shape))
             }
+            _ if arguments.return_schema.is_some() => {
+                return Err(
+                    "this plan does not attest the subagent's return, so `return_schema` is not taken: declare the \
+                     attest-schema offer to attest, or omit `return_schema`"
+                        .to_string(),
+                );
+            }
+            None => None,
             Some(name) => Some(ReturnSanitizer::Named(name)),
         };
         Ok(Some(ReturnPolicy { floor, sanitizer }))
@@ -2938,47 +2947,71 @@ fn block_feedback(planned: &PlannedBlock, offers: &[(OfferId, PlanId)], chain: &
 
 fn fork_heading(advice: ForkAdvice) -> &'static str {
     match advice {
-        ForkAdvice::Delegate { .. } => "Keep this session unchanged:",
         ForkAdvice::SameLabel => "Alternative:",
-        ForkAdvice::BelowFloor { .. } => "Not acceptable here:",
+        ForkAdvice::Narrowing {
+            standing: FloorStanding::Unbound,
+            ..
+        } => "Keep this session unchanged:",
+        ForkAdvice::Narrowing {
+            standing: FloorStanding::Within,
+            ..
+        } => "Delegation:",
+        ForkAdvice::Narrowing {
+            standing: FloorStanding::Below,
+            ..
+        } => "Not acceptable here:",
     }
 }
 
-fn fork_advice_text(advice: ForkAdvice) -> &'static str {
-    match advice {
-        ForkAdvice::Delegate {
-            remedies_required: false,
-        } => {
-            "If this trajectory's harness advertises a child-session tool, delegate this call and all work that uses \
-             its result there.\nFinish there by returning nothing, or return only a sanitized derivation. Returning \
-             the raw value applies the same change to this session."
+fn fork_advice_text(advice: ForkAdvice) -> String {
+    let ForkAdvice::Narrowing {
+        standing,
+        remedies_required,
+        sanitized_return,
+    } = advice
+    else {
+        return "If this trajectory's harness advertises a child-session tool, handle the work there if isolation is \
+                useful.\nA child inherits the same session label, so delegation does not clear these requirements."
+            .to_string();
+    };
+    let delegated = if remedies_required {
+        "this call, its required remedies, and all work that uses its result"
+    } else {
+        "this call and all work that uses its result"
+    };
+    match (standing, sanitized_return) {
+        (FloorStanding::Unbound, true) => format!(
+            "If this trajectory's harness advertises a child-session tool, delegate {delegated} there.\nFinish there \
+             by returning nothing, or return only a sanitized derivation. Returning the raw value applies the same \
+             change to this session."
+        ),
+        (FloorStanding::Unbound, false) => format!(
+            "If this trajectory's harness advertises a child-session tool, delegate {delegated} there.\nNo return \
+             sanitizer is registered, so finish there by returning nothing: a returned value applies the same \
+             change to this session."
+        ),
+        (FloorStanding::Within, true) => format!(
+            "This session is a subagent, and the floor its parent declared allows this change: accept it here.\nTo \
+             keep this session unchanged instead, delegate {delegated} to a further subagent declared with a \
+             return sanitizer; one declared with the bare floor would apply the same change here on its return."
+        ),
+        (FloorStanding::Within, false) => {
+            "This session is a subagent, and the floor its parent declared allows this change: accept it here.\nA \
+             further subagent's return would apply the same change to this session, so delegating gains nothing."
+                .to_string()
         }
-        ForkAdvice::Delegate {
-            remedies_required: true,
-        } => {
-            "If this trajectory's harness advertises a child-session tool, delegate this call, its required remedies, \
-             and all work that uses its result there.\nFinish there by returning nothing, or return only a sanitized \
-             derivation. Returning the raw value applies the same change to this session."
-        }
-        ForkAdvice::SameLabel => {
-            "If this trajectory's harness advertises a child-session tool, handle the work there if isolation is \
-             useful.\nA child inherits the same session label, so delegation does not clear these requirements."
-        }
-        ForkAdvice::BelowFloor {
-            sanitized_return: true,
-        } => {
+        (FloorStanding::Below, true) => format!(
             "This session is a subagent, and this change falls below the floor its parent declared: this session \
              cannot accept it, and a subagent started here under the bare floor cannot either.\nA subagent started \
-             here with a return sanitizer can: delegate this call and all work that uses its result there, and \
-             declare that sanitizer when the spawn asks for the return declaration."
-        }
-        ForkAdvice::BelowFloor {
-            sanitized_return: false,
-        } => {
+             here with a return sanitizer can: delegate {delegated} there, and declare that sanitizer when the \
+             spawn asks for the return declaration."
+        ),
+        (FloorStanding::Below, false) => {
             "This session is a subagent, and this change falls below the floor its parent declared: neither this \
              session nor any subagent started here can accept it, and no return sanitizer is registered.\nDo not \
              start a subagent for this. Finish without this call, or return a plain note that the work needs a \
              subagent declared with a lower floor or a return sanitizer, so the parent can start one."
+                .to_string()
         }
     }
 }

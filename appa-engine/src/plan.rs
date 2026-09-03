@@ -214,15 +214,28 @@ pub struct PlannedBlock {
 /// situation the block is in; the harness spells it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ForkAdvice {
-    /// A child can take this narrowing and finish by returning nothing or a sanitized derivation.
-    /// `remedies_required` when the block also carries requirement gaps the child must clear.
-    Delegate { remedies_required: bool },
     /// Only requirement gaps: a child starts at the same label, so delegation clears nothing.
     SameLabel,
-    /// The narrowing falls below this trajectory's floor: neither it nor a child under the same
-    /// floor can accept it. `sanitized_return` when a return sanitizer this trajectory may
-    /// declare would lift a child's return over the floor.
-    BelowFloor { sanitized_return: bool },
+    /// The block narrows this trajectory. `sanitized_return` when a return sanitizer this
+    /// trajectory may declare would lift a child's return over the change; `remedies_required`
+    /// when the block also carries requirement gaps a child would have to clear.
+    Narrowing {
+        standing: FloorStanding,
+        remedies_required: bool,
+        sanitized_return: bool,
+    },
+}
+
+/// Where a narrowing stands against the floor a fork set on this trajectory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FloorStanding {
+    /// A root: no fork bounds it, and a child can take the change in its place.
+    Unbound,
+    /// The floor permits the change: the parent declared it to be accepted here, and a child
+    /// under the same floor gains nothing.
+    Within,
+    /// The floor refuses the change here and in every child under it.
+    Below,
 }
 
 impl PlannedBlock {
@@ -297,13 +310,14 @@ pub(crate) fn plan(
     let fork_advice = match (role, &raw.narrowing) {
         (CallRole::MarkedSpawn, _) => None,
         (_, None) => Some(ForkAdvice::SameLabel),
-        (_, Some(narrowing)) => Some(match floor.as_ref().filter(|floor| !floor.holds(&narrowing.to)) {
-            Some(_) => ForkAdvice::BelowFloor {
-                sanitized_return: return_options(registry, floor.as_ref()).iter().any(Option::is_some),
+        (_, Some(narrowing)) => Some(ForkAdvice::Narrowing {
+            standing: match &floor {
+                None => FloorStanding::Unbound,
+                Some(floor) if floor.holds(&narrowing.to) => FloorStanding::Within,
+                Some(_) => FloorStanding::Below,
             },
-            None => ForkAdvice::Delegate {
-                remedies_required: !raw.requirement_gaps.is_empty(),
-            },
+            remedies_required: !raw.requirement_gaps.is_empty(),
+            sanitized_return: return_options(registry, floor.as_ref()).iter().any(Option::is_some),
         }),
     };
     Ok(PlannedBlock {
@@ -3373,6 +3387,15 @@ mod tests {
                 from: established(TRUSTED, Audience::public()),
                 to: established(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
             })]
+        );
+        assert_eq!(
+            planned.fork_advice,
+            Some(ForkAdvice::Narrowing {
+                standing: FloorStanding::Unbound,
+                remedies_required: false,
+                sanitized_return: false,
+            }),
+            "a root with no return sanitizer registered is told a child can take the change, unsanitized"
         );
     }
 
