@@ -380,6 +380,13 @@ impl Engine {
         view.views(child)?.return_policy_of(child).cloned()
     }
 
+    /// The lowest trust rank a return declaration made on this branch may set: its own floor's
+    /// trust, or the chain's bottom for a root or under a fork whose sanitizer raises trust.
+    /// A declaration below it is refused as [`plan::ReturnPolicyRefusal::FloorBelowOwn`].
+    pub fn lowest_return_trust(&self, views: &Views) -> crate::label::Trust {
+        plan::floor_of(&self.registry, views).map_or(crate::label::Trust::new(0), |floor| floor.lowest_trust())
+    }
+
     /// The return policy the fork `parent` prepared carries, before a child is bound to it: what
     /// the runtime tells the child at its start, read from the view that binds it.
     pub fn prepared_return_policy(
@@ -12009,6 +12016,37 @@ mod tests {
                 sanitized_return: true,
             }),
             "a sanitizer admitting the suspicious value and raising it back to trusted is the sanitized route"
+        );
+    }
+
+    #[test]
+    fn the_lowest_declarable_return_trust_is_the_own_floors_unless_its_sanitizer_raises_trust() {
+        let e = open_engine(returning_registry(vec![lifting_sanitizer("redactor")]));
+        let root_log = vec![opened(&e)];
+        assert_eq!(
+            e.lowest_return_trust(&viewing(&e, &root_log).views(&traj()).expect("the root is opened")),
+            SUSPICIOUS,
+            "a root is bound by no floor"
+        );
+
+        let bare = TrajectoryId::new("bare");
+        let log = [root_log.clone(), forked_child(&e, &root_log, &bare)].concat();
+        assert_eq!(
+            e.lowest_return_trust(&viewing(&e, &log).views(&bare).expect("the child is opened")),
+            TRUSTED,
+            "under the bare floor the child declares nothing below its parent's trust"
+        );
+
+        let lifted = TrajectoryId::new("lifted");
+        let policy = ReturnPolicy {
+            sanitizer: named("redactor"),
+            ..floor_policy(&e, &root_log)
+        };
+        let log = [root_log.clone(), spawn_family_at(&e, &root_log, &lifted, policy)].concat();
+        assert_eq!(
+            e.lowest_return_trust(&viewing(&e, &log).views(&lifted).expect("the child is opened")),
+            SUSPICIOUS,
+            "a trust-raising return sanitizer leaves the trust dimension unbound"
         );
     }
 

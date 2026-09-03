@@ -955,6 +955,16 @@ impl Floor {
         &self.label
     }
 
+    /// The lowest trust a return declaration made under this floor may set: the floor's own
+    /// trust, or the chain's bottom where the fork's sanitizer raises trust and leaves that
+    /// dimension unbound.
+    pub(crate) fn lowest_trust(&self) -> crate::label::Trust {
+        match self.raised {
+            Some(crate::authority::Transition::Trust { .. }) => crate::label::Trust::new(0),
+            _ => self.label.trust,
+        }
+    }
+
     /// Does `label` stay at or above the floor on every dimension the floor binds? A
     /// dimension the fork's sanitizer raises is unbound: the derivation replaces it wholesale.
     pub(crate) fn holds(&self, label: &Label) -> bool {

@@ -1023,11 +1023,11 @@ impl RuntimeEngine {
             AudienceRound::Failed(error) => return Err(proposal_refusal(error)),
         };
         let append = decision.append.map(ValidatedFactBatch::into_unsealed);
-        let then = self.deliver_proposals(decision.follow_up, &views.current_label())?;
+        let then = self.deliver_proposals(decision.follow_up, &self.return_bounds(&views))?;
         Ok(EngineDecision { append, then })
     }
 
-    fn deliver_proposals(&self, follow_up: FollowUp, label: &Label) -> Result<Next, EngineRefusal> {
+    fn deliver_proposals(&self, follow_up: FollowUp, bounds: &ReturnBounds) -> Result<Next, EngineRefusal> {
         match follow_up {
             FollowUp::Proposals {
                 released: releases,
@@ -1043,7 +1043,7 @@ impl RuntimeEngine {
                     });
                 }
                 if let Some(block) = blocked.into_iter().next() {
-                    let feedback = self.block_delivery(&block, label);
+                    let feedback = self.block_delivery(&block, bounds);
                     return Ok(Next::ModelResponse {
                         invocations: Vec::new(),
                         feedback: vec![feedback],
@@ -1065,8 +1065,8 @@ impl RuntimeEngine {
         }
     }
 
-    fn block_delivery(&self, block: &CoreBlocked, label: &Label) -> Feedback {
-        let (text, offers, review) = self.rendered_block(block, label);
+    fn block_delivery(&self, block: &CoreBlocked, bounds: &ReturnBounds) -> Feedback {
+        let (text, offers, review) = self.rendered_block(block, bounds);
         let offers = offers
             .into_iter()
             .map(|offer| {
@@ -1093,14 +1093,14 @@ impl RuntimeEngine {
         Feedback { text, offers, review }
     }
 
-    fn rendered_block(&self, block: &CoreBlocked, label: &Label) -> (String, Vec<OfferId>, Vec<PendingReview>) {
+    fn rendered_block(&self, block: &CoreBlocked, bounds: &ReturnBounds) -> (String, Vec<OfferId>, Vec<PendingReview>) {
         let offers: Vec<(OfferId, PlanId)> = block
             .offers
             .iter()
             .map(|(offer, plan)| (offer_id(offer), *plan))
             .collect();
         let chain = self.engine.registry().trust_chain();
-        let text = block_feedback(&block.block, &offers, chain, label);
+        let text = block_feedback(&block.block, &offers, chain, bounds);
         let review = self.pending_reviews(block, &offers);
         (text, offers.into_iter().map(|(offer, _)| offer).collect(), review)
     }
@@ -1344,10 +1344,10 @@ impl RuntimeEngine {
                 feedback: "[appa] the state changed and this offer no longer applies; re-propose the call".to_string(),
             }),
             FollowUp::Offer(OfferFollowUp::Denied { block }) => {
-                Next::PresentToModel(self.offer_block_delivery(&block, &views.current_label()))
+                Next::PresentToModel(self.offer_block_delivery(&block, &self.return_bounds(&views)))
             }
             FollowUp::Offer(OfferFollowUp::Substituted { block }) => {
-                Next::PresentToModel(self.offer_block_delivery(&block, &views.current_label()))
+                Next::PresentToModel(self.offer_block_delivery(&block, &self.return_bounds(&views)))
             }
             FollowUp::Offer(OfferFollowUp::Staged(confined)) => Next::PresentToModel(self.stage_delivery(
                 "[appa] the cleaned result still narrows this session.",
@@ -1429,9 +1429,16 @@ impl RuntimeEngine {
         AuthorityOutcome::Outcome(OfferOutcome::Approved(approvals))
     }
 
-    fn offer_block_delivery(&self, block: &CoreBlocked, label: &Label) -> Presentation {
-        let (feedback, offers, _) = self.rendered_block(block, label);
+    fn offer_block_delivery(&self, block: &CoreBlocked, bounds: &ReturnBounds) -> Presentation {
+        let (feedback, offers, _) = self.rendered_block(block, bounds);
         Presentation::Blocked { feedback, offers }
+    }
+
+    fn return_bounds(&self, views: &Views) -> ReturnBounds {
+        ReturnBounds {
+            label: views.current_label(),
+            lowest: self.engine.lowest_return_trust(views),
+        }
     }
 
     /// The return policy an offer's execution declares, where its plan ends in a return step:
@@ -2837,6 +2844,13 @@ fn label_spelling(chain: &TrustChain, label: &Label) -> String {
     }
 }
 
+/// What bounds a return declaration made on a trajectory: its current label, which no floor
+/// stands above, and the lowest trust its own floor lets it declare.
+struct ReturnBounds {
+    label: Label,
+    lowest: Trust,
+}
+
 /// The spelling a return declaration's example needs: this trajectory's label as the
 /// `label` argument takes it, and the trust ranks a placeholder stands for.
 struct ReturnSpelling {
@@ -2845,19 +2859,23 @@ struct ReturnSpelling {
 }
 
 impl ReturnSpelling {
-    /// A floor never stands above the declaring trajectory, so only the ranks at or below its
-    /// trust are named; the unnamed top sentinel names the whole chain.
-    fn of(chain: &TrustChain, label: &Label) -> ReturnSpelling {
+    /// Only the ranks the declaration may take are named: at or below the trajectory's trust,
+    /// and at or above the lowest its own floor permits. The unnamed top sentinel stands for
+    /// the whole chain.
+    fn of(chain: &TrustChain, bounds: &ReturnBounds) -> ReturnSpelling {
+        let ReturnBounds { label, lowest } = bounds;
         let held = if label.trust == Trust::new(u8::MAX) {
             chain.len()
         } else {
             usize::from(label.trust.rank()) + 1
         };
+        let lowest = usize::from(lowest.rank());
         ReturnSpelling {
             floor: label_spelling(chain, label),
             ranks: chain
                 .names()
-                .take(held)
+                .skip(lowest)
+                .take(held.saturating_sub(lowest))
                 .map(|name| format!("\"{}\"", terminal_safe(name)))
                 .collect::<Vec<_>>()
                 .join(", "),
@@ -2941,7 +2959,12 @@ fn remedy_lines(planned: &PlannedBlock, offers: &[(OfferId, PlanId)], spelling: 
         .collect()
 }
 
-fn block_feedback(planned: &PlannedBlock, offers: &[(OfferId, PlanId)], chain: &TrustChain, label: &Label) -> String {
+fn block_feedback(
+    planned: &PlannedBlock,
+    offers: &[(OfferId, PlanId)],
+    chain: &TrustChain,
+    bounds: &ReturnBounds,
+) -> String {
     let mut reasons = Vec::new();
     for gap in &planned.raw.requirement_gaps {
         reasons.push(terminal_safe(&gap_text(gap)));
@@ -2967,7 +2990,7 @@ fn block_feedback(planned: &PlannedBlock, offers: &[(OfferId, PlanId)], chain: &
     ];
     lines.extend(reasons.into_iter().map(|reason| format!("  - {reason}")));
 
-    let remedies = remedy_lines(planned, offers, &ReturnSpelling::of(chain, label));
+    let remedies = remedy_lines(planned, offers, &ReturnSpelling::of(chain, bounds));
     if !remedies.is_empty() {
         lines.push(String::new());
         lines.push("Continue:".to_string());
