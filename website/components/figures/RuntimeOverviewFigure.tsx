@@ -19,15 +19,31 @@ function PanelTitle({ x, title, subtitle }: { x: number; title: string; subtitle
   );
 }
 
-function Card({ x, y, width, title, detail }: { x: number; y: number; width: number; title: string; detail: string }) {
+function Card({
+  x,
+  y,
+  width,
+  title,
+  detail,
+}: {
+  x: number;
+  y: number;
+  width: number;
+  title: string;
+  detail: string[];
+}) {
   return (
     <g>
-      <rect x={x} y={y} width={width} height="58" rx="6" className="rof-card" />
+      <rect x={x} y={y} width={width} height="92" rx="6" className="rof-card" />
       <text x={x + 14} y={y + 23} className="rof-card-title">
         {title}
       </text>
-      <text x={x + 14} y={y + 42} className="rof-card-detail">
-        {detail}
+      <text x={x + 14} y={y + 47} className="rof-card-detail">
+        {detail.map((line, index) => (
+          <tspan key={line} x={x + 14} dy={index === 0 ? 0 : 18}>
+            {line}
+          </tspan>
+        ))}
       </text>
     </g>
   );
@@ -58,36 +74,36 @@ export function RuntimeOverviewFigure() {
         <rect x="30" y="42" width="390" height="292" rx="9" className="rof-panel rof-panel-bridge" />
         <rect x="480" y="42" width="390" height="292" rx="9" className="rof-panel" />
 
-        {/* Left: Agent Harness (can be in-process middleware, callbacks, or external plugin) */}
-        <PanelTitle x={54} title="Agent harness" subtitle="agent loop · in-process middleware, callbacks, or plugin" />
-        <Card x={54} y={122} width={342} title="Agent execution loop" detail="prompts model & plans proposed tool calls" />
-        <path d="M 225 180 L 225 195" className="rof-rail" markerEnd="url(#rof-arrow)" />
-        <Card x={54} y={198} width={342} title="Lifecycle hooks & enforcement" detail="intercepts calls & results · enforces allow, block, replace" />
+        {/* The hooks sit on the harness boundary: agent loop -> hooks -> Appa. */}
+        <PanelTitle x={54} title="Agent harness" subtitle="agent loop · callbacks · plugins" />
+        <Card x={54} y={132} width={153} title="Agent loop" detail={["prompts the model", "proposes calls"]} />
+        <path d="M 207 178 L 235 178" className="rof-rail" markerEnd="url(#rof-arrow)" />
+        <Card x={238} y={132} width={182} title="Agent hooks" detail={["sends hook payloads", "applies decisions"]} />
         <g className="rof-fail-closed">
           <circle cx="65" cy="286" r="4" />
           <text x="77" y="290">fail closed on any error</text>
         </g>
 
-        {/* Right: OpenAPPA Runtime */}
+        {/* The adapter sits on the Appa boundary: hooks -> adapter -> core. */}
         <g transform="translate(504 61)" aria-hidden="true">
           <PixelMark size={24} />
         </g>
         <text x="538" y="76" className="rof-title">OpenAPPA runtime</text>
-        <text x="504" y="99" className="rof-subtitle">daemon (appa-runtime) · policy engine & adapters</text>
-        <Card x={504} y={122} width={342} title="Adapter (hook receiver)" detail="receives POST /hook · decodes payload into HookEvent" />
-        <path d="M 675 180 L 675 195" className="rof-rail" markerEnd="url(#rof-arrow)" />
-        <Card x={504} y={198} width={342} title="Policy engine (APPA core)" detail="evaluates security labels, tool contracts & remedies" />
+        <text x="504" y="99" className="rof-subtitle">daemon · policy engine · adapters</text>
+        <Card x={480} y={132} width={184} title="Appa adapter" detail={["maps hook payloads", "to OpenAPPA events"]} />
+        <path d="M 664 178 L 692 178" className="rof-rail" markerEnd="url(#rof-arrow)" />
+        <Card x={695} y={132} width={151} title="Appa core" detail={["checks policy", "returns decisions"]} />
         <g className="rof-fail-closed">
           <circle cx="515" cy="286" r="4" />
           <text x="527" y="290">deterministic policy rules</text>
         </g>
 
         {/* Request and response rails between harness and runtime. */}
-        <path d="M 420 150 L 477 150" className="rof-rail rof-rail-accent" markerEnd="url(#rof-arrow-accent)" />
-        <text x="450" y="137" className="rof-rail-label" textAnchor="middle">POST /hook</text>
+        <path d="M 420 157 L 477 157" className="rof-rail rof-rail-accent" markerEnd="url(#rof-arrow-accent)" />
+        <text x="450" y="148" className="rof-rail-label" textAnchor="middle">POST /hook</text>
 
-        <path d="M 480 231 L 423 231" className="rof-rail" markerEnd="url(#rof-arrow)" />
-        <text x="450" y="219" className="rof-rail-label" textAnchor="middle">decision</text>
+        <path d="M 480 202 L 423 202" className="rof-rail" markerEnd="url(#rof-arrow)" />
+        <text x="450" y="193" className="rof-rail-label" textAnchor="middle">decision</text>
 
         {/* Remedies use the runtime's MCP surface rather than the hook codec. */}
         <path d="M 225 334 C 225 385, 675 385, 675 334" className="rof-remedy-rail" markerEnd="url(#rof-arrow)" />
