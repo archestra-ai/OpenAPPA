@@ -16,8 +16,8 @@ summarised and posted back to Slack.
 your own Drafts. Trusted data, no approval.
 
 *Writes other people read* — sending or scheduling a message, creating
-or updating a canvas, creating a channel. Trusted data bounded to
-`internal` (`audience = { within = ["internal"] }`): agents post
+or updating a canvas, creating a channel. Trusted data that reaches
+`internal` (`audience = { contains = ["internal"] }`): agents post
 autonomously without human interruption, while requester secrets
 (`self`) are strictly prevented from entering channels.
 

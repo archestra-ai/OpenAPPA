@@ -221,10 +221,90 @@ async fn the_battery_judges_relative_credentials_and_offers_review_for_public_re
         "the default authority can review the audience expansion"
     );
     assert_eq!(review.len(), 1, "the offer is backed by the default human authority");
-    assert!(feedback.contains("Request approval"));
+    assert!(feedback.contains("Submit for approval"));
     assert!(review[0].text.contains("page.html"), "the review shows the exact call");
     assert!(
         review[0].text.contains("public"),
         "the review shows the audience expansion it covers"
+    );
+}
+
+/// The Slack battery requires `contains = ["internal"]` on writes: a public session can
+/// post autonomously without human approval, while a session holding `self` secrets cannot
+/// leak them into Slack channels.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_slack_battery_allows_public_writes_and_blocks_leaking_self_secrets() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let slack_battery_dir = dir.path().join("batteries/slack");
+    let claude_battery_dir = dir.path().join("batteries/claude-code");
+    std::fs::create_dir_all(&slack_battery_dir).expect("slack battery directory is created");
+    std::fs::create_dir_all(&claude_battery_dir).expect("claude battery directory is created");
+
+    let repository = repo_root();
+    let default = std::fs::read_to_string(repository.join("integrations/claude-code/examples/claude-code.appa.toml"))
+        .expect("the initialized default is readable");
+    std::fs::copy(
+        repository.join("batteries/slack/appa.toml"),
+        slack_battery_dir.join("appa.toml"),
+    )
+    .expect("slack battery file is copied");
+    std::fs::copy(
+        repository.join("batteries/claude-code/appa.toml"),
+        claude_battery_dir.join("appa.toml"),
+    )
+    .expect("claude battery file is copied");
+
+    let root_path = dir.path().join("appa.toml");
+    std::fs::write(
+        &root_path,
+        format!("include = [\"batteries/claude-code/appa.toml\", \"batteries/slack/appa.toml\"]\n\n{default}"),
+    )
+    .expect("the config includes both batteries");
+
+    let config = Config::load(&root_path).expect("the config loads");
+    let runtime = Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("opens"));
+    assert_eq!(
+        hooks::handle(&runtime, HookEvent::SessionStart { root: root() }).await,
+        HookDecision::Ack
+    );
+
+    let slack_send = ProposedCall {
+        tool: "mcp__claude_ai_Slack__slack_send_message".to_string(),
+        arguments: raw(serde_json::json!({ "channel_id": "C123", "text": "hello" })),
+    };
+
+    // 1. Fresh public session: slack write is allowed autonomously
+    assert_eq!(
+        propose(&runtime, slack_send.clone()).await,
+        HookDecision::AllowCall { spawn: None },
+        "a public session can post to slack without hitl"
+    );
+    ran(&runtime, slack_send.clone()).await;
+
+    // 2. Read .env and accept narrowing to self
+    let read_env = call("Read", "file_path", ".env");
+    let narrowing = propose(&runtime, read_env.clone()).await;
+    let HookDecision::DenyCall { feedback, .. } = narrowing else {
+        panic!("reading .env narrows to self");
+    };
+    assert!(matches!(
+        runtime.execute_remedy(&actor(), last_offer(&feedback)).await,
+        RemedyOutcome::Authorized { .. }
+    ));
+    assert_eq!(
+        propose(&runtime, read_env.clone()).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    ran(&runtime, read_env).await;
+
+    // 3. Narrowed to self: slack write is BLOCKED from leaking secrets
+    let blocked_slack = propose(&runtime, slack_send).await;
+    let HookDecision::DenyCall { offers, .. } = blocked_slack else {
+        panic!("slack write must be blocked when session holds self secrets, got {blocked_slack:?}");
+    };
+    assert!(
+        offers.is_empty(),
+        "slack write cannot leak self secrets: no remedy plan"
     );
 }
