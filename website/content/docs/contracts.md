@@ -179,7 +179,7 @@ A call no declaration and no wildcard covers is refused before it runs. That ref
 
 The mandate is the vocabulary an annotator's answers may use. Every bound is optional; an omitted bound admits the whole policy vocabulary, so a reviewed mandate is written, not implied.
 
-The optional `hint` is trusted deployer instruction. It can define ranks, audiences, marks, and effects. It can also give evidence rules and complete examples. The hint is advisory and cannot expand the mandate. A hint is at most 512 characters.
+The optional `hint` is a trusted deployer instruction. It can define ranks, audiences, marks, and effects, as well as specify evidence rules and examples. The hint is advisory and cannot expand the mandate. A hint cannot exceed 512 characters.
 
 | Key | Bounds | Omitted |
 |---|---|---|
@@ -209,7 +209,13 @@ Every annotation artifact carries the tool name and its policy-declared descript
 
 #### Implementing an annotator
 
-An annotator either carries its implementation or leaves it to the deployment. An annotator that carries a stock model builtin names it on its declaration with `builtin = "claude-code"` or `builtin = "llm"` and takes no `[externals.annotators]` binding. Every other annotator is bound by name under `[externals.annotators.<name>]` to an HTTP endpoint or a Unix command. [Externals](#externals) has the binding rule, the transports, and the consult every kind shares. `builtin` under `[externals.annotators.<name>]` is a configuration error. A registered annotator without a binding, a binding no `[[annotator]]` registers, a binding for an annotator that carries a builtin, and a declared builtin the deployment cannot serve — `llm` without `[externals.llm]`, `claude-code` where no Unix process group exists — refuse the deployment when it opens and when it reloads.
+An Annotator either carries an inline builtin implementation or delegates its execution to the deployment. An Annotator using a stock model builtin specifies `builtin = "claude-code"` or `builtin = "llm"` on its declaration and requires no `[externals.annotators]` binding. Every other Annotator is bound by name under `[externals.annotators.<name>]` to an HTTP endpoint or a Unix command. The [Externals](#externals) section details the binding rules, transports, and shared consult structure. Specifying `builtin` under `[externals.annotators.<name>]` is a configuration error.
+
+The deployment refuses to open or reload if any of the following occur:
+- A registered Annotator lacks a binding.
+- A binding references an unregistered Annotator.
+- A binding is defined for an Annotator that already specifies a `builtin`.
+- A declared `builtin` cannot be served (for example, `llm` without `[externals.llm]`, or `claude-code` where no Unix process group exists).
 
 ```toml
 [[annotator]]

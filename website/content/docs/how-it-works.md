@@ -140,9 +140,9 @@ Tool contracts are strictly declarative TOML. Instead of writing imperative acce
 Every released tool call carries one complete annotation — its `delta`, its `requires`, and the effects it emits, with every dimension concrete. The policy produces that annotation in one of two ways:
 
 - **Static declaration**: The `[[tool]]` entry writes the whole contract, and every call to the tool carries it.
-- **Annotator**: Where the contract depends on the call, the `[[tool]]` entry names a registered **annotator**. The annotator reads selected call data and answers the complete contract inside its **mandate**.
+- **Annotator**: Where the contract depends on the call parameters, the `[[tool]]` entry names a registered **annotator**. The annotator reads selected call data and returns the complete contract bounded by its **mandate**.
 
-An Annotator declaration can include a trusted policy `hint`. The hint defines policy-specific values and the evidence that selects them. It cannot expand the mandate. Every artifact identifies the proposed tool and carries its policy description, when present. An input mapping can limit which argument values cross the consult boundary.
+An Annotator declaration can include a trusted policy `hint`. The hint defines policy-specific values and the criteria for selecting them, but cannot expand the mandate. Every artifact identifies the proposed tool and includes its policy description (when present). An input mapping can restrict which argument values cross the consult boundary.
 
 An annotation is pinned to the exact call it was produced for. A sanitizer rewrite that changes the arguments is annotated afresh, so no call ever runs under another call's annotation, and replay reconstructs every decision without consulting an annotator again.
 

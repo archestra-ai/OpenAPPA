@@ -145,7 +145,7 @@ json.dump(
 )
 ```
 
-The artifact always carries `tool` and the policy-declared `description`, when present. Without an `inputs` mapping, `artifact.args` is the complete argument object. With a mapping, it contains only selected values under their aliases. The declaration carries the optional `hint`, input sources, and mandate vocabulary. A battery Annotator must validate the version, `kind`, `name`, tool name, and argument types. It must exit with an error for bad input.
+The artifact always carries `tool` and the policy-declared `description` (when present). Without an `inputs` mapping, `artifact.args` contains the complete argument object; with a mapping, it contains only the selected values under their aliases. The declaration specifies the optional `hint`, input sources, and mandate vocabulary. A battery Annotator must validate the version, `kind`, `name`, tool name, and argument types, exiting with an error if given invalid input.
 
 OpenAPPA runs the command without a shell. The script path is relative to the battery config. Its folder is the working folder.
 

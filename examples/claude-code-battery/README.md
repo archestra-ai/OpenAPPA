@@ -40,12 +40,7 @@ The Claude Code battery sends every Bash command to the Claude Code model
 builtin. The model annotates the command before dispatch: its output label and
 its required trust and audience.
 
-The `Read` rule invokes `read-sensitivity.py` for one call. OpenAPPA writes
-one JSON consult to standard input, reads one JSON answer from standard
-output, and waits for the command to exit. The artifact carries `tool`, the
-policy description, and `args`. An Annotator that maps no `inputs` receives
-the complete argument object in `args`. Its answer is the call's complete
-contract: `delta`, `requires`, and `emits`.
+The `Read` rule invokes `read-sensitivity.py` for each call. OpenAPPA writes a JSON consult to standard input, reads a JSON answer from standard output, and waits for the process to exit. The consult artifact carries `tool`, the policy description (when present), and `args`. When an Annotator defines no `inputs` mapping, `args` contains the full argument object. The Annotator returns the call's complete contract: `delta`, `requires`, and `emits`.
 
 The Bash annotator controls declared information flows. It is not a shell or
 network sandbox. A Claude Code deployment must use an OS sandbox to deny

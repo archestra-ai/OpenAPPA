@@ -456,9 +456,10 @@ impl Default for PlannerCap {
     }
 }
 
-/// The longest hint a registration may carry. Remedy offers repeat Authority and Sanitizer
-/// hints, and model consults carry component hints in their system prompts. A bounded hint keeps
-/// trusted configuration from flooding either context. A sentence or two is the intended shape.
+/// The longest hint a registration may carry. OpenAPPA includes Authority and Sanitizer hints in
+/// remedy offers and embeds component hints in model consult system prompts. Bounding the hint
+/// length prevents trusted configuration from flooding either context. A sentence or two is the
+/// intended shape.
 pub const MAX_HINT_CHARS: usize = 512;
 
 fn worst_case_plan_alternatives(

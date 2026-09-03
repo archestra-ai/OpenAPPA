@@ -8,11 +8,11 @@ use crate::groups::{DeclaredAudience, Expansions};
 use crate::label::{Audience, Label, Trust};
 use crate::names::{AuthorityName, GroupName, MarkName, SanitizerName, TagName};
 
-/// Trusted deployer prose for a registered component. An Authority or Sanitizer hint travels with
-/// every remedy plan that names the entity. Every component hint enters its consult declaration;
-/// model transports use it as instruction. Advisory only: a hint NEVER enters a check, enumeration,
-/// or ordering, and it widens no mandate. The load lint bounds its length
-/// ([`crate::registry::MAX_HINT_CHARS`]).
+/// Trusted deployer prose for a registered component. OpenAPPA includes an Authority or
+/// Sanitizer hint in remedy plans that reference the component. For model-backed components,
+/// the hint is included in the consult's system prompt declaration to guide model evaluation.
+/// Advisory only: a hint NEVER enters a check, enumeration, or ordering, and it cannot expand
+/// a mandate. The load lint bounds its length ([`crate::registry::MAX_HINT_CHARS`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hint(String);
 
