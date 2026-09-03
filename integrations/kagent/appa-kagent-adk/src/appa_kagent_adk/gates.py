@@ -6,10 +6,14 @@ The entrypoint brings each under the tool gate here:
 
 - Code execution runs through a wrapped ``code_executor``. The wrapper
   sends a ``ToolCall`` for the code, runs the inner executor only on
-  ``allow_call``, and returns the output through a ``ToolResult``.
+  ``allow_call`` or ``pass_control``, and returns the output through a
+  ``ToolResult``.
 - The memory write-back runs through a wrapped ``after_agent_callback``.
   The wrapper sends a ``ToolCall`` for the persist and calls the stock
-  callback only on ``allow_call``.
+  callback only on ``allow_call`` or ``pass_control``. It then reports
+  the persist through a ``ToolResult`` and drops the decision, because
+  the persist's result never enters attention. A transport failure or a
+  refused report still fails closed.
 
 The synthetic tool names are ``appa_code_execution`` and
 ``appa_memory_persist`` — the spellings a policy's ``[[tool]]`` entries
@@ -106,8 +110,10 @@ def gate_memory_persist(agent: Any, plugin: AppaPluginKagent) -> bool:
     """Wrap the stock memory auto-save callback under the tool gate.
 
     Returns whether a stock persist callback was found and wrapped. The
-    read tools (``load_memory``, ``save_memory``, ``prefetch_memory``)
-    stay ordinary tools and already cross the gate.
+    tools ``load_memory`` and ``save_memory`` are ordinary tools and
+    cross the gate. The prefetch (``prefetch_memory``) appends stored
+    memories to the model instructions with no function call, and no
+    hook sees it.
     """
     callbacks = getattr(agent, "after_agent_callback", None)
     if not callbacks:
