@@ -675,26 +675,46 @@ fn sanitizer_schema() -> serde_json::Value {
     })
 }
 
+/// One closed string vocabulary as a schema `enum`; `None` when it has no member, because
+/// `{"enum": []}` is a schema no validator accepts and the shape that needs it is left out.
+fn closed_enum(vocabulary: &[String]) -> Option<serde_json::Value> {
+    (!vocabulary.is_empty()).then(|| serde_json::json!({"type": "string", "enum": vocabulary}))
+}
+
+/// The items of an array over a closed vocabulary. An array position cannot be left out,
+/// so a vocabulary with no member names one stand-in that no mandate permits and
+/// [`AnnotationAnswer::from_wire`] refuses on every leaf; the empty array is then the only
+/// value that decodes.
+fn array_items(vocabulary: &[String]) -> serde_json::Value {
+    closed_enum(vocabulary).unwrap_or_else(|| {
+        serde_json::json!({
+            "type": "string",
+            "enum": ["__appa_no_such_value__"]
+        })
+    })
+}
+
 fn dynamic_audience_schema(audiences: &[String]) -> serde_json::Value {
-    let readers: Vec<&String> = audiences
+    let readers: Vec<String> = audiences
         .iter()
         .filter(|audience| audience.as_str() != "public")
+        .cloned()
         .collect();
     serde_json::json!({
         "oneOf": [
             {"type": "string", "const": "public"},
-            {"type": "array", "items": {"type": "string", "enum": readers}}
+            {"type": "array", "items": array_items(&readers)}
         ]
     })
 }
 
 /// The strict-mode-compatible schema for one annotation answer: every accepted shape is a
 /// variant with all its properties required, so an OpenAI-compatible provider can enforce
-/// it as written.
+/// it as written. A shape that needs a rank is offered only when the mandate names one.
 fn annotation_schema(declaration: &AnnotationDeclaration) -> serde_json::Value {
-    let trust = serde_json::json!({"type": "string", "enum": declaration.trust_ranks});
+    let trust = closed_enum(&declaration.trust_ranks);
     let audience = dynamic_audience_schema(&declaration.audiences);
-    let effect = serde_json::json!({"type": "string", "enum": declaration.effects});
+    let effect = array_items(&declaration.effects);
     let object = |pairs: &[(&str, &serde_json::Value)]| {
         serde_json::json!({
             "type": "object",
@@ -720,27 +740,33 @@ fn annotation_schema(declaration: &AnnotationDeclaration) -> serde_json::Value {
             object(&[("contains", &audience), ("within", &audience)])
         ]
     });
-    let attention = serde_json::json!({
-        "type": "array",
-        "items": {"type": "string", "enum": declaration.attention_marks}
-    });
-    let delta = serde_json::json!({"oneOf": [
-        object(&[]),
-        object(&[("trust", &trust)]),
-        object(&[("audience", &audience)]),
-        object(&[("trust", &trust), ("audience", &audience)]),
-    ]});
-    let requires = serde_json::json!({"oneOf": [
+    let attention = serde_json::json!({"type": "array", "items": array_items(&declaration.attention_marks)});
+    let mut delta = vec![object(&[]), object(&[("audience", &audience)])];
+    let mut requires = vec![
         object(&[("history", &history), ("attention", &attention)]),
-        object(&[("trust", &trust), ("history", &history), ("attention", &attention)]),
-        object(&[("audience", &required_audience), ("history", &history), ("attention", &attention)]),
         object(&[
-            ("trust", &trust),
             ("audience", &required_audience),
             ("history", &history),
-            ("attention", &attention)
+            ("attention", &attention),
         ]),
-    ]});
+    ];
+    if let Some(trust) = &trust {
+        delta.push(object(&[("trust", trust)]));
+        delta.push(object(&[("trust", trust), ("audience", &audience)]));
+        requires.push(object(&[
+            ("trust", trust),
+            ("history", &history),
+            ("attention", &attention),
+        ]));
+        requires.push(object(&[
+            ("trust", trust),
+            ("audience", &required_audience),
+            ("history", &history),
+            ("attention", &attention),
+        ]));
+    }
+    let delta = serde_json::json!({"oneOf": delta});
+    let requires = serde_json::json!({"oneOf": requires});
     let emits = serde_json::json!({"type": "array", "items": effect});
     object(&[("delta", &delta), ("requires", &requires), ("emits", &emits)])
 }
@@ -1044,7 +1070,7 @@ mod tests {
         );
         assert_eq!(prompt.schema["additionalProperties"], serde_json::json!(false));
         assert_eq!(
-            prompt.schema["properties"]["delta"]["oneOf"][1]["properties"]["trust"]["enum"],
+            prompt.schema["properties"]["delta"]["oneOf"][2]["properties"]["trust"]["enum"],
             serde_json::json!(["suspicious", "trusted"])
         );
         assert_eq!(
@@ -1070,5 +1096,131 @@ mod tests {
             })
             .is_none()
         );
+    }
+
+    /// Every `enum` member list and every property name in a rendered schema, at any depth.
+    fn walk(schema: &serde_json::Value, enums: &mut Vec<Vec<String>>, properties: &mut Vec<String>) {
+        match schema {
+            serde_json::Value::Object(fields) => {
+                for (key, value) in fields {
+                    match (key.as_str(), value) {
+                        ("enum", serde_json::Value::Array(members)) => enums.push(
+                            members
+                                .iter()
+                                .filter_map(|member| member.as_str().map(str::to_string))
+                                .collect(),
+                        ),
+                        ("properties", serde_json::Value::Object(named)) => {
+                            properties.extend(named.keys().cloned());
+                            named.values().for_each(|value| walk(value, enums, properties));
+                        }
+                        _ => walk(value, enums, properties),
+                    }
+                }
+            }
+            serde_json::Value::Array(items) => items.iter().for_each(|item| walk(item, enums, properties)),
+            _ => {}
+        }
+    }
+
+    fn neutral(extra: serde_json::Value) -> serde_json::Value {
+        let mut answer = serde_json::json!({
+            "delta": {}, "requires": {"history": [], "attention": []}, "emits": []
+        });
+        for (key, value) in extra.as_object().expect("an object").clone() {
+            match key.as_str() {
+                "delta" | "emits" => answer[key] = value,
+                mark => answer["requires"][mark] = value,
+            }
+        }
+        answer
+    }
+
+    /// A mandate can name no rank, no reader, no mark and no effect kind — the policy loader
+    /// accepts an explicitly empty bound for each. The rendered schema then offers no shape
+    /// that needs a rank, keeps every `enum` inhabited, and every value it admits decodes,
+    /// except the stand-in an empty array vocabulary carries, which no leaf accepts.
+    #[test]
+    fn an_empty_mandate_vocabulary_renders_only_shapes_that_decode() {
+        let ranks = ["suspicious".to_string(), "trusted".to_string()];
+        let full = annotation_declaration();
+        let no_ranks = AnnotationDeclaration {
+            trust_ranks: vec![],
+            ..annotation_declaration()
+        };
+        let nothing = AnnotationDeclaration {
+            hint: None,
+            inputs: vec![],
+            trust_ranks: vec![],
+            audiences: vec![],
+            attention_marks: vec![],
+            effects: vec![],
+        };
+        for (name, declaration, offers_a_rank, carries_a_stand_in) in [
+            ("full", &full, true, false),
+            ("no ranks", &no_ranks, false, false),
+            ("nothing", &nothing, false, true),
+        ] {
+            let schema = annotation_schema(declaration);
+            let (mut enums, mut properties) = (Vec::new(), Vec::new());
+            walk(&schema, &mut enums, &mut properties);
+            assert!(!enums.is_empty(), "{name}: the walk reached no enum: {schema}");
+            assert!(
+                enums.iter().all(|members| !members.is_empty()),
+                "{name}: an empty enum is a schema no validator accepts: {schema}"
+            );
+            assert_eq!(
+                properties.iter().any(|property| property == "trust"),
+                offers_a_rank,
+                "{name}: a shape needing a rank is offered exactly when the mandate names one: {schema}"
+            );
+            let stand_ins: Vec<&String> = enums
+                .iter()
+                .flatten()
+                .filter(|member| !ranks.contains(member) && !full_vocabulary(&full).contains(member))
+                .collect();
+            assert_eq!(
+                !stand_ins.is_empty(),
+                carries_a_stand_in,
+                "{name}: a stand-in appears exactly for an empty array vocabulary: {schema}"
+            );
+            for stand_in in stand_ins {
+                for (leaf, answer) in [
+                    (
+                        "delta.audience",
+                        neutral(serde_json::json!({"delta": {"audience": [stand_in]}})),
+                    ),
+                    (
+                        "requires.attention",
+                        neutral(serde_json::json!({"attention": [stand_in]})),
+                    ),
+                    (
+                        "requires.history",
+                        neutral(serde_json::json!({"history": [{"contains": stand_in}]})),
+                    ),
+                    ("emits", neutral(serde_json::json!({"emits": [stand_in]}))),
+                ] {
+                    assert_eq!(
+                        AnnotationAnswer::from_wire(&answer, declaration),
+                        None,
+                        "{name}: the stand-in is admitted at {leaf}"
+                    );
+                }
+            }
+            assert_eq!(
+                AnnotationAnswer::from_wire(&neutral(serde_json::json!({})), declaration).map(|answer| answer.emits),
+                Some(vec![]),
+                "{name}: the neutral annotation decodes"
+            );
+        }
+    }
+
+    fn full_vocabulary(declaration: &AnnotationDeclaration) -> Vec<String> {
+        ["public".to_string()]
+            .into_iter()
+            .chain(declaration.audiences.iter().cloned())
+            .chain(declaration.attention_marks.iter().cloned())
+            .chain(declaration.effects.iter().cloned())
+            .collect()
     }
 }
