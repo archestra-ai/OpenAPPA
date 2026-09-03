@@ -7,9 +7,9 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::sync::Arc;
 
-use appa_runtime::api::Runtime;
 #[cfg(unix)]
 use appa_runtime::api::RemedyOutcome;
+use appa_runtime::api::Runtime;
 use appa_runtime::config::Config;
 #[cfg(unix)]
 use appa_runtime::hooks;
@@ -132,9 +132,8 @@ fn call(tool: &str, argument: &str, value: &str) -> ProposedCall {
 async fn the_battery_judges_relative_credential_paths_like_absolute_ones() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let config = composed_with_the_battery(&dir);
-    let runtime = Arc::new(
-        Runtime::open(config, dir.path().join("appa.db"), None).expect("the composed deployment opens"),
-    );
+    let runtime =
+        Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("the composed deployment opens"));
     assert_eq!(
         hooks::handle(&runtime, HookEvent::SessionStart { root: root() }).await,
         HookDecision::Ack
@@ -167,7 +166,10 @@ async fn the_battery_judges_relative_credential_paths_like_absolute_ones() {
         runtime.execute_remedy(&actor(), last_offer(&feedback)).await,
         RemedyOutcome::Authorized { .. }
     ));
-    assert_eq!(propose(&runtime, read.clone()).await, HookDecision::AllowCall { spawn: None });
+    assert_eq!(
+        propose(&runtime, read.clone()).await,
+        HookDecision::AllowCall { spawn: None }
+    );
     ran(&runtime, read).await;
 
     assert!(
