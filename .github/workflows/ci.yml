@@ -581,9 +581,9 @@ jobs:
       # so the script drops the daemon copy.
       APPA_E2E_PRUNE_DAEMON_IMAGES: "1"
       # One endpoint serves the agents and the policy's sanitizers. This
-      # free model advertises the tools, response_format and structured
-      # outputs that the sanitizer consult needs.
-      APPA_E2E_MODEL: nvidia/nemotron-3-super-120b-a12b:free
+      # versioned model advertises the tools, response_format and structured
+      # outputs that the sanitizer consult needs without free-tier throttling.
+      APPA_E2E_MODEL: openai/gpt-4.1-mini
       APPA_E2E_BASE_URL: https://openrouter.ai/api/v1
     steps:
       - name: Checkout project
