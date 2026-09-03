@@ -4,7 +4,9 @@ import { DocPagination } from "@/components/DocPagination";
 import { getAllDocs, getDocsByCategory, type TocItem } from "@/lib/docs";
 
 export function DocShell({ toc, children }: { toc: TocItem[]; children: React.ReactNode }) {
-  const allDocs = getAllDocs().map(({ slug, title }) => ({ slug, title }));
+  const allDocs = getAllDocs()
+    .filter(({ sidebar }) => sidebar)
+    .map(({ slug, title }) => ({ slug, title }));
   const categories = getDocsByCategory().map((category) => ({
     name: category.name,
     docs: category.docs.map(({ slug, title, proposal }) => ({ slug, title, proposal })),

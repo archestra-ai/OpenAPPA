@@ -8,10 +8,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::contract::{ToolAnnotation, ToolDeclaration};
-use crate::fact::ReturnPolicy;
 use crate::label::{Label, Trust};
 use crate::names::SurfaceName;
-use crate::registry::{LoadError, PlannerCap, Registry, RegistryConfig, TrustChain, check_rank, check_readers};
+use crate::registry::{LoadError, PlannerCap, Registry, RegistryConfig, TrustChain, check_rank, check_routable};
 use crate::value::ToolName;
 
 /// How a tool executes relative to the engine's release: a component consumes the
@@ -92,7 +91,6 @@ pub struct ProfileDeclaration {
     pub dispatch: ExecutorClass,
     pub executor_exceptions: BTreeMap<ToolName, ExecutorClass>,
     pub confined_results: BTreeSet<ToolName>,
-    pub confined_child_return: bool,
     pub provider_surfaces: BTreeMap<SurfaceName, SurfaceMode>,
     pub binding: BindingMode,
 }
@@ -109,7 +107,6 @@ pub struct DeploymentProfile {
     dispatch: ExecutorClass,
     executor_exceptions: BTreeMap<ToolName, ExecutorClass>,
     confined_results: BTreeSet<ToolName>,
-    confined_child_return: bool,
     provider_surfaces: BTreeMap<SurfaceName, SurfaceMode>,
     binding: BindingMode,
 }
@@ -125,7 +122,6 @@ impl ProfileDeclaration {
             dispatch: ExecutorClass::Assumed,
             executor_exceptions: BTreeMap::new(),
             confined_results: BTreeSet::new(),
-            confined_child_return: false,
             provider_surfaces: BTreeMap::new(),
             binding: BindingMode::Harness,
         }
@@ -144,7 +140,6 @@ impl DeploymentProfile {
             dispatch,
             mut executor_exceptions,
             confined_results,
-            confined_child_return,
             provider_surfaces,
             binding,
         } = declaration;
@@ -155,7 +150,6 @@ impl DeploymentProfile {
             dispatch,
             executor_exceptions,
             confined_results,
-            confined_child_return,
             provider_surfaces,
             binding,
         })
@@ -187,10 +181,6 @@ impl DeploymentProfile {
         self.confined_results.contains(tool)
     }
 
-    pub fn confines_child_return(&self) -> bool {
-        self.confined_child_return
-    }
-
     pub fn provider_surfaces(&self) -> impl Iterator<Item = (&SurfaceName, SurfaceMode)> {
         self.provider_surfaces.iter().map(|(name, mode)| (name, *mode))
     }
@@ -205,7 +195,6 @@ impl<'de> Deserialize<'de> for DeploymentProfile {
             dispatch: ExecutorClass,
             executor_exceptions: BTreeMap<ToolName, ExecutorClass>,
             confined_results: BTreeSet<ToolName>,
-            confined_child_return: bool,
             provider_surfaces: BTreeMap<SurfaceName, SurfaceMode>,
             binding: BindingMode,
         }
@@ -216,7 +205,6 @@ impl<'de> Deserialize<'de> for DeploymentProfile {
             dispatch: wire.dispatch,
             executor_exceptions: wire.executor_exceptions,
             confined_results: wire.confined_results,
-            confined_child_return: wire.confined_child_return,
             provider_surfaces: wire.provider_surfaces,
             binding: wire.binding,
         })
@@ -228,7 +216,7 @@ impl<'de> Deserialize<'de> for DeploymentProfile {
 /// rank of the trust chain.
 pub fn neutral_starting_label(chain: &TrustChain) -> Label {
     let top = Trust::new(chain.len().saturating_sub(1) as u8);
-    Label::new(top, crate::label::Audience::Public)
+    Label::new(top, crate::label::Audience::public())
 }
 
 /// The version of the policy configuration dialect a policy file was written in, carried on the
@@ -256,7 +244,6 @@ pub struct DeploymentPolicy {
     pub registry: RegistryConfig,
     pub planner_cap: PlannerCap,
     pub dialect: PolicyDialectVersion,
-    pub child_return: ReturnPolicy,
     pub profile: ProfileDeclaration,
 }
 
@@ -284,8 +271,8 @@ impl PolicyFileKey {
 pub struct PolicyIdentityV1(#[serde(with = "crate::hex32")] [u8; 32]);
 
 impl PolicyIdentityV1 {
-    pub(crate) fn of_registry(registry: &Registry, child_return: &ReturnPolicy) -> Self {
-        let document = identity_document_from_registry(registry, child_return);
+    pub(crate) fn of_registry(registry: &Registry) -> Self {
+        let document = identity_document_from_registry(registry);
         let canonical = serde_json_canonicalizer::to_vec(&document).expect("an identity document canonicalizes");
         let mut hasher = Sha256::new();
         hasher.update(b"appa:policy-identity:v1");
@@ -301,7 +288,7 @@ impl PolicyIdentityV1 {
     }
 }
 
-fn identity_document_from_registry(registry: &Registry, child_return: &ReturnPolicy) -> serde_json::Value {
+fn identity_document_from_registry(registry: &Registry) -> serde_json::Value {
     fn render_annotation(matcher: &crate::registry::ToolMatcher, tool: &ToolAnnotation) -> serde_json::Value {
         serde_json::json!({
             "name": tool.name,
@@ -364,9 +351,8 @@ fn identity_document_from_registry(registry: &Registry, child_return: &ReturnPol
             annotators: Vec::new(),
             authorities: registry.authorities().to_vec(),
             sanitizers: registry.sanitizers().cloned().collect(),
-            membership: registry.membership().cloned(),
+            audience: registry.audience_config().clone(),
         },
-        child_return,
         registry.profile(),
     );
     let document_map = document.as_object_mut().expect("identity document is an object");
@@ -379,18 +365,14 @@ fn identity_document_from_registry(registry: &Registry, child_return: &ReturnPol
 /// production reads [`crate::engine::Engine::identity`], which is this same digest taken
 /// from the registry the engine actually holds.
 #[cfg(test)]
-pub(crate) fn identity_of(
-    registry: &RegistryConfig,
-    child_return: &ReturnPolicy,
-    profile: &DeploymentProfile,
-) -> PolicyIdentityV1 {
+pub(crate) fn identity_of(registry: &RegistryConfig, profile: &DeploymentProfile) -> PolicyIdentityV1 {
     let built = crate::registry::Registry::build(
         registry.clone(),
         crate::registry::PlannerCap::default(),
         profile.clone(),
     )
     .expect("a fixture configuration builds");
-    PolicyIdentityV1::of_registry(&built, child_return)
+    PolicyIdentityV1::of_registry(&built)
 }
 
 fn canonical_value(value: &impl Serialize) -> serde_json::Value {
@@ -406,11 +388,7 @@ fn sorted_set(values: &[impl Serialize]) -> Vec<serde_json::Value> {
     rendered
 }
 
-fn identity_document(
-    registry: &RegistryConfig,
-    child_return: &ReturnPolicy,
-    profile: &DeploymentProfile,
-) -> serde_json::Value {
+fn identity_document(registry: &RegistryConfig, profile: &DeploymentProfile) -> serde_json::Value {
     let authorities: Vec<serde_json::Value> = registry
         .authorities
         .iter()
@@ -446,9 +424,9 @@ fn identity_document(
         "trust_chain": registry.trust_chain,
         "authorities": authorities,
         "sanitizers": sanitizers,
-        // Which directory expands a group is part of what the policy means.
-        "membership": registry.membership,
-        "child_return": child_return,
+        // Which sources feed each audience and who resolves identity are part of what the
+        // policy means.
+        "audience": registry.audience,
         "deployment": profile,
     })
 }
@@ -483,19 +461,17 @@ pub(crate) fn derive_open_vectors<'a>(
 /// [`crate::engine::Engine::open`]): a policy construct that names an engine behavior the
 /// deployment cannot perform is a load error, and the error names the missing coverage. Weaker
 /// choices load and surface as open vectors instead.
-pub(crate) fn validate_coverage(
-    registry: &Registry,
-    declaration: &ProfileDeclaration,
-    child_return: &ReturnPolicy,
-) -> Result<(), LoadError> {
+pub(crate) fn validate_coverage(registry: &Registry, declaration: &ProfileDeclaration) -> Result<(), LoadError> {
     let profile = registry.profile();
     let chain = registry.trust_chain();
     check_rank(chain, Some(profile.starting_label.trust), || {
         "deployment starting label".to_string()
     })?;
-    check_readers(&profile.starting_label.audience, || {
-        "deployment starting label".to_string()
-    })?;
+    check_routable(
+        registry.audience(),
+        profile.starting_label.audience.symbolic_atoms(),
+        || "deployment starting label".to_string(),
+    )?;
 
     // Without a wildcard, a deployment declaration naming an unwritten tool is a typo.
     // With one, every name is a runnable annotated call, so coverage accepts it.
@@ -524,35 +500,18 @@ pub(crate) fn validate_coverage(
         }
     }
 
-    if let ReturnPolicy::Sanitized(name) = child_return {
-        if !profile.context_control {
-            return Err(LoadError::ChildWithoutContextControl);
-        }
-        match registry.sanitizer(name) {
-            Some(sanitizer) if sanitizer.on.output && sanitizer.scope.is_unscoped() => {}
-            Some(sanitizer) if sanitizer.on.output => {
-                return Err(LoadError::ChildReturnSanitizerScoped(name.as_str().to_string()));
-            }
-            Some(_) => {
-                return Err(LoadError::ChildReturnSanitizerNotOutput(name.as_str().to_string()));
-            }
-            None => {
-                return Err(LoadError::ChildReturnSanitizerUnknown(name.as_str().to_string()));
-            }
-        }
-    }
-
-    // An output sanitizer runs on a confined result its scope reaches, or on a confined
-    // child return, which originates from no tool and so is reached only by an unscoped
-    // one. A sanitizer no confined source can reach never runs, and the deployment that
-    // declares it believes a derivation is available that is not.
+    // An output sanitizer runs on a confined result its scope reaches, or on a child's return,
+    // which a parent declares at a marked spawn — only under context control — and which
+    // originates from no tool, so only an unscoped sanitizer reaches it. A sanitizer no source
+    // can reach never runs, and the deployment that declares it believes a derivation is
+    // available that is not.
     for sanitizer in registry.sanitizers().filter(|sanitizer| sanitizer.on.output) {
         let reaches_a_result = profile.confined_results.iter().any(|tool| {
             registry
                 .variants(tool)
                 .any(|declaration| sanitizer.scope.covers(declaration.tags()))
         });
-        let reaches_the_child_return = profile.confined_child_return && sanitizer.scope.is_unscoped();
+        let reaches_the_child_return = profile.context_control && sanitizer.scope.is_unscoped();
         if !reaches_a_result && !reaches_the_child_return {
             return Err(LoadError::OutputSanitizerUncovered {
                 sanitizer: sanitizer.name.as_str().to_string(),
@@ -573,7 +532,7 @@ pub(crate) fn validate_coverage(
 }
 
 /// A profile that covers everything a test registry declares: every tool enforced and confined,
-/// child return confined, context control on, no provider surfaces, harness binding, the neutral
+/// context control on, no provider surfaces, harness binding, the neutral
 /// starting label. The engine's own tests open under this so coverage never masks the behavior
 /// under test.
 #[cfg(test)]
@@ -594,7 +553,7 @@ pub(crate) fn opening_at(trajectory: crate::value::TrajectoryId, starting_label:
         annotators: Vec::new(),
         authorities: Vec::new(),
         sanitizers: Vec::new(),
-        membership: None,
+        audience: crate::audience::AudienceConfig::default(),
     };
     let profile = DeploymentProfile::declare(ProfileDeclaration {
         starting_label,
@@ -604,7 +563,7 @@ pub(crate) fn opening_at(trajectory: crate::value::TrajectoryId, starting_label:
     crate::fact::Fact::TrajectoryOpened {
         trajectory,
         dialect: PolicyDialectVersion::new(1),
-        policy_digest: identity_of(&config, &ReturnPolicy::Raw, &profile),
+        policy_digest: identity_of(&config, &profile),
         profile,
         policy_file_key: PolicyFileKey::of(b"fixture"),
         open_vectors: Vec::new(),
@@ -627,7 +586,6 @@ pub(crate) fn covering_declaration(config: &RegistryConfig) -> ProfileDeclaratio
                 crate::registry::base_tool_name(declaration.name()).expect("test contracts have valid names")
             })
             .collect(),
-        confined_child_return: true,
         provider_surfaces: BTreeMap::new(),
         binding: BindingMode::Harness,
     }
@@ -640,7 +598,7 @@ mod tests {
     use crate::contract::{Delta, LabelRequirements, Requires};
     use crate::engine::Engine;
     use crate::fact::EffectSet;
-    use crate::groups::DeclaredAudience;
+    use crate::label::DeclaredAudience;
     use crate::label::{Audience, ReaderId};
     use crate::names::{AnnotatorName, AuthorityName, SanitizerName, TagName};
 
@@ -667,7 +625,7 @@ mod tests {
             annotators: vec![],
             authorities: vec![],
             sanitizers: vec![],
-            membership: None,
+            audience: crate::audience::AudienceConfig::default(),
         }
     }
 
@@ -707,16 +665,11 @@ mod tests {
         }
     }
 
-    fn open(
-        cfg: RegistryConfig,
-        declaration: ProfileDeclaration,
-        child_return: ReturnPolicy,
-    ) -> Result<Engine, LoadError> {
+    fn open(cfg: RegistryConfig, declaration: ProfileDeclaration) -> Result<Engine, LoadError> {
         Engine::open(DeploymentPolicy {
             registry: cfg,
             planner_cap: PlannerCap::default(),
             dialect: PolicyDialectVersion::new(1),
-            child_return,
             profile: declaration,
         })
     }
@@ -735,19 +688,20 @@ mod tests {
         let uncovered = |cfg: &RegistryConfig| {
             let mut declaration = covering_declaration(cfg);
             declaration.confined_results.clear();
-            declaration.confined_child_return = false;
+            declaration.context_control = false;
             declaration
         };
         assert!(matches!(
-            open(cfg.clone(), uncovered(&cfg), ReturnPolicy::Raw),
+            open(cfg.clone(), uncovered(&cfg)),
             Err(LoadError::OutputSanitizerUncovered { sanitizer }) if sanitizer == "redactor"
         ));
+        // Under context control a parent may declare the sanitizer for its child's return.
         let mut child_only = uncovered(&cfg);
-        child_only.confined_child_return = true;
-        assert!(open(cfg.clone(), child_only, ReturnPolicy::Raw).is_ok());
+        child_only.context_control = true;
+        assert!(open(cfg.clone(), child_only).is_ok());
         let mut result_only = uncovered(&cfg);
         result_only.confined_results.insert(ToolName::new("fetch"));
-        assert!(open(cfg, result_only, ReturnPolicy::Raw).is_ok());
+        assert!(open(cfg, result_only).is_ok());
     }
 
     /// Coverage is per sanitizer and per scope: some other tool being confined does not
@@ -764,46 +718,29 @@ mod tests {
         };
         cfg.sanitizers = vec![scoped];
 
-        let confining = |cfg: &RegistryConfig, tools: &[&str], child: bool| {
+        let confining = |cfg: &RegistryConfig, tools: &[&str], context_control: bool| {
             let mut declaration = covering_declaration(cfg);
             declaration.confined_results = tools.iter().map(|name| ToolName::new(*name)).collect();
-            declaration.confined_child_return = child;
+            declaration.context_control = context_control;
             declaration
         };
 
         assert!(
             matches!(
-                open(cfg.clone(), confining(&cfg, &["fetch"], false), ReturnPolicy::Raw),
+                open(cfg.clone(), confining(&cfg, &["fetch"], false)),
                 Err(LoadError::OutputSanitizerUncovered { sanitizer }) if sanitizer == "redactor"
             ),
             "a confined tool outside the scope is not an application point"
         );
         assert!(
             matches!(
-                open(cfg.clone(), confining(&cfg, &["fetch"], true), ReturnPolicy::Raw),
+                open(cfg.clone(), confining(&cfg, &["fetch"], true)),
                 Err(LoadError::OutputSanitizerUncovered { sanitizer }) if sanitizer == "redactor"
             ),
             "a scoped sanitizer never reaches a child return"
         );
         let covered = confining(&cfg, &["post"], false);
-        assert!(open(cfg, covered, ReturnPolicy::Raw).is_ok());
-    }
-
-    #[test]
-    fn a_child_return_binding_needs_context_control() {
-        let mut cfg = config(vec![tool("fetch")]);
-        cfg.sanitizers = vec![output_sanitizer("redactor")];
-        let bound = ReturnPolicy::Sanitized(SanitizerName::new("redactor"));
-        let mut declaration = covering_declaration(&cfg);
-        declaration.context_control = false;
-        assert!(matches!(
-            open(cfg.clone(), declaration, bound.clone()),
-            Err(LoadError::ChildWithoutContextControl)
-        ));
-        assert!(open(cfg.clone(), covering_declaration(&cfg), bound).is_ok());
-        let mut uncontrolled = covering_declaration(&cfg);
-        uncontrolled.context_control = false;
-        assert!(open(cfg, uncontrolled, ReturnPolicy::Raw).is_ok());
+        assert!(open(cfg, covered).is_ok());
     }
 
     #[test]
@@ -823,7 +760,7 @@ mod tests {
         let mut declaration = covering_declaration(&cfg);
         provider_run(&mut declaration, "search");
         assert!(matches!(
-            open(cfg, declaration, ReturnPolicy::Raw),
+            open(cfg, declaration),
             Err(LoadError::ProviderRunConstruct { tool, construct })
                 if tool == "search" && construct == ProviderRunConstruct::Requires
         ));
@@ -836,19 +773,19 @@ mod tests {
         let mut declaration = covering_declaration(&cfg);
         provider_run(&mut declaration, "search");
         assert!(matches!(
-            open(cfg, declaration, ReturnPolicy::Raw),
+            open(cfg, declaration),
             Err(LoadError::ProviderRunAnnotated(tool)) if tool == "search"
         ));
         let cfg = config(vec![tool("search")]);
         let mut declaration = covering_declaration(&cfg);
         provider_run(&mut declaration, "search");
-        assert!(open(cfg, declaration, ReturnPolicy::Raw).is_ok());
+        assert!(open(cfg, declaration).is_ok());
 
         let cfg = config(vec![tool("search(query:*)")]);
         let mut declaration = covering_declaration(&cfg);
         provider_run(&mut declaration, "search");
         assert!(matches!(
-            open(cfg, declaration, ReturnPolicy::Raw),
+            open(cfg, declaration),
             Err(LoadError::ProviderRunSelector(tool)) if tool == "search"
         ));
     }
@@ -861,13 +798,13 @@ mod tests {
             .executor_exceptions
             .insert(ToolName::new("ghost"), ExecutorClass::Assumed);
         assert!(matches!(
-            open(cfg.clone(), declaration, ReturnPolicy::Raw),
+            open(cfg.clone(), declaration),
             Err(LoadError::UnknownDeploymentTool { slot: CoverageSlot::ExecutorException, tool }) if tool == "ghost"
         ));
         let mut declaration = covering_declaration(&cfg);
         declaration.confined_results.insert(ToolName::new("ghost"));
         assert!(matches!(
-            open(cfg, declaration, ReturnPolicy::Raw),
+            open(cfg, declaration),
             Err(LoadError::UnknownDeploymentTool { slot: CoverageSlot::ConfinedResult, tool }) if tool == "ghost"
         ));
     }
@@ -880,7 +817,7 @@ mod tests {
             .executor_exceptions
             .insert(ToolName::new("ghost"), ExecutorClass::Assumed);
         assert!(matches!(
-            open(cfg, declaration, ReturnPolicy::Raw),
+            open(cfg, declaration),
             Err(LoadError::UnknownDeploymentTool { slot: CoverageSlot::ExecutorException, tool }) if tool == "ghost"
         ));
     }
@@ -893,7 +830,7 @@ mod tests {
             .executor_exceptions
             .insert(ToolName::new("search"), ExecutorClass::ProviderRun);
         assert!(matches!(
-            open(cfg, declaration, ReturnPolicy::Raw),
+            open(cfg, declaration),
             Err(LoadError::ConfinedProviderRun { tool }) if tool == "search"
         ));
     }
@@ -902,15 +839,15 @@ mod tests {
     fn the_starting_label_must_be_in_the_deployment_vocabulary() {
         let cfg = config(vec![tool("fetch")]);
         let mut declaration = covering_declaration(&cfg);
-        declaration.starting_label = Label::new(Trust::new(9), Audience::Public);
+        declaration.starting_label = Label::new(Trust::new(9), Audience::public());
         assert!(matches!(
-            open(cfg.clone(), declaration, ReturnPolicy::Raw),
+            open(cfg.clone(), declaration),
             Err(LoadError::RankOutOfChain { rank: 9, .. })
         ));
         let mut declaration = covering_declaration(&cfg);
         declaration.starting_label = Label::new(Trust::new(1), Audience::restricted([ReaderId::new("@auditors")]));
         assert!(matches!(
-            open(cfg, declaration, ReturnPolicy::Raw),
+            open(cfg, declaration),
             Err(LoadError::NonLiteralReader { reader, .. }) if reader == "@auditors"
         ));
     }
@@ -923,7 +860,6 @@ mod tests {
             registry: cfg.clone(),
             planner_cap: PlannerCap::default(),
             dialect: PolicyDialectVersion::new(1),
-            child_return: ReturnPolicy::Raw,
             profile: declaration.clone(),
         })
         .unwrap();
@@ -944,7 +880,6 @@ mod tests {
                 registry: with_sanitizer,
                 planner_cap: PlannerCap::default(),
                 dialect: PolicyDialectVersion::new(1),
-                child_return: ReturnPolicy::Raw,
                 profile: declaration,
             }),
             Err(LoadError::OutputSanitizerUncovered { .. })
@@ -973,7 +908,6 @@ mod tests {
                 registry: cfg.clone(),
                 planner_cap: PlannerCap::new(cap).expect("nonzero"),
                 dialect: PolicyDialectVersion::new(1),
-                child_return: ReturnPolicy::Raw,
                 profile: declaration,
             })
         };
@@ -992,9 +926,7 @@ mod tests {
         let mut leak = tool("leak");
         leak.delta = Delta {
             trust: None,
-            audience: Some(DeclaredAudience::literal(Audience::restricted([ReaderId::new(
-                "internal",
-            )]))),
+            audience: Some(DeclaredAudience::restricted([ReaderId::new("insider")])),
         };
         let mut cfg = config(vec![leak]);
         cfg.sanitizers = vec![Sanitizer {
@@ -1004,8 +936,8 @@ mod tests {
                 output: true,
             },
             transition: DeclaredTransition::Audience {
-                from_includes: DeclaredAudience::literal(Audience::restricted([ReaderId::new("internal")])),
-                to: DeclaredAudience::literal(Audience::Public),
+                from_includes: DeclaredAudience::restricted([ReaderId::new("insider")]),
+                to: DeclaredAudience::literal(Audience::public()),
             },
             scope: Scope::default(),
             hint: None,
@@ -1016,7 +948,7 @@ mod tests {
     fn public_trajectory_log() -> Vec<crate::fact::Fact> {
         vec![opening_at(
             crate::value::TrajectoryId::new("t"),
-            Label::new(Trust::new(1), Audience::Public),
+            Label::new(Trust::new(1), Audience::public()),
         )]
     }
 
@@ -1029,7 +961,7 @@ mod tests {
         let log = public_trajectory_log();
         let trajectory = crate::value::TrajectoryId::new("t");
         let plans_for = |declaration: ProfileDeclaration| {
-            let engine = open(narrowing_catalogue(), declaration, ReturnPolicy::Raw).unwrap();
+            let engine = open(narrowing_catalogue(), declaration).unwrap();
             let projection = Projection::build(&log, 1);
             let views = projection.view(&trajectory);
             let call = engine.resolve_call(ToolName::new("leak"), b"{}").unwrap();
@@ -1050,7 +982,6 @@ mod tests {
 
         let mut unconfined = covering_declaration(&narrowing_catalogue());
         unconfined.confined_results.clear();
-        unconfined.confined_child_return = true;
         let offered = plans_for(unconfined);
         assert_eq!(offered.len(), 1);
         assert!(matches!(
@@ -1068,68 +999,35 @@ mod tests {
             sanitizer.name = SanitizerName::new(format!("scrub-{i}"));
             cfg.sanitizers.push(sanitizer);
         }
-        let open_capped = |result: bool, child: bool, cap: u64| {
+        let open_capped = |result: bool, context_control: bool, cap: u64| {
             let mut declaration = covering_declaration(&cfg);
             if !result {
                 declaration.confined_results.clear();
             }
-            declaration.confined_child_return = child;
+            declaration.context_control = context_control;
             Engine::open(DeploymentPolicy {
                 registry: cfg.clone(),
                 planner_cap: PlannerCap::new(cap).expect("nonzero"),
                 dialect: PolicyDialectVersion::new(1),
-                child_return: ReturnPolicy::Raw,
                 profile: declaration,
             })
         };
+        // Five sanitizers: a confined result offers each as a settlement, and under context
+        // control a marked spawn offers each as a return declaration.
         assert!(matches!(
             open_capped(true, false, 5),
             Err(LoadError::TooManyPlanAlternatives { count: 6, max: 5, .. })
         ));
         assert!(matches!(
             open_capped(false, true, 5),
-            Err(LoadError::TooManyReturnPlanAlternatives { count: 6, max: 5 })
+            Err(LoadError::TooManyPlanAlternatives { count: 6, max: 5, .. })
+        ));
+        assert!(matches!(
+            open_capped(true, true, 35),
+            Err(LoadError::TooManyPlanAlternatives { count: 36, max: 35, .. })
         ));
         assert!(open_capped(true, false, 6).is_ok());
         assert!(open_capped(false, true, 6).is_ok());
-    }
-
-    #[test]
-    fn the_child_return_binding_is_validated_at_the_engine_choke_point() {
-        let cfg = narrowing_catalogue();
-        assert!(matches!(
-            open(
-                cfg.clone(),
-                covering_declaration(&cfg),
-                ReturnPolicy::Sanitized(SanitizerName::new("ghost")),
-            ),
-            Err(LoadError::ChildReturnSanitizerUnknown(name)) if name == "ghost"
-        ));
-        let mut input_only = cfg.clone();
-        input_only.sanitizers[0].on = SanitizerPoints {
-            input: true,
-            output: false,
-        };
-        assert!(matches!(
-            open(
-                input_only,
-                covering_declaration(&cfg),
-                ReturnPolicy::Sanitized(SanitizerName::new("scrub")),
-            ),
-            Err(LoadError::ChildReturnSanitizerNotOutput(name)) if name == "scrub"
-        ));
-        let mut scoped = cfg.clone();
-        scoped.sanitizers[0].scope = Scope {
-            tags: vec![crate::names::TagName::new("outbound")],
-        };
-        assert!(matches!(
-            open(
-                scoped,
-                covering_declaration(&cfg),
-                ReturnPolicy::Sanitized(SanitizerName::new("scrub")),
-            ),
-            Err(LoadError::ChildReturnSanitizerScoped(name)) if name == "scrub"
-        ));
     }
 
     #[test]
@@ -1171,7 +1069,7 @@ mod tests {
         declaration
             .provider_surfaces
             .insert(SurfaceName::new("file_search"), SurfaceMode::Mediated);
-        let engine = open(cfg, declaration, ReturnPolicy::Raw).unwrap();
+        let engine = open(cfg, declaration).unwrap();
         assert_eq!(
             engine.open_vectors(),
             vec![
@@ -1191,12 +1089,12 @@ mod tests {
     #[test]
     fn a_fully_enforced_deployment_derives_no_vectors() {
         let cfg = config(vec![tool("fetch")]);
-        let engine = open(cfg.clone(), covering_declaration(&cfg), ReturnPolicy::Raw).unwrap();
+        let engine = open(cfg.clone(), covering_declaration(&cfg)).unwrap();
         assert_eq!(engine.open_vectors(), vec![]);
     }
 
-    fn identity(cfg: &RegistryConfig, child: &ReturnPolicy, profile: &DeploymentProfile) -> PolicyIdentityV1 {
-        super::identity_of(cfg, child, profile)
+    fn identity(cfg: &RegistryConfig, profile: &DeploymentProfile) -> PolicyIdentityV1 {
+        super::identity_of(cfg, profile)
     }
 
     #[test]
@@ -1215,10 +1113,7 @@ mod tests {
             config(vec![t])
         };
         let profile = covering_profile(&single);
-        assert_eq!(
-            identity(&single, &ReturnPolicy::Raw, &profile),
-            identity(&doubled, &ReturnPolicy::Raw, &profile)
-        );
+        assert_eq!(identity(&single, &profile), identity(&doubled, &profile));
     }
 
     #[test]
@@ -1235,10 +1130,10 @@ mod tests {
         }];
         cfg.sanitizers = vec![output_sanitizer("redactor")];
         let profile = covering_profile(&cfg);
-        let bare = identity(&cfg, &ReturnPolicy::Raw, &profile);
+        let bare = identity(&cfg, &profile);
         cfg.authorities[0].hint = Some(Hint::new("the wire-approval desk"));
         cfg.sanitizers[0].hint = Some(Hint::new("strips PII"));
-        assert_eq!(identity(&cfg, &ReturnPolicy::Raw, &profile), bare);
+        assert_eq!(identity(&cfg, &profile), bare);
     }
 
     #[test]
@@ -1246,18 +1141,18 @@ mod tests {
         let mut cfg = config(vec![tool("fetch")]);
         cfg.sanitizers = vec![output_sanitizer("redactor")];
         let profile = covering_profile(&cfg);
-        let unscoped = identity(&cfg, &ReturnPolicy::Raw, &profile);
+        let unscoped = identity(&cfg, &profile);
 
         cfg.sanitizers[0].scope = Scope {
             tags: vec![TagName::new("outbound")],
         };
-        let scoped = identity(&cfg, &ReturnPolicy::Raw, &profile);
+        let scoped = identity(&cfg, &profile);
         assert_ne!(scoped, unscoped);
 
         cfg.sanitizers[0].scope = Scope {
             tags: vec![TagName::new("inbound")],
         };
-        assert_ne!(identity(&cfg, &ReturnPolicy::Raw, &profile), scoped);
+        assert_ne!(identity(&cfg, &profile), scoped);
     }
 
     #[test]
@@ -1274,22 +1169,22 @@ mod tests {
         };
         cfg.authorities = vec![officer("first"), officer("second")];
         let profile = covering_profile(&cfg);
-        let base = identity(&cfg, &ReturnPolicy::Raw, &profile);
+        let base = identity(&cfg, &profile);
 
         let mut permuted = cfg.clone();
         permuted.tools.reverse();
-        assert_eq!(identity(&permuted, &ReturnPolicy::Raw, &profile), base);
+        assert_eq!(identity(&permuted, &profile), base);
 
         let mut rerouted = cfg.clone();
         rerouted.authorities.reverse();
-        assert_ne!(identity(&rerouted, &ReturnPolicy::Raw, &profile), base);
+        assert_ne!(identity(&rerouted, &profile), base);
     }
 
     #[test]
     fn every_semantic_edit_moves_the_identity() {
         let cfg = config(vec![tool("fetch")]);
         let profile = covering_profile(&cfg);
-        let base = identity(&cfg, &ReturnPolicy::Raw, &profile);
+        let base = identity(&cfg, &profile);
 
         let delta_edit = config(vec![{
             let mut t = tool("fetch");
@@ -1299,7 +1194,7 @@ mod tests {
             };
             t
         }]);
-        assert_ne!(identity(&delta_edit, &ReturnPolicy::Raw, &profile), base);
+        assert_ne!(identity(&delta_edit, &profile), base);
 
         // Routing the tool through an Annotator, and then narrowing that Annotator's mandate,
         // each move the identity: what a produced annotation may say is part of the policy.
@@ -1310,24 +1205,20 @@ mod tests {
             cfg
         };
         let annotated_edit = routed(None);
-        assert_ne!(identity(&annotated_edit, &ReturnPolicy::Raw, &profile), base);
+        assert_ne!(identity(&annotated_edit, &profile), base);
         assert_ne!(
             identity(
                 &routed(Some(std::collections::BTreeSet::from([Trust::new(0)]))),
-                &ReturnPolicy::Raw,
                 &profile
             ),
-            identity(&annotated_edit, &ReturnPolicy::Raw, &profile)
+            identity(&annotated_edit, &profile)
         );
-
-        let sanitized = ReturnPolicy::Sanitized(SanitizerName::new("redactor"));
-        assert_ne!(identity(&cfg, &sanitized, &profile), base);
 
         let mut weaker = covering_declaration(&cfg);
         weaker
             .executor_exceptions
             .insert(ToolName::new("fetch"), ExecutorClass::Assumed);
         let weaker = DeploymentProfile::declare(weaker).unwrap();
-        assert_ne!(identity(&cfg, &ReturnPolicy::Raw, &weaker), base);
+        assert_ne!(identity(&cfg, &weaker), base);
     }
 }

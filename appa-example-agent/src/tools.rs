@@ -46,13 +46,30 @@ fn control_tool_schema() -> WireTool {
         CONTROL_TOOL,
         "Execute one remedy plan by the offer id that blocking feedback surfaced. The id must be \
          quoted exactly. Accepting a narrowing permanently restricts this trajectory, so run any \
-         later work that needs its current label before you accept.",
+         later work that needs its current label before you accept. A plan that declares a \
+         subagent's return takes `label`, the lowest label this trajectory accepts from the \
+         return; a plan that attests it also takes `return_schema`.",
         serde_json::json!({
             "type": "object",
             "properties": {
                 "offer_id": {
                     "type": "string",
                     "description": "The offer id exactly as the feedback surfaced it.",
+                },
+                "label": {
+                    "type": "object",
+                    "description": "For a return declaration: the lowest label accepted from the subagent's \
+                                    return, in the policy's delta spelling. An omitted dimension keeps this \
+                                    trajectory's current value.",
+                    "properties": {
+                        "trust": { "type": "string" },
+                        "audience": { "type": "array", "items": { "type": "string" } }
+                    },
+                    "additionalProperties": false,
+                },
+                "return_schema": {
+                    "type": "object",
+                    "description": "For an attested return: the JSON schema the subagent's return must match.",
                 }
             },
             "required": ["offer_id"],

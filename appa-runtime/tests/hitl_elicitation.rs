@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use appa_runtime::api::Runtime;
 use appa_runtime::{config::Config, hooks, mcp};
-use appa_runtime_api::{Actor, HookDecision, HookEvent, ProposedCall, TrajectoryId};
+use appa_runtime_api::{Actor, HookDecision, HookEvent, ProposedCall, Ruling, TrajectoryId};
 use rmcp::model::{ElicitRequestParams, ElicitResult, ElicitationAction};
 use rmcp::service::{RequestContext, RoleClient};
 use rmcp::{ClientHandler, ServiceExt};
@@ -16,7 +16,7 @@ fn policy(review_timeout_ms: u64) -> String {
 
 const POLICY: &str = r#"
 [policy]
-version = 1
+version = 2
 
 [[policy.tool]]
 name = "read_notes"
@@ -147,6 +147,7 @@ async fn deployment_with(review_timeout_ms: u64) -> Deployment {
                 arguments: raw(serde_json::json!({"body": "the quarterly figures"})),
             },
             spawn: false,
+            ruling: None,
         },
     )
     .await;
@@ -199,7 +200,7 @@ async fn dynamic_deployment() -> Deployment {
     let policy = format!(
         r#"
 [policy]
-version = 1
+version = 2
 
 [[policy.annotator]]
 name = "classifier"
@@ -256,6 +257,7 @@ builtin = "hitl"
                 arguments: raw(serde_json::json!({"command": "cat .env"})),
             },
             spawn: false,
+            ruling: None,
         },
     )
     .await;
@@ -302,6 +304,12 @@ fn offer_id(feedback: &str) -> String {
 }
 
 async fn execute<H: ClientHandler>(deployment: &Deployment, reviewer: H) -> String {
+    execute_with(deployment, reviewer, None).await
+}
+
+/// The control call, vouched with a ruling the harness obtained through its own
+/// review channel — or none, leaving the ruling to the elicitation.
+async fn execute_with<H: ClientHandler>(deployment: &Deployment, reviewer: H, ruling: Option<Ruling>) -> String {
     let vouched = hooks::handle(
         &deployment.runtime,
         HookEvent::ToolCall {
@@ -314,6 +322,7 @@ async fn execute<H: ClientHandler>(deployment: &Deployment, reviewer: H) -> Stri
                 arguments: raw(serde_json::json!({ "offer_id": deployment.offer })),
             },
             spawn: false,
+            ruling,
         },
     )
     .await;
@@ -445,5 +454,81 @@ async fn an_unanswered_review_closes_on_its_window_and_the_offer_stands() {
     assert!(
         retried.contains("Authorized"),
         "an unanswered review took nothing away; the same offer still rules: {retried}",
+    );
+}
+
+#[tokio::test]
+async fn the_block_carries_the_review_for_the_hitl_authority() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let path = dir.path().join("appa.toml");
+    std::fs::write(&path, policy(5000)).expect("the fixture writes");
+    let config = Config::load(&path).expect("the fixture validates");
+    let runtime = Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens"));
+    let root = TrajectoryId("cc:hitl-review".to_string());
+    hooks::handle(&runtime, HookEvent::SessionStart { root: root.clone() }).await;
+
+    let blocked = hooks::handle(
+        &runtime,
+        HookEvent::ToolCall {
+            actor: Actor {
+                root: root.clone(),
+                child: None,
+            },
+            call: ProposedCall {
+                tool: "publish".to_string(),
+                arguments: raw(serde_json::json!({"body": "the quarterly figures"})),
+            },
+            spawn: false,
+            ruling: None,
+        },
+    )
+    .await;
+    let HookDecision::DenyCall { feedback, review, .. } = blocked else {
+        panic!("a tool behind an attention mark must not release unruled: {blocked:?}");
+    };
+    assert_eq!(
+        review.len(),
+        1,
+        "the one offer consults the one hitl authority: {review:?}"
+    );
+    assert_eq!(
+        review[0].offer,
+        offer_id(&feedback),
+        "the review names the offer the feedback quotes"
+    );
+    let text = &review[0].text;
+    for needle in [
+        "publish",
+        "the quarterly figures",
+        "The person at the keyboard.",
+        "signoff",
+    ] {
+        assert!(
+            text.contains(needle),
+            "the review is the consult artifact as the person reads it ({needle}): {text}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_harness_ruling_approves_with_no_elicitation_channel() {
+    let deployment = deployment().await;
+    let answer = execute_with(&deployment, Absent, Some(Ruling::Approve)).await;
+    assert!(
+        answer.contains("Authorized"),
+        "the harness's own reviewer approved, so no elicitation was needed: {answer}"
+    );
+}
+
+#[tokio::test]
+async fn a_harness_ruling_denies_and_retires_the_offer() {
+    let deployment = deployment().await;
+    let answer = execute_with(&deployment, Absent, Some(Ruling::Deny)).await;
+    assert!(!answer.contains("Authorized"), "a denial authorizes nothing: {answer}");
+
+    let again = execute_with(&deployment, Absent, Some(Ruling::Approve)).await;
+    assert!(
+        !again.contains("Authorized"),
+        "a denied offer is gone; a later approval cannot revive it: {again}",
     );
 }

@@ -12,11 +12,11 @@ deals, and workspace settings). Add it to your root config with
 *Meeting content* — meetings, transcripts, notes, action items,
 coaching feedback, clips, collections, stories, companies, people,
 dossiers, and deals. The result may only reach readers allowed to see
-Grain data (`private`). Anything built from it cannot be sent to a
+Grain data (`internal`). Anything built from it cannot be sent to a
 public place.
 
 *Directory and settings* — workspace users, teams, smart topics, seat
-counts, and settings. Private to Grain readers.
+counts, and settings. Internal, like the meetings.
 
 *Links* — `resolve_urls` turns ids into URLs. No restriction.
 

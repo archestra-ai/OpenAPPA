@@ -7,13 +7,13 @@
 # by everyone (audience contains `public`).
 #
 # For a private repository, add root rules that name it; root rules run
-# first. Its reads become private, and its writes accept private data.
+# first. Its reads become `internal`, and its writes accept `internal` data.
 # A rule names one tool and matches one argument, so add one rule per
 # tool you use against that repository — here the issue tools:
 #
 #   [[policy.tool]]
 #   name = "mcp__github__issue_read(repo:my-private-repo)"
-#   delta = { trust = "suspicious", audience = ["private"] }
+#   delta = { trust = "suspicious", audience = ["internal"] }
 #
 #   [[policy.tool]]
 #   name = "mcp__github__issue_write(repo:my-private-repo)"
@@ -21,12 +21,16 @@
 #
 #   [policy.tool.requires]
 #   trust = "trusted"
-#   audience = { contains = ["private"] }
+#   audience = { contains = ["internal"] }
 #   #
 # To cover a whole organisation instead, match `owner:my-org`.
+#
+# The battery also ships `audience-source.py`, the `github` audience
+# source. Audience mappings are root-only, so the binding sits beside
+# them in the root config, not here — the README shows the wiring.
 
 [policy]
-version = 1
+version = 2
 
 # --- who am I: no outside content, nothing sent ---
 

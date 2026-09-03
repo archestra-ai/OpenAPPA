@@ -16,11 +16,14 @@ pub struct Provider {
 
 enum Step {
     Says(WireMessage),
-    /// Call the control tool with an offer id from the last feedback. Offer
-    /// ids are minted per block (`RUL-6`), so they cannot be scripted in
-    /// advance; this reads one out of the transcript exactly as a model would.
+    /// Call the control tool with the `nth` offer id of the last feedback and
+    /// `arguments`. Offer ids are minted per block (`RUL-6`), so they cannot be
+    /// scripted in advance; this reads one out of the transcript exactly as a
+    /// model would.
     Pursues {
         id: String,
+        nth: usize,
+        arguments: serde_json::Value,
     },
 }
 
@@ -51,8 +54,19 @@ impl Provider {
 
     /// Pursue the first offer, without depending on its presentation text.
     pub fn pursues_first(&self) -> &Self {
+        self.pursues_the_nth_offer_with(0, serde_json::json!({}))
+    }
+
+    /// Declare a child's return from a marked spawn's block: the `nth` plan —
+    /// the bare floor first, then each registered return sanitizer in registry
+    /// order — with the lowest label the parent accepts, `{}` for its own.
+    pub fn declares_the_return(&self, nth: usize, label: serde_json::Value) -> &Self {
+        self.pursues_the_nth_offer_with(nth, serde_json::json!({ "label": label }))
+    }
+
+    fn pursues_the_nth_offer_with(&self, nth: usize, arguments: serde_json::Value) -> &Self {
         let id = self.next_id();
-        self.push(Step::Pursues { id })
+        self.push(Step::Pursues { id, nth, arguments })
     }
 
     /// The most recent tool result containing `needle`, across every request
@@ -94,16 +108,16 @@ impl Provider {
                         .unwrap_or_else(|| panic!("the script ran out; the agent asked again with: {body}"));
                     let message = match step {
                         Step::Says(message) => message,
-                        Step::Pursues { id } => {
-                            let offer =
-                                surfaced_offer(&body).unwrap_or_else(|| panic!("no offer id surfaced, in: {body}"));
+                        Step::Pursues { id, nth, mut arguments } => {
+                            let offers =
+                                surfaced_offers(&body).unwrap_or_else(|| panic!("no offer id surfaced, in: {body}"));
+                            let offer = offers
+                                .get(nth)
+                                .unwrap_or_else(|| panic!("no offer {nth} surfaced among {offers:?}, in: {body}"));
+                            arguments["offer_id"] = serde_json::Value::String(offer.clone());
                             WireMessage::assistant_tool_calls(
                                 None,
-                                vec![call_of(
-                                    &id,
-                                    "execute_remedy_plan",
-                                    &serde_json::json!({ "offer_id": offer }).to_string(),
-                                )],
+                                vec![call_of(&id, "execute_remedy_plan", &arguments.to_string())],
                             )
                         }
                     };
@@ -134,19 +148,23 @@ fn call_of(id: &str, tool: &str, arguments: &str) -> WireToolCall {
     }
 }
 
-/// The opaque offer id associated with the most recent option that mentions
-/// `wanted`; surrounding presentation copy is deliberately ignored.
-fn surfaced_offer(request: &serde_json::Value) -> Option<String> {
+/// The opaque offer ids of the most recent message that lists any, in the
+/// order the block lists them; surrounding presentation copy is deliberately
+/// ignored.
+fn surfaced_offers(request: &serde_json::Value) -> Option<Vec<String>> {
     let messages = request["messages"].as_array()?;
-    messages
-        .iter()
-        .rev()
-        .find_map(|message| opaque_offer_id(message.get("content")?.as_str()?))
+    messages.iter().rev().find_map(|message| {
+        let ids = opaque_offer_ids(message.get("content")?.as_str()?);
+        (!ids.is_empty()).then_some(ids)
+    })
 }
 
-fn opaque_offer_id(text: &str) -> Option<String> {
-    let after = text.split("offer_id:").nth(1)?;
-    let rest = after.trim_start().strip_prefix('"')?;
-    let end = rest.find('"')?;
-    Some(rest[..end].to_string())
+fn opaque_offer_ids(text: &str) -> Vec<String> {
+    text.split("offer_id:")
+        .skip(1)
+        .filter_map(|after| {
+            let rest = after.trim_start().strip_prefix('"')?;
+            Some(rest[..rest.find('"')?].to_string())
+        })
+        .collect()
 }

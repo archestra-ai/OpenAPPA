@@ -1,15 +1,15 @@
 mod common;
-use common::{offers, raw};
+use common::{actor, last_offer, propose, raw, root};
 
 use std::sync::Arc;
 
 use appa_runtime::api::{AuditEvent, DispatchOutcome, OfferId, RemedyOutcome, Runtime};
 use appa_runtime::{config::Config, hooks};
-use appa_runtime_api::{Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, ToolOutcome, TrajectoryId};
+use appa_runtime_api::{HookDecision, HookEvent, OutcomeBody, ProposedCall, ToolOutcome};
 
 const POLICY: &str = r#"
 [policy]
-version = 1
+version = 2
 
 [[policy.tool]]
 name = "read_hr"
@@ -38,17 +38,6 @@ builtin = "redact-email"
 const RAW_BODY: &str = "mail alice@corp.example today";
 const REDACTED_BODY: &str = "mail [redacted-email] today";
 
-fn root() -> TrajectoryId {
-    TrajectoryId("substitution-test".to_string())
-}
-
-fn actor() -> Actor {
-    Actor {
-        root: root(),
-        child: None,
-    }
-}
-
 fn read_hr() -> ProposedCall {
     ProposedCall {
         tool: "read_hr".to_string(),
@@ -61,18 +50,6 @@ fn send(body: &str) -> ProposedCall {
         tool: "send".to_string(),
         arguments: raw(serde_json::json!({"body": body})),
     }
-}
-
-async fn propose(runtime: &Arc<Runtime>, call: ProposedCall) -> HookDecision {
-    hooks::handle(
-        runtime,
-        HookEvent::ToolCall {
-            actor: actor(),
-            call,
-            spawn: false,
-        },
-    )
-    .await
 }
 
 async fn report(runtime: &Arc<Runtime>, call: ProposedCall, body: &str) -> HookDecision {
@@ -94,13 +71,6 @@ fn feedback_of(decision: &HookDecision) -> String {
         HookDecision::DenyCall { feedback, .. } => feedback.clone(),
         other => panic!("expected a deny carrying feedback, got {other:?}"),
     }
-}
-
-fn last_offer(feedback: &str) -> OfferId {
-    offers(feedback)
-        .last()
-        .cloned()
-        .unwrap_or_else(|| panic!("no offer id in feedback: {feedback}"))
 }
 
 async fn narrowed_and_blocked(dir: &tempfile::TempDir) -> (Arc<Runtime>, OfferId) {

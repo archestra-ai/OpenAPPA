@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: appa-runtime-policy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "appa-demo.labels" . | nindent 4 }}
+data:
+  demo.appa.toml: |
+{{ .Files.Get "files/demo.appa.toml" | indent 4 }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: appa-runtime-relay
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "appa-demo.labels" . | nindent 4 }}
+data:
+  default.conf: |
+{{ .Files.Get "files/appa-relay.conf" | indent 4 }}

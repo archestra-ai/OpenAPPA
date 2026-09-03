@@ -6,7 +6,7 @@ include = [
 ]
 
 [policy]
-version = 1
+version = 2
 
 [policy.deployment]
 dispatch = "enforced"
@@ -18,13 +18,29 @@ hint = "Ask the person running the session."
 [policy.authority.permits]
 attention = ["hitl"]
 
+# Audience mappings are root-only. The Slack battery ships the source
+# script; mapping its collections here registers the `slack` provider,
+# so the binding below must sit beside the mapping. The script reads
+# its token from APPA_SLACK_TOKEN.
+[policy.audience.self]
+from = ["slack:viewer"]
+
+[policy.audience.internal]
+from = ["slack:full-members"]
+
+# A directory read pages through a whole workspace, so the limits here
+# are sized for the audience sources rather than for a single annotation.
 [externals]
-timeout_ms = 5000
+timeout_ms = 30000
 review_timeout_ms = 600000
-max_body_bytes = 65536
+max_body_bytes = 1048576
 
 [externals.authorities.hitl]
 builtin = "hitl"
+
+[externals.audience.slack]
+command = ["python3", "../../batteries/slack/audience-source.py"]
+token_env = "APPA_PROVIDER_SLACK_TOKEN"   # the one variable this command inherits
 
 # Root contracts run before every included battery. This local rule bypasses
 # the shipped Bash classifier for `cargo test` and adds a fresh approval step.
@@ -37,14 +53,15 @@ attention = ["hitl"]
 
 [policy.tool.delta]
 trust = "suspicious"
-audience = ["private"]
 
-# A root contract can also replace the battery's Read rule with a local
-# annotator. The local rule folds the suspicious-output delta into every
-# annotation it produces.
+# A root contract can also replace the battery's Read rules with a local
+# annotator. This one folds the suspicious-output delta into every annotation
+# and asks a person before a sensitive file is read. An annotation names no
+# reader: `self` and `internal` are written in static rules, never answered.
 [[policy.annotator]]
 name = "local.read-sensitivity"
-audiences = ["private"]
+audiences = []
+marks = ["hitl"]
 
 [[policy.tool]]
 name = "Read"

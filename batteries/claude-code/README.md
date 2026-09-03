@@ -1,24 +1,26 @@
 # Claude Code battery
 
 Use this battery for Claude Code sessions that need policy-aware shell commands
-and automatic privacy labels for local file reads.
+and `self` labels on the requester's own secrets.
 
-It covers two built-in tools, and its wildcard covers every tool the policy
-does not name:
+It covers two built-in tools:
 
-- **Bash** — Before a command runs, the Claude Code model decides what trust,
-  audience, and fresh attention the command requires. It also labels the
-  command's output for trust and audience. This lets later tools distinguish,
-  for example, public build output from private or suspicious command output.
-- **Read** — Before a file is read, a local Python resolver checks its path.
-  Hidden paths, credential files, private keys, system-secret locations, and
-  sensitive symlink targets produce private content. Other paths produce public
-  content. The resolver does not block the read or lower its trust.
-- **Every other tool** — The wildcard rule sends a tool with no policy entry,
-  such as an MCP server's tool, to the Claude Code model for a per-call
-  contract before it runs. The annotator can hold an unknown tool's output to
-  suspicious trust and a private audience, or clear one it recognizes. Name a tool exactly, or add a
-  root rule, when it needs its own contract.
+- **Bash** — A command that names a credential path (`.ssh/`, `.netrc`,
+  `.claude.json`, `.aws/credentials`, a private key, ...) is refused outright:
+  one contract judges one call, and a compound command could read and send in
+  the same call. Before any other command runs, the Claude Code model decides
+  what trust and fresh attention it requires and labels its output for trust.
+  An annotation names no reader (`audiences = []`), so the model never decides
+  who may see a command's output; static rules do.
+- **Read** — Reading a hidden path, a credential file, a private key, or a
+  system secret location narrows the session to `self`, the requester: nothing
+  built from it reaches a sink that requires `internal` or `public`. The rules
+  match the path as written, absolute or relative. Other paths keep the
+  session's label. No rule blocks a read or lowers its trust.
+
+The default config created by `appa init claude-code` separately provides the
+wildcard fallback for tools it does not name. Keeping that fallback in the root
+lets this battery compose without declaring a second wildcard or annotator.
 
 ## Add it to a deployment
 
@@ -26,7 +28,7 @@ does not name:
 include = ["batteries/claude-code/appa.toml"]
 
 [policy]
-version = 1
+version = 2
 ```
 
 Root rules take precedence over the battery. Add a root rule when a particular
@@ -41,12 +43,12 @@ these root rules require fresh human approval for every `kubectl` command:
 [[policy.tool]]
 name = "Bash(command:kubectl)"
 requires = { attention = ["hitl"] }
-delta = { trust = "suspicious", audience = ["private"] }
+delta = { trust = "suspicious", audience = ["internal"] }
 
 [[policy.tool]]
 name = "Bash(command:kubectl *)"
 requires = { attention = ["hitl"] }
-delta = { trust = "suspicious", audience = ["private"] }
+delta = { trust = "suspicious", audience = ["internal"] }
 
 [[policy.authority]]
 name = "operator"

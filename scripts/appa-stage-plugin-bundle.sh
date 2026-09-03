@@ -7,9 +7,9 @@
 # appa-plugin-<version>.tar.gz, and `appa init claude-code` accepts exactly the
 # bytes whose SHA-256 its own build baked in.
 #
-# `plugin_bundle::validate_tree` is the single definition of the shape this must
-# produce, and it runs against this script's real output in the init and
-# rendered-hook tests, so a bundle that loses a required file fails CI here
+# `plugin_layout::REPOSITORY_MAPPINGS` is the single definition of what this
+# copies, and a runtime unit test digests this script's real output against the
+# mapping's, so a release bundle that drifts from what init stages fails CI here
 # rather than at someone's install.
 set -eu
 
@@ -44,6 +44,12 @@ cp -- "$repo/integrations/claude-code/live-gate-check.py" ./live-gate-check.py
 
 mkdir -p -- ./website/content/docs
 cp -- "$repo/website/content/docs/contracts.md" ./website/content/docs/contracts.md
+
+# Generated Python caches are not plugin source. A developer may have them in a
+# checkout, while a GitHub source archive and a clean release runner never do;
+# excluding them keeps all three staging paths byte-identical.
+find . -type d -name __pycache__ -prune -exec rm -rf -- {} +
+find . -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
 
 # Modes are applied by init when it materializes a deployment; these are for
 # anyone who unpacks the archive by hand.

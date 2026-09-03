@@ -11,8 +11,12 @@ pub(crate) use session::raw;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-pub use crate::engine::{AuditEntry, AuditEvent, AuditLabel, DispatchOutcome, TrajectoryStatus};
-pub use appa_runtime_api::{Actor, OutcomeBody, ProposedCall, SpawnBinding, SpawnRef, ToolOutcome, TrajectoryId};
+pub use crate::engine::{
+    AuditEntry, AuditEvent, AuditLabel, DispatchOutcome, LabelSpelling, RemedyArguments, TrajectoryStatus,
+};
+pub use appa_runtime_api::{
+    Actor, OfferedRemedy, OutcomeBody, ProposedCall, SpawnBinding, SpawnRef, ToolOutcome, TrajectoryId,
+};
 pub(crate) use session::{LateOpen, Session, is_control_tool};
 
 use crate::config::Config;
@@ -44,10 +48,24 @@ impl ExactCall {
     }
 }
 
+/// One trajectory's standing to run the offer it quoted at the control
+/// tool's hook, with the person's ruling its harness attached, if any.
+#[derive(Debug, Clone, PartialEq)]
+struct Vouch {
+    actor: Actor,
+    ruling: Option<appa_runtime_api::Ruling>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ToolCallDecision {
-    Allow { spawn: Option<SpawnBinding> },
-    Deny { feedback: String },
+    Allow {
+        spawn: Option<SpawnBinding>,
+    },
+    Deny {
+        feedback: String,
+        offers: Vec<OfferedRemedy>,
+        review: Vec<appa_runtime_api::Review>,
+    },
 }
 
 /// What the adapter gives the harness as the tool output. `Keep`: use
@@ -83,15 +101,32 @@ pub enum RemedyOutcome {
     Refused { detail: String },
 }
 
+/// Whom taking an offer involves: nobody but the model (the plain narrowing acceptance), the
+/// named authorities' rulings, or the named sanitizer's rewrite of the value.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum OfferKind {
+    Accept,
+    Authority { names: Vec<String> },
+    Sanitizer { name: String },
+}
+
 /// What happens to the child's final message: delivered to the parent,
 /// nothing returned, or delivery stopped. The child
 /// is finished, so `feedback` goes to the parent as the spawn call's
 /// outcome and names the options by `OfferId`.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ChildReturnDecision {
-    Returned { value: String },
+    Returned {
+        value: String,
+    },
+    /// The fork's sanitizer derived `value`; it crosses when the child returns exactly it.
+    Staged {
+        value: String,
+    },
     NoValue,
-    Blocked { feedback: String },
+    Blocked {
+        feedback: String,
+    },
 }
 
 /// What a spawn call's result produced: the child's return, when
@@ -170,6 +205,8 @@ pub(crate) enum EventError {
     BindingMismatch,
     #[error("the family log stayed contended after {attempts} replays")]
     Contended { attempts: u32 },
+    #[error("external resolution did not settle after {rounds} rounds")]
+    ResolutionDiverged { rounds: u32 },
     #[error("the engine returned a follow-up this event cannot deliver")]
     UnexpectedDecision,
     #[error("the persisted log is refused: {0}")]
@@ -178,15 +215,40 @@ pub(crate) enum EventError {
     PolicyUnavailable(String),
     #[error("engine invariant breach: {0}")]
     EngineInvariant(String),
-    #[error("annotator={annotator} error={reason}")]
-    AnnotationRefused { annotator: String, reason: String },
+    #[error("annotator={annotator} error={reason}{next_action}")]
+    AnnotationRefused {
+        annotator: String,
+        reason: String,
+        next_action: &'static str,
+    },
     #[error("tool {tool} is not declared in this policy and no wildcard covers it; the call is refused before it runs")]
     UndeclaredTool { tool: String },
+    /// `execute_remedy_plan` came without what the offered plan needs, or with an
+    /// argument the policy cannot read. Nothing is appended and the offer stands.
+    #[error("{detail}")]
+    RemedyArguments { detail: String },
+    #[error(
+        "delegation to {tool} is not declared by the policy: an agent runs as a child only under a contract that names it, and the wildcard covers no spawn"
+    )]
+    UndeclaredSpawn { tool: String },
     #[error("storage failure: {0}")]
     Storage(String),
 }
 
 impl EventError {
+    fn annotation_refused(annotator: String, reason: String) -> Self {
+        let next_action = if annotator == "claude-code.undeclared-tool" {
+            "; this tool has no exact policy contract; run /appa-guide init to sync installed MCP tools"
+        } else {
+            ""
+        };
+        Self::AnnotationRefused {
+            annotator,
+            reason,
+            next_action,
+        }
+    }
+
     /// Whether this failure is the deployment's problem rather than
     /// something the model or the harness can act on. An operational
     /// failure refuses wherever it happens, so the harness fails closed
@@ -200,6 +262,7 @@ impl EventError {
             | EventError::PolicyUnavailable(_)
             | EventError::EngineInvariant(_)
             | EventError::Contended { .. }
+            | EventError::ResolutionDiverged { .. }
             | EventError::AnnotationRefused { .. }
             | EventError::UndeclaredTool { .. }
             | EventError::UnexpectedDecision => true,
@@ -207,6 +270,7 @@ impl EventError {
             | EventError::SubstitutionAbandoned { .. }
             | EventError::TrajectoryEnded
             | EventError::ChildDispatchOpen
+            | EventError::RemedyArguments { .. }
             | EventError::UnknownTrajectory
             | EventError::TrajectoryExists
             | EventError::UnknownDispatch
@@ -215,6 +279,7 @@ impl EventError {
             | EventError::NotAChild
             | EventError::SpawnNotTaken
             | EventError::SpawnAmbiguous
+            | EventError::UndeclaredSpawn { .. }
             | EventError::BindingMismatch => false,
         }
     }
@@ -231,6 +296,7 @@ impl From<EngineRefusal> for EventError {
             EngineRefusal::UnknownOffer => EventError::UnknownOffer,
             EngineRefusal::Unbindable => EventError::BindingMismatch,
             EngineRefusal::UndeclaredTool { tool } => EventError::UndeclaredTool { tool },
+            EngineRefusal::Arguments { detail } => EventError::RemedyArguments { detail },
         }
     }
 }
@@ -265,6 +331,21 @@ impl Deployment {
         })
     }
 
+    /// Answer every authority and sanitizer the policy declares in process — approve, and
+    /// the body unchanged — as if the bound party had. `appa replay`'s deployment only.
+    fn stand_in_for_remedies(&mut self) {
+        let registry = self.resident.registry();
+        self.externals.stand_in_for_remedies(
+            registry
+                .authorities()
+                .iter()
+                .map(|authority| authority.name.as_str().to_string()),
+            registry
+                .sanitizers()
+                .map(|sanitizer| sanitizer.name.as_str().to_string()),
+        );
+    }
+
     fn resident(&self) -> PolicyEngine<'_> {
         PolicyEngine::Resident(&self.resident)
     }
@@ -290,19 +371,108 @@ pub struct Runtime {
     inner: Arc<Inner>,
 }
 
+/// Which contract may release a spawn — a call that opens a child trajectory.
+///
+/// `Declared`: only a contract written for the tool's name; the wildcard, which covers
+/// every ordinary call the policy does not write, covers no spawn. An agent the policy never
+/// names is denied before it runs, with the reason as the model's feedback. `Wildcard`: the
+/// wildcard covers a spawn as it covers any call. The harness adapter picks: kagent's spawns
+/// are other agents called as tools, and a child trajectory is not something a per-call
+/// annotation can stand for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpawnCoverage {
+    Declared,
+    Wildcard,
+}
+
+/// Everything `open` and `open_in_memory` share before the log is chosen: the modules, the
+/// consult gates, and the deployment compiled from the configuration.
+struct Prepared {
+    modules: crate::builtins::ModuleRegistry,
+    gates: ConsultGates,
+    deployment: Deployment,
+}
+
+impl Prepared {
+    fn new(config: Config, modules: Option<PathBuf>) -> Result<Prepared, OpenError> {
+        let modules =
+            crate::builtins::load(modules.as_deref()).map_err(|error| OpenError::Modules(error.to_string()))?;
+        let gates = ConsultGates::per_runtime();
+        let deployment = Deployment::load(config, &modules, gates.clone())?;
+        gates.serve_llm(deployment.config.externals.llm_bound());
+        Ok(Prepared {
+            modules,
+            gates,
+            deployment,
+        })
+    }
+
+    fn assemble(self, backend: Backend) -> Result<Runtime, OpenError> {
+        let store = LogStore::open(backend).map_err(|error| match error {
+            appa_eventlog::OpenError::Damaged { path, detail } => OpenError::Damaged(format!("{path}: {detail}")),
+            error @ appa_eventlog::OpenError::ForeignSchema { .. } => OpenError::Damaged(error.to_string()),
+            error => OpenError::Storage(error.to_string()),
+        })?;
+        Ok(Runtime {
+            inner: Arc::new(Inner {
+                deployment: std::sync::RwLock::new(Arc::new(self.deployment)),
+                retired: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+                store,
+                modules: self.modules,
+                executing: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+                permits: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+                prompted: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+                gates: self.gates,
+                named_spawns: std::sync::atomic::AtomicBool::new(false),
+            }),
+        })
+    }
+}
+
 struct Inner {
     deployment: std::sync::RwLock<Arc<Deployment>>,
     retired: std::sync::Mutex<std::collections::BTreeMap<String, Arc<RuntimeEngine>>>,
     store: LogStore,
     modules: crate::builtins::ModuleRegistry,
     executing: std::sync::Mutex<std::collections::BTreeSet<String>>,
-    permits: std::sync::Mutex<std::collections::BTreeMap<String, Vec<Actor>>>,
+    permits: std::sync::Mutex<std::collections::BTreeMap<String, Vec<Vouch>>>,
+    /// Trajectories a prompt reached since their turn last settled. Claude Code sends no
+    /// `Stop` hook for a turn the user interrupted, so the prompt is the only sign the
+    /// previous turn is over; the next tool call or turn end settles what it left behind.
+    prompted: std::sync::Mutex<std::collections::BTreeSet<String>>,
     /// The gates every process-costing consult of this runtime passes; deployment reloads
     /// clone them, so old and new snapshots contend on the same permits.
     gates: ConsultGates,
+    /// `true` under [`SpawnCoverage::Declared`]: set once, before the runtime is shared.
+    named_spawns: std::sync::atomic::AtomicBool,
+}
+
+/// The trajectory an actor's events belong to: the child when the harness names one.
+pub(crate) fn acting_trajectory(actor: &Actor) -> &TrajectoryId {
+    actor.child.as_ref().unwrap_or(&actor.root)
+}
+
+impl Runtime {
+    /// Settle which contracts may release a spawn. Called once by the binary, for the
+    /// adapter it serves, before the runtime is shared; the default is `Wildcard`.
+    pub fn with_spawn_coverage(self, coverage: SpawnCoverage) -> Runtime {
+        self.inner.named_spawns.store(
+            coverage == SpawnCoverage::Declared,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self
+    }
 }
 
 impl Inner {
+    pub(super) fn spawn_coverage(&self) -> SpawnCoverage {
+        if self.named_spawns.load(std::sync::atomic::Ordering::Relaxed) {
+            SpawnCoverage::Declared
+        } else {
+            SpawnCoverage::Wildcard
+        }
+    }
+
     fn deployment(&self) -> Arc<Deployment> {
         Arc::clone(
             &self
@@ -389,27 +559,31 @@ impl Runtime {
     /// a policy this deployment cannot honor is refused before
     /// anything opens.
     pub fn open(config: Config, db: PathBuf, modules: Option<PathBuf>) -> Result<Runtime, OpenError> {
-        let modules =
-            crate::builtins::load(modules.as_deref()).map_err(|error| OpenError::Modules(error.to_string()))?;
-        let gates = ConsultGates::per_runtime();
-        let deployment = Deployment::load(config, &modules, gates.clone())?;
-        gates.serve_llm(deployment.config.externals.llm_bound());
-        let store = LogStore::open(Backend::Sqlite { path: db }).map_err(|error| match error {
-            appa_eventlog::OpenError::Damaged { path, detail } => OpenError::Damaged(format!("{path}: {detail}")),
-            error @ appa_eventlog::OpenError::ForeignSchema { .. } => OpenError::Damaged(error.to_string()),
-            error => OpenError::Storage(error.to_string()),
-        })?;
-        Ok(Runtime {
-            inner: Arc::new(Inner {
-                deployment: std::sync::RwLock::new(Arc::new(deployment)),
-                retired: std::sync::Mutex::new(std::collections::BTreeMap::new()),
-                store,
-                modules,
-                executing: std::sync::Mutex::new(std::collections::BTreeSet::new()),
-                permits: std::sync::Mutex::new(std::collections::BTreeMap::new()),
-                gates,
-            }),
-        })
+        let prepared = Prepared::new(config, modules)?;
+        prepared.assemble(Backend::Sqlite { path: db })
+    }
+
+    /// The deployment `appa replay` runs: the same session and engine over a log that lives
+    /// only as long as this value, with every authority and sanitizer answered in process —
+    /// approve, and the body unchanged — as if the bound party had. Annotators, audience
+    /// sources, and identity stay bound as configured. Nothing of the run survives the process.
+    pub fn open_in_memory(config: Config, modules: Option<PathBuf>) -> Result<Runtime, OpenError> {
+        let mut prepared = Prepared::new(config, modules)?;
+        prepared.deployment.stand_in_for_remedies();
+        prepared.assemble(Backend::Memory)
+    }
+
+    /// The policy file key the serving deployment answers under. An install compares it
+    /// against the key of the configuration it just validated: a process that kept
+    /// running across the install serves the policy it loaded at startup, and only a
+    /// difference here is worth reloading.
+    pub(crate) fn serving_policy_key(&self) -> String {
+        let serving = self
+            .inner
+            .deployment
+            .read()
+            .expect("the deployment lock is never poisoned: no panic runs while it is held");
+        crate::engine::policy_file_key(serving.config.policy_file().bytes())
     }
 
     /// Replace the serving deployment with the one this configuration
@@ -515,6 +689,26 @@ impl Runtime {
         }
     }
 
+    /// The first of `candidates` this family has opened, live or ended, from
+    /// one view rebuild; `None` when it opened none of them.
+    pub(crate) fn opened_among(
+        &self,
+        root: &TrajectoryId,
+        candidates: &[TrajectoryId],
+    ) -> Result<Option<TrajectoryId>, EventError> {
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+        let log = self.inner.log(root)?;
+        let deployment = self.inner.deployment();
+        let policy = self.inner.resolve_policy(&deployment, &log)?;
+        let view = policy.engine().rebuild_view(&log).map_err(EventError::from)?;
+        Ok(candidates
+            .iter()
+            .find(|candidate| policy.engine().liveness(&view, candidate) != Liveness::Unopened)
+            .cloned())
+    }
+
     pub fn status(&self, id: &TrajectoryId) -> Option<TrajectoryStatus> {
         let deployment = self.inner.deployment();
         let (policy, log) = self.root_log(&deployment, id, "status")?;
@@ -569,9 +763,31 @@ impl Runtime {
 
     /// Execute one surfaced remedy offer by its id.
     pub async fn execute_remedy(&self, acting: &Actor, offer: OfferId) -> RemedyOutcome {
-        self.remedy(acting, offer, None).await
+        self.remedy(acting, offer, RemedyArguments::default(), None, None).await
     }
 
+    /// Execute one surfaced remedy offer with the arguments a plan declaring a subagent's
+    /// return takes: the floor, and the schema where the plan attests.
+    pub async fn execute_remedy_with(
+        &self,
+        acting: &Actor,
+        offer: OfferId,
+        arguments: RemedyArguments,
+    ) -> RemedyOutcome {
+        self.remedy(acting, offer, arguments, None, None).await
+    }
+}
+
+/// The control call's arguments as a model spells them — `offer_id`, and for a plan
+/// declaring a subagent's return `label` and `return_schema` — for a harness that routes the
+/// control tool itself.
+pub fn parse_control_arguments(arguments: &str) -> Result<(OfferId, RemedyArguments), String> {
+    let args: crate::mcp::ExecuteRemedyPlanArgs =
+        serde_json::from_str(arguments).map_err(|error| format!("execute_remedy_plan arguments: {error}"))?;
+    Ok((OfferId(args.offer_id.clone()), RemedyArguments::from(args)))
+}
+
+impl Runtime {
     /// The whole act: resolve the quoted id inside the acting trajectory's
     /// own family, claim the offer, and answer. `elicitation` is supplied
     /// rather than extracted, so the body is reachable without a live peer.
@@ -579,7 +795,9 @@ impl Runtime {
         &self,
         acting: &Actor,
         quoted: OfferId,
+        arguments: RemedyArguments,
         elicitation: Option<&Elicitation>,
+        ruling: Option<appa_runtime_api::Ruling>,
     ) -> RemedyOutcome {
         let unknown = || RemedyOutcome::Refused {
             detail: "no live offer with this id exists".to_string(),
@@ -606,7 +824,7 @@ impl Runtime {
                 };
             }
         };
-        match session.on_remedy(offer, elicitation).await {
+        match session.on_remedy(offer, arguments, elicitation, ruling).await {
             Ok(RemedyDecision::Authorized { call }) => RemedyOutcome::Authorized { call: call.proposed() },
             Ok(RemedyDecision::Substituted { call }) => RemedyOutcome::Substituted { call: call.proposed() },
             Ok(RemedyDecision::Returned { value }) => RemedyOutcome::Returned { value },
@@ -616,6 +834,18 @@ impl Runtime {
                 detail: error.to_string(),
             },
         }
+    }
+
+    /// What taking a quoted offer in this root's family would consult, or `None` for an
+    /// offer that no longer stands.
+    pub(crate) fn offer_kind(&self, root: &TrajectoryId, quoted: &OfferId) -> Option<OfferKind> {
+        let log = self.inner.log(root).ok()?;
+        let offer = crate::engine::resolve_rendered(&log, quoted)?;
+        let deployment = self.inner.deployment();
+        let policy = self.inner.resolve_policy(&deployment, &log).ok()?;
+        let view = policy.engine().rebuild_view(&log).ok()?;
+        let pursuer = policy.engine().offer_pursuer(&view, &offer)?;
+        policy.engine().offer_kind(&view, &pursuer, &offer)
     }
 
     /// The canonical identity a quoted id names in this family, and the
@@ -631,20 +861,30 @@ impl Runtime {
     }
 
     /// Record that this trajectory quoted this offer id, for the request
-    /// that runs it.
-    pub(crate) fn vouch(&self, quoted: &OfferId, acting: &Actor) {
+    /// that runs it. `ruling` is a person's answer the harness obtained
+    /// through its own review channel; it rides the vouch and is spent
+    /// with it, so it can answer exactly the execution it was given for.
+    pub(crate) fn vouch(&self, quoted: &OfferId, acting: &Actor, ruling: Option<appa_runtime_api::Ruling>) {
         let mut permits = self.inner.permits.lock().expect("the permit mutex is never poisoned");
         let holders = permits.entry(quoted.0.clone()).or_default();
-        if !holders.contains(acting) {
-            holders.push(acting.clone());
+        match holders.iter_mut().find(|holder| holder.actor == *acting) {
+            Some(holder) => holder.ruling = ruling,
+            None => holders.push(Vouch {
+                actor: acting.clone(),
+                ruling,
+            }),
         }
     }
 
-    /// The trajectory vouched for this quoted id, taken once.
-    pub(crate) fn take_vouched(&self, quoted: &OfferId) -> Option<Actor> {
+    /// The trajectory vouched for this quoted id, taken once, with the
+    /// ruling its harness attached.
+    pub(crate) fn take_vouched(&self, quoted: &OfferId) -> Option<(Actor, Option<appa_runtime_api::Ruling>)> {
         let mut permits = self.inner.permits.lock().expect("the permit mutex is never poisoned");
         let mut holders = permits.remove(&quoted.0)?;
-        (holders.len() == 1).then(|| holders.remove(0))
+        (holders.len() == 1).then(|| {
+            let vouch = holders.remove(0);
+            (vouch.actor, vouch.ruling)
+        })
     }
 
     /// Drop every vouch this actor still holds. A vouch is recorded when the actor
@@ -655,9 +895,32 @@ impl Runtime {
     pub(crate) fn release_vouches(&self, acting: &Actor) {
         let mut permits = self.inner.permits.lock().expect("the permit mutex is never poisoned");
         permits.retain(|_, holders| {
-            holders.retain(|holder| holder != acting);
+            holders.retain(|holder| holder.actor != *acting);
             !holders.is_empty()
         });
+    }
+
+    /// A prompt reached this actor. Nothing is recorded: the mark lives in memory and is
+    /// consumed by the actor's next tool call or turn end, whichever comes first. A
+    /// restarted runtime forgets it and the next proposal refuses until a turn end closes
+    /// the abandoned call.
+    pub(crate) fn note_prompt(&self, acting: &Actor) {
+        let mut prompted = self
+            .inner
+            .prompted
+            .lock()
+            .expect("the prompted mutex is never poisoned");
+        prompted.insert(acting_trajectory(acting).0.clone());
+    }
+
+    /// Whether a prompt reached this actor since its turn last settled. Consumed once.
+    pub(crate) fn take_prompted(&self, acting: &Actor) -> bool {
+        let mut prompted = self
+            .inner
+            .prompted
+            .lock()
+            .expect("the prompted mutex is never poisoned");
+        prompted.remove(acting_trajectory(acting).0.as_str())
     }
 
     fn spend_vouch(&self, quoted: &OfferId, acting: &Actor) {
@@ -665,7 +928,7 @@ impl Runtime {
         let Some(holders) = permits.get_mut(&quoted.0) else {
             return;
         };
-        holders.retain(|holder| holder != acting);
+        holders.retain(|holder| holder.actor != *acting);
         if holders.is_empty() {
             permits.remove(&quoted.0);
         }
@@ -900,9 +1163,20 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
     }
     bound_exactly("annotator", bound_by_deployment.into_iter(), &externals.annotators)?;
     bound_exactly(
-        "membership resolver",
-        rc.membership.iter().map(|resolver| resolver.as_str()),
-        &externals.membership,
+        "audience source",
+        rc.audience.sources.iter().map(|source| source.provider.as_str()),
+        &externals.audience,
+    )?;
+    // The shipped `verified-email` implementation is engine-computed and takes no binding;
+    // only a policy-selected custom implementation binds, exactly once.
+    let custom_identity = match &rc.audience.identity {
+        Some(appa_engine::audience::IdentityImplementation::Custom(name)) => Some(name.as_str()),
+        Some(appa_engine::audience::IdentityImplementation::VerifiedEmail) | None => None,
+    };
+    bound_exactly(
+        "identity implementation",
+        custom_identity.into_iter(),
+        &externals.identity,
     )?;
     Ok(())
 }
@@ -963,7 +1237,7 @@ fn compile_stored_policy(bytes: &[u8]) -> Result<appa_policy::Config, String> {
 pub(crate) mod testing {
     fn engine_dispatch(label: &str) -> appa_engine::value::DispatchId {
         let policy = appa_policy::Config::from_toml_str(
-            "version = 1
+            "version = 2
 [[tool]]
 name = \"Bash\"
 ",
@@ -993,6 +1267,19 @@ mod deployment_tests {
     use super::*;
     use crate::config::{AnnotatorImplementation, Endpoint, ExternalBindings, LlmBinding, LlmProvider};
 
+    #[test]
+    fn the_undeclared_tool_fallback_refusal_names_the_recovery_action() {
+        let fallback = EventError::annotation_refused(
+            "claude-code.undeclared-tool".to_string(),
+            "non_success status=1".to_string(),
+        )
+        .to_string();
+        assert!(fallback.contains("run /appa-guide init"), "{fallback}");
+
+        let exact = EventError::annotation_refused("bash-classifier".to_string(), "timeout".to_string()).to_string();
+        assert!(!exact.contains("/appa-guide init"), "{exact}");
+    }
+
     /// A deployment with no `[externals.annotators]` bindings: the policy under test names
     /// `builtin = "claude-code"` on the declarations it wants answered by Claude Code.
     fn claude_config(policy: &str) -> Config {
@@ -1012,7 +1299,7 @@ mod deployment_tests {
     fn a_claude_builtin_deployment_opens_without_an_endpoint() {
         let tool_level = claude_config(
             r#"
-                version = 1
+                version = 2
                 [[annotator]]
                 name = "classifier"
                 builtin = "claude-code"
@@ -1031,7 +1318,7 @@ mod deployment_tests {
         let config = || {
             claude_config(
                 r#"
-                version = 1
+                version = 2
                 [[annotator]]
                 name = "classifier"
                 builtin = "claude-code"
@@ -1058,7 +1345,7 @@ mod deployment_tests {
         // recompiling them is the trust gate, and it runs before any fact replays.
         let legacy = br#"
 [policy]
-version = 1
+version = 2
 [[policy.dynamic_resolver]]
 name = "directory"
 [[policy.tool]]
@@ -1077,7 +1364,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     fn every_annotator_has_its_own_implementation() {
         let mut config = claude_config(
             r#"
-                version = 1
+                version = 2
                 [[annotator]]
                 name = "bash-classifier"
                 builtin = "claude-code"
@@ -1104,7 +1391,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     #[test]
     fn an_authority_may_stay_unbound_but_its_binding_must_be_declared() {
         let policy = r#"
-            version = 1
+            version = 2
             [[authority]]
             name = "reviewer"
             [authority.permits]
@@ -1129,7 +1416,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     #[test]
     fn missing_and_undeclared_annotator_implementations_are_refused() {
         let policy = r#"
-            version = 1
+            version = 2
             [[annotator]]
             name = "classifier"
             [[tool]]
@@ -1156,7 +1443,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     fn a_builtin_annotator_takes_no_deployment_binding() {
         let mut bound = claude_config(
             r#"
-                version = 1
+                version = 2
                 [[annotator]]
                 name = "classifier"
                 builtin = "claude-code"
@@ -1178,7 +1465,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     #[test]
     fn a_declared_llm_annotator_needs_the_llm_table_at_open_and_reload() {
         let policy = r#"
-            version = 1
+            version = 2
             [[annotator]]
             name = "classifier"
             builtin = "llm"
@@ -1216,7 +1503,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     #[test]
     fn the_llm_gate_follows_the_serving_deployment_and_never_a_refused_one() {
         let policy = r#"
-            version = 1
+            version = 2
             [[annotator]]
             name = "classifier"
             builtin = "llm"
@@ -1292,7 +1579,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     fn versioned_policy(description: &str) -> Config {
         claude_config(&format!(
             r#"
-            version = 1
+            version = 2
             [[tool]]
             name = "fetch"
             description = "{description}"
@@ -1337,6 +1624,28 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         );
     }
 
+    #[test]
+    fn the_serving_policy_key_names_the_deployment_answering_now() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime =
+            Runtime::open(versioned_policy("first"), dir.path().join("appa.db"), None).expect("the deployment opens");
+        let before = runtime.serving_policy_key();
+
+        let reloaded = runtime
+            .reload(versioned_policy("second"))
+            .expect("the second deployment loads");
+        assert_eq!(
+            runtime.serving_policy_key(),
+            reloaded.policy_key,
+            "the key answers for the deployment the reload installed"
+        );
+        assert_ne!(
+            runtime.serving_policy_key(),
+            before,
+            "a different policy answers under a different key, which is what makes the key a divergence signal"
+        );
+    }
+
     fn retired_len(runtime: &Runtime) -> usize {
         runtime
             .inner
@@ -1367,14 +1676,14 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         };
         let quoted = OfferId("offer-1".to_string());
 
-        runtime.vouch(&quoted, &actor);
+        runtime.vouch(&quoted, &actor, None);
         assert_eq!(
             runtime.take_vouched(&quoted),
-            Some(actor.clone()),
+            Some((actor.clone(), None)),
             "a standing vouch is what the tool takes"
         );
 
-        runtime.vouch(&quoted, &actor);
+        runtime.vouch(&quoted, &actor, None);
         crate::hooks::handle(&runtime, appa_runtime_api::HookEvent::TurnEnd { actor: actor.clone() }).await;
         assert_eq!(
             runtime.take_vouched(&quoted),

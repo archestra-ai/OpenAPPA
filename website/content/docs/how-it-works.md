@@ -20,7 +20,7 @@ Because policy checks happen prospectively before tools run, sensitive data is n
 OpenAPPA operates on three runtime concepts:
 
 1. **Security Labels** (`label`)  
-   Attached to every running trajectory. A label tracks audience (which reader IDs are authorized to receive the trajectory's data) and trust rank (whether data comes from a vetted internal source or untrusted external data).
+   Attached to every running trajectory. A label tracks audience (who is authorized to receive the trajectory's data) and trust rank (whether data comes from a vetted internal source or untrusted external data). An audience can name readers exactly, or symbolically: OpenAPPA ships the built-in chain `self` ⊆ `internal` ⊆ `public`, and policies declare named audiences such as `@finance` on top of it. A symbolic audience stays symbolic in the label and the log; when a decision needs actual membership, OpenAPPA reads the configured sources — Google Workspace, Slack, or GitHub, each bound to your own endpoint or command — for that one act, pins the answer, and replays from the pin without ever consulting a source again.
 
 2. **Tool Contracts** (`delta` & `requires`)  
    Declarative rules configured per tool. Reading data restricts the trajectory's label (`delta`), while invoking an outbound tool verifies that the destination is permitted by the trajectory's current label (`requires`).
@@ -55,9 +55,12 @@ This monotonic structure provides a **formally provable non-interference guarant
 To see how this works in practice, consider an agent configured with three tools: `get_ticket_from_crm`, `send_email`, and `file_github_issue`:
 
 ```toml
+[audience.internal]
+from = ["google-workspace:full-members"]   # who "internal" means, read from the directory per act
+
 [[tool]]
 name  = "get_ticket_from_crm"
-delta = { audience = ["internal"] }   # reading CRM data restricts the trajectory to "internal"
+delta = { audience = ["internal"] }   # reading CRM data restricts the trajectory to the built-in internal audience
 
 [[tool]]
 name       = "send_email"
@@ -94,6 +97,9 @@ token_env = "APPA_PII_TOKEN"               # sent as a bearer token
 
 [externals.authorities.user]
 builtin = "hitl"                           # ask a person
+
+[externals.audience.google-workspace]
+url = "https://audience.corp/google-workspace"   # answers the internal membership reads
 ```
 
 ### What happens when the agent reads a ticket?
@@ -104,17 +110,17 @@ When the agent calls `get_ticket_from_crm()`, OpenAPPA intercepts the dispatch b
 |---|---|---|
 | **Accept Narrowing** | Trajectory becomes `internal`. | `file_github_issue` is blocked; `send_email` requires authority approval for external recipients. |
 | **Sanitize the Result** | Trajectory stays `{public, trusted}`. | Raw ticket is withheld from the model; `remove_pii`'s sanitized derivation is admitted in its place. |
-| **Child Branch + Sanitizer** | Parent stays `{public, trusted}`; child narrows to `internal`. | Child reads raw ticket, reasons over it, and returns the sanitized derivation across the merge boundary. |
+| **Child Branch + Sanitizer** | Parent stays `{public, trusted}`; child narrows to `internal`. | Parent declares the sanitized route at the spawn; child reads raw ticket, reasons over it, and returns the sanitized derivation across the merge boundary. |
 
 :::fig-two-endings:::
 
-If the agent accepts narrowing to `internal` and later attempts `send_email(body, "auditor@external.com")`, OpenAPPA detects that `auditor@external.com` is outside the `internal` audience, halts dispatch, and returns a remedy plan pointing to the `user` authority. Once the human approves, the email dispatches and the event is permanently logged.
+If the agent accepts narrowing to `internal` and later attempts `send_email(body, "auditor@external.com")`, OpenAPPA reads the configured `internal` sources for this act, finds `auditor@external.com` is not a member, halts dispatch, and returns a remedy plan pointing to the `user` authority. Once the human approves, the email dispatches and the event is permanently logged — with the membership answer pinned to it, so replay reaches the same decision without a directory call.
 
 ## Sub-agents isolate sensitive reads
 
 Reading untrusted external files, third-party APIs, or confidential internal records normally restricts the entire agent session. Child trajectories isolate these label modifications within host-managed sub-executions.
 
-A child process can read and reason over raw, untrusted data in its own sandboxed context without restricting the parent. When the child completes, it returns only a clean, bounded answer across the merge boundary. The main agent stays clean and retains its full reach to interact with public tools. Parent and child branches share a single append-only log so that all sends and approvals remain globally auditable.
+A child process can read and reason over raw, untrusted data in its own sandboxed context without restricting the parent. The parent declares, when it spawns the child, the lowest label it accepts from the child's return and whether a sanitizer rewrites the return first; the child can narrow no further than that declaration allows. When the child completes, it returns only what the declaration covers across the merge boundary, and a return outside it is blocked at the child, never quietly widened. The main agent stays clean and retains its full reach to interact with public tools. Parent and child branches share a single append-only log so that all sends and approvals remain globally auditable.
 
 ## Engine refusals enumerate every valid remedy
 
@@ -196,7 +202,7 @@ You don't need to throw away existing security controls. OpenAPPA unifies them a
 | Custom approval webhooks / LLM evaluators | Authority (`url`, `command`, or model builtin) |
 | Content scanners & argument-aware trust, audience, and review classifiers | Annotator (endpoint, command, or model builtin) inside its declared mandate |
 | PII redactors & sanitizers | Sanitizer (`builtin = "redact-email"`, endpoint, command, or model builtin) |
-| Directory / IAM group lookups | Membership Resolver |
+| Directory / IAM group lookups | Audience sources (`[audience.self]`, `[audience.internal]`, `[[audience.group]]`): the Google Workspace, Slack, and GitHub catalogs, each bound to your own endpoint or command |
 | Imperative `if/else` access checks | Tool Contracts (`delta` & `requires`) |
 
 Crucially, an authority or sanitizer can do only what its `permits` declares, and an annotator can answer only inside its declared mandate. Even if a third-party scanner or classifier makes a mistake, it cannot grant permissions beyond its pre-configured bounds.

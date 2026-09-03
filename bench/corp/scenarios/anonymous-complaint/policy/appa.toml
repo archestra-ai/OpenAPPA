@@ -1,12 +1,9 @@
 [policy]
-version = 1
+version = 2
 trust_chain = ["suspicious", "internal"]
 [policy.boundary]
 trust = "internal"
 audience = ["public"]
-[policy.child]
-return_sanitizer = "complainant-redactor"
-
 # Branching is an ordinary registered tool: the runtime checks this call like
 # any other, and releasing it is what opens a child trajectory (`BRN-2`,
 # `BRN-3`). No delta, because releasing it admits no value — a child's return
@@ -49,7 +46,6 @@ audience = { from = ["quiet.wren@identity.example"], to = ["public"] }
 [policy.deployment]
 context_control = true
 dispatch = "enforced"
-confined_child_return = true
 confined_results = ["search_hr", "read_hr", "create_hr", "send_email"]
 
 # --- registered externals ---------------------------------------------------

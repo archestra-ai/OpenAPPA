@@ -1,6 +1,11 @@
 param(
     [switch]$SessionContext,
-    [switch]$EnsureRuntime
+    [switch]$EnsureRuntime,
+    # The hooks that report a finished turn pass this. They decide nothing, so
+    # they never block, and they take the shorter deadline: a turn end waits on
+    # no evidence round trip. The map declares it beside the event it registers
+    # so nothing in a posted event can move a hook's blocking outcome.
+    [switch]$TurnEnd
 )
 
 # Hooks protect only sessions launched with APPA_GATE=1 (the clappa
@@ -78,7 +83,16 @@ function Stop-StaleRuntime {
             [Console]::Error.WriteLine("appa protection: pid $stalePid is not appa runtime; not stopping it")
             return $false
         }
-        Stop-Process -Id $stalePid -ErrorAction SilentlyContinue
+        try {
+            Stop-Process -Id $stalePid -ErrorAction Stop
+        } catch {
+            # Gone between the lookup and the stop: the same concurrent-starter
+            # race as no process at all, settled by the wait below.
+            if ($null -ne (Get-Process -Id $stalePid -ErrorAction SilentlyContinue)) {
+                [Console]::Error.WriteLine("appa protection: cannot stop the stale runtime (pid $stalePid): $($_.Exception.Message)")
+                return $false
+            }
+        }
     }
     $deadline = (Get-Date).AddSeconds(10)
     while ((Get-Date) -lt $deadline) {
@@ -170,10 +184,36 @@ if (-not $protected) {
     exit 0
 }
 
-# The hooks that report a finished turn. They decide nothing, so they
-# never block, and they take the shorter deadline: a turn end waits on
-# no evidence round trip.
-$turnEnds = @("Stop", "StopFailure", "SubagentStop")
+# The subagent definitions in reach that declare maxTurns. Claude Code ends
+# such a subagent at its turn cap with no SubagentStop, so the return check
+# never runs and the parent receives its partial output unchecked; a prompt
+# is refused while one exists. The project and user agent directories and
+# the installed plugins' agent directories are scanned; agents passed on the
+# command line (--agents, --plugin-dir) are not.
+function Find-MaxTurnsAgents {
+    $projectDir = if ($env:CLAUDE_PROJECT_DIR) { $env:CLAUDE_PROJECT_DIR } else { (Get-Location).Path }
+    $found = @()
+    foreach ($dir in @((Join-Path $projectDir ".claude\agents"), (Join-Path $HOME ".claude\agents"))) {
+        if (-not (Test-Path -LiteralPath $dir)) {
+            continue
+        }
+        foreach ($file in Get-ChildItem -LiteralPath $dir -Filter *.md -File) {
+            if (Select-String -LiteralPath $file.FullName -Pattern '^maxTurns:' -Quiet) {
+                $found += $file.FullName
+            }
+        }
+    }
+    $plugins = Join-Path $HOME ".claude\plugins\cache"
+    if (Test-Path -LiteralPath $plugins) {
+        foreach ($file in Get-ChildItem -LiteralPath $plugins -Recurse -Filter *.md -File) {
+            if ((Split-Path -Leaf (Split-Path -Parent $file.FullName)) -eq "agents" -and
+                (Select-String -LiteralPath $file.FullName -Pattern '^maxTurns:' -Quiet)) {
+                $found += $file.FullName
+            }
+        }
+    }
+    ,$found
+}
 
 try {
     $payload = [Console]::In.ReadToEnd()
@@ -193,7 +233,13 @@ try {
             throw "the runtime at $runtimeUrl is not healthy and could not be started"
         }
     }
-    $timeout = if ($null -ne $hookInput -and $turnEnds -contains $hookInput.hook_event_name) { 30 } else { 120 }
+    if ($null -ne $hookInput -and $hookInput.hook_event_name -eq "UserPromptSubmit") {
+        $declaring = Find-MaxTurnsAgents
+        if ($declaring.Count -gt 0) {
+            throw "[appa] this session cannot be protected while a subagent definition declares maxTurns: Claude Code ends that subagent without the return check and hands the parent its partial output unchecked. Remove maxTurns from: $($declaring -join ', ')"
+        }
+    }
+    $timeout = if ($TurnEnd) { 30 } else { 120 }
     $response = Invoke-WebRequest -Uri "$runtimeUrl/hook" -Method Post `
         -ContentType "application/json" -Body $payload -TimeoutSec $timeout -UseBasicParsing
     [Console]::Out.Write([string]$response.Content)
@@ -203,7 +249,7 @@ try {
     # hooks means "do not stop", which would hold the actor in a turn it
     # has finished. A runtime that does not answer costs a call left
     # open, which the next turn end closes.
-    if ($null -ne $hookInput -and $turnEnds -contains $hookInput.hook_event_name) {
+    if ($TurnEnd) {
         [Console]::Error.WriteLine("OpenAPPA runtime did not answer the turn end: $failure")
         exit 0
     }

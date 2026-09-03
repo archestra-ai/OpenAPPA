@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::contract::{PinnedAnnotation, PinnedMembership};
+use crate::contract::PinnedAnnotation;
 use crate::label::Label;
 use crate::params::CanonicalArguments;
 
@@ -88,10 +88,6 @@ impl CanonicalDigest {
             if let Some(pinned) = &call.annotation {
                 hasher.update([3u8]);
                 hasher.update(canonical_json(pinned));
-            }
-            hasher.update([1u8]);
-            for membership in &call.memberships {
-                hasher.update(canonical_json(membership));
             }
         }
         CanonicalDigest(hasher.finalize().into())
@@ -201,24 +197,6 @@ impl BlockId {
                 .field(&nonce.0)
                 .field(dispatch.trajectory().0.as_bytes())
                 .field(dispatch.digest().0.as_slice())
-                .field(&generation.value().to_be_bytes())
-                .finish(),
-        )
-    }
-
-    /// The stage one pending child return surfaces. Bound to the return
-    /// identity and to the generation its candidate stands at, so each successive stage of the
-    /// same pending return is a stage of its own even under a repeated nonce.
-    pub(crate) fn of_return(
-        nonce: &OfferNonce,
-        id: &ChildReturnId,
-        generation: crate::basis::SubjectGeneration,
-    ) -> Self {
-        BlockId(
-            Framed::tagged(b"appa.block.return.v1")
-                .field(&nonce.0)
-                .field(id.child().0.as_bytes())
-                .field(&id.occurrence().to_be_bytes())
                 .field(&generation.value().to_be_bytes())
                 .finish(),
         )
@@ -363,8 +341,8 @@ pub enum Provenance {
         batch: crate::transition::ProposalBatchId,
         position: u32,
         effects: crate::fact::EffectSet,
-        #[serde(default)]
-        resolutions: Vec<crate::groups::GroupResolution>,
+        #[serde(default, skip_serializing_if = "crate::audience::AudienceEvidence::is_empty")]
+        evidence: crate::audience::AudienceEvidence,
     },
 }
 
@@ -428,7 +406,6 @@ pub struct ResolvedCall {
     declaration: ToolDeclarationId,
     arguments: CanonicalArguments,
     annotation: Option<PinnedAnnotation>,
-    memberships: Vec<PinnedMembership>,
 }
 
 impl<'de> Deserialize<'de> for ResolvedCall {
@@ -439,21 +416,10 @@ impl<'de> Deserialize<'de> for ResolvedCall {
             declaration: ToolDeclarationId,
             arguments: CanonicalArguments,
             annotation: Option<PinnedAnnotation>,
-            #[serde(default)]
-            memberships: Vec<PinnedMembership>,
         }
 
         let wire = WireCall::deserialize(deserializer)?;
-        let pinned_memberships = wire.memberships.clone();
-        let canonical = ResolvedCall::new_keyed(wire.tool, wire.declaration, wire.arguments)
-            .with_annotation(wire.annotation)
-            .with_memberships(wire.memberships);
-        if canonical.memberships != pinned_memberships {
-            return Err(serde::de::Error::custom(
-                "pinned membership answers are not in their canonical order",
-            ));
-        }
-        Ok(canonical)
+        Ok(ResolvedCall::new_keyed(wire.tool, wire.declaration, wire.arguments).with_annotation(wire.annotation))
     }
 }
 
@@ -469,7 +435,6 @@ impl ResolvedCall {
             declaration,
             arguments,
             annotation: None,
-            memberships: Vec::new(),
         }
     }
 
@@ -505,26 +470,6 @@ impl ResolvedCall {
         self.annotation.as_ref()
     }
 
-    /// Attach the membership answers pinned to this call. Canonical order only: a
-    /// duplicate binding is not merged here — the boundary refuses it
-    /// ([`crate::check::validate_memberships`]) — so the set the runtime handed over is exactly
-    /// the set the call carries.
-    pub fn with_memberships(mut self, memberships: Vec<PinnedMembership>) -> Self {
-        self.memberships = memberships;
-        self.memberships.sort_by_cached_key(canonical_json);
-        self
-    }
-
-    pub fn memberships(&self) -> &[PinnedMembership] {
-        &self.memberships
-    }
-
-    pub fn membership(&self, argument: &str) -> Option<&PinnedMembership> {
-        self.memberships
-            .iter()
-            .find(|membership| membership.argument() == argument)
-    }
-
     /// The canonical digest of this exact rendered call, recomputed from the tool and arguments.
     /// The pinned answers are **not** part of it: a repeat is the same rendered call whatever an
     /// Annotator said, which is why anything holding a call by identity alone must compare the call
@@ -533,23 +478,15 @@ impl ResolvedCall {
         CanonicalDigest::of_call(&self.tool, &self.arguments)
     }
 
-    /// The call a substitution of this one's arguments renders: the same callee, the
-    /// replacement arguments, and only those membership answers the replacement leaves standing.
+    /// The call a substitution of this one's arguments renders: the same callee with the
+    /// replacement arguments.
     ///
     /// Annotation evidence is exact-call evidence: it binds the canonical digest of the call the
     /// Annotator saw, and a substitution renders a different canonical call, so no pinned
-    /// annotation rides along — the rewritten call is annotated afresh or not at all. A
-    /// membership answer expands the group one argument names, so it survives only while that
-    /// argument's value is unchanged.
+    /// annotation rides along — the rewritten call is annotated afresh or not at all. Audience
+    /// evidence is operation-level, pinned on the record, so it needs nothing from the call.
     pub(crate) fn substituting(&self, arguments: CanonicalArguments) -> ResolvedCall {
-        let unchanged = |argument: &str| arguments.value().get(argument) == self.arguments.value().get(argument);
-        let memberships = self
-            .memberships
-            .iter()
-            .filter(|membership| unchanged(membership.argument()))
-            .cloned()
-            .collect();
-        ResolvedCall::new_keyed(self.tool.clone(), self.declaration, arguments).with_memberships(memberships)
+        ResolvedCall::new_keyed(self.tool.clone(), self.declaration, arguments)
     }
 }
 

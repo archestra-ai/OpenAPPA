@@ -36,7 +36,7 @@ impl SanitizerName {
 }
 
 name_newtype!(AnnotatorName);
-name_newtype!(MembershipResolverName);
+name_newtype!(IdentityImplementationName);
 name_newtype!(GroupName);
 
 impl std::fmt::Display for GroupName {
@@ -45,26 +45,34 @@ impl std::fmt::Display for GroupName {
     }
 }
 
-/// How an `includes($arg)` placeholder reads its actual string argument: the
-/// reserved word `public` is the Public audience itself, an `@`-marked name is a group for the
-/// membership resolver, and any other string is one literal reader ID. `@` with no name after
-/// it is malformed and reads as nothing.
+/// One audience entry as policy and tool arguments spell it: the reserved word `public` is
+/// the Public audience itself, `self` and `internal` are the built-in chain audiences, an
+/// `@`-marked spelling is a group reference — a configured named audience or a
+/// source-qualified selector — and any other string is one literal reader ID. `@` with no
+/// name after it, and a malformed selector form, read as nothing. The one grammar: a
+/// declared audience list and an `includes($arg)` placeholder's actual both read through it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum AudienceArgument {
+pub enum AudienceArgument {
     Public,
-    Group(GroupName),
+    Chain(crate::label::ChainAudience),
+    Group(crate::label::GroupRef),
     Reader(crate::label::ReaderId),
 }
 
 impl AudienceArgument {
-    pub(crate) fn parse(value: &str) -> Option<AudienceArgument> {
-        match value {
-            "public" => Some(AudienceArgument::Public),
-            _ => match value.strip_prefix('@') {
-                Some("") => None,
-                Some(group) => Some(AudienceArgument::Group(GroupName::new(group))),
-                None => Some(AudienceArgument::Reader(crate::label::ReaderId::new(value))),
-            },
+    pub fn parse(value: &str) -> Option<AudienceArgument> {
+        if value == "public" {
+            return Some(AudienceArgument::Public);
+        }
+        if let Some(chain) = crate::label::ChainAudience::parse(value) {
+            return Some(AudienceArgument::Chain(chain));
+        }
+        match value.strip_prefix('@') {
+            Some(reference) => crate::label::GroupRef::parse(reference).map(AudienceArgument::Group),
+            None => {
+                let reader = crate::label::ReaderId::new(value);
+                reader.is_literal().then_some(AudienceArgument::Reader(reader))
+            }
         }
     }
 }
@@ -78,11 +86,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_placeholder_argument_spells_public_a_group_or_one_reader() {
+    fn a_placeholder_argument_spells_an_audience_a_group_or_one_reader() {
         assert_eq!(AudienceArgument::parse("public"), Some(AudienceArgument::Public));
         assert_eq!(
+            AudienceArgument::parse("self"),
+            Some(AudienceArgument::Chain(crate::label::ChainAudience::Self_))
+        );
+        assert_eq!(
+            AudienceArgument::parse("internal"),
+            Some(AudienceArgument::Chain(crate::label::ChainAudience::Internal))
+        );
+        assert_eq!(
             AudienceArgument::parse("@auditors"),
-            Some(AudienceArgument::Group(GroupName::new("auditors")))
+            Some(AudienceArgument::Group(crate::label::GroupRef::Named(GroupName::new(
+                "auditors"
+            ))))
+        );
+        assert_eq!(
+            AudienceArgument::parse("@google-workspace:group/finance@corp.com"),
+            Some(AudienceArgument::Group(crate::label::GroupRef::Source {
+                provider: "google-workspace".into(),
+                selector: "group/finance@corp.com".into()
+            }))
         );
         assert_eq!(
             AudienceArgument::parse("ap@corp.example"),
@@ -91,9 +116,11 @@ mod tests {
         assert_eq!(
             AudienceArgument::parse("Public"),
             Some(AudienceArgument::Reader(crate::label::ReaderId::new("Public"))),
-            "the reserved word is exact"
+            "the reserved words are exact"
         );
         assert_eq!(AudienceArgument::parse("@"), None);
+        assert_eq!(AudienceArgument::parse("@slack:"), None);
+        assert_eq!(AudienceArgument::parse(""), None, "an empty id names no reader");
         assert_eq!(GroupName::new("auditors").to_string(), "@auditors");
     }
 }

@@ -15,10 +15,10 @@
 use serde::ser::SerializeStruct as _;
 use serde::{Deserialize, Serialize};
 
+use appa_engine::audience::MemberClaims;
 use appa_engine::authority::{Authority, DeclaredTransition, Sanitizer};
 use appa_engine::check::Gap;
-use appa_engine::groups::DeclaredAudience;
-use appa_engine::label::{Audience, Trust};
+use appa_engine::label::{Clause, DeclaredAudience, ReaderId, Trust};
 use appa_engine::registry::TrustChain;
 
 /// Which registered external a consult addresses. Closed: the wire
@@ -30,7 +30,12 @@ pub enum ConsultKind {
     /// The Annotator boundary: one consult produces the complete annotation for one proposed
     /// call of a tool the policy routes through it.
     Annotation,
-    Membership,
+    /// A registered audience source: one consult answers one selector's members, or one
+    /// member lookup's claims.
+    AudienceSource,
+    /// A custom identity implementation: one consult canonicalizes one member's claims to
+    /// its principal.
+    Identity,
 }
 
 impl ConsultKind {
@@ -39,7 +44,8 @@ impl ConsultKind {
             ConsultKind::Authority => "authority",
             ConsultKind::Sanitizer => "sanitizer",
             ConsultKind::Annotation => "annotation",
-            ConsultKind::Membership => "membership",
+            ConsultKind::AudienceSource => "audience",
+            ConsultKind::Identity => "identity",
         }
     }
 }
@@ -67,8 +73,15 @@ pub enum ConsultBody {
         declaration: AnnotationDeclaration,
         artifact: AnnotationArtifact,
     },
-    /// A membership resolver declares nothing: the group name is the whole question.
-    Membership { artifact: MembershipArtifact },
+    /// An audience source declares the selector templates the policy registers for its
+    /// provider; the artifact is the one collection or member the consult reads.
+    AudienceSource {
+        declaration: AudienceSourceDeclaration,
+        artifact: AudienceSourceArtifact,
+    },
+    /// A custom identity implementation declares nothing: the member's claims are the whole
+    /// question.
+    Identity { artifact: MemberClaims },
 }
 
 impl Consult {
@@ -77,7 +90,8 @@ impl Consult {
             ConsultBody::Authority { .. } => ConsultKind::Authority,
             ConsultBody::Sanitizer { .. } => ConsultKind::Sanitizer,
             ConsultBody::Annotation { .. } => ConsultKind::Annotation,
-            ConsultBody::Membership { .. } => ConsultKind::Membership,
+            ConsultBody::AudienceSource { .. } => ConsultKind::AudienceSource,
+            ConsultBody::Identity { .. } => ConsultKind::Identity,
         }
     }
 
@@ -88,7 +102,8 @@ impl Consult {
             ConsultBody::Authority { declaration, .. } => serde_json::to_value(declaration),
             ConsultBody::Sanitizer { declaration, .. } => serde_json::to_value(declaration),
             ConsultBody::Annotation { declaration, .. } => serde_json::to_value(declaration),
-            ConsultBody::Membership { .. } => Ok(serde_json::json!({})),
+            ConsultBody::AudienceSource { declaration, .. } => serde_json::to_value(declaration),
+            ConsultBody::Identity { .. } => Ok(serde_json::json!({})),
         }
         .expect("a declaration serializes: it holds strings, lists, and a compiled schema")
     }
@@ -98,7 +113,8 @@ impl Consult {
             ConsultBody::Authority { artifact, .. } => serde_json::to_value(artifact),
             ConsultBody::Sanitizer { artifact, .. } => serde_json::to_value(artifact),
             ConsultBody::Annotation { artifact, .. } => serde_json::to_value(artifact),
-            ConsultBody::Membership { artifact } => serde_json::to_value(artifact),
+            ConsultBody::AudienceSource { artifact, .. } => serde_json::to_value(artifact),
+            ConsultBody::Identity { artifact } => serde_json::to_value(artifact),
         }
         .expect("an artifact serializes: it holds strings and canonical JSON")
     }
@@ -129,13 +145,7 @@ impl WireAudience {
     fn declared(audience: &DeclaredAudience) -> WireAudience {
         match audience {
             DeclaredAudience::Public => WireAudience::Public,
-            DeclaredAudience::Restricted { readers, groups } => WireAudience::Readers(
-                readers
-                    .iter()
-                    .map(|reader| reader.as_str().to_string())
-                    .chain(groups.iter().map(|group| group.to_string()))
-                    .collect(),
-            ),
+            DeclaredAudience::Union(clause) => WireAudience::Readers(clause_entries(clause)),
         }
     }
 
@@ -147,7 +157,7 @@ impl WireAudience {
             serde_json::Value::Array(readers) => readers
                 .iter()
                 .map(|reader| match reader.as_str() {
-                    Some(reader) if is_literal_reader(reader) => Some(reader.to_string()),
+                    Some(reader) if ReaderId::new(reader).is_literal() => Some(reader.to_string()),
                     _ => None,
                 })
                 .collect::<Option<Vec<String>>>()
@@ -166,11 +176,16 @@ impl Serialize for WireAudience {
     }
 }
 
-/// Is `reader` an id a resolver may name? `public` is the unrestricted audience,
-/// not a reader; an `@` mark is a group only a membership resolver expands; an
-/// empty id names no one.
-pub(crate) fn is_literal_reader(reader: &str) -> bool {
-    !reader.is_empty() && reader != "public" && !reader.starts_with('@')
+/// One declared union clause's entries, in the policy's own spellings: the chain audience,
+/// the `@` group marks, then the literal readers.
+pub(crate) fn clause_entries(clause: &Clause) -> Vec<String> {
+    clause
+        .chain()
+        .map(|chain| chain.as_str().to_string())
+        .into_iter()
+        .chain(clause.groups().map(ToString::to_string))
+        .chain(clause.readers().iter().map(|reader| reader.as_str().to_string()))
+        .collect()
 }
 
 fn rank_name(chain: &TrustChain, trust: Trust) -> String {
@@ -264,8 +279,10 @@ impl Requirement {
             },
             Gap::Includes { recipients } => Requirement::Audience {
                 required: match recipients {
-                    Audience::Public => AudienceRequirement::Public,
-                    Audience::Restricted(readers) => AudienceRequirement::Readers(readers.len()),
+                    DeclaredAudience::Public => AudienceRequirement::Public,
+                    DeclaredAudience::Union(clause) => AudienceRequirement::Readers(
+                        clause.readers().len() + clause.groups().count() + usize::from(clause.chain().is_some()),
+                    ),
                 },
             },
             Gap::NoPrior(effect) => Requirement::Effect {
@@ -570,29 +587,84 @@ impl AnnotationAnswer {
     }
 }
 
-// ---------------------------------------------------------------- membership
+// ------------------------------------------------------ audience and identity
 
+/// What the policy registered for one audience source: the selector templates its
+/// provider serves.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct MembershipArtifact {
-    pub group: String,
+pub struct AudienceSourceDeclaration {
+    pub templates: Vec<String>,
 }
 
+/// The one question an audience source consult carries: a selector whose members it
+/// reports, or one provider-qualified member whose claims it looks up.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum AudienceSourceArtifact {
+    Selector { selector: String },
+    Member { member: String },
+}
+
+/// A selector consult's answer: `{"members": [{"id", "verified_email"?}, ...]}` — an empty
+/// list is a complete answer. Each id must be non-empty; whether it sits in the source's
+/// own provider namespace is validated where the evidence is gathered.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ReadersAnswer {
-    pub readers: Vec<String>,
+pub struct MembersAnswer {
+    pub members: Vec<MemberClaims>,
 }
 
-impl ReadersAnswer {
-    /// Read one directory answer: literal readers only, an empty set being a complete
-    /// answer.
-    pub fn from_wire(answer: &serde_json::Value) -> Option<ReadersAnswer> {
-        let answer: ReadersAnswer = serde_json::from_value(answer.clone()).ok()?;
+impl MembersAnswer {
+    pub fn from_wire(answer: &serde_json::Value) -> Option<MembersAnswer> {
+        let answer: MembersAnswer = serde_json::from_value(answer.clone()).ok()?;
         answer
-            .readers
+            .members
             .iter()
-            .all(|reader| is_literal_reader(reader))
+            .all(|member| !member.id.is_empty())
             .then_some(answer)
+    }
+}
+
+/// A member lookup's answer: `{"claims": {...}}`, or `{"claims": null}` — the provider
+/// definitively does not know the member, who keeps its qualified identity. The `claims`
+/// key must be present: an empty object is no answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LookupAnswer {
+    pub claims: Option<MemberClaims>,
+}
+
+impl LookupAnswer {
+    pub fn from_wire(answer: &serde_json::Value) -> Option<LookupAnswer> {
+        let object = answer.as_object()?;
+        if object.len() != 1 {
+            return None;
+        }
+        let claims = match object.get("claims")? {
+            serde_json::Value::Null => None,
+            value => {
+                let claims: MemberClaims = serde_json::from_value(value.clone()).ok()?;
+                if claims.id.is_empty() {
+                    return None;
+                }
+                Some(claims)
+            }
+        };
+        Some(LookupAnswer { claims })
+    }
+}
+
+/// A custom identity implementation's answer: `{"principal": "..."}` — one literal reader,
+/// never a reserved spelling or a group mark.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrincipalAnswer {
+    pub principal: String,
+}
+
+impl PrincipalAnswer {
+    pub fn from_wire(answer: &serde_json::Value) -> Option<PrincipalAnswer> {
+        let answer: PrincipalAnswer = serde_json::from_value(answer.clone()).ok()?;
+        ReaderId::new(answer.principal.as_str()).is_literal().then_some(answer)
     }
 }
 
@@ -636,14 +708,14 @@ Examples:
 An audience is either the reserved `public` value or an array of audience names from `audiences`; never put `public` inside an array. Use only trust values from `trust_ranks`, audience values from `audiences`, attention values from `attention_marks`, and effect values from `effects`. `args` is evidence for choosing among those values, not a source of new policy labels. Never invent labels.";
 
 impl ModelPrompt {
-    /// `None` for a membership consult: no model serves a directory lookup, and the
-    /// configuration refuses the binding before a consult can reach here.
+    /// `None` for an audience or identity consult: no model serves a directory read, and
+    /// the configuration refuses the binding before a consult can reach here.
     pub fn new(consult: &Consult) -> Option<ModelPrompt> {
         let (preamble, schema) = match &consult.body {
             ConsultBody::Authority { .. } => (AUTHORITY_PREAMBLE, authority_schema()),
             ConsultBody::Sanitizer { .. } => (SANITIZER_PREAMBLE, sanitizer_schema()),
             ConsultBody::Annotation { declaration, .. } => (ANNOTATION_PREAMBLE, annotation_schema(declaration)),
-            ConsultBody::Membership { .. } => return None,
+            ConsultBody::AudienceSource { .. } | ConsultBody::Identity { .. } => return None,
         };
         let declaration = consult.declaration_json();
         Some(ModelPrompt {
@@ -774,20 +846,37 @@ fn annotation_schema(declaration: &AnnotationDeclaration) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use appa_engine::label::GroupRef;
 
     fn chain() -> TrustChain {
         TrustChain::new(vec!["suspicious".to_string(), "trusted".to_string()])
     }
 
     #[test]
-    fn a_declared_audience_keeps_its_group_marks() {
-        let declared = DeclaredAudience::Restricted {
-            readers: [appa_engine::label::ReaderId::new("alice")].into_iter().collect(),
-            groups: [appa_engine::names::GroupName::new("eng")].into_iter().collect(),
-        };
+    fn a_declared_audience_keeps_its_symbolic_spellings() {
+        use appa_engine::label::{ChainAudience, ReaderId};
+        let declared = DeclaredAudience::Union(
+            Clause::new(
+                [ChainAudience::Internal],
+                [
+                    GroupRef::Named(appa_engine::names::GroupName::new("eng")),
+                    GroupRef::Source {
+                        provider: "slack".to_string(),
+                        selector: "user-group/oncall".to_string(),
+                    },
+                ],
+                [ReaderId::new("alice")],
+            )
+            .expect("a literal fixture reader"),
+        );
         assert_eq!(
             WireAudience::declared(&declared),
-            WireAudience::Readers(vec!["alice".to_string(), "@eng".to_string()])
+            WireAudience::Readers(vec![
+                "internal".to_string(),
+                "@eng".to_string(),
+                "@slack:user-group/oncall".to_string(),
+                "alice".to_string()
+            ])
         );
         assert_eq!(WireAudience::declared(&DeclaredAudience::Public), WireAudience::Public);
     }
@@ -802,7 +891,7 @@ mod tests {
             WireAudience::from_wire(&serde_json::json!("public")),
             Some(WireAudience::Public)
         );
-        for reserved in ["public", "@admins", ""] {
+        for reserved in ["public", "self", "internal", "@admins", ""] {
             assert_eq!(
                 WireAudience::from_wire(&serde_json::json!(["alice", reserved])),
                 None,
@@ -824,10 +913,10 @@ mod tests {
                 actual: Trust::new(0),
             },
             Gap::Includes {
-                recipients: Audience::restricted([ReaderId::new("alice"), ReaderId::new("bob")]),
+                recipients: DeclaredAudience::restricted([ReaderId::new("alice"), ReaderId::new("bob")]),
             },
             Gap::Includes {
-                recipients: Audience::Public,
+                recipients: DeclaredAudience::Public,
             },
             Gap::NoPrior(EffectKind::new("network")),
             Gap::Attention(MarkName::new("review")),
@@ -874,16 +963,74 @@ mod tests {
             None
         );
         assert_eq!(
-            ReadersAnswer::from_wire(&serde_json::json!({"readers": []})),
-            Some(ReadersAnswer { readers: vec![] })
+            MembersAnswer::from_wire(&serde_json::json!({"members": []})),
+            Some(MembersAnswer { members: vec![] })
+        );
+        assert_eq!(
+            MembersAnswer::from_wire(
+                &serde_json::json!({"members": [{"id": "slack:U1", "verified_email": "a@corp.com"}, {"id": "slack:U2"}]})
+            ),
+            Some(MembersAnswer {
+                members: vec![
+                    MemberClaims {
+                        id: "slack:U1".to_string(),
+                        verified_email: Some("a@corp.com".to_string()),
+                    },
+                    MemberClaims {
+                        id: "slack:U2".to_string(),
+                        verified_email: None,
+                    },
+                ]
+            })
         );
         for malformed in [
-            serde_json::json!({"readers": ["public"]}),
-            serde_json::json!({"readers": [42]}),
-            serde_json::json!({"readers": [], "version": 1}),
+            serde_json::json!({"members": [{"id": ""}]}),
+            serde_json::json!({"members": [{"id": "slack:U1", "display_name": "Alice"}]}),
+            serde_json::json!({"members": [42]}),
+            serde_json::json!({"members": [], "version": 1}),
             serde_json::json!({}),
         ] {
-            assert_eq!(ReadersAnswer::from_wire(&malformed), None, "{malformed}");
+            assert_eq!(MembersAnswer::from_wire(&malformed), None, "{malformed}");
+        }
+
+        assert_eq!(
+            LookupAnswer::from_wire(&serde_json::json!({"claims": null})),
+            Some(LookupAnswer { claims: None })
+        );
+        assert_eq!(
+            LookupAnswer::from_wire(&serde_json::json!({"claims": {"id": "slack:U1"}})),
+            Some(LookupAnswer {
+                claims: Some(MemberClaims {
+                    id: "slack:U1".to_string(),
+                    verified_email: None,
+                })
+            })
+        );
+        for malformed in [
+            serde_json::json!({}),
+            serde_json::json!({"claims": {"id": ""}}),
+            serde_json::json!({"claims": {}}),
+            serde_json::json!({"claims": null, "note": "x"}),
+            serde_json::json!(null),
+        ] {
+            assert_eq!(LookupAnswer::from_wire(&malformed), None, "{malformed}");
+        }
+
+        assert_eq!(
+            PrincipalAnswer::from_wire(&serde_json::json!({"principal": "a@corp.com"})),
+            Some(PrincipalAnswer {
+                principal: "a@corp.com".to_string()
+            })
+        );
+        for malformed in [
+            serde_json::json!({"principal": "public"}),
+            serde_json::json!({"principal": "internal"}),
+            serde_json::json!({"principal": "@eng"}),
+            serde_json::json!({"principal": ""}),
+            serde_json::json!({"principal": "x", "note": "y"}),
+            serde_json::json!({}),
+        ] {
+            assert_eq!(PrincipalAnswer::from_wire(&malformed), None, "{malformed}");
         }
     }
 
@@ -1012,22 +1159,57 @@ mod tests {
                 }
             })
         );
-        let membership = Consult {
-            name: "directory".to_string(),
-            body: ConsultBody::Membership {
-                artifact: MembershipArtifact {
-                    group: "@eng".to_string(),
+        let source = Consult {
+            name: "slack".to_string(),
+            body: ConsultBody::AudienceSource {
+                declaration: AudienceSourceDeclaration {
+                    templates: vec!["viewer".to_string(), "user-group/<handle>".to_string()],
+                },
+                artifact: AudienceSourceArtifact::Selector {
+                    selector: "user-group/eng".to_string(),
                 },
             },
         };
         assert_eq!(
-            serde_json::to_value(&membership).expect("serializes"),
+            serde_json::to_value(&source).expect("serializes"),
             serde_json::json!({
                 "version": 1,
-                "kind": "membership",
-                "name": "directory",
+                "kind": "audience",
+                "name": "slack",
+                "declaration": {"templates": ["viewer", "user-group/<handle>"]},
+                "artifact": {"selector": "user-group/eng"}
+            })
+        );
+        let lookup = Consult {
+            name: "slack".to_string(),
+            body: ConsultBody::AudienceSource {
+                declaration: AudienceSourceDeclaration { templates: vec![] },
+                artifact: AudienceSourceArtifact::Member {
+                    member: "slack:U012345".to_string(),
+                },
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&lookup).expect("serializes")["artifact"],
+            serde_json::json!({"member": "slack:U012345"})
+        );
+        let identity = Consult {
+            name: "corp-identity".to_string(),
+            body: ConsultBody::Identity {
+                artifact: MemberClaims {
+                    id: "slack:U012345".to_string(),
+                    verified_email: Some("alice@corp.com".to_string()),
+                },
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&identity).expect("serializes"),
+            serde_json::json!({
+                "version": 1,
+                "kind": "identity",
+                "name": "corp-identity",
                 "declaration": {},
-                "artifact": {"group": "@eng"}
+                "artifact": {"id": "slack:U012345", "verified_email": "alice@corp.com"}
             })
         );
     }
@@ -1087,10 +1269,23 @@ mod tests {
 
         assert!(
             ModelPrompt::new(&Consult {
-                name: "directory".to_string(),
-                body: ConsultBody::Membership {
-                    artifact: MembershipArtifact {
-                        group: "@eng".to_string()
+                name: "slack".to_string(),
+                body: ConsultBody::AudienceSource {
+                    declaration: AudienceSourceDeclaration { templates: vec![] },
+                    artifact: AudienceSourceArtifact::Selector {
+                        selector: "user-group/eng".to_string()
+                    }
+                },
+            })
+            .is_none()
+        );
+        assert!(
+            ModelPrompt::new(&Consult {
+                name: "corp-identity".to_string(),
+                body: ConsultBody::Identity {
+                    artifact: MemberClaims {
+                        id: "slack:U012345".to_string(),
+                        verified_email: None
                     }
                 },
             })

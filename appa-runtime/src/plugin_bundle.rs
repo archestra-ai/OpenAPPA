@@ -1,10 +1,11 @@
 //! The Claude plugin bundle belonging to this binary's own release.
 //!
-//! A binary is built knowing the SHA-256 of its release's plugin artifact and
-//! accepts no other bytes. That digest is the whole compatibility rule: there is
-//! no version field inside the artifact and no commit to compare, because the
-//! digest already pins the exact bytes. A development build has no digest, so it
-//! refuses to download and requires `--plugin-source`.
+//! A release binary is built knowing its release tag and the SHA-256 of that
+//! tag's plugin artifact. A clean source build knows its Git commit and the
+//! canonical SHA-256 of the plugin tree built beside it. In both cases init
+//! resolves immutable remote bytes automatically and verifies them before any
+//! installed state changes. A dirty source build uses the exact local checkout
+//! only while it still matches the tree digest baked at compile time.
 
 use std::env;
 use std::fmt;
@@ -16,13 +17,43 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+pub use crate::plugin_layout::stage_repository;
+use crate::plugin_layout::{
+    EntryKind, MAX_ENTRIES, MAX_UNCOMPRESSED_BYTES, TreeDigestError, absorb_field, canonical_tree_digest, walk,
+};
+
+// ---------------------------------------------------------------------------
+// Debug-only test seams
+// ---------------------------------------------------------------------------
+
+/// The one place a debug-only seam reads the environment.
+///
+/// Three seams exist -- the endpoint, the release download base and the source
+/// archive base -- and each of them is this function. `[profile.release]` pins
+/// `debug-assertions = false`, so a shipped binary reads no environment here at
+/// all. The release workflow proves that on the packaged artifact by feeding it
+/// a malformed `APPA_ENDPOINT` and requiring it to be ignored; that single probe
+/// stands for all three seams only for as long as this is the only gate.
+fn debug_override(name: &str) -> Option<String> {
+    if cfg!(debug_assertions) {
+        env::var(name).ok()
+    } else {
+        None
+    }
+}
+
 /// Files and directories every plugin source must carry, in the marketplace-root
-/// shape `scripts/appa-stage-plugin-bundle.sh` produces. One validator serves
+/// shape `plugin_layout::stage_repository` produces. One validator serves
 /// both source resolution and the reuse check on an existing deployment.
-const REQUIRED_FILES: [&str; 8] = [
+const REQUIRED_FILES: [&str; 9] = [
     ".claude-plugin/marketplace.json",
     "plugin/.claude-plugin/plugin.json",
     "plugin/hooks/hooks.json",
+    // The starter init runs on Unix once the plugin is already in place, and the
+    // file `set_executable_modes` marks executable. Missing here is a refusal
+    // before anything is mutated; missing there is a plugin Claude points at and
+    // a runtime nothing can bring up.
+    "plugin/hooks/ensure-runtime.sh",
     // Both hook maps register a wrapper script rather than a command line, so a
     // tree carrying the map without its script registers hooks that cannot run.
     // Materialization keeps both scripts; only the inactive map is removed.
@@ -42,15 +73,21 @@ const REQUIRED_DIRS: [&str; 2] = ["plugin", "batteries"];
 /// platform and removes the other, so a deployment carries exactly one. The same
 /// validator serves both, and this is the only thing it varies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TreeShape {
+enum TreeShape {
     Source,
     Deployment,
 }
 
 #[derive(Debug, Error)]
 pub enum PluginBundleError {
-    #[error("appa {version} is a development build with no plugin artifact digest; pass --plugin-source <checkout>")]
-    NoBakedDigest { version: &'static str },
+    #[error("this appa build has no usable plugin source identity; rebuild it from a Git checkout or a release tag")]
+    MissingBuildIdentity,
+    #[error("this appa build carries a release plugin digest but no release tag")]
+    MissingReleaseRef,
+    #[error("this appa build carries an invalid plugin tree digest: {value}")]
+    MalformedBuildDigest { value: String },
+    #[error("this appa build carries an unknown plugin source kind: {value}")]
+    MalformedBuildSourceKind { value: String },
     #[error("{value} is not a SHA-256 digest")]
     MalformedDigest { value: String },
     #[error("the plugin source at {path} is not a marketplace root: {reason}")]
@@ -79,6 +116,14 @@ pub enum PluginBundleError {
         expected: PluginDigest,
         actual: PluginDigest,
     },
+    #[error("the plugin at {origin} is not the twin of this appa build: expected tree {expected}, got {actual}")]
+    SourceDigestMismatch {
+        origin: String,
+        expected: PluginDigest,
+        actual: PluginDigest,
+    },
+    #[error("cannot stage the plugin from the OpenAPPA source at {path}: {reason}")]
+    StageRepository { path: PathBuf, reason: String },
 }
 
 /// The SHA-256 of a plugin artifact: what a binary was built with, and what a
@@ -87,7 +132,7 @@ pub enum PluginBundleError {
 pub struct PluginDigest([u8; 32]);
 
 impl PluginDigest {
-    pub fn parse(value: &str) -> Result<Self, PluginBundleError> {
+    fn parse(value: &str) -> Result<Self, PluginBundleError> {
         let trimmed = value.trim();
         let malformed = || PluginBundleError::MalformedDigest {
             value: trimmed.to_owned(),
@@ -105,13 +150,14 @@ impl PluginDigest {
         Ok(Self(bytes))
     }
 
-    pub fn of(bytes: &[u8]) -> Self {
+    #[cfg(test)]
+    fn of(bytes: &[u8]) -> Self {
         let mut digest = Sha256::new();
         digest.update(bytes);
         Self(digest.finalize().into())
     }
 
-    pub fn from_hasher(hasher: Sha256) -> Self {
+    fn from_hasher(hasher: Sha256) -> Self {
         Self(hasher.finalize().into())
     }
 }
@@ -131,48 +177,116 @@ impl fmt::Debug for PluginDigest {
     }
 }
 
-/// The digest of the plugin artifact this build belongs to.
-///
-/// Release builds carry it as a compile-time constant, so a shipped binary
-/// cannot be pointed at other bytes by its environment. `[profile.release]` pins
-/// `debug-assertions = false`, which is what closes the debug branch there.
-pub fn expected_plugin_digest() -> Option<PluginDigest> {
-    let raw = if cfg!(debug_assertions) {
-        env::var("APPA_PLUGIN_SHA256").ok()
-    } else {
-        option_env!("APPA_PLUGIN_SHA256").map(str::to_owned)
-    };
-    raw.as_deref().and_then(|value| PluginDigest::parse(value).ok())
+/// How a build without a release digest identifies its plugin source, as
+/// `build.rs` stamps it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceKind {
+    /// A clean checkout: the plugin is the tree at the build's Git commit.
+    Commit,
+    /// A dirty checkout: the plugin is the tree in the repository itself.
+    Local,
 }
 
-/// Where a deployment's bytes come from. `Explicit` is the development override;
-/// everything else resolves to this binary's own release artifact.
-#[derive(Debug, Clone)]
-pub enum PluginSource {
-    Explicit(PathBuf),
-    Release(PluginDigest),
-}
-
-impl PluginSource {
-    /// `--plugin-source` when given, otherwise this build's release artifact.
-    /// A development build with neither refuses rather than guessing.
-    pub fn resolve(explicit: Option<&str>) -> Result<Self, PluginBundleError> {
-        Self::decide(explicit, expected_plugin_digest())
-    }
-
-    /// The decision itself, with this build's digest supplied rather than read,
-    /// so it is testable without touching the process environment.
-    pub fn decide(explicit: Option<&str>, baked: Option<PluginDigest>) -> Result<Self, PluginBundleError> {
-        match explicit {
-            Some(path) => Ok(Self::Explicit(canonical_source(Path::new(path))?)),
-            None => baked.map(Self::Release).ok_or(PluginBundleError::NoBakedDigest {
-                version: env!("CARGO_PKG_VERSION"),
+impl SourceKind {
+    fn parse(value: &str) -> Result<Self, PluginBundleError> {
+        match value {
+            "commit" => Ok(Self::Commit),
+            "local" => Ok(Self::Local),
+            other => Err(PluginBundleError::MalformedBuildSourceKind {
+                value: other.to_owned(),
             }),
         }
     }
 }
 
-/// Resolve the user's `--plugin-source` argument like any other path argument.
+#[derive(Debug, Clone, Copy)]
+struct BuildIdentity<'a> {
+    pub release_digest: Option<PluginDigest>,
+    pub release_ref: Option<&'a str>,
+    pub commit: Option<&'a str>,
+    pub tree_digest: Option<PluginDigest>,
+    pub local_root: Option<&'a str>,
+    pub source_kind: Option<SourceKind>,
+}
+
+impl BuildIdentity<'static> {
+    fn compiled() -> Result<Self, PluginBundleError> {
+        // Both digests are compile-time constants. Runtime environment changes
+        // cannot redirect a shipped binary to different plugin bytes.
+        let release_digest = option_env!("APPA_PLUGIN_SHA256")
+            .map(PluginDigest::parse)
+            .transpose()
+            .map_err(|_| PluginBundleError::MalformedBuildDigest {
+                value: option_env!("APPA_PLUGIN_SHA256").unwrap_or_default().to_owned(),
+            })?;
+        let raw_tree = option_env!("APPA_PLUGIN_TREE_SHA256").ok_or(PluginBundleError::MissingBuildIdentity)?;
+        let tree_digest = PluginDigest::parse(raw_tree).map_err(|_| PluginBundleError::MalformedBuildDigest {
+            value: raw_tree.to_owned(),
+        })?;
+        Ok(Self {
+            release_digest,
+            release_ref: option_env!("APPA_RELEASE_REF"),
+            commit: option_env!("APPA_BUILD_COMMIT"),
+            tree_digest: Some(tree_digest),
+            local_root: option_env!("APPA_PLUGIN_SOURCE_ROOT"),
+            source_kind: option_env!("APPA_PLUGIN_SOURCE_KIND")
+                .map(SourceKind::parse)
+                .transpose()?,
+        })
+    }
+}
+
+/// Where a deployment's bytes come from. `Explicit` is the semi-hidden
+/// development override; normal init resolves the identity baked into this
+/// binary without consulting PATH, the working directory, or mutable refs.
+#[derive(Debug, Clone)]
+pub(crate) enum PluginSource {
+    Explicit(PathBuf),
+    Release { reference: String, digest: PluginDigest },
+    Commit { commit: String, digest: PluginDigest },
+    Local { root: PathBuf, digest: PluginDigest },
+}
+
+impl PluginSource {
+    /// `--plugin-source` when given, otherwise this build's immutable twin.
+    pub fn resolve(explicit: Option<&str>) -> Result<Self, PluginBundleError> {
+        Self::decide(explicit, BuildIdentity::compiled()?)
+    }
+
+    /// The decision itself with metadata supplied explicitly for unit tests.
+    fn decide(explicit: Option<&str>, build: BuildIdentity<'_>) -> Result<Self, PluginBundleError> {
+        if let Some(path) = explicit {
+            return Ok(Self::Explicit(canonical_source(Path::new(path))?));
+        }
+        if let Some(digest) = build.release_digest {
+            let reference = build.release_ref.ok_or(PluginBundleError::MissingReleaseRef)?;
+            return Ok(Self::Release {
+                reference: reference.to_owned(),
+                digest,
+            });
+        }
+        let digest = build.tree_digest.ok_or(PluginBundleError::MissingBuildIdentity)?;
+        match build.source_kind {
+            Some(SourceKind::Commit) => {
+                let commit = build.commit.ok_or(PluginBundleError::MissingBuildIdentity)?;
+                Ok(Self::Commit {
+                    commit: commit.to_owned(),
+                    digest,
+                })
+            }
+            Some(SourceKind::Local) => {
+                let root = build.local_root.ok_or(PluginBundleError::MissingBuildIdentity)?;
+                Ok(Self::Local {
+                    root: PathBuf::from(root),
+                    digest,
+                })
+            }
+            None => Err(PluginBundleError::MissingBuildIdentity),
+        }
+    }
+}
+
+/// Resolve the developer's `--plugin-source` override like any other path argument.
 ///
 /// Windows keeps the existing carve-out: Claude rejects a `\\?\` marketplace
 /// path, so the extended-length prefix is stripped after canonicalization.
@@ -197,12 +311,12 @@ fn strip_extended_prefix(path: &Path) -> PathBuf {
     }
 }
 
-/// Structural validation, applied identically to a `--plugin-source` checkout, a
+/// Structural validation, applied identically to a `--plugin-source` tree, a
 /// freshly extracted archive, and an existing deployment considered for reuse.
 ///
 /// This checks shape, not content: a tree whose `batteries/` files were edited in
 /// place passes. Reuse pairs it with a byte comparison of the one generated file.
-pub fn validate_tree(root: &Path, shape: TreeShape) -> Result<(), PluginBundleError> {
+fn validate_tree(root: &Path, shape: TreeShape) -> Result<(), PluginBundleError> {
     let invalid = |reason: String| PluginBundleError::InvalidSource {
         path: root.to_path_buf(),
         reason,
@@ -224,31 +338,6 @@ pub fn validate_tree(root: &Path, shape: TreeShape) -> Result<(), PluginBundleEr
         return Err(invalid(format!("{WINDOWS_HOOKS} is missing")));
     }
     Ok(())
-}
-
-/// A staged relative path as the canonical digest encodes it: UTF-8 with `/`
-/// separators on every platform. The bundle is ASCII filenames, so a path that
-/// cannot be spelled this way is refused rather than normalized.
-pub fn portable_relative_path(relative: &Path) -> Result<String, PluginBundleError> {
-    let mut parts = Vec::new();
-    for component in relative.components() {
-        match component {
-            std::path::Component::Normal(part) => match part.to_str() {
-                Some(text) => parts.push(text),
-                None => {
-                    return Err(PluginBundleError::UnportablePath {
-                        path: relative.to_path_buf(),
-                    });
-                }
-            },
-            _ => {
-                return Err(PluginBundleError::UnportablePath {
-                    path: relative.to_path_buf(),
-                });
-            }
-        }
-    }
-    Ok(parts.join("/"))
 }
 
 // ---------------------------------------------------------------------------
@@ -273,11 +362,7 @@ pub const DEFAULT_ENDPOINT_URL: &str = "http://127.0.0.1:8787";
 
 impl Endpoint {
     pub fn resolve() -> Result<Self, PluginBundleError> {
-        let configured = if cfg!(debug_assertions) {
-            env::var("APPA_ENDPOINT").ok()
-        } else {
-            None
-        };
+        let configured = debug_override("APPA_ENDPOINT");
         Self::parse(configured.as_deref().unwrap_or(DEFAULT_ENDPOINT_URL))
     }
 
@@ -313,7 +398,7 @@ impl Endpoint {
         &self.url
     }
 
-    pub fn listen(&self) -> SocketAddr {
+    fn listen(&self) -> SocketAddr {
         self.listen
     }
 
@@ -327,156 +412,40 @@ impl Endpoint {
 // Canonical digests
 // ---------------------------------------------------------------------------
 
-/// Every length prefix in both digests is an unsigned 64-bit big-endian integer
-/// followed immediately by exactly that many bytes. Naive concatenation would be
-/// ambiguous, and both digests name deployment directories, so the encoding is
-/// observable identity and is pinned rather than left to the implementation.
-fn absorb_field(hasher: &mut Sha256, bytes: &[u8]) {
-    hasher.update((bytes.len() as u64).to_be_bytes());
-    hasher.update(bytes);
+/// The identity of a plugin source that has no release digest of its own:
+/// the canonical tree digest `build.rs` bakes in, over the staged tree and
+/// before rendering. Without this, editing a file in a `--plugin-source` tree
+/// and re-running init would reuse the existing deployment and never reach
+/// Claude.
+fn canonical_source_digest(root: &Path) -> Result<PluginDigest, PluginBundleError> {
+    Ok(PluginDigest(canonical_tree_digest(root)?))
 }
 
-const KIND_FILE: u8 = b'f';
-const KIND_DIRECTORY: u8 = b'd';
-
-type StagedEntry = (String, u8, PathBuf);
-
-/// The identity of a plugin source that has no release digest of its own.
-///
-/// Computed over the staged tree after staging and **before** rendering, so it
-/// never depends on the paths being rendered into it. Without this, editing a
-/// file in a `--plugin-source` checkout and re-running init would reuse the
-/// existing deployment and never reach Claude.
-pub fn canonical_source_digest(root: &Path) -> Result<PluginDigest, PluginBundleError> {
-    let entries = walk(root)?;
-
-    let mut hasher = Sha256::new();
-    for (relative, kind, absolute) in entries {
-        absorb_field(&mut hasher, relative.as_bytes());
-        hasher.update([kind]);
-        if kind == KIND_DIRECTORY {
-            absorb_field(&mut hasher, &[]);
-        } else {
-            absorb_file(&mut hasher, &absolute)?;
+impl From<TreeDigestError> for PluginBundleError {
+    fn from(error: TreeDigestError) -> Self {
+        match error {
+            TreeDigestError::Read { path, source } => Self::ReadSource { path, source },
+            TreeDigestError::UnportablePath { path } => Self::UnportablePath { path },
+            TreeDigestError::UnsupportedEntry { path } => Self::UnsupportedEntry { path },
+            TreeDigestError::Oversized { path, reason } => Self::OversizedSource { path, reason },
         }
     }
-    Ok(PluginDigest::from_hasher(hasher))
-}
-
-/// The tree in canonical order, refused if it exceeds the source bounds.
-fn walk(root: &Path) -> Result<Vec<StagedEntry>, PluginBundleError> {
-    let mut entries = Vec::new();
-    collect_entries(root, root, &mut entries)?;
-    if entries.len() > MAX_ENTRIES {
-        return Err(PluginBundleError::OversizedSource {
-            path: root.to_path_buf(),
-            reason: format!("it holds more than {MAX_ENTRIES} entries"),
-        });
-    }
-    let mut total = 0u64;
-    for (_, kind, absolute) in &entries {
-        if *kind != KIND_FILE {
-            continue;
-        }
-        let length = fs::metadata(absolute)
-            .map_err(|source| PluginBundleError::ReadSource {
-                path: absolute.clone(),
-                source,
-            })?
-            .len();
-        total = total.saturating_add(length);
-        if total > MAX_UNCOMPRESSED_BYTES {
-            return Err(PluginBundleError::OversizedSource {
-                path: root.to_path_buf(),
-                reason: format!("it holds more than {MAX_UNCOMPRESSED_BYTES} bytes"),
-            });
-        }
-    }
-    // Bytewise on the UTF-8 path bytes, never locale collation.
-    entries.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
-    Ok(entries)
-}
-
-/// A file's length prefix and then its bytes, streamed.
-///
-/// The length comes from the file's own metadata and exactly that many bytes are
-/// absorbed, so the encoding stays the length-prefixed one the digest is defined
-/// as, without holding a whole file in memory.
-fn absorb_file(hasher: &mut Sha256, path: &Path) -> Result<(), PluginBundleError> {
-    use std::io::Read;
-
-    let read = |source: std::io::Error| PluginBundleError::ReadSource {
-        path: path.to_path_buf(),
-        source,
-    };
-    let mut file = fs::File::open(path).map_err(read)?;
-    let length = file.metadata().map_err(read)?.len();
-    hasher.update(length.to_be_bytes());
-
-    let mut remaining = length;
-    let mut buffer = [0u8; 64 * 1024];
-    while remaining > 0 {
-        let wanted = remaining.min(buffer.len() as u64) as usize;
-        let filled = file.read(&mut buffer[..wanted]).map_err(read)?;
-        if filled == 0 {
-            return Err(PluginBundleError::OversizedSource {
-                path: path.to_path_buf(),
-                reason: "it changed size while being read".to_owned(),
-            });
-        }
-        hasher.update(&buffer[..filled]);
-        remaining -= filled as u64;
-    }
-    Ok(())
-}
-
-fn collect_entries(root: &Path, directory: &Path, entries: &mut Vec<StagedEntry>) -> Result<(), PluginBundleError> {
-    let read = fs::read_dir(directory).map_err(|source| PluginBundleError::ReadSource {
-        path: directory.to_path_buf(),
-        source,
-    })?;
-    for entry in read {
-        let entry = entry.map_err(|source| PluginBundleError::ReadSource {
-            path: directory.to_path_buf(),
-            source,
-        })?;
-        let absolute = entry.path();
-        let relative = absolute
-            .strip_prefix(root)
-            .map_err(|_| PluginBundleError::UnportablePath { path: absolute.clone() })?;
-        let portable = portable_relative_path(relative)?;
-        // Symlinks and special files are refused here exactly as in extraction:
-        // the bundle is regular files and directories.
-        let kind = entry.file_type().map_err(|source| PluginBundleError::ReadSource {
-            path: absolute.clone(),
-            source,
-        })?;
-        if kind.is_dir() {
-            entries.push((portable, KIND_DIRECTORY, absolute.clone()));
-            collect_entries(root, &absolute, entries)?;
-        } else if kind.is_file() {
-            entries.push((portable, KIND_FILE, absolute));
-        } else {
-            return Err(PluginBundleError::UnsupportedEntry { path: absolute });
-        }
-    }
-    Ok(())
 }
 
 /// Everything a deployment's identity depends on beyond the source bytes.
 #[derive(Debug, Clone)]
-pub struct DeploymentPlan {
-    pub source_digest: PluginDigest,
-    pub binary_path: PathBuf,
-    pub config_path: PathBuf,
-    pub data_dir: PathBuf,
-    pub endpoint: Endpoint,
+struct DeploymentPlan {
+    source_digest: PluginDigest,
+    binary_path: PathBuf,
+    config_path: PathBuf,
+    data_dir: PathBuf,
+    endpoint: Endpoint,
 }
 
 /// The name of the deployment directory: the source identity plus every path and
 /// platform detail rendered into it, so a deployment can never be reused for a
 /// different binary, config, data directory, endpoint or platform.
-pub fn deployment_digest(plan: &DeploymentPlan) -> Result<PluginDigest, PluginBundleError> {
+fn deployment_digest(plan: &DeploymentPlan) -> Result<PluginDigest, PluginBundleError> {
     let mut hasher = Sha256::new();
     absorb_field(&mut hasher, plan.source_digest.to_string().as_bytes());
     absorb_field(&mut hasher, path_identity(&plan.binary_path)?.as_bytes());
@@ -503,22 +472,24 @@ fn path_identity(path: &Path) -> Result<&str, PluginBundleError> {
 // Materialization
 // ---------------------------------------------------------------------------
 
-/// Caps on what a plugin source may be, whichever way it arrives. The bundle is
-/// a few hundred small text files; these bound a hostile archive or a
-/// development checkout that has accumulated a large generated directory,
-/// without being tight enough to constrain the real one.
-const MAX_ENTRIES: usize = 4096;
-const MAX_UNCOMPRESSED_BYTES: u64 = 64 * 1024 * 1024;
-
-/// The generated file every deployed shell surface sources.
+/// The two generated files every deployed shell surface sources, one per
+/// platform. Both are written into every deployment, so a deployment made from
+/// a POSIX host still carries a current PowerShell one.
 const PATHS_SH: &str = "plugin/hooks/appa-paths.sh";
-const WINDOWS_HOOKS: &str = "plugin/hooks/hooks.windows.json";
 const PATHS_PS1: &str = "plugin/hooks/appa-paths.ps1";
 
+/// The Windows hook map. Materialization renames it over `hooks.json` on
+/// Windows and removes it everywhere else, so a deployment carries exactly one.
+const WINDOWS_HOOKS: &str = "plugin/hooks/hooks.windows.json";
+
 /// Where a deployment's bytes come from at materialization time.
+#[derive(Clone, Copy)]
 pub enum Population<'a> {
-    /// A `--plugin-source` checkout, copied.
+    /// A staged `--plugin-source` marketplace root, copied.
     Tree(&'a Path),
+    /// The repository that produced a dirty source build, staged through the
+    /// same repository-to-marketplace mapping used at compile time.
+    Repository { root: &'a Path, expected: PluginDigest },
     /// A verified release archive, extracted.
     Archive(&'a Path),
 }
@@ -527,10 +498,6 @@ pub enum Population<'a> {
 #[derive(Debug, Clone)]
 pub struct Deployment {
     pub root: PathBuf,
-    /// Whether an existing deployment was validated and reused, rather than
-    /// materialized afresh. This is the convergence property: a rerun that
-    /// changes nothing reuses, and one that finds drift does not.
-    pub reused: bool,
 }
 
 /// Materialize the deployment for this source and these paths, or reuse the
@@ -561,12 +528,27 @@ pub fn materialize(
                 walk(source)?;
                 copy_tree(source, &incoming)?
             }
+            Population::Repository { root, .. } => {
+                stage_repository(root, &incoming).map_err(|error| PluginBundleError::StageRepository {
+                    path: root.to_path_buf(),
+                    reason: error.to_string(),
+                })?;
+            }
             Population::Archive(archive) => extract_archive(archive, &incoming)?,
         }
         validate_tree(&incoming, TreeShape::Source)?;
         // After staging, before rendering: the source identity must not depend
         // on the paths about to be rendered into it.
         let source_digest = canonical_source_digest(&incoming)?;
+        if let Population::Repository { root, expected } = population
+            && source_digest != expected
+        {
+            return Err(PluginBundleError::SourceDigestMismatch {
+                origin: root.display().to_string(),
+                expected,
+                actual: source_digest,
+            });
+        }
         let plan = DeploymentPlan {
             source_digest,
             binary_path: binary_path.to_path_buf(),
@@ -583,7 +565,7 @@ pub fn materialize(
         Err(error) => {
             // Our own unpublished reservation: removing it deletes no
             // registered state.
-            let _ = fs::remove_dir_all(&incoming);
+            discard_reservation(&incoming);
             return Err(error);
         }
     };
@@ -592,11 +574,8 @@ pub fn materialize(
     if published.is_dir() {
         match reusable(&published, &plan) {
             Ok(()) => {
-                let _ = fs::remove_dir_all(&incoming);
-                return Ok(Deployment {
-                    root: published,
-                    reused: true,
-                });
+                discard_reservation(&incoming);
+                return Ok(Deployment { root: published });
             }
             Err(reason) => {
                 tracing::debug!(path = %published.display(), %reason, "quarantining a damaged deployment");
@@ -606,7 +585,7 @@ pub fn materialize(
     }
 
     if let Err(error) = render(&incoming, &plan) {
-        let _ = fs::remove_dir_all(&incoming);
+        discard_reservation(&incoming);
         return Err(error);
     }
 
@@ -620,10 +599,10 @@ pub fn materialize(
                 std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::DirectoryNotEmpty
             ) =>
         {
-            let _ = fs::remove_dir_all(&incoming);
+            discard_reservation(&incoming);
         }
         Err(source) => {
-            let _ = fs::remove_dir_all(&incoming);
+            discard_reservation(&incoming);
             return Err(PluginBundleError::WriteDeployment {
                 path: published,
                 source,
@@ -633,8 +612,16 @@ pub fn materialize(
 
     Ok(Deployment {
         root: deployments_dir.join(digest.to_string()),
-        reused: false,
     })
+}
+
+/// Remove this init's own unpublished reservation. No registered state is
+/// lost with it, so a failure is noted rather than reported over the error
+/// or the deployment the caller is already returning.
+fn discard_reservation(incoming: &Path) {
+    if let Err(error) = fs::remove_dir_all(incoming) {
+        tracing::warn!(path = %incoming.display(), %error, "cannot remove an unpublished deployment");
+    }
 }
 
 /// Whether an existing deployment can be reused as-is.
@@ -660,7 +647,7 @@ fn reusable(published: &Path, plan: &DeploymentPlan) -> Result<(), String> {
 /// Move a damaged deployment aside. Nothing is ever deleted, and the
 /// destination never pre-exists, so `rename` cannot silently replace a
 /// directory. The namespace is deliberately distinct from the
-/// `.appa-init-recovery-` prefix that init sweeps globally.
+/// `.appa-init-recovery-` prefix init names its rollback source with.
 fn quarantine(deployments_dir: &Path, published: &Path) -> Result<(), PluginBundleError> {
     let name = published
         .file_name()
@@ -761,6 +748,14 @@ fn extract_archive(archive: &Path, destination: &Path) -> Result<(), PluginBundl
             )));
         }
 
+        let kind = entry.header().entry_type();
+        // GitHub source archives may contain POSIX PAX metadata records. They
+        // describe following entries and do not materialize in the plugin
+        // tree; the following entry's resolved path is still checked below.
+        if matches!(kind, tar::EntryType::XHeader | tar::EntryType::XGlobalHeader) {
+            continue;
+        }
+
         let path = entry
             .path()
             .map_err(|error| malformed(format!("unreadable entry path: {error}")))?
@@ -779,7 +774,7 @@ fn extract_archive(archive: &Path, destination: &Path) -> Result<(), PluginBundl
             source,
         };
 
-        match entry.header().entry_type() {
+        match kind {
             tar::EntryType::Directory => fs::create_dir_all(&target).map_err(write)?,
             tar::EntryType::Regular => {
                 if let Some(parent) = target.parent() {
@@ -836,7 +831,7 @@ fn safe_relative(path: &Path) -> EntryPath {
 // ---------------------------------------------------------------------------
 
 /// Turn the staged tree into a deployment for these exact paths: select the
-/// platform hook map, write the generated paths files, and replace the legacy
+/// platform hook map, write the generated paths files, and replace the default
 /// endpoint literal everywhere it appears.
 fn render(root: &Path, plan: &DeploymentPlan) -> Result<(), PluginBundleError> {
     select_platform_hooks(root)?;
@@ -858,20 +853,20 @@ fn select_platform_hooks(root: &Path) -> Result<(), PluginBundleError> {
     }
 }
 
-/// Replace the legacy endpoint literal in every text file of the deployment.
+/// Replace the default endpoint literal in every text file of the deployment.
 ///
-/// Three successive drafts of this change each missed a consumer, so the
-/// substitution is total over the tree rather than driven by a hand-written list
-/// of files. A file that does not contain the literal is left untouched, and
-/// binary files cannot contain it.
+/// The substitution is total over the tree rather than driven by a list of
+/// files, so no consumer of the literal can be missed. A file that does not
+/// contain the literal is left untouched, and binary files cannot contain it.
 fn render_endpoint(root: &Path, endpoint_url: &str) -> Result<(), PluginBundleError> {
     if endpoint_url == DEFAULT_ENDPOINT_URL {
         return Ok(());
     }
-    for (_, kind, absolute) in walk(root)? {
-        if kind != KIND_FILE {
+    for entry in walk(root)? {
+        if entry.kind != EntryKind::File {
             continue;
         }
+        let absolute = entry.absolute;
         let bytes = fs::read(&absolute).map_err(|source| PluginBundleError::ReadSource {
             path: absolute.clone(),
             source,
@@ -968,6 +963,7 @@ fn ps_literal(value: &str) -> String {
 // ---------------------------------------------------------------------------
 
 const RELEASE_BASE_URL: &str = "https://github.com/archestra-ai/OpenAPPA/releases/download";
+const SOURCE_ARCHIVE_BASE_URL: &str = "https://github.com/archestra-ai/OpenAPPA/archive";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_REDIRECTS: usize = 5;
@@ -987,13 +983,14 @@ fn cached_archive_path(cache_dir: &Path, version: &str, digest: PluginDigest) ->
 /// The release download base. `APPA_RELEASE_BASE_URL` overrides it in debug
 /// builds only, and init reads it once at the boundary rather than leaving the
 /// fetch to consult the environment underneath its caller.
-pub fn release_base_url() -> String {
-    let configured = if cfg!(debug_assertions) {
-        env::var("APPA_RELEASE_BASE_URL").ok()
-    } else {
-        None
-    };
-    configured.unwrap_or_else(|| RELEASE_BASE_URL.to_owned())
+pub(crate) fn release_base_url() -> String {
+    debug_override("APPA_RELEASE_BASE_URL").unwrap_or_else(|| RELEASE_BASE_URL.to_owned())
+}
+
+/// The immutable GitHub source-archive base. Like the release test seam, the
+/// override exists only in debug builds and cannot redirect a shipped binary.
+pub(crate) fn source_archive_base_url() -> String {
+    debug_override("APPA_SOURCE_ARCHIVE_BASE_URL").unwrap_or_else(|| SOURCE_ARCHIVE_BASE_URL.to_owned())
 }
 
 /// The verified archive for this build's release, from the cache when it is
@@ -1001,8 +998,9 @@ pub fn release_base_url() -> String {
 ///
 /// Every path ends in the same check against the digest this binary was built
 /// with, so the cache cannot be used to bypass a refusal.
-pub fn ensure_archive(
+pub(crate) fn ensure_archive(
     digest: PluginDigest,
+    reference: &str,
     version: &str,
     cache_dir: &Path,
     base_url: &str,
@@ -1024,7 +1022,7 @@ pub fn ensure_archive(
         source,
     })?;
 
-    let url = format!("{base_url}/v{version}/{}", artifact_name(version));
+    let url = format!("{base_url}/{reference}/{}", artifact_name(version));
     let incoming = tempfile::NamedTempFile::new_in(cache_dir).map_err(|source| PluginBundleError::WriteDeployment {
         path: cache_dir.to_path_buf(),
         source,
@@ -1049,6 +1047,140 @@ pub fn ensure_archive(
             source: error.error,
         })?;
     Ok(cached)
+}
+
+fn commit_archive_name(commit: &str, digest: PluginDigest) -> String {
+    format!("appa-plugin-{commit}-{digest}.tar.gz")
+}
+
+/// Resolve a clean source build's plugin from its immutable Git commit.
+///
+/// GitHub's repository archive is transport only. It is staged into the same
+/// marketplace shape as a release and checked against the canonical tree
+/// digest baked into the binary before entering the cache.
+pub(crate) fn ensure_commit_archive(
+    commit: &str,
+    expected: PluginDigest,
+    cache_dir: &Path,
+    base_url: &str,
+) -> Result<PathBuf, PluginBundleError> {
+    fs::create_dir_all(cache_dir).map_err(|source| PluginBundleError::WriteDeployment {
+        path: cache_dir.to_path_buf(),
+        source,
+    })?;
+    let cached = cache_dir.join(commit_archive_name(commit, expected));
+    if cached.is_file() {
+        match bundle_archive_digest(&cached) {
+            Ok(actual) if actual == expected => return Ok(cached),
+            Ok(_) | Err(_) => {
+                tracing::debug!(path = %cached.display(), "re-fetching a commit bundle that no longer matches its tree digest");
+            }
+        }
+    }
+
+    let source = tempfile::NamedTempFile::new_in(cache_dir).map_err(|error| PluginBundleError::WriteDeployment {
+        path: cache_dir.to_path_buf(),
+        source: error,
+    })?;
+    let url = format!("{base_url}/{commit}.tar.gz");
+    download(&url, source.path())?;
+
+    let workspace = tempfile::tempdir_in(cache_dir).map_err(|error| PluginBundleError::WriteDeployment {
+        path: cache_dir.to_path_buf(),
+        source: error,
+    })?;
+    let repository_container = workspace.path().join("repository");
+    fs::create_dir(&repository_container).map_err(|source| PluginBundleError::WriteDeployment {
+        path: repository_container.clone(),
+        source,
+    })?;
+    extract_archive(source.path(), &repository_container)?;
+    let repository = single_directory(&repository_container)?;
+    let bundle = workspace.path().join("bundle");
+    stage_repository(&repository, &bundle).map_err(|error| PluginBundleError::StageRepository {
+        path: repository.clone(),
+        reason: error.to_string(),
+    })?;
+    validate_tree(&bundle, TreeShape::Source)?;
+    let actual = canonical_source_digest(&bundle)?;
+    if actual != expected {
+        return Err(PluginBundleError::SourceDigestMismatch {
+            origin: format!("commit {commit} fetched from {url}"),
+            expected,
+            actual,
+        });
+    }
+
+    let incoming = tempfile::NamedTempFile::new_in(cache_dir).map_err(|error| PluginBundleError::WriteDeployment {
+        path: cache_dir.to_path_buf(),
+        source: error,
+    })?;
+    pack_bundle(&bundle, incoming.path())?;
+    incoming
+        .persist(&cached)
+        .map_err(|error| PluginBundleError::WriteDeployment {
+            path: cached.clone(),
+            source: error.error,
+        })?;
+    Ok(cached)
+}
+
+fn single_directory(container: &Path) -> Result<PathBuf, PluginBundleError> {
+    let mut entries = fs::read_dir(container).map_err(|source| PluginBundleError::ReadSource {
+        path: container.to_path_buf(),
+        source,
+    })?;
+    let first = entries
+        .next()
+        .transpose()
+        .map_err(|source| PluginBundleError::ReadSource {
+            path: container.to_path_buf(),
+            source,
+        })?
+        .ok_or_else(|| PluginBundleError::MalformedArchive {
+            path: container.to_path_buf(),
+            reason: "it contains no repository root".to_owned(),
+        })?;
+    if entries.next().is_some() || !first.path().is_dir() {
+        return Err(PluginBundleError::MalformedArchive {
+            path: container.to_path_buf(),
+            reason: "it does not contain exactly one repository root".to_owned(),
+        });
+    }
+    Ok(first.path())
+}
+
+fn pack_bundle(source: &Path, destination: &Path) -> Result<(), PluginBundleError> {
+    let file = fs::File::create(destination).map_err(|source| PluginBundleError::WriteDeployment {
+        path: destination.to_path_buf(),
+        source,
+    })?;
+    let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+    let mut archive = tar::Builder::new(encoder);
+    archive
+        .append_dir_all(".", source)
+        .map_err(|source| PluginBundleError::WriteDeployment {
+            path: destination.to_path_buf(),
+            source,
+        })?;
+    archive
+        .into_inner()
+        .and_then(flate2::write::GzEncoder::finish)
+        .map_err(|source| PluginBundleError::WriteDeployment {
+            path: destination.to_path_buf(),
+            source,
+        })?;
+    Ok(())
+}
+
+fn bundle_archive_digest(archive: &Path) -> Result<PluginDigest, PluginBundleError> {
+    let staged = tempfile::tempdir().map_err(|source| PluginBundleError::WriteDeployment {
+        path: archive.to_path_buf(),
+        source,
+    })?;
+    extract_archive(archive, staged.path())?;
+    validate_tree(staged.path(), TreeShape::Source)?;
+    canonical_source_digest(staged.path())
 }
 
 fn digest_of_file(path: &Path) -> Result<PluginDigest, PluginBundleError> {
@@ -1147,21 +1279,25 @@ mod tests {
     }
 
     #[test]
-    fn digest_rejects_malformed_hex() {
-        for value in ["", "abc", &"z".repeat(64), &"a".repeat(63), &"a".repeat(65)] {
-            assert!(PluginDigest::parse(value).is_err(), "accepted {value:?}");
+    fn a_build_stamped_with_an_unknown_source_kind_is_refused() {
+        assert_eq!(SourceKind::parse("commit").unwrap(), SourceKind::Commit);
+        assert_eq!(SourceKind::parse("local").unwrap(), SourceKind::Local);
+        for value in ["", "release", "Commit", "git"] {
+            assert!(
+                matches!(
+                    SourceKind::parse(value),
+                    Err(PluginBundleError::MalformedBuildSourceKind { .. })
+                ),
+                "accepted {value:?}"
+            );
         }
     }
 
     #[test]
-    fn portable_path_uses_forward_slashes() {
-        let relative: PathBuf = ["plugin", "hooks", "hooks.json"].iter().collect();
-        assert_eq!(portable_relative_path(&relative).unwrap(), "plugin/hooks/hooks.json");
-    }
-
-    #[test]
-    fn portable_path_refuses_traversal_components() {
-        assert!(portable_relative_path(Path::new("../escape")).is_err());
+    fn digest_rejects_malformed_hex() {
+        for value in ["", "abc", &"z".repeat(64), &"a".repeat(63), &"a".repeat(65)] {
+            assert!(PluginDigest::parse(value).is_err(), "accepted {value:?}");
+        }
     }
 
     fn sample_tree(root: &Path) {
@@ -1261,21 +1397,21 @@ mod tests {
         sample_tree(source.path());
 
         let first = deploy(source.path(), deployments.path(), "http://127.0.0.1:9999");
-        assert!(!first.reused);
 
         let paths = fs::read_to_string(first.root.join(PATHS_SH)).unwrap();
         assert!(paths.contains("APPA_BIN='/data/bin/appa'"));
         assert!(paths.contains("APPA_ENDPOINT='http://127.0.0.1:9999'"));
 
-        // Every consumer carrying the legacy literal is rendered, without a
-        // hand-written list of files.
+        // Every consumer carrying the default literal is rendered.
         let statusline = fs::read_to_string(first.root.join("plugin/statusline.sh")).unwrap();
         assert!(statusline.contains("http://127.0.0.1:9999"));
         assert!(!statusline.contains(DEFAULT_ENDPOINT_URL));
 
+        // A rerun that changes nothing converges on the same directory and moves
+        // nothing aside.
         let second = deploy(source.path(), deployments.path(), "http://127.0.0.1:9999");
-        assert!(second.reused);
         assert_eq!(second.root, first.root);
+        assert_eq!(fs::read_dir(deployments.path()).unwrap().count(), 1);
     }
 
     #[test]
@@ -1335,7 +1471,6 @@ mod tests {
             fs::write(first.root.join(name), damaged).unwrap();
 
             let repaired = deploy(source.path(), deployments.path(), DEFAULT_ENDPOINT_URL);
-            assert!(!repaired.reused, "{name} was reused while stale");
             assert!(
                 fs::read_to_string(repaired.root.join(name)).unwrap().contains(restored),
                 "{name} was not restored",
@@ -1393,6 +1528,93 @@ mod tests {
         (base, stop)
     }
 
+    fn repository_archive() -> Vec<u8> {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let mut bytes = Vec::new();
+        {
+            let encoder = flate2::write::GzEncoder::new(&mut bytes, flate2::Compression::fast());
+            let mut archive = tar::Builder::new(encoder);
+
+            // GitHub source archives can begin with this POSIX PAX metadata
+            // entry. It is transport metadata, not part of the source tree.
+            let metadata = b"27 comment=GitHub archive\n";
+            let mut header = tar::Header::new_ustar();
+            header.set_path("pax_global_header").unwrap();
+            header.set_size(metadata.len() as u64);
+            header.set_entry_type(tar::EntryType::XGlobalHeader);
+            header.set_cksum();
+            archive.append(&header, metadata.as_slice()).unwrap();
+
+            for (source, _) in crate::plugin_layout::REPOSITORY_MAPPINGS {
+                let path = repository.join(source);
+                let archived = Path::new("OpenAPPA-test").join(source);
+                if path.is_dir() {
+                    archive.append_dir_all(archived, path).unwrap();
+                } else {
+                    archive.append_path_with_name(path, archived).unwrap();
+                }
+            }
+            archive.into_inner().unwrap().finish().unwrap();
+        }
+        bytes
+    }
+
+    #[test]
+    fn build_time_and_runtime_repository_staging_have_one_tree_identity() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let staged = tempfile::tempdir().unwrap();
+        stage_repository(repository, staged.path()).unwrap();
+
+        let runtime = canonical_source_digest(staged.path()).unwrap();
+        let compiled = PluginDigest::parse(env!("APPA_PLUGIN_TREE_SHA256")).unwrap();
+        assert_eq!(runtime, compiled);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_release_script_and_runtime_mapping_stage_identical_trees() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let scripted = directory.path().join("scripted");
+        let mapped = directory.path().join("mapped");
+        let status = std::process::Command::new("sh")
+            .arg(repository.join("scripts/appa-stage-plugin-bundle.sh"))
+            .arg(&scripted)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        stage_repository(repository, &mapped).unwrap();
+
+        assert_eq!(
+            canonical_source_digest(&scripted).unwrap(),
+            canonical_source_digest(&mapped).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_commit_source_archive_is_staged_verified_and_cached() {
+        let expected = PluginDigest::parse(env!("APPA_PLUGIN_TREE_SHA256")).unwrap();
+        let (base, _stop) = serve(repository_archive());
+        let cache = tempfile::tempdir().unwrap();
+
+        let archive = ensure_commit_archive("71b5080", expected, cache.path(), &base).unwrap();
+
+        assert_eq!(bundle_archive_digest(&archive).unwrap(), expected);
+        assert!(archive.file_name().unwrap().to_string_lossy().contains("71b5080"));
+    }
+
+    #[test]
+    fn a_commit_whose_plugin_tree_is_not_the_build_twin_is_refused() {
+        let (base, _stop) = serve(repository_archive());
+        let cache = tempfile::tempdir().unwrap();
+        let expected = PluginDigest::of(b"not this repository tree");
+
+        let refused = ensure_commit_archive("71b5080", expected, cache.path(), &base);
+
+        assert!(matches!(refused, Err(PluginBundleError::SourceDigestMismatch { .. })));
+        assert_eq!(fs::read_dir(cache.path()).unwrap().count(), 0);
+    }
+
     #[test]
     fn a_verified_download_lands_in_the_cache() {
         let cache = tempfile::tempdir().unwrap();
@@ -1400,7 +1622,7 @@ mod tests {
         let digest = PluginDigest::of(&body);
         let (base, _stop) = serve(body);
 
-        let archive = ensure_archive(digest, "9.9.9", cache.path(), &base).unwrap();
+        let archive = ensure_archive(digest, "v9.9.9", "9.9.9", cache.path(), &base).unwrap();
 
         assert_eq!(digest_of_file(&archive).unwrap(), digest);
         assert!(
@@ -1419,7 +1641,7 @@ mod tests {
         let (base, _stop) = serve(b"someone else's bytes".to_vec());
         let expected = PluginDigest::of(b"what this build accepts");
 
-        let refused = ensure_archive(expected, "9.9.9", cache.path(), &base);
+        let refused = ensure_archive(expected, "v9.9.9", "9.9.9", cache.path(), &base);
 
         assert!(matches!(refused, Err(PluginBundleError::DigestMismatch { .. })));
         let leftovers: Vec<_> = fs::read_dir(cache.path())
@@ -1438,7 +1660,7 @@ mod tests {
         fs::write(cached_archive_path(cache.path(), "9.9.9", digest), &body).unwrap();
 
         // Nothing is listening here, so any request would fail.
-        let archive = ensure_archive(digest, "9.9.9", cache.path(), "http://127.0.0.1:1").unwrap();
+        let archive = ensure_archive(digest, "v9.9.9", "9.9.9", cache.path(), "http://127.0.0.1:1").unwrap();
 
         assert_eq!(fs::read(archive).unwrap(), body);
     }
@@ -1452,17 +1674,76 @@ mod tests {
         fs::write(&path, b"corrupted").unwrap();
 
         let (base, _stop) = serve(body.clone());
-        let archive = ensure_archive(digest, "9.9.9", cache.path(), &base).unwrap();
+        let archive = ensure_archive(digest, "v9.9.9", "9.9.9", cache.path(), &base).unwrap();
 
         assert_eq!(fs::read(archive).unwrap(), body);
     }
 
     #[test]
-    fn a_development_build_refuses_to_download() {
+    fn a_clean_source_build_resolves_its_commit_twin() {
+        let digest = PluginDigest::of(b"tree");
+        let source = PluginSource::decide(
+            None,
+            BuildIdentity {
+                release_digest: None,
+                release_ref: None,
+                commit: Some("71b5080ad2a49e21493887c5bf71a45c620e924f"),
+                tree_digest: Some(digest),
+                local_root: None,
+                source_kind: Some(SourceKind::Commit),
+            },
+        )
+        .unwrap();
+        assert!(
+            matches!(source, PluginSource::Commit { commit, digest: actual } if commit == "71b5080ad2a49e21493887c5bf71a45c620e924f" && actual == digest)
+        );
+    }
+
+    #[test]
+    fn the_compiled_binary_always_has_an_automatic_plugin_source() {
         assert!(matches!(
-            PluginSource::decide(None, None),
-            Err(PluginBundleError::NoBakedDigest { .. })
+            PluginSource::resolve(None).unwrap(),
+            PluginSource::Release { .. } | PluginSource::Commit { .. } | PluginSource::Local { .. }
         ));
+    }
+
+    #[test]
+    fn a_release_build_resolves_the_stamped_tag_not_the_cargo_version() {
+        let release = PluginDigest::of(b"release archive");
+        let source = PluginSource::decide(
+            None,
+            BuildIdentity {
+                release_digest: Some(release),
+                release_ref: Some("v7.8.9"),
+                commit: Some("ignored"),
+                tree_digest: Some(PluginDigest::of(b"tree")),
+                local_root: None,
+                source_kind: None,
+            },
+        )
+        .unwrap();
+        assert!(
+            matches!(source, PluginSource::Release { reference, digest } if reference == "v7.8.9" && digest == release)
+        );
+    }
+
+    #[test]
+    fn the_explicit_development_source_wins_over_build_metadata() {
+        let source = tempfile::tempdir().unwrap();
+        sample_tree(source.path());
+        let selected = PluginSource::decide(
+            source.path().to_str(),
+            BuildIdentity {
+                release_digest: None,
+                release_ref: None,
+                commit: None,
+                tree_digest: None,
+                local_root: None,
+                source_kind: None,
+            },
+        )
+        .unwrap();
+        assert!(matches!(selected, PluginSource::Explicit(path) if path == source.path().canonicalize().unwrap()));
     }
 
     #[test]

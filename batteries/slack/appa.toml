@@ -1,7 +1,8 @@
 # Included Slack battery for the claude.ai Slack connector.
 #
 # Plain rules only: one per tool, no argument patterns. Everything read
-# from Slack is private. Every write needs trusted data; one that shows
+# from Slack is `internal`: it reaches only the organization's members.
+# Every write needs trusted data; one that shows
 # text to other people also needs a person's approval. The root config supplies
 # the `hitl` authority.
 #
@@ -20,83 +21,87 @@
 #   name = "mcp__claude_ai_Slack__slack_send_message(channel_id:C0ABC123)"
 #   requires = { trust = "trusted" }
 #   delta = {}
+#
+# The battery also ships `audience-source.py`, the `slack` audience
+# source. Audience mappings are root-only, so the binding sits beside
+# them in the root config, not here — the README shows the wiring.
 
 [policy]
-version = 1
+version = 2
 
-# --- reads: private ---
+# --- reads: internal ---
 
 [[policy.tool]]
 name = "mcp__claude_ai_Slack__slack_read_channel"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Slack__slack_read_thread"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Slack__slack_read_canvas"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Slack__slack_read_file"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Slack__slack_read_user_profile"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Slack__slack_list_channel_members"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Slack__slack_get_reactions"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Slack__slack_search_public"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Slack__slack_search_public_and_private"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Slack__slack_search_channels"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Slack__slack_search_users"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Slack__slack_search_emojis"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 # --- writes nobody else reads yet: trusted data, no approval ---
 

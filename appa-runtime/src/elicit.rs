@@ -174,7 +174,7 @@ impl Elicitation {
 
 /// The review as the person reads it: a pure rendering of the consult, nothing from the
 /// trajectory beside it.
-fn review_text(authority: &str, declaration: &AuthorityDeclaration, artifact: &AuthorityArtifact) -> String {
+pub(crate) fn review_text(authority: &str, declaration: &AuthorityDeclaration, artifact: &AuthorityArtifact) -> String {
     let arguments =
         serde_json::to_string_pretty(&artifact.arguments).unwrap_or_else(|_| artifact.arguments.to_string());
     let requirements = match artifact.requirements.as_slice() {

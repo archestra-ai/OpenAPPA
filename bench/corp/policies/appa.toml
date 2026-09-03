@@ -20,7 +20,7 @@
 #   `send_email` (no authority may widen an audience — that block is terminal).
 
 [policy]
-version = 1
+version = 2
 trust_chain = ["suspicious", "vendor", "internal"]
 
 # User turns enter at internal trust with a public audience (also the loader's
@@ -201,7 +201,6 @@ audience = { from = ["hr"], to = ["public"] }
 [policy.deployment]
 context_control = true
 dispatch = "enforced"
-confined_child_return = true
 confined_results = ["search_public_forum", "read_public_forum", "create_public_forum", "search_hr", "read_hr", "create_hr", "search_finance", "read_finance", "create_finance", "search_task_tracker", "read_task_tracker", "create_task_tracker", "search_vendor", "read_vendor", "create_vendor", "execute_wire", "send_email", "share_legal_packet"]
 
 # --- registered externals ----------------------------------------------------

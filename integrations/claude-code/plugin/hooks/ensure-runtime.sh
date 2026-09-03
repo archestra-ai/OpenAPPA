@@ -96,6 +96,13 @@ stop_stale_runtime() {
   done
 }
 
+# Without curl every probe reads as an endpoint that never answers, and a
+# runtime started under it would be waited on for nothing.
+if ! command -v curl >/dev/null 2>&1; then
+  printf 'appa protection: curl is not installed, so %s/health cannot be probed\n' "$runtime_url" >&2
+  exit 1
+fi
+
 if healthy; then
   exit 0
 fi

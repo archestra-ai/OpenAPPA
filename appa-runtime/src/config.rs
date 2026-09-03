@@ -14,6 +14,20 @@ pub struct Config {
     pub externals: Externals,
 }
 
+/// The runtime's own environment namespace: its wiring (`APPA_CONFIG`, `APPA_DB`,
+/// `APPA_GATE`, …) and every secret a `token_env` names. Nothing in it reaches a child
+/// process, so a bearer token this runtime sends and a gate variable that would recurse a
+/// consult both stay in this process.
+pub(crate) const RUNTIME_VARIABLE_PREFIX: &str = "APPA_";
+
+/// The namespace a `command` external's own credential lives in — a battery's provider
+/// token, which the runtime never reads and never sends. A child inherits nothing of the
+/// runtime's namespace by default; the one variable its binding names is put back, and only
+/// from this namespace, so a credential reaches the one command that reads it and no other.
+/// A `url` binding's `token_env` may not name a variable here, so the passthrough cannot
+/// become a way to hand a subprocess a secret this runtime holds.
+pub(crate) const PROVIDER_CREDENTIAL_PREFIX: &str = "APPA_PROVIDER_";
+
 /// The effective policy file: deterministic TOML bytes after includes
 /// compose, and the policy value parsed from those bytes. The stored
 /// value and bytes always describe the same deployment.
@@ -50,7 +64,8 @@ pub struct ExternalBindings {
     pub authorities: BTreeMap<String, Binding>,
     pub sanitizers: BTreeMap<String, Binding>,
     pub annotators: BTreeMap<String, Binding>,
-    pub membership: BTreeMap<String, Binding>,
+    pub audience: BTreeMap<String, Binding>,
+    pub identity: BTreeMap<String, Binding>,
     pub claude_code: ClaudeCode,
     pub llm: Option<LlmBinding>,
 }
@@ -66,7 +81,8 @@ impl ExternalBindings {
             authorities: BTreeMap::new(),
             sanitizers: BTreeMap::new(),
             annotators: BTreeMap::new(),
-            membership: BTreeMap::new(),
+            audience: BTreeMap::new(),
+            identity: BTreeMap::new(),
             claude_code: ClaudeCode::default(),
             llm: None,
         }
@@ -78,8 +94,15 @@ impl ExternalBindings {
 /// declared it — an embedded host supplies an absolute one itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Binding {
-    Url { url: String, token_env: Option<String> },
-    Command { argv: Vec<String>, cwd: PathBuf },
+    Url {
+        url: String,
+        token_env: Option<String>,
+    },
+    Command {
+        argv: Vec<String>,
+        cwd: PathBuf,
+        token_env: Option<String>,
+    },
     Builtin(String),
 }
 
@@ -145,8 +168,12 @@ pub struct Externals {
     /// One implementation per policy-declared `[[annotator]]` that names no `builtin` on
     /// its declaration. An Annotator that carries a stock builtin takes no entry here.
     pub annotators: BTreeMap<String, AnnotatorImplementation>,
-    /// The one resolver the policy's `[membership]` registers, under its name.
-    pub membership: BTreeMap<String, Implementation>,
+    /// One implementation per audience source provider the policy's `[audience.*]` tables
+    /// reference, under the provider's name.
+    pub audience: BTreeMap<String, Implementation>,
+    /// The one custom identity implementation the policy's `[identity]` selects, under its
+    /// name. The shipped `verified-email` implementation is deterministic and takes no entry.
+    pub identity: BTreeMap<String, Implementation>,
     /// Deployment knobs for the stock `claude-code` builtin.
     pub claude_code: ClaudeCode,
     /// The profile the stock `llm` builtin consults, where the deployment declares one.
@@ -224,11 +251,14 @@ pub enum AnnotatorImplementation {
     Command(ResolverCommand),
 }
 
-/// A command binding's argv and the directory of the config that declared it.
+/// A command binding's argv, the directory of the config that declared it, and the one
+/// `APPA_PROVIDER_*` variable its child inherits. The name is carried, never the value: the
+/// runtime forwards the variable at spawn and never reads the credential itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolverCommand {
     pub argv: Vec<String>,
     pub cwd: PathBuf,
+    pub token_env: Option<String>,
 }
 
 pub const CLAUDE_CODE_BUILTIN: &str = "claude-code";
@@ -345,6 +375,22 @@ pub enum ConfigError {
         name: String,
         var: String,
     },
+    #[error(
+        "the {section} endpoint {name:?} names {var}, which a command child can inherit: a token this runtime sends itself needs a variable outside {prefix}"
+    )]
+    ChildCredentialVariable {
+        section: &'static str,
+        name: String,
+        var: String,
+        prefix: &'static str,
+    },
+    #[error("the {section} command {name:?} names {var}, and only a {prefix} variable reaches its child")]
+    CommandCredentialVariable {
+        section: &'static str,
+        name: String,
+        var: String,
+        prefix: &'static str,
+    },
     #[error("the {section} endpoint {name:?} names {var}, which is not set")]
     MissingSecret {
         section: &'static str,
@@ -389,22 +435,26 @@ pub enum ConfigError {
     UnrepresentableEmbeddedSetting { field: &'static str },
 }
 
-/// The four sections a component binds under. Every section takes the same three
-/// transports; which builtin names a section accepts is the one difference.
+/// The five sections a component binds under. Every section takes the same transports;
+/// which builtin names a section accepts is the one difference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Section {
     Authorities,
     Sanitizers,
     Annotators,
-    Membership,
+    /// One audience source per provider: `[externals.audience.<provider>]`.
+    Audience,
+    /// The one custom identity implementation: `[externals.identity.<name>]`.
+    Identity,
 }
 
 impl Section {
-    pub(crate) const ALL: [Section; 4] = [
+    pub(crate) const ALL: [Section; 5] = [
         Section::Authorities,
         Section::Sanitizers,
         Section::Annotators,
-        Section::Membership,
+        Section::Audience,
+        Section::Identity,
     ];
 
     pub(crate) fn name(self) -> &'static str {
@@ -412,7 +462,8 @@ impl Section {
             Section::Authorities => "authorities",
             Section::Sanitizers => "sanitizers",
             Section::Annotators => "annotators",
-            Section::Membership => "membership",
+            Section::Audience => "audience",
+            Section::Identity => "identity",
         }
     }
 
@@ -428,10 +479,11 @@ impl Section {
     /// Whether `builtin` is a name this section may bind. Authorities and sanitizers take
     /// the stock names, the model builtins, and any module-grammar name (the module's
     /// presence is checked when the deployment opens); an Annotator names a stock builtin
-    /// on its policy declaration instead, and a membership resolver is never a builtin.
+    /// on its policy declaration instead, and an audience source or a custom identity
+    /// implementation is never a builtin.
     fn check_builtin(self, name: &str, builtin: &str) -> Result<(), ConfigError> {
         let allowed = match self {
-            Section::Annotators | Section::Membership => {
+            Section::Annotators | Section::Audience | Section::Identity => {
                 return Err(ConfigError::BuiltinNotAllowed {
                     section: self.name(),
                     name: name.to_string(),
@@ -489,7 +541,9 @@ struct RawExternals {
     #[serde(default)]
     annotators: BTreeMap<String, RawBinding>,
     #[serde(default)]
-    membership: BTreeMap<String, RawBinding>,
+    audience: BTreeMap<String, RawBinding>,
+    #[serde(default)]
+    identity: BTreeMap<String, RawBinding>,
     claude_code: Option<RawClaudeCode>,
     llm: Option<RawLlm>,
 }
@@ -500,7 +554,8 @@ impl RawExternals {
             Section::Authorities => &self.authorities,
             Section::Sanitizers => &self.sanitizers,
             Section::Annotators => &self.annotators,
-            Section::Membership => &self.membership,
+            Section::Audience => &self.audience,
+            Section::Identity => &self.identity,
         }
     }
 
@@ -663,7 +718,8 @@ impl Config {
             authorities,
             sanitizers,
             annotators,
-            membership,
+            audience,
+            identity,
             claude_code,
             llm,
         } = raw.externals;
@@ -692,7 +748,8 @@ impl Config {
                     .into_iter()
                     .map(|(name, implementation)| (name, annotator_implementation(implementation)))
                     .collect(),
-                membership: resolve(Section::Membership, membership)?,
+                audience: resolve(Section::Audience, audience)?,
+                identity: resolve(Section::Identity, identity)?,
                 claude_code: resolve_claude_code(claude_code)?,
                 llm,
             },
@@ -724,7 +781,8 @@ fn embedded_document(policy: toml::Value, bindings: &ExternalBindings) -> Result
         (Section::Authorities, &bindings.authorities),
         (Section::Sanitizers, &bindings.sanitizers),
         (Section::Annotators, &bindings.annotators),
-        (Section::Membership, &bindings.membership),
+        (Section::Audience, &bindings.audience),
+        (Section::Identity, &bindings.identity),
     ] {
         if entries.is_empty() {
             continue;
@@ -755,8 +813,8 @@ fn embedded_document(policy: toml::Value, bindings: &ExternalBindings) -> Result
             toml::Value::String(bindings.claude_code.model.clone()),
         );
         // Only a budget that differs from the default is written, so a host that leaves it
-        // alone composes the same bytes as an authored table that names `command` and
-        // `model` and omits `timeout_ms`.
+        // alone composes the same bytes — and so the same policy key — as an authored table
+        // that names `command` and `model` and omits `timeout_ms`.
         if bindings.claude_code.timeout != DEFAULT_CLAUDE_CODE_TIMEOUT {
             claude_code.insert(
                 "timeout_ms".to_string(),
@@ -834,7 +892,7 @@ fn embedded_binding(
             entry
         }
         Binding::Builtin(builtin) => vec![("builtin", toml::Value::String(builtin.clone()))],
-        Binding::Command { argv, cwd } => {
+        Binding::Command { argv, cwd, token_env } => {
             if !cwd.is_absolute() {
                 return Err(ConfigError::RelativeCommandCwd {
                     section: section.name(),
@@ -845,10 +903,14 @@ fn embedded_binding(
                 field: "externals command cwd",
             })?;
             command_cwds.insert(section.origin_key(name), toml::Value::String(cwd.to_string()));
-            vec![(
+            let mut entry = vec![(
                 "command",
                 toml::Value::Array(argv.iter().cloned().map(toml::Value::String).collect()),
-            )]
+            )];
+            if let Some(token_env) = token_env {
+                entry.push(("token_env", toml::Value::String(token_env.clone())));
+            }
+            entry
         }
     };
     Ok(toml::Value::Table(
@@ -1103,7 +1165,7 @@ fn resolve_binding(
             }
             Ok(Implementation::Builtin(builtin))
         }
-        (None, None, Some(argv)) if token_env.is_none() => resolve_command(section, name, argv, origins),
+        (None, None, Some(argv)) => resolve_command(section, name, argv, token_env, origins),
         _ => Err(ConfigError::ImplementationChoice {
             section: section.name(),
             name: name.to_string(),
@@ -1111,10 +1173,16 @@ fn resolve_binding(
     }
 }
 
+/// A command's `token_env` is the opposite of a URL's: the runtime sends nothing, it
+/// forwards one variable to the child that reads it, and only from the passthrough
+/// namespace. Presence is deliberately not checked here — the runtime never reads the
+/// value, so a policy stays loadable and describable on a machine that holds no provider
+/// credential, and a missing one surfaces as the child's own refusal to answer.
 fn resolve_command(
     section: Section,
     name: &str,
     argv: Vec<String>,
+    token_env: Option<String>,
     origins: &BTreeMap<String, PathBuf>,
 ) -> Result<Implementation, ConfigError> {
     if argv.is_empty() || argv.iter().any(String::is_empty) {
@@ -1123,9 +1191,20 @@ fn resolve_command(
             name: name.to_string(),
         });
     }
+    if let Some(var) = token_env
+        .as_ref()
+        .filter(|var| !var.starts_with(PROVIDER_CREDENTIAL_PREFIX))
+    {
+        return Err(ConfigError::CommandCredentialVariable {
+            section: section.name(),
+            name: name.to_string(),
+            var: var.clone(),
+            prefix: PROVIDER_CREDENTIAL_PREFIX,
+        });
+    }
     #[cfg(not(unix))]
     {
-        let _ = (argv, origins);
+        let _ = (argv, origins, token_env);
         return Err(ConfigError::UnsupportedCommandPlatform {
             section: section.name(),
             name: name.to_string(),
@@ -1139,6 +1218,7 @@ fn resolve_command(
                 .get(&section.origin_key(name))
                 .expect("every composed command binding records its source")
                 .clone(),
+            token_env,
         }))
     }
 }
@@ -1240,11 +1320,19 @@ fn resolve_token(
     let Some(var) = token_env else {
         return Ok(None);
     };
-    if !var.starts_with("APPA_") {
+    if !var.starts_with(RUNTIME_VARIABLE_PREFIX) {
         return Err(ConfigError::ForeignSecretVariable {
             section,
             name: name.to_string(),
             var,
+        });
+    }
+    if var.starts_with(PROVIDER_CREDENTIAL_PREFIX) {
+        return Err(ConfigError::ChildCredentialVariable {
+            section,
+            name: name.to_string(),
+            var,
+            prefix: PROVIDER_CREDENTIAL_PREFIX,
         });
     }
     match lookup(&var) {
@@ -1301,7 +1389,8 @@ mod tests {
         let table = match section {
             Section::Authorities => &config.externals.authorities,
             Section::Sanitizers => &config.externals.sanitizers,
-            Section::Membership => &config.externals.membership,
+            Section::Audience => &config.externals.audience,
+            Section::Identity => &config.externals.identity,
             Section::Annotators => {
                 return config
                     .externals
@@ -1384,6 +1473,16 @@ mod tests {
         );
         assert!(matches!(parse(&unset), Err(ConfigError::MissingSecret { .. })));
 
+        // The passthrough namespace reaches command children, so a token this runtime sends
+        // may not live there — the refusal comes before the variable is even read.
+        let passthrough = format!(
+            "{MINIMAL}\n[externals.authorities.security]\nurl = \"https://authority.internal\"\ntoken_env = \"APPA_PROVIDER_AUTHORITY_TOKEN\"\n"
+        );
+        assert!(matches!(
+            parse(&passthrough),
+            Err(ConfigError::ChildCredentialVariable { .. }),
+        ));
+
         let empty = format!(
             "{MINIMAL}\n[externals.authorities.security]\nurl = \"https://authority.internal\"\ntoken_env = \"APPA_AUTHORITY_TOKEN\"\n"
         );
@@ -1391,6 +1490,46 @@ mod tests {
             parse_with(&empty, |_| Some(String::new())),
             Err(ConfigError::MissingSecret { .. }),
         ));
+    }
+
+    /// A command's `token_env` is the mirror of a URL's: nothing is sent, one variable is
+    /// forwarded to the child that reads it, and only from the passthrough namespace.
+    #[cfg(unix)]
+    #[test]
+    fn a_command_forwards_one_credential_and_only_from_the_passthrough_namespace() {
+        let with = |token_env: &str| {
+            format!(
+                "{MINIMAL}\n[externals.audience.slack]\ncommand = [\"python3\", \"source.py\"]\ntoken_env = \"{token_env}\"\n"
+            )
+        };
+        let set = |var: &str| (var == "APPA_PROVIDER_SLACK_TOKEN").then(|| "xoxb-fixture".to_string());
+
+        assert!(
+            matches!(
+                parse_with(&with("APPA_SLACK_TOKEN"), set),
+                Err(ConfigError::CommandCredentialVariable { .. })
+            ),
+            "the runtime's own namespace never reaches a child, so a command cannot name it"
+        );
+        assert!(matches!(
+            parse_with(&with("SLACK_TOKEN"), set),
+            Err(ConfigError::CommandCredentialVariable { .. }),
+        ));
+        assert!(
+            parse_with(&with("APPA_PROVIDER_GITHUB_TOKEN"), set).is_ok(),
+            "the runtime never reads the value, so a policy stays loadable and describable \
+             without the credential on the machine"
+        );
+
+        let config = parse_with(&with("APPA_PROVIDER_SLACK_TOKEN"), set).expect("the bound credential validates");
+        let Some(Implementation::Command(command)) = config.externals.audience.get("slack") else {
+            panic!("the slack audience source is a command")
+        };
+        assert_eq!(command.token_env.as_deref(), Some("APPA_PROVIDER_SLACK_TOKEN"));
+        assert!(
+            !format!("{command:?}").contains("xoxb-fixture"),
+            "the binding carries the variable name, never the credential"
+        );
     }
 
     #[test]
@@ -1490,7 +1629,7 @@ mod tests {
             }
         }
         // An Annotator names a stock builtin on its policy declaration, never here.
-        for section in [Section::Annotators, Section::Membership] {
+        for section in [Section::Annotators, Section::Audience, Section::Identity] {
             for builtin in ["hitl", "approve", "redact-email", "claude-code", "llm", "some-module"] {
                 assert!(
                     matches!(cell(section, builtin), Err(ConfigError::BuiltinNotAllowed { .. })),
@@ -1595,10 +1734,10 @@ mod tests {
             Err(ConfigError::ImplementationChoice { .. })
         ));
 
-        let singleton_membership = format!("{MINIMAL}\n[externals.membership]\nurl = \"https://directory.internal\"\n");
+        let singleton_audience = format!("{MINIMAL}\n[externals.audience]\nurl = \"https://directory.internal\"\n");
         assert!(
-            toml::from_str::<RawConfig>(&singleton_membership).is_err(),
-            "membership binds by name like every other section"
+            toml::from_str::<RawConfig>(&singleton_audience).is_err(),
+            "an audience source binds by provider name like every other section"
         );
     }
 
@@ -1642,7 +1781,7 @@ mod tests {
                 include = ["first.toml", "second.toml"]
 
                 [policy]
-                version = 1
+                version = 2
 
                 [[policy.tool]]
                 name = "root"
@@ -1660,7 +1799,7 @@ mod tests {
                 format!(
                     r#"
                         [policy]
-                        version = 1
+                        version = 2
 
                         [[policy.tool]]
                         name = "{name}"
@@ -1694,7 +1833,7 @@ mod tests {
             r#"
                 include = ["battery/claude.toml"]
                 [policy]
-                version = 1
+                version = 2
                 [externals]
                 timeout_ms = 5000
                 max_body_bytes = 65536
@@ -1709,13 +1848,15 @@ mod tests {
             dir.path().join("battery/claude.toml"),
             r#"
                 [policy]
-                version = 1
+                version = 2
                 [externals.annotators.battery]
                 command = ["python3", "resolver.py"]
                 [externals.sanitizers.scrub]
                 command = ["python3", "scrub.py"]
-                [externals.membership.directory]
-                command = ["python3", "directory.py"]
+                [externals.audience.slack]
+                command = ["python3", "slack-audience.py"]
+                [externals.identity.corp-identity]
+                command = ["python3", "identity.py"]
             "#,
         )
         .expect("write included config");
@@ -1732,7 +1873,8 @@ mod tests {
         for (section, name) in [
             (Section::Annotators, "battery"),
             (Section::Sanitizers, "scrub"),
-            (Section::Membership, "directory"),
+            (Section::Audience, "slack"),
+            (Section::Identity, "corp-identity"),
         ] {
             assert_eq!(
                 command_cwd(section, name),
@@ -1781,11 +1923,11 @@ mod tests {
     }
 
     fn embedded(bindings: ExternalBindings) -> Result<Config, ConfigError> {
-        Config::embedded("version = 1".to_string(), bindings)
+        Config::embedded("version = 2".to_string(), bindings)
     }
 
     #[test]
-    fn an_embedded_default_claude_budget_matches_an_authored_omission() {
+    fn an_embedded_default_budget_stores_what_an_authored_table_omitting_it_stores() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let mut bindings = ExternalBindings::new(Duration::from_millis(5000), 65_536);
         bindings.claude_code = ClaudeCode {
@@ -1793,22 +1935,30 @@ mod tests {
             model: "pinned".to_string(),
             timeout: DEFAULT_CLAUDE_CODE_TIMEOUT,
         };
-        let host = embedded(bindings).expect("the embedded claude bindings load");
+        let host = Config::embedded(
+            "version = 2\nanything = \"the runtime does not interpret this\"\n".to_string(),
+            bindings,
+        )
+        .expect("the embedded claude bindings load");
 
-        let from_host_path = dir.path().join("host.toml");
-        std::fs::write(&from_host_path, host.policy_file().bytes()).expect("write the stored embedded config");
-        let from_host = Config::load(&from_host_path).expect("the stored embedded config reloads");
+        // Both sides come back through the file loader, so only their content can differ,
+        // never their serialization.
+        let from_host = dir.path().join("host.toml");
+        std::fs::write(&from_host, host.policy_file().bytes()).expect("write the stored embedded config");
+        let from_host = Config::load(&from_host).expect("the stored embedded config reloads");
 
         let authored_path = dir.path().join("authored.toml");
         std::fs::write(
             &authored_path,
-            "[policy]\nversion = 1\n\n\
+            "[policy]\nversion = 2\nanything = \"the runtime does not interpret this\"\n\n\
              [externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n\n\
              [externals.claude_code]\ncommand = \"/opt/claude/bin/claude\"\nmodel = \"pinned\"\n",
         )
         .expect("write the authored config");
         let authored = Config::load(&authored_path).expect("the authored claude table loads");
 
+        // A budget neither side states must not be stated by one of them: an install
+        // compares these policy keys, so equal deployments must compose equal bytes.
         assert_eq!(from_host.policy_file().bytes(), authored.policy_file().bytes());
         assert_eq!(from_host.externals.claude_code, authored.externals.claude_code);
         assert_eq!(authored.externals.claude_code.timeout, DEFAULT_CLAUDE_CODE_TIMEOUT);
@@ -1826,6 +1976,7 @@ mod tests {
                 Binding::Command {
                     argv: vec!["python3".to_string(), argument.to_string()],
                     cwd: std::fs::canonicalize(cwd).expect("canonical command directory"),
+                    token_env: None,
                 },
             );
             embedded(bindings).expect("embedded command config loads")
@@ -1853,6 +2004,7 @@ mod tests {
             Binding::Command {
                 argv: vec!["python3".to_string()],
                 cwd: PathBuf::from("battery"),
+                token_env: None,
             },
         );
         assert!(matches!(
@@ -1912,7 +2064,7 @@ mod tests {
         std::fs::write(
             &path,
             format!(
-                "[policy]\nversion = 1\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n\
+                "[policy]\nversion = 2\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n\
                  [externals.authorities.desk]\nurl = \"https://desk.internal\"\ntoken_env = \"{VAR}\"\n\
                  [externals.llm]\nprovider = \"anthropic\"\nmodel = \"claude-sonnet-4-5\"\ntoken_env = \"{VAR}\"\ntimeout_ms = 30000\nmax_concurrent = 2\n"
             ),
@@ -1932,7 +2084,7 @@ mod tests {
             std::fs::write(
                 &root,
                 format!(
-                    "include = [{include}]\n[policy]\nversion = 1\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n"
+                    "include = [{include}]\n[policy]\nversion = 2\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n"
                 ),
             )
             .expect("write root config");
@@ -1942,18 +2094,18 @@ mod tests {
         assert!(matches!(Config::load(&root), Err(ConfigError::AbsoluteInclude { .. })));
 
         write_root("\"battery.toml\", \"./battery.toml\"");
-        std::fs::write(dir.path().join("battery.toml"), "[policy]\nversion = 1\n").expect("write included config");
+        std::fs::write(dir.path().join("battery.toml"), "[policy]\nversion = 2\n").expect("write included config");
         assert!(matches!(Config::load(&root), Err(ConfigError::DuplicateInclude { .. })));
 
         write_root("\"battery.toml\"");
         std::fs::write(
             dir.path().join("battery.toml"),
-            "include = [\"nested.toml\"]\n[policy]\nversion = 1\n",
+            "include = [\"nested.toml\"]\n[policy]\nversion = 2\n",
         )
         .expect("write nested include");
         assert!(matches!(Config::load(&root), Err(ConfigError::IncludedTopLevel { .. })));
 
-        std::fs::write(dir.path().join("battery.toml"), "[policy]\nversion = 2\n").expect("write version mismatch");
+        std::fs::write(dir.path().join("battery.toml"), "[policy]\nversion = 1\n").expect("write version mismatch");
         assert!(matches!(Config::load(&root), Err(ConfigError::IncludedVersion { .. })));
     }
 
@@ -1968,7 +2120,7 @@ mod tests {
             std::fs::write(
                 &root,
                 format!(
-                    "include = [{includes}]\n[policy]\nversion = 1\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n\
+                    "include = [{includes}]\n[policy]\nversion = 2\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n\
                      [externals.annotators.classifier]\nurl = \"https://classifier.internal\"\n\
                      [externals.authorities.desk]\nurl = \"https://desk.internal\"\n"
                 ),
@@ -1978,7 +2130,7 @@ mod tests {
         let battery = dir.path().join("battery.toml");
         write_root("\"battery.toml\"");
 
-        std::fs::write(&battery, "[policy]\nversion = 1\nlimits = {}\n").expect("write singleton override");
+        std::fs::write(&battery, "[policy]\nversion = 2\nlimits = {}\n").expect("write singleton override");
         assert!(matches!(
             Config::load(&root),
             Err(ConfigError::IncludedPolicyField { .. })
@@ -1988,7 +2140,7 @@ mod tests {
             std::fs::write(
                 &battery,
                 format!(
-                    "[policy]\nversion = 1\n[externals.{}.fresh]\nurl = \"https://fresh.internal\"\n",
+                    "[policy]\nversion = 2\n[externals.{}.fresh]\nurl = \"https://fresh.internal\"\n",
                     section.name()
                 ),
             )
@@ -2000,7 +2152,7 @@ mod tests {
         for (section, name) in [("annotators", "classifier"), ("authorities", "desk")] {
             std::fs::write(
                 &battery,
-                format!("[policy]\nversion = 1\n[externals.{section}.{name}]\nurl = \"https://other.internal\"\n"),
+                format!("[policy]\nversion = 2\n[externals.{section}.{name}]\nurl = \"https://other.internal\"\n"),
             )
             .expect("write duplicate external");
             assert!(
@@ -2016,7 +2168,7 @@ mod tests {
         for file in ["battery.toml", "other.toml"] {
             std::fs::write(
                 dir.path().join(file),
-                "[policy]\nversion = 1\n[externals.sanitizers.scrub]\nurl = \"https://scrub.internal\"\n",
+                "[policy]\nversion = 2\n[externals.sanitizers.scrub]\nurl = \"https://scrub.internal\"\n",
             )
             .expect("write twin fragments");
         }
@@ -2033,7 +2185,7 @@ mod tests {
             "claude_code = { model = \"other\" }",
             "llm = { provider = \"openai\", model = \"m\" }",
         ] {
-            std::fs::write(&battery, format!("[policy]\nversion = 1\n[externals]\n{field}\n"))
+            std::fs::write(&battery, format!("[policy]\nversion = 2\n[externals]\n{field}\n"))
                 .expect("write external singleton");
             assert!(
                 matches!(Config::load(&root), Err(ConfigError::IncludedExternalsField { .. })),
@@ -2049,12 +2201,12 @@ mod tests {
         let second = dir.path().join("second.toml");
         std::fs::write(
             &first,
-            "# comment\n[policy]\nversion=1\n[externals]\ntimeout_ms=5000\nmax_body_bytes=65536\n",
+            "# comment\n[policy]\nversion=2\n[externals]\ntimeout_ms=5000\nmax_body_bytes=65536\n",
         )
         .expect("write first config");
         std::fs::write(
             &second,
-            "[policy]\nversion = 1 # another comment\n\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n",
+            "[policy]\nversion = 2 # another comment\n\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n",
         )
         .expect("write second config");
         let first = Config::load(&first).expect("first config loads");
@@ -2070,7 +2222,7 @@ mod tests {
             std::fs::write(
                 &path,
                 format!(
-                    "[policy]\nversion = 1\n[[policy.tool]]\nname = {:?}\n[[policy.tool]]\nname = {:?}\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n",
+                    "[policy]\nversion = 2\n[[policy.tool]]\nname = {:?}\n[[policy.tool]]\nname = {:?}\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n",
                     names[0], names[1]
                 ),
             )

@@ -2,18 +2,18 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::audience::AudienceEvidence;
 use crate::basis::SubjectKey;
 use crate::candidate::{DerivedCandidate, SanitizerLineage};
 use crate::contract::PinnedAnnotation;
 use crate::fact::{
     BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ForkSnapshot, ObservedResult, ReturnPolicy,
 };
-use crate::groups::GroupResolution;
 use crate::label::Label;
 use crate::names::{AuthorityName, SanitizerName};
 use crate::value::{
-    CanonicalDigest, ChildReturnId, DispatchId, ForkId, LabeledValue, Provenance, RawResultDigest, ResolvedCall,
-    ToolName, TrajectoryId, ValueId,
+    CanonicalDigest, ChildReturnId, DispatchId, ForkId, LabeledValue, Provenance, ResolvedCall, ToolName, TrajectoryId,
+    ValueId,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,11 +29,10 @@ pub(crate) struct PreparedFork {
     pub(crate) parent: TrajectoryId,
     pub(crate) snapshot: ForkSnapshot,
     pub(crate) return_policy: ReturnPolicy,
-    pub(crate) shape: Option<crate::shape::ReturnShape>,
     denials: BTreeMap<CanonicalDigest, BTreeSet<AuthorityName>>,
 }
 
-static MISSING_SOURCE: Label = Label::bottom();
+static MISSING_SOURCE: std::sync::LazyLock<Label> = std::sync::LazyLock::new(Label::bottom);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CloseKind {
@@ -56,7 +55,7 @@ pub(crate) struct DecidedBatch {
     /// position: a marked call's block is planned differently on every later read of it.
     pub(crate) spawn: Option<crate::transition::SpawnMark>,
     pub(crate) released: Vec<DispatchId>,
-    pub(crate) resolutions: Vec<GroupResolution>,
+    pub(crate) evidence: AudienceEvidence,
 }
 
 /// One offer the log has opened. Whether it is still *pending* is not stored: that is
@@ -72,22 +71,20 @@ pub(crate) struct RecordedOffer {
     pub(crate) subject: crate::basis::SubjectKey,
     pub(crate) plan: crate::plan::ExecutableRemedyPlan,
     pub(crate) basis: crate::basis::PolicyBasis,
-    /// The group resolutions the act that surfaced this offer consumed: its execution
-    /// starts from them.
-    pub(crate) resolutions: Vec<GroupResolution>,
+    /// The pinned audience evidence the act that surfaced this offer consumed: its
+    /// execution starts from it.
+    pub(crate) evidence: AudienceEvidence,
     pub(crate) end: Option<OfferEnd>,
 }
 
-/// The live derived candidate of one subject, with the transformer that claimed it and the chain
-/// that produced it.
+/// The live derived candidate of one subject, with the chain that produced it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RecordedCandidate {
-    pub(crate) via: crate::candidate::DerivedVia,
     pub(crate) derived: DerivedCandidate,
     pub(crate) lineage: SanitizerLineage,
-    /// The group resolutions the hop that derived this candidate consumed: what a later read of
-    /// the candidate under its own contract inherits, as it inherits an offer's.
-    pub(crate) resolutions: Vec<GroupResolution>,
+    /// The pinned audience evidence the hop that derived this candidate consumed: what a
+    /// later read of the candidate under its own contract inherits, as it inherits an offer's.
+    pub(crate) evidence: AudienceEvidence,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -108,46 +105,17 @@ pub(crate) struct PreparedApproval {
     pub(crate) acceptance: Option<crate::check::Narrowing>,
     pub(crate) rulings: Vec<crate::execute::AuthorityEvidence>,
     pub(crate) sanitizer: Option<crate::names::SanitizerName>,
+    pub(crate) return_policy: Option<ReturnPolicy>,
     pub(crate) basis: crate::basis::PolicyBasis,
-    /// The group resolutions the approval was prepared under: its consumption releases
-    /// under them.
-    pub(crate) resolutions: Vec<GroupResolution>,
+    /// The pinned audience evidence the approval was prepared under: its consumption
+    /// releases under it.
+    pub(crate) evidence: AudienceEvidence,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ReturnedChild {
     id: ChildReturnId,
     value: LabeledValue,
-}
-
-/// One durable child submission in custody: the raw handoff a `ReturnSubmitted` record
-/// transferred, held here for the return lifecycle alone — the parent's label fold never reads it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SubmittedReturn {
-    pub(crate) fork: ForkId,
-    pub(crate) parent: TrajectoryId,
-    pub(crate) digest: RawResultDigest,
-    body: Option<crate::value::ValueBody>,
-    pub(crate) policy: ReturnPolicy,
-    /// The parent's established bound pinned at the submission fold step: every
-    /// candidate of this return measures its residual here, never against the live fold.
-    pub(crate) receiving: Label,
-}
-
-impl SubmittedReturn {
-    /// The raw bytes in custody. Every reader runs on a pending return — established by
-    /// [`Views::pending_return`] or an uncrossed-branch guard — where custody still holds them.
-    pub(crate) fn body(&self) -> &crate::value::ValueBody {
-        self.body
-            .as_ref()
-            .expect("custody holds the raw bytes until the crossing consumes them")
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RejectedReturn {
-    pub(crate) digest: RawResultDigest,
-    pub(crate) reason: crate::fact::ReturnRejection,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -164,15 +132,21 @@ pub struct Projection {
     receiving_bounds: BTreeMap<DispatchId, Label>,
     /// The narrowing accepted at the check of each dispatch released under an acceptance.
     accepted_narrowings: BTreeMap<DispatchId, crate::check::Narrowing>,
-    dispatch_resolutions: BTreeMap<DispatchId, Vec<GroupResolution>>,
+    dispatch_evidence: BTreeMap<DispatchId, AudienceEvidence>,
     subject_dispatches: BTreeMap<crate::basis::SubjectKey, DispatchId>,
     observations: BTreeMap<DispatchId, ObservedResult>,
     prepared: BTreeMap<ForkId, PreparedFork>,
     bound: BTreeMap<ForkId, TrajectoryId>,
     fork_of: BTreeMap<TrajectoryId, ForkId>,
     child_returns: Vec<ReturnedChild>,
-    submitted_returns: BTreeMap<ChildReturnId, SubmittedReturn>,
-    rejected_returns: BTreeMap<ChildReturnId, RejectedReturn>,
+    /// Values returned per child so far: the occurrence its next crossing mints.
+    returns_by: BTreeMap<TrajectoryId, u32>,
+    /// Children addressed again since their latest return: what such a child says next is a
+    /// new crossing, whatever its bytes, because it may answer a different errand at a
+    /// different label.
+    resumed_since_return: BTreeSet<TrajectoryId>,
+    /// The label each resumed child last inherited from its parent, folded beside its fork seed.
+    resumed: BTreeMap<TrajectoryId, Label>,
     ended: BTreeSet<TrajectoryId>,
     bound_sanitizers: BTreeMap<DispatchId, SanitizerName>,
     /// The live derived candidate of each subject that has one. A successful hop
@@ -231,15 +205,16 @@ impl Projection {
             dispatch_calls: BTreeMap::new(),
             receiving_bounds: BTreeMap::new(),
             accepted_narrowings: BTreeMap::new(),
-            dispatch_resolutions: BTreeMap::new(),
+            dispatch_evidence: BTreeMap::new(),
             subject_dispatches: BTreeMap::new(),
             observations: BTreeMap::new(),
             prepared: BTreeMap::new(),
             bound: BTreeMap::new(),
             fork_of: BTreeMap::new(),
             child_returns: Vec::new(),
-            submitted_returns: BTreeMap::new(),
-            rejected_returns: BTreeMap::new(),
+            returns_by: BTreeMap::new(),
+            resumed_since_return: BTreeSet::new(),
+            resumed: BTreeMap::new(),
             ended: BTreeSet::new(),
             bound_sanitizers: BTreeMap::new(),
             candidates: BTreeMap::new(),
@@ -270,10 +245,6 @@ impl Projection {
     /// Fold one record into every view. The one fold: replay, cache rebuild, and the advance of a
     /// held view all reach the log through this function, so no second fold can drift from it.
     pub(crate) fn fold(&mut self, fact: &Fact) {
-        let pinned_receiving: Option<Label> = match fact {
-            Fact::ReturnSubmitted { parent, .. } => Some(self.fold_for(parent)),
-            _ => None,
-        };
         let Projection {
             revision: _,
             values,
@@ -286,15 +257,16 @@ impl Projection {
             dispatch_calls,
             receiving_bounds,
             accepted_narrowings,
-            dispatch_resolutions,
+            dispatch_evidence,
             subject_dispatches,
             observations,
             prepared,
             bound,
             fork_of,
             child_returns,
-            submitted_returns,
-            rejected_returns,
+            returns_by,
+            resumed_since_return,
+            resumed,
             ended,
             bound_sanitizers,
             candidates,
@@ -327,7 +299,7 @@ impl Projection {
                     subject,
                     plan,
                     basis,
-                    resolutions,
+                    evidence,
                     ..
                 } => {
                     offers.insert(
@@ -339,7 +311,7 @@ impl Projection {
                             subject: subject.clone(),
                             plan: plan.clone(),
                             basis: *basis,
-                            resolutions: resolutions.clone(),
+                            evidence: evidence.clone(),
                             end: None,
                         },
                     );
@@ -368,8 +340,9 @@ impl Projection {
                     acceptance,
                     rulings,
                     sanitizer,
+                    return_policy,
                     basis,
-                    resolutions,
+                    evidence,
                 } => {
                     approvals.insert(
                         *offer,
@@ -380,8 +353,9 @@ impl Projection {
                             acceptance: acceptance.clone(),
                             rulings: rulings.clone(),
                             sanitizer: sanitizer.clone(),
+                            return_policy: return_policy.clone(),
                             basis: *basis,
-                            resolutions: resolutions.clone(),
+                            evidence: evidence.clone(),
                         },
                     );
                 }
@@ -391,7 +365,7 @@ impl Projection {
                     proposals,
                     spawn,
                     released,
-                    resolutions,
+                    evidence,
                 } => {
                     decided.insert(
                         batch.clone(),
@@ -401,7 +375,7 @@ impl Projection {
                             proposals: proposals.clone(),
                             spawn: *spawn,
                             released: released.clone(),
-                            resolutions: resolutions.clone(),
+                            evidence: evidence.clone(),
                         },
                     );
                 }
@@ -443,19 +417,17 @@ impl Projection {
                     receiving,
                     proposed_effects,
                     annotation,
-                    memberships,
                     subject,
-                    resolutions,
+                    evidence,
                     proposed_label: _,
                 } => {
                     dispatch_calls.insert(
                         dispatch.clone(),
                         ResolvedCall::new_keyed(tool.clone(), *declaration, arguments.clone())
-                            .with_annotation(annotation.clone())
-                            .with_memberships(memberships.clone()),
+                            .with_annotation(annotation.clone()),
                     );
                     receiving_bounds.insert(dispatch.clone(), receiving.clone());
-                    dispatch_resolutions.insert(dispatch.clone(), resolutions.clone());
+                    dispatch_evidence.insert(dispatch.clone(), evidence.clone());
                     subject_dispatches.insert(subject.clone(), dispatch.clone());
                     open.insert(dispatch.clone());
                     reservations.insert(dispatch.clone(), proposed_effects.clone());
@@ -497,7 +469,7 @@ impl Projection {
                 } => {
                     accepted_narrowings.insert(dispatch.clone(), narrowing.clone());
                 }
-                Fact::Ruling { .. } | Fact::ChildReturnAcceptance { .. } => {}
+                Fact::Ruling { .. } => {}
                 Fact::Denial {
                     trajectory,
                     digest,
@@ -517,21 +489,21 @@ impl Projection {
                 }
                 Fact::CandidateDerived {
                     subject,
-                    via,
                     derived,
                     lineage,
-                    resolutions,
+                    evidence,
                     ..
                 } => {
                     candidates.insert(
                         subject.clone(),
                         RecordedCandidate {
-                            via: via.clone(),
                             derived: derived.clone(),
                             lineage: lineage.clone(),
-                            resolutions: match derived {
-                                DerivedCandidate::Call { .. } => resolutions.clone(),
-                                DerivedCandidate::Result { .. } | DerivedCandidate::Return { .. } => Vec::new(),
+                            evidence: match derived {
+                                DerivedCandidate::Call { .. } => evidence.clone(),
+                                DerivedCandidate::Result { .. } | DerivedCandidate::Return { .. } => {
+                                    AudienceEvidence::default()
+                                }
                             },
                         },
                     );
@@ -542,7 +514,6 @@ impl Projection {
                     fork,
                     snapshot,
                     return_policy,
-                    shape,
                 } => {
                     prepared.insert(
                         fork.clone(),
@@ -550,7 +521,6 @@ impl Projection {
                             parent: trajectory.clone(),
                             snapshot: snapshot.clone(),
                             return_policy: return_policy.clone(),
-                            shape: shape.clone(),
                             denials: denials.get(trajectory).cloned().unwrap_or_default(),
                         },
                     );
@@ -565,54 +535,24 @@ impl Projection {
                     }
                 }
                 Fact::ChildReturn { id, value, .. } => {
-                    ended.insert(id.child().clone());
                     child_returns.push(ReturnedChild {
                         id: id.clone(),
                         value: value.clone(),
                     });
+                    *returns_by.entry(id.child().clone()).or_insert(0) += 1;
+                    resumed_since_return.remove(id.child());
                     candidates.remove(&SubjectKey::Return(id.clone()));
-                    if let Some(submitted) = submitted_returns.get_mut(id) {
-                        submitted.body = None;
-                    }
-                }
-                Fact::ReturnSubmitted {
-                    id,
-                    fork,
-                    parent,
-                    digest,
-                    body,
-                    policy,
-                    ..
-                } => {
-                    ended.insert(id.child().clone());
-                    submitted_returns.insert(
-                        id.clone(),
-                        SubmittedReturn {
-                            fork: fork.clone(),
-                            parent: parent.clone(),
-                            digest: *digest,
-                            body: Some(body.clone()),
-                            policy: policy.clone(),
-                            receiving: pinned_receiving
-                                .clone()
-                                .expect("a submission's receiving bound was read above"),
-                        },
-                    );
-                }
-                Fact::ReturnRejected { id, digest, reason, .. } => {
-                    ended.insert(id.child().clone());
-                    rejected_returns.insert(
-                        id.clone(),
-                        RejectedReturn {
-                            digest: *digest,
-                            reason: reason.clone(),
-                        },
-                    );
                 }
                 Fact::Boundary { trajectory, kind } => match kind {
                     BoundaryKind::Merge { .. } => {}
                     BoundaryKind::VoidReturn => {
                         ended.insert(trajectory.clone());
+                    }
+                    BoundaryKind::Resume { seed } => {
+                        resumed.insert(trajectory.clone(), seed.clone());
+                        resumed_since_return.insert(trajectory.clone());
+                        let occurrence = returns_by.get(trajectory).copied().unwrap_or(0);
+                        candidates.remove(&SubjectKey::Return(ChildReturnId::new(trajectory.clone(), occurrence)));
                     }
                 },
             }
@@ -678,6 +618,9 @@ impl Projection {
 
     fn fold_for(&self, trajectory: &TrajectoryId) -> Label {
         let mut fold = self.opened_base(trajectory);
+        if let Some(seed) = self.resumed.get(trajectory) {
+            fold.fold(seed);
+        }
         for (_, label) in self.basis_sources(trajectory) {
             fold.fold(label);
         }
@@ -1025,16 +968,6 @@ impl Views<'_> {
             .map(|prepared| &prepared.return_policy)
     }
 
-    /// The structured-return shape the child's fork froze: every non-void submission
-    /// validates against exactly this stored form. `None` for an unshaped or unforked child.
-    pub(crate) fn return_shape_of(&self, child: &TrajectoryId) -> Option<&crate::shape::ReturnShape> {
-        self.projection
-            .fork_of
-            .get(child)
-            .and_then(|fork| self.projection.prepared.get(fork))
-            .and_then(|prepared| prepared.shape.as_ref())
-    }
-
     pub(crate) fn child_return(&self, id: &ChildReturnId) -> Option<&LabeledValue> {
         self.projection
             .child_returns
@@ -1043,40 +976,40 @@ impl Views<'_> {
             .map(|returned| &returned.value)
     }
 
-    /// How many values `child` has already returned. Nonzero refuses a further return (a child
-    /// returns at most once); the count also mints the crossing's occurrence.
-    pub(crate) fn returns_by(&self, child: &TrajectoryId) -> u32 {
+    /// The value `child` crossed most recently, if any: a stop repeating it is a replay of that
+    /// crossing, never a second one. A child addressed again since has no replayable return:
+    /// what it says next crosses anew, at the label it stands at then.
+    pub(crate) fn latest_return(&self, child: &TrajectoryId) -> Option<&LabeledValue> {
+        if self.projection.resumed_since_return.contains(child) {
+            return None;
+        }
         self.projection
             .child_returns
             .iter()
-            .filter(|returned| returned.id.child() == child)
-            .count() as u32
+            .rev()
+            .find(|returned| returned.id.child() == child)
+            .map(|returned| &returned.value)
     }
 
-    /// Has this branch ended its errand? True after its one value crossing, its void
-    /// terminal, a durable submission that transferred custody, or a terminal
-    /// rejection. The one replay-derived ended-branch predicate: an ended branch is
-    /// closed to new turns, further returns, and forking, and every gate reads this — never the
-    /// raw counts.
+    /// How many values `child` has already returned — the occurrence its next crossing mints.
+    pub(crate) fn returns_by(&self, child: &TrajectoryId) -> u32 {
+        self.projection.returns_by.get(child).copied().unwrap_or(0)
+    }
+
+    /// The return policy a fork this trajectory prepared carries, before a child is bound to it.
+    pub(crate) fn prepared_return_policy(&self, fork: &ForkId) -> Option<&ReturnPolicy> {
+        self.projection
+            .prepared
+            .get(fork)
+            .map(|prepared| &prepared.return_policy)
+    }
+
+    /// Has this branch ended its errand by its void terminal? A value crossing ends nothing:
+    /// a child returns again after the parent addresses it again. The one replay-derived
+    /// ended-branch predicate: an ended branch is closed to new turns, further returns, and
+    /// forking, and every gate reads this — never the raw counts.
     pub fn has_ended(&self, branch: &TrajectoryId) -> bool {
         self.projection.ended.contains(branch)
-    }
-
-    pub(crate) fn submitted_return(&self, id: &ChildReturnId) -> Option<&SubmittedReturn> {
-        self.projection.submitted_returns.get(id)
-    }
-
-    /// The submission still awaiting its crossing: submitted, and no crossing of this identity
-    /// has consumed it yet. The return lifecycle plans and validates against exactly this.
-    pub(crate) fn pending_return(&self, id: &ChildReturnId) -> Option<&SubmittedReturn> {
-        if self.child_return(id).is_some() {
-            return None;
-        }
-        self.projection.submitted_returns.get(id)
-    }
-
-    pub(crate) fn rejected_return(&self, id: &ChildReturnId) -> Option<&RejectedReturn> {
-        self.projection.rejected_returns.get(id)
     }
 
     /// The fork that opened this child through the two-stage binding. `None` for a
@@ -1182,12 +1115,6 @@ impl Views<'_> {
         self.projection.candidates.get(subject).map(|held| &held.derived)
     }
 
-    /// The transformer this subject's live candidate claims: the sanitizer hop that
-    /// derived it. The crossing paths branch on it.
-    pub(crate) fn candidate_via(&self, subject: &SubjectKey) -> Option<&crate::candidate::DerivedVia> {
-        self.projection.candidates.get(subject).map(|held| &held.via)
-    }
-
     /// Where this call subject's candidate stands: the label its substituted bytes
     /// carry and the sanitizers its chain has spent. A subject no hop has touched stands at the
     /// origin, so a first proposal and an unspent chain read alike.
@@ -1198,19 +1125,19 @@ impl Views<'_> {
     /// What the call this subject stands for is to its deployment: the one proposal its batch's
     /// decision marked as the context-controlled spawn, or an ordinary call. A subject
     /// of no decided batch — a stage that is not a call's — is ordinary.
-    pub(crate) fn call_role(&self, subject: &SubjectKey) -> crate::plan::CallRole {
+    pub(crate) fn call_role(&self, subject: &SubjectKey) -> crate::check::CallRole {
         match subject {
             SubjectKey::Call { batch, position, .. }
                 if self.decided_batch(batch).is_some_and(|decided| {
                     decided.spawn == Some(crate::transition::SpawnMark::at(*position as usize))
                 }) =>
             {
-                crate::plan::CallRole::MarkedSpawn
+                crate::check::CallRole::MarkedSpawn
             }
             SubjectKey::Call { .. }
             | SubjectKey::Approval(_)
             | SubjectKey::ConfinedResult(_)
-            | SubjectKey::Return(_) => crate::plan::CallRole::Ordinary,
+            | SubjectKey::Return(_) => crate::check::CallRole::Ordinary,
         }
     }
 
@@ -1236,14 +1163,18 @@ impl Views<'_> {
         proposal_of(&self.projection.decided, subject)
     }
 
-    /// The group resolutions the hop that derived this subject's candidate consumed; empty for a
-    /// subject no hop has touched.
-    pub(crate) fn candidate_resolutions(&self, subject: &SubjectKey) -> &[GroupResolution] {
+    /// The pinned audience evidence the hop that derived this subject's candidate consumed;
+    /// empty for a subject no hop has touched.
+    pub(crate) fn candidate_evidence(&self, subject: &SubjectKey) -> &AudienceEvidence {
+        const NONE: &AudienceEvidence = &AudienceEvidence {
+            sources: Vec::new(),
+            lookups: Vec::new(),
+            identity: Vec::new(),
+        };
         self.projection
             .candidates
             .get(subject)
-            .map(|held| held.resolutions.as_slice())
-            .unwrap_or_default()
+            .map_or(NONE, |held| &held.evidence)
     }
 
     /// The call this subject stands on now: the candidate an input hop derived, or the proposal
@@ -1270,8 +1201,8 @@ impl Views<'_> {
         self.projection.receiving_bounds.get(dispatch)
     }
 
-    pub(crate) fn dispatch_resolutions(&self, dispatch: &DispatchId) -> Option<&[GroupResolution]> {
-        self.projection.dispatch_resolutions.get(dispatch).map(Vec::as_slice)
+    pub(crate) fn dispatch_evidence(&self, dispatch: &DispatchId) -> Option<&AudienceEvidence> {
+        self.projection.dispatch_evidence.get(dispatch)
     }
 
     /// The dispatch this subject's decision released, if one did. A repeat answers with
@@ -1306,7 +1237,7 @@ mod tests {
     }
 
     fn base() -> Label {
-        Label::new(Trust::new(3), Audience::Public)
+        Label::new(Trust::new(3), Audience::public())
     }
 
     fn opened(t: &str) -> Fact {
@@ -1330,10 +1261,10 @@ mod tests {
             !projection.admission_moves_label(&traj("a"), &identity().label),
             "a value at the trajectory's own label folds to the same label"
         );
-        assert!(projection.admission_moves_label(&traj("a"), &labeled(1, Audience::Public).label));
+        assert!(projection.admission_moves_label(&traj("a"), &labeled(1, Audience::public()).label));
         assert!(projection.admission_moves_label(
             &traj("a"),
-            &labeled(3, Audience::restricted([ReaderId::new("internal")])).label
+            &labeled(3, Audience::restricted([ReaderId::new("insider")])).label
         ));
     }
 
@@ -1360,7 +1291,7 @@ mod tests {
                 proposals: vec![call.clone().with_annotation(Some(pin))],
                 spawn: None,
                 released: vec![],
-                resolutions: vec![],
+                evidence: crate::audience::AudienceEvidence::default(),
             },
         ];
         assert_eq!(
@@ -1387,7 +1318,7 @@ mod tests {
             proposals: vec![proposal("first"), proposal("second")],
             spawn: None,
             released: vec![],
-            resolutions: vec![],
+            evidence: crate::audience::AudienceEvidence::default(),
         });
         let projection = build(&log);
         let subject = |trajectory: &str, position: u32| SubjectKey::Call {
@@ -1449,8 +1380,10 @@ mod tests {
                 trajectory: traj(parent),
                 fork: fork.clone(),
                 snapshot,
-                return_policy: ReturnPolicy::Raw,
-                shape: None,
+                return_policy: ReturnPolicy {
+                    floor: Label::top(),
+                    sanitizer: None,
+                },
             },
             Fact::ForkOpened {
                 trajectory: traj(child),
@@ -1469,12 +1402,12 @@ mod tests {
         let mut log = vec![opened("a")];
         log.extend(fork_pair("a", "b", ForkSnapshot::freeze(base(), [])));
         log.push(admit("a", labeled(1, internal.clone())));
-        log.push(admit("b", labeled(3, Audience::Public)));
+        log.push(admit("b", labeled(3, Audience::public())));
         let p = build(&log);
         assert_eq!(p.view(&traj("a")).current_label(), Label::new(Trust::new(1), internal));
         assert_eq!(
             p.view(&traj("b")).current_label(),
-            Label::new(Trust::new(3), Audience::Public)
+            Label::new(Trust::new(3), Audience::public())
         );
         assert!(!p.is_opened(&traj("c")));
     }
@@ -1493,9 +1426,8 @@ mod tests {
                 receiving: Label::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
                 annotation: None,
-                memberships: Vec::new(),
                 subject: crate::basis::fixture_subject(&traj("a")),
-                resolutions: vec![],
+                evidence: crate::audience::AudienceEvidence::default(),
             },
             Fact::DispatchClosed {
                 trajectory: traj("a"),
@@ -1524,9 +1456,8 @@ mod tests {
                 receiving: Label::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
                 annotation: None,
-                memberships: Vec::new(),
                 subject: crate::basis::fixture_subject(&traj("a")),
-                resolutions: vec![],
+                evidence: crate::audience::AudienceEvidence::default(),
             },
             Fact::DispatchClosed {
                 trajectory: traj("a"),
@@ -1554,9 +1485,8 @@ mod tests {
                 receiving: Label::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
                 annotation: None,
-                memberships: Vec::new(),
                 subject: crate::basis::fixture_subject(&traj("a")),
-                resolutions: vec![],
+                evidence: crate::audience::AudienceEvidence::default(),
             },
             Fact::DispatchClosed {
                 trajectory: traj("a"),
@@ -1640,7 +1570,7 @@ mod tests {
     fn a_cold_replay_reports_the_ended_trajectory() {
         let log = vec![
             opened("a"),
-            admit("a", labeled(2, Audience::Public)),
+            admit("a", labeled(2, Audience::public())),
             Fact::Boundary {
                 trajectory: traj("a"),
                 kind: BoundaryKind::VoidReturn,
@@ -1663,20 +1593,19 @@ mod tests {
                 receiving: Label::top(),
                 proposed_effects: EffectSet::new([]).unwrap(),
                 annotation: None,
-                memberships: Vec::new(),
                 subject: crate::basis::fixture_subject(&traj("a")),
-                resolutions: vec![],
+                evidence: crate::audience::AudienceEvidence::default(),
             },
             Fact::ValueAdmitted {
                 trajectory: traj("a"),
-                value: labeled(1, Audience::Public),
+                value: labeled(1, Audience::public()),
                 provenance: Provenance::ToolResult {
                     dispatch: dispatch("a"),
                 },
             },
             Fact::ValueAdmitted {
                 trajectory: traj("a"),
-                value: labeled(1, Audience::Public),
+                value: labeled(1, Audience::public()),
                 provenance: Provenance::ChildReturn {
                     child: traj("kid"),
                     id: ChildReturnId::new(traj("kid"), 0),
@@ -1703,7 +1632,7 @@ mod tests {
     #[test]
     fn a_dangling_basis_source_folds_fail_closed_to_bottom() {
         let mut log = vec![opened("a")];
-        let ghost = labeled(2, Audience::Public);
+        let ghost = labeled(2, Audience::public());
         log.extend(fork_pair(
             "a",
             "b",
@@ -1711,14 +1640,24 @@ mod tests {
         ));
         let fold = build(&log).view(&traj("b")).current_label();
         assert_eq!(fold, Label::new(Trust::new(0), Audience::restricted([])));
-        assert!(!fold.covers(&Audience::restricted([ReaderId::new("anyone")])));
+        let within = crate::label::WithinAssertions::default();
+        let providers = std::collections::BTreeSet::new();
+        let expansions = crate::label::Expansions::default();
+        let context = crate::label::MembershipContext::new(&within, &providers, &expansions);
+        assert_eq!(
+            fold.covers(
+                &crate::label::DeclaredAudience::restricted([ReaderId::new("anyone")]),
+                &context,
+            ),
+            crate::label::Evaluation::Fails,
+        );
     }
 
     #[test]
     fn value_ids_index_in_log_order() {
         let log = vec![
-            admit("a", labeled(3, Audience::Public)),
-            admit("a", labeled(1, Audience::Public)),
+            admit("a", labeled(3, Audience::public())),
+            admit("a", labeled(1, Audience::public())),
         ];
         let p = build(&log);
         assert_eq!(p.value_label(ValueId::new(0)).unwrap().trust, Trust::new(3));

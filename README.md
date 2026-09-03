@@ -64,21 +64,28 @@ The Claude Code plugin is a playground for the model, not the product. It is the
 fastest way to watch a policy make a decision on real work:
 
 ```sh
-cargo install --path appa-runtime --force
-plugin=$(mktemp -d)/bundle
-sh scripts/appa-stage-plugin-bundle.sh "$plugin"
-appa init claude-code --plugin-source "$plugin"
+curl -fsSL https://openappa.com/install.sh | sh
+~/.local/bin/appa init claude-code
 ```
 
-A release binary carries the digest of its own release's plugin and needs no
-`--plugin-source`; a build from a checkout has no such digest, so it is given
-the bundle staged from that same checkout.
+The installer verifies the checksum of the release binary for Linux or macOS
+and places it in `~/.local/bin`. Windows users unpack the zip from the
+[releases page](https://github.com/archestra-ai/OpenAPPA/releases). From a
+checkout, `cargo install --path appa-runtime --force` builds the binary
+instead.
+
+A release binary resolves the plugin from its baked release tag and digest. A
+clean checkout build resolves the plugin from its baked Git commit and verifies
+the canonical plugin-tree digest; a dirty plugin build uses that exact checkout
+only while its bytes still match the build.
 
 The native `appa` command installs the plugin, the runtime deployment,
 statusline, and `clappa` launcher. It replaces an existing APPA plugin instead
 of stacking a second copy and preserves an existing policy or custom
-statusline. Start `clappa`, then run `/appa-guide init` to bring the
-session's MCP servers into the policy. Plain `claude` sessions stay untouched.
+statusline. Fresh policies use a fail-closed Claude annotator as a compatibility
+net for MCP tools they do not yet name. Start `clappa`, then run
+`/appa-guide init` to replace that fallback with exact connector contracts.
+Plain `claude` sessions stay untouched.
 
 ![A protected Claude Code session refuses to post content from a private meeting recording to a public GitHub repo, and explains why](website/public/images/claude-code-blocked-flow.png)
 

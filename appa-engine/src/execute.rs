@@ -4,9 +4,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::check::Gap;
-use crate::groups::Expansions;
+use crate::label::{Evaluation, MembershipContext};
 use crate::names::AuthorityName;
-use crate::plan::covers_gap;
+use crate::plan::{NeededAtoms, gap_cover};
 use crate::registry::Registry;
 
 /// One authority's approval of the exact canonical call an offer names.
@@ -40,6 +40,8 @@ pub enum PlanError {
     ReviewMismatch,
     #[error("this authority response was approved for a different offer")]
     EvidenceOfferMismatch,
+    #[error("the supplied evidence leaves a mandate's audience membership undecided")]
+    MembershipNeeded(crate::label::MembershipNeeded),
 }
 
 /// The mandate envelope of a released block: no ruling claims a gap the block
@@ -51,8 +53,9 @@ pub(crate) fn rulings_cover<'a>(
     contract: &crate::contract::ToolAnnotation,
     block: &crate::check::RawBlock,
     rulings: impl Iterator<Item = (&'a AuthorityName, &'a [Gap])> + Clone,
-    expansions: &Expansions,
+    context: &MembershipContext<'_>,
 ) -> Result<(), PlanError> {
+    let mut needs = NeededAtoms::default();
     for (authority, covers) in rulings.clone() {
         let registered = registry
             .authority(authority)
@@ -61,10 +64,16 @@ pub(crate) fn rulings_cover<'a>(
             if !block.requirement_gaps.contains(gap) {
                 return Err(PlanError::RulingClaimsAbsentGap(gap.clone()));
             }
-            if !covers_gap(registered, gap, &contract.tags, expansions) {
-                return Err(PlanError::RulingExceedsMandate {
-                    authority: authority.as_str().to_string(),
-                });
+            match gap_cover(registered, gap, &contract.tags, context) {
+                Evaluation::Holds => {}
+                Evaluation::Fails => {
+                    return Err(PlanError::RulingExceedsMandate {
+                        authority: authority.as_str().to_string(),
+                    });
+                }
+                // An undecided cover is a missing answer, never an exceeded mandate: the
+                // atoms aggregate and refuse after every definitive judgment has its say.
+                Evaluation::Needs(needed) => needs.absorb(needed),
             }
         }
     }
@@ -73,7 +82,7 @@ pub(crate) fn rulings_cover<'a>(
             return Err(PlanError::GapUncovered(gap.clone()));
         }
     }
-    Ok(())
+    needs.refuse_if_any().map_err(PlanError::MembershipNeeded)
 }
 
 #[cfg(test)]
@@ -143,7 +152,7 @@ mod tests {
             annotators: vec![],
             authorities: vec![officer, attester],
             sanitizers: vec![],
-            membership: None,
+            audience: crate::audience::AudienceConfig::default(),
         })
         .unwrap()
     }
@@ -158,12 +167,13 @@ mod tests {
     fn envelope(authority: &str, covers: &[Gap], block: &crate::check::RawBlock) -> Result<(), PlanError> {
         let registry = registry();
         let name = AuthorityName::new(authority);
+        let parts = crate::label::TestContext::default();
         rulings_cover(
             &registry,
             registry.tool(&ToolName::new("wire")).unwrap().declared().unwrap(),
             block,
             [(&name, covers)].into_iter(),
-            &Expansions::default(),
+            &parts.context(),
         )
     }
 
@@ -175,12 +185,13 @@ mod tests {
     #[test]
     fn a_gap_no_ruling_claims_is_refused() {
         let registry = registry();
+        let parts = crate::label::TestContext::default();
         let refused = rulings_cover(
             &registry,
             registry.tool(&ToolName::new("wire")).unwrap().declared().unwrap(),
             &block(vec![floor_gap()]),
             std::iter::empty(),
-            &Expansions::default(),
+            &parts.context(),
         );
         assert_eq!(refused, Err(PlanError::GapUncovered(floor_gap())));
     }

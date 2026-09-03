@@ -2,11 +2,11 @@
 
 use thiserror::Error;
 
+use crate::audience::AudienceEvidence;
 use crate::candidate::{ConfinedFrom, DerivedCandidate, SanitizerLineage};
 use crate::check::Narrowing;
 use crate::fact::{CloseOutcome, EffectSet, Fact, ObservedResult};
-use crate::groups::Expansions;
-use crate::label::Label;
+use crate::label::{Label, MembershipContext};
 use crate::names::SanitizerName;
 use crate::projection::Views;
 use crate::registry::Registry;
@@ -52,6 +52,8 @@ pub enum AdmitError {
     SanitizerBindingMismatch,
     #[error("the bound sanitizer is not registered for output, or the raw result does not satisfy its `from`")]
     SanitizerTransitionUnmet,
+    #[error("the bound sanitizer's transition awaits membership answers")]
+    MembershipNeeded(crate::label::MembershipNeeded),
     #[error(
         "the derivation still narrows the bound its dispatch pinned: the residual is the agent's to accept or improve at the confined stage"
     )]
@@ -110,22 +112,22 @@ pub(crate) fn bound_candidate(
     sanitizer: &SanitizerName,
     raw_digest: RawResultDigest,
     body: ValueBody,
-    expansions: &Expansions,
-) -> Result<(crate::authority::Transition, DerivedCandidate, SanitizerLineage), AdmitError> {
+    context: &MembershipContext<'_>,
+) -> Result<(DerivedCandidate, SanitizerLineage), AdmitError> {
     if views.bound_sanitizer(dispatch) != Some(sanitizer) {
         return Err(AdmitError::SanitizerBindingMismatch);
     }
     let registered = registry
         .sanitizer(sanitizer)
         .ok_or_else(|| AdmitError::UnknownTool(sanitizer.as_str().to_string()))?;
-    let raw_label = contract.output_label(expansions);
+    let raw_label = contract.output_label();
     let derived = registered
-        .derive_output(&raw_label, &contract.tags, expansions)
+        .derive_output(&raw_label, &contract.tags, context)
+        .map_err(AdmitError::MembershipNeeded)?
         .ok_or(AdmitError::SanitizerTransitionUnmet)?;
     let receiving = views.receiving_bound(dispatch).ok_or(AdmitError::NotOpen)?;
     let residual = confined_residual(receiving, &derived);
     Ok((
-        registered.transition.resolve(expansions),
         DerivedCandidate::Result {
             dispatch: dispatch.clone(),
             source: raw_digest,
@@ -145,7 +147,8 @@ pub(crate) fn admit_result(
     dispatch: &DispatchId,
     call: &ResolvedCall,
     admission: ResultAdmission,
-    expansions: &Expansions,
+    context: &MembershipContext<'_>,
+    evidence: &AudienceEvidence,
 ) -> Result<Vec<Fact>, AdmitError> {
     let contract = registry
         .annotation_of(call)
@@ -179,7 +182,7 @@ pub(crate) fn admit_result(
     }
 
     let trajectory = views.trajectory().clone();
-    let output_label = || contract.output_label(expansions);
+    let output_label = || contract.output_label();
     let close_success = || Fact::DispatchClosed {
         trajectory: trajectory.clone(),
         dispatch: dispatch.clone(),
@@ -226,8 +229,8 @@ pub(crate) fn admit_result(
             sanitizer,
             raw_digest,
         } => {
-            let (transition, derived, lineage) = bound_candidate(
-                registry, views, dispatch, &contract, &sanitizer, raw_digest, body, expansions,
+            let (derived, lineage) = bound_candidate(
+                registry, views, dispatch, &contract, &sanitizer, raw_digest, body, context,
             )?;
             let DerivedCandidate::Result { value, residual, .. } = &derived else {
                 unreachable!("a bound output sanitizer derives a confined result")
@@ -241,13 +244,10 @@ pub(crate) fn admit_result(
                 Fact::CandidateDerived {
                     trajectory: trajectory.clone(),
                     subject: crate::basis::SubjectKey::ConfinedResult(dispatch.clone()),
-                    via: crate::candidate::DerivedVia {
-                        name: sanitizer,
-                        transition,
-                    },
+                    sanitizer,
                     derived,
                     lineage,
-                    resolutions: registry.resolutions(expansions),
+                    evidence: evidence.clone(),
                 },
                 admit_derived(value),
             ]
@@ -297,7 +297,7 @@ mod tests {
     use crate::authority::{DeclaredTransition, Sanitizer, SanitizerPoints, Scope};
     use crate::contract::{Delta, ToolAnnotation, ToolDeclaration};
     use crate::fact::EffectKind;
-    use crate::groups::DeclaredAudience;
+    use crate::label::DeclaredAudience;
     use crate::label::{Audience, ReaderId, Trust};
     use crate::projection::Projection;
     use crate::registry::{RegistryConfig, TrustChain};
@@ -306,8 +306,27 @@ mod tests {
 
     const SUSPICIOUS: Trust = Trust::new(0);
 
+    fn admit(
+        registry: &Registry,
+        views: &Views,
+        dispatch: &DispatchId,
+        call: &ResolvedCall,
+        admission: ResultAdmission,
+    ) -> Result<Vec<Fact>, AdmitError> {
+        let parts = crate::label::TestContext::default();
+        admit_result(
+            registry,
+            views,
+            dispatch,
+            call,
+            admission,
+            &parts.context(),
+            &AudienceEvidence::default(),
+        )
+    }
+
     fn internal() -> Audience {
-        Audience::restricted([ReaderId::new("internal")])
+        Audience::restricted([ReaderId::new("insider")])
     }
 
     fn traj() -> TrajectoryId {
@@ -315,7 +334,7 @@ mod tests {
     }
 
     fn opened() -> Fact {
-        crate::profile::opening_at(traj(), Label::new(Trust::new(1), Audience::Public))
+        crate::profile::opening_at(traj(), Label::new(Trust::new(1), Audience::public()))
     }
 
     fn registry() -> Registry {
@@ -339,7 +358,7 @@ mod tests {
             },
             transition: DeclaredTransition::Audience {
                 from_includes: DeclaredAudience::literal(internal()),
-                to: DeclaredAudience::literal(Audience::Public),
+                to: DeclaredAudience::literal(Audience::public()),
             },
             scope: Scope::default(),
             hint: None,
@@ -351,8 +370,8 @@ mod tests {
                 output: true,
             },
             transition: DeclaredTransition::Audience {
-                from_includes: DeclaredAudience::literal(Audience::restricted([ReaderId::new("finance")])),
-                to: DeclaredAudience::literal(Audience::Public),
+                from_includes: DeclaredAudience::restricted([ReaderId::new("finance")]),
+                to: DeclaredAudience::literal(Audience::public()),
             },
             scope: Scope::default(),
             hint: None,
@@ -405,7 +424,7 @@ mod tests {
             }],
             authorities: vec![],
             sanitizers: vec![out_san, finance_san],
-            membership: None,
+            audience: crate::audience::AudienceConfig::default(),
         })
         .unwrap()
     }
@@ -430,9 +449,8 @@ mod tests {
             receiving: Label::top(),
             proposed_effects: EffectSet::new([EffectKind::new("read")]).unwrap(),
             annotation: call.annotation().cloned(),
-            memberships: Vec::new(),
             subject: crate::basis::fixture_subject(&traj()),
-            resolutions: vec![],
+            evidence: crate::audience::AudienceEvidence::default(),
         };
         (record, dispatch)
     }
@@ -467,7 +485,7 @@ mod tests {
         let (log, dispatch) = open_log(&call);
         let p = views_of(&log);
         let t = traj();
-        let batch = admit_result(
+        let batch = admit(
             &reg,
             &p.view(&t),
             &dispatch,
@@ -475,7 +493,6 @@ mod tests {
             ResultAdmission::SuccessRaw {
                 body: ValueBody::new("ticket #7"),
             },
-            &Expansions::default(),
         )
         .unwrap();
         assert!(matches!(
@@ -498,15 +515,7 @@ mod tests {
         let (log, dispatch) = open_log(&call);
         let p = views_of(&log);
         let t = traj();
-        let batch = admit_result(
-            &reg,
-            &p.view(&t),
-            &dispatch,
-            &call,
-            ResultAdmission::Failure,
-            &Expansions::default(),
-        )
-        .unwrap();
+        let batch = admit(&reg, &p.view(&t), &dispatch, &call, ResultAdmission::Failure).unwrap();
         assert_eq!(batch.len(), 1);
         assert!(matches!(
             &batch[0],
@@ -529,26 +538,12 @@ mod tests {
             crate::params::test_arguments(&json!({ "x": 1 })),
         );
         assert_eq!(
-            admit_result(
-                &reg,
-                &p.view(&t),
-                &dispatch,
-                &other,
-                ResultAdmission::SuccessNoValue,
-                &Expansions::default()
-            ),
+            admit(&reg, &p.view(&t), &dispatch, &other, ResultAdmission::SuccessNoValue,),
             Err(AdmitError::DigestMismatch)
         );
         let empty = views_of(&[opened()]);
         assert_eq!(
-            admit_result(
-                &reg,
-                &empty.view(&t),
-                &dispatch,
-                &call,
-                ResultAdmission::SuccessNoValue,
-                &Expansions::default()
-            ),
+            admit(&reg, &empty.view(&t), &dispatch, &call, ResultAdmission::SuccessNoValue,),
             Err(AdmitError::NotOpen)
         );
     }
@@ -571,13 +566,12 @@ mod tests {
         let (log, dispatch) = open_log(&call);
         let p = views_of(&log);
         assert_eq!(
-            admit_result(
+            admit(
                 &reg,
                 &p.view(&t),
                 &dispatch,
                 &call,
                 ResultAdmission::CandidateAccepted { offer: offer() },
-                &Expansions::default()
             ),
             Err(AdmitError::NoCandidate)
         );
@@ -604,29 +598,15 @@ mod tests {
         );
 
         assert_eq!(
-            admit_result(
-                &reg,
-                &p.view(&t),
-                &dispatch,
-                &call,
-                ResultAdmission::Failure,
-                &Expansions::default()
-            ),
+            admit(&reg, &p.view(&t), &dispatch, &call, ResultAdmission::Failure,),
             Err(AdmitError::SuccessContradicted)
         );
         assert_eq!(
-            admit_result(
-                &reg,
-                &p.view(&t),
-                &dispatch,
-                &call,
-                ResultAdmission::Indeterminate,
-                &Expansions::default()
-            ),
+            admit(&reg, &p.view(&t), &dispatch, &call, ResultAdmission::Indeterminate,),
             Err(AdmitError::SuccessContradicted)
         );
 
-        let batch = admit_result(
+        let batch = admit(
             &reg,
             &p.view(&t),
             &dispatch,
@@ -634,7 +614,6 @@ mod tests {
             ResultAdmission::SuccessRaw {
                 body: ValueBody::new(BODY),
             },
-            &Expansions::default(),
         )
         .unwrap();
         assert!(batch.iter().any(|fact| matches!(
@@ -658,13 +637,12 @@ mod tests {
         let p = views_of(&log);
         let sibling = TrajectoryId::new("sibling");
         assert_eq!(
-            admit_result(
+            admit(
                 &reg,
                 &p.view(&sibling),
                 &dispatch,
                 &call,
                 ResultAdmission::SuccessNoValue,
-                &Expansions::default()
             ),
             Err(AdmitError::ForeignDispatch)
         );
@@ -690,18 +668,11 @@ mod tests {
             Err(AdmitError::AlreadySucceeded)
         );
         assert_eq!(
-            admit_result(
-                &reg,
-                &p.view(&t),
-                &dispatch,
-                &call,
-                ResultAdmission::Failure,
-                &Expansions::default()
-            ),
+            admit(&reg, &p.view(&t), &dispatch, &call, ResultAdmission::Failure,),
             Err(AdmitError::SuccessContradicted)
         );
 
-        let batch = admit_result(
+        let batch = admit(
             &reg,
             &p.view(&t),
             &dispatch,
@@ -709,7 +680,6 @@ mod tests {
             ResultAdmission::SuccessRaw {
                 body: ValueBody::new(BODY),
             },
-            &Expansions::default(),
         )
         .unwrap();
         assert!(batch.iter().any(|fact| matches!(
@@ -732,6 +702,7 @@ mod tests {
         let call = get_call();
         let (mut log, dispatch) = open_log(&call);
         let t = traj();
+        let parts = crate::label::TestContext::default();
         log.push(Fact::OutputSanitizerBound {
             trajectory: t.clone(),
             dispatch: dispatch.clone(),
@@ -741,15 +712,16 @@ mod tests {
                 &reg,
                 &reg.annotation_of(&call).expect("the fixture registers the tool"),
                 &crate::names::SanitizerName::new("declassify"),
-                &Expansions::default(),
+                &parts.context(),
             )
+            .expect("the fixture's audiences are literal")
             .expect("declassify applies to this output"),
-            resolutions: vec![],
+            evidence: crate::audience::AudienceEvidence::default(),
         });
         let p = views_of(&log);
 
         assert_eq!(
-            admit_result(
+            admit(
                 &reg,
                 &p.view(&t),
                 &dispatch,
@@ -757,13 +729,12 @@ mod tests {
                 ResultAdmission::SuccessRaw {
                     body: ValueBody::new("ticket"),
                 },
-                &Expansions::default()
             ),
             Err(AdmitError::OutputSanitizerBound)
         );
 
         assert_eq!(
-            admit_result(
+            admit(
                 &reg,
                 &p.view(&t),
                 &dispatch,
@@ -773,13 +744,12 @@ mod tests {
                     sanitizer: crate::names::SanitizerName::new("finance-only"),
                     raw_digest: RawResultDigest::of(b"ticket"),
                 },
-                &Expansions::default()
             ),
             Err(AdmitError::SanitizerBindingMismatch)
         );
 
         assert_eq!(
-            admit_result(
+            admit(
                 &reg,
                 &p.view(&t),
                 &dispatch,
@@ -789,9 +759,112 @@ mod tests {
                     sanitizer: crate::names::SanitizerName::new("declassify"),
                     raw_digest: RawResultDigest::of(b"ticket"),
                 },
-                &Expansions::default()
             ),
             Err(AdmitError::ConfinedResidual)
+        );
+    }
+
+    /// A bound sanitizer whose `from` names a group derives only under that group's answer:
+    /// an admission whose context lacks it asks for the atom instead of reporting the
+    /// transition unmet.
+    #[test]
+    fn a_bound_derivation_missing_a_membership_answer_asks_for_it() {
+        let team = crate::label::GroupRef::Named(crate::names::GroupName::new("team"));
+        let team_atom = crate::label::SymbolicAtom::Group(team.clone());
+        let declassify = crate::names::SanitizerName::new("declassify");
+        let get = ToolAnnotation {
+            description: Some("A test tool.".to_string()),
+            name: ToolName::new("get_ticket"),
+            tags: vec![],
+            delta: Delta {
+                trust: Some(SUSPICIOUS),
+                audience: Some(DeclaredAudience::literal(internal())),
+            },
+            parameters: crate::params::ToolParameters::open(),
+            emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
+            requires: Default::default(),
+        };
+        let reg = Registry::build_covered(RegistryConfig {
+            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
+            tools: vec![ToolDeclaration::Declared(get)],
+            annotators: vec![],
+            authorities: vec![],
+            sanitizers: vec![Sanitizer {
+                name: declassify.clone(),
+                on: SanitizerPoints {
+                    input: false,
+                    output: true,
+                },
+                transition: DeclaredTransition::Audience {
+                    from_includes: DeclaredAudience::Union(
+                        crate::label::Clause::new([], [team], []).expect("a group clause"),
+                    ),
+                    to: DeclaredAudience::literal(internal()),
+                },
+                scope: Scope::default(),
+                hint: None,
+            }],
+            audience: crate::audience::AudienceConfig {
+                sources: vec![crate::audience::SourceRegistration {
+                    provider: "slack".to_string(),
+                    templates: vec![crate::audience::SelectorTemplate::new("user-group/<handle>")],
+                }],
+                groups: vec![crate::audience::NamedAudience {
+                    name: crate::names::GroupName::new("team"),
+                    within: None,
+                    from: vec![crate::audience::SelectorSpec {
+                        provider: "slack".to_string(),
+                        selector: "user-group/team".to_string(),
+                    }],
+                }],
+                ..crate::audience::AudienceConfig::default()
+            },
+        })
+        .unwrap();
+        let call = get_call();
+        let (mut log, dispatch) = open_log(&call);
+        let answered = crate::label::TestContext {
+            expansions: crate::label::Expansions::new(
+                [(
+                    team_atom.clone(),
+                    std::collections::BTreeSet::from([ReaderId::new("insider")]),
+                )],
+                [],
+            ),
+            ..crate::label::TestContext::default()
+        };
+        log.push(Fact::OutputSanitizerBound {
+            trajectory: traj(),
+            dispatch: dispatch.clone(),
+            plan: crate::plan::PlanId::new(1),
+            sanitizer: declassify.clone(),
+            contribution: crate::plan::bound_contribution(
+                &reg,
+                &reg.annotation_of(&call).expect("the fixture registers the tool"),
+                &declassify,
+                &answered.context(),
+            )
+            .expect("the binding answered the group")
+            .expect("declassify applies to this output"),
+            evidence: crate::audience::AudienceEvidence::default(),
+        });
+        let p = views_of(&log);
+
+        assert_eq!(
+            admit(
+                &reg,
+                &p.view(&traj()),
+                &dispatch,
+                &call,
+                ResultAdmission::SuccessSanitized {
+                    body: ValueBody::new("redacted"),
+                    sanitizer: declassify,
+                    raw_digest: RawResultDigest::of(b"ticket"),
+                },
+            ),
+            Err(AdmitError::MembershipNeeded(crate::label::MembershipNeeded {
+                needed: vec![team_atom]
+            }))
         );
     }
 
@@ -802,7 +875,7 @@ mod tests {
         let (log, dispatch) = open_log(&call);
         let p = views_of(&log);
         assert_eq!(
-            admit_result(
+            admit(
                 &reg,
                 &p.view(&traj()),
                 &dispatch,
@@ -812,7 +885,6 @@ mod tests {
                     sanitizer: crate::names::SanitizerName::new("declassify"),
                     raw_digest: RawResultDigest::of(b"ticket"),
                 },
-                &Expansions::default()
             ),
             Err(AdmitError::SanitizerBindingMismatch)
         );

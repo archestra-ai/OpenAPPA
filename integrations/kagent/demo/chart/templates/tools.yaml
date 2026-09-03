@@ -1,0 +1,53 @@
+# The demo toolset: canned cluster data with real hazards, over streamable HTTP.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-tools
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "appa-demo.labels" . | nindent 4 }}
+    app: demo-tools
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: demo-tools }
+  template:
+    metadata:
+      labels: { app: demo-tools }
+    spec:
+      containers:
+        - name: demo-tools
+          image: {{ include "appa-demo.image" (dict "image" .Values.tools.image "root" .) }}
+          imagePullPolicy: {{ .Values.tools.image.pullPolicy }}
+          ports:
+            - { name: http, containerPort: 3000 }
+          readinessProbe:
+            tcpSocket: { port: http }
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-tools
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "appa-demo.labels" . | nindent 4 }}
+spec:
+  selector: { app: demo-tools }
+  ports:
+    - { name: http, port: 3000, targetPort: http }
+---
+apiVersion: kagent.dev/v1alpha2
+kind: RemoteMCPServer
+metadata:
+  name: demo-tools
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "appa-demo.labels" . | nindent 4 }}
+spec:
+  description: The cluster-ops demo tools (canned data with real hazards).
+  protocol: STREAMABLE_HTTP
+  url: http://demo-tools.{{ .Release.Namespace }}.svc.cluster.local:3000/mcp
+  timeout: 30s
+  sseReadTimeout: 5m0s
+  terminateOnClose: true

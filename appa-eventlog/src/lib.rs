@@ -502,7 +502,7 @@ mod tests {
     use super::*;
 
     const POLICY: &str = r#"
-        version = 1
+        version = 2
     "#;
 
     fn engine() -> appa_engine::engine::Engine {

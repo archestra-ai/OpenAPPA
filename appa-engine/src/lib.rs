@@ -12,8 +12,17 @@
 //! (audience × trust) and a **free** monoid of events. Propagation folds the label
 //! restrictively (min trust, intersect audience) into the trajectory's one concrete label
 //! ([`label::Label`] — there is no partial or pending label state anywhere in the algebra);
-//! checking is the sink-side two-valued comparison against that label. The
-//! two are never conflated.
+//! checking is the sink-side comparison against that label. The two are never conflated.
+//!
+//! The audience dimension is **symbolic**: a canonical intersection of union clauses
+//! ([`label::Audience`]) over the built-in audience chain `self` ⊆ `internal` ⊆ `public`,
+//! group references (`@finance`, `@slack:user-group/eng`), and literal readers. Symbols
+//! survive in labels and durable events. A check answers from a sound derivability calculus
+//! over policy-declared facts — the chain, `within` assertions — where that suffices, and
+//! otherwise evaluates the exact denotation from the operation's pinned evidence: primitive
+//! source answers, member lookups, and identity mappings ([`audience`]), from which identity
+//! application, union, and the symmetric `within` closure are recomputed on replay. A failed
+//! derivation never denies; a missing answer is a membership ask, never a label state.
 //!
 //! Every released tool call carries one complete concrete annotation
 //! ([`contract::ToolAnnotation`]): its delta, its requirements, and the effects it emits.
@@ -27,6 +36,7 @@
 //! to arrive is an operational refusal, never a policy denial.
 //!
 pub mod admit;
+pub mod audience;
 pub mod authority;
 pub mod basis;
 pub mod branch;
@@ -36,7 +46,6 @@ pub mod contract;
 pub mod engine;
 pub mod execute;
 pub mod fact;
-pub mod groups;
 mod hex32;
 pub mod label;
 pub mod names;

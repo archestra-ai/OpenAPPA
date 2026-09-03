@@ -6,7 +6,7 @@ use appa_policy::Config;
 
 /// A tool declaration under the default trust chain, with the given TOML lines after its name.
 fn tool_policy(name: &str, body: &str) -> String {
-    format!("version = 1\n\n[[tool]]\nname = \"{name}\"\n{body}\n")
+    format!("version = 2\n\n[[tool]]\nname = \"{name}\"\n{body}\n")
 }
 
 /// The one annotation a policy here registers under `name`; these policies never order several,

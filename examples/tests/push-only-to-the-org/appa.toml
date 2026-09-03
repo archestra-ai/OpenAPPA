@@ -1,0 +1,25 @@
+# Two rules use the command text. A push to the organization is allowed. Any
+# other push needs approval.
+
+[policy]
+version = 2
+
+[[policy.tool]]
+name = "Bash(command:git push https://github.com/archestra-ai/*)"
+delta = {}
+
+[[policy.tool]]
+name = "Bash(command:git push *)"
+requires = { attention = ["hitl"] }
+delta = {}
+
+[[policy.authority]]
+name = "hitl"
+hint = "Ask the person running this session."
+
+[policy.authority.permits]
+attention = ["hitl"]
+
+[externals]
+timeout_ms = 2000
+max_body_bytes = 65536

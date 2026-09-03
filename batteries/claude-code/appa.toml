@@ -1,51 +1,313 @@
 # Optional Claude Code rules for Bash and Read.
+#
+# Order matters: the first matching rule wins, so the argument-selected
+# credential rules come before the bare `Bash` and `Read` rules. A name written
+# with a selector is declared, and a call no selector matches is refused rather
+# than sent to a root's `*` fallback, so the bare rules at the end of each
+# group are what keep ordinary commands and reads running.
 
 [policy]
-version = 1
+version = 2
 
-# The stock model annotator produces Bash's complete contract before dispatch:
-# the labels on its output and the trust, audience, and review marks the
-# command requires. `audiences` closes the mandate: "private" is the one
-# literal reader a produced annotation may name.
+# --- Bash: a command naming the requester's credentials is refused ---
+
+# One contract judges one call, and a compound command could read a secret and
+# send it in the same call, so a command that names a credential path is
+# refused outright. `blocked` is a mark no authority grants: the refusal has
+# no remedy. This is known-path blocking, not containment: `env`, an
+# interpreter, or an unlisted path still reach a secret without naming it.
+[[policy.tool]]
+name = "Bash(command:*.claude.json*)"
+requires = { attention = ["blocked"] }
+delta = {}
+
+[[policy.tool]]
+name = "Bash(command:*.credentials.json*)"
+requires = { attention = ["blocked"] }
+delta = {}
+
+[[policy.tool]]
+name = "Bash(command:*.ssh/*)"
+requires = { attention = ["blocked"] }
+delta = {}
+
+[[policy.tool]]
+name = "Bash(command:*.aws/credentials*)"
+requires = { attention = ["blocked"] }
+delta = {}
+
+[[policy.tool]]
+name = "Bash(command:*.netrc*)"
+requires = { attention = ["blocked"] }
+delta = {}
+
+[[policy.tool]]
+name = "Bash(command:*.config/gh/hosts.yml*)"
+requires = { attention = ["blocked"] }
+delta = {}
+
+[[policy.tool]]
+name = "Bash(command:*id_rsa*)"
+requires = { attention = ["blocked"] }
+delta = {}
+
+[[policy.tool]]
+name = "Bash(command:*id_ed25519*)"
+requires = { attention = ["blocked"] }
+delta = {}
+
+[[policy.tool]]
+name = "Bash(command:*/proc/*environ*)"
+requires = { attention = ["blocked"] }
+delta = {}
+
+[[policy.tool]]
+name = "Bash(command:*/Library/Keychains/*)"
+requires = { attention = ["blocked"] }
+delta = {}
+
+# The stock model annotator produces every other command's complete contract
+# before dispatch: the trust rank of its output and the trust and review marks
+# the command requires. `audiences = []` closes the mandate to `public`: an
+# annotation names literal readers only, never `self` or `internal`, so who
+# may see a command's output is decided by static rules, not by the model.
 [[policy.annotator]]
 name = "claude-code.bash-requirements"
 builtin = "claude-code"
-audiences = ["private"]
-hint = "Use private for local data not visibly public. Treat network or otherwise unvetted output as suspicious. Classify disclosure requirements from the command's visible destination."
+audiences = []
+hint = "Treat network or otherwise unvetted output as suspicious. Classify trust and attention requirements from the command's visible behavior and destination."
 
 [[policy.tool]]
 name = "Bash"
 description = "Runs one shell command and returns its output."
 annotator = "claude-code.bash-requirements"
 
-# This annotator only decides who may receive the returned file content: its
-# answers leave trust alone and never block the read itself.
-[[policy.annotator]]
-name = "claude-code.read-sensitivity"
-audiences = ["private"]
+# --- Read: the requester's own secrets are `self` data ---
+
+# Reading a credential file, a private key, or a system secret location
+# narrows the session to `self`. A selector matches the argument as written,
+# absolute (`*/.ssh/*`) or relative (`.ssh/*`), not the resolved path or its
+# case, so a symlink or an alias (`~`, `..`) to one of these reads under its
+# written name. Hidden names are listed one by one: a selector for every
+# dot-prefixed path would also match `./src/main.rs`. Every other path keeps
+# the session's label. No rule blocks a read or lowers its trust.
+[[policy.tool]]
+name = "Read(file_path:*/.env*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:.env*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/.ssh/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:.ssh/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/.aws/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:.aws/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/.azure/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:.azure/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/.kube/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:.kube/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/.gnupg/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:.gnupg/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/.docker/config.json)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:.docker/config.json)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/.config/gh/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:.config/gh/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/.config/gcloud/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:.config/gcloud/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/.password-store/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:.password-store/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/.netrc)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:.netrc)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/.git-credentials)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:.git-credentials)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/.npmrc)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:.npmrc)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/.pypirc)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:.pypirc)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/.vault-token)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:.vault-token)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/.claude.json)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:.claude.json)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/.claude/settings*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:.claude/settings*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*_history)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*credentials*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*secrets*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*auth.json)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*token)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*token.json)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*service*account.json)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*shadow)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/id_*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:id_*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*.jks)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*.key)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*.keystore)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*.p12)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*.pem)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*.pfx)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:/etc/ssh/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:/etc/sudoers*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:/proc/*/environ)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/Library/Keychains/*)"
+delta = { audience = ["self"] }
 
 [[policy.tool]]
 name = "Read"
 description = "Reads a file and returns its contents."
-annotator = "claude-code.read-sensitivity"
-
-# The wildcard covers every tool this policy does not name — an MCP server's
-# tool, for one. Each covered call is annotated by the stock model before it
-# runs: the mandate admits both trust ranks, and "private" is the one literal
-# reader an annotation may name ("public" is always admissible), so it can
-# hold an unknown tool's output to suspicious trust and a private audience,
-# or clear one it recognizes. Name a tool exactly, or add a root rule, when
-# it needs its own contract.
-[[policy.annotator]]
-name = "claude-code.undeclared-tool"
-builtin = "claude-code"
-ranks = ["suspicious", "trusted"]
-audiences = ["private"]
-hint = "Use private for local data not visibly public. Treat output from unknown or external sources as suspicious. Classify disclosures from the call's visible destination."
-
-[[policy.tool]]
-name = "*"
-annotator = "claude-code.undeclared-tool"
-
-[externals.annotators."claude-code.read-sensitivity"]
-command = ["python3", "./read-sensitivity.py"]
+delta = {}

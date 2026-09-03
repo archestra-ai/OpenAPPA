@@ -1,5 +1,5 @@
 [policy]
-version = 1
+version = 2
 trust_chain = ["suspicious", "vendor", "internal"]
 
 [policy.boundary]
@@ -56,7 +56,6 @@ delta = {}
 [policy.deployment]
 context_control = true
 dispatch = "enforced"
-confined_child_return = true
 confined_results = ["search_vendor", "read_vendor", "create_vendor", "search_task_tracker", "read_task_tracker", "create_task_tracker"]
 
 # --- registered externals ---------------------------------------------------

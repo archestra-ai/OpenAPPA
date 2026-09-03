@@ -179,7 +179,7 @@ async fn main() -> anyhow::Result<()> {
         // A slow OpenRouter upstream can spend minutes on one completion, and
         // retrying a cut-off completion never helps — give each attempt room.
         OpenAiCompatible::new(
-            OpenAiConfig::openrouter(args.model.clone(), api_key).with_request_timeout(Duration::from_secs(180)),
+            OpenAiConfig::openrouter(args.model.clone(), api_key).with_request_timeout(Duration::from_secs(300)),
         ),
         ToolShim::new(format!("{origin}{}", shim::TOOLS_PATH)),
         ToolCatalogue::new(catalogue::advertised(&compiled, forking)),
@@ -216,17 +216,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if let Some(path) = &args.status_file {
-        let status = match &outcome {
-            Outcome::Answer(_) => "completed",
-            Outcome::BudgetFinalized { .. } => "budget_finalized",
-            Outcome::Stopped(appa_example_agent::StopReason::InferenceFailed(_)) => "provider_failed",
-            Outcome::Stopped(appa_example_agent::StopReason::Refused(_)) => "runtime_refused",
-            Outcome::Stopped(appa_example_agent::StopReason::Cancelled) => "cancelled",
-            Outcome::Stopped(appa_example_agent::StopReason::BudgetExhausted) => "budget_exhausted",
-        };
         std::fs::write(
             path,
-            serde_json::to_vec_pretty(&serde_json::json!({ "version": 1, "status": status }))?,
+            serde_json::to_vec_pretty(&serde_json::json!({ "version": 1, "status": terminal_status(&outcome) }))?,
         )
         .with_context(|| format!("write terminal status to {}", path.display()))?;
     }
@@ -246,6 +238,32 @@ async fn main() -> anyhow::Result<()> {
         // benchmark included — takes the whole of stdout as the answer,
         // and an account of why there is none would read as one.
         Outcome::Stopped(reason) => anyhow::bail!("the run stopped: {reason}"),
+    }
+}
+
+/// The typed status the benchmark reads. A provider that could not be reached,
+/// answered past the deadline, was unavailable on every bounded attempt, or
+/// failed due to billing/quota (HTTP 402) is `provider_failed`, which nothing
+/// in this repository can fix; a provider that answered unusably — a rejected
+/// key (401), a malformed body, no choices — is `provider_rejected`, a
+/// configuration or contract fault the benchmark must surface.
+fn terminal_status(outcome: &Outcome) -> &'static str {
+    use appa_example_agent::{ProviderError, StopReason};
+    match outcome {
+        Outcome::Answer(_) => "completed",
+        Outcome::BudgetFinalized { .. } => "budget_finalized",
+        Outcome::Stopped(StopReason::InferenceFailed(
+            ProviderError::Timeout { .. }
+            | ProviderError::Transport { .. }
+            | ProviderError::Unavailable { .. }
+            | ProviderError::Status { code: 402, .. },
+        )) => "provider_failed",
+        Outcome::Stopped(StopReason::InferenceFailed(
+            ProviderError::Status { .. } | ProviderError::Malformed { .. } | ProviderError::NoChoice { .. },
+        )) => "provider_rejected",
+        Outcome::Stopped(StopReason::Refused(_)) => "runtime_refused",
+        Outcome::Stopped(StopReason::Cancelled) => "cancelled",
+        Outcome::Stopped(StopReason::BudgetExhausted) => "budget_exhausted",
     }
 }
 
@@ -285,7 +303,8 @@ fn bind_hosted_externals(config: &mut Config, origin: &str) -> usize {
         .authorities
         .values_mut()
         .chain(externals.sanitizers.values_mut())
-        .chain(externals.membership.values_mut())
+        .chain(externals.audience.values_mut())
+        .chain(externals.identity.values_mut())
         .filter_map(|implementation| match implementation {
             Implementation::Resolver(endpoint) => Some(endpoint),
             Implementation::Builtin(_) | Implementation::Command(_) => None,
@@ -379,6 +398,7 @@ fn replay(entries: &[AuditEntry]) {
             }
             AuditEvent::Merged => eprintln!("appa: [{at}] merged a child return"),
             AuditEvent::VoidReturn => eprintln!("appa: [{at}] ended with a void return"),
+            AuditEvent::Resumed { seed } => eprintln!("appa: [{at}] resumed at {}/{}", seed.trust, seed.audience),
         }
     }
 }
@@ -433,6 +453,55 @@ mod tests {
         assert_eq!(
             system_prompt_with_addendum(Some("  test pressure  ")),
             format!("{}\n\ntest pressure", SYSTEM_PROMPT.trim_end())
+        );
+    }
+
+    /// Only a provider that could not be reached in time is a provider
+    /// fault the bench forgives; a provider that answered unusably is a
+    /// fault of this side of the wire and stays red.
+    #[test]
+    fn a_provider_that_answered_unusably_is_not_a_provider_fault() {
+        use appa_example_agent::{Outcome, ProviderError, StopReason};
+        use std::time::Duration;
+        let stopped = |error: ProviderError| Outcome::Stopped(StopReason::InferenceFailed(error));
+        assert_eq!(
+            super::terminal_status(&stopped(ProviderError::Timeout {
+                attempts: 3,
+                timeout: Duration::from_secs(1),
+            })),
+            "provider_failed"
+        );
+        assert_eq!(
+            super::terminal_status(&stopped(ProviderError::Transport { attempts: 3 })),
+            "provider_failed"
+        );
+        assert_eq!(
+            super::terminal_status(&stopped(ProviderError::Unavailable { code: 503, attempts: 3 })),
+            "provider_failed"
+        );
+        assert_eq!(
+            super::terminal_status(&stopped(ProviderError::Status {
+                code: 401,
+                attempts: 1,
+                detail: String::new(),
+            })),
+            "provider_rejected"
+        );
+        assert_eq!(
+            super::terminal_status(&stopped(ProviderError::Status {
+                code: 402,
+                attempts: 1,
+                detail: String::new(),
+            })),
+            "provider_failed"
+        );
+        assert_eq!(
+            super::terminal_status(&stopped(ProviderError::Malformed { attempts: 1 })),
+            "provider_rejected"
+        );
+        assert_eq!(
+            super::terminal_status(&stopped(ProviderError::NoChoice { attempts: 1 })),
+            "provider_rejected"
         );
     }
 }

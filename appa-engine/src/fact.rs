@@ -2,9 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::authority::Transition;
 use crate::basis::SubjectKey;
-use crate::candidate::{DerivedCandidate, DerivedVia, SanitizerLineage};
+use crate::candidate::{DerivedCandidate, SanitizerLineage};
 use crate::check::{Gap, Narrowing};
 use crate::execute::AuthorityReview;
 use crate::label::Label;
@@ -12,39 +11,65 @@ use crate::names::{AuthorityName, SanitizerName};
 use crate::plan::PlanId;
 use crate::profile::{DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyFileKey, PolicyIdentityV1};
 use crate::value::{
-    CanonicalDigest, ChildReturnId, DispatchId, ForkId, LabeledValue, Provenance, RawResultDigest, ToolName,
-    TrajectoryId, ValueId,
+    CanonicalDigest, ChildReturnId, DispatchId, LabeledValue, Provenance, RawResultDigest, ToolName, TrajectoryId,
+    ValueId,
 };
 
-/// How a child bound at fork may return: the immutable policy recorded on the `Fork` boundary.
-/// The submission path is **derived from this binding**, never selected by the caller, so no
-/// engine client can route a return through a transformer the fork did not declare — that would
-/// be a trust-laundering selector.
+/// How a child bound at fork may return: the policy the parent declared when it approved the
+/// spawn, recorded immutably on the fork. `floor` is the lowest label the parent accepts from
+/// the child — inside the child, no remedy accepts a narrowing below it, and a return that
+/// stands below it is refused at the child's stop. `sanitizer` names the derivation every return
+/// crosses through; the dimension it raises is the one the floor does not bind, so the child may
+/// descend freely there. The submission path is **derived from this binding**, never selected by
+/// the child, so no engine client can route a return through a transformer the fork did not
+/// declare — that would be a trust-laundering selector.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ReturnPolicy {
-    Raw,
-    Sanitized(SanitizerName),
+pub struct ReturnPolicy {
+    pub floor: Label,
+    pub sanitizer: Option<ReturnSanitizer>,
+}
+
+/// The derivation a fork's returns cross through: the reserved `attest-schema` sanitizer over
+/// the shape the parent authored, or a registered untagged output sanitizer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReturnSanitizer {
+    Attest(crate::shape::ReturnShape),
+    Named(SanitizerName),
+}
+
+impl ReturnSanitizer {
+    pub fn name(&self) -> SanitizerName {
+        match self {
+            ReturnSanitizer::Attest(_) => SanitizerName::new(SanitizerName::ATTEST_SCHEMA),
+            ReturnSanitizer::Named(name) => name.clone(),
+        }
+    }
+
+    pub fn shape(&self) -> Option<&crate::shape::ReturnShape> {
+        match self {
+            ReturnSanitizer::Attest(shape) => Some(shape),
+            ReturnSanitizer::Named(_) => None,
+        }
+    }
+}
+
+impl ReturnPolicy {
+    /// The sanitizer name a plan step declares for this policy, compared step against record.
+    pub fn sanitizer_name(&self) -> Option<SanitizerName> {
+        self.sanitizer.as_ref().map(ReturnSanitizer::name)
+    }
 }
 
 /// How a child's returned value crossed to the parent — the audit half of [`Fact::ChildReturn`]. A
-/// sanitized crossing records the declared transition and the raw submission's digest; the raw
-/// text itself stays confined in the child.
+/// sanitized crossing records the sanitizer and the raw submission's digest; the transition it
+/// applied is the registry's, and the raw text itself stays confined in the child.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReturnDerivation {
     Raw,
     Sanitized {
         sanitizer: SanitizerName,
         raw_digest: RawResultDigest,
-        transition: Transition,
     },
-}
-
-/// Why a mandatory return sanitizer was inapplicable at submission. Closed and
-/// body-free: the reason names the failed precondition, never the refused bytes.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ReturnRejection {
-    MandateUnmet,
-    PreconditionUnmet,
 }
 
 /// A configurable effect kind — the log's outer-world vocabulary (`egress`, `mutation`,
@@ -156,8 +181,15 @@ impl ForkSnapshot {
 /// (`ForkPrepared`, `ForkOpened`); `Merge` carries the consumed child return.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BoundaryKind {
-    Merge { child_return: ChildReturnId },
+    Merge {
+        child_return: ChildReturnId,
+    },
     VoidReturn,
+    /// The parent addressed a bound child again: the parent's current label flows into the
+    /// child, and a staged return derivation the child never echoed is dropped.
+    Resume {
+        seed: Label,
+    },
 }
 
 /// What the runtime observed when a dispatch succeeded: a usable body, bound by its
@@ -218,10 +250,8 @@ pub enum Fact {
         /// the registry at replay, which the opening's policy identity already fixes
         /// byte-for-byte.
         annotation: Option<crate::contract::PinnedAnnotation>,
-        #[serde(default)]
-        memberships: Vec<crate::contract::PinnedMembership>,
-        #[serde(default)]
-        resolutions: Vec<crate::groups::GroupResolution>,
+        #[serde(default, skip_serializing_if = "crate::audience::AudienceEvidence::is_empty")]
+        evidence: crate::audience::AudienceEvidence,
         subject: crate::basis::SubjectKey,
     },
     DispatchSucceeded {
@@ -242,8 +272,8 @@ pub enum Fact {
         authority: AuthorityName,
         covers: Vec<Gap>,
         reviewed: AuthorityReview,
-        #[serde(default)]
-        resolutions: Vec<crate::groups::GroupResolution>,
+        #[serde(default, skip_serializing_if = "crate::audience::AudienceEvidence::is_empty")]
+        evidence: crate::audience::AudienceEvidence,
     },
     Denial {
         trajectory: TrajectoryId,
@@ -256,28 +286,25 @@ pub enum Fact {
         plan: PlanId,
         narrowing: Narrowing,
     },
-    ChildReturnAcceptance {
-        trajectory: TrajectoryId,
-        child_return: ChildReturnId,
-        narrowing: Narrowing,
-    },
     OutputSanitizerBound {
         trajectory: TrajectoryId,
         dispatch: DispatchId,
         plan: PlanId,
         sanitizer: SanitizerName,
         contribution: Label,
-        #[serde(default)]
-        resolutions: Vec<crate::groups::GroupResolution>,
+        #[serde(default, skip_serializing_if = "crate::audience::AudienceEvidence::is_empty")]
+        evidence: crate::audience::AudienceEvidence,
     },
+    /// One sanitizer's derivation of a subject's value; the transition it applied is the
+    /// registry's, recomputed at replay.
     CandidateDerived {
         trajectory: TrajectoryId,
         subject: SubjectKey,
-        via: DerivedVia,
+        sanitizer: SanitizerName,
         derived: DerivedCandidate,
         lineage: SanitizerLineage,
-        #[serde(default)]
-        resolutions: Vec<crate::groups::GroupResolution>,
+        #[serde(default, skip_serializing_if = "crate::audience::AudienceEvidence::is_empty")]
+        evidence: crate::audience::AudienceEvidence,
     },
     CandidateAccepted {
         trajectory: TrajectoryId,
@@ -290,29 +317,8 @@ pub enum Fact {
         id: ChildReturnId,
         value: LabeledValue,
         derivation: ReturnDerivation,
-        #[serde(default)]
-        resolutions: Vec<crate::groups::GroupResolution>,
-    },
-    ReturnSubmitted {
-        trajectory: TrajectoryId,
-        id: ChildReturnId,
-        fork: ForkId,
-        parent: TrajectoryId,
-        label: crate::label::Label,
-        digest: RawResultDigest,
-        body: crate::value::ValueBody,
-        policy: ReturnPolicy,
-        #[serde(default)]
-        resolutions: Vec<crate::groups::GroupResolution>,
-    },
-    ReturnRejected {
-        trajectory: TrajectoryId,
-        id: ChildReturnId,
-        fork: ForkId,
-        digest: RawResultDigest,
-        reason: ReturnRejection,
-        #[serde(default)]
-        resolutions: Vec<crate::groups::GroupResolution>,
+        #[serde(default, skip_serializing_if = "crate::audience::AudienceEvidence::is_empty")]
+        evidence: crate::audience::AudienceEvidence,
     },
     /// One proposal batch was decided: the identity the runtime supplied and the
     /// policy content it was bound to. This is the decision boundary itself, so replay reads it
@@ -330,8 +336,8 @@ pub enum Fact {
         proposals: Vec<crate::value::ResolvedCall>,
         spawn: Option<crate::transition::SpawnMark>,
         released: Vec<DispatchId>,
-        #[serde(default)]
-        resolutions: Vec<crate::groups::GroupResolution>,
+        #[serde(default, skip_serializing_if = "crate::audience::AudienceEvidence::is_empty")]
+        evidence: crate::audience::AudienceEvidence,
     },
     /// One executable plan of one surfaced block, bound to the identity the model will name to
     /// execute it.
@@ -353,8 +359,8 @@ pub enum Fact {
         subject: crate::basis::SubjectKey,
         plan: crate::plan::ExecutableRemedyPlan,
         basis: crate::basis::PolicyBasis,
-        #[serde(default)]
-        resolutions: Vec<crate::groups::GroupResolution>,
+        #[serde(default, skip_serializing_if = "crate::audience::AudienceEvidence::is_empty")]
+        evidence: crate::audience::AudienceEvidence,
     },
     /// The agent selected this offer, and the engine prepared what its plan promised. Terminal: an offer is accepted once and never revives.
     ///
@@ -383,9 +389,12 @@ pub enum Fact {
         acceptance: Option<Narrowing>,
         rulings: Vec<crate::execute::AuthorityEvidence>,
         sanitizer: Option<SanitizerName>,
+        /// The child's return policy a marked spawn's plan declared, carried to the fork the
+        /// release prepares. `None` for every ordinary call.
+        return_policy: Option<ReturnPolicy>,
         basis: crate::basis::PolicyBasis,
-        #[serde(default)]
-        resolutions: Vec<crate::groups::GroupResolution>,
+        #[serde(default, skip_serializing_if = "crate::audience::AudienceEvidence::is_empty")]
+        evidence: crate::audience::AudienceEvidence,
     },
     CallApprovalConsumed {
         trajectory: TrajectoryId,
@@ -402,7 +411,6 @@ pub enum Fact {
         fork: crate::value::ForkId,
         snapshot: ForkSnapshot,
         return_policy: ReturnPolicy,
-        shape: Option<crate::shape::ReturnShape>,
     },
     ForkOpened {
         trajectory: TrajectoryId,
@@ -415,6 +423,23 @@ pub enum Fact {
 }
 
 impl Fact {
+    /// The pinned audience evidence a record carries in its own field. A provider-run
+    /// [`Fact::ValueAdmitted`] carries evidence inside its provenance instead, and the
+    /// batch that lands it is bound to its act already.
+    pub(crate) fn audience_evidence(&self) -> Option<&crate::audience::AudienceEvidence> {
+        match self {
+            Fact::DispatchOpened { evidence, .. }
+            | Fact::Ruling { evidence, .. }
+            | Fact::OutputSanitizerBound { evidence, .. }
+            | Fact::CandidateDerived { evidence, .. }
+            | Fact::ChildReturn { evidence, .. }
+            | Fact::ProposalBatchDecided { evidence, .. }
+            | Fact::OfferOpened { evidence, .. }
+            | Fact::CallApproved { evidence, .. } => Some(evidence),
+            _ => None,
+        }
+    }
+
     pub fn trajectory(&self) -> &TrajectoryId {
         match self {
             Fact::TrajectoryOpened { trajectory, .. }
@@ -426,13 +451,10 @@ impl Fact {
             | Fact::Ruling { trajectory, .. }
             | Fact::Denial { trajectory, .. }
             | Fact::Acceptance { trajectory, .. }
-            | Fact::ChildReturnAcceptance { trajectory, .. }
             | Fact::OutputSanitizerBound { trajectory, .. }
             | Fact::CandidateDerived { trajectory, .. }
             | Fact::CandidateAccepted { trajectory, .. }
             | Fact::ChildReturn { trajectory, .. }
-            | Fact::ReturnSubmitted { trajectory, .. }
-            | Fact::ReturnRejected { trajectory, .. }
             | Fact::OfferOpened { trajectory, .. }
             | Fact::OfferAccepted { trajectory, .. }
             | Fact::OfferDenied { trajectory, .. }

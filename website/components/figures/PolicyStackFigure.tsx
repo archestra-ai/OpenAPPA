@@ -51,7 +51,7 @@ export function PolicyStackFigure() {
                   </text>
                   <line x1={x + 14} y1={y + 34} x2={x + CARD.w - 14} y2={y + 34} stroke="var(--border-weak)" />
                   <text x={x + 14} y={y + 52} fill="var(--text-weak)">
-                    version = 1
+                    version = 2
                   </text>
                   <text x={x + 14} y={y + 70} fill="var(--text-weak)">
                     [[tool]]

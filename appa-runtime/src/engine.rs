@@ -36,21 +36,26 @@
 //! the plan from the live views and matches it by value, so an offer whose
 //! basis has moved declines instead of executing.
 
+use appa_engine::audience::{AudienceEvidence, IdentityImplementation, IdentityMapping, MemberClaims, SelectorSpec};
 use appa_engine::contract::{
-    AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, PinnedAnnotation, PinnedMembership,
-    ProducedAnnotation, RecipientSpec, Requires, ToolAnnotation, ToolDeclaration,
+    AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, PinnedAnnotation, ProducedAnnotation,
+    RecipientSpec, Requires, ToolDeclaration,
 };
 pub(crate) use appa_engine::engine::ForkStatus;
 use appa_engine::engine::{Engine, EngineError};
 use appa_engine::execute::{AuthorityEvidence, AuthorityReview};
-use appa_engine::fact::{BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ReturnDerivation};
-use appa_engine::groups::{DeclaredAudience, GroupExpansion};
-use appa_engine::label::{Audience, Label, ReaderId, Trust};
-use appa_engine::names::{GroupName, MarkName};
-use appa_engine::plan::{ExecutableRemedyPlan, PlanId, PlannedBlock, RemedyPlan, RequiredRuling};
+use appa_engine::fact::{
+    BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ReturnDerivation, ReturnPolicy, ReturnSanitizer,
+};
+use appa_engine::label::{Audience, Clause, DeclaredAudience, Label, ReaderId, SymbolicAtom, Trust};
+use appa_engine::names::MarkName;
+use appa_engine::plan::{
+    ExecutableRemedyPlan, FloorStanding, ForkAdvice, PlanId, PlannedBlock, RemedyPlan, RequiredRuling,
+};
 use appa_engine::profile::PolicyFileKey as EnginePolicyFileKey;
 use appa_engine::projection::Views;
 use appa_engine::registry::TrustChain;
+use appa_engine::shape::{ReturnMismatch, ReturnShape};
 use appa_engine::transition::Blocked as CoreBlocked;
 /// The engine's own validated view is the runtime's too: the runtime adds no
 /// wrapper, because everything it would carry beside the log is already on
@@ -67,7 +72,7 @@ use appa_engine::value::{
     ResolvedCall, ToolName, TrajectoryId as EngineTrajectoryId, ValueBody,
 };
 use appa_eventlog::Log;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::api::OutcomeBody;
 pub(crate) use crate::api::{OfferId, ProposedCall, SpawnBinding, ToolOutcome, TrajectoryId};
@@ -75,6 +80,7 @@ use crate::consult::{
     AnnotationAnswer, AnnotationDeclaration, AuthorityAnswer, AuthorityArtifact, AuthorityDeclaration, HistoryEntry,
     Requirement, Ruling, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint, WireAudience,
 };
+use appa_runtime_api::{OfferedRemedy, OfferedReturn};
 
 /// One fresh 256-bit random number per act that can surface offers; the
 /// runtime mixes it into every `OfferId` it mints.
@@ -97,7 +103,19 @@ pub struct ReleasedCall {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Feedback {
     pub text: String,
-    pub offers: Vec<OfferId>,
+    pub offers: Vec<OfferedRemedy>,
+    /// Every authority an offered plan would consult, with the review a person would read.
+    /// The engine lists them all; the session keeps the ones whose backend is a person.
+    pub review: Vec<PendingReview>,
+}
+
+/// One authority an offered plan consults, and the review as a person reads it — the
+/// same text the elicitation channel shows, rendered from the consult artifact alone.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingReview {
+    pub offer: OfferId,
+    pub authority: String,
+    pub text: String,
 }
 
 /// One external consult the session must resolve before the same semantic
@@ -125,9 +143,27 @@ pub enum ExternalRequest {
         /// The consult artifact: the complete call, or one value per declared input.
         args: serde_json::Value,
     },
-    Membership {
-        resolver: String,
-        group: String,
+    /// One audience source read: the members of one selector's collection at the
+    /// registered source of `provider`.
+    AudienceSource {
+        provider: String,
+        selector: String,
+        /// The selector templates the policy registers for the provider: the consult's
+        /// declaration.
+        templates: Vec<String>,
+    },
+    /// One member lookup at its provider's source: the claims for one qualified reader.
+    MemberLookup {
+        provider: String,
+        member: String,
+        templates: Vec<String>,
+    },
+    /// One custom identity canonicalization: the principal for one member's claims. Only a
+    /// policy-selected custom implementation is consulted; the shipped `verified-email`
+    /// normalization is deterministic and recomputed by the engine.
+    Identity {
+        implementation: String,
+        claims: MemberClaims,
     },
 }
 
@@ -152,10 +188,22 @@ pub enum ExternalEvidence {
         call: appa_engine::value::CanonicalDigest,
         answer: AnnotationAnswer,
     },
-    Membership {
-        resolver: String,
-        group: String,
-        readers: Option<Vec<String>>,
+    AudienceSource {
+        provider: String,
+        selector: String,
+        members: Option<Vec<MemberClaims>>,
+    },
+    MemberLookup {
+        provider: String,
+        member: String,
+        /// `None`: the consult produced no answer. `Some(None)`: the provider definitively
+        /// does not know the member, who keeps its qualified identity.
+        claims: Option<Option<MemberClaims>>,
+    },
+    Identity {
+        implementation: String,
+        id: String,
+        principal: Option<ReaderId>,
     },
 }
 
@@ -207,6 +255,7 @@ pub enum EngineEvent {
     ExecuteOffer {
         trajectory: TrajectoryId,
         offer: OfferId,
+        arguments: RemedyArguments,
         evidence: Vec<ExternalEvidence>,
         entropy: OfferNonce,
     },
@@ -218,8 +267,24 @@ pub enum EngineEvent {
         child: TrajectoryId,
         value: Option<String>,
         evidence: Vec<ExternalEvidence>,
-        entropy: OfferNonce,
     },
+}
+
+/// What `execute_remedy_plan` carries beside the offer id: the floor the child's return may
+/// narrow the declaring trajectory to and, for an attesting plan, the schema the return must
+/// match. Read only when the offered plan declares a return; every other plan ignores them.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RemedyArguments {
+    pub label: Option<LabelSpelling>,
+    pub return_schema: Option<serde_json::Value>,
+}
+
+/// A label as the policy dialect spells a `delta`: a trust rank name and an audience list. An
+/// omitted dimension keeps the declaring trajectory's current value.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct LabelSpelling {
+    pub trust: Option<String>,
+    pub audience: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -241,12 +306,28 @@ pub enum Next {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Presentation {
     KeepOutput,
-    ReplaceOutput { placeholder: String },
-    Value { value: String },
-    Declined { feedback: String },
-    NoAnswer { feedback: String },
+    ReplaceOutput {
+        placeholder: String,
+    },
+    Value {
+        value: String,
+    },
+    /// A child's return the fork's sanitizer derived, crossing when the child returns
+    /// exactly it.
+    Staged {
+        value: String,
+    },
+    Declined {
+        feedback: String,
+    },
+    NoAnswer {
+        feedback: String,
+    },
     NoValue,
-    Blocked { feedback: String, offers: Vec<OfferId> },
+    Blocked {
+        feedback: String,
+        offers: Vec<OfferId>,
+    },
 }
 
 /// One engine interaction's outcome, as the session drives it: the records to
@@ -284,6 +365,10 @@ pub enum EngineRefusal {
     Unbindable,
     #[error("tool {tool} is not declared in this policy and no wildcard covers it; the call is refused before it runs")]
     UndeclaredTool { tool: String },
+    /// The offer's execution came without what its plan needs, or with an argument the
+    /// policy cannot read. Nothing is appended; the offer stands.
+    #[error("{detail}")]
+    Arguments { detail: String },
 }
 
 /// One trajectory's current label rendered for a display surface — the
@@ -360,6 +445,11 @@ pub enum AuditEvent {
     },
     Merged,
     VoidReturn,
+    /// The parent addressed its bound child again: the parent's label as it stood flowed into
+    /// the child.
+    Resumed {
+        seed: AuditLabel,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -454,6 +544,14 @@ pub struct RuntimeEngine {
 }
 
 impl RuntimeEngine {
+    /// Whether the policy writes a contract for this tool's exact name. The wildcard does not
+    /// count: it covers a name at a proposal, and a spawn under `SpawnCoverage::Declared` needs
+    /// the name written.
+    pub(crate) fn names_tool(&self, tool: &str) -> bool {
+        let name = appa_engine::value::ToolName::new(tool);
+        self.engine.registry().classify(&name) == Some(appa_engine::registry::ToolKind::Declared)
+    }
+
     /// The one constructor: both halves — the decision core and the consult input
     /// mapping — come from the same compiled policy, so an engine can never carry
     /// another policy's mapping.
@@ -533,6 +631,45 @@ impl RuntimeEngine {
     }
 
     /// Which trajectory pursues this offer.
+    /// The compiled policy this engine decides under.
+    pub(crate) fn registry(&self) -> &appa_engine::registry::Registry {
+        self.engine.registry()
+    }
+
+    /// Whom taking this offer involves, read without taking it: nobody (the plain narrowing
+    /// acceptance), an authority, or a sanitizer. `None` for an offer that no longer stands.
+    /// `appa replay` reads it to take the offer a trace expects, the way the model would.
+    pub(crate) fn offer_kind(
+        &self,
+        view: &EngineView,
+        trajectory: &TrajectoryId,
+        offer: &OfferId,
+    ) -> Option<crate::api::OfferKind> {
+        let engine_offer = parse_offer(offer)?;
+        match self
+            .engine
+            .offer_consults(view, &engine_id(trajectory), &engine_offer)
+            .ok()?
+        {
+            OfferConsult::Accept => Some(crate::api::OfferKind::Accept),
+            OfferConsult::Authorities { required, .. } => {
+                let mut names: Vec<String> = required
+                    .iter()
+                    .map(|requirement| requirement.authority.as_str().to_string())
+                    .collect();
+                names.sort();
+                names.dedup();
+                Some(crate::api::OfferKind::Authority { names })
+            }
+            OfferConsult::Rewrite { sanitizer, .. } | OfferConsult::Sanitizer { sanitizer, .. } => {
+                Some(crate::api::OfferKind::Sanitizer {
+                    name: sanitizer.as_str().to_string(),
+                })
+            }
+            OfferConsult::Stale | OfferConsult::Replay(_) => None,
+        }
+    }
+
     pub(crate) fn offer_pursuer(&self, view: &EngineView, offer: &OfferId) -> Option<TrajectoryId> {
         let engine_offer = parse_offer(offer)?;
         let surfaced = view.offer_trajectory(&engine_offer)?.clone();
@@ -755,17 +892,15 @@ impl RuntimeEngine {
             Fact::Denial { authority, .. } => AuditEvent::Denied {
                 authority: terminal_safe(authority.as_str()),
             },
-            Fact::Acceptance { narrowing, .. }
-            | Fact::ChildReturnAcceptance { narrowing, .. }
-            | Fact::CandidateAccepted { narrowing, .. } => AuditEvent::Narrowed {
+            Fact::Acceptance { narrowing, .. } | Fact::CandidateAccepted { narrowing, .. } => AuditEvent::Narrowed {
                 from: self.render_label(&narrowing.from)?,
                 to: self.render_label(&narrowing.to)?,
             },
             Fact::OutputSanitizerBound { sanitizer, .. } => AuditEvent::SanitizerBound {
                 sanitizer: terminal_safe(sanitizer.as_str()),
             },
-            Fact::CandidateDerived { via, .. } => AuditEvent::Sanitized {
-                sanitizer: terminal_safe(via.name.as_str()),
+            Fact::CandidateDerived { sanitizer, .. } => AuditEvent::Sanitized {
+                sanitizer: terminal_safe(sanitizer.as_str()),
             },
             Fact::ChildReturn { value, derivation, .. } => AuditEvent::ChildReturn {
                 sanitizer: match derivation {
@@ -777,6 +912,9 @@ impl RuntimeEngine {
             Fact::Boundary { kind, .. } => match kind {
                 BoundaryKind::Merge { .. } => AuditEvent::Merged,
                 BoundaryKind::VoidReturn => AuditEvent::VoidReturn,
+                BoundaryKind::Resume { seed } => AuditEvent::Resumed {
+                    seed: self.render_label(seed)?,
+                },
             },
             Fact::TrajectoryOpened { .. } | Fact::ProposalBatchDecided { .. } => return Some(None),
             Fact::OfferOpened { .. }
@@ -786,10 +924,7 @@ impl RuntimeEngine {
             | Fact::CallApproved { .. }
             | Fact::CallApprovalConsumed { .. }
             | Fact::BasisAdvanced { .. } => return Some(None),
-            Fact::ForkPrepared { .. }
-            | Fact::ForkOpened { .. }
-            | Fact::ReturnSubmitted { .. }
-            | Fact::ReturnRejected { .. } => return Some(None),
+            Fact::ForkPrepared { .. } | Fact::ForkOpened { .. } => return Some(None),
         };
         Some(Some(event))
     }
@@ -816,16 +951,12 @@ impl RuntimeEngine {
             EngineEvent::ExecuteOffer {
                 trajectory: owner,
                 offer,
+                arguments,
                 evidence,
                 entropy,
-            } => self.execute_offer(view, &owner, &offer, &evidence, &entropy),
+            } => self.execute_offer(view, &owner, &offer, &arguments, &evidence, &entropy),
             EngineEvent::BindFork { fork, child } => self.bind_fork(view, &fork, &child),
-            EngineEvent::ChildReturn {
-                child,
-                value,
-                evidence,
-                entropy,
-            } => self.child_return(view, &child, value, &evidence, &entropy),
+            EngineEvent::ChildReturn { child, value, evidence } => self.child_return(view, &child, value, &evidence),
         }
     }
 
@@ -854,61 +985,49 @@ impl RuntimeEngine {
                 detail: "deciding a proposal for a trajectory the log has not opened".to_string(),
             });
         };
-        let CallAnswers {
-            annotation,
-            memberships,
-        } = match self.answers_for(&views, &resolved, evidence) {
+        let CallAnswers { annotation } = match self.answers_for(&views, &resolved, evidence) {
             Ok(answers) => answers,
-            Err(Resolution::Feedback(text)) => return Ok(deny(text)),
-            Err(Resolution::Consult(requests)) => return Ok(EngineDecision::deliver(Next::ResolveExternal(requests))),
+            Err(Resolution(requests)) => return Ok(EngineDecision::deliver(Next::ResolveExternal(requests))),
         };
         let proposed = CoreProposedCall {
             tool: ToolName::new(call.tool.clone()),
             arguments: call.arguments.get().as_bytes().to_vec(),
             annotation,
-            memberships,
         };
-        let expansions = self.membership_evidence(evidence);
         // A deployment that does not control context releases the marked call
         // unmarked, so the batch may be decided twice. The mark is all that
         // differs between the two attempts.
-        let judge = || {
-            let decide = |marked: bool| {
-                let batch = ProposalBatch {
-                    id: batch_id(entropy),
-                    trajectory: engine_id(trajectory),
-                    provider_results: Vec::new(),
-                    proposals: vec![proposed.clone()],
-                    spawn: marked.then(|| SpawnMark::at(0)),
-                    offer_nonce: engine_nonce(entropy),
-                    evidence: Vec::new(),
-                    expansions: expansions.expansions(),
+        let judged =
+            self.judge_under_audience(evidence, UnresolvedAudience::Denied { tool: &call.tool }, |audience| {
+                let decide = |marked: bool| {
+                    let batch = ProposalBatch {
+                        id: batch_id(entropy),
+                        trajectory: engine_id(trajectory),
+                        provider_results: Vec::new(),
+                        proposals: vec![proposed.clone()],
+                        spawn: marked.then(|| SpawnMark::at(0)),
+                        offer_nonce: engine_nonce(entropy),
+                        evidence: Vec::new(),
+                        audience: audience.clone(),
+                    };
+                    self.engine.handle(view, CoreEvent::Proposals(batch))
                 };
-                self.engine.handle(view, CoreEvent::Proposals(batch))
-            };
-            match decide(spawn) {
-                Err(TransitionError::SpawnUncontrolled) if spawn => decide(false),
-                decided => decided,
-            }
-        };
-        let decision = match judge() {
-            Ok(decision) => decision,
-            Err(TransitionError::MembershipNeeded { needed }) => {
-                return match self.membership_consult(&expansions, needed)? {
-                    MembershipConsult::Requests(requests) => {
-                        Ok(EngineDecision::deliver(Next::ResolveExternal(requests)))
-                    }
-                    MembershipConsult::Unresolved(group) => Ok(deny(unresolved_group(&call.tool, &group))),
-                };
-            }
-            Err(error) => return Err(proposal_refusal(error)),
+                match decide(spawn) {
+                    Err(TransitionError::SpawnUncontrolled) if spawn => decide(false),
+                    decided => decided,
+                }
+            })?;
+        let decision = match judged {
+            AudienceRound::Judged(decision) => decision,
+            AudienceRound::Presented(decision) => return Ok(decision),
+            AudienceRound::Failed(error) => return Err(proposal_refusal(error)),
         };
         let append = decision.append.map(ValidatedFactBatch::into_unsealed);
-        let then = self.deliver_proposals(decision.follow_up)?;
+        let then = self.deliver_proposals(decision.follow_up, &self.return_bounds(&views))?;
         Ok(EngineDecision { append, then })
     }
 
-    fn deliver_proposals(&self, follow_up: FollowUp) -> Result<Next, EngineRefusal> {
+    fn deliver_proposals(&self, follow_up: FollowUp, bounds: &ReturnBounds) -> Result<Next, EngineRefusal> {
         match follow_up {
             FollowUp::Proposals {
                 released: releases,
@@ -924,7 +1043,7 @@ impl RuntimeEngine {
                     });
                 }
                 if let Some(block) = blocked.into_iter().next() {
-                    let feedback = self.block_delivery(&block);
+                    let feedback = self.block_delivery(&block, bounds);
                     return Ok(Next::ModelResponse {
                         invocations: Vec::new(),
                         feedback: vec![feedback],
@@ -946,19 +1065,82 @@ impl RuntimeEngine {
         }
     }
 
-    fn block_delivery(&self, block: &CoreBlocked) -> Feedback {
-        let (text, offers) = self.rendered_block(block);
-        Feedback { text, offers }
+    fn block_delivery(&self, block: &CoreBlocked, bounds: &ReturnBounds) -> Feedback {
+        let (text, offers, review) = self.rendered_block(block, bounds);
+        let offers = offers
+            .into_iter()
+            .map(|offer| {
+                let returns = block
+                    .offers
+                    .iter()
+                    .find(|(id, _)| offer_id(id) == offer)
+                    .and_then(|(_, plan)| {
+                        block.block.plans.iter().find_map(|candidate| match candidate {
+                            RemedyPlan::Executable(executable) if executable.id == *plan => {
+                                executable.return_step().map(|sanitizer| match sanitizer {
+                                    None => OfferedReturn::AsSpoken,
+                                    Some(name) => OfferedReturn::Sanitized {
+                                        sanitizer: name.as_str().to_string(),
+                                    },
+                                })
+                            }
+                            _ => None,
+                        })
+                    });
+                OfferedRemedy { id: offer.0, returns }
+            })
+            .collect();
+        Feedback { text, offers, review }
     }
 
-    fn rendered_block(&self, block: &CoreBlocked) -> (String, Vec<OfferId>) {
+    fn rendered_block(&self, block: &CoreBlocked, bounds: &ReturnBounds) -> (String, Vec<OfferId>, Vec<PendingReview>) {
         let offers: Vec<(OfferId, PlanId)> = block
             .offers
             .iter()
             .map(|(offer, plan)| (offer_id(offer), *plan))
             .collect();
-        let text = block_feedback(&block.block, &offers, self.engine.registry().trust_chain());
-        (text, offers.into_iter().map(|(offer, _)| offer).collect())
+        let chain = self.engine.registry().trust_chain();
+        let text = block_feedback(&block.block, &offers, chain, bounds);
+        let review = self.pending_reviews(block, &offers);
+        (text, offers.into_iter().map(|(offer, _)| offer).collect(), review)
+    }
+
+    /// The reviews the offered plans would raise: for each plan element that consults an
+    /// authority, the consult artifact rendered as the person reads it. Built here, at the
+    /// block, so a harness with its own review channel can show it before the execution.
+    fn pending_reviews(&self, block: &CoreBlocked, offers: &[(OfferId, PlanId)]) -> Vec<PendingReview> {
+        let registry = self.engine.registry();
+        let chain = registry.trust_chain();
+        let mut reviews = Vec::new();
+        for plan in &block.block.plans {
+            let RemedyPlan::Executable(plan) = plan else {
+                continue;
+            };
+            let Some((offer, _)) = offers.iter().find(|(_, planned)| *planned == plan.id) else {
+                continue;
+            };
+            for requirement in &plan.required {
+                let Some(registered) = registry.authority(&requirement.authority) else {
+                    continue;
+                };
+                let declaration = AuthorityDeclaration::of(registered, chain);
+                let artifact = AuthorityArtifact {
+                    tool: block.call.tool().as_str().to_string(),
+                    arguments: block.call.arguments().clone(),
+                    requirements: requirement
+                        .covers
+                        .iter()
+                        .map(|gap| Requirement::of(gap, chain))
+                        .collect(),
+                };
+                reviews.push(PendingReview {
+                    offer: offer.clone(),
+                    authority: requirement.authority.as_str().to_string(),
+                    text: crate::elicit::review_text(requirement.authority.as_str(), &declaration, &artifact),
+                });
+            }
+        }
+        reviews
     }
 
     fn tool_outcome(
@@ -969,35 +1151,24 @@ impl RuntimeEngine {
         evidence: &[ExternalEvidence],
         entropy: &OfferNonce,
     ) -> Result<EngineDecision, EngineRefusal> {
-        let expansions = self.membership_evidence(evidence);
-        let judge = |evidence: &[ExternalEvidence]| {
-            let report = ToolReport {
-                dispatch: dispatch.clone(),
-                outcome: engine_outcome(outcome),
-                evidence: sanitizer_evidence(evidence),
-                offer_nonce: engine_nonce(entropy),
-                expansions: expansions.expansions(),
-            };
-            self.engine.handle(view, CoreEvent::Outcome(report))
-        };
-        let decision = match judge(evidence) {
-            Ok(decision) => decision,
-            Err(TransitionError::MembershipNeeded { needed }) => {
-                return match self.membership_consult(&expansions, needed)? {
-                    MembershipConsult::Requests(requests) => {
-                        Ok(EngineDecision::deliver(Next::ResolveExternal(requests)))
-                    }
-                    MembershipConsult::Unresolved(group) => {
-                        Ok(EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
-                            feedback: format!(
-                                "[appa] membership of {group} could not be resolved; the result is withheld and may be retried"
-                            ),
-                            offers: Vec::new(),
-                        })))
-                    }
+        let judged = self.judge_under_audience(
+            evidence,
+            UnresolvedAudience::Withheld { subject: "result" },
+            |audience| {
+                let report = ToolReport {
+                    dispatch: dispatch.clone(),
+                    outcome: engine_outcome(outcome),
+                    evidence: sanitizer_evidence(evidence),
+                    offer_nonce: engine_nonce(entropy),
+                    audience: audience.clone(),
                 };
-            }
-            Err(error) => return Err(outcome_refusal(error)),
+                self.engine.handle(view, CoreEvent::Outcome(report))
+            },
+        )?;
+        let decision = match judged {
+            AudienceRound::Judged(decision) => decision,
+            AudienceRound::Presented(decision) => return Ok(decision),
+            AudienceRound::Failed(error) => return Err(outcome_refusal(error)),
         };
         let append = decision.append.map(ValidatedFactBatch::into_unsealed);
         let then = match decision.follow_up {
@@ -1031,6 +1202,7 @@ impl RuntimeEngine {
         view: &EngineView,
         trajectory: &TrajectoryId,
         offer: &OfferId,
+        arguments: &RemedyArguments,
         evidence: &[ExternalEvidence],
         entropy: &OfferNonce,
     ) -> Result<EngineDecision, EngineRefusal> {
@@ -1045,6 +1217,9 @@ impl RuntimeEngine {
                 detail: "executing an offer for a trajectory the log has not opened".to_string(),
             });
         };
+        let return_policy = self
+            .declared_return_policy(view, &owner, &views, &engine_offer, arguments)
+            .map_err(|detail| EngineRefusal::Arguments { detail })?;
         let outcome = match self
             .engine
             .offer_consults(view, &owner, &engine_offer)
@@ -1070,47 +1245,33 @@ impl RuntimeEngine {
                     Ok(derived) => derived,
                     Err(next) => return Ok(next),
                 };
-                // A rewrite whose arguments select another ordered declaration is a new call
-                // under it: that declaration's annotation and placeholder groups are gathered
-                // about the rewritten arguments before the engine judges it. A rewrite that
-                // stays in its declaration carries no membership pins (the engine's
-                // unchanged-argument rule), but an Annotated declaration is still annotated
-                // afresh — the digest is the annotation's key, so a sanitizer rewrite always
-                // re-annotates. A derivation the engine cannot mint a call from is the
-                // engine's to refuse.
-                let (annotation, memberships) = match self
+                // A rewrite into an Annotated declaration — its own or another — is
+                // annotated afresh about the rewritten arguments before the engine judges
+                // it: the digest is the annotation's key. Any group its contract reads is
+                // asked through the act's own audience evidence, not gathered here. A
+                // derivation the engine cannot mint a call from is the engine's to refuse.
+                let annotation = match self
                     .engine
                     .resolve_call(call.tool().clone(), derived.as_str().as_bytes())
                 {
-                    Ok(rewritten) if rewritten.declaration_id() != call.declaration_id() => {
-                        match self.answers_for(&views, &rewritten, evidence) {
-                            Ok(answers) => (answers.annotation, answers.memberships),
-                            Err(Resolution::Consult(requests)) => {
-                                return Ok(EngineDecision::deliver(Next::ResolveExternal(requests)));
-                            }
-                            Err(Resolution::Feedback(text)) => return Ok(no_answer(text)),
-                        }
-                    }
                     Ok(rewritten) => match self.engine.registry().declaration(&rewritten) {
                         Some(declaration @ ToolDeclaration::Annotated { .. }) => {
                             match self.annotation_for(&views, declaration, &rewritten, evidence) {
-                                Ok(annotation) => (Some(annotation), Vec::new()),
-                                Err(Resolution::Consult(requests)) => {
+                                Ok(annotation) => Some(annotation),
+                                Err(Resolution(requests)) => {
                                     return Ok(EngineDecision::deliver(Next::ResolveExternal(requests)));
                                 }
-                                Err(Resolution::Feedback(text)) => return Ok(no_answer(text)),
                             }
                         }
-                        _ => (None, Vec::new()),
+                        _ => None,
                     },
-                    Err(_) => (None, Vec::new()),
+                    Err(_) => None,
                 };
                 OfferOutcome::Derived(Evidence::Rewrite {
                     sanitizer,
                     source,
                     derived,
                     annotation,
-                    memberships,
                 })
             }
             OfferConsult::Sanitizer {
@@ -1136,37 +1297,39 @@ impl RuntimeEngine {
                 }
             }
         };
-        let expansions = self.membership_evidence(evidence);
-        let execution = OfferExecution {
-            trajectory: engine_id(trajectory),
-            offer: engine_offer,
-            outcome,
-            offer_nonce: engine_nonce(entropy),
-            expansions: expansions.expansions(),
-        };
-        let decision = match self.engine.handle(view, CoreEvent::ExecuteOffer(execution)) {
-            Ok(decision) => decision,
-            Err(TransitionError::MembershipNeeded { needed }) => {
-                return match self.membership_consult(&expansions, needed)? {
-                    MembershipConsult::Requests(requests) => {
-                        Ok(EngineDecision::deliver(Next::ResolveExternal(requests)))
-                    }
-                    MembershipConsult::Unresolved(group) => Ok(no_answer(format!(
-                        "[appa] membership of {group} could not be resolved; the offer stands and may be executed again"
-                    ))),
-                };
-            }
+        let judged = self.judge_under_audience(evidence, UnresolvedAudience::OfferStands, |audience| {
+            let execution = OfferExecution {
+                trajectory: engine_id(trajectory),
+                offer: engine_offer,
+                outcome,
+                return_policy,
+                offer_nonce: engine_nonce(entropy),
+                audience: audience.clone(),
+            };
+            self.engine.handle(view, CoreEvent::ExecuteOffer(execution))
+        })?;
+        let decision = match judged {
+            AudienceRound::Judged(decision) => decision,
+            AudienceRound::Presented(decision) => return Ok(decision),
             // A sanitizer's derivation the engine cannot use — malformed, schema-invalid, or not
             // a strict improvement — lands no fact and opens no dispatch; the offer stands for a
             // later deliberate retry. The external's answer is not an
             // integration fault, so it is not a refusal.
-            Err(TransitionError::Call(_) | TransitionError::SanitizerUnapplicable) => {
+            AudienceRound::Failed(TransitionError::Call(_) | TransitionError::SanitizerUnapplicable) => {
                 return Ok(no_answer(
                     "[appa] the sanitizer's derivation was not usable; the offer stands and may be executed again"
                         .to_string(),
                 ));
             }
-            Err(error) => return Err(offer_refusal(error)),
+            // A return declaration the engine will not hold a child to: the floor is not one
+            // this trajectory can set, or the declaration does not fit the plan. The offer
+            // stands for a corrected declaration.
+            AudienceRound::Failed(TransitionError::ReturnPolicy(refusal)) => {
+                return Ok(no_answer(format!(
+                    "[appa] the return declaration is refused: {refusal}; the offer stands and may be executed again"
+                )));
+            }
+            AudienceRound::Failed(error) => return Err(offer_refusal(error)),
         };
         let append = decision.append.map(ValidatedFactBatch::into_unsealed);
         let then = match decision.follow_up {
@@ -1180,19 +1343,16 @@ impl RuntimeEngine {
             FollowUp::Offer(OfferFollowUp::Invalidated) => Next::PresentToModel(Presentation::Declined {
                 feedback: "[appa] the state changed and this offer no longer applies; re-propose the call".to_string(),
             }),
-            FollowUp::Offer(OfferFollowUp::Denied { block }) => Next::PresentToModel(self.offer_block_delivery(&block)),
+            FollowUp::Offer(OfferFollowUp::Denied { block }) => {
+                Next::PresentToModel(self.offer_block_delivery(&block, &self.return_bounds(&views)))
+            }
             FollowUp::Offer(OfferFollowUp::Substituted { block }) => {
-                Next::PresentToModel(self.offer_block_delivery(&block))
+                Next::PresentToModel(self.offer_block_delivery(&block, &self.return_bounds(&views)))
             }
             FollowUp::Offer(OfferFollowUp::Staged(confined)) => Next::PresentToModel(self.stage_delivery(
                 "[appa] the cleaned result still narrows this session.",
                 &confined.residual,
                 &confined.offers,
-            )),
-            FollowUp::Offer(OfferFollowUp::ReturnStaged(stage)) => Next::PresentToModel(self.stage_delivery(
-                "[appa] the child's return still narrows this session.",
-                &stage.residual,
-                &stage.offers,
             )),
             FollowUp::Offer(OfferFollowUp::Released(release)) => Next::InvokeTool(released(&release)),
             FollowUp::Offer(OfferFollowUp::Settled(_)) => Next::PresentToModel(Presentation::Declined {
@@ -1269,9 +1429,123 @@ impl RuntimeEngine {
         AuthorityOutcome::Outcome(OfferOutcome::Approved(approvals))
     }
 
-    fn offer_block_delivery(&self, block: &CoreBlocked) -> Presentation {
-        let (feedback, offers) = self.rendered_block(block);
+    fn offer_block_delivery(&self, block: &CoreBlocked, bounds: &ReturnBounds) -> Presentation {
+        let (feedback, offers, _) = self.rendered_block(block, bounds);
         Presentation::Blocked { feedback, offers }
+    }
+
+    fn return_bounds(&self, views: &Views) -> ReturnBounds {
+        ReturnBounds {
+            label: views.current_label(),
+            lowest: self.engine.lowest_return_trust(views),
+        }
+    }
+
+    /// The return policy an offer's execution declares, where its plan ends in a return step:
+    /// the floor, spelled as a delta over this trajectory's current label, and the schema an
+    /// attesting plan needs. A plan with no return step takes none, whatever was passed.
+    fn declared_return_policy(
+        &self,
+        view: &EngineView,
+        owner: &EngineTrajectoryId,
+        views: &Views,
+        offer: &EngineOfferId,
+        arguments: &RemedyArguments,
+    ) -> Result<Option<ReturnPolicy>, String> {
+        let Some(step) = self
+            .engine
+            .offer_plan(view, owner, offer)
+            .and_then(|plan| plan.return_step().map(|sanitizer| sanitizer.cloned()))
+        else {
+            return Ok(None);
+        };
+        let Some(spelling) = &arguments.label else {
+            return Err(
+                "this plan declares the subagent's return: pass `label`, the lowest label this session \
+                        accepts from the return (omit a dimension to keep this session's current value)"
+                    .to_string(),
+            );
+        };
+        let current = views.current_label();
+        let delta = appa_policy::parse_delta(
+            spelling.trust.as_deref(),
+            spelling.audience.as_deref(),
+            self.engine.registry().trust_chain(),
+            "label",
+        )
+        .map_err(|error| format!("`label` is not a label this policy spells: {error}"))?;
+        let floor = Label {
+            trust: delta.trust.unwrap_or(current.trust),
+            audience: delta
+                .audience
+                .map(|declared| Audience::of_declared(&declared))
+                .unwrap_or(current.audience),
+        };
+        let sanitizer = match step {
+            Some(name) if name.is_attest_schema() => {
+                let Some(schema) = &arguments.return_schema else {
+                    return Err(
+                        "this plan attests the subagent's return: pass `return_schema`, the JSON schema the return \
+                         must match"
+                            .to_string(),
+                    );
+                };
+                let shape = ReturnShape::compile(schema)
+                    .map_err(|error| format!("`return_schema` does not compile to a return shape: {error}"))?;
+                Some(ReturnSanitizer::Attest(shape))
+            }
+            _ if arguments.return_schema.is_some() => {
+                return Err(
+                    "this plan does not attest the subagent's return, so `return_schema` is not taken: declare the \
+                     attest-schema offer to attest, or omit `return_schema`"
+                        .to_string(),
+                );
+            }
+            None => None,
+            Some(name) => Some(ReturnSanitizer::Named(name)),
+        };
+        Ok(Some(ReturnPolicy { floor, sanitizer }))
+    }
+
+    /// What a starting child is told about its return: the schema an attesting fork holds it
+    /// to, or the sanitizer that rewrites it and the echo that follows. A bare floor tells the
+    /// child nothing it could act on.
+    pub(crate) fn fork_return_contract(
+        &self,
+        view: &EngineView,
+        parent: &TrajectoryId,
+        fork: &appa_engine::value::ForkId,
+    ) -> Option<String> {
+        let policy = self.engine.prepared_return_policy(view, &engine_id(parent), fork)?;
+        match policy.sanitizer? {
+            ReturnSanitizer::Attest(shape) => Some(format!(
+                "[appa] Your final message is checked when you stop: it must be one JSON object matching this \
+                 schema, and nothing else. A stop that does not match is blocked with the reason; a stop that \
+                 matches but is not in canonical form is blocked with the exact bytes to return, and you return \
+                 them verbatim.\nSchema: {}",
+                shape.normalized()
+            )),
+            ReturnSanitizer::Named(name) => Some(format!(
+                "[appa] Your final message is checked when you stop, and sanitizer {} rewrites it before the \
+                 parent receives it. The first stop is blocked with the rewritten message; return it verbatim \
+                 as your next final message.",
+                terminal_safe(name.as_str())
+            )),
+        }
+    }
+
+    /// The value `child` crossed most recently, as the harness would deliver it.
+    pub(crate) fn latest_return(&self, view: &EngineView, child: &TrajectoryId) -> Option<String> {
+        self.engine
+            .latest_return_of(view, &engine_id(child))
+            .map(|body| body.as_str().to_string())
+    }
+
+    fn label_text(&self, label: &Label) -> String {
+        match self.render_label(label) {
+            Some(rendered) => format!("{}/{}", rendered.trust, rendered.audience),
+            None => "an unnamed label".to_string(),
+        }
     }
 
     /// One staged delivery: the narrowing the model must still accept,
@@ -1315,13 +1589,15 @@ impl RuntimeEngine {
         }
     }
 
+    /// One child's stop. The engine decides what crosses: the value merged, the derivation
+    /// staged for the child to echo, or nothing. A stop held below the floor or outside the
+    /// fork's shape is blocked with the reason.
     fn child_return(
         &self,
         view: &EngineView,
         child: &TrajectoryId,
         value: Option<String>,
         evidence: &[ExternalEvidence],
-        entropy: &OfferNonce,
     ) -> Result<EngineDecision, EngineRefusal> {
         let fork = self
             .engine
@@ -1335,52 +1611,52 @@ impl RuntimeEngine {
                 body: ValueBody::new(body),
             },
         };
-        let expansions = self.membership_evidence(evidence);
-        let judge = |evidence: &[ExternalEvidence]| {
+        let withheld = UnresolvedAudience::Withheld { subject: "return" };
+        let blocked = |feedback: String| {
+            Ok(EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
+                feedback,
+                offers: Vec::new(),
+            })))
+        };
+        let judged = self.judge_under_audience(evidence, withheld, |audience| {
             let report = ChildReport {
                 child: engine_id(child),
                 fork: fork.clone(),
                 submission: submission.clone(),
                 evidence: sanitizer_evidence(evidence),
-                offer_nonce: engine_nonce(entropy),
-                expansions: expansions.expansions(),
+                audience: audience.clone(),
             };
             self.engine.handle(view, CoreEvent::ChildReturn(report))
-        };
-        let decision = match judge(evidence) {
-            Ok(decision) => decision,
-            Err(TransitionError::MembershipNeeded { needed }) => {
-                return match self.membership_consult(&expansions, needed)? {
-                    MembershipConsult::Requests(requests) => {
-                        Ok(EngineDecision::deliver(Next::ResolveExternal(requests)))
-                    }
-                    MembershipConsult::Unresolved(group) => {
-                        Ok(EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
-                            feedback: format!(
-                                "[appa] membership of {group} could not be resolved; the return is withheld and may be retried"
-                            ),
-                            offers: Vec::new(),
-                        })))
-                    }
-                };
+        })?;
+        let decision = match judged {
+            AudienceRound::Judged(decision) => decision,
+            AudienceRound::Presented(decision) => return Ok(decision),
+            AudienceRound::Failed(TransitionError::ReturnBelowFloor { floor }) => {
+                return blocked(format!(
+                    "[appa] your final message cannot cross: this session's label fell below the floor the parent \
+                     set for your return ({}). Nothing this session holds now can cross; stop with an empty final \
+                     message to end without a return.",
+                    self.label_text(&floor)
+                ));
             }
-            Err(error) => return Err(child_refusal(error)),
+            AudienceRound::Failed(TransitionError::ReturnShapeMismatch(mismatch)) => {
+                let policy = self.engine.return_policy_of(view, &engine_id(child));
+                return blocked(shape_feedback(&mismatch, policy.as_ref()));
+            }
+            AudienceRound::Failed(TransitionError::SanitizerUnapplicable) => {
+                return Ok(withheld.present("the return sanitizer's derivation was not usable"));
+            }
+            AudienceRound::Failed(error) => return Err(child_refusal(error)),
         };
         let append = decision.append.map(ValidatedFactBatch::into_unsealed);
         let then = match decision.follow_up {
             FollowUp::Child(ChildFollowUp::Merged { admitted }) => Next::PresentToModel(Presentation::Value {
                 value: admitted.as_str().to_string(),
             }),
-            FollowUp::Child(ChildFollowUp::Ended) => Next::PresentToModel(Presentation::NoValue),
-            FollowUp::Child(ChildFollowUp::Pending(stage)) => Next::PresentToModel(self.stage_delivery(
-                "[appa] the child's return still narrows this session.",
-                &stage.residual,
-                &stage.offers,
-            )),
-            FollowUp::Child(ChildFollowUp::Rejected { reason }) => Next::PresentToModel(Presentation::Blocked {
-                feedback: format!("[appa] the child's return could not cross: {reason:?}"),
-                offers: Vec::new(),
+            FollowUp::Child(ChildFollowUp::Staged { derived }) => Next::PresentToModel(Presentation::Staged {
+                value: derived.as_str().to_string(),
             }),
+            FollowUp::Child(ChildFollowUp::Ended) => Next::PresentToModel(Presentation::NoValue),
             FollowUp::Child(ChildFollowUp::Resolve(request)) => self.resolve_or_withhold(
                 view,
                 &engine_id(child),
@@ -1399,9 +1675,9 @@ impl RuntimeEngine {
     }
 
     /// Every answer a call must carry before it is proposed, from the evidence gathered so
-    /// far, or the consults still owed: the produced annotation for an Annotated declaration,
-    /// and the membership pins for the placeholder groups a declared contract's arguments
-    /// name. Every consult still owed goes out in one round; feedback ends the proposal.
+    /// far, or the consult still owed: the produced annotation for an Annotated declaration.
+    /// A declared call owes nothing here — the symbolic audiences its contract reads
+    /// surface from the act's own decision as membership asks.
     fn answers_for(
         &self,
         views: &Views,
@@ -1413,38 +1689,11 @@ impl RuntimeEngine {
             .registry()
             .declaration(resolved)
             .expect("a resolved call names its registered declaration");
-        let mut requests = Vec::new();
-        // An Annotated declaration owes exactly one thing: its produced annotation, which is
-        // complete, concrete, and literal — so it carries no membership pins.
-        let (annotation, memberships) = match declaration {
-            ToolDeclaration::Declared(contract) => {
-                let memberships = gather(&mut requests, self.memberships_for(contract, resolved, evidence))?;
-                (Some(None), memberships)
-            }
-            ToolDeclaration::Annotated { .. } => {
-                let annotation = gather(
-                    &mut requests,
-                    self.annotation_for(views, declaration, resolved, evidence),
-                )?;
-                (annotation.map(Some), Some(Vec::new()))
-            }
+        let annotation = match declaration {
+            ToolDeclaration::Declared(_) => None,
+            ToolDeclaration::Annotated { .. } => Some(self.annotation_for(views, declaration, resolved, evidence)?),
         };
-        match (annotation, memberships) {
-            (Some(annotation), Some(memberships)) => Ok(CallAnswers {
-                annotation,
-                memberships,
-            }),
-            _ => {
-                // A group several arguments name is asked for once.
-                let mut distinct: Vec<ExternalRequest> = Vec::with_capacity(requests.len());
-                for request in requests {
-                    if !distinct.contains(&request) {
-                        distinct.push(request);
-                    }
-                }
-                Err(Resolution::Consult(distinct))
-            }
-        }
+        Ok(CallAnswers { annotation })
     }
 
     /// The pinned annotation an Annotated declaration owes: a pin standing on an open offer
@@ -1481,7 +1730,7 @@ impl RuntimeEngine {
                 .annotators
                 .get(annotator.as_str())
                 .expect("the deployment registers every annotator the policy declares");
-            return Err(Resolution::Consult(vec![ExternalRequest::Annotation {
+            return Err(Resolution(vec![ExternalRequest::Annotation {
                 annotator: annotator.as_str().to_string(),
                 call: digest,
                 declaration: self.annotation_declaration(annotator, binding),
@@ -1673,140 +1922,322 @@ impl RuntimeEngine {
         }
     }
 
-    fn membership_evidence(&self, evidence: &[ExternalEvidence]) -> MembershipEvidence {
-        let registry = self.engine.registry();
-        let mut gathered = MembershipEvidence::default();
-        let Some(resolver) = registry.membership() else {
-            return gathered;
-        };
-        for entry in evidence {
-            let ExternalEvidence::Membership {
-                resolver: named,
-                group,
-                readers,
-            } = entry
-            else {
-                continue;
-            };
-            let group = GroupName::new(group.clone());
-            if named != resolver.as_str() || !registry.groups().contains(&group) {
-                continue;
-            }
-            let expansion = readers
-                .as_ref()
-                .and_then(|readers| GroupExpansion::new(group.clone(), readers.iter().map(ReaderId::new)).ok());
-            // An expansion outranks a no-answer for the same group, whichever was reported first.
-            match (gathered.answers.get(&group), expansion) {
-                (Some(Some(_)), _) => {}
-                (_, expansion) => {
-                    gathered.answers.insert(group, expansion);
-                }
-            }
-        }
-        gathered
+    /// The selector templates the policy registers for one provider, for a consult's
+    /// declaration. Every primitive a consult asks for names a registered provider.
+    fn templates_of(&self, provider: &str) -> Result<Vec<String>, EngineRefusal> {
+        self.engine
+            .registry()
+            .audience()
+            .templates(provider)
+            .map(|templates| templates.iter().map(|template| template.as_str().to_string()).collect())
+            .ok_or_else(|| EngineRefusal::Invariant {
+                detail: format!("a consult names the unregistered audience provider {provider}"),
+            })
     }
 
-    fn membership_consult(
+    /// One act judged under its audience evidence: the evidence gathered from the consult
+    /// answers, the act judged with it pinned, and — while the engine still needs membership
+    /// answers — the consults that gather them. An answer the act cannot obtain is presented
+    /// the way `unresolved` names.
+    fn judge_under_audience<T>(
         &self,
-        gathered: &MembershipEvidence,
-        needed: Vec<GroupName>,
-    ) -> Result<MembershipConsult, EngineRefusal> {
-        let Some(resolver) = self.engine.registry().membership() else {
-            // A policy that writes a group registers a resolver at load.
-            return Err(EngineRefusal::Invariant {
-                detail: "the engine reads a group under a policy that registers no membership resolver".to_string(),
-            });
-        };
-        if let Some(group) = needed
-            .iter()
-            .find(|group| matches!(gathered.answers.get(*group), Some(None)))
-        {
-            return Ok(MembershipConsult::Unresolved(group.clone()));
-        }
-        Ok(MembershipConsult::Requests(
-            needed
-                .into_iter()
-                .map(|group| ExternalRequest::Membership {
-                    resolver: resolver.as_str().to_string(),
-                    group: group.as_str().to_string(),
-                })
-                .collect(),
-        ))
-    }
-
-    fn memberships_for(
-        &self,
-        contract: &ToolAnnotation,
-        resolved: &ResolvedCall,
         evidence: &[ExternalEvidence],
-    ) -> Result<Vec<PinnedMembership>, Resolution> {
-        // No placeholder resolving to a group, nothing to read: `group_reads` already
-        // answers empty for that, and for strictly more.
-        let reads = appa_engine::check::group_reads(contract, resolved);
-        if reads.is_empty() {
-            return Ok(Vec::new());
-        }
-        let Some(resolver) = self.engine.registry().membership() else {
-            let read = &reads[0];
-            return Err(Resolution::Feedback(format!(
-                "[appa] {}: argument {} names {}, but this deployment registers no membership resolver; the call was not checked",
-                resolved.tool().as_str(),
-                read.argument,
-                read.group
-            )));
+        unresolved: UnresolvedAudience<'_>,
+        judge: impl FnOnce(&AudienceEvidence) -> Result<T, TransitionError>,
+    ) -> Result<AudienceRound<T>, EngineRefusal> {
+        let act = match self.act_audience(evidence) {
+            Ok(act) => act,
+            Err(AudienceFailure::Consult(requests)) => {
+                return Ok(AudienceRound::Presented(EngineDecision::deliver(
+                    Next::ResolveExternal(requests),
+                )));
+            }
+            Err(AudienceFailure::Refused(detail)) => return Ok(AudienceRound::Presented(unresolved.present(&detail))),
         };
-        let mut pins = Vec::new();
-        let mut requests: Vec<ExternalRequest> = Vec::new();
-        for read in reads {
-            let group = read.group.as_str();
-            let answer = evidence.iter().find_map(|entry| match entry {
-                ExternalEvidence::Membership {
-                    resolver: named,
-                    group: expanded,
-                    readers,
-                } if named == resolver.as_str() && expanded == group => Some(readers.clone()),
-                _ => None,
-            });
-            match answer {
-                None => {
-                    let request = ExternalRequest::Membership {
-                        resolver: resolver.as_str().to_string(),
-                        group: group.to_string(),
-                    };
-                    if !requests.contains(&request) {
-                        requests.push(request);
+        match judge(&act.payload) {
+            Ok(judged) => Ok(AudienceRound::Judged(judged)),
+            Err(TransitionError::MembershipNeeded { needed }) => match self.audience_consult(&act, needed)? {
+                AudienceConsult::Requests(requests) => Ok(AudienceRound::Presented(EngineDecision::deliver(
+                    Next::ResolveExternal(requests),
+                ))),
+                AudienceConsult::Unresolved(detail) => Ok(AudienceRound::Presented(unresolved.present(&detail))),
+            },
+            Err(error) => Ok(AudienceRound::Failed(error)),
+        }
+    }
+
+    /// One act's audience evidence, gathered from the consult answers: the source claims,
+    /// member lookups, and — under a custom identity implementation — the identity mappings
+    /// for every claimed member. A failed consult stays runtime-side as a recorded no-answer;
+    /// an answer no registered source could have served is dropped rather than carried into
+    /// an act it would refuse. The gathered payload is pre-validated against the same test
+    /// replay applies — the engine's, which is the one rule on duplicate or foreign answers
+    /// — so an inadmissible answer is an operational refusal here, never an engine error.
+    fn act_audience(&self, evidence: &[ExternalEvidence]) -> Result<ActAudience, AudienceFailure> {
+        let audience = self.engine.registry().audience();
+        let mut payload = AudienceEvidence::default();
+        let mut unanswered = Unanswered::default();
+        for entry in evidence {
+            match entry {
+                ExternalEvidence::AudienceSource {
+                    provider,
+                    selector,
+                    members,
+                } => {
+                    let routable = audience
+                        .templates(provider)
+                        .is_some_and(|templates| templates.iter().any(|template| template.matches(selector)));
+                    if !routable {
+                        continue;
                     }
-                }
-                Some(Some(readers)) => {
-                    match PinnedMembership::new(read.argument.clone(), readers.into_iter().map(ReaderId::new)) {
-                        Ok(pin) => pins.push(pin),
-                        Err(_) => {
-                            return Err(Resolution::Feedback(unresolved_group(
-                                resolved.tool().as_str(),
-                                &read.group,
-                            )));
+                    // A claim outside the source's own provider namespace is a broken
+                    // answer; conservatively, the selector was not answered.
+                    let members = members
+                        .clone()
+                        .filter(|members| members.iter().all(|member| qualified_by(provider, &member.id)));
+                    match members {
+                        Some(members) => payload.sources.push(appa_engine::audience::SourceClaims {
+                            provider: provider.clone(),
+                            selector: selector.clone(),
+                            members,
+                        }),
+                        None => {
+                            unanswered.selectors.insert(SelectorSpec {
+                                provider: provider.clone(),
+                                selector: selector.clone(),
+                            });
                         }
                     }
                 }
-                Some(None) => {
-                    return Err(Resolution::Feedback(unresolved_group(
-                        resolved.tool().as_str(),
-                        &read.group,
-                    )));
+                ExternalEvidence::MemberLookup {
+                    provider,
+                    member,
+                    claims,
+                } => {
+                    if !audience.providers().contains(provider) || !qualified_by(provider, member) {
+                        continue;
+                    }
+                    // Claims for an id other than the member asked are a broken answer — a
+                    // source could otherwise canonicalize its member to another provider's
+                    // namespace, or pre-seat an identity mapping for a member it does not
+                    // own. Conservatively, the member was not answered.
+                    let claims = match claims {
+                        Some(Some(answered)) if answered.id != *member => None,
+                        other => other.clone(),
+                    };
+                    match claims {
+                        Some(claims) => payload.lookups.push(appa_engine::audience::MemberLookup {
+                            provider: provider.clone(),
+                            member: member.clone(),
+                            claims,
+                        }),
+                        None => {
+                            unanswered.members.insert(member.clone());
+                        }
+                    }
                 }
+                ExternalEvidence::Identity {
+                    implementation,
+                    id,
+                    principal,
+                } => {
+                    let named = match audience.identity() {
+                        IdentityImplementation::Custom(name) => name.as_str() == implementation,
+                        IdentityImplementation::VerifiedEmail => false,
+                    };
+                    if !named {
+                        continue;
+                    }
+                    match principal {
+                        Some(principal) => payload.identity.push(IdentityMapping {
+                            id: id.clone(),
+                            principal: principal.clone(),
+                        }),
+                        None => {
+                            unanswered.identities.insert(id.clone());
+                        }
+                    }
+                }
+                _ => {}
             }
         }
-        if !requests.is_empty() {
-            return Err(Resolution::Consult(requests));
+        // Under a custom identity implementation every claimed member canonicalizes through
+        // a pinned mapping; the ones still unmapped are this round's identity consults.
+        if let IdentityImplementation::Custom(name) = audience.identity() {
+            let mut requests: Vec<ExternalRequest> = Vec::new();
+            // One question per id, asked about the folded claim the engine will canonicalize
+            // through: a member reported twice, once silently, is one member.
+            let claimed = match appa_engine::audience::folded_claims(&payload) {
+                Ok(folded) => folded,
+                Err(refusal) => {
+                    tracing::debug!(%refusal, "gathered audience evidence refused");
+                    return Err(AudienceFailure::Refused(format!(
+                        "the gathered audience evidence is not admissible: {}",
+                        refusal_class(&refusal)
+                    )));
+                }
+            };
+            for claims in claimed.values() {
+                if payload.identity.iter().any(|mapping| mapping.id == claims.id) {
+                    continue;
+                }
+                if unanswered.identities.contains(&claims.id) {
+                    // The member id is directory data the model has not seen: it stays
+                    // out of the model-visible refusal.
+                    tracing::debug!(implementation = name.as_str(), id = %claims.id, "identity gave no principal");
+                    return Err(AudienceFailure::Refused(format!(
+                        "identity implementation {} gave no principal for a claimed member",
+                        name.as_str(),
+                    )));
+                }
+                let request = ExternalRequest::Identity {
+                    implementation: name.as_str().to_string(),
+                    claims: claims.clone(),
+                };
+                if !requests.contains(&request) {
+                    requests.push(request);
+                }
+            }
+            if !requests.is_empty() {
+                return Err(AudienceFailure::Consult(requests));
+            }
         }
-        Ok(pins)
+        if let Err(refusal) = audience.expansions(&payload) {
+            // The refusal's own Display can carry directory data (member ids, claimed
+            // emails) the model has not seen; the model-visible detail names only the
+            // failure class and its provider/selector.
+            tracing::debug!(%refusal, "gathered audience evidence refused");
+            return Err(AudienceFailure::Refused(format!(
+                "the gathered audience evidence is not admissible: {}",
+                refusal_class(&refusal)
+            )));
+        }
+        Ok(ActAudience { payload, unanswered })
     }
+
+    /// The consults that answer the symbolic atoms an act still needs, or the operational
+    /// refusal where a needed answer already failed or no registered source serves an atom.
+    fn audience_consult(&self, act: &ActAudience, needed: Vec<SymbolicAtom>) -> Result<AudienceConsult, EngineRefusal> {
+        let audience = self.engine.registry().audience();
+        let primitives = match audience.needed_primitives(&needed) {
+            Ok(primitives) => primitives,
+            // A dynamically supplied reference no source serves: an operational failure,
+            // never a policy state. (A statically written one refuses at policy load.)
+            Err(unroutable) => return Ok(AudienceConsult::Unresolved(unroutable.to_string())),
+        };
+        let mut requests: Vec<ExternalRequest> = Vec::new();
+        for spec in &primitives.selectors {
+            let answered = act
+                .payload
+                .sources
+                .iter()
+                .any(|claims| claims.provider == spec.provider && claims.selector == spec.selector);
+            if answered {
+                continue;
+            }
+            if act.unanswered.selectors.contains(spec) {
+                return Ok(AudienceConsult::Unresolved(format!(
+                    "audience source {} gave no answer for {}",
+                    spec.provider, spec.selector
+                )));
+            }
+            requests.push(ExternalRequest::AudienceSource {
+                provider: spec.provider.clone(),
+                selector: spec.selector.clone(),
+                templates: self.templates_of(&spec.provider)?,
+            });
+        }
+        for spec in &primitives.lookups {
+            if act.payload.lookups.iter().any(|lookup| lookup.member == spec.member) {
+                continue;
+            }
+            if act.unanswered.members.contains(&spec.member) {
+                // The member can be a reader a delta wrote that the model never saw.
+                return Ok(AudienceConsult::Unresolved(format!(
+                    "audience source {} gave no answer for a member lookup",
+                    spec.provider
+                )));
+            }
+            requests.push(ExternalRequest::MemberLookup {
+                provider: spec.provider.clone(),
+                member: spec.member.clone(),
+                templates: self.templates_of(&spec.provider)?,
+            });
+        }
+        if requests.is_empty() {
+            // Every primitive is answered and pre-validated, yet the act still asked.
+            return Err(EngineRefusal::Invariant {
+                detail: format!(
+                    "the act re-asks for answered audience atoms: {}",
+                    needed.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+                ),
+            });
+        }
+        Ok(AudienceConsult::Requests(requests))
+    }
+}
+
+/// One model-visible line for an evidence refusal: the failure class and, where they are
+/// policy or argument data the model already holds, the provider and selector — never a
+/// member id or a claimed email, which are directory data.
+fn refusal_class(refusal: &appa_engine::audience::EvidenceRefusal) -> String {
+    use appa_engine::audience::EvidenceRefusal;
+    match refusal {
+        EvidenceRefusal::DuplicateSelector { provider, selector } => {
+            format!("two answers for selector {provider}:{selector} in one operation")
+        }
+        EvidenceRefusal::DuplicateLookup { .. } => "two lookups for one member in one operation".to_string(),
+        EvidenceRefusal::DuplicateIdentity { .. } => {
+            "two identity mappings for one member in one operation".to_string()
+        }
+        EvidenceRefusal::ForeignMember { provider, selector, .. } => {
+            format!("selector {provider}:{selector} reports a member outside its own provider namespace")
+        }
+        EvidenceRefusal::ForeignLookup { provider, .. } => {
+            format!("a lookup under provider {provider} answers outside that namespace")
+        }
+        EvidenceRefusal::ForeignLookupClaims { provider, .. } => {
+            format!("a lookup under provider {provider} carries claims for a different id")
+        }
+        EvidenceRefusal::DuplicateMember { provider, selector, .. } => {
+            format!("selector {provider}:{selector} reports one member twice in one answer")
+        }
+        EvidenceRefusal::ReservedPrincipal { .. } => "an identity mapping names a reserved principal".to_string(),
+        EvidenceRefusal::ConflictingClaims { .. } => {
+            "one member carries conflicting verified-email claims in one operation".to_string()
+        }
+        EvidenceRefusal::MalformedEmail { .. } => {
+            "a member claims a verified email that does not parse as one address".to_string()
+        }
+        EvidenceRefusal::UnmappedIdentity { .. } => {
+            "the identity implementation returned no mapping for a claimed member".to_string()
+        }
+        EvidenceRefusal::UnroutableSelector { provider, selector } => {
+            format!("no registered audience source serves selector {provider}:{selector}")
+        }
+        EvidenceRefusal::UnroutableLookup { provider, .. } => {
+            format!("no registered audience provider {provider} serves a member lookup")
+        }
+        EvidenceRefusal::UnrequestedEvidence { .. } => {
+            "evidence beyond this operation's inherited pins and its own asks".to_string()
+        }
+        EvidenceRefusal::ContradictedPin { .. } => {
+            "an answer that contradicts the one an earlier record of this chain pinned".to_string()
+        }
+    }
+}
+
+/// Is `id` inside `provider`'s own namespace? One rule decides qualification everywhere:
+/// the engine's `ReaderId::provider_prefix`, which also decides which readers the engine
+/// asks to canonicalize. A second spelling of the rule here would let an id the engine asks
+/// about fall outside what this gathering records — and the act would re-ask forever.
+fn qualified_by(provider: &str, id: &str) -> bool {
+    appa_engine::label::ReaderId::new(id).provider_prefix() == Some(provider)
 }
 
 /// Everything a proposal carries beyond its tool and arguments, gathered before it is judged.
 struct CallAnswers {
     annotation: Option<PinnedAnnotation>,
-    memberships: Vec<PinnedMembership>,
 }
 
 /// The consult artifact an annotation request carries: the complete call — its proposed
@@ -1851,23 +2282,8 @@ fn annotation_args(
     serde_json::Value::Object(args)
 }
 
-/// One answer's contribution to a proposal's round of consults: the answer, or the consults it
-/// still owes gathered beside the others'. Feedback ends the round.
-fn gather<T>(requests: &mut Vec<ExternalRequest>, answer: Result<T, Resolution>) -> Result<Option<T>, Resolution> {
-    match answer {
-        Ok(answer) => Ok(Some(answer)),
-        Err(Resolution::Consult(consults)) => {
-            requests.extend(consults);
-            Ok(None)
-        }
-        Err(Resolution::Feedback(text)) => Err(Resolution::Feedback(text)),
-    }
-}
-
-fn unresolved_group(tool: &str, group: &GroupName) -> String {
-    format!(
-        "[appa] {tool}: membership of {group} could not be resolved; the call was not checked — propose it again later"
-    )
+fn unresolved_audience(tool: &str, detail: &str) -> String {
+    format!("[appa] {tool}: {detail}; the call was not checked — propose it again later")
 }
 
 enum AuthorityOutcome {
@@ -1882,26 +2298,73 @@ enum SanitizerAnswer {
     Derived(ValueBody),
 }
 
+/// The consults an answer still owes before its call can be judged.
 #[derive(Debug)]
-enum Resolution {
-    Feedback(String),
-    Consult(Vec<ExternalRequest>),
+struct Resolution(Vec<ExternalRequest>);
+
+enum AudienceConsult {
+    Requests(Vec<ExternalRequest>),
+    Unresolved(String),
 }
 
-enum MembershipConsult {
-    Requests(Vec<ExternalRequest>),
-    Unresolved(GroupName),
+/// How an act presents an audience answer it cannot obtain: a failed or inadmissible
+/// consult, or a dynamically supplied reference no registered source serves.
+#[derive(Clone, Copy)]
+enum UnresolvedAudience<'a> {
+    /// The proposed call is denied.
+    Denied { tool: &'a str },
+    /// The value — a tool result or a child's return — is withheld and may be retried.
+    Withheld { subject: &'static str },
+    /// The offer stands and may be executed again.
+    OfferStands,
+}
+
+impl UnresolvedAudience<'_> {
+    fn present(self, detail: &str) -> EngineDecision {
+        match self {
+            UnresolvedAudience::Denied { tool } => deny(unresolved_audience(tool, detail)),
+            UnresolvedAudience::Withheld { subject } => {
+                EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
+                    feedback: format!("[appa] {detail}; the {subject} is withheld and may be retried"),
+                    offers: Vec::new(),
+                }))
+            }
+            UnresolvedAudience::OfferStands => {
+                no_answer(format!("[appa] {detail}; the offer stands and may be executed again"))
+            }
+        }
+    }
+}
+
+/// Where one act's audience round ends: judged, presented short of a judgment (consults
+/// still owed, or an unobtainable answer), or failed in the engine for another reason.
+enum AudienceRound<T> {
+    Judged(T),
+    Presented(EngineDecision),
+    Failed(TransitionError),
+}
+
+/// Why an act cannot carry audience evidence yet: the identity consults still owed, or the
+/// operational refusal a failed or inadmissible answer forces.
+enum AudienceFailure {
+    Consult(Vec<ExternalRequest>),
+    Refused(String),
+}
+
+/// One act's validated audience payload — what the act pins — beside the consults that
+/// already produced no answer, which are never re-asked.
+struct ActAudience {
+    payload: AudienceEvidence,
+    unanswered: Unanswered,
 }
 
 #[derive(Debug, Default)]
-struct MembershipEvidence {
-    answers: BTreeMap<GroupName, Option<GroupExpansion>>,
-}
-
-impl MembershipEvidence {
-    fn expansions(&self) -> Vec<GroupExpansion> {
-        self.answers.values().flatten().cloned().collect()
-    }
+struct Unanswered {
+    selectors: BTreeSet<SelectorSpec>,
+    /// Qualified members whose lookup produced no answer.
+    members: BTreeSet<String>,
+    /// Member ids the custom identity implementation gave no principal for.
+    identities: BTreeSet<String>,
 }
 
 fn deny(text: String) -> EngineDecision {
@@ -1914,6 +2377,7 @@ fn deny_next(text: String) -> Next {
         feedback: vec![Feedback {
             text,
             offers: Vec::new(),
+            review: Vec::new(),
         }],
     }
 }
@@ -2113,9 +2577,6 @@ fn malformed_feedback(error: &EngineError) -> String {
         EngineError::ProviderRunTool(tool) => format!(
             "[appa] tool {tool} is provider-run: it executes inside the inference call and cannot be proposed as a tool call"
         ),
-        EngineError::InvalidReturnSchema(error) => {
-            format!("[appa] invalid call: return_schema does not compile to a canonical shape: {error}")
-        }
         error => format!("[appa] invalid call: {error}"),
     }
 }
@@ -2197,18 +2658,25 @@ fn effect_names(effects: &EffectSet) -> Vec<String> {
 }
 
 fn audience_wire(audience: &Audience) -> String {
-    match audience {
-        Audience::Public => "public".to_string(),
-        Audience::Restricted(readers) if readers.is_empty() => "∅".to_string(),
-        Audience::Restricted(readers) => {
-            let shown: Vec<&str> = readers.iter().take(3).map(ReaderId::as_str).collect();
-            let rest = readers.len().saturating_sub(3);
-            if rest > 0 {
-                format!("{}+{rest}", shown.join(","))
-            } else {
-                shown.join(",")
-            }
-        }
+    if audience.is_public() {
+        return "public".to_string();
+    }
+    audience.clauses().map(clause_wire).collect::<Vec<_>>().join(" ∩ ")
+}
+
+/// One union clause's summary: the chain audience, group marks, and readers in canonical
+/// order — three entries shown, the rest counted; the empty clause is nobody.
+fn clause_wire(clause: &Clause) -> String {
+    let mut entries = crate::consult::clause_entries(clause);
+    if entries.is_empty() {
+        return "∅".to_string();
+    }
+    let rest = entries.len().saturating_sub(3);
+    entries.truncate(3);
+    if rest > 0 {
+        format!("{}+{rest}", entries.join(","))
+    } else {
+        entries.join(",")
     }
 }
 
@@ -2251,13 +2719,16 @@ fn gap_text(gap: &appa_engine::check::Gap) -> String {
             format!("trust is {actual:?}, below the required floor {required:?}")
         }
         Gap::Includes { recipients } => match recipients {
-            appa_engine::label::Audience::Public => "the readers are not the public audience".to_string(),
-            appa_engine::label::Audience::Restricted(readers) => {
-                format!("the readers do not include {} required recipient(s)", readers.len())
+            DeclaredAudience::Public => "the readers are not the public audience".to_string(),
+            DeclaredAudience::Union(clause) => {
+                format!(
+                    "the readers do not include {} required recipient(s)",
+                    clause_size(clause)
+                )
             }
         },
-        // The count only, as for `includes`: a cap may resolve a directory group.
-        Gap::Cap { cap } => format!("the committed readers exceed the cap of {}", audience_count(cap)),
+        // The count only, as for `includes`: a cap may read a directory group's members.
+        Gap::Cap { cap } => format!("the committed readers exceed the cap of {}", declared_count(cap)),
         Gap::Prior(effect) => format!("requires a prior {} effect", effect.as_str()),
         Gap::NoPrior(effect) => format!("forbidden after a {} effect", effect.as_str()),
         Gap::Attention(mark) => format!("requires attention: {}", mark.as_str()),
@@ -2297,16 +2768,158 @@ fn narrowing_feedback(narrowing: &appa_engine::check::Narrowing, chain: &TrustCh
 }
 
 fn audience_count(audience: &Audience) -> String {
-    match audience {
-        Audience::Public => "public".to_string(),
-        Audience::Restricted(readers) => match readers.len() {
-            1 => "1 reader".to_string(),
-            count => format!("{count} readers"),
-        },
+    if audience.is_public() {
+        return "public".to_string();
+    }
+    let clauses = audience.clauses().count();
+    if clauses > 1 {
+        return format!("an intersection of {clauses} audiences");
+    }
+    let clause = audience.clauses().next().expect("a non-public audience holds a clause");
+    clause_count(clause)
+}
+
+/// One clause's atom count as feedback shows it — counts only, never who.
+fn clause_count(clause: &Clause) -> String {
+    let symbolic = clause.groups().count() + usize::from(clause.chain().is_some());
+    match (clause.readers().len(), symbolic) {
+        (0, 0) => "nobody".to_string(),
+        (1, 0) => "1 reader".to_string(),
+        (count, 0) => format!("{count} readers"),
+        (0, _) => "a symbolic audience".to_string(),
+        (count, _) => format!("a symbolic audience and {count} reader(s)"),
     }
 }
 
-fn remedy_instruction(plan: &ExecutableRemedyPlan, id: &OfferId) -> String {
+fn clause_size(clause: &Clause) -> usize {
+    clause.readers().len() + clause.groups().count() + usize::from(clause.chain().is_some())
+}
+
+fn declared_count(audience: &DeclaredAudience) -> String {
+    match audience {
+        DeclaredAudience::Public => "public".to_string(),
+        DeclaredAudience::Union(clause) => clause_count(clause),
+    }
+}
+
+fn shape_feedback(mismatch: &ReturnMismatch, policy: Option<&ReturnPolicy>) -> String {
+    let schema = policy
+        .and_then(|policy| policy.sanitizer.as_ref())
+        .and_then(ReturnSanitizer::shape)
+        .map(|shape| shape.normalized().to_string())
+        .unwrap_or_default();
+    format!(
+        "[appa] your final message must be one JSON object matching the schema the parent set, and nothing else; \
+         it was refused: {mismatch}\nSchema: {schema}"
+    )
+}
+
+/// A label in the spelling `execute_remedy_plan` takes for a return floor. An audience that is
+/// an intersection of clauses has no one-list spelling; the trust rank alone is shown then, and
+/// the omitted dimension keeps the trajectory's current value.
+fn label_spelling(chain: &TrustChain, label: &Label) -> String {
+    let quoted = |text: &str| format!("\"{}\"", terminal_safe(text));
+    let top = Trust::new((chain.len() - 1) as u8);
+    let trust = chain
+        .name_of(if label.trust == Trust::new(u8::MAX) {
+            top
+        } else {
+            label.trust
+        })
+        .map(quoted)
+        .unwrap_or_else(|| "\"<rank>\"".to_string());
+    let audience = if label.audience.is_public() {
+        Some(vec!["public".to_string()])
+    } else {
+        match label.audience.clauses().collect::<Vec<_>>().as_slice() {
+            [clause] => Some(crate::consult::clause_entries(clause)),
+            _ => None,
+        }
+    };
+    match audience {
+        Some(entries) => format!(
+            "{{trust: {trust}, audience: [{}]}}",
+            entries.iter().map(|entry| quoted(entry)).collect::<Vec<_>>().join(", ")
+        ),
+        None => format!("{{trust: {trust}}}"),
+    }
+}
+
+/// What bounds a return declaration made on a trajectory: its current label, which no floor
+/// stands above, and the lowest trust its own floor lets it declare.
+struct ReturnBounds {
+    label: Label,
+    lowest: Trust,
+}
+
+/// The spelling a return declaration's example needs: this trajectory's label as the
+/// `label` argument takes it, and the trust ranks a placeholder stands for.
+struct ReturnSpelling {
+    floor: String,
+    ranks: String,
+}
+
+impl ReturnSpelling {
+    /// Only the ranks the declaration may take are named: at or below the trajectory's trust,
+    /// and at or above the lowest its own floor permits. The unnamed top sentinel stands for
+    /// the whole chain.
+    fn of(chain: &TrustChain, bounds: &ReturnBounds) -> ReturnSpelling {
+        let ReturnBounds { label, lowest } = bounds;
+        let held = if label.trust == Trust::new(u8::MAX) {
+            chain.len()
+        } else {
+            usize::from(label.trust.rank()) + 1
+        };
+        let lowest = usize::from(lowest.rank());
+        ReturnSpelling {
+            floor: label_spelling(chain, label),
+            ranks: chain
+                .names()
+                .skip(lowest)
+                .take(held.saturating_sub(lowest))
+                .map(|name| format!("\"{}\"", terminal_safe(name)))
+                .collect::<Vec<_>>()
+                .join(", "),
+        }
+    }
+}
+
+fn return_instruction(
+    sanitizer: Option<&appa_engine::names::SanitizerName>,
+    id: &OfferId,
+    spelling: &ReturnSpelling,
+) -> String {
+    let id = terminal_safe(&id.0);
+    let ReturnSpelling { floor, ranks } = spelling;
+    match sanitizer {
+        None => format!(
+            "  - Declare the lowest label this session accepts from the subagent's return, then propose the spawn \
+             again. The subagent starts at this session's label, now {floor}, and can accept no change below the \
+             floor it is given: a subagent that must read below this session's trust needs the floor at that rank, \
+             and its return may then narrow this session that far. An omitted dimension keeps its current \
+             value.\n    execute_remedy_plan(offer_id: \"{id}\", label: {{trust: \"<rank>\"}}), with <rank> one \
+             of {ranks} (lowest first)"
+        ),
+        Some(name) if name.is_attest_schema() => format!(
+            "  - Attest the subagent's return: declare the floor and the JSON schema its return must match. The \
+             schema is strict: an object lists its `properties`, every one `required`, and is closed as written \
+             (no `additionalProperties`); an integer carries `minimum` and `maximum`; a string leaf carries \
+             `enum`, `const`, or `format`, never free text. The return crosses at the attestation's \
+             label.\n    execute_remedy_plan(offer_id: \"{id}\", label: {floor}, return_schema: {{type: \
+             \"object\", ...}})"
+        ),
+        Some(name) => format!(
+            "  - Have sanitizer {} rewrite the subagent's return before this session receives it, and declare the \
+             floor.\n    execute_remedy_plan(offer_id: \"{id}\", label: {floor})",
+            terminal_safe(name.as_str())
+        ),
+    }
+}
+
+fn remedy_instruction(plan: &ExecutableRemedyPlan, id: &OfferId, spelling: &ReturnSpelling) -> String {
+    if let Some(sanitizer) = plan.return_step() {
+        return return_instruction(sanitizer, id, spelling);
+    }
     let needs_approval = !plan.required.is_empty();
     let action = match (needs_approval, plan.narrowing().is_some(), plan.sanitizer()) {
         (true, _, Some(sanitizer)) => {
@@ -2329,7 +2942,7 @@ fn remedy_instruction(plan: &ExecutableRemedyPlan, id: &OfferId) -> String {
     )
 }
 
-fn remedy_lines(planned: &PlannedBlock, offers: &[(OfferId, PlanId)]) -> Vec<String> {
+fn remedy_lines(planned: &PlannedBlock, offers: &[(OfferId, PlanId)], spelling: &ReturnSpelling) -> Vec<String> {
     planned
         .plans
         .iter()
@@ -2337,7 +2950,7 @@ fn remedy_lines(planned: &PlannedBlock, offers: &[(OfferId, PlanId)]) -> Vec<Str
             RemedyPlan::Executable(plan) => offers
                 .iter()
                 .find(|(_, offered)| *offered == plan.id)
-                .map(|(id, _)| remedy_instruction(plan, id)),
+                .map(|(id, _)| remedy_instruction(plan, id, spelling)),
             RemedyPlan::Redispatch(redispatch) => Some(format!(
                 "  - Run {} first; it clears: {}.",
                 terminal_safe(redispatch.tool().as_str()),
@@ -2347,13 +2960,28 @@ fn remedy_lines(planned: &PlannedBlock, offers: &[(OfferId, PlanId)]) -> Vec<Str
         .collect()
 }
 
-fn block_feedback(planned: &PlannedBlock, offers: &[(OfferId, PlanId)], chain: &TrustChain) -> String {
+fn block_feedback(
+    planned: &PlannedBlock,
+    offers: &[(OfferId, PlanId)],
+    chain: &TrustChain,
+    bounds: &ReturnBounds,
+) -> String {
     let mut reasons = Vec::new();
     for gap in &planned.raw.requirement_gaps {
         reasons.push(terminal_safe(&gap_text(gap)));
     }
     if let Some(narrowing) = &planned.raw.narrowing {
         reasons.extend(narrowing_feedback(narrowing, chain));
+    }
+    if planned.plans.iter().any(|plan| match plan {
+        RemedyPlan::Executable(plan) => plan.return_step().is_some(),
+        RemedyPlan::Redispatch(_) => false,
+    }) {
+        reasons.push(format!(
+            "This call starts a subagent, and this session has not declared what its return may carry. The policy's \
+             trust ranks, lowest first: {}.",
+            chain.names().map(terminal_safe).collect::<Vec<_>>().join(" < ")
+        ));
     }
 
     let mut lines = vec![
@@ -2363,22 +2991,94 @@ fn block_feedback(planned: &PlannedBlock, offers: &[(OfferId, PlanId)], chain: &
     ];
     lines.extend(reasons.into_iter().map(|reason| format!("  - {reason}")));
 
-    let remedies = remedy_lines(planned, offers);
+    let remedies = remedy_lines(planned, offers, &ReturnSpelling::of(chain, bounds));
     if !remedies.is_empty() {
         lines.push(String::new());
         lines.push("Continue:".to_string());
         lines.extend(remedies);
     }
-    if let Some(advice) = &planned.fork_advice {
+    if let Some(advice) = planned.fork_advice {
+        let remedies_required = !planned.raw.requirement_gaps.is_empty();
         lines.push(String::new());
-        lines.push(if planned.raw.narrowing.is_some() {
-            "Keep this session unchanged:".to_string()
-        } else {
-            "Alternative:".to_string()
-        });
-        lines.push(format!("  {}", advice.replace('\n', "\n  ")));
+        lines.push(fork_heading(advice).to_string());
+        lines.push(format!(
+            "  {}",
+            fork_advice_text(advice, remedies_required).replace('\n', "\n  ")
+        ));
     }
     lines.join("\n")
+}
+
+fn fork_heading(advice: ForkAdvice) -> &'static str {
+    match advice {
+        ForkAdvice::SameLabel => "Alternative:",
+        ForkAdvice::Narrowing {
+            standing: FloorStanding::Unbound,
+            ..
+        } => "Keep this session unchanged:",
+        ForkAdvice::Narrowing {
+            standing: FloorStanding::Within,
+            ..
+        } => "Delegation:",
+        ForkAdvice::Narrowing {
+            standing: FloorStanding::Below,
+            ..
+        } => "Not acceptable here:",
+    }
+}
+
+/// `remedies_required` when the block also carries requirement gaps a child would clear.
+fn fork_advice_text(advice: ForkAdvice, remedies_required: bool) -> String {
+    let ForkAdvice::Narrowing {
+        standing,
+        sanitized_return,
+    } = advice
+    else {
+        return "If this trajectory's harness advertises a child-session tool, handle the work there if isolation is \
+                useful.\nA child inherits the same session label, so delegation does not clear these requirements."
+            .to_string();
+    };
+    let delegated = if remedies_required {
+        "this call, its required remedies, and all work that uses its result"
+    } else {
+        "this call and all work that uses its result"
+    };
+    match (standing, sanitized_return) {
+        (FloorStanding::Unbound, true) => format!(
+            "If this trajectory's harness advertises a child-session tool, delegate {delegated} there.\nFinish there \
+             by returning nothing, or return only a sanitized derivation. Returning the raw value applies the same \
+             change to this session."
+        ),
+        (FloorStanding::Unbound, false) => format!(
+            "If this trajectory's harness advertises a child-session tool, delegate {delegated} there.\nNo \
+             registered return sanitizer carries this change back without applying it here, so finish there by \
+             returning nothing: a returned value applies the same change to this session."
+        ),
+        (FloorStanding::Within, true) => format!(
+            "This session is a subagent, and the floor its parent declared allows this change: accept it here.\nTo \
+             keep this session unchanged instead, delegate {delegated} to a further subagent declared with a \
+             return sanitizer; one declared with the bare floor would apply the same change here on its return."
+        ),
+        (FloorStanding::Within, false) => {
+            "This session is a subagent, and the floor its parent declared allows this change: accept it here.\nA \
+             further subagent's return would apply the same change to this session, so delegating gains nothing."
+                .to_string()
+        }
+        (FloorStanding::Below, true) => format!(
+            "This session is a subagent, and this change falls below the floor its parent declared: this session \
+             cannot accept it, and a subagent started here under the bare floor cannot either.\nA subagent started \
+             here with a return sanitizer can: delegate {delegated} there, and declare that sanitizer when the \
+             spawn asks for the return declaration."
+        ),
+        (FloorStanding::Below, false) => {
+            "This session is a subagent, and this change falls below the floor its parent declared: neither this \
+             session nor any subagent started here can accept it, and no registered return sanitizer carries \
+             this change back without applying it.\nDo not start a subagent for this. Finish without this call, \
+             or return a plain note that the work needs a subagent declared with a lower floor or a return \
+             sanitizer, so the parent can start one."
+                .to_string()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2391,20 +3091,18 @@ mod tests {
     use crate::consult::{AnnotationAnswer, HistoryEntry, RequiredAudienceAnswer, SanitizerPoint, WireAudience};
     use appa_engine::contract::{AudienceRequirement, HistoryRequirement, RecipientSpec};
     use appa_engine::fact::{EffectKind, EffectSet};
-    use appa_engine::groups::DeclaredAudience;
-    use appa_engine::label::{Audience, ReaderId, Trust};
+    use appa_engine::label::{Audience, DeclaredAudience, ReaderId, Trust};
     use appa_engine::names::{AnnotatorName, MarkName};
     use appa_engine::plan::{ExecutableRemedyPlan, PlanId, PlannedBlock, RemedyPlan, RemedyStep};
     use appa_engine::value::{RawResultDigest, ToolName, ValueBody};
-    use std::collections::BTreeSet;
 
     #[test]
     fn a_sanitizer_consult_names_its_point_and_the_tool_the_value_belongs_to() {
         let policy = appa_policy::Config::from_toml_str(
             r#"
-                version = 1
+                version = 2
                 [deployment]
-                confined_child_return = true
+                context_control = true
                 [[tool]]
                 name = "fetch"
                 parameters = { type = "object", properties = { url = { type = "string" } }, required = ["url"] }
@@ -2463,7 +3161,7 @@ mod tests {
     fn annotator_policy() -> appa_policy::Config {
         appa_policy::Config::from_toml_str(
             r#"
-                version = 1
+                version = 2
                 [[annotator]]
                 name = "classifier"
                 [[tool]]
@@ -2617,7 +3315,7 @@ mod tests {
         let owner = engine_id(&trajectory);
         let views = view.views(&owner).expect("the root is opened");
         let asked = match engine.annotation_for(&views, declaration, &call, &[]) {
-            Err(Resolution::Consult(requests)) => match requests.as_slice() {
+            Err(Resolution(requests)) => match requests.as_slice() {
                 [
                     ExternalRequest::Annotation {
                         annotator,
@@ -2725,7 +3423,7 @@ mod tests {
                     answer: answer(),
                 }],
             ),
-            Err(Resolution::Consult(_))
+            Err(Resolution(_))
         ));
     }
 
@@ -2754,29 +3452,48 @@ mod tests {
             (OfferId("offer-for-8".to_string()), PlanId::new(8)),
             (OfferId("offer-for-3".to_string()), PlanId::new(3)),
         ];
+        let spelling = super::ReturnSpelling {
+            floor: "{}".to_string(),
+            ranks: String::new(),
+        };
         assert_eq!(
-            remedy_lines(&planned, &offers),
+            remedy_lines(&planned, &offers, &spelling),
             vec![
-                remedy_instruction(&plan(3), &offers[1].0),
-                remedy_instruction(&plan(8), &offers[0].0),
+                remedy_instruction(&plan(3), &offers[1].0, &spelling),
+                remedy_instruction(&plan(8), &offers[0].0, &spelling),
             ],
             "the plan with no offer is not shown; the rest carry their own offer"
         );
     }
 
     fn restricted(ids: &[&str]) -> Audience {
-        Audience::Restricted(ids.iter().map(|id| ReaderId::new((*id).to_string())).collect())
+        Audience::restricted(ids.iter().map(|id| ReaderId::new((*id).to_string())))
     }
 
     #[test]
     fn audience_wire_spells_every_reader_shape() {
-        assert_eq!(audience_wire(&Audience::Public), "public");
-        assert_eq!(audience_wire(&Audience::Restricted(BTreeSet::new())), "∅");
+        use appa_engine::label::{ChainAudience, Clause, GroupRef};
+        assert_eq!(audience_wire(&Audience::public()), "public");
+        assert_eq!(audience_wire(&Audience::nobody()), "∅");
         assert_eq!(audience_wire(&restricted(&["hr"])), "hr");
         assert_eq!(
             audience_wire(&restricted(&["d@x", "a@x", "c@x", "b@x"])),
             "a@x,b@x,c@x+1",
             "sorted, three shown, the rest counted",
+        );
+        let symbolic = Audience::of_clauses([
+            Clause::new(
+                [ChainAudience::Internal],
+                [GroupRef::Named(appa_engine::names::GroupName::new("finance"))],
+                [],
+            )
+            .expect("a symbolic clause"),
+            Clause::new([], [], [ReaderId::new("alice")]).expect("a reader clause"),
+        ]);
+        assert_eq!(
+            audience_wire(&symbolic),
+            "alice ∩ internal,@finance",
+            "clauses intersect in canonical order; each clause unions its spelled atoms",
         );
     }
 

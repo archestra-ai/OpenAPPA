@@ -2,14 +2,14 @@
 //! executable behind the command override, a real store, the real hook path.
 
 mod common;
-use common::{raw, serve};
+use common::{audit_len, propose, ran, raw, root, serve};
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use appa_runtime::api::{AuditEvent, Runtime};
 use appa_runtime::{config::Config, hooks};
-use appa_runtime_api::{Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, ToolOutcome, TrajectoryId};
+use appa_runtime_api::{Actor, HookDecision, HookEvent, ProposedCall, TrajectoryId};
 use axum::Router;
 use axum::extract::State;
 use axum::routing::post;
@@ -73,51 +73,11 @@ fn produced(delta_trust: &str) -> serde_json::Value {
     })
 }
 
-fn root() -> TrajectoryId {
-    TrajectoryId("annotators-test".to_string())
-}
-
-fn actor() -> Actor {
-    Actor {
-        root: root(),
-        child: None,
-    }
-}
-
 fn fetch(url: &str) -> ProposedCall {
     ProposedCall {
         tool: "fetch".to_string(),
         arguments: raw(serde_json::json!({ "url": url })),
     }
-}
-
-async fn propose(runtime: &Arc<Runtime>, call: ProposedCall) -> HookDecision {
-    hooks::handle(
-        runtime,
-        HookEvent::ToolCall {
-            actor: actor(),
-            call,
-            spawn: false,
-        },
-    )
-    .await
-}
-
-async fn ran(runtime: &Arc<Runtime>, call: ProposedCall) {
-    assert_eq!(
-        hooks::handle(
-            runtime,
-            HookEvent::ToolResult {
-                actor: actor(),
-                call,
-                outcome: ToolOutcome::Success {
-                    body: OutcomeBody::Available("done".to_string()),
-                },
-            },
-        )
-        .await,
-        HookDecision::Ack
-    );
 }
 
 async fn open_runtime(dir: &tempfile::TempDir, config_toml: &str) -> Arc<Runtime> {
@@ -132,20 +92,16 @@ async fn open_runtime(dir: &tempfile::TempDir, config_toml: &str) -> Arc<Runtime
     runtime
 }
 
-fn audit_len(runtime: &Runtime) -> usize {
-    runtime.audit(&root()).expect("the audit reads").len()
-}
-
 fn http_policy(url: &str) -> String {
     format!(
         r#"
 [policy]
-version = 1
+version = 2
 
 [[policy.annotator]]
 name = "classifier"
-audiences = ["internal"]
-hint = "Use internal for data restricted to company readers."
+audiences = ["insider"]
+hint = "Use insider for data restricted to company readers."
 
 [[policy.tool]]
 name = "fetch"
@@ -177,7 +133,7 @@ delta = {}
     format!(
         r#"
 [policy]
-version = 1
+version = 2
 
 [[policy.annotator]]
 name = "classifier"
@@ -234,10 +190,10 @@ async fn an_http_annotator_annotates_the_complete_call_and_a_fresh_proposal_cons
     assert_eq!(
         request["declaration"],
         serde_json::json!({
-            "hint": "Use internal for data restricted to company readers.",
+            "hint": "Use insider for data restricted to company readers.",
             "inputs": [],
             "trust_ranks": ["suspicious", "trusted"],
-            "audiences": ["internal"],
+            "audiences": ["insider"],
             "attention_marks": [],
             "effects": [],
         })
@@ -279,7 +235,7 @@ async fn only_the_selected_declaration_consults_its_annotator() {
     let config = format!(
         r#"
 [policy]
-version = 1
+version = 2
 
 [[policy.annotator]]
 name = "classifier"
@@ -421,10 +377,10 @@ async fn a_mapped_input_shows_the_annotator_one_argument() {
     annotator.set("classifier", Answer::Wire(produced("trusted")));
     let config = http_policy(&url).replace(
         r#"name = "classifier"
-audiences = ["internal"]"#,
+audiences = ["insider"]"#,
         r#"name = "classifier"
 inputs = { subject = "$tool_call.arguments.url" }
-audiences = ["internal"]"#,
+audiences = ["insider"]"#,
     );
     let runtime = open_runtime(&dir, &config).await;
 
@@ -495,7 +451,7 @@ fn builtin_policy(command: &std::path::Path, extra: &str) -> String {
     format!(
         r#"
 [policy]
-version = 1
+version = 2
 
 [[policy.annotator]]
 name = "classifier"
@@ -619,6 +575,7 @@ async fn concurrent_claude_consults_are_gated_by_the_runtime_permit_pool() {
                     actor: Actor { root, child: None },
                     call: fetch("https://a.example"),
                     spawn: false,
+                    ruling: None,
                 },
             )
             .await
@@ -675,7 +632,7 @@ async fn a_declared_llm_annotator_consults_the_llm_profile_and_no_binding() {
     let config = format!(
         r#"
 [policy]
-version = 1
+version = 2
 
 [[policy.annotator]]
 name = "classifier"
@@ -802,9 +759,9 @@ async fn a_produced_history_requirement_gates_on_the_effects_a_prior_release_com
     );
     let config = http_policy(&url).replace(
         r#"name = "classifier"
-audiences = ["internal"]"#,
+audiences = ["insider"]"#,
         r#"name = "classifier"
-audiences = ["internal"]
+audiences = ["insider"]
 effects = ["egress"]"#,
     );
     let runtime = open_runtime(&dir, &config).await;
@@ -832,7 +789,7 @@ fn wildcard_policy(url: &str) -> String {
     format!(
         r#"
 [policy]
-version = 1
+version = 2
 
 [[policy.annotator]]
 name = "gatekeeper"

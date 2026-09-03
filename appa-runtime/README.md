@@ -16,22 +16,21 @@ re-validates its persisted log before it is trusted.
 The Claude Code adapter requires the `claude` command, `curl`, and Cargo when building from a checkout.
 
 Every `appa` build knows the SHA-256 of the plugin artifact belonging to its own
-release and accepts no other bytes. From an extracted release archive on POSIX,
-init downloads that artifact, verifies it, and caches it:
+release and accepts no other bytes. On Linux and macOS the installer fetches
+the release archive, verifies its checksum, and places `appa` in
+`~/.local/bin`; init then downloads that artifact, verifies it, and caches it:
 
 ```sh
-install -m 755 appa ~/.local/bin/
-appa init claude-code
+curl -fsSL https://openappa.com/install.sh | sh
+~/.local/bin/appa init claude-code
 ```
 
-A build from a checkout has no such digest, refuses to download, and requires an
-explicit source:
+A build from a checkout carries its exact Git commit and plugin-tree digest, so
+the same command works there too:
 
 ```sh
 cargo install --path appa-runtime --force
-plugin=$(mktemp -d)/bundle
-sh scripts/appa-stage-plugin-bundle.sh "$plugin"
-appa init claude-code --plugin-source "$plugin"
+appa init claude-code
 ```
 
 The result does not depend on the working directory. It replaces an existing APPA plugin instead of stacking
@@ -61,7 +60,7 @@ that releases one tool:
 
 ```toml
 [policy]
-version = 1
+version = 2
 
 [[policy.tool]]
 name = "Bash"

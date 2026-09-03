@@ -5,12 +5,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::audience::{AudienceConfig, AudienceRegistry, SelectorSpec, Unroutable};
 use crate::authority::{Authority, DeclaredTransition, Hint, Sanitizer};
 use crate::contract::{AudienceRequirement, HistoryRequirement, RecipientSpec, ToolAnnotation, ToolDeclaration};
 use crate::fact::EffectKind;
-use crate::groups::{DeclaredAudience, ExpansionRefusal, Expansions, GroupExpansion, GroupResolution};
-use crate::label::{Audience, ReaderId, Trust};
-use crate::names::{AnnotatorName, AuthorityName, GroupName, MarkName, MembershipResolverName, SanitizerName, TagName};
+use crate::label::{
+    Audience, DeclaredAudience, Evaluation, Expansions, GroupRef, MembershipContext, ReaderId, SymbolicAtom, Trust,
+};
+use crate::names::{AnnotatorName, AuthorityName, MarkName, SanitizerName, TagName};
 use crate::value::{ToolDeclarationId, ToolName};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -226,6 +228,11 @@ impl TrustChain {
         self.ranks.get(trust.rank() as usize).map(String::as_str)
     }
 
+    /// Every rank name, lowest first.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.ranks.iter().map(String::as_str)
+    }
+
     pub fn len(&self) -> usize {
         self.ranks.len()
     }
@@ -314,11 +321,11 @@ pub struct RegistryConfig {
     pub annotators: Vec<AnnotatorDeclaration>,
     pub authorities: Vec<Authority>,
     pub sanitizers: Vec<Sanitizer>,
-    /// The deployment's one membership resolver, registered by name. Every
-    /// `@group` a placeholder argument names resolves through it; without one, such an argument
-    /// names a reader set nothing can expand.
+    /// The audience side of the policy: registered sources, the chain mappings, the configured
+    /// named audiences, and the identity implementation. All of it is policy meaning; how a
+    /// deployment reaches a source or the identity implementation never enters.
     #[serde(default)]
-    pub membership: Option<MembershipResolverName>,
+    pub audience: AudienceConfig,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -374,11 +381,23 @@ pub enum LoadError {
     #[error("{context}: hint is {len} characters, over the maximum {max}")]
     HintTooLong { context: String, len: usize, max: usize },
     #[error(
-        "{context}: {reader:?} is not a literal reader ID — `public` is a label state, and the `@` mark is reserved for groups a membership resolver expands"
+        "{context}: {reader:?} is not a literal reader ID — `public`, `self`, and `internal` are audience states, and the `@` mark is reserved for group references"
     )]
     NonLiteralReader { context: String, reader: String },
-    #[error("group {group} is written in a configuration that registers no membership resolver")]
-    GroupWithoutResolver { group: String },
+    #[error("{context}: {fault} — a policy-written audience reference must resolve at load")]
+    UnroutableAudience { context: String, fault: Unroutable },
+    #[error("audience source provider {0:?} is registered more than once")]
+    DuplicateAudienceProvider(String),
+    #[error(
+        "audience source provider name {0:?} is malformed: a provider is a non-empty name without `:` or a leading `@`"
+    )]
+    MalformedAudienceProvider(String),
+    #[error("named audience name {0:?} is malformed: a name is non-empty, written bare, and holds no `:`")]
+    MalformedNamedAudience(String),
+    #[error("named audience @{0} is configured more than once")]
+    DuplicateNamedAudience(String),
+    #[error("named audience @{0} lists no sources")]
+    EmptyAudienceFrom(String),
     #[error("the deployment declaration names unregistered tool {tool} in {slot}")]
     UnknownDeploymentTool {
         slot: crate::profile::CoverageSlot,
@@ -389,19 +408,9 @@ pub enum LoadError {
     )]
     ConfinedProviderRun { tool: String },
     #[error(
-        "sanitizer {sanitizer} registers on tool_output but the deployment confines no application point — neither a result point nor the child-return crossing"
+        "sanitizer {sanitizer} registers on tool_output but the deployment confines no application point — neither a result point nor, under context control, a child's return"
     )]
     OutputSanitizerUncovered { sanitizer: String },
-    #[error("[child] declares a return binding but the deployment does not control child context")]
-    ChildWithoutContextControl,
-    #[error("[child] return_sanitizer names unregistered sanitizer {0}")]
-    ChildReturnSanitizerUnknown(String),
-    #[error("[child] return_sanitizer {0} is not registered for tool output")]
-    ChildReturnSanitizerNotOutput(String),
-    #[error(
-        "[child] return_sanitizer {0} declares a scope: a child return originates from no tool, so only an unscoped sanitizer can be bound to it"
-    )]
-    ChildReturnSanitizerScoped(String),
     #[error(
         "sanitizer {0} registers on tool_input with a trust transition: only the `contains` check reads an input substitution, so a trust `to` can never help a call and the sanitizer would sit inert"
     )]
@@ -437,8 +446,11 @@ pub enum LoadError {
 /// tool, the grouped-assignment product times its release paths plus its direct-redispatch
 /// candidates; per catalogue, the confined child-return menu. The bound keeps enumeration total
 /// (no runtime truncation: "every sound alternative" is literal). Deployment configuration
-/// sets it via `[limits] planner_cap`; omitted, the cap is 64. Zero is unrepresentable: every
-/// stage's worst case is at least one, so a zero cap would refuse every registry.
+/// sets it via `[limits] planner_cap`; omitted, the cap is 4096. The bound is a sum as much as
+/// a product: for an annotated tool every audience-narrowing tool in the catalogue counts as a
+/// redispatch candidate, so the default admits a catalogue of a few thousand tools before a
+/// deployment has to raise it. Zero is unrepresentable: every stage's worst case is at least
+/// one, so a zero cap would refuse every registry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlannerCap(u128);
 
@@ -452,7 +464,7 @@ impl PlannerCap {
 
 impl Default for PlannerCap {
     fn default() -> Self {
-        PlannerCap(64)
+        PlannerCap(4096)
     }
 }
 
@@ -465,13 +477,14 @@ pub const MAX_HINT_CHARS: usize = 512;
 fn worst_case_plan_alternatives(
     declaration: &ToolDeclaration,
     confined: bool,
+    context_control: bool,
     tools: &[&ToolDeclaration],
     authorities: &[Authority],
     sanitizers: &[Sanitizer],
-    literal: &Expansions,
+    context: &MembershipContext<'_>,
 ) -> u128 {
     use crate::check::Gap;
-    use crate::plan::covers_gap;
+    use crate::plan::{covers_gap, gap_cover};
 
     let tags = declaration.tags();
     let mut count: u128 = 1;
@@ -490,29 +503,21 @@ fn worst_case_plan_alternatives(
             .filter(|authority| authority.scope.covers(tags) && authority.mandate.reader_ceiling.is_some())
             .count()
     };
-    // A static `includes` is decidable at load whenever neither side names a group, so the
-    // count is the authorities that can actually cover it rather than every one carrying a
-    // reader ceiling — planning admits only the former. A group on either side is a
-    // directory answer this lint cannot have, and ruling such an authority out would
-    // UNDERCOUNT: the cap is the only bound on how many plans one block surfaces, so an
-    // undecidable authority stays counted.
-    let includes_competent = |recipients: &crate::groups::DeclaredAudience| {
+    // A static `includes` is decided at load wherever the derivability calculus settles it.
+    // The lint reads no directory, so a comparison that would need membership answers stays
+    // counted: ruling such an authority out would UNDERCOUNT, and the cap is the only bound
+    // on how many plans one block surfaces. Only a definitive non-cover drops out.
+    let includes_competent = |recipients: &DeclaredAudience| {
         authorities
             .iter()
             .filter(|authority| {
-                let Some(ceiling) = &authority.mandate.reader_ceiling else {
+                if authority.mandate.reader_ceiling.is_none() || !authority.scope.covers(tags) {
                     return false;
-                };
-                if !authority.scope.covers(tags) {
-                    return false;
-                }
-                if recipients.groups().next().is_some() || ceiling.groups().next().is_some() {
-                    return true;
                 }
                 let gap = Gap::Includes {
-                    recipients: recipients.resolve(literal),
+                    recipients: recipients.clone(),
                 };
-                covers_gap(authority, &gap, tags, literal)
+                !matches!(gap_cover(authority, &gap, tags, context), Evaluation::Fails)
             })
             .count()
     };
@@ -534,7 +539,7 @@ fn worst_case_plan_alternatives(
                 multiply(
                     authorities
                         .iter()
-                        .filter(|authority| covers_gap(authority, &gap, tags, literal))
+                        .filter(|authority| covers_gap(authority, &gap, tags, context))
                         .count(),
                 );
             }
@@ -548,7 +553,7 @@ fn worst_case_plan_alternatives(
                 multiply(
                     authorities
                         .iter()
-                        .filter(|authority| covers_gap(authority, &gap, tags, literal))
+                        .filter(|authority| covers_gap(authority, &gap, tags, context))
                         .count(),
                 );
             }
@@ -576,7 +581,7 @@ fn worst_case_plan_alternatives(
                         multiply(
                             authorities
                                 .iter()
-                                .filter(|authority| covers_gap(authority, &gap, tags, literal))
+                                .filter(|authority| covers_gap(authority, &gap, tags, context))
                                 .count(),
                         );
                     }
@@ -593,7 +598,7 @@ fn worst_case_plan_alternatives(
                 multiply(
                     authorities
                         .iter()
-                        .filter(|authority| covers_gap(authority, &gap, tags, literal))
+                        .filter(|authority| covers_gap(authority, &gap, tags, context))
                         .count(),
                 );
             }
@@ -609,23 +614,30 @@ fn worst_case_plan_alternatives(
             .filter(|sanitizer| !sanitizer.name.is_attest_schema())
             .filter(|sanitizer| sanitizer.on.output && sanitizer.applies_to(tags))
             .count(),
-        ToolDeclaration::Declared(tool) if tool.delta.groups().next().is_some() => sanitizers
+        ToolDeclaration::Declared(tool) if tool.delta.symbolic_atoms().next().is_some() => sanitizers
             .iter()
             .filter(|sanitizer| !sanitizer.name.is_attest_schema())
             .filter(|sanitizer| sanitizer.on.output && sanitizer.applies_to(tags))
             .count(),
         ToolDeclaration::Declared(tool) => {
-            let output = tool.output_label(literal);
+            let output = tool.output_label();
             sanitizers
                 .iter()
                 .filter(|sanitizer| !sanitizer.name.is_attest_schema())
                 .filter(|sanitizer| {
-                    sanitizer.on.output && sanitizer.applies_to(tags) && sanitizer.transition.may_admit(&output)
+                    sanitizer.on.output
+                        && sanitizer.applies_to(tags)
+                        && sanitizer.transition.may_admit(&output, context)
                 })
                 .count()
         }
     };
     multiply(applicable + 1);
+    // Under context control any call may be a marked spawn, whose every plan ends in one of the
+    // return declarations: the bare floor, or the floor behind an untagged output sanitizer.
+    if context_control {
+        multiply(worst_case_return_options(sanitizers));
+    }
 
     // What the Annotator may require is unknown at load, so every candidate that emits at all,
     // and every audience-narrowing candidate, stays counted as a redispatch.
@@ -640,12 +652,10 @@ fn worst_case_plan_alternatives(
                     HistoryRequirement::NoPrior(_) => None,
                 })
                 .collect(),
-            tool.requires.audience_requirements().iter().any(|requirement| {
-                matches!(
-                    requirement,
-                    AudienceRequirement::Cap(DeclaredAudience::Restricted { .. })
-                )
-            }),
+            tool.requires
+                .audience_requirements()
+                .iter()
+                .any(|requirement| matches!(requirement, AudienceRequirement::Cap(DeclaredAudience::Union(_)))),
         ),
     };
     let any_prior = matches!(declaration, ToolDeclaration::Annotated { .. });
@@ -655,7 +665,7 @@ fn worst_case_plan_alternatives(
             ToolDeclaration::Declared(tool) => {
                 tool.emits.iter().any(|kind| priors.contains(&kind))
                     || (any_prior && !tool.emits.is_empty())
-                    || (has_cap && matches!(tool.delta.audience.as_ref(), Some(DeclaredAudience::Restricted { .. })))
+                    || (has_cap && matches!(tool.delta.audience.as_ref(), Some(DeclaredAudience::Union(_))))
             }
             // An Annotated candidate's emits and delta are unknown at load; the cap is the only
             // bound, so it stays counted wherever a prior or a cap could match it.
@@ -685,16 +695,11 @@ fn worst_case_confined_stage(sanitizers: &[Sanitizer], confined: bool, tags: &[T
     )
 }
 
-fn worst_case_return_stage(sanitizers: &[Sanitizer], confined: bool) -> u128 {
-    if !confined {
-        return 1;
-    }
-    1u128.saturating_add(
-        sanitizers
-            .iter()
-            .filter(|sanitizer| sanitizer.on.output && sanitizer.applies_to(&[]))
-            .count() as u128,
-    )
+fn worst_case_return_options(sanitizers: &[Sanitizer]) -> usize {
+    1 + sanitizers
+        .iter()
+        .filter(|sanitizer| sanitizer.on.output && sanitizer.applies_to(&[]))
+        .count()
 }
 
 /// The wildcard's spelling in a policy: `[[tool]] name = "*"` covers every tool call the policy
@@ -731,8 +736,10 @@ pub struct Registry {
     authorities: Vec<Authority>,
     attention_marks: BTreeSet<MarkName>,
     sanitizers: BTreeMap<SanitizerName, Sanitizer>,
-    membership: Option<MembershipResolverName>,
-    groups: Vec<GroupName>,
+    audience: AudienceRegistry,
+    /// The declared audience configuration as loaded — what the policy identity carries;
+    /// the validated registry beside it is derived and never serialized.
+    audience_config: crate::audience::AudienceConfig,
     profile: crate::profile::DeploymentProfile,
 }
 
@@ -747,6 +754,13 @@ impl Registry {
     ) -> Result<Registry, LoadError> {
         config.trust_chain.validate()?;
         let audience_readers = configured_audience_readers(&config, &profile);
+        let audience = validated_audience_registry(&config.audience)?;
+        for clause in profile.starting_label().audience.clauses() {
+            check_literal(clause.readers(), || "starting label".to_string())?;
+        }
+        check_routable(&audience, profile.starting_label().audience.symbolic_atoms(), || {
+            "starting label".to_string()
+        })?;
 
         // Sanitizers index first: the child return-sanitizer binding validates against them.
         let mut sanitizers = BTreeMap::new();
@@ -772,8 +786,8 @@ impl Registry {
                     }
                 }
                 DeclaredTransition::Audience { from_includes, to } => {
-                    check_declared_readers(from_includes, || format!("{} from", context()))?;
-                    check_declared_readers(to, || format!("{} to", context()))?;
+                    check_declared(&audience, from_includes, || format!("{} from", context()))?;
+                    check_declared(&audience, to, || format!("{} to", context()))?;
                 }
             }
             check_hint(sanitizer.hint.as_ref(), context)?;
@@ -843,16 +857,18 @@ impl Registry {
                     check_rank(&config.trust_chain, tool.requires.trust_floor(), || {
                         format!("tool {} trust floor", tool.name.as_str())
                     })?;
-                    if let Some(audience) = tool.delta.audience.as_ref() {
-                        check_declared_readers(audience, || format!("tool {} delta", tool.name.as_str()))?;
+                    if let Some(declared) = tool.delta.audience.as_ref() {
+                        check_declared(&audience, declared, || format!("tool {} delta", tool.name.as_str()))?;
                     }
                     for requirement in tool.requires.audience_requirements() {
                         match requirement {
                             AudienceRequirement::Includes(RecipientSpec::Static(recipients)) => {
-                                check_declared_readers(recipients, || format!("tool {} contains", tool.name.as_str()))?;
+                                check_declared(&audience, recipients, || {
+                                    format!("tool {} contains", tool.name.as_str())
+                                })?;
                             }
                             AudienceRequirement::Cap(cap) => {
-                                check_declared_readers(cap, || format!("tool {} within", tool.name.as_str()))?;
+                                check_declared(&audience, cap, || format!("tool {} within", tool.name.as_str()))?;
                             }
                             AudienceRequirement::Includes(RecipientSpec::Placeholder(_)) => {}
                         }
@@ -896,7 +912,7 @@ impl Registry {
                 format!("authority {} trust ceiling", authority.name.as_str())
             })?;
             if let Some(ceiling) = &authority.mandate.reader_ceiling {
-                check_declared_readers(ceiling, || {
+                check_declared(&audience, ceiling, || {
                     format!("authority {} reader ceiling", authority.name.as_str())
                 })?;
             }
@@ -912,33 +928,11 @@ impl Registry {
             check_audience_bindings(tool)?;
         }
 
-        // A produced annotation pins literal readers only, so an Annotated declaration writes
-        // no group at load and contributes nothing here.
-        let mut groups: Vec<GroupName> = tools
-            .values()
-            .flatten()
-            .filter_map(|(_, d)| d.declared())
-            .chain(provider_run.values())
-            .flat_map(ToolAnnotation::groups)
-            .chain(
-                config
-                    .authorities
-                    .iter()
-                    .flat_map(|authority| authority.mandate.groups()),
-            )
-            .chain(sanitizers.values().flat_map(Sanitizer::groups))
-            .cloned()
-            .collect();
-        groups.sort();
-        groups.dedup();
-        if config.membership.is_none()
-            && let Some(group) = groups.first()
-        {
-            return Err(LoadError::GroupWithoutResolver {
-                group: group.to_string(),
-            });
-        }
-        let literal = Expansions::empty_members(&groups);
+        // The planner-cap lint runs the same cover evaluation planning runs, against the
+        // policy facts alone: the declared `within` assertions and no directory answers.
+        let no_expansions = Expansions::default();
+        let membership_context =
+            MembershipContext::new(audience.within_assertions(), audience.providers(), &no_expansions);
 
         let sanitizer_list: Vec<Sanitizer> = sanitizers.values().cloned().collect();
         let checkable_tools: Vec<&ToolDeclaration> = tools.values().flatten().map(|(_, d)| d).collect();
@@ -946,10 +940,11 @@ impl Registry {
             let count = worst_case_plan_alternatives(
                 declaration,
                 profile.confines_result(declaration.name()),
+                profile.context_control(),
                 &checkable_tools,
                 &config.authorities,
                 &sanitizer_list,
-                &literal,
+                &membership_context,
             );
             if count > planner_cap.0 {
                 return Err(LoadError::TooManyPlanAlternatives {
@@ -959,14 +954,6 @@ impl Registry {
                 });
             }
         }
-        let confined = worst_case_return_stage(&sanitizer_list, profile.confines_child_return());
-        if confined > planner_cap.0 {
-            return Err(LoadError::TooManyReturnPlanAlternatives {
-                count: confined,
-                max: planner_cap.0,
-            });
-        }
-
         // Attention names are a policy vocabulary, not an authority vocabulary. A policy may
         // deliberately use a mark as an unremediable denial (for example `blocked`) while
         // registering no authority at all. An Annotator must be able to produce those marks,
@@ -1042,37 +1029,21 @@ impl Registry {
             authorities: config.authorities,
             attention_marks,
             sanitizers,
-            membership: config.membership,
-            groups,
+            audience,
+            audience_config: config.audience,
             profile,
         })
     }
 
-    pub fn membership(&self) -> Option<&MembershipResolverName> {
-        self.membership.as_ref()
+    /// The validated audience registry: sources, chain mappings, named audiences, `within`
+    /// assertions, and the identity implementation.
+    pub fn audience(&self) -> &AudienceRegistry {
+        &self.audience
     }
 
-    /// Every group this policy's declarations write, in name order: the table records
-    /// index resolutions into ([`crate::groups::GroupIndex`]) and the set an event's expansions may name.
-    pub fn groups(&self) -> &[GroupName] {
-        &self.groups
-    }
-
-    /// An event's answers as one operation's expansions: each names a group this
-    /// policy writes, once.
-    pub(crate) fn expansions_from_event(&self, answers: &[GroupExpansion]) -> Result<Expansions, ExpansionRefusal> {
-        Expansions::from_event(&self.groups, answers)
-    }
-
-    pub(crate) fn expansions_from_resolutions(
-        &self,
-        resolutions: &[GroupResolution],
-    ) -> Result<Expansions, ExpansionRefusal> {
-        Expansions::from_resolutions(&self.groups, resolutions)
-    }
-
-    pub(crate) fn resolutions(&self, expansions: &Expansions) -> Vec<GroupResolution> {
-        expansions.resolutions(&self.groups)
+    /// The declared audience configuration, for the policy identity document.
+    pub fn audience_config(&self) -> &crate::audience::AudienceConfig {
+        &self.audience_config
     }
 
     pub fn profile(&self) -> &crate::profile::DeploymentProfile {
@@ -1311,22 +1282,120 @@ pub(crate) fn check_rank(
     }
 }
 
-/// Every reader ID a label the algebra holds directly names must be literal:
-/// `public` is a reserved audience *state* — [`Audience::Public`] carries it, so it is never a
-/// member of a restricted set — and the `@` mark names a group only a membership resolver may
-/// expand. The deployment starting label is an [`Audience`] because no operation ever resolves it.
-pub(crate) fn check_readers(audience: &Audience, context: impl Fn() -> String) -> Result<(), LoadError> {
-    let Audience::Restricted(readers) = audience else {
-        return Ok(());
+/// Validate the audience configuration and index it: providers registered once, named
+/// audiences unique and sourced, and every configured
+/// selector owned by a registered source. A static typo dies here, at load — only a
+/// dynamically supplied reference can fail operationally.
+fn validated_audience_registry(config: &AudienceConfig) -> Result<AudienceRegistry, LoadError> {
+    let mut providers = BTreeSet::new();
+    for source in &config.sources {
+        // A provider name with a `:` makes one member id qualified under two providers, a
+        // leading `@` makes its members non-literal readers, and an empty name owns no
+        // namespace at all. The one qualification rule (`ReaderId::provider_prefix`) stays
+        // unambiguous only over names this shape.
+        if source.provider.is_empty() || source.provider.contains(':') || source.provider.starts_with('@') {
+            return Err(LoadError::MalformedAudienceProvider(source.provider.clone()));
+        }
+        if !providers.insert(source.provider.as_str()) {
+            return Err(LoadError::DuplicateAudienceProvider(source.provider.clone()));
+        }
+    }
+    let mut named = BTreeSet::new();
+    for group in &config.groups {
+        // A name with a `:` round-trips through its `@` spelling as a source selector — a
+        // durable label would decode to a different atom — and an empty name spells `@`.
+        if group.name.as_str().is_empty() || group.name.as_str().contains(':') || group.name.as_str().starts_with('@') {
+            return Err(LoadError::MalformedNamedAudience(group.name.as_str().to_string()));
+        }
+        if !named.insert(group.name.clone()) {
+            return Err(LoadError::DuplicateNamedAudience(group.name.as_str().to_string()));
+        }
+        if group.from.is_empty() {
+            return Err(LoadError::EmptyAudienceFrom(group.name.as_str().to_string()));
+        }
+    }
+    let registry = AudienceRegistry::build(config);
+    let sourced = |specs: &[SelectorSpec], context: &str| -> Result<(), LoadError> {
+        for spec in specs {
+            check_selector(&registry, spec, || context.to_string())?;
+        }
+        Ok(())
     };
-    check_literal(readers, context)
+    sourced(&config.self_from, "[audience.self]")?;
+    sourced(&config.internal_from, "[audience.internal]")?;
+    for group in &config.groups {
+        sourced(&group.from, &format!("named audience @{}", group.name.as_str()))?;
+    }
+    Ok(registry)
 }
 
-fn check_declared_readers(audience: &DeclaredAudience, context: impl Fn() -> String) -> Result<(), LoadError> {
-    let DeclaredAudience::Restricted { readers, .. } = audience else {
-        return Ok(());
-    };
-    check_literal(readers, context)
+fn check_selector(
+    registry: &AudienceRegistry,
+    spec: &SelectorSpec,
+    context: impl Fn() -> String,
+) -> Result<(), LoadError> {
+    registry
+        .route_selector(&spec.provider, &spec.selector)
+        .map(|_| ())
+        .map_err(|fault| LoadError::UnroutableAudience {
+            context: context(),
+            fault,
+        })
+}
+
+/// Every group reference a policy declaration writes must resolve at load: a named audience
+/// must be configured, and a source-qualified selector must match a template of its
+/// registered provider. Chain words and readers pass — they are always meaningful.
+pub(crate) fn check_routable(
+    registry: &AudienceRegistry,
+    atoms: impl IntoIterator<Item = SymbolicAtom>,
+    context: impl Fn() -> String,
+) -> Result<(), LoadError> {
+    for atom in atoms {
+        let SymbolicAtom::Group(group) = atom else {
+            continue;
+        };
+        let fault = match &group {
+            GroupRef::Named(name) => {
+                if registry.group(name).is_some() {
+                    continue;
+                }
+                Unroutable::UnknownGroup(name.clone())
+            }
+            GroupRef::Source { provider, selector } => {
+                match check_selector(
+                    registry,
+                    &SelectorSpec {
+                        provider: provider.clone(),
+                        selector: selector.clone(),
+                    },
+                    &context,
+                ) {
+                    Ok(()) => continue,
+                    Err(error) => return Err(error),
+                }
+            }
+        };
+        return Err(LoadError::UnroutableAudience {
+            context: context(),
+            fault,
+        });
+    }
+    Ok(())
+}
+
+/// One test for every audience a policy declaration writes: its readers are literal — no
+/// reserved spelling, no `@` mark smuggled into a reader set built in code — and its group
+/// references route.
+fn check_declared(
+    registry: &AudienceRegistry,
+    declared: &DeclaredAudience,
+    context: impl Fn() -> String + Copy,
+) -> Result<(), LoadError> {
+    if let DeclaredAudience::Union(clause) = declared {
+        check_literal(clause.readers(), context)?;
+    }
+    check_routable(registry, declared.symbolic_atoms(), context)
 }
 
 fn check_literal(readers: &BTreeSet<ReaderId>, context: impl Fn() -> String) -> Result<(), LoadError> {
@@ -1360,14 +1429,14 @@ fn configured_audience_readers(
     profile: &crate::profile::DeploymentProfile,
 ) -> BTreeSet<ReaderId> {
     fn add_audience(readers: &mut BTreeSet<ReaderId>, audience: &Audience) {
-        if let Audience::Restricted(declared) = audience {
-            readers.extend(declared.iter().cloned());
+        for clause in audience.clauses() {
+            readers.extend(clause.readers().iter().cloned());
         }
     }
 
     fn add_declared(readers: &mut BTreeSet<ReaderId>, audience: &DeclaredAudience) {
-        if let DeclaredAudience::Restricted { readers: declared, .. } = audience {
-            readers.extend(declared.iter().cloned());
+        if let DeclaredAudience::Union(clause) = audience {
+            readers.extend(clause.readers().iter().cloned());
         }
     }
 
@@ -1431,7 +1500,7 @@ mod tests {
             annotators: vec![],
             authorities: vec![],
             sanitizers: vec![],
-            membership: None,
+            audience: crate::audience::AudienceConfig::default(),
         }
     }
 
@@ -1587,6 +1656,45 @@ mod tests {
     }
 
     #[test]
+    fn audience_provider_and_group_names_are_shaped_at_load() {
+        use crate::audience::{NamedAudience, SourceRegistration};
+        let source = |provider: &str| SourceRegistration {
+            provider: provider.to_string(),
+            templates: vec![crate::audience::SelectorTemplate::new("viewer")],
+        };
+        // A `:` makes one member id qualified under two providers, `@` makes members
+        // non-literal, and an empty name owns no namespace.
+        for provider in ["", "a:b", "@evil"] {
+            let mut cfg = base();
+            cfg.audience.sources = vec![source(provider)];
+            assert!(
+                matches!(
+                    Registry::build_covered(cfg),
+                    Err(LoadError::MalformedAudienceProvider(_))
+                ),
+                "{provider:?}"
+            );
+        }
+        // A group name with `:` round-trips through its `@` spelling as a source selector.
+        for name in ["", "a:b", "@x"] {
+            let mut cfg = base();
+            cfg.audience.sources = vec![source("slack")];
+            cfg.audience.groups = vec![NamedAudience {
+                name: crate::names::GroupName::new(name),
+                within: None,
+                from: vec![SelectorSpec {
+                    provider: "slack".into(),
+                    selector: "viewer".into(),
+                }],
+            }];
+            assert!(
+                matches!(Registry::build_covered(cfg), Err(LoadError::MalformedNamedAudience(_))),
+                "{name:?}"
+            );
+        }
+    }
+
+    #[test]
     fn every_declared_audience_refuses_a_reserved_or_group_reader() {
         for reserved in ["public", "@auditors"] {
             for (context, cfg) in audience_sites(reserved) {
@@ -1638,7 +1746,7 @@ mod tests {
         public_ceiling.authorities = vec![Authority {
             name: AuthorityName::new("officer"),
             mandate: Mandate {
-                reader_ceiling: Some(DeclaredAudience::literal(Audience::Public)),
+                reader_ceiling: Some(DeclaredAudience::literal(Audience::public())),
                 ..Mandate::default()
             },
             scope: Scope::default(),
@@ -1736,9 +1844,7 @@ mod tests {
     #[test]
     fn an_omitted_mandate_bound_resolves_to_the_whole_policy_vocabulary() {
         let mut catalogued = tool("send");
-        catalogued.delta.audience = Some(DeclaredAudience::literal(Audience::restricted([ReaderId::new(
-            "internal",
-        )])));
+        catalogued.delta.audience = Some(DeclaredAudience::restricted([ReaderId::new("insider")]));
         catalogued.emits = EffectSet::new([EffectKind::new("mail.sent")]).unwrap();
         catalogued.requires.attention = vec![MarkName::new("signoff")];
         let mut cfg = base();
@@ -1762,7 +1868,7 @@ mod tests {
         // The whole vocabulary includes what another annotator's explicit bound declares.
         assert_eq!(
             open.audiences().map(ReaderId::as_str).collect::<Vec<_>>(),
-            ["internal", "support"]
+            ["insider", "support"]
         );
         assert_eq!(
             open.marks().map(MarkName::as_str).collect::<Vec<_>>(),
@@ -2170,7 +2276,7 @@ mod tests {
             AudienceRequirement::Includes(RecipientSpec::Static(DeclaredAudience::literal(Audience::restricted(
                 [ReaderId::new("finance")],
             )))),
-            AudienceRequirement::Cap(DeclaredAudience::literal(Audience::Public)),
+            AudienceRequirement::Cap(DeclaredAudience::literal(Audience::public())),
         ];
         cfg.tools = declared(vec![emitter]);
         assert!(Registry::build_covered(cfg).is_ok());
@@ -2198,11 +2304,15 @@ mod tests {
     }
 
     #[test]
-    fn the_default_planner_cap_refuses_an_over_wide_registry_at_sixty_four() {
-        assert!(Registry::build_covered(n_squared_config(8)).is_ok());
+    fn the_default_planner_cap_refuses_an_over_wide_registry_at_four_thousand_ninety_six() {
+        assert!(Registry::build_covered(n_squared_config(64)).is_ok());
         assert!(matches!(
-            Registry::build_covered(n_squared_config(9)),
-            Err(LoadError::TooManyPlanAlternatives { count: 81, max: 64, .. })
+            Registry::build_covered(n_squared_config(65)),
+            Err(LoadError::TooManyPlanAlternatives {
+                count: 4225,
+                max: 4096,
+                ..
+            })
         ));
     }
 
@@ -2215,12 +2325,17 @@ mod tests {
         cfg.annotators = vec![annotator("classifier")];
         cfg.tools = vec![annotated("lookup", "classifier")];
         cfg.sanitizers = (0..16).map(output_sanitizer).collect();
+        // Without context control no return declaration multiplies the menu:
         // 1 × (16 sanitizers + 1 bare release) + the declaration itself as a redispatch = 18.
+        let mut uncontrolled = crate::profile::covering_declaration(&cfg);
+        uncontrolled.context_control = false;
+        let uncontrolled =
+            crate::profile::DeploymentProfile::declare(uncontrolled).expect("the declaration normalizes");
         assert!(matches!(
-            Registry::build_covered_with_cap(cfg.clone(), PlannerCap::new(17).expect("nonzero")),
+            Registry::build(cfg.clone(), PlannerCap::new(17).expect("nonzero"), uncontrolled.clone()),
             Err(LoadError::TooManyPlanAlternatives { count: 18, max: 17, ref tool }) if tool == "lookup"
         ));
-        assert!(Registry::build_covered_with_cap(cfg, PlannerCap::new(18).expect("nonzero")).is_ok());
+        assert!(Registry::build(cfg, PlannerCap::new(18).expect("nonzero"), uncontrolled).is_ok());
     }
 
     /// An Annotated declaration's requirements exist only per call, so the lint takes the worst
@@ -2233,7 +2348,7 @@ mod tests {
                 name: AuthorityName::new(name),
                 mandate: Mandate {
                     trust_ceiling: Some(Trust::new(1)),
-                    reader_ceiling: Some(DeclaredAudience::literal(Audience::Public)),
+                    reader_ceiling: Some(DeclaredAudience::literal(Audience::public())),
                     attends: vec![MarkName::new("signoff")],
                     ..Mandate::default()
                 },
@@ -2246,9 +2361,9 @@ mod tests {
             cfg.authorities = (0..n).map(|i| officer(format!("a{i}"))).collect();
             cfg
         };
-        assert!(Registry::build_covered(wide(3)).is_ok());
+        assert!(Registry::build_covered_with_cap(wide(3), PlannerCap::new(64).expect("nonzero")).is_ok());
         assert!(matches!(
-            Registry::build_covered(wide(4)),
+            Registry::build_covered_with_cap(wide(4), PlannerCap::new(64).expect("nonzero")),
             Err(LoadError::TooManyPlanAlternatives { count: 65, max: 64, ref tool }) if tool == "wire"
         ));
     }
@@ -2284,7 +2399,7 @@ mod tests {
             })
             .collect();
         assert!(
-            Registry::build_covered(cfg.clone()).is_ok(),
+            Registry::build_covered_with_cap(cfg.clone(), PlannerCap::new(64).expect("nonzero")).is_ok(),
             "authorities that cannot cover the recipient are not alternatives"
         );
 
@@ -2294,24 +2409,45 @@ mod tests {
             (0..65).map(|index| capped_at(&format!("r{index}"), DeclaredAudience::restricted([recipient.clone()]))),
         );
         assert!(matches!(
-            Registry::build_covered(reaching),
+            Registry::build_covered_with_cap(reaching, PlannerCap::new(64).expect("nonzero")),
             Err(LoadError::TooManyPlanAlternatives { count: 65, max: 64, .. })
         ));
 
-        // A group on the authority's ceiling is a directory answer the lint cannot have,
-        // so those authorities stay counted rather than being ruled out.
+        // A symbolic ceiling is a membership answer the lint cannot have, so those
+        // authorities stay counted rather than being ruled out.
         let mut grouped = cfg.clone();
         grouped.authorities = (0..80)
             .map(|index| {
                 capped_at(
                     &format!("g{index}"),
-                    DeclaredAudience::declared([], [GroupName::new("desk")]).expect("a group declaration"),
+                    DeclaredAudience::Union(
+                        crate::label::Clause::new(
+                            [],
+                            [crate::label::GroupRef::Named(crate::names::GroupName::new("desk"))],
+                            [],
+                        )
+                        .expect("a group clause"),
+                    ),
                 )
             })
             .collect();
-        grouped.membership = Some(crate::names::MembershipResolverName::new("directory"));
+        grouped.audience = crate::audience::AudienceConfig {
+            sources: vec![crate::audience::SourceRegistration {
+                provider: "slack".to_string(),
+                templates: vec![crate::audience::SelectorTemplate::new("user-group/<handle>")],
+            }],
+            groups: vec![crate::audience::NamedAudience {
+                name: crate::names::GroupName::new("desk"),
+                within: None,
+                from: vec![crate::audience::SelectorSpec {
+                    provider: "slack".to_string(),
+                    selector: "user-group/desk".to_string(),
+                }],
+            }],
+            ..crate::audience::AudienceConfig::default()
+        };
         assert!(matches!(
-            Registry::build_covered(grouped),
+            Registry::build_covered_with_cap(grouped, PlannerCap::new(64).expect("nonzero")),
             Err(LoadError::TooManyPlanAlternatives { count: 80, max: 64, .. })
         ));
     }
@@ -2334,8 +2470,11 @@ mod tests {
         assert_eq!(PlannerCap::new(0), None);
     }
 
+    /// Under context control any call may be a marked spawn, so every tool's menu multiplies by
+    /// the return declarations: the bare floor plus each untagged output sanitizer, the reserved
+    /// attestation included. A confined result's own settlements never count the attestation.
     #[test]
-    fn the_cap_counts_the_reserved_attest_schema_only_for_the_return_stage() {
+    fn return_declarations_multiply_every_menu_only_under_context_control() {
         let lifting = |name: &str, scope: Scope| Sanitizer {
             name: SanitizerName::new(name),
             on: SanitizerPoints {
@@ -2366,16 +2505,22 @@ mod tests {
         let mut cfg = base();
         cfg.tools = declared(vec![narrowing]);
         cfg.sanitizers = vec![lifting("attest-schema", Scope::default()), scoped("s1"), scoped("s2")];
-        let cap = PlannerCap::new(3).expect("nonzero");
-        assert!(Registry::build_covered_with_cap(cfg, cap).is_ok());
-
-        let mut only_attest = base();
-        only_attest.sanitizers = vec![lifting("attest-schema", Scope::default())];
-        let tight = PlannerCap::new(1).expect("nonzero");
+        // Three settlements (bare, s1, s2) times two return declarations (bare, attest-schema).
         assert!(matches!(
-            Registry::build_covered_with_cap(only_attest, tight),
-            Err(LoadError::TooManyReturnPlanAlternatives { count: 2, max: 1 })
+            Registry::build_covered_with_cap(cfg.clone(), PlannerCap::new(5).expect("nonzero")),
+            Err(LoadError::TooManyPlanAlternatives { count: 6, max: 5, ref tool }) if tool == "wire"
         ));
+        assert!(Registry::build_covered_with_cap(cfg.clone(), PlannerCap::new(6).expect("nonzero")).is_ok());
+
+        let mut uncontrolled = crate::profile::covering_declaration(&cfg);
+        uncontrolled.context_control = false;
+        let uncontrolled =
+            crate::profile::DeploymentProfile::declare(uncontrolled).expect("the declaration normalizes");
+        assert!(matches!(
+            Registry::build(cfg.clone(), PlannerCap::new(2).expect("nonzero"), uncontrolled.clone()),
+            Err(LoadError::TooManyPlanAlternatives { count: 3, max: 2, ref tool }) if tool == "wire"
+        ));
+        assert!(Registry::build(cfg, PlannerCap::new(3).expect("nonzero"), uncontrolled).is_ok());
     }
 
     fn output_sanitizer(index: usize) -> Sanitizer {
@@ -2386,8 +2531,8 @@ mod tests {
                 output: true,
             },
             transition: DeclaredTransition::Audience {
-                from_includes: DeclaredAudience::literal(Audience::Public),
-                to: DeclaredAudience::literal(Audience::Public),
+                from_includes: DeclaredAudience::literal(Audience::public()),
+                to: DeclaredAudience::literal(Audience::public()),
             },
             scope: Scope::default(),
             hint: None,
@@ -2436,14 +2581,11 @@ mod tests {
         let mut tools = vec![target];
         for i in 0..narrowers {
             let mut narrower = tool(&format!("narrow{i}"));
-            narrower.delta.audience = Some(DeclaredAudience::literal(Audience::restricted([
-                ReaderId::new("a"),
-                ReaderId::new("c"),
-            ])));
+            narrower.delta.audience = Some(DeclaredAudience::restricted([ReaderId::new("a"), ReaderId::new("c")]));
             tools.push(narrower);
         }
         let mut public = tool("public-delta");
-        public.delta.audience = Some(DeclaredAudience::literal(Audience::Public));
+        public.delta.audience = Some(DeclaredAudience::literal(Audience::public()));
         let neutral = tool("neutral");
         let mut unannotated = tool("unannotated");
         unannotated.delta = Delta::NONE;
@@ -2454,10 +2596,7 @@ mod tests {
     }
 
     fn cap_target_config(narrowers: usize) -> RegistryConfig {
-        cap_target_config_with(
-            narrowers,
-            DeclaredAudience::literal(Audience::restricted([ReaderId::new("a")])),
-        )
+        cap_target_config_with(narrowers, DeclaredAudience::restricted([ReaderId::new("a")]))
     }
 
     #[test]
@@ -2492,7 +2631,7 @@ mod tests {
         ));
         assert!(
             Registry::build_covered_with_cap(
-                cap_target_config_with(4, DeclaredAudience::literal(Audience::Public)),
+                cap_target_config_with(4, DeclaredAudience::literal(Audience::public())),
                 cap
             )
             .is_ok()
@@ -2514,7 +2653,7 @@ mod tests {
         };
         let mut fixer = tool("fixer");
         fixer.emits = EffectSet::new([EffectKind::new("k")]).unwrap();
-        fixer.delta.audience = Some(DeclaredAudience::literal(Audience::restricted([ReaderId::new("a")])));
+        fixer.delta.audience = Some(DeclaredAudience::restricted([ReaderId::new("a")]));
         let mut cfg = base();
         cfg.tools = declared(vec![target, fixer]);
         assert!(Registry::build_covered_with_cap(cfg, PlannerCap::new(2).expect("nonzero")).is_ok());
@@ -2560,19 +2699,6 @@ mod tests {
     }
 
     #[test]
-    fn the_confined_return_stage_is_bounded_even_in_a_zero_tool_catalogue() {
-        let mut cfg = base();
-        cfg.tools = vec![];
-        cfg.sanitizers = (0..5).map(output_sanitizer).collect();
-        let cap = PlannerCap::new(4).expect("nonzero");
-        assert!(matches!(
-            Registry::build_covered_with_cap(cfg.clone(), cap),
-            Err(LoadError::TooManyReturnPlanAlternatives { count: 6, max: 4 })
-        ));
-        assert!(Registry::build_covered_with_cap(cfg, PlannerCap::new(6).expect("nonzero")).is_ok());
-    }
-
-    #[test]
     fn a_confined_stage_bound_counts_only_the_sanitizers_whose_scope_reaches_it() {
         let mut cfg = base();
         cfg.tools = vec![];
@@ -2615,8 +2741,8 @@ mod tests {
             to: Trust::new(1),
         };
         let audience = DeclaredTransition::Audience {
-            from_includes: DeclaredAudience::literal(Audience::restricted([ReaderId::new("internal")])),
-            to: DeclaredAudience::literal(Audience::restricted([ReaderId::new("partner")])),
+            from_includes: DeclaredAudience::restricted([ReaderId::new("insider")]),
+            to: DeclaredAudience::restricted([ReaderId::new("partner")]),
         };
         let built = |sanitizer: Sanitizer| {
             let mut cfg = base();
@@ -2670,8 +2796,8 @@ mod tests {
             output: true,
         };
         let audience = DeclaredTransition::Audience {
-            from_includes: DeclaredAudience::literal(Audience::restricted([ReaderId::new("internal")])),
-            to: DeclaredAudience::literal(Audience::restricted([ReaderId::new("partner")])),
+            from_includes: DeclaredAudience::restricted([ReaderId::new("insider")]),
+            to: DeclaredAudience::restricted([ReaderId::new("partner")]),
         };
         assert!(matches!(
             built(attest(output_only, audience, Scope::default())),
@@ -2712,8 +2838,8 @@ mod tests {
                 output: false,
             },
             transition: DeclaredTransition::Audience {
-                from_includes: DeclaredAudience::literal(Audience::restricted([ReaderId::new("internal")])),
-                to: DeclaredAudience::literal(Audience::restricted([ReaderId::new("partner")])),
+                from_includes: DeclaredAudience::restricted([ReaderId::new("insider")]),
+                to: DeclaredAudience::restricted([ReaderId::new("partner")]),
             },
             scope,
             hint: None,
@@ -2724,7 +2850,7 @@ mod tests {
         let mut target = tool("post");
         target.tags = vec![TagName::new("outbound")];
         target.requires.label.audience = vec![AudienceRequirement::Includes(RecipientSpec::Static(
-            DeclaredAudience::literal(Audience::restricted([ReaderId::new("partner")])),
+            DeclaredAudience::restricted([ReaderId::new("partner")]),
         ))];
         let with = |sanitizers: Vec<Sanitizer>| {
             let mut cfg = base();
@@ -2752,7 +2878,7 @@ mod tests {
     #[test]
     fn sanitizer_chains_do_not_multiply_either_stage_bound() {
         let mut narrowing = tool("fetch");
-        narrowing.delta.audience = Some(DeclaredAudience::literal(Audience::restricted([ReaderId::new("a")])));
+        narrowing.delta.audience = Some(DeclaredAudience::restricted([ReaderId::new("a")]));
         let mut cfg = base();
         cfg.tools = declared(vec![narrowing]);
         cfg.sanitizers = (0..5).map(output_sanitizer).collect();

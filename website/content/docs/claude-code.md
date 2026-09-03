@@ -9,25 +9,35 @@ OpenAPPA is designed for multiple agent surfaces. **Claude Code is simply the fi
 
 ## Install the Claude Code demo
 
-You need Cargo, Claude Code, and `curl`.
+You need Claude Code and `curl`.
 
 ```sh
-cargo install --path appa-runtime --force
-plugin=$(mktemp -d)/bundle
-sh scripts/appa-stage-plugin-bundle.sh "$plugin"
-appa init claude-code --plugin-source "$plugin"
+curl -fsSL https://openappa.com/install.sh | sh
+~/.local/bin/appa init claude-code
 ```
+
+The installer downloads the release binary for your Linux or macOS machine,
+verifies its checksum, and places `appa` in `~/.local/bin`. It prints a hint
+when that directory is not on your `PATH`. Set `APPA_VERSION` to a release tag
+to install that release instead of the latest one. On Windows, unpack the zip
+from the [releases page](https://github.com/archestra-ai/OpenAPPA/releases)
+and run `appa init claude-code` from it. From a checkout, `cargo install --path
+appa-runtime --force` builds the binary instead of downloading one.
+
+Initialization prints progress while it resolves the matching plugin, updates
+Claude Code, and starts the runtime. If a different APPA build already owns the
+runtime endpoint, it asks before stopping that process; an unidentified
+listener is never stopped automatically.
 
 Initialization installs `clappa` beside `appa` so the short command works below.
 
 The native `appa` command installs the runtime, the matching Claude Code
-plugin, the statusline, and `clappa`, a protected way to start Claude Code. Each
-build accepts exactly one plugin artifact: a release binary knows the digest of
-its own release's artifact and downloads it, and a build from a checkout has no
-such digest and is given the bundle staged from that checkout. Init replaces an
-existing APPA installation instead of stacking another hook set. It preserves an
-existing policy and custom statusline. It does not replace `claude` or change how
-ordinary sessions start.
+plugin, the statusline, and `clappa`, a protected way to start Claude Code. A
+release binary resolves its plugin from its baked tag and artifact digest; a
+checkout build resolves it from its baked commit and plugin-tree digest. Init
+replaces an existing APPA installation instead of stacking another hook set. It
+preserves an existing policy and custom statusline. It does not replace `claude`
+or change how ordinary sessions start.
 
 ## 1. Teach OpenAPPA about your tools
 
@@ -44,6 +54,8 @@ clappa
 ```
 
 The skill inspects the MCP servers and tools available to Claude Code. It uses their declared purpose to identify what they read and which actions can send data outside the session. When a data boundary is unclear, it asks you one focused question.
+
+Before this sync, a fresh installation routes unnamed tools through a bounded Claude annotator. The fallback fails closed and keeps newly installed tools from becoming an immediate configuration outage; exact contracts and maintained batteries produced by the skill take precedence over it.
 
 It begins with `appa describe`, which reports the current config,
 included batteries, policy tools, referenced groups, and membership wiring.
@@ -87,7 +99,7 @@ OpenAPPA can also call the installed Claude Code CLI as a model builtin: an auth
 [[annotator]]
 name    = "classify-customer"
 builtin = "claude-code"
-hint    = "Use private for customer records. Use suspicious for data from unvetted sources."
+hint    = "Use suspicious for customer data from unvetted sources."
 
 [[tool]]
 name        = "get_customer"
@@ -124,7 +136,7 @@ To serve the same annotator from an API key instead of the subscription, declare
 [[annotator]]
 name    = "classify-customer"
 builtin = "llm"
-hint    = "Use private for customer records. Use suspicious for data from unvetted sources."
+hint    = "Use suspicious for customer data from unvetted sources."
 
 [externals.llm]
 provider       = "anthropic"        # anthropic | openai | gemini | ollama
@@ -143,8 +155,8 @@ claude plugin uninstall appa-runtime
 claude plugin marketplace remove appa
 pkill -f 'appa runtime'
 rm -rf ~/.local/share/appa/bin ~/.local/share/appa/deployments ~/.local/share/appa/cache
-rm -f ~/.cargo/bin/clappa ~/.local/bin/appa-statusline.sh
-cargo uninstall appa
+rm -f ~/.local/bin/appa ~/.local/bin/clappa ~/.local/bin/appa-statusline.sh
+rm -f ~/.cargo/bin/clappa && cargo uninstall appa   # checkout builds only
 
 # drop the statusline entry appa init wrote, and keep one of your own:
 jq 'if (.statusLine.command? // "") | test("appa-statusline") then del(.statusLine) else . end' \

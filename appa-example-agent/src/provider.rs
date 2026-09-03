@@ -128,23 +128,32 @@ pub struct ProviderCompletion {
 /// on a guess.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum ProviderError {
-    #[error("inference exceeded the {timeout:?} request deadline on each of {attempts} attempt(s)")]
+    #[error("inference exceeded the {timeout:?} request deadline on the last of {attempts} attempt(s)")]
     Timeout { attempts: u32, timeout: Duration },
     #[error("inference transport fault after {attempts} attempt(s)")]
     Transport { attempts: u32 },
-    #[error("inference endpoint returned HTTP {code} after {attempts} attempt(s)")]
-    Status { code: u16, attempts: u32 },
+    /// The endpoint answered, but could not serve: a transient status (408, 429, 5xx) on
+    /// the last of the bounded attempts.
+    #[error("inference endpoint was unavailable (HTTP {code}) on the last of {attempts} attempt(s)")]
+    Unavailable { code: u16, attempts: u32 },
+    /// The endpoint answered with a status no retry changes: a rejected key, a bad request.
+    #[error("inference endpoint returned HTTP {code}{detail} after {attempts} attempt(s)")]
+    Status { code: u16, attempts: u32, detail: String },
     #[error("inference response was oversized or malformed after {attempts} attempt(s)")]
     Malformed { attempts: u32 },
     #[error("inference response carried no choices after {attempts} attempt(s)")]
     NoChoice { attempts: u32 },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum AttemptFault {
     Timeout,
     Transport,
-    Status { code: u16, retry_after: Option<Duration> },
+    Status {
+        code: u16,
+        retry_after: Option<Duration>,
+        detail: String,
+    },
     Malformed,
     NoChoice,
 }
@@ -154,16 +163,18 @@ impl AttemptFault {
     /// failed connection are kept apart because they call for opposite
     /// remedies: a deadline that a long generation legitimately outgrows wants
     /// a longer deadline, since every retry then meets the same wall, while a
-    /// flapping endpoint wants more attempts, spaced further apart.
+    /// flapping endpoint wants more attempts, spaced further apart. A
+    /// connection that never came up is a transport fault even when it
+    /// timed out: the request deadline never started.
     fn of(error: &reqwest::Error) -> Self {
-        if error.is_timeout() {
+        if error.is_timeout() && !error.is_connect() {
             AttemptFault::Timeout
         } else {
             AttemptFault::Transport
         }
     }
 
-    fn retryable(self) -> bool {
+    fn retryable(&self) -> bool {
         match self {
             AttemptFault::Timeout | AttemptFault::Transport => true,
             AttemptFault::Status { code, .. } => matches!(code, 408 | 429 | 500 | 502 | 503 | 504),
@@ -171,9 +182,9 @@ impl AttemptFault {
         }
     }
 
-    fn retry_after(self) -> Option<Duration> {
+    fn retry_after(&self) -> Option<Duration> {
         match self {
-            AttemptFault::Status { retry_after, .. } => retry_after,
+            AttemptFault::Status { retry_after, .. } => *retry_after,
             _ => None,
         }
     }
@@ -185,7 +196,8 @@ impl AttemptFault {
                 timeout: request_timeout,
             },
             AttemptFault::Transport => ProviderError::Transport { attempts },
-            AttemptFault::Status { code, .. } => ProviderError::Status { code, attempts },
+            AttemptFault::Status { code, .. } if self.retryable() => ProviderError::Unavailable { code, attempts },
+            AttemptFault::Status { code, detail, .. } => ProviderError::Status { code, attempts, detail },
             AttemptFault::Malformed => ProviderError::Malformed { attempts },
             AttemptFault::NoChoice => ProviderError::NoChoice { attempts },
         }
@@ -251,15 +263,29 @@ impl OpenAiCompatible {
             .await
             .map_err(|error| AttemptFault::of(&error))?;
         if !response.status().is_success() {
+            let status = response.status();
             let retry_after = response
                 .headers()
                 .get(reqwest::header::RETRY_AFTER)
                 .and_then(|value| value.to_str().ok())
                 .and_then(|value| value.trim().parse::<u64>().ok())
                 .map(Duration::from_secs);
+            let mut response = response;
+            let detail = match read_body_capped(&mut response, 512).await {
+                Ok(bytes) => {
+                    let text = String::from_utf8_lossy(&bytes).trim().to_string();
+                    if text.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {text}")
+                    }
+                }
+                Err(_) => String::new(),
+            };
             return Err(AttemptFault::Status {
-                code: response.status().as_u16(),
+                code: status.as_u16(),
                 retry_after,
+                detail,
             });
         }
 
@@ -401,8 +427,41 @@ mod tests {
             .await
             .expect_err("401 is permanent");
 
-        assert_eq!(error, ProviderError::Status { code: 401, attempts: 1 });
+        assert_eq!(
+            error,
+            ProviderError::Status {
+                code: 401,
+                attempts: 1,
+                detail: String::new()
+            }
+        );
         assert_eq!(*attempts.lock().expect("not poisoned"), 1);
+    }
+
+    #[tokio::test]
+    async fn a_status_error_carries_response_body_detail() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|| async { (axum::http::StatusCode::PAYMENT_REQUIRED, "Key credit limit exceeded") }),
+        );
+        let error = provider(app)
+            .await
+            .complete(request())
+            .await
+            .expect_err("402 is permanent");
+
+        assert_eq!(
+            error,
+            ProviderError::Status {
+                code: 402,
+                attempts: 1,
+                detail: ": Key credit limit exceeded".to_string()
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "inference endpoint returned HTTP 402: Key credit limit exceeded after 1 attempt(s)"
+        );
     }
 
     #[tokio::test]
@@ -427,7 +486,7 @@ mod tests {
             .await
             .expect_err("the outage persists");
 
-        assert_eq!(error, ProviderError::Status { code: 429, attempts: 3 });
+        assert_eq!(error, ProviderError::Unavailable { code: 429, attempts: 3 });
         assert_eq!(*attempts.lock().expect("not poisoned"), 3);
     }
 
@@ -482,6 +541,34 @@ mod tests {
             .expect_err("the endpoint never answers in time");
 
         assert_eq!(error, ProviderError::Timeout { attempts: 3, timeout });
+        assert_eq!(*attempts.lock().expect("not poisoned"), 3);
+    }
+
+    #[tokio::test]
+    async fn a_connection_the_endpoint_drops_is_a_transport_fault_not_a_deadline() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a loopback port");
+        let address = listener.local_addr().expect("the listener has an address");
+        let attempts = Arc::new(Mutex::new(0u32));
+        tokio::spawn({
+            let attempts = Arc::clone(&attempts);
+            async move {
+                while let Ok((socket, _)) = listener.accept().await {
+                    *attempts.lock().expect("not poisoned") += 1;
+                    drop(socket);
+                }
+            }
+        });
+        let config = OpenAiConfig::new(format!("http://{address}"), "fixture/model", "test-key")
+            .with_request_timeout(Duration::from_secs(5))
+            .with_test_retry_policy(3, Duration::ZERO, Duration::ZERO);
+        let error = OpenAiCompatible::with_http_client(config, HttpClient::loopback())
+            .complete(request())
+            .await
+            .expect_err("the endpoint never answers");
+
+        assert_eq!(error, ProviderError::Transport { attempts: 3 });
         assert_eq!(*attempts.lock().expect("not poisoned"), 3);
     }
 }

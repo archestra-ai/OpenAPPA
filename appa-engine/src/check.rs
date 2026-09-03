@@ -1,4 +1,7 @@
-//! The two-outcome check: the pure evaluation of a proposed call against the trajectory.
+//! The check: the pure evaluation of a proposed call against the trajectory. Its outcome is
+//! allow or block — or, before either, a membership ask: the symbolic atoms the audience
+//! comparisons need extensional answers for. The ask is not a decision and appends nothing;
+//! the operation gathers the pinned evidence and the same check runs again, decided.
 
 use serde::{Deserialize, Serialize};
 
@@ -7,17 +10,22 @@ use crate::contract::{
     AudienceRequirement, HistoryRequirement, RecipientSpec, StaticAnnotation, ToolAnnotation, ToolDeclaration,
 };
 use crate::fact::EffectKind;
-use crate::groups::Expansions;
-use crate::label::{Audience, Label, ReaderId, Trust};
-use crate::names::{AnnotatorName, AudienceArgument, GroupName, MarkName};
+use crate::label::{
+    Audience, Clause, DeclaredAudience, Evaluation, Label, MembershipContext, MembershipNeeded, ReaderId, SymbolicAtom,
+    Trust,
+};
+use crate::names::{AnnotatorName, AudienceArgument, MarkName};
 use crate::projection::Views;
 use crate::value::ResolvedCall;
 
+/// One requirement the committed label misses. The audience payloads are the declared,
+/// symbolic recipient sets — feedback renders `internal` or `@finance` as written, never a
+/// membership snapshot.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Gap {
     TrustFloor { required: Trust, actual: Trust },
-    Includes { recipients: Audience },
-    Cap { cap: Audience },
+    Includes { recipients: DeclaredAudience },
+    Cap { cap: DeclaredAudience },
     Prior(EffectKind),
     NoPrior(EffectKind),
     Attention(MarkName),
@@ -32,11 +40,25 @@ pub struct Narrowing {
 }
 
 /// The block as the check finds it — the gaps and/or a narrowing — before remedy planning.
-/// The slots are independent and may coexist.
+/// The slots are independent and may coexist. A marked spawn is blocked with both empty
+/// until its approval declares the child's return policy: that block has no gap to clear and
+/// no narrowing to settle, only the declaration to make.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RawBlock {
     pub requirement_gaps: Vec<Gap>,
     pub narrowing: Option<Narrowing>,
+}
+
+/// What the checked call is to its deployment: an ordinary tool call, or the one proposal the
+/// runtime marked as the context-controlled spawn. The mark is a property of the
+/// subject, fixed when its batch was decided, so a substituted successor keeps its predecessor's
+/// role. A marked spawn never checks to `Allow` on its own: its release spends an approval
+/// carrying the child's return policy, and until one stands it is blocked with the plans that
+/// declare one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CallRole {
+    Ordinary,
+    MarkedSpawn,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,9 +68,10 @@ pub enum CheckOutcome {
 }
 
 /// The label the trajectory would hold after this call commits, on the check's clock: the
-/// current fold narrowed by the delta.
-pub(crate) fn committed_label(annotation: &ToolAnnotation, current: &Label, expansions: &Expansions) -> Label {
-    current.combine(&annotation.delta.output_label(expansions))
+/// current fold narrowed by the delta. Expansion-free — symbolic audience atoms fold as
+/// themselves.
+pub(crate) fn committed_label(annotation: &ToolAnnotation, current: &Label) -> Label {
+    current.combine(&annotation.delta.output_label())
 }
 
 /// What the check reads from the call it evaluates: the arguments its placeholders spell.
@@ -68,8 +91,8 @@ pub(crate) fn evaluate_static(
     current: &Label,
     has_committed: &impl Fn(&EffectKind) -> bool,
     has_reserved: &impl Fn(&EffectKind) -> bool,
-    expansions: &Expansions,
-) -> RawBlock {
+    context: &MembershipContext<'_>,
+) -> Result<RawBlock, MembershipNeeded> {
     evaluate_state(
         annotation.annotation(),
         current,
@@ -77,19 +100,22 @@ pub(crate) fn evaluate_static(
         has_reserved,
         CallReads::Static,
         &CallStage::default(),
-        expansions,
+        context,
     )
 }
 
-/// Evaluate one call against the branch views. Pure: a function of the annotation, the views, and
-/// the resolved arguments. The block carries every slot at once: the gaps and the narrowing.
+/// Evaluate one call against the branch views. Pure: a function of the annotation, the views,
+/// the resolved arguments, and the membership context. The block carries every slot at once:
+/// the gaps and the narrowing. `Err` is the membership ask — the union of every atom the
+/// audience comparisons still need, deterministic in the call and the context.
 pub(crate) fn evaluate(
     annotation: &ToolAnnotation,
     views: &Views,
     call: &ResolvedCall,
     stage: &CallStage,
-    expansions: &Expansions,
-) -> CheckOutcome {
+    role: CallRole,
+    context: &MembershipContext<'_>,
+) -> Result<CheckOutcome, MembershipNeeded> {
     let current = views.current_label();
     let eval = evaluate_state(
         annotation,
@@ -98,12 +124,12 @@ pub(crate) fn evaluate(
         &|kind| views.has_reservation(kind),
         CallReads::Resolved(call),
         stage,
-        expansions,
-    );
-    if eval.requirement_gaps.is_empty() && eval.narrowing.is_none() {
-        return CheckOutcome::Allow;
+        context,
+    )?;
+    if role == CallRole::Ordinary && eval.requirement_gaps.is_empty() && eval.narrowing.is_none() {
+        return Ok(CheckOutcome::Allow);
     }
-    CheckOutcome::Block(eval)
+    Ok(CheckOutcome::Block(eval))
 }
 
 /// The gap logic on an abstract `(current label, history predicates)` state — the one place the
@@ -118,9 +144,9 @@ pub(crate) fn evaluate_state(
     has_reserved: &impl Fn(&EffectKind) -> bool,
     reads: CallReads<'_>,
     stage: &CallStage,
-    expansions: &Expansions,
-) -> RawBlock {
-    let committed = committed_label(annotation, current, expansions);
+    context: &MembershipContext<'_>,
+) -> Result<RawBlock, MembershipNeeded> {
+    let committed = committed_label(annotation, current);
 
     let narrowing = (&committed != current).then(|| Narrowing {
         from: current.clone(),
@@ -128,7 +154,15 @@ pub(crate) fn evaluate_state(
     });
 
     let mut gaps = Vec::new();
-    label_gaps(annotation, &committed, reads, stage, expansions, &mut gaps);
+    let mut needed = Vec::new();
+    label_gaps(annotation, &committed, reads, stage, context, &mut gaps, &mut needed);
+    if !needed.is_empty() {
+        // An undecided comparison keeps the whole check open: gaps drive remedy planning,
+        // and a requirement that is neither held nor refuted cannot be planned over yet.
+        needed.sort();
+        needed.dedup();
+        return Err(MembershipNeeded { needed });
+    }
     history_gaps(annotation, has_committed, has_reserved, &mut gaps);
     for mark in annotation.requires.attention_marks() {
         gaps.push(Gap::Attention(mark.clone()));
@@ -140,16 +174,21 @@ pub(crate) fn evaluate_state(
         }
     }
 
-    RawBlock {
+    Ok(RawBlock {
         requirement_gaps: seen,
         narrowing,
-    }
+    })
 }
 
-fn released_covers(stage: &CallStage, committed: &Label, recipients: &Audience) -> bool {
+fn released_covers(
+    stage: &CallStage,
+    committed: &Label,
+    recipients: &DeclaredAudience,
+    context: &MembershipContext<'_>,
+) -> Evaluation {
     match stage.substituted() {
-        None => committed.covers(recipients),
-        Some(label) => label.covers(recipients),
+        None => committed.covers(recipients, context),
+        Some(label) => label.covers(recipients, context),
     }
 }
 
@@ -158,8 +197,9 @@ fn label_gaps(
     committed: &Label,
     reads: CallReads<'_>,
     stage: &CallStage,
-    expansions: &Expansions,
+    context: &MembershipContext<'_>,
     gaps: &mut Vec<Gap>,
+    needed: &mut Vec<SymbolicAtom>,
 ) {
     if let Some(floor) = annotation.requires.trust_floor()
         && !committed.meets_floor(floor)
@@ -171,12 +211,12 @@ fn label_gaps(
     }
     for requirement in annotation.requires.audience_requirements() {
         match requirement {
-            AudienceRequirement::Includes(spec) => match resolve_recipients(spec, reads, expansions) {
-                Some(recipients) => {
-                    if !released_covers(stage, committed, &recipients) {
-                        gaps.push(Gap::Includes { recipients });
-                    }
-                }
+            AudienceRequirement::Includes(spec) => match resolve_recipients(spec, reads) {
+                Some(recipients) => match released_covers(stage, committed, &recipients, context) {
+                    Evaluation::Holds => {}
+                    Evaluation::Fails => gaps.push(Gap::Includes { recipients }),
+                    Evaluation::Needs(mut ask) => needed.append(&mut ask.needed),
+                },
                 None => match spec {
                     // An argument that spells no recipients resolves to nothing a released
                     // value could cover — the gap names the unresolved placeholder, closed.
@@ -190,12 +230,11 @@ fn label_gaps(
                     }
                 },
             },
-            AudienceRequirement::Cap(cap) => {
-                let cap = cap.resolve(expansions);
-                if !committed.within_cap(&cap) {
-                    gaps.push(Gap::Cap { cap });
-                }
-            }
+            AudienceRequirement::Cap(cap) => match committed.within_cap(cap, context) {
+                Evaluation::Holds => {}
+                Evaluation::Fails => gaps.push(Gap::Cap { cap: cap.clone() }),
+                Evaluation::Needs(mut ask) => needed.append(&mut ask.needed),
+            },
         }
     }
 }
@@ -222,19 +261,28 @@ fn history_gaps(
     }
 }
 
-fn resolve_recipients(spec: &RecipientSpec, reads: CallReads<'_>, expansions: &Expansions) -> Option<Audience> {
+/// The declared recipient set one includes-requirement compares against: the static
+/// declaration itself, or the symbolic audience its placeholder argument spells. A chain
+/// word, a group reference, and a literal reader all stay symbolic here — membership, if the
+/// comparison needs it, is the evaluation's question, never this parse's.
+fn resolve_recipients(spec: &RecipientSpec, reads: CallReads<'_>) -> Option<DeclaredAudience> {
     match (spec, reads) {
-        (RecipientSpec::Static(audience), _) => Some(audience.resolve(expansions)),
+        (RecipientSpec::Static(declared), _) => Some(declared.clone()),
         (RecipientSpec::Placeholder(_), CallReads::Static) => {
             unreachable!("`StaticAnnotation::of` refuses a placeholder, so a static read never meets one")
         }
-        (RecipientSpec::Placeholder(key), CallReads::Resolved(call)) => match placeholder_argument(key, call)? {
-            AudienceArgument::Public => Some(Audience::Public),
-            AudienceArgument::Reader(reader) => Some(Audience::restricted([reader])),
-            AudienceArgument::Group(_) => call
-                .membership(key)
-                .map(|membership| Audience::restricted(membership.readers().iter().cloned())),
-        },
+        (RecipientSpec::Placeholder(key), CallReads::Resolved(call)) => {
+            placeholder_argument(key, call).map(|argument| match argument {
+                AudienceArgument::Public => DeclaredAudience::Public,
+                AudienceArgument::Chain(chain) => {
+                    DeclaredAudience::Union(Clause::new([chain], [], []).expect("a chain clause names no reader"))
+                }
+                AudienceArgument::Group(group) => {
+                    DeclaredAudience::Union(Clause::new([], [group], []).expect("a group clause names no reader"))
+                }
+                AudienceArgument::Reader(reader) => DeclaredAudience::restricted([reader]),
+            })
+        }
     }
 }
 
@@ -243,34 +291,6 @@ fn placeholder_argument(key: &str, call: &ResolvedCall) -> Option<AudienceArgume
         .get(key)
         .and_then(|value| value.as_str())
         .and_then(AudienceArgument::parse)
-}
-
-/// One group a proposed call reads through a placeholder: the argument that spells it
-/// and the group it spells. What the runtime resolves and what the engine requires a pin for.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct GroupRead {
-    pub argument: String,
-    pub group: GroupName,
-}
-
-/// Every group this call's placeholders spell, in argument order. These are
-/// the expansions the call must carry before it can be checked.
-pub fn group_reads(annotation: &ToolAnnotation, call: &ResolvedCall) -> Vec<GroupRead> {
-    annotation
-        .requires
-        .audience_requirements()
-        .iter()
-        .filter_map(|requirement| match requirement {
-            AudienceRequirement::Includes(RecipientSpec::Placeholder(key)) => match placeholder_argument(key, call) {
-                Some(AudienceArgument::Group(group)) => Some(GroupRead {
-                    argument: key.clone(),
-                    group,
-                }),
-                _ => None,
-            },
-            _ => None,
-        })
-        .collect()
 }
 
 /// Why a call's annotation evidence is not admissible, or what it still owes.
@@ -311,9 +331,11 @@ pub(crate) fn validate_annotation(
     }
     let annotation = pinned.produced();
     let outside = |what: &str| AnnotationRefusal::OutsidePolicy(what.to_string());
-    // Literal: a produced annotation pins exact reader sets — no groups, no placeholders.
-    if annotation.groups().next().is_some() {
-        return Err(outside("a produced annotation names a group"));
+    // Literal: a produced annotation pins exact reader sets — no chain words, no groups,
+    // no placeholders. Symbolic audiences are the policy author's vocabulary, not an
+    // annotator's.
+    if annotation.symbolic_atoms().next().is_some() {
+        return Err(outside("a produced annotation names a symbolic audience"));
     }
     let placeholder = annotation.requires.audience_requirements().iter().any(|requirement| {
         matches!(
@@ -327,17 +349,20 @@ pub(crate) fn validate_annotation(
     let mandate = registry
         .annotator_mandate(annotator)
         .expect("declarations name only registered annotators");
-    let permits_audience = |audience: &Audience| match audience {
-        Audience::Public => true,
-        Audience::Restricted(readers) => readers.iter().all(|reader| mandate.permits_reader(reader)),
+    let permits_readers =
+        |readers: &std::collections::BTreeSet<ReaderId>| readers.iter().all(|reader| mandate.permits_reader(reader));
+    // The literal check above holds here, so every clause is a plain reader list.
+    let permits_audience = |audience: &Audience| audience.clauses().all(|clause| permits_readers(clause.readers()));
+    let permits_declared = |declared: &DeclaredAudience| match declared {
+        DeclaredAudience::Public => true,
+        DeclaredAudience::Union(clause) => permits_readers(clause.readers()),
     };
-    let expansions = Expansions::empty_members(&[]);
     if let Some(trust) = annotation.delta.trust
         && !mandate.permits_trust(trust)
     {
         return Err(outside("the produced delta trust is outside the mandate"));
     }
-    if !permits_audience(&annotation.delta.output_label(&expansions).audience) {
+    if !permits_audience(&annotation.delta.output_label().audience) {
         return Err(outside("the produced delta audience is outside the mandate"));
     }
     if annotation
@@ -352,10 +377,8 @@ pub(crate) fn validate_annotation(
         .audience_requirements()
         .iter()
         .all(|requirement| match requirement {
-            AudienceRequirement::Includes(RecipientSpec::Static(recipients)) => {
-                permits_audience(&recipients.resolve(&expansions))
-            }
-            AudienceRequirement::Cap(cap) => permits_audience(&cap.resolve(&expansions)),
+            AudienceRequirement::Includes(RecipientSpec::Static(recipients)) => permits_declared(recipients),
+            AudienceRequirement::Cap(cap) => permits_declared(cap),
             AudienceRequirement::Includes(RecipientSpec::Placeholder(_)) => true,
         });
     if !audience_within {
@@ -381,74 +404,8 @@ pub(crate) fn validate_annotation(
     Ok(())
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum MembershipRefusal {
-    #[error("the call names groups its check needs expansions for")]
-    Needed(Vec<GroupRead>),
-    #[error("the pinned membership answer for argument {0} is not bound to this call")]
-    Foreign(String),
-}
-
-/// The pinned answers a checked call may carry are exactly the ones its placeholders spell:
-/// one per group-reading argument, nothing else, and one expansion per group
-/// — two arguments spelling the same group share one resolution. The live boundary
-/// and the replay validator both run this, so a log cannot hold pins the deciding path refused.
-pub(crate) fn validate_memberships(annotation: &ToolAnnotation, call: &ResolvedCall) -> Result<(), MembershipRefusal> {
-    let reads = group_reads(annotation, call);
-    let mut expansions: Vec<(&GroupName, &std::collections::BTreeSet<ReaderId>)> = Vec::new();
-    let mut seen: Vec<&str> = Vec::new();
-    for membership in call.memberships() {
-        let argument = membership.argument();
-        let Some(read) = reads.iter().find(|read| read.argument == argument) else {
-            return Err(MembershipRefusal::Foreign(argument.to_string()));
-        };
-        if seen.contains(&argument) {
-            return Err(MembershipRefusal::Foreign(argument.to_string()));
-        }
-        seen.push(argument);
-        match expansions.iter().find(|(group, _)| **group == read.group) {
-            Some((_, readers)) if *readers != membership.readers() => {
-                return Err(MembershipRefusal::Foreign(argument.to_string()));
-            }
-            Some(_) => {}
-            None => expansions.push((&read.group, membership.readers())),
-        }
-    }
-    let missing: Vec<GroupRead> = reads
-        .into_iter()
-        .filter(|read| !seen.contains(&read.argument.as_str()))
-        .collect();
-    if missing.is_empty() {
-        Ok(())
-    } else {
-        Err(MembershipRefusal::Needed(missing))
-    }
-}
-
-/// One operation reads one answer per group: a pin whose readers differ from the
-/// expansion the operation reads the same group under — a group a declaration also writes — is
-/// not evidence for this operation. Pins no read spells are [`validate_memberships`]'s.
-pub(crate) fn pins_agree(
-    annotation: &ToolAnnotation,
-    call: &ResolvedCall,
-    expansions: &Expansions,
-) -> Result<(), MembershipRefusal> {
-    let reads = group_reads(annotation, call);
-    for membership in call.memberships() {
-        let disagrees = reads
-            .iter()
-            .find(|read| read.argument == membership.argument())
-            .and_then(|read| expansions.readers(&read.group))
-            .is_some_and(|readers| readers != membership.readers());
-        if disagrees {
-            return Err(MembershipRefusal::Foreign(membership.argument().to_string()));
-        }
-    }
-    Ok(())
-}
-
-fn unresolved_recipient(key: &str) -> Audience {
-    Audience::restricted([ReaderId::new(format!("<unresolved:{key}>"))])
+fn unresolved_recipient(key: &str) -> DeclaredAudience {
+    DeclaredAudience::restricted([ReaderId::new(format!("<unresolved:{key}>"))])
 }
 
 #[cfg(test)]
@@ -458,7 +415,8 @@ mod tests {
     use super::*;
     use crate::contract::{Delta, LabelRequirements, PinnedAnnotation, ProducedAnnotation, Requires, ToolAnnotation};
     use crate::fact::{EffectKind, EffectSet};
-    use crate::groups::DeclaredAudience;
+    use crate::label::GroupRef;
+    use crate::names::GroupName;
     use crate::params::ToolParameters;
     use crate::registry::{AnnotatorDeclaration, Registry, RegistryConfig, TrustChain};
     use crate::value::ToolName;
@@ -495,9 +453,7 @@ mod tests {
                     description: Some("Reads one file.".to_string()),
                     delta: Delta {
                         trust: Some(Trust::new(1)),
-                        audience: Some(DeclaredAudience::literal(Audience::restricted([ReaderId::new(
-                            "support",
-                        )]))),
+                        audience: Some(DeclaredAudience::restricted([ReaderId::new("support")])),
                     },
                     emits: EffectSet::new([EffectKind::new("mail.sent")]).unwrap(),
                     requires: Requires {
@@ -517,7 +473,7 @@ mod tests {
             annotators,
             authorities: vec![],
             sanitizers: vec![],
-            membership: None,
+            audience: crate::audience::AudienceConfig::default(),
         })
         .expect("the fixture policy loads")
     }
@@ -625,7 +581,9 @@ mod tests {
         let grouped = ToolAnnotation {
             delta: Delta {
                 trust: None,
-                audience: Some(DeclaredAudience::declared([], [GroupName::new("team")]).unwrap()),
+                audience: Some(DeclaredAudience::Union(
+                    Clause::new([], [GroupRef::Named(GroupName::new("team"))], []).unwrap(),
+                )),
             },
             ..annotation("lookup")
         };
@@ -662,17 +620,15 @@ mod tests {
         let within = ToolAnnotation {
             delta: Delta {
                 trust: Some(Trust::new(0)),
-                audience: Some(DeclaredAudience::literal(Audience::restricted([ReaderId::new(
-                    "support",
-                )]))),
+                audience: Some(DeclaredAudience::restricted([ReaderId::new("support")])),
             },
             emits: EffectSet::new([EffectKind::new("mail.sent")]).unwrap(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: Some(Trust::new(0)),
-                    audience: vec![AudienceRequirement::Cap(DeclaredAudience::literal(
-                        Audience::restricted([ReaderId::new("support")]),
-                    ))],
+                    audience: vec![AudienceRequirement::Cap(DeclaredAudience::restricted([ReaderId::new(
+                        "support",
+                    )]))],
                 },
                 history: vec![HistoryRequirement::NoPrior(EffectKind::new("mail.sent"))],
                 attention: vec![MarkName::new("reviewed")],
@@ -695,9 +651,7 @@ mod tests {
             ToolAnnotation {
                 delta: Delta {
                     trust: None,
-                    audience: Some(DeclaredAudience::literal(Audience::restricted([ReaderId::new(
-                        "stranger",
-                    )]))),
+                    audience: Some(DeclaredAudience::restricted([ReaderId::new("stranger")])),
                 },
                 ..annotation("lookup")
             },
@@ -716,7 +670,7 @@ mod tests {
                     label: LabelRequirements {
                         trust_floor: None,
                         audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
-                            DeclaredAudience::literal(Audience::restricted([ReaderId::new("stranger")])),
+                            DeclaredAudience::restricted([ReaderId::new("stranger")]),
                         ))],
                     },
                     ..Requires::default()
@@ -763,7 +717,7 @@ mod tests {
         let produced = ToolAnnotation {
             delta: Delta {
                 trust: None,
-                audience: Some(DeclaredAudience::literal(Audience::Public)),
+                audience: Some(DeclaredAudience::Public),
             },
             ..annotation("lookup")
         };
@@ -774,9 +728,7 @@ mod tests {
         let restricted = ToolAnnotation {
             delta: Delta {
                 trust: None,
-                audience: Some(DeclaredAudience::literal(Audience::restricted([ReaderId::new(
-                    "support",
-                )]))),
+                audience: Some(DeclaredAudience::restricted([ReaderId::new("support")])),
             },
             ..annotation("lookup")
         };

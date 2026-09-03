@@ -41,16 +41,17 @@ use std::num::NonZeroU32;
 
 use serde::{Deserialize, Serialize};
 
+use crate::audience::{AudienceEvidence, EvidenceRefusal};
 use crate::basis::SubjectKey;
 use crate::candidate::CallStage;
+use crate::check::CallRole;
 use crate::check::{self, CallReads, CheckOutcome, Gap, Narrowing, RawBlock};
 use crate::contract::{NotStatic, StaticAnnotation, ToolAnnotation};
 use crate::engine::Engine;
 use crate::fact::EffectKind;
-use crate::groups::{ExpansionRefusal, Expansions, GroupExpansion, MembershipNeeded};
-use crate::label::{Audience, Label};
-use crate::names::{AuthorityName, GroupName, SanitizerName};
-use crate::plan::{self, CallRole, ExecutableRemedyPlan, GapPower, RemedyStep};
+use crate::label::{Audience, Expansions, Label, MembershipContext, MembershipNeeded, SymbolicAtom, WithinAssertions};
+use crate::names::{AuthorityName, SanitizerName};
+use crate::plan::{self, ExecutableRemedyPlan, GapPower, RemedyStep};
 use crate::projection::Views;
 use crate::registry::Registry;
 use crate::value::{CanonicalDigest, ResolvedCall, ToolName};
@@ -93,7 +94,7 @@ impl RecoveryRoute {
                 RouteStep::Derive(sanitizer) | RouteStep::Sanitize(sanitizer) => Some(Contingency::SanitizerResult {
                     sanitizer: sanitizer.clone(),
                 }),
-                RouteStep::Accept(_) => None,
+                RouteStep::Accept(_) | RouteStep::Return(_) => None,
             })
             .collect();
         if contingencies.is_empty() {
@@ -125,6 +126,9 @@ pub enum RouteStep {
         call: CanonicalDigest,
     },
     Sanitize(SanitizerName),
+    /// Declare the child's return policy for a marked spawn: a floor, behind the named untagged
+    /// output sanitizer when one is given.
+    Return(Option<SanitizerName>),
 }
 
 /// `Complete` ends with the blocked call's release. `Prefix` stops earlier, where the next state
@@ -184,10 +188,10 @@ pub enum RouteError {
     UnknownSubject,
     #[error("the call passes its check; there is nothing to recover from")]
     NotBlocked,
-    #[error("planning this block reads groups no expansion answers: {0:?}")]
-    MembershipNeeded(Vec<GroupName>),
+    #[error("planning this block reads symbolic audiences no pinned answer decides: {0:?}")]
+    MembershipNeeded(Vec<SymbolicAtom>),
     #[error(transparent)]
-    Expansion(#[from] ExpansionRefusal),
+    Evidence(#[from] EvidenceRefusal),
     #[error("the view was built under another policy")]
     ForeignView,
 }
@@ -206,6 +210,7 @@ pub(crate) struct BlockContext {
     call: ResolvedCall,
     stage: CallStage,
     role: CallRole,
+    floor: Option<plan::Floor>,
     denied: BTreeSet<AuthorityName>,
     expansions: Expansions,
     raw: RawBlock,
@@ -216,7 +221,7 @@ impl BlockContext {
         engine: &Engine,
         views: &Views,
         subject: &SubjectKey,
-        answers: &[GroupExpansion],
+        answers: &AudienceEvidence,
     ) -> Result<BlockContext, RouteError> {
         let SubjectKey::Call { batch, .. } = subject else {
             return Err(RouteError::NotACallSubject);
@@ -229,33 +234,37 @@ impl BlockContext {
             .ok_or(RouteError::UnknownSubject)?
             .into_owned();
 
-        let mut expansions = registry.expansions_from_event(answers)?;
+        let mut evidence = answers.clone();
         if let Some((_, offers)) = views.pending_block(subject) {
             for (offer, _) in &offers {
                 if let Some(recorded) = views.offer(offer) {
-                    expansions = expansions.inheriting(&engine.recorded_expansions(&recorded.resolutions));
+                    evidence = evidence.inheriting(&recorded.evidence)?;
                 }
             }
         }
-        expansions = expansions.inheriting(&engine.recorded_expansions(&decided.resolutions));
+        evidence = evidence.inheriting(&decided.evidence)?;
         // A candidate an input hop derived may stand under another contract than the proposal;
-        // the groups that contract reads were resolved by the hop.
-        expansions = expansions.inheriting(&engine.recorded_expansions(views.candidate_resolutions(subject)));
-        expansions.require(contract.groups())?;
+        // the atoms that contract reads were pinned by the hop.
+        evidence = evidence.inheriting(views.candidate_evidence(subject))?;
+        let expansions = registry.audience().expansions(&evidence)?;
 
         let stage = views.call_stage(subject);
         let role = views.call_role(subject);
-        let raw = match check::evaluate(&contract, views, &call, &stage, &expansions) {
-            CheckOutcome::Allow => return Err(RouteError::NotBlocked),
-            CheckOutcome::Block(raw) => raw,
+        let audience = registry.audience();
+        let membership = MembershipContext::new(audience.within_assertions(), audience.providers(), &expansions);
+        let raw = match check::evaluate(&contract, views, &call, &stage, role, &membership) {
+            Ok(CheckOutcome::Allow) => return Err(RouteError::NotBlocked),
+            Ok(CheckOutcome::Block(raw)) => raw,
+            Err(needed) => return Err(needed.into()),
         };
-        expansions.require(plan::block_groups(registry, &contract, &raw, role).iter())?;
         let denied = views.denied_authorities(&call.digest()).cloned().unwrap_or_default();
+        let floor = plan::floor_of(registry, views);
         Ok(BlockContext {
             contract,
             call,
             stage,
             role,
+            floor,
             denied,
             expansions,
             raw,
@@ -273,10 +282,10 @@ struct RouteState {
 }
 
 impl RouteState {
-    fn after(&self, tool: &StaticAnnotation<'_>, expansions: &Expansions) -> RouteState {
+    fn after(&self, tool: &StaticAnnotation<'_>) -> RouteState {
         let contract = tool.annotation();
         RouteState {
-            label: check::committed_label(contract, &self.label, expansions),
+            label: check::committed_label(contract, &self.label),
             committed: self.committed.iter().chain(contract.emits.iter()).cloned().collect(),
         }
     }
@@ -368,7 +377,7 @@ impl Run {
 /// the mandate power it assigns per requirement.
 struct Found {
     route: RecoveryRoute,
-    disclosure: Option<Audience>,
+    disclosure: Vec<Audience>,
     powers: Vec<(Gap, Power)>,
     /// The block's requirement keys plus every key `powers` assigns.
     keys: Vec<Gap>,
@@ -414,7 +423,18 @@ struct Search<'a> {
     visited: BTreeSet<Visit>,
 }
 
-impl Search<'_> {
+impl<'a> Search<'a> {
+    /// The membership context planning reads: the policy's assertions and providers beside
+    /// the answers the block's pinned evidence recomputes to.
+    fn membership(&self) -> MembershipContext<'a> {
+        let audience = self.registry.audience();
+        MembershipContext::new(
+            audience.within_assertions(),
+            audience.providers(),
+            &self.context.expansions,
+        )
+    }
+
     fn first_visit(&mut self, tool: Option<&ToolName>, path: &Path) -> bool {
         let mut goals = path.goals.clone();
         if let Some(tool) = tool {
@@ -435,19 +455,6 @@ impl Search<'_> {
         |kind| self.views.has_reservation(kind)
     }
 
-    /// The groups planning this block reads, required before any plan resolves them — the gate
-    /// the engine runs before it enumerates a live block's plans.
-    fn require_groups(
-        &self,
-        contract: &ToolAnnotation,
-        block: &RawBlock,
-        role: CallRole,
-    ) -> Result<(), MembershipNeeded> {
-        self.context
-            .expansions
-            .require(plan::block_groups(self.registry, contract, block, role).iter())
-    }
-
     /// The blocked call's stage in `state`: its own plans, then every tool that may run first.
     /// `budget` is how many preceding tools the depth still allows.
     fn target(
@@ -461,6 +468,7 @@ impl Search<'_> {
             return Ok(());
         }
         let context = self.context;
+        let membership = self.membership();
         let eval = check::evaluate_state(
             &context.contract,
             &state.label,
@@ -468,9 +476,8 @@ impl Search<'_> {
             &self.has_reserved(),
             CallReads::Resolved(&context.call),
             &context.stage,
-            &context.expansions,
-        );
-        self.require_groups(&context.contract, &eval, context.role)?;
+            &membership,
+        )?;
         if eval.requirement_gaps.is_empty() && eval.narrowing.is_none() {
             found.push(self.found(
                 path.steps.clone(),
@@ -479,6 +486,20 @@ impl Search<'_> {
                 &eval.requirement_gaps,
             ));
         } else {
+            // The same gate live planning holds a surfaced block to: every atom the
+            // enumeration may consult is answered, or the missing ones are the ask. Without
+            // it, an unanswered mandate would silently drop this state's plans from the
+            // advisory menu instead of refusing the search.
+            let mut unanswered: Vec<SymbolicAtom> =
+                plan::block_atoms(self.registry, &context.contract, &eval, context.role)
+                    .into_iter()
+                    .filter(|atom| !self.context.expansions.answered(atom))
+                    .collect();
+            if !unanswered.is_empty() {
+                unanswered.sort();
+                unanswered.dedup();
+                return Err(MembershipNeeded { needed: unanswered });
+            }
             for plan in plan::enumerate_plans(
                 self.registry,
                 &context.contract,
@@ -488,8 +509,9 @@ impl Search<'_> {
                 &context.call,
                 &context.stage,
                 context.role,
-                &context.expansions,
-            ) {
+                context.floor.as_ref(),
+                &membership,
+            )? {
                 if context.denied.iter().any(|authority| plan.names_authority(authority)) {
                     continue;
                 }
@@ -520,7 +542,9 @@ impl Search<'_> {
             if path.excludes(&tool.name) {
                 continue;
             }
-            let clears = plan::direct_clears(tool, &eval.requirement_gaps, &state.label, &context.expansions);
+            let mut undecided = plan::NeededAtoms::default();
+            let clears = plan::direct_clears(tool, &eval.requirement_gaps, &state.label, &membership, &mut undecided);
+            undecided.refuse_if_any()?;
             if clears.is_empty() {
                 continue;
             }
@@ -569,20 +593,18 @@ impl Search<'_> {
         if budget == 0 {
             return halt(Halt::Depth);
         }
-        let expansions = &self.context.expansions;
-        let static_contract = match StaticAnnotation::of(tool, expansions) {
+        let membership = self.membership();
+        let static_contract = match StaticAnnotation::of(tool) {
             Ok(static_contract) => static_contract,
-            Err(NotStatic::Arguments) => return halt(Halt::Arguments),
-            Err(NotStatic::Membership(needed)) => return Err(MembershipNeeded { needed }),
+            Err(NotStatic) => return halt(Halt::Arguments),
         };
         let eval = check::evaluate_static(
             &static_contract,
             &state.label,
             &self.has_committed(state),
             &self.has_reserved(),
-            expansions,
-        );
-        self.require_groups(tool, &eval, CallRole::Ordinary)?;
+            &membership,
+        )?;
         if eval
             .requirement_gaps
             .iter()
@@ -597,7 +619,7 @@ impl Search<'_> {
                     clears,
                     accepts: eval.narrowing,
                 }],
-                state: state.after(&static_contract, expansions),
+                state: state.after(&static_contract),
                 budget: budget - 1,
             }]);
         }
@@ -611,7 +633,10 @@ impl Search<'_> {
             if goal.excludes(&first.name) {
                 continue;
             }
-            let first_clears = plan::direct_clears(first, &eval.requirement_gaps, &state.label, expansions);
+            let mut undecided = plan::NeededAtoms::default();
+            let first_clears =
+                plan::direct_clears(first, &eval.requirement_gaps, &state.label, &membership, &mut undecided);
+            undecided.refuse_if_any()?;
             if first_clears.is_empty() {
                 continue;
             }
@@ -650,6 +675,7 @@ impl Search<'_> {
                 },
                 RemedyStep::Sanitize(sanitizer) => RouteStep::Sanitize(sanitizer.clone()),
                 RemedyStep::Derive(sanitizer) => RouteStep::Derive(sanitizer.clone()),
+                RemedyStep::Return(sanitizer) => RouteStep::Return(sanitizer.clone()),
             })
             .collect()
     }
@@ -672,11 +698,14 @@ impl Search<'_> {
         }
     }
 
-    /// The readers outside `audience` that the route's rulings admit a flow to: the union over
-    /// every ruling-covered `includes` gap. Nothing else discloses — a trust floor or a waiver
-    /// escalates without widening the readership, and a hop clears its gap with derived bytes.
-    fn disclosure(&self, steps: &[RouteStep], audience: &Audience) -> Option<Audience> {
-        let mut disclosed: Option<Audience> = None;
+    /// The recipient sets the route's rulings admit a flow to beyond the committed audience:
+    /// one entry per ruling-covered `includes` gap not derivably inside `audience`. Nothing
+    /// else discloses — a trust floor or a waiver escalates without widening the readership,
+    /// and a hop clears its gap with derived bytes. Derivability ranks routes only; the exact
+    /// comparison at release time is untouched.
+    fn disclosure(&self, steps: &[RouteStep], audience: &Audience) -> Vec<Audience> {
+        let within = self.registry.audience().within_assertions();
+        let mut disclosed: Vec<Audience> = Vec::new();
         for step in steps {
             let RouteStep::Authorize { covers, .. } = step else {
                 continue;
@@ -685,21 +714,13 @@ impl Search<'_> {
                 let Gap::Includes { recipients } = gap else {
                     continue;
                 };
-                let outside = match (recipients, audience) {
-                    (Audience::Public, _) => Audience::Public,
-                    (Audience::Restricted(readers), Audience::Public) => Audience::Restricted(readers.clone()),
-                    (Audience::Restricted(readers), Audience::Restricted(held)) => {
-                        Audience::Restricted(readers.difference(held).cloned().collect())
-                    }
-                };
-                disclosed = Some(match (disclosed, outside) {
-                    (None, outside) => outside,
-                    (Some(Audience::Public), _) | (_, Audience::Public) => Audience::Public,
-                    (Some(Audience::Restricted(mut all)), Audience::Restricted(more)) => {
-                        all.extend(more);
-                        Audience::Restricted(all)
-                    }
-                });
+                let admitted = Audience::of_declared(recipients);
+                if admitted.derives_within_audience(audience, within) {
+                    continue;
+                }
+                if !disclosed.contains(&admitted) {
+                    disclosed.push(admitted);
+                }
             }
         }
         disclosed
@@ -710,7 +731,7 @@ impl Search<'_> {
     /// among `gaps` — the gaps of the state the hop was chosen in — it improves. Tools run first
     /// and acceptance assign none.
     fn powers(&self, steps: &[RouteStep], gaps: &[Gap]) -> Vec<(Gap, Power)> {
-        let expansions = &self.context.expansions;
+        let within = self.registry.audience().within_assertions();
         let mut powers = Vec::new();
         for step in steps {
             match step {
@@ -722,10 +743,7 @@ impl Search<'_> {
                         .mandate;
                     for gap in covers {
                         let reader_ceiling = match gap {
-                            Gap::Includes { .. } => mandate
-                                .reader_ceiling
-                                .as_ref()
-                                .map(|ceiling| ceiling.resolve(expansions)),
+                            Gap::Includes { .. } => mandate.reader_ceiling.as_ref().map(Audience::of_declared),
                             _ => None,
                         };
                         powers.push((
@@ -746,16 +764,16 @@ impl Search<'_> {
                     let crate::authority::DeclaredTransition::Audience { to, .. } = transition else {
                         continue;
                     };
-                    let to = to.resolve(expansions);
+                    let to = Audience::of_declared(to);
                     for gap in gaps {
                         if let Gap::Includes { recipients } = gap
-                            && to.includes(recipients)
+                            && Audience::of_declared(recipients).derives_within_audience(&to, within)
                         {
                             powers.push((requirement_key(gap), Power::Substitution(to.clone())));
                         }
                     }
                 }
-                RouteStep::Precede { .. } | RouteStep::Accept(_) | RouteStep::Sanitize(_) => {}
+                RouteStep::Precede { .. } | RouteStep::Accept(_) | RouteStep::Sanitize(_) | RouteStep::Return(_) => {}
             }
         }
         powers
@@ -787,15 +805,16 @@ impl Search<'_> {
     /// block's own plus any either route clears by a ruling (a route needing an extra ruling
     /// assigns power where the other assigns none).
     fn precedes(&self, a: &Found, b: &Found) -> bool {
+        let within = self.registry.audience().within_assertions();
         let mut strictly_less = false;
         for key in a.keys.iter().chain(b.keys.iter().filter(|key| !a.keys.contains(key))) {
-            match plan::gap_power_cmp(key, &self.power_of(a, key), &self.power_of(b, key)) {
+            match plan::gap_power_cmp(key, &self.power_of(a, key), &self.power_of(b, key), within) {
                 Some(Ordering::Less) => strictly_less = true,
                 Some(Ordering::Equal) => {}
                 Some(Ordering::Greater) | None => return false,
             }
         }
-        match disclosure_cmp(a.disclosure.as_ref(), b.disclosure.as_ref()) {
+        match disclosure_cmp(&a.disclosure, &b.disclosure, within) {
             Some(Ordering::Less) => strictly_less = true,
             Some(Ordering::Equal) => {}
             Some(Ordering::Greater) | None => return false,
@@ -854,13 +873,12 @@ fn requirement_key(gap: &Gap) -> Gap {
     }
 }
 
-fn disclosure_cmp(a: Option<&Audience>, b: Option<&Audience>) -> Option<Ordering> {
-    match (a, b) {
-        (None, None) => Some(Ordering::Equal),
-        (None, Some(_)) => Some(Ordering::Less),
-        (Some(_), None) => Some(Ordering::Greater),
-        (Some(a), Some(b)) => plan::inclusion_cmp(a.within(b), b.within(a)),
-    }
+fn disclosure_cmp(a: &[Audience], b: &[Audience], within: &WithinAssertions) -> Option<Ordering> {
+    let covered = |of: &[Audience], by: &[Audience]| {
+        of.iter()
+            .all(|entry| by.iter().any(|holder| entry.derives_within_audience(holder, within)))
+    };
+    plan::inclusion_cmp(covered(a, b), covered(b, a))
 }
 
 #[cfg(test)]
@@ -869,7 +887,7 @@ mod tests {
     use crate::authority::{Authority, Mandate, Sanitizer, SanitizerPoints, Scope};
     use crate::contract::{AudienceRequirement, Delta, HistoryRequirement, RecipientSpec, Requires, ToolAnnotation};
     use crate::fact::{CloseOutcome, EffectSet, Fact};
-    use crate::groups::DeclaredAudience;
+    use crate::label::DeclaredAudience;
     use crate::label::{Label, ReaderId, Trust};
     use crate::projection::Projection;
     use crate::registry::{RegistryConfig, TrustChain};
@@ -1008,7 +1026,7 @@ mod tests {
         tools: Vec<ToolAnnotation>,
         authorities: Vec<Authority>,
         sanitizers: Vec<Sanitizer>,
-        membership: Option<crate::names::MembershipResolverName>,
+        audience: crate::audience::AudienceConfig,
     }
 
     impl Deployment {
@@ -1017,7 +1035,7 @@ mod tests {
                 tools,
                 authorities: vec![],
                 sanitizers: vec![],
-                membership: None,
+                audience: crate::audience::AudienceConfig::default(),
             }
         }
 
@@ -1042,7 +1060,7 @@ mod tests {
                 annotators: vec![],
                 authorities: self.authorities,
                 sanitizers: self.sanitizers,
-                membership: self.membership,
+                audience: self.audience,
             })
             .unwrap()
         }
@@ -1077,13 +1095,12 @@ mod tests {
             tool: seed.tool().clone(),
             declaration: seed.declaration_id(),
             arguments: seed.canonical_arguments().clone(),
-            proposed_label: Label::new(TRUSTED, Audience::Public),
-            receiving: Label::new(TRUSTED, Audience::Public),
+            proposed_label: Label::new(TRUSTED, Audience::public()),
+            receiving: Label::new(TRUSTED, Audience::public()),
             proposed_effects: EffectSet::new(kinds.iter().map(|kind| effect(kind))).unwrap(),
             annotation: None,
-            memberships: Vec::new(),
             subject: crate::basis::fixture_subject(&traj()),
-            resolutions: vec![],
+            evidence: crate::audience::AudienceEvidence::default(),
         }
     }
 
@@ -1101,15 +1118,24 @@ mod tests {
 
     fn raw_block(registry: &Registry, views: &Views, call: &ResolvedCall) -> RawBlock {
         let contract = registry.annotation_of(call).unwrap();
-        match check::evaluate(&contract, views, call, &CallStage::default(), &Expansions::default()) {
-            CheckOutcome::Block(raw) => raw,
+        let parts = crate::label::TestContext::default();
+        match check::evaluate(
+            &contract,
+            views,
+            call,
+            &CallStage::default(),
+            CallRole::Ordinary,
+            &parts.context(),
+        ) {
+            Ok(CheckOutcome::Block(raw)) => raw,
             other => panic!("expected a block, got {other:?}"),
         }
     }
 
     /// The routes of a blocked call, planned as the engine reconstructs the block from a log.
     fn routes(registry: &Registry, log: &[Fact], call: &ResolvedCall, depth: RouteDepth) -> Vec<RecoveryRoute> {
-        routes_with(registry, log, call, depth, &[]).expect("no planned state reads a group")
+        routes_with(registry, log, call, depth, &AudienceEvidence::default())
+            .expect("no planned state reads a symbolic audience")
     }
 
     fn routes_with(
@@ -1117,7 +1143,7 @@ mod tests {
         log: &[Fact],
         call: &ResolvedCall,
         depth: RouteDepth,
-        answers: &[GroupExpansion],
+        answers: &AudienceEvidence,
     ) -> Result<Vec<RecoveryRoute>, RouteError> {
         let projection = Projection::build(log, log.len() as u64);
         let trajectory = traj();
@@ -1127,8 +1153,9 @@ mod tests {
             call: call.clone(),
             stage: CallStage::default(),
             role: CallRole::Ordinary,
+            floor: None,
             denied: views.denied_authorities(&call.digest()).cloned().unwrap_or_default(),
-            expansions: registry.expansions_from_event(answers).expect("well-formed answers"),
+            expansions: registry.audience().expansions(answers).expect("well-formed answers"),
             raw: raw_block(registry, &views, call),
         };
         search(registry, &views, &context, depth)
@@ -1188,6 +1215,8 @@ mod tests {
                 RouteStep::Authorize { authority, .. } => format!("authorize:{}", authority.as_str()),
                 RouteStep::Accept(_) => "accept".to_string(),
                 RouteStep::Sanitize(sanitizer) => format!("sanitize:{}", sanitizer.as_str()),
+                RouteStep::Return(None) => "return".to_string(),
+                RouteStep::Return(Some(sanitizer)) => format!("return:{}", sanitizer.as_str()),
             })
             .collect()
     }
@@ -1199,7 +1228,7 @@ mod tests {
             requiring_prior(tool("wipe"), &["backup"]),
         ])
         .registry();
-        let log = vec![opened(TRUSTED, Audience::Public)];
+        let log = vec![opened(TRUSTED, Audience::public())];
         let wipe = call("wipe", json!({}));
 
         assert_eq!(
@@ -1230,7 +1259,7 @@ mod tests {
             requiring_prior(tool("wipe"), &["backup"]),
         ])
         .registry();
-        let log = vec![opened(TRUSTED, Audience::Public)];
+        let log = vec![opened(TRUSTED, Audience::public())];
         let wipe = call("wipe", json!({}));
 
         assert_eq!(
@@ -1275,7 +1304,7 @@ mod tests {
             requiring_prior(tool("wipe"), &["a", "self"]),
         ])
         .registry();
-        let log = vec![opened(TRUSTED, Audience::Public)];
+        let log = vec![opened(TRUSTED, Audience::public())];
 
         assert!(routes(&registry, &log, &call("wipe", json!({})), depth(50)).is_empty());
     }
@@ -1286,7 +1315,7 @@ mod tests {
             narrowing_to(emitting("backup", &["backup"]), Some(SUSPICIOUS), None),
             requiring_trust(requiring_prior(tool("wipe"), &["backup"]), TRUSTED),
         ];
-        let log = vec![opened(TRUSTED, Audience::Public)];
+        let log = vec![opened(TRUSTED, Audience::public())];
         let wipe = call("wipe", json!({}));
 
         let unruled = Deployment::of(tools.clone()).registry();
@@ -1306,8 +1335,8 @@ mod tests {
                         tool: ToolName::new("backup"),
                         clears: vec![prior("backup")],
                         accepts: Some(Narrowing {
-                            from: Label::new(TRUSTED, Audience::Public),
-                            to: Label::new(SUSPICIOUS, Audience::Public),
+                            from: Label::new(TRUSTED, Audience::public()),
+                            to: Label::new(SUSPICIOUS, Audience::public()),
                         }),
                     },
                     RouteStep::Authorize {
@@ -1329,7 +1358,7 @@ mod tests {
     #[test]
     fn a_reservation_holds_across_the_route_and_a_narrowing_delta_reopens_an_audience_gap() {
         let partner = readers(&["partner"]);
-        let internal = readers(&["internal"]);
+        let internal = readers(&["insider"]);
         let wipe = call("wipe", json!({}));
 
         let reserving = Deployment::of(vec![
@@ -1337,7 +1366,7 @@ mod tests {
             requiring_no_prior(requiring_prior(tool("wipe"), &["backup"]), "email.sent"),
         ])
         .registry();
-        let log = vec![opened(TRUSTED, Audience::Public), reserved("email.sent")];
+        let log = vec![opened(TRUSTED, Audience::public()), reserved("email.sent")];
         assert!(
             routes(&reserving, &log, &wipe, depth(2)).is_empty(),
             "an open reservation blocks `no_prior` on every state a route reaches"
@@ -1347,14 +1376,14 @@ mod tests {
             narrowing_to(emitting("backup", &["backup"]), None, Some(internal.clone())),
             requiring_includes(requiring_prior(tool("wipe"), &["backup"]), partner.clone()),
         ];
-        let log = vec![opened(TRUSTED, Audience::Public)];
+        let log = vec![opened(TRUSTED, Audience::public())];
         let unruled = Deployment::of(tools.clone()).registry();
         assert!(
             routes(&unruled, &log, &wipe, depth(2)).is_empty(),
             "the emitter narrows the audience below the recipients, and nothing vouches for them"
         );
         let ruled = Deployment::of(tools)
-            .authorities(vec![reader_authority("officer", Audience::Public)])
+            .authorities(vec![reader_authority("officer", Audience::public())])
             .registry();
         assert_eq!(
             routes(&ruled, &log, &wipe, depth(2)),
@@ -1364,13 +1393,15 @@ mod tests {
                         tool: ToolName::new("backup"),
                         clears: vec![prior("backup")],
                         accepts: Some(Narrowing {
-                            from: Label::new(TRUSTED, Audience::Public),
+                            from: Label::new(TRUSTED, Audience::public()),
                             to: Label::new(TRUSTED, internal),
                         }),
                     },
                     RouteStep::Authorize {
                         authority: AuthorityName::new("officer"),
-                        covers: vec![Gap::Includes { recipients: partner }],
+                        covers: vec![Gap::Includes {
+                            recipients: DeclaredAudience::literal(partner)
+                        }],
                         call: wipe.digest(),
                     },
                 ],
@@ -1382,22 +1413,24 @@ mod tests {
 
     #[test]
     fn a_cap_gap_is_cleared_by_the_call_whose_committed_label_stays_within_it() {
-        let internal = readers(&["internal"]);
+        let internal = readers(&["insider"]);
         let registry = Deployment::of(vec![
             narrowing_to(tool("read_internal"), None, Some(internal.clone())),
             requiring_cap(tool("wipe"), internal.clone()),
         ])
         .registry();
-        let log = vec![opened(TRUSTED, Audience::Public)];
+        let log = vec![opened(TRUSTED, Audience::public())];
 
         assert_eq!(
             routes(&registry, &log, &call("wipe", json!({})), depth(2)),
             vec![route(
                 vec![RouteStep::Precede {
                     tool: ToolName::new("read_internal"),
-                    clears: vec![Gap::Cap { cap: internal.clone() }],
+                    clears: vec![Gap::Cap {
+                        cap: DeclaredAudience::literal(internal.clone())
+                    }],
                     accepts: Some(Narrowing {
-                        from: Label::new(TRUSTED, Audience::Public),
+                        from: Label::new(TRUSTED, Audience::public()),
                         to: Label::new(TRUSTED, internal),
                     }),
                 }],
@@ -1410,7 +1443,7 @@ mod tests {
     #[test]
     fn every_way_a_preceding_call_stays_undetermined_ends_the_route_as_a_prefix() {
         let wipe = call("wipe", json!({}));
-        let log = vec![opened(TRUSTED, Audience::Public)];
+        let log = vec![opened(TRUSTED, Audience::public())];
         let prefix = |halt: Halt| {
             vec![route(
                 vec![],
@@ -1434,23 +1467,25 @@ mod tests {
         let partner = readers(&["partner"]);
         let blocked = requiring_includes(emitting("backup", &["backup"]), partner.clone());
         let registry = Deployment::of(vec![blocked, requiring_prior(tool("wipe"), &["backup"])]).registry();
-        let log_internal = vec![opened(TRUSTED, readers(&["internal"]))];
+        let log_internal = vec![opened(TRUSTED, readers(&["insider"]))];
         assert_eq!(
             routes(&registry, &log_internal, &wipe, depth(2)),
-            prefix(Halt::Block(vec![Gap::Includes { recipients: partner }])),
+            prefix(Halt::Block(vec![Gap::Includes {
+                recipients: DeclaredAudience::literal(partner)
+            }])),
             "a call-bound gap of the preceding call is planned at its own block"
         );
     }
 
     #[test]
     fn an_input_hop_is_a_prefix_that_resumes_from_the_derived_candidate() {
-        let internal = readers(&["internal"]);
+        let internal = readers(&["insider"]);
         let partner = readers(&["partner"]);
         let registry = Deployment::of(vec![requiring_includes(tool("wire"), partner.clone())])
             .sanitizers(vec![input_redaction(
                 "redact",
                 internal.clone(),
-                readers(&["internal", "partner"]),
+                readers(&["insider", "partner"]),
             )])
             .registry();
         let log = vec![opened(TRUSTED, internal)];
@@ -1471,16 +1506,16 @@ mod tests {
 
     #[test]
     fn an_acceptance_alone_is_the_one_guaranteed_route() {
-        let internal = readers(&["internal"]);
+        let internal = readers(&["insider"]);
         let registry =
             Deployment::of(vec![narrowing_to(tool("read_internal"), None, Some(internal.clone()))]).registry();
-        let log = vec![opened(TRUSTED, Audience::Public)];
+        let log = vec![opened(TRUSTED, Audience::public())];
 
         assert_eq!(
             routes(&registry, &log, &call("read_internal", json!({})), depth(2)),
             vec![route(
                 vec![RouteStep::Accept(Narrowing {
-                    from: Label::new(TRUSTED, Audience::Public),
+                    from: Label::new(TRUSTED, Audience::public()),
                     to: Label::new(TRUSTED, internal),
                 })],
                 RouteOutcome::Complete,
@@ -1496,7 +1531,7 @@ mod tests {
             .registry();
         let first = call("wire", json!({ "to": "a" }));
         let second = call("wire", json!({ "to": "b" }));
-        let log = vec![opened(SUSPICIOUS, Audience::Public)];
+        let log = vec![opened(SUSPICIOUS, Audience::public())];
 
         let bound = |call: &ResolvedCall| {
             vec![route(
@@ -1558,7 +1593,7 @@ mod tests {
             ),
         ])
         .registry();
-        let log = vec![opened(SUSPICIOUS, Audience::Public), committed("email.sent")];
+        let log = vec![opened(SUSPICIOUS, Audience::public()), committed("email.sent")];
 
         let found = routes(&registry, &log, &call("wire", json!({})), depth(2));
         let shapes: Vec<Vec<String>> = found.iter().map(shape).collect();
@@ -1578,20 +1613,20 @@ mod tests {
 
     #[test]
     fn a_substitution_precedes_a_ruling_and_less_disclosure_precedes_more() {
-        let internal = readers(&["internal"]);
+        let internal = readers(&["insider"]);
         let registry = Deployment::of(vec![
             emitting("zbackup", &["backup"]),
             narrowing_to(emitting("abackup", &["backup"]), None, Some(readers(&["carol"]))),
             requiring_includes(
                 requiring_prior(tool("wire"), &["backup"]),
-                readers(&["internal", "partner"]),
+                readers(&["insider", "partner"]),
             ),
         ])
-        .authorities(vec![reader_authority("officer", Audience::Public)])
+        .authorities(vec![reader_authority("officer", Audience::public())])
         .sanitizers(vec![input_redaction(
             "redact",
             internal.clone(),
-            readers(&["internal", "partner"]),
+            readers(&["insider", "partner"]),
         )])
         .registry();
         let log = vec![opened(TRUSTED, internal)];
@@ -1614,18 +1649,18 @@ mod tests {
 
     #[test]
     fn hops_over_a_gap_a_preceding_call_opens_rank_by_their_substitution_power() {
-        let internal = readers(&["internal"]);
+        let internal = readers(&["insider"]);
         let partner = readers(&["partner"]);
         let registry = Deployment::of(vec![
             narrowing_to(emitting("backup", &["backup"]), None, Some(internal.clone())),
             requiring_includes(requiring_prior(tool("wire"), &["backup"]), partner),
         ])
         .sanitizers(vec![
-            input_redaction("broad", internal.clone(), Audience::Public),
-            input_redaction("narrow", internal, readers(&["internal", "partner"])),
+            input_redaction("broad", internal.clone(), Audience::public()),
+            input_redaction("narrow", internal, readers(&["insider", "partner"])),
         ])
         .registry();
-        let log = vec![opened(TRUSTED, Audience::Public)];
+        let log = vec![opened(TRUSTED, Audience::public())];
 
         let found = routes(&registry, &log, &call("wire", json!({})), depth(2));
         let shapes: Vec<Vec<String>> = found.iter().map(shape).collect();
@@ -1650,7 +1685,7 @@ mod tests {
             requiring_prior(tool("wipe"), &["backup", "snapshot"]),
         ])
         .registry();
-        let log = vec![opened(TRUSTED, Audience::Public)];
+        let log = vec![opened(TRUSTED, Audience::public())];
         let wipe = call("wipe", json!({}));
 
         let first = routes(&registry, &log, &wipe, depth(4));
@@ -1678,7 +1713,7 @@ mod tests {
 
     #[test]
     fn depth_one_routes_are_exactly_the_stage_plans() {
-        let internal = readers(&["internal"]);
+        let internal = readers(&["insider"]);
         let partner = readers(&["partner"]);
         let registry = Deployment::of(vec![
             emitting("backup", &["backup"]),
@@ -1689,7 +1724,7 @@ mod tests {
         .sanitizers(vec![input_redaction(
             "redact",
             internal.clone(),
-            readers(&["internal", "partner"]),
+            readers(&["insider", "partner"]),
         )])
         .registry();
         let log = vec![opened(SUSPICIOUS, internal)];
@@ -1698,6 +1733,7 @@ mod tests {
             let projection = Projection::build(&log, log.len() as u64);
             let trajectory = traj();
             let views = projection.view(&trajectory);
+            let parts = crate::label::TestContext::default();
             let contract = registry
                 .annotation_of(&proposal)
                 .expect("the fixture registers the tool");
@@ -1711,8 +1747,9 @@ mod tests {
                     stage: &CallStage::default(),
                     role: CallRole::Ordinary,
                 },
-                &Expansions::default(),
-            );
+                &parts.context(),
+            )
+            .expect("the fixture's audiences are literal");
             let expected: Vec<RecoveryRoute> = planned
                 .plans
                 .iter()
@@ -1739,6 +1776,7 @@ mod tests {
                                     RemedyStep::Accept(narrowing) => RouteStep::Accept(narrowing.clone()),
                                     RemedyStep::Sanitize(sanitizer) => RouteStep::Sanitize(sanitizer.clone()),
                                     RemedyStep::Derive(sanitizer) => RouteStep::Derive(sanitizer.clone()),
+                                    RemedyStep::Return(sanitizer) => RouteStep::Return(sanitizer.clone()),
                                 })
                                 .collect(),
                             RouteOutcome::Complete,

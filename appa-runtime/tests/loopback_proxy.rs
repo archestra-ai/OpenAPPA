@@ -76,7 +76,7 @@ fn policy(url: &str) -> String {
     format!(
         r#"
 [policy]
-version = 1
+version = 2
 
 [[policy.annotator]]
 name = "classifier"
@@ -133,6 +133,7 @@ async fn a_token_bearing_loopback_annotator_is_reached_directly_when_a_proxy_is_
                 arguments: raw(serde_json::json!({ "url": "https://a.example" })),
             },
             spawn: false,
+            ruling: None,
         },
     )
     .await;

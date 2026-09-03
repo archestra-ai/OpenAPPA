@@ -133,7 +133,6 @@ pub const SANITIZER_PATH: &str = "/sanitizer";
 pub const ANNOTATOR_PATH: &str = "/annotator";
 /// The one annotator the playground implements: the email recipient directory.
 pub const DIRECTORY_ANNOTATOR: &str = "email-recipient-readers";
-pub const MEMBERSHIP_PATH: &str = "/membership";
 
 const CONSULT_TIMEOUT: Duration = Duration::from_secs(300);
 const REVIEW_WINDOW: Duration = Duration::from_secs(365 * 24 * 60 * 60);
@@ -189,16 +188,6 @@ pub fn externals_for(policy: &appa_policy::Config, base: &str) -> ExternalBindin
         .filter(|name| name.as_str() == DIRECTORY_ANNOTATOR)
         .map(|name| (name.as_str().to_string(), endpoint(format!("{base}{ANNOTATOR_PATH}"))))
         .collect();
-    bindings.membership = registry
-        .membership
-        .iter()
-        .map(|resolver| {
-            (
-                resolver.as_str().to_string(),
-                endpoint(format!("{base}{MEMBERSHIP_PATH}")),
-            )
-        })
-        .collect();
     bindings
 }
 
@@ -228,7 +217,7 @@ mod tests {
 
     #[test]
     fn an_enabled_system_without_a_contract_still_gets_its_tools() {
-        let merged = merge_policy("version = 1\n", &systems("crm")).unwrap();
+        let merged = merge_policy("version = 2\n", &systems("crm")).unwrap();
         assert_eq!(merged.defaulted, vec!["create_customer_data", "list_customers"]);
         assert!(merged.dropped.is_empty());
         let value: toml::Value = toml::from_str(&merged.toml).unwrap();
@@ -238,7 +227,7 @@ mod tests {
     #[test]
     fn an_ordered_contract_counts_for_its_base_tool() {
         let merged = merge_policy(
-            "version = 1\n[[tool]]\nname = \"list_customers(query:vip-*)\"\ndelta = {}\n",
+            "version = 2\n[[tool]]\nname = \"list_customers(query:vip-*)\"\ndelta = {}\n",
             &systems("crm"),
         )
         .unwrap();
@@ -264,7 +253,7 @@ mod tests {
     #[test]
     fn a_wildcard_is_retained_and_covers_the_undeclared_tools() {
         let merged = merge_policy(
-            "version = 1\n[[annotator]]\nname = \"acl\"\n[[tool]]\nname = \"*\"\nannotator = \"acl\"\n",
+            "version = 2\n[[annotator]]\nname = \"acl\"\n[[tool]]\nname = \"*\"\nannotator = \"acl\"\n",
             &systems("crm"),
         )
         .unwrap();
@@ -293,7 +282,7 @@ mod tests {
     fn a_contract_keeps_its_terms_and_gains_a_schema() {
         let merged = merge_policy(
             r#"
-version = 1
+version = 2
 [[tool]]
 name  = "list_customers"
 delta = { audience = ["crm"] }
@@ -317,7 +306,7 @@ delta = { audience = ["crm"] }
     fn a_contract_for_a_disabled_system_is_dropped_and_reported() {
         let merged = merge_policy(
             r#"
-version = 1
+version = 2
 [[tool]]
 name  = "list_issues"
 delta = {}
@@ -338,7 +327,7 @@ delta = {}
 
     #[test]
     fn no_systems_leaves_no_tools() {
-        let merged = merge_policy("version = 1\n", &BTreeSet::new()).unwrap();
+        let merged = merge_policy("version = 2\n", &BTreeSet::new()).unwrap();
         assert!(merged.defaulted.is_empty());
         let value: toml::Value = toml::from_str(&merged.toml).unwrap();
         assert!(value.get("tool").is_none());

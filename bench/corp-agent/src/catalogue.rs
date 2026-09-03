@@ -53,8 +53,10 @@ fn fork_description(declaration: &ToolDeclaration, chain: &TrustChain) -> String
          label the read narrowed to, so a write your current label still permits belongs here, \
          issued once the child returns. Prefer this over accepting a narrowing whenever later \
          work needs your current label. A child inherits your label and can never widen it. The \
-         child's final message is its return, and it crosses checked — a child that did the work \
-         itself should finish by saying nothing. {}",
+         spawn is held until you declare, from the block's menu, the lowest label you accept from \
+         the child's return and whether a sanitizer rewrites it first; the child can narrow no \
+         further than that floor. The child's final message is its return, and it crosses \
+         checked — a child that did the work itself should finish by saying nothing. {}",
         contract_description(declaration, chain)
     )
 }
@@ -135,7 +137,7 @@ mod tests {
     /// The policy proper, as the dialect takes it — the `[policy]` table of a
     /// deployment file, unwrapped.
     const POLICY: &str = r#"
-version = 1
+version = 2
 trust_chain = ["suspicious", "internal"]
 
 [[tool]]

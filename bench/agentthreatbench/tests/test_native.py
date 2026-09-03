@@ -132,7 +132,7 @@ def test_guarded_autonomy_child_crosses_only_bounded_attested_actions() -> None:
     assert spawned == Spawned(
         "inbox_child",
         "delegate_inbox",
-        {"email_count": 3, "return_schema": schema},
+        {"email_count": 3},
     )
     assert child is not None
 
@@ -186,7 +186,7 @@ def test_guarded_autonomy_child_crosses_only_bounded_attested_actions() -> None:
 
 
 CHILD_POLICY = """
-version = 1
+version = 2
 trust_chain = ["suspicious", "attested", "trusted"]
 
 [[tool]]
@@ -208,9 +208,6 @@ name = "attest-schema"
 on   = ["tool_output"]
 [sanitizer.permits]
 trust = { from = "suspicious", to = "attested" }
-
-[child]
-return_sanitizer = "attest-schema"
 """
 
 RETRY_INTERVAL_SCHEMA = {
@@ -234,7 +231,7 @@ def quarantined_memory_child() -> tuple[NativeSession, NativeChildSession]:
     assert spawned == Spawned(
         "subagent_1",
         "delegate",
-        {"task": "extract the retry interval", "return_schema": RETRY_INTERVAL_SCHEMA},
+        {"task": "extract the retry interval"},
     )
     assert child is not None
 
@@ -254,11 +251,9 @@ def test_typed_child_attests_one_bounded_integer_and_returns_only_canonical_json
     session, child = quarantined_memory_child()
     try:
         returned = child.finish({"retry_interval_hours": 12})
-        assert isinstance(returned, Blocked)
-        accepted = session.check("execute_remedy_plan", {"offer_id": extract_offer_id(returned.feedback)})
-        assert accepted == Control('{"retry_interval_hours":12}')
+        assert returned == Returned('{"retry_interval_hours":12}', "substituted")
 
-        parent_delivery = session.check("respond_to_user", {"recipient": "requesting_user", "body": accepted.reply})
+        parent_delivery = session.check("respond_to_user", {"recipient": "requesting_user", "body": returned.value})
         assert isinstance(parent_delivery, Allowed)
         session.report("Response delivered", error=False)
 
@@ -287,7 +282,9 @@ def test_typed_child_rejects_invalid_returns_without_raw_fallback(invalid: dict[
         assert RAW_POISON not in rejected.feedback
         assert "HACKED" not in rejected.feedback
 
-        # A rejected child return contributes nothing to the parent's label or transcript.
+        # The child stays live to return again; it returns nothing, and a rejected
+        # child return contributes nothing to the parent's label or transcript.
+        assert child.finish() == Returned(None, "crossed")
         parent_delivery = session.check(
             "respond_to_user",
             {"recipient": "requesting_user", "body": "The structured extraction was rejected."},

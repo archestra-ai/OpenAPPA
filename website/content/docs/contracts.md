@@ -10,7 +10,7 @@ OpenAPPA reads a root TOML file. The root can compose policy fragments with `inc
 This document is a reference guide for writing and reviewing OpenAPPA policy TOML files. It covers global settings, audience lists and conditions, contract declarations (`[[tool]]`, `[[annotator]]`, `[[authority]]`, `[[sanitizer]]`), and policy review red flags.
 
 ```toml
-version = 1
+version = 2
 
 # Optional. The trust chain, least-trusted first; the rank names are yours.
 # Omitted, it defaults to `suspicious < trusted`.
@@ -19,47 +19,94 @@ trust_chain = ["suspicious", "trusted"]
 
 ### Audience lists and conditions
 
-An audience is a list of readers. Where a policy states the audience a value carries, it writes the list itself: `delta = { audience = ["support"] }`. The list `["public"]` is the unrestricted audience. The same bare list form sets `[boundary].audience` and `starting_label.audience`.
+An audience list is the union of its entries. An entry is one of four spellings:
+
+| Entry | Meaning |
+|---|---|
+| `"public"` | The unrestricted audience. It stands alone: `public` is the whole universe and combines with nothing. |
+| `"self"`, `"internal"` | A built-in symbolic audience (see [the chain](#audiences)). At most one per list — the union of two chain levels is the outer one, so writing both is a mistake the policy refuses. |
+| `"@name"`, `"@provider:selector"` | A mention of a configured named audience, or of a source collection directly. |
+| anything else | A literal reader ID, compared exactly. |
+
+Where a policy states the audience a value carries, it writes the list itself: `delta = { audience = ["support"] }`. The same bare list form sets `[boundary].audience` and `starting_label.audience`. Symbolic entries stay symbolic: a label holds `internal` or `@finance` as written, and the log records it that way.
 
 Where a policy checks the current audience or the trajectory's history, it names the condition:
 
 | Key | Under | Meaning | Example |
 |---|---|---|---|
 | **`contains`** | `requires.audience` | The current audience must include these readers. A `$arg` placeholder is allowed only here. | `audience = { contains = ["$recipient"] }` |
-| **`within`** | `requires.audience` | The current audience must be a subset of these readers. | `audience = { within = ["internal"] }` |
+| **`within`** | `requires.audience` | The current audience must sit within this audience. | `audience = { within = ["internal"] }` |
 | **`contains`** | `requires.effects` | The trajectory already recorded this effect. | `effects = { contains = ["backup.completed"] }` |
 | **`excludes`** | `requires.effects` | The effect is neither recorded in the trajectory nor reserved by an unsettled dispatch. | `effects = { excludes = ["migration.applied"] }` |
 
 Any other key under `requires.audience` or `requires.effects` is a policy load error.
 
-### Groups
+### Audiences
 
-A reader list can name a **group**, written `@name`. An argument placeholder (`contains = ["$recipient"]`) can also resolve to a group. When OpenAPPA evaluates an operation, the registered `[membership]` resolver converts the group name into its literal list of readers. A name without `@` is a literal reader ID. Using `@` in a literal reader ID or referencing a group without registering `[membership]` causes a policy load error.
+OpenAPPA ships a built-in audience chain:
+
+**`self` ⊆ `internal` ⊆ `public`**
+
+`self` is the deployment's configured operating principal — whoever its credentials represent, which need not be a person. `internal` is the organization. `public` is the unrestricted state. The chain is fixed — a policy maps sources into its levels but never adds levels. Beyond the chain, `[[audience.group]]` declares named audiences (`@finance`), composed from the same sources.
+
+A symbolic audience is a named reader set, and it stays symbolic: a label holds `internal ∩ [alice]` or `internal ∩ @finance` without expanding either name. When a decision needs actual membership — a `contains` or `within` comparison — OpenAPPA consults the configured sources for exactly the sets that decision reads, pins the answers to that one act, and records them with it. An act accepts only that evidence: an answer neither inherited from the record the act continues nor requested by its own reads is refused, live and at replay. Replay reads the pinned answers and never consults a source. A pinned answer is inherited by the acts that continue the same record — the remedy plan or approval it opened — so directory changes apply to the next independent decision; they never rewrite a label.
+
+#### Audience sources
+
+This build ships one audience source per provider, each with a fixed set of selector templates. A `from` list picks collections out of them; a provider enters the policy identity only when a selector references it:
+
+| Provider | Selectors |
+|---|---|
+| `google-workspace` | `viewer`, `full-members`, `group/<group-address>` |
+| `slack` | `viewer`, `full-members`, `user-group/<handle>` |
+| `github` | `viewer`, `org/<org>/members`, `org/<org>/team/<team>` |
+
+`viewer` names the requesting principal and feeds only `self`. The full-membership collections — and, for GitHub, one explicitly selected organization's members — feed `internal`: membership in unrelated, open-source, or personal organizations never implies `internal`. The named and full-membership collections feed `[[audience.group]]` entries; `viewer` does not. A selector that does not fit its level refuses the policy at load.
 
 ```toml
-[membership]                    # one per deployment; every @group resolves here
-name = "corp-directory"         # registration only; the deployment binds the directory
+[audience.self]
+from = ["google-workspace:viewer", "slack:viewer", "github:viewer"]
 
-[[tool]]
-name     = "post_audit_note"
-requires = { audience = { within = ["finance", "@auditors"] } }  # a group in a `within` list
-delta    = {}
+[audience.internal]
+from = [
+  "google-workspace:full-members",
+  "slack:full-members",
+  "github:org/archestra-ai/members",   # only this organization; selected explicitly
+]
+
+[[audience.group]]
+name   = "finance"
+within = "internal"                    # a trusted policy assertion: @finance ⊆ internal
+from   = ["google-workspace:group/finance@corp.com", "github:org/archestra-ai/team/finance"]
 ```
 
-Each tool call resolves group membership freshly, then pins that reader set for the duration of the call (including checks, remedy plans, dispatch, and logging). Directory updates apply to new calls immediately without reloading the policy. Execution records store the resolved reader IDs, never the group name. The reserved word `public` cannot be a group member.
+Multiple sources feeding one audience are unioned. `within` asserts containment in a built-in audience (`self` or `internal`), and the engine trusts the assertion as policy. If the finance source reports an externally addressed member, that reader belongs to `@finance` and therefore to `internal`: OpenAPPA never second-guesses a configured source by inspecting a reader's email domain.
 
-The deployment binds the registered name under `[externals.membership.<name>]` to an HTTP endpoint or a local command; no builtin serves a directory. The consult is the common envelope described under [Externals](#externals), with an empty declaration and the group name as the artifact:
+A mention is `@` followed by the one selector grammar: `@finance` names a configured `[[audience.group]]`, and `@slack:user-group/oncall` reads a source collection directly, without a group declaration. A direct source mention still needs its provider referenced by some `from` list — a provider enters the registered sources exactly when a selector picks from it. A mention written in the policy is validated at load: `@finacne` with no declaration refuses the policy. A dynamically supplied mention no source serves fails the call operationally — the call does not run and nothing is recorded.
+
+#### Identity
+
+Provider identities differ: `google-workspace:alice@corp.com`, `slack:U012345`, and `github:alice` may be the same person. Before any exact reader comparison, each member a source reports is canonicalized to one principal by the deployment's identity implementation:
 
 ```toml
-[externals.membership.corp-directory]         # the deployment binds the directory
-url = "https://directory.corp/members"
+[identity]
+implementation = "verified-email"      # the shipped default
 ```
 
-```json
-{ "version": 1, "kind": "membership", "name": "corp-directory", "declaration": {}, "artifact": { "group": "auditors" } }
+`verified-email` is deterministic and network-free. A member with a verified email becomes that address; a member without one keeps its provider-qualified ID. The address is the principal itself, so a reader written as an address — in a policy, in a tool argument, or in an annotation — is the same reader the directory's verified claim resolves to, and an ordinary email recipient matches the directory member who holds that address. It trusts only claims the source marks verified and applies only conservative normalization (domain case only — no dot removal, no `+suffix` stripping, no alias folding), so a personal GitHub email and a corporate Workspace email stay distinct principals. Explicit aliasing is what a custom implementation is for:
+
+```toml
+[identity]
+implementation = "corp-identity"       # bound under [externals.identity.corp-identity]
 ```
 
-The answer is `{"version": 1, "answer": {"readers": ["cfo", "audit-lead"]}}`. An empty reader list is a valid answer. If a membership resolver fails (timeout, network error, or invalid answer), OpenAPPA halts the check with an operational error and records nothing to the log.
+A custom implementation answers one principal per member, is pinned per act like any membership answer, and must be deterministic. If it fails or answers an invalid principal, the act fails operationally and records nothing.
+
+#### Bindings and failure
+
+The deployment binds each referenced provider under `[externals.audience.<provider>]`, and a custom identity implementation under `[externals.identity.<name>]`, each to an HTTP endpoint or a local command; no builtin serves either kind. [Externals](#externals) has the envelope. An audience consult's declaration is the provider's selector templates; its artifact is one selector (`{"selector": "user-group/oncall"}`, answered `{"members": [{"id": "slack:U1", "verified_email": "a@corp.com"}, ...]}` — an empty list is a complete answer) or one member lookup (`{"member": "slack:U1"}`, answered `{"claims": {...}}` or `{"claims": null}`). An identity consult's artifact is one member's claims, answered `{"principal": "a@corp.com"}`.
+
+Any source or identity failure — timeout, network error, invalid answer — halts the act with an operational error and records nothing to the log. A failed consult is never a policy decision.
 
 ### Ordered tool contracts
 
@@ -104,7 +151,7 @@ OpenAPPA selects the contract before it validates that contract's `parameters` s
 
 ### Annotators
 
-Every released tool call carries one complete annotation: the `delta` its result contributes, the `requires` it must meet, and the effects it emits. A `[[tool]]` entry usually writes that annotation statically. Where the right contract depends on the call itself — a file path, a recipient, a command line — the entry names a registered **annotator** instead, and the annotator answers the complete annotation for each proposed call. An annotator does not resolve `@group` membership.
+Every released tool call carries one complete annotation: the `delta` its result contributes, the `requires` it must meet, and the effects it emits. A `[[tool]]` entry usually writes that annotation statically. Where the right contract depends on the call itself — a file path, a recipient, a command line — the entry names a registered **annotator** instead, and the annotator answers the complete annotation for each proposed call. An annotator's answers name literal readers only — never a symbolic audience.
 
 An `[[annotator]]` declares three things. Its optional `hint` explains the policy vocabulary. Its `inputs` select call data. Its **mandate** bounds every answer. A `[[tool]]` routes through it with `annotator = "<name>"`. That tool entry writes no `delta`, `requires`, or `effects` because the annotator produces all three. Annotator names are opaque non-empty strings and can contain dots.
 
@@ -167,7 +214,7 @@ The wildcard entry `name = "*"` covers every call the policy does not name. It m
 [[annotator]]
 name      = "classify-anything"
 ranks     = ["suspicious"]                     # The long tail never earns trust
-audiences = ["internal"]
+audiences = ["support"]
 
 [[tool]]
 name      = "*"
@@ -185,7 +232,7 @@ The optional `hint` is a trusted deployer instruction. It can define ranks, audi
 | Key | Bounds | Omitted |
 |---|---|---|
 | `ranks` | The trust ranks an answer may write in `delta.trust` and `requires.trust`. | Every rank in the trust chain. |
-| `audiences` | The literal readers a restricted audience answer may name. `public` is always admissible and is never listed as a reader; a group is never admissible. An empty list closes the mandate to `public` answers only. | Every reader the policy writes. |
+| `audiences` | The literal readers a restricted audience answer may name. `public` is always admissible and is never listed as a reader; a symbolic audience — `self`, `internal`, or a mention — is never admissible. An empty list closes the mandate to `public` answers only. | Every reader the policy writes. |
 | `marks` | The attention marks an answer may require. | Every mark an authority names under `permits.attention`. |
 | `effects` | The effect kinds an answer may emit or check in history. | Every effect kind the policy declares. |
 
@@ -222,7 +269,7 @@ The deployment refuses to open or reload if any of the following occur:
 [[annotator]]
 name    = "classify-call"
 builtin = "claude-code"
-hint    = "Use internal for company-only data and suspicious for data from unvetted sources."
+hint    = "Use suspicious for data from unvetted sources. Use trusted only when the call identifies a vetted source."
 ```
 
 The mandate is the ceiling policy review relies on, whichever transport serves the annotator: every transport passes the same exact-shape and mandate validation before an annotation is admitted.
@@ -273,16 +320,15 @@ Response, from an endpoint or a command:
 
 `version` must match the consult. `answer` is exactly one object with exactly three keys: `delta`, `requires`, and `emits`. `requires` always carries its `history` and `attention` arrays, even empty; every other leaf is optional and means the identity when omitted. A model builtin answers the same object without the envelope.
 
-OpenAPPA rejects a `null` anywhere, an unknown key anywhere, an empty `audience` object, a duplicate `emits` kind, and any value outside the mandate. `delta.audience` and the audience leaves of `requires` are `"public"` or a list of the mandate's readers, and never a group. `requires.audience` is an object with `contains`, `within`, or both. Each `history` entry is one object with one key: `{"contains": "<effect>"}` or `{"excludes": "<effect>"}`. A rejected answer is no answer: the call does not run, nothing is recorded, and the call can be proposed again.
+OpenAPPA rejects a `null` anywhere, an unknown key anywhere, an empty `audience` object, a duplicate `emits` kind, and any value outside the mandate. `delta.audience` and the audience leaves of `requires` are `"public"` or a list of the mandate's readers, and never a symbolic audience. `requires.audience` is an object with `contains`, `within`, or both. Each `history` entry is one object with one key: `{"contains": "<effect>"}` or `{"excludes": "<effect>"}`. A rejected answer is no answer: the call does not run, nothing is recorded, and the call can be proposed again.
 
 ### Deployment coverage
 
 The `[deployment]` table declares the capabilities of your hosting environment—such as starting security labels, enforced execution points, raw output withholding, and child branch isolation.
 
 During policy load, OpenAPPA validates that all declared constructs are supported by the deployment. If a policy requires a capability the deployment lacks, loading fails with an explicit error:
-- A `tool_output` sanitizer requires an application point the deployment can withhold: a tool listed in `confined_results`, or the child-return crossing (`confined_child_return = true`).
+- A `tool_output` sanitizer requires an application point the deployment can withhold: a tool listed in `confined_results`, or — under `context_control` — a child's return.
 - A tool listed in `confined_results` requires a deployment that can withhold raw results. A provider-run tool cannot be listed: its result reaches the model inside the inference call, before any host could withhold it. A coverage entry must name a tool the policy covers; with a wildcard, every name qualifies.
-- A `[child]` section requires child context isolation.
 - Provider-run tools (tools executed directly inside a provider inference call) may declare only a static `delta`: no `requires`, no `annotator`, and no argument selectors.
 
 Uncovered vectors are explicitly declared in the deployment configuration so security leaders can audit them, rather than silently degrading guarantees.
@@ -296,7 +342,7 @@ A tool contract is short: a name, a `delta`, and often `effects` and a `[tool.re
 | **`delta` Accuracy** | Tool reads sensitive customer data but declares `delta = {}` or omits `delta`. | Declare explicit restriction, e.g. `delta = { audience = ["support"] }`. | Undermines downstream checks; over-restricting is safe (costs reach, doesn't leak). |
 | **Expecting late classification** | Omitting `delta` in the belief that something will classify the result later. | Omit `delta`, or write `delta = {}`, for a result that carries no restriction; name an `annotator` when the restriction depends on the call. | An unwritten dimension is the identity, not a pending state; nothing classifies it later. |
 | **`effects` Completeness** | Mutation or deployment tool omits `effects`. | Declare all side effects, e.g., `effects = ["migration.applied", "mutation"]`. | Under-declared effects pass `excludes` checks silently without triggering history constraints. |
-| **Dynamic Recipients** | Static readers when an ACL depends on an argument. | Use a placeholder for a recipient the call names — a literal reader, `public`, or an `@group` — or an annotator for an argument-derived contract. | Static readers can ignore the proposed argument; placeholder groups and annotations pin their answer to the call. |
+| **Dynamic Recipients** | Static readers when an ACL depends on an argument. | Use a placeholder for a recipient the call names — a literal reader, `public`, a built-in audience, or an `@` mention — or an annotator for an argument-derived contract. | Static readers can ignore the proposed argument; membership answers and annotations pin to the call. |
 | **Annotator beside statics** | A `[[tool]]` that names an `annotator` and also writes `delta`, `requires`, or `effects`. | Give the contract one producer: a static declaration, or an annotator that answers all three. | It does not load: `annotator` replaces the static semantic fields. |
 | **Unbounded wildcard mandate** | `name = "*"` routed through an annotator that declares no `ranks`, `audiences`, `marks`, or `effects`. | Bound the wildcard annotator's mandate to the vocabulary the long tail actually needs. | An omitted bound admits the whole policy vocabulary; the mandate is the ceiling review relies on, not the annotator's judgment. |
 | **Combined Read & Release** | Single tool `share_doc(doc, recipient)` fetching and releasing in one step. | Split into `fetch_doc` (read) and `grant_doc_access` (release). | Combined tools force authorities to approve releases before content is fetched. |
@@ -338,7 +384,7 @@ excludes = ["migration.applied"]                       # Neither recorded nor re
 - **Omitted is identity**: An omitted `delta` and `delta = {}` say the same thing — the result carries no restriction. An omitted `requires` slot asks nothing. There is no pending state: what the annotation does not restrict, nothing restricts later.
 - **Annotators (`annotator`)**: Routes every call of the tool through one registered `[[annotator]]`, which answers the complete contract — `delta`, `requires`, and effects — for that call, inside its declared mandate. The answer is pinned to the exact call and holds on replay.
 - **One producer per contract**: A contract's semantics have one source — the static fields, or the named annotator. `annotator` beside `delta`, `requires`, or `effects` is a load error.
-- **Dynamic argument placeholders (`$arg`)**: `requires.audience = { contains = ["$recipient"] }` evaluates `$recipient` against the actual call argument at runtime. The argument value can be a literal reader ID, the reserved word `public`, or an `@group` expanded by the membership resolver. Placeholders are supported only inside `contains`. The argument must be declared as a required top-level string in the tool's `parameters` schema.
+- **Dynamic argument placeholders (`$arg`)**: `requires.audience = { contains = ["$recipient"] }` evaluates `$recipient` against the actual call argument at runtime. The argument value can be a literal reader ID, the reserved word `public`, a built-in audience (`self`, `internal`), or an `@` mention read from the configured sources. Placeholders are supported only inside `contains`. The argument must be declared as a required top-level string in the tool's `parameters` schema. A dynamically supplied mention no source serves fails the call operationally, never as a policy denial.
 - **Wildcard tool (`name = "*"`)**: Covers every call the policy does not name. It must name an `annotator` and nothing else — no static fields, no metadata, no argument selector — and a policy writes at most one. An exact declaration always wins over it. A call no declaration and no wildcard covers is refused before it runs.
 - **History checks (`requires.effects`)**: `contains` passes when the trajectory already recorded the effect. `excludes` passes when the effect is neither recorded nor reserved by an unsettled dispatch (a dispatch released with that effect that has not yet succeeded or failed).
 - **Attention demands (`requires.attention`)**: Forces fresh authority sign-off on *every* call; never satisfied by execution history.
@@ -448,16 +494,16 @@ on   = ["tool_output"]
 trust = { from = "suspicious", to = "trusted" } # Instead of `audience`, never alongside it
 
 [deployment]
-confined_child_return = true                    # The child-return crossing is an application point
+context_control = true                          # A child's return is an application point
 ```
 
 When a tool result would narrow the trajectory label, OpenAPPA checks if a registered `tool_output` sanitizer can improve the label. If selected, the host withholds the raw result and runs the sanitizer. If the cleaned derivation prevents narrowing, it enters the trajectory label. If residual narrowing remains, the agent can accept the residual or apply another compatible sanitizer. A sanitizer whose declared transition cannot improve the label is never offered.
 
 Like an authority, a sanitizer can name `tags`: it then applies only to values whose originating tool carries one of them. A child sub-execution return originates from no tool, so only a sanitizer without `tags` applies at that crossing.
 
-At `tool_input`, the sanitizer derives a replacement for the whole argument set of one call, and the harness dispatches exactly the substituted bytes. This substitution can satisfy an unmet `contains` audience requirement, but cannot clear a `within` or trust requirement (`within` bounds the trajectory's own reach, and rewriting arguments does not change the decision to invoke the tool). A rewritten call is judged by the ordered contract its rewritten arguments select: the sanitizer's `tags` must reach that contract too, and its effects and requirements apply. An annotation binds the exact call, so a rewrite of an annotator-backed tool is annotated afresh, whichever contract it selects; a group membership answer survives only when the rewrite stays in its contract and the argument naming the group is unchanged.
+At `tool_input`, the sanitizer derives a replacement for the whole argument set of one call, and the harness dispatches exactly the substituted bytes. This substitution can satisfy an unmet `contains` audience requirement, but cannot clear a `within` or trust requirement (`within` bounds the trajectory's own reach, and rewriting arguments does not change the decision to invoke the tool). A rewritten call is judged by the ordered contract its rewritten arguments select: the sanitizer's `tags` must reach that contract too, and its effects and requirements apply. An annotation binds the exact call, so a rewrite of an annotator-backed tool is annotated afresh, whichever contract it selects; membership answers are pinned to the act, so the substituted call is judged under the same pinned evidence.
 
-To enforce automated return sanitization across all child sub-executions, policies can bind a default return sanitizer:
+A parent declares what a child's return may carry when it spawns the child. Under `context_control`, a spawn is held until the parent takes one plan from the block's menu: the first plan takes the return as spoken; each plan after it routes the return through one registered `tool_output` sanitizer without `tags`, in registry order. Every plan takes a `label`, the lowest label the parent accepts from the return (`{}` for the parent's own); the `attest-schema` plan also takes `return_schema`. The declaration bounds the child: it can narrow no further than the declared floor, or, on a sanitized route, than the sanitizer lifts back to it. The child learns the declared shape when it starts, and returns by ending its turn. A return the declaration does not cover is blocked at the child with the reason, and the child may stop again with what does cross.
 
 ```toml
 [[sanitizer]]
@@ -468,16 +514,16 @@ on   = ["tool_output"]
 audience = { from = ["finance"], to = ["public"] }
 
 [deployment]
-context_control       = true        # [child] needs child context isolation
-confined_child_return = true
+context_control = true              # Children run on their own context; their returns are an application point
+```
 
-[child]
-return_sanitizer = "pii-redactor"   # Forces all child sub-execution returns through pii-redactor
+```json
+{ "offer_id": "<the pii-redactor plan>", "label": {} }
 ```
 
 The reserved builtin `attest-schema` validates structured sub-agent returns without altering data bytes. It safely raises trust from `suspicious` to `trusted` when:
 1. All returned fields are strictly shape-bounded (numbers, booleans, fixed enums, bounded formats; no free text).
-2. The schema structure was bound before the sub-agent read untrusted data.
+2. The parent declared the schema at the spawn, before the sub-agent read untrusted data.
 3. The parent agent had trusted status when spawning the sub-agent.
 
 ```toml
@@ -490,7 +536,11 @@ hint = "Verifies the sub-agent returned valid structured data matching the schem
 trust = { from = "suspicious", to = "trusted" }
 
 [deployment]
-confined_child_return = true
+context_control = true
+```
+
+```json
+{ "offer_id": "<the attest-schema plan>", "label": {}, "return_schema": { "type": "object", "properties": { "days_allowed": { "type": "integer", "minimum": 0 } }, "required": ["days_allowed"] } }
 ```
 
 Registering `name = "attest-schema"` is sufficient; OpenAPPA applies it natively without an `[externals]` entry (binding one is a load error).
@@ -514,24 +564,31 @@ builtin = "redact-email"
 [externals.annotators.classify-customer]
 url = "https://classifier.corp/label"
 
-[externals.membership.corp-directory]
-url = "https://directory.corp/members"
+[externals.audience.slack]
+url = "https://audience.corp/slack"
+
+[externals.identity.corp-identity]
+url = "https://identity.corp/resolve"
 ```
 
-An entry is `[externals.<kind>.<name>]`, with `<kind>` one of `authorities`, `sanitizers`, `annotators`, or `membership`. An authority or sanitizer entry takes exactly one of `url`, `command`, or `builtin`. An annotator or membership entry takes exactly one of `url` or `command`; `builtin` there is a configuration error. An annotator that names `builtin = "claude-code"` or `builtin = "llm"` on its `[[annotator]]` declaration takes no entry, and neither does the reserved `attest-schema` sanitizer. An entry whose name no declaration registers refuses the deployment when it opens, and so does a registered sanitizer, annotator, or membership resolver without its entry. An authority may stay unbound; it then returns no answer, so a remedy that names it cannot release the call. An included fragment can add entries, and it can declare an annotator with a builtin: every deployment that includes it then serves that builtin — `[externals.llm]` for `llm`, a Unix host for `claude-code`. The root-wide settings (`timeout_ms`, `max_body_bytes`, `review_timeout_ms`, `[externals.claude_code]`, `[externals.llm]`) stay in the root, and the same name in two files is an error.
+An entry is `[externals.<kind>.<name>]`, with `<kind>` one of `authorities`, `sanitizers`, `annotators`, `audience`, or `identity`. An authority or sanitizer entry takes exactly one of `url`, `command`, or `builtin`. An annotator, audience, or identity entry takes exactly one of `url` or `command`; `builtin` there is a configuration error. An annotator that names `builtin = "claude-code"` or `builtin = "llm"` on its `[[annotator]]` declaration takes no entry, and neither does the reserved `attest-schema` sanitizer or the shipped `verified-email` identity implementation. An entry whose name no declaration registers refuses the deployment when it opens, and so does a registered sanitizer or annotator, a referenced audience source, or a custom identity implementation without its entry. An authority may stay unbound; it then returns no answer, so a remedy that names it cannot release the call. An included fragment can add entries, and it can declare an annotator with a builtin: every deployment that includes it then serves that builtin — `[externals.llm]` for `llm`, a Unix host for `claude-code`. The root-wide settings (`timeout_ms`, `max_body_bytes`, `review_timeout_ms`, `[externals.claude_code]`, `[externals.llm]`) stay in the root, and the same name in two files is an error.
 
 ### Transports
 
 | Binding | Serves | Notes |
 |---|---|---|
-| `url = "…"` | every kind | HTTPS anywhere; cleartext `http` only on loopback; no credentials in the URL. `token_env` names an `APPA_*` variable whose value is sent as a bearer token. |
-| `command = ["…", …]` | every kind | Unix only. One JSON consult on standard input, one JSON answer on standard output; no shell; the working folder is that of the file that declares it; bounded by `timeout_ms` and `max_body_bytes`. At most eight run at once per runtime. |
+| `url = "…"` | every kind | HTTPS anywhere; cleartext `http` only on loopback; no credentials in the URL. `token_env` names an `APPA_*` variable whose value is sent as a bearer token, and never an `APPA_PROVIDER_*` one. |
+| `command = ["…", …]` | every kind | Unix only. One JSON consult on standard input, one JSON answer on standard output; no shell; the working folder is that of the file that declares it; bounded by `timeout_ms` and `max_body_bytes`. At most eight run at once per runtime. The child inherits no `APPA_*` variable except the one `APPA_PROVIDER_*` credential its own `token_env` names. |
 | `builtin = "hitl"` | authorities | The harness asks a person. |
 | `builtin = "approve"` | authorities | Approves within `permits`. |
 | `builtin = "redact-email"` | sanitizers | Replaces email addresses with a placeholder. |
 | `builtin = "claude-code"` | authorities, sanitizers; an annotator names it on its declaration | Unix only. One isolated `claude -p` process per consult, tuned in `[externals.claude_code]`. |
 | `builtin = "llm"` | authorities, sanitizers; an annotator names it on its declaration | The API-key profile in `[externals.llm]`. |
 | `builtin = "<module>"` | authorities, sanitizers | A deployer module from `--modules-dir`, called in-process. |
+
+`APPA_*` is the runtime's own environment namespace: its wiring and every secret a `url` binding's `token_env` names. A child process inherits none of it.
+
+A `command` binding takes a `token_env` of its own, and it means the opposite of a URL's: the runtime sends nothing, it forwards that one variable to the child that reads it. The variable must be in the `APPA_PROVIDER_*` namespace — a credential belonging to the provider, such as a battery's Slack or GitHub token, which the runtime never reads. A `url` binding's `token_env` may not name a variable there, so the forwarding cannot carry a secret this runtime holds, and a command receives only the credential its own binding names, never another command's. The value is not read when the policy loads, so a policy stays loadable and describable on a machine that holds no provider credential; a missing one surfaces as the source's own refusal to answer. A `claude-code` consult inherits nothing of the namespace at all.
 
 ### The consult
 
@@ -550,17 +607,18 @@ Every transport receives one JSON object per consult:
 | Key | Meaning |
 |---|---|
 | `version` | The consult shape. It is `1`. |
-| `kind` | `authority`, `sanitizer`, `annotation`, or `membership`. |
+| `kind` | `authority`, `sanitizer`, `annotation`, `audience`, or `identity`. |
 | `name` | The registered name, for one service that answers for several. |
-| `declaration` | The policy-authored half: a component's `hint` and `permits`, or an Annotator's hint, input names, and mandate. The agent never writes it. |
-| `artifact` | The judged value: a call and its unmet requirements, a body to rewrite, an Annotator's `args`, or a group name. |
+| `declaration` | The registered half: the component's `hint` and `permits`, an annotator's hint, input names, and mandate vocabulary, or an audience source's selector templates. The agent never writes it. |
+| `artifact` | The value under judgment: the call and its unmet requirements, the body to rewrite, an annotator's `args`, a selector or member to read, or the member claims to canonicalize. |
 
 | Kind | `declaration` | `artifact` | `answer` |
 |---|---|---|---|
 | `authority` | `hint`, `permits` | `tool`, `arguments`, `requirements` | `ruling` (`approve` or `deny`), optional `reason` |
 | `sanitizer` | `hint`, `on`, `permits`, `parameters` (for `tool_input`) | `tool` (when known), `body` | `body` |
 | `annotation` | `hint`, `inputs`, `trust_ranks`, `audiences`, `attention_marks`, `effects` | `args` | `delta`, `requires`, `emits` |
-| `membership` | empty | `group` | `readers` |
+| `audience` | `templates` | `selector`, or `member` for a lookup | `members`, or `claims` for a lookup |
+| `identity` | empty | the member's claims: `id`, `verified_email` when present | `principal` |
 
 The consult never carries the trajectory: no current label, no rank, no reader ids, no history, no user turn. A component judges the artifact against its own declaration and nothing else.
 
@@ -572,7 +630,7 @@ An endpoint or a command answers `{"version": 1, "answer": { … }}`. `version` 
 
 A model answer can do what the kind allows any implementation: an authority's ruling stays within `permits`, an annotation within its annotator's mandate, and a sanitizer's derivation carries exactly the `permits` transition. A model sanitizer deserves a second look: `permits` caps the label the derivation claims, not the bytes the model leaves in it, so keep its transition narrow and its `hint` exact.
 
-`[externals.claude_code]` tunes the subscription transport: `command` sets the executable, `model` pins the model, and `timeout_ms` gives a consult its own budget. Each consult is one `claude -p` process in safe mode with no tools, no project settings, no session persistence, a fresh temporary working directory, and every `APPA_*` variable removed from its environment. At most four run at once per runtime.
+`[externals.claude_code]` tunes the subscription transport: `command` sets the executable, `model` pins the model, and `timeout_ms` gives a consult its own budget. Each consult is one `claude -p` process in safe mode with no tools, no project settings, no session persistence, a fresh temporary working directory, the CLI's optional background traffic disabled, and every `APPA_*` variable removed from its environment. At most four run at once per runtime.
 
 `[externals.llm]` is the API-key transport, one profile per deployment:
 

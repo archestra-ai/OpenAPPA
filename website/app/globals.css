@@ -29,8 +29,8 @@
   --bg-weak-hover: hsl(42, 15%, 93%);
   --bg-strong: hsl(30, 8%, 12%);
 
-  --text: hsl(30, 5%, 26%);
-  --text-weak: hsl(32, 3%, 54%);
+  --text: hsl(30, 6%, 14%);
+  --text-weak: hsl(32, 4%, 40%);
   --text-strong: hsl(30, 8%, 11%);
   --text-inverted: hsl(40, 25%, 99%);
 
@@ -40,7 +40,7 @@
 
   --border: hsl(36, 8%, 79%);
   --border-weak: hsl(38, 8%, 86%);
-  --icon: hsl(32, 4%, 51%);
+  --icon: hsl(32, 4%, 44%);
 
   /* accent — one interactive hue: links, active nav, focus (AA on --bg) */
   --accent: hsl(151, 55%, 28%);
@@ -57,7 +57,7 @@
   --info-bg: hsl(215, 55%, 93%);
 
   /* syntax — neutrals carry structure, hue only where it informs */
-  --syn-comment: hsl(32, 3%, 54%);
+  --syn-comment: hsl(32, 4%, 44%);
   --syn-keyword: hsl(30, 8%, 11%);
   --syn-string: hsl(151, 45%, 30%);
   --syn-number: hsl(36, 75%, 34%);
@@ -109,14 +109,14 @@
   --bg-weak-hover: hsl(30, 5%, 15%);
   --bg-strong: hsl(40, 12%, 92%);
 
-  --text: hsl(35, 7%, 80%);
-  --text-weak: hsl(33, 4%, 50%);
+  --text: hsl(35, 8%, 88%);
+  --text-weak: hsl(33, 5%, 62%);
   --text-strong: hsl(40, 12%, 93%);
   --text-inverted: hsl(30, 6%, 8%);
 
   --border: hsl(30, 4%, 30%);
   --border-weak: hsl(30, 4%, 21%);
-  --icon: hsl(32, 4%, 46%);
+  --icon: hsl(32, 4%, 56%);
 
   --accent: hsl(146, 45%, 62%);
   --accent-hover: hsl(146, 52%, 72%);
@@ -130,7 +130,7 @@
   --info: hsl(212, 55%, 65%);
   --info-bg: hsl(215, 30%, 14%);
 
-  --syn-comment: hsl(33, 4%, 50%);
+  --syn-comment: hsl(33, 5%, 60%);
   --syn-keyword: hsl(40, 12%, 93%);
   --syn-string: hsl(146, 42%, 63%);
   --syn-number: hsl(40, 68%, 63%);
@@ -146,7 +146,6 @@ body {
   color: var(--text);
   font-size: 14px;
   line-height: 1.7;
-  -webkit-font-smoothing: antialiased;
 }
 
 /* code is always mono, whatever the surrounding face */
@@ -630,6 +629,28 @@ samp {
   color: var(--text-weak);
 }
 
+.doc-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+  font-size: 13px;
+  color: var(--text-weak);
+}
+
+.doc-breadcrumb a {
+  color: var(--text-weak);
+  text-decoration: none;
+}
+
+.doc-breadcrumb a:hover {
+  color: var(--accent);
+}
+
+.doc-breadcrumb [aria-current="page"] {
+  color: var(--text);
+}
+
 /* ————————————————————————————————————————————————
    Table of contents
    ———————————————————————————————————————————————— */
@@ -828,6 +849,19 @@ samp {
   color: inherit;
 }
 
+/* ```text blocks are box-drawing diagrams. The Plex Mono webfont ships
+   a latin subset with no U+2500 box-drawing glyphs, so their rails fall
+   back to a font with different metrics, and the default 1.6 leading
+   opens gaps between the │ glyphs. Diagrams get the system mono stack —
+   whose box glyphs span the full line box — and tighter leading;
+   command snippets keep the site font and the roomier default. */
+.prose pre code.language-text {
+  display: block;
+  font-family: ui-monospace, "Cascadia Mono", Menlo, Consolas,
+    "DejaVu Sans Mono", monospace;
+  line-height: 1.15;
+}
+
 .battery-figure {
   width: 100%;
   max-width: 45rem;
@@ -844,11 +878,129 @@ samp {
   height: auto;
 }
 
+.battery-catalog {
+  margin: 1.25rem 0 2.25rem;
+}
+
+.battery-catalog-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.prose .battery-card {
+  display: flex;
+  min-width: 0;
+  min-height: 8.25rem;
+  flex-direction: column;
+  padding: 16px;
+  border: 1px solid var(--border-weak);
+  border-radius: 7px;
+  background: var(--bg);
+  color: var(--text);
+  text-decoration: none;
+  transition:
+    border-color 120ms ease,
+    background 120ms ease,
+    transform 120ms ease;
+}
+
+.prose .battery-card:hover {
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+  color: var(--text);
+  text-decoration: none;
+  transform: translateY(-1px);
+}
+
+.battery-card-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.battery-card-title {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.battery-card-logo {
+  width: 22px;
+  height: 22px;
+  flex: none;
+  object-fit: contain;
+}
+
+.dark .battery-card-logo-github {
+  filter: invert(1);
+}
+
+.battery-card-arrow {
+  flex: none;
+  font-size: 16px;
+  line-height: 1;
+  color: var(--accent);
+}
+
+.prose .battery-card-name {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--text-strong);
+}
+
+.prose .battery-card-add {
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  background: var(--bg-weak);
+  text-align: center;
+}
+
+.battery-card-plus {
+  font-family: var(--font-mono);
+  font-size: 27px;
+  font-weight: 300;
+  line-height: 0.8;
+  color: var(--accent);
+}
+
+.battery-card-description {
+  margin-top: 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-weak);
+}
+
+@media (max-width: 640px) {
+  .battery-catalog-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .prose .battery-card {
+    min-height: 6.5rem;
+  }
+
+  .prose .battery-card-add {
+    min-height: 4.5rem;
+    flex-direction: row;
+  }
+}
+
 .prose blockquote {
   border-left: 2px solid var(--border);
   padding-left: 1rem;
   margin: 1rem 0;
   color: var(--text-weak);
+}
+
+.prose blockquote:has(> p:first-child > strong:only-child) {
+  border-left: 0;
+  padding-left: 0;
 }
 
 .prose hr {
@@ -1023,6 +1175,10 @@ samp {
   transition: opacity 120ms ease;
 }
 
+.prose blockquote .codeblock .copy {
+  opacity: 1;
+}
+
 .codeblock:hover .copy {
   opacity: 1;
 }
@@ -1094,19 +1250,80 @@ samp {
   letter-spacing: -0.01em;
 }
 
-/* The hero lockup is sized fluidly by the page that renders it; see
-   app/(site)/page.tsx. It must never wrap — that is what dropped the wordmark
-   onto a second line on a phone. */
-.hero h1 .logo-lockup,
-.hero h1 .logo-word-group {
-  flex-wrap: nowrap;
-  max-width: 100%;
-}
-
 .hero .tagline {
   margin-top: 0.5rem;
   color: var(--text-weak);
   font-size: 15px;
+}
+
+/* ————————————————————————————————————————————————
+   "How to spell it" — hero pronunciation button
+   ———————————————————————————————————————————————— */
+
+.spell-it {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 0.6rem;
+  padding: 0;
+  border: 0;
+  background: none;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  /* No uppercasing here, unlike the rest of the mono chrome: the label is a
+     respelling, and "OPEN-AH-PA" is not one. */
+  letter-spacing: 0.01em;
+  color: var(--text-weak);
+  transition: color 0.12s ease;
+  cursor: pointer;
+}
+
+/* The glyph is the only colored thing, and only while it matters: idle it is
+   chrome, hovered or playing it is the accent. */
+.spell-it .spell-it-glyph {
+  color: var(--icon);
+  transition: color 0.12s ease;
+}
+
+.spell-it:hover .spell-it-glyph,
+.spell-it[data-speaking] .spell-it-glyph {
+  color: var(--accent);
+}
+
+.spell-it-say {
+  color: var(--text-weak);
+  transition: color 0.12s ease;
+}
+
+.spell-it:hover .spell-it-say,
+.spell-it[data-speaking] .spell-it-say {
+  color: var(--text);
+}
+
+.spell-it:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+.spell-it-glyph {
+  flex: none;
+}
+
+/* Speaking: the glyph is a pause bar, and it breathes so the state reads
+   without a second label. */
+.spell-it[data-speaking] .spell-it-glyph {
+  animation: spell-it-pulse 1s ease-in-out infinite;
+}
+
+@keyframes spell-it-pulse {
+  50% { opacity: 0.35; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spell-it[data-speaking] .spell-it-glyph {
+    animation: none;
+  }
 }
 
 /* ————————————————————————————————————————————————
