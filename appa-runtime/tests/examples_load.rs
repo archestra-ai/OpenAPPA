@@ -53,13 +53,11 @@ fn the_initialized_default_composes_with_the_claude_code_battery() {
     let repository = repo_root();
     let default = std::fs::read_to_string(repository.join("integrations/claude-code/examples/claude-code.appa.toml"))
         .expect("the initialized default is readable");
-    for file in ["appa.toml", "read-sensitivity.py"] {
-        std::fs::copy(
-            repository.join("batteries/claude-code").join(file),
-            battery_dir.join(file),
-        )
-        .expect("the battery file is copied");
-    }
+    std::fs::copy(
+        repository.join("batteries/claude-code/appa.toml"),
+        battery_dir.join("appa.toml"),
+    )
+    .expect("the battery file is copied");
 
     let root = dir.path().join("appa.toml");
     std::fs::write(
@@ -74,7 +72,6 @@ fn the_initialized_default_composes_with_the_claude_code_battery() {
         .expect("the composed tools are an array");
     for (name, annotator) in [
         ("Bash", "claude-code.bash-requirements"),
-        ("Read", "claude-code.read-sensitivity"),
         ("*", "claude-code.undeclared-tool"),
     ] {
         let matches = tools
@@ -84,6 +81,12 @@ fn the_initialized_default_composes_with_the_claude_code_battery() {
         assert_eq!(matches.len(), 1, "{name} has exactly one composed rule");
         assert_eq!(matches[0]["annotator"].as_str(), Some(annotator));
     }
+    let read = tools
+        .iter()
+        .filter(|tool| tool["name"].as_str() == Some("Read"))
+        .collect::<Vec<_>>();
+    assert_eq!(read.len(), 1, "the plain Read rule composes once, after the battery's selectors");
+    assert!(read[0].get("annotator").is_none(), "Read is static: no annotator names a reader");
 
     let database = dir.path().join("appa.db");
     Runtime::open(config, database, None).expect("the composed deployment opens");

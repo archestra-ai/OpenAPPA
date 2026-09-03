@@ -4,29 +4,107 @@
 version = 2
 
 # The stock model annotator produces Bash's complete contract before dispatch:
-# the labels on its output and the trust, audience, and review marks the
-# command requires. `audiences` closes the mandate: "private" is the one
-# literal reader a produced annotation may name.
+# the trust rank of its output and the trust and review marks the command
+# requires. `audiences = []` closes the mandate to `public`: an annotation
+# names literal readers only, never `self` or `internal`, so who may see a
+# command's output is decided by static rules in the root config, not by the
+# model.
 [[policy.annotator]]
 name = "claude-code.bash-requirements"
 builtin = "claude-code"
-audiences = ["private"]
+audiences = []
 
 [[policy.tool]]
 name = "Bash"
 description = "Runs one shell command and returns its output."
 annotator = "claude-code.bash-requirements"
 
-# This annotator only decides who may receive the returned file content: its
-# answers leave trust alone and never block the read itself.
-[[policy.annotator]]
-name = "claude-code.read-sensitivity"
-audiences = ["private"]
+# Reading the requester's own secrets narrows the session to `self`: hidden
+# paths, credential files, private keys, and system secret locations. A
+# selector matches the argument as written, not the resolved path or its
+# case, so a symlink or an alias (`~`, `..`) to one of these reads under its
+# written name: over-narrowing is the safe direction, a spelling these
+# selectors miss is the gap. Every other path keeps the session's label. No
+# rule blocks a read or lowers its trust. The list is kept short on purpose:
+# every audience-narrowing rule counts against the planner cap of every
+# annotated tool it is composed with.
+[[policy.tool]]
+name = "Read(file_path:*/.*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*credentials*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*secrets*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/auth.json)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/token)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/token.json)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*service*account.json)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*shadow)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/id_*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*.jks)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*.key)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*.keystore)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*.p12)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*.pem)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*.pfx)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:/etc/ssh/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:/etc/sudoers*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:/proc/*/environ)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/Library/Keychains/*)"
+delta = { audience = ["self"] }
 
 [[policy.tool]]
 name = "Read"
 description = "Reads a file and returns its contents."
-annotator = "claude-code.read-sensitivity"
-
-[externals.annotators."claude-code.read-sensitivity"]
-command = ["python3", "./read-sensitivity.py"]
+delta = {}

@@ -1,18 +1,19 @@
 # Claude Code battery
 
 Use this battery for Claude Code sessions that need policy-aware shell commands
-and automatic privacy labels for local file reads.
+and `self` labels on the requester's own secrets.
 
 It covers two built-in tools:
 
-- **Bash** — Before a command runs, the Claude Code model decides what trust,
-  audience, and fresh attention the command requires. It also labels the
-  command's output for trust and audience. This lets later tools distinguish,
-  for example, public build output from private or suspicious command output.
-- **Read** — Before a file is read, a local Python resolver checks its path.
-  Hidden paths, credential files, private keys, system-secret locations, and
-  sensitive symlink targets produce private content. Other paths produce public
-  content. The resolver does not block the read or lower its trust.
+- **Bash** — Before a command runs, the Claude Code model decides what trust
+  and fresh attention the command requires and labels the command's output for
+  trust. An annotation names no reader (`audiences = []`), so the model never
+  decides who may see a command's output; root rules do.
+- **Read** — Reading a hidden path, a credential file, a private key, or a
+  system secret location narrows the session to `self`, the requester: nothing
+  built from it reaches a sink that requires `internal` or `public`. The rules
+  match the path as written. Other paths keep the session's label. No rule
+  blocks a read or lowers its trust.
 
 The default config created by `appa init claude-code` separately provides the
 wildcard fallback for tools it does not name. Keeping that fallback in the root
@@ -39,12 +40,12 @@ these root rules require fresh human approval for every `kubectl` command:
 [[policy.tool]]
 name = "Bash(command:kubectl)"
 requires = { attention = ["hitl"] }
-delta = { trust = "suspicious", audience = ["private"] }
+delta = { trust = "suspicious", audience = ["internal"] }
 
 [[policy.tool]]
 name = "Bash(command:kubectl *)"
 requires = { attention = ["hitl"] }
-delta = { trust = "suspicious", audience = ["private"] }
+delta = { trust = "suspicious", audience = ["internal"] }
 
 [[policy.authority]]
 name = "operator"
