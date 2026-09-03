@@ -297,21 +297,30 @@ jobs:
             echo "::error::the published plugin artifact is not the one the binaries accept"
             exit 1
           fi
-          sha256sum "${expected_archives[@]}" > SHA256SUMS
           sh -n appa-install.sh
+          # The installer is an asset like any other. Leaving it out of
+          # SHA256SUMS meant the one file users are told to pipe into a shell
+          # was the only one they could not verify.
+          sha256sum "${expected_archives[@]}" appa-install.sh > SHA256SUMS
 
-      - name: Read release state
-        id: release-state
+      - name: Refuse an already-published release
         env:
           GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
         run: |
           is_draft=$(gh release view "$TAG_NAME" --json isDraft --jq '.isDraft')
-          echo "is_draft=${is_draft}" >> "$GITHUB_OUTPUT"
+          # Publishing is the whole point of this job. A release that is already
+          # public cannot be published again, and skipping both remaining steps
+          # would report success for a run that shipped nothing -- the worst
+          # possible answer for a workflow whose recovery story is "dispatch it
+          # again".
+          if [ "$is_draft" != "true" ]; then
+            echo "::error::${TAG_NAME} is already published; nothing was uploaded"
+            exit 1
+          fi
 
       - name: Upload release assets
-        if: ${{ steps.release-state.outputs.is_draft == 'true' }}
         env:
           GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
@@ -319,7 +328,6 @@ jobs:
         run: gh release upload "$TAG_NAME" dist/* --clobber
 
       - name: Publish release
-        if: ${{ steps.release-state.outputs.is_draft == 'true' }}
         env:
           GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
