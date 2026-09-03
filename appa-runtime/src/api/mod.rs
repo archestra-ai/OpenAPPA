@@ -11,8 +11,12 @@ pub(crate) use session::raw;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-pub use crate::engine::{AuditEntry, AuditEvent, AuditLabel, DispatchOutcome, TrajectoryStatus};
-pub use appa_runtime_api::{Actor, OutcomeBody, ProposedCall, SpawnBinding, SpawnRef, ToolOutcome, TrajectoryId};
+pub use crate::engine::{
+    AuditEntry, AuditEvent, AuditLabel, DispatchOutcome, LabelSpelling, RemedyArguments, TrajectoryStatus,
+};
+pub use appa_runtime_api::{
+    Actor, OfferedRemedy, OutcomeBody, ProposedCall, SpawnBinding, SpawnRef, ToolOutcome, TrajectoryId,
+};
 pub(crate) use session::{LateOpen, Session, is_control_tool};
 
 use crate::config::Config;
@@ -46,8 +50,13 @@ impl ExactCall {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ToolCallDecision {
-    Allow { spawn: Option<SpawnBinding> },
-    Deny { feedback: String },
+    Allow {
+        spawn: Option<SpawnBinding>,
+    },
+    Deny {
+        feedback: String,
+        offers: Vec<OfferedRemedy>,
+    },
 }
 
 /// What the adapter gives the harness as the tool output. `Keep`: use
@@ -89,9 +98,17 @@ pub enum RemedyOutcome {
 /// outcome and names the options by `OfferId`.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ChildReturnDecision {
-    Returned { value: String },
+    Returned {
+        value: String,
+    },
+    /// The fork's sanitizer derived `value`; it crosses when the child returns exactly it.
+    Staged {
+        value: String,
+    },
     NoValue,
-    Blocked { feedback: String },
+    Blocked {
+        feedback: String,
+    },
 }
 
 /// What a spawn call's result produced: the child's return, when
@@ -150,8 +167,6 @@ pub(crate) enum EventError {
     TrajectoryEnded,
     #[error("the child has a call still open; report its outcome before the child ends")]
     ChildDispatchOpen,
-    #[error("[appa] this subagent already returned; a second, different return cannot cross")]
-    ChildAlreadyReturned,
     #[error("no trajectory with this id exists")]
     UnknownTrajectory,
     #[error("a trajectory with this id already exists")]
@@ -190,6 +205,10 @@ pub(crate) enum EventError {
     },
     #[error("tool {tool} is not declared in this policy and no wildcard covers it; the call is refused before it runs")]
     UndeclaredTool { tool: String },
+    /// `execute_remedy_plan` came without what the offered plan needs, or with an
+    /// argument the policy cannot read. Nothing is appended and the offer stands.
+    #[error("[appa] {detail}")]
+    RemedyArguments { detail: String },
     #[error("storage failure: {0}")]
     Storage(String),
 }
@@ -229,7 +248,7 @@ impl EventError {
             | EventError::SubstitutionAbandoned { .. }
             | EventError::TrajectoryEnded
             | EventError::ChildDispatchOpen
-            | EventError::ChildAlreadyReturned
+            | EventError::RemedyArguments { .. }
             | EventError::UnknownTrajectory
             | EventError::TrajectoryExists
             | EventError::UnknownDispatch
@@ -254,6 +273,7 @@ impl From<EngineRefusal> for EventError {
             EngineRefusal::UnknownOffer => EventError::UnknownOffer,
             EngineRefusal::Unbindable => EventError::BindingMismatch,
             EngineRefusal::UndeclaredTool { tool } => EventError::UndeclaredTool { tool },
+            EngineRefusal::Arguments { detail } => EventError::RemedyArguments { detail },
         }
     }
 }
@@ -551,6 +571,26 @@ impl Runtime {
         }
     }
 
+    /// The first of `candidates` this family has opened, live or ended, from
+    /// one view rebuild; `None` when it opened none of them.
+    pub(crate) fn opened_among(
+        &self,
+        root: &TrajectoryId,
+        candidates: &[TrajectoryId],
+    ) -> Result<Option<TrajectoryId>, EventError> {
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+        let log = self.inner.log(root)?;
+        let deployment = self.inner.deployment();
+        let policy = self.inner.resolve_policy(&deployment, &log)?;
+        let view = policy.engine().rebuild_view(&log).map_err(EventError::from)?;
+        Ok(candidates
+            .iter()
+            .find(|candidate| policy.engine().liveness(&view, candidate) != Liveness::Unopened)
+            .cloned())
+    }
+
     pub fn status(&self, id: &TrajectoryId) -> Option<TrajectoryStatus> {
         let deployment = self.inner.deployment();
         let (policy, log) = self.root_log(&deployment, id, "status")?;
@@ -605,9 +645,31 @@ impl Runtime {
 
     /// Execute one surfaced remedy offer by its id.
     pub async fn execute_remedy(&self, acting: &Actor, offer: OfferId) -> RemedyOutcome {
-        self.remedy(acting, offer, None).await
+        self.remedy(acting, offer, RemedyArguments::default(), None).await
     }
 
+    /// Execute one surfaced remedy offer with the arguments a plan declaring a subagent's
+    /// return takes: the floor, and the schema where the plan attests.
+    pub async fn execute_remedy_with(
+        &self,
+        acting: &Actor,
+        offer: OfferId,
+        arguments: RemedyArguments,
+    ) -> RemedyOutcome {
+        self.remedy(acting, offer, arguments, None).await
+    }
+}
+
+/// The control call's arguments as a model spells them — `offer_id`, and for a plan
+/// declaring a subagent's return `label` and `return_schema` — for a harness that routes the
+/// control tool itself.
+pub fn parse_control_arguments(arguments: &str) -> Result<(OfferId, RemedyArguments), String> {
+    let args: crate::mcp::ExecuteRemedyPlanArgs =
+        serde_json::from_str(arguments).map_err(|error| format!("execute_remedy_plan arguments: {error}"))?;
+    Ok((OfferId(args.offer_id.clone()), RemedyArguments::from(args)))
+}
+
+impl Runtime {
     /// The whole act: resolve the quoted id inside the acting trajectory's
     /// own family, claim the offer, and answer. `elicitation` is supplied
     /// rather than extracted, so the body is reachable without a live peer.
@@ -615,6 +677,7 @@ impl Runtime {
         &self,
         acting: &Actor,
         quoted: OfferId,
+        arguments: RemedyArguments,
         elicitation: Option<&Elicitation>,
     ) -> RemedyOutcome {
         let unknown = || RemedyOutcome::Refused {
@@ -642,7 +705,7 @@ impl Runtime {
                 };
             }
         };
-        match session.on_remedy(offer, elicitation).await {
+        match session.on_remedy(offer, arguments, elicitation).await {
             Ok(RemedyDecision::Authorized { call }) => RemedyOutcome::Authorized { call: call.proposed() },
             Ok(RemedyDecision::Substituted { call }) => RemedyOutcome::Substituted { call: call.proposed() },
             Ok(RemedyDecision::Returned { value }) => RemedyOutcome::Returned { value },

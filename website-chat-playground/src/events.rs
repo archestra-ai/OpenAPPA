@@ -238,7 +238,7 @@ impl AuditReader {
                 events
             }
             // Algebraically detailed records the chat does not render.
-            AuditEvent::SanitizerBound { .. } | AuditEvent::VoidReturn => Vec::new(),
+            AuditEvent::SanitizerBound { .. } | AuditEvent::VoidReturn | AuditEvent::Resumed { .. } => Vec::new(),
         }
     }
 }

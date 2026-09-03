@@ -19,6 +19,16 @@ pub async fn answer(runtime: &Runtime, codec: &Codec, body: &[u8]) -> (u16, serd
         Err(ParseRefusal::Unreadable { detail }) => return (400, serde_json::json!({ "error": detail })),
         Err(ParseRefusal::Malformed { detail }) => return (409, serde_json::json!({ "error": detail })),
     };
+    if let HookEvent::ToolCall { actor, call, .. } = &event {
+        match runtime.opened_among(&actor.root, &(codec.names_children)(actor, call)) {
+            Ok(Some(child)) => {
+                tracing::debug!(root = %actor.root.0, child = %child.0, "a call names a family child's transcript");
+                return (200, (codec.render)(&event, &deny(NAMED_TRANSCRIPT.to_string())));
+            }
+            Ok(None) => {}
+            Err(error) => return (409, (codec.render)(&event, &refuse(error.to_string()))),
+        }
+    }
     let decision = handle(runtime, event.clone()).await;
     let status = match decision {
         HookDecision::Refuse { .. } => 409,
@@ -26,6 +36,11 @@ pub async fn answer(runtime: &Runtime, codec: &Codec, body: &[u8]) -> (u16, serd
     };
     (status, (codec.render)(&event, &decision))
 }
+
+/// A subagent's words reach its parent through the checked return only; a call that
+/// names the file the harness keeps them in is refused before it runs.
+const NAMED_TRANSCRIPT: &str = "[appa] this call names a subagent's transcript or output file; a subagent's words \
+                                reach this session only through its checked return";
 
 /// Dispatch one typed event to its session and fold the outcome into
 /// one decision. The dispatcher holds nothing between calls; every id
@@ -79,7 +94,7 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             .await
             {
                 Ok(ToolCallDecision::Allow { spawn }) => HookDecision::AllowCall { spawn },
-                Ok(ToolCallDecision::Deny { feedback }) => HookDecision::DenyCall { feedback },
+                Ok(ToolCallDecision::Deny { feedback, offers }) => HookDecision::DenyCall { feedback, offers },
                 Err(error) => fold(error, deny),
             }
         }
@@ -118,20 +133,24 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             }
         }
         HookEvent::ChildStart { root, child, spawn } => {
+            // The child is told what its return must look like where the
+            // fork's policy shapes it; a return that crosses as spoken
+            // needs no word.
             let root = match open_or_reopen(runtime, &root) {
                 Ok(session) => session,
                 Err(error) => return refuse(error.to_string()),
             };
-            match root.on_child_start(child, spawn) {
-                Ok(_) => HookDecision::Ack,
+            match root.start_child(child, spawn) {
+                Ok((_, Some(text))) => HookDecision::Context { text },
+                Ok((_, None)) => HookDecision::Ack,
                 Err(error) => refuse(error.to_string()),
             }
         }
         HookEvent::ChildEnd { root, child, value } => {
             // The subagent's return is checked here and blocked when it
             // may not cross; a block keeps the subagent running until it
-            // returns something that may. A child the family never saw
-            // start is blocked too: its return has no fork to cross on.
+            // returns what may. A child the family never saw start is
+            // blocked too: its return has no fork to cross on.
             let said = value.clone();
             match on_child(runtime, &root, &child, MissingStart::Refuse, |session| {
                 let value = value.clone();
@@ -153,11 +172,15 @@ fn outcome_decision(decision: ToolResultDecision) -> HookDecision {
     }
 }
 
+/// A crossing as spoken answers with no opinion. What crosses otherwise — the canonical
+/// form of a shaped return, a sanitizer's derivation — goes back as the value the child
+/// must return, or the harness deliver, for it to reach the parent.
 fn return_decision(said: Option<String>, decision: ChildReturnDecision) -> HookDecision {
     match decision {
         ChildReturnDecision::Returned { value } if said.as_deref() != Some(value.as_str()) => {
             HookDecision::ChildReturn { value }
         }
+        ChildReturnDecision::Staged { value } => HookDecision::ChildReturn { value },
         ChildReturnDecision::Returned { .. } | ChildReturnDecision::NoValue => HookDecision::Ack,
         ChildReturnDecision::Blocked { feedback } => block(feedback),
     }
@@ -265,7 +288,10 @@ fn fold(error: EventError, family: fn(String) -> HookDecision) -> HookDecision {
 }
 
 fn deny(feedback: String) -> HookDecision {
-    HookDecision::DenyCall { feedback }
+    HookDecision::DenyCall {
+        feedback,
+        offers: Vec::new(),
+    }
 }
 
 fn block(reason: String) -> HookDecision {
@@ -332,6 +358,58 @@ mod tests {
         answer(runtime, &codec(), body).await
     }
 
+    fn spawn_call() -> crate::api::ProposedCall {
+        crate::api::ProposedCall {
+            tool: "Task".to_string(),
+            arguments: crate::api::raw(serde_json::json!({"prompt": "look it up"})),
+        }
+    }
+
+    /// Declare the one return route the fixture offers — as spoken, floored at the
+    /// parent's current label — for the offer the blocked spawn surfaced.
+    async fn declare_return(runtime: &Runtime, root: &TrajectoryId, offers: &[appa_runtime_api::OfferedRemedy]) {
+        let offer = offers
+            .iter()
+            .find(|offer| offer.returns == Some(appa_runtime_api::OfferedReturn::AsSpoken))
+            .expect("the menu offers the bare floor");
+        let actor = Actor {
+            root: root.clone(),
+            child: None,
+        };
+        let arguments = crate::engine::RemedyArguments {
+            label: Some(crate::engine::LabelSpelling::default()),
+            return_schema: None,
+        };
+        let outcome = runtime
+            .execute_remedy_with(&actor, OfferId(offer.id.clone()), arguments)
+            .await;
+        assert!(
+            matches!(outcome, crate::api::RemedyOutcome::Authorized { .. }),
+            "the declaration approves the spawn, got {outcome:?}"
+        );
+    }
+
+    /// The marked spawn's round trip: blocked on the return menu, declared, released.
+    async fn declared_spawn(runtime: &Runtime, root: &TrajectoryId) -> appa_runtime_api::SpawnBinding {
+        let spawn = || HookEvent::ToolCall {
+            actor: Actor {
+                root: root.clone(),
+                child: None,
+            },
+            call: spawn_call(),
+            spawn: true,
+        };
+        let HookDecision::DenyCall { offers, .. } = handle(runtime, spawn()).await else {
+            panic!("a marked spawn blocks until its return is declared");
+        };
+        declare_return(runtime, root, &offers).await;
+        let released = handle(runtime, spawn()).await;
+        let HookDecision::AllowCall { spawn: Some(binding) } = released else {
+            panic!("the declared spawn must release with its binding, got {released:?}");
+        };
+        binding
+    }
+
     const CONTROL_TOOL_FIXTURE_NAME: &str = "mcp__plugin_appa-runtime_appa__execute_remedy_plan";
 
     fn fixtures() -> Vec<serde_json::Value> {
@@ -350,8 +428,30 @@ mod tests {
         for event in fixtures() {
             let name = event["hook_event_name"].as_str().expect("each fixture names its hook");
             let control = event["tool_name"] == CONTROL_TOOL_FIXTURE_NAME;
+            let spawn = name == "PreToolUse" && event["tool_name"] == "Agent" && event.get("agent_id").is_none();
 
             let body = serde_json::to_vec(&event).expect("the fixture re-serializes");
+            if spawn {
+                // The parent's spawn blocks on the return menu; the model declares and
+                // proposes the spawn again.
+                let (status, answer) = call_hook(&runtime, &body).await;
+                assert_eq!(status, 200, "hook {name} refused: {answer}");
+                assert_eq!(
+                    answer["hookSpecificOutput"]["permissionDecision"], "deny",
+                    "a marked spawn blocks until its return is declared"
+                );
+                let root = TrajectoryId(format!("cc:{}", event["session_id"].as_str().expect("a session id")));
+                let quoted = runtime
+                    .minted_offers(&root, &root)
+                    .into_iter()
+                    .next()
+                    .expect("the block surfaced the return declaration");
+                let offers = vec![appa_runtime_api::OfferedRemedy {
+                    id: quoted.0,
+                    returns: Some(appa_runtime_api::OfferedReturn::AsSpoken),
+                }];
+                declare_return(&runtime, &root, &offers).await;
+            }
             let (status, answer) = call_hook(&runtime, &body).await;
 
             assert_eq!(status, 200, "hook {name} refused: {answer}");
@@ -725,24 +825,7 @@ mod tests {
         let root = appa_runtime_api::TrajectoryId("cc:s1".to_string());
         let child = appa_runtime_api::TrajectoryId("cc:s1:a1".to_string());
 
-        let released = handle(
-            &runtime,
-            HookEvent::ToolCall {
-                actor: Actor {
-                    root: root.clone(),
-                    child: None,
-                },
-                call: crate::api::ProposedCall {
-                    tool: "Task".to_string(),
-                    arguments: crate::api::raw(serde_json::json!({"prompt": "look it up"})),
-                },
-                spawn: true,
-            },
-        )
-        .await;
-        let HookDecision::AllowCall { spawn: Some(binding) } = released else {
-            panic!("the marked spawn must release with its binding, got {released:?}");
-        };
+        let binding = declared_spawn(&runtime, &root).await;
         assert_eq!(
             handle(
                 &runtime,
@@ -839,25 +922,7 @@ mod tests {
         let runtime = open_runtime(&dir);
         let root = appa_runtime_api::TrajectoryId("cc:s1".to_string());
         let child = appa_runtime_api::TrajectoryId("cc:s1:a1".to_string());
-        let released = handle(
-            &runtime,
-            HookEvent::ToolCall {
-                actor: Actor {
-                    root: root.clone(),
-                    child: None,
-                },
-                call: crate::api::ProposedCall {
-                    tool: "Task".to_string(),
-                    arguments: crate::api::raw(serde_json::json!({"prompt": "look it up"})),
-                },
-                spawn: true,
-            },
-        )
-        .await;
-        assert!(
-            matches!(released, HookDecision::AllowCall { spawn: Some(_) }),
-            "got {released:?}"
-        );
+        declared_spawn(&runtime, &root).await;
 
         let decision = handle(
             &runtime,

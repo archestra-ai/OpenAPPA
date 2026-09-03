@@ -17,7 +17,7 @@
 //! | `SessionStart` | `SessionStart` |
 //! | `UserPromptSubmit` | `Prompt` |
 //! | `PreToolUse` | `ToolCall`; the `Agent` (`Task`) tool is the spawn |
-//! | `PostToolUse` for `Agent` (`Task`) | `SpawnResult` when the response carries the subagent's message (`content`); `ToolResult` when it is the launch acknowledgement |
+//! | `PostToolUse` for `Agent` (`Task`) | `SpawnResult` when the response names the subagent (`agentId`) or carries its message (`content`); `ToolResult` otherwise |
 //! | `PostToolUse`, `PostToolUseFailure` | `ToolResult` (the Q14 outcome mapping) |
 //! | `SubagentStart` | `ChildStart`, naming the family's spawn in flight |
 //! | `SubagentStop` | `ChildEnd` carrying `last_assistant_message` as the return; `TurnEnd` for a helper with an empty `agent_type` |
@@ -25,28 +25,36 @@
 //!
 //! Subagents. Claude Code spawns a subagent through its `Agent` tool
 //! (`Task` is its older name), so the codec marks that call as the
-//! deployment's context-controlled spawn. `SubagentStart`
-//! names the new subagent (`agent_id`) but not the `Agent` call that
-//! started it, so the child start can echo no binding: it names the
-//! family's spawn in flight, and the runtime ties it to the one prepared
-//! fork still open for binding. The child's `SubagentStop` is the return
-//! channel: its `last_assistant_message` is the message the parent
-//! receives, and the codec reports it as `ChildEnd` naming the child.
-//! A `decision: block` answer there keeps the subagent running with the
-//! reason, and it stops again (`stop_hook_active: true`), so a return
-//! that may not cross holds the subagent until it returns an admissible
-//! message. The parent's `Agent` `PostToolUse` is the spawn outcome
-//! only. In a top-level session the spawn is asynchronous: that hook
-//! fires at launch with `agentId` and no `content`, and crosses as a
-//! plain `ToolResult`. A synchronous spawn (`claude -p`) delivers the
-//! same message in `content` after the child's stop and crosses as
-//! `SpawnResult`, which replays the crossing the child's stop decided.
-//! Claude Code's own helper agents stop with an empty `agent_type`, no
-//! `SubagentStart` and no tool calls: their stop is the child's
-//! `TurnEnd`, and no return is claimed. No hook can substitute what the
-//! parent receives, so a return substitution (`ChildReturn`) is not
-//! enforceable on this harness: the codec answers it with a block, and
-//! the subagent must return a message that crosses unchanged.
+//! deployment's context-controlled spawn; the runtime holds the spawn
+//! until the parent declares the child's return from the block's menu.
+//! `SubagentStart` names the new subagent (`agent_id`) but not the
+//! `Agent` call that started it, so the child start can echo no binding:
+//! it names the family's spawn in flight, and the runtime ties it to the
+//! one prepared fork still open for binding. Its answer carries the
+//! child's return contract as `additionalContext`. The child's
+//! `SubagentStop` is the return channel: its `last_assistant_message` is
+//! the message the parent receives, and the codec reports it as
+//! `ChildEnd` naming the child. A `decision: block` answer there keeps
+//! the subagent running with the reason, and it stops again
+//! (`stop_hook_active: true`), so a return that may not cross holds the
+//! subagent until it returns an admissible message. No hook can
+//! substitute what the parent receives, so a return the runtime would
+//! substitute (`ChildReturn`) is rendered as a block carrying the exact
+//! bytes to return: the subagent echoes them, and the next stop crosses.
+//! The parent's `Agent` `PostToolUse` is the spawn outcome: in a
+//! top-level session the spawn is asynchronous, the hook fires at launch
+//! with `agentId` and no `content`, and its `SpawnResult` binds the fork
+//! to that child before the dispatch closes, whichever of it and
+//! `SubagentStart` lands first. A synchronous spawn (`claude -p`)
+//! delivers the child's message in `content` after the child's stop, and
+//! the same `SpawnResult` replays the crossing the stop decided; a
+//! message the runtime never checked at a stop is withheld from the
+//! parent. Claude Code's own helper agents stop with an empty
+//! `agent_type`, no `SubagentStart` and no tool calls: their stop is the
+//! child's `TurnEnd`, and no return is claimed. A call whose arguments
+//! name a family child's output file or transcript (`names_children`)
+//! is refused by the runtime: the default spellings only, a heuristic
+//! rather than a guarantee.
 //!
 //! Outcome mapping, which is the adapter's contract. This
 //! harness runs the tools itself, so the codec observes no HTTP status,
@@ -107,7 +115,55 @@ use appa_runtime_api::{
 };
 
 pub fn codec() -> Codec {
-    Codec { parse, render }
+    Codec {
+        parse,
+        render,
+        names_children,
+    }
+}
+
+/// The family children a call's arguments name by Claude Code's own file spellings: a
+/// background subagent's output file (`tasks/<agent>.output`) and a persisted subagent
+/// transcript (`subagents/agent-<agent>.jsonl`). Every string leaf of the arguments is scanned,
+/// so a path inside a shell command is caught as a `Read` path is. The default spellings only:
+/// a renamed copy, a symlink, or a relative path the shell resolves is not.
+fn names_children(actor: &Actor, call: &ProposedCall) -> Vec<TrajectoryId> {
+    let Ok(arguments) = serde_json::from_str::<serde_json::Value>(call.arguments.get()) else {
+        return Vec::new();
+    };
+    let mut agents = Vec::new();
+    collect_agent_files(&arguments, &mut agents);
+    agents.sort();
+    agents.dedup();
+    agents
+        .into_iter()
+        .map(|agent| TrajectoryId(format!("{}:{agent}", actor.root.0)))
+        .collect()
+}
+
+fn collect_agent_files(value: &serde_json::Value, agents: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(text) => {
+            agents.extend(agent_file_ids(text, "tasks/", ".output"));
+            agents.extend(agent_file_ids(text, "subagents/agent-", ".jsonl"));
+        }
+        serde_json::Value::Array(items) => items.iter().for_each(|item| collect_agent_files(item, agents)),
+        serde_json::Value::Object(fields) => fields.values().for_each(|field| collect_agent_files(field, agents)),
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
+}
+
+/// Every `<prefix><id><suffix>` in `text` whose id is one Claude Code mints (letters, digits,
+/// `-` and `_`).
+fn agent_file_ids(text: &str, prefix: &str, suffix: &str) -> Vec<String> {
+    let is_id_char = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+    text.match_indices(prefix)
+        .filter_map(|(at, _)| {
+            let rest = &text[at + prefix.len()..];
+            let id: String = rest.chars().take_while(|c| is_id_char(*c)).collect();
+            (!id.is_empty() && rest[id.len()..].starts_with(suffix)).then_some(id)
+        })
+        .collect()
 }
 
 fn is_spawn_tool(tool: &str) -> bool {
@@ -146,9 +202,6 @@ fn is_fixed_value(key: &str, value: &str) -> bool {
 
 const REDACTED: &str = "[appa] redacted";
 
-const UNSUBSTITUTABLE_RETURN: &str =
-    "[appa] the return cannot be substituted where the parent receives it; return a message that may cross unchanged";
-
 fn is_mcp_tool(tool: &str) -> bool {
     tool.starts_with("mcp__")
 }
@@ -166,6 +219,15 @@ fn content_slot(tool: &str) -> Option<&'static str> {
 
 fn withheld(reason: &str) -> String {
     format!("[appa] the tool result was withheld: {reason}")
+}
+
+/// The stop feedback that carries the exact bytes the subagent must return for its message
+/// to cross: a subagent's stop can be held, never rewritten.
+fn echo(value: &str) -> String {
+    format!(
+        "[appa] what crosses to the parent is not your message as written. Return exactly this as your final \
+         message, verbatim and nothing else:\n{value}"
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -212,7 +274,7 @@ impl WireEvent {
     fn actor(&self) -> Actor {
         Actor {
             root: self.root(),
-            child: self.agent_id.as_deref().map(|agent| self.child_id(agent)),
+            child: self.agent().map(|agent| self.child_id(agent)),
         }
     }
 
@@ -229,21 +291,31 @@ impl WireEvent {
         }
     }
 
-    /// The spawn's result when the parent's `Agent` response carries the
-    /// subagent's message (`content`); a launch acknowledgement carries
-    /// none and is a plain tool result.
+    /// The spawn's result when the parent's `Agent` response names the
+    /// subagent (`agentId`) or carries its message (`content`): a launch
+    /// acknowledgement names the child and carries no message. A response
+    /// with neither is a plain tool result.
     fn spawn_return(&self) -> Option<(Option<TrajectoryId>, Option<String>)> {
         let response = self.tool_response.as_ref()?;
-        let content = response.get("content").filter(|content| !content.is_null())?;
         let child = response
             .get("agentId")
-            .and_then(|id| id.as_str())
+            .and_then(|id| non_empty(id.as_str()))
             .map(|agent| self.child_id(agent));
-        let value = match text_blocks(content) {
+        let content = response.get("content").filter(|content| !content.is_null());
+        if child.is_none() && content.is_none() {
+            return None;
+        }
+        let value = content.map(|content| match text_blocks(content) {
             Some(texts) => texts.join("\n"),
             None => content.to_string(),
-        };
-        Some((child, non_empty(Some(&value)).map(str::to_string)))
+        });
+        Some((
+            child,
+            value
+                .as_deref()
+                .and_then(|value| non_empty(Some(value)))
+                .map(str::to_string),
+        ))
     }
 }
 
@@ -392,11 +464,22 @@ fn render(event: &HookEvent, decision: &HookDecision) -> serde_json::Value {
             Some(replacement) => replaced(replacement, None),
             None => block(output),
         },
-        // Where the codec cannot restate what the parent receives, the
-        // substitution is not enforceable: the return stays withheld.
+        // No hook rewrites what a subagent's stop delivers, so the
+        // subagent is held until it returns the crossing value itself.
         HookDecision::ChildReturn { value } => match replacement(event, value) {
             Some(replacement) => replaced(replacement, None),
-            None => block(UNSUBSTITUTABLE_RETURN),
+            None => block(&echo(value)),
+        },
+        // Context reaches an actor at its start only; every other event
+        // has no slot for it and is acknowledged.
+        HookDecision::Context { text } => match event {
+            HookEvent::ChildStart { .. } => serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "SubagentStart",
+                    "additionalContext": text,
+                }
+            }),
+            _ => serde_json::json!({}),
         },
         HookDecision::Refuse { detail } => match replacement(event, &withheld(detail)) {
             Some(replacement) => {
@@ -860,7 +943,27 @@ mod tests {
     }
 
     #[test]
-    fn a_launch_acknowledgement_is_the_spawns_tool_result() {
+    fn a_blank_agent_id_names_no_child() {
+        let event = agent_post_tool_use(serde_json::json!({"status": "async_launched", "agentId": ""}));
+        assert!(
+            matches!(parse_value(&event), Ok(Some(HookEvent::ToolResult { .. }))),
+            "an acknowledgement naming no subagent is a plain tool result"
+        );
+        let call = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "s1",
+            "agent_id": "",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+        });
+        match parse_value(&call) {
+            Ok(Some(HookEvent::ToolCall { actor, .. })) => assert_eq!(actor.child, None),
+            other => panic!("a tool call parses: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_launch_acknowledgement_names_the_child_and_carries_no_message() {
         let launched = serde_json::json!({
             "isAsync": true,
             "status": "async_launched",
@@ -874,14 +977,14 @@ mod tests {
         without_content["content"] = serde_json::Value::Null;
         for (tool, response) in [
             ("Agent", launched.clone()),
-            ("Task", launched),
+            ("Task", launched.clone()),
             ("Agent", without_content),
         ] {
             let mut event = agent_post_tool_use(response.clone());
             event["tool_name"] = serde_json::Value::String(tool.to_string());
             assert_eq!(
                 parse_value(&event),
-                Ok(Some(HookEvent::ToolResult {
+                Ok(Some(HookEvent::SpawnResult {
                     actor: Actor {
                         root: root(),
                         child: None,
@@ -893,10 +996,21 @@ mod tests {
                     outcome: ToolOutcome::Success {
                         body: OutcomeBody::Available(response.to_string()),
                     },
+                    child: Some(TrajectoryId("cc:s1:a2".to_string())),
+                    value: None,
                 })),
-                "the {tool} launch acknowledgement is a plain tool result",
+                "the {tool} launch acknowledgement names its child and crosses nothing",
             );
         }
+        let mut anonymous = launched;
+        anonymous.as_object_mut().expect("an object").remove("agentId");
+        assert!(
+            matches!(
+                parse_value(&agent_post_tool_use(anonymous)),
+                Ok(Some(HookEvent::ToolResult { .. }))
+            ),
+            "a response naming no subagent is a plain tool result",
+        );
         let mut undelivered = agent_post_tool_use(serde_json::Value::Null);
         undelivered
             .as_object_mut()
@@ -1128,6 +1242,7 @@ mod tests {
                 &event,
                 &HookDecision::DenyCall {
                     feedback: "blocked: the recipient cannot read this".to_string(),
+                    offers: Vec::new(),
                 }
             ),
             serde_json::json!({
@@ -1397,24 +1512,8 @@ mod tests {
     }
 
     #[test]
-    fn a_child_return_replaces_the_subagents_message_in_the_spawn_result() {
+    fn a_withheld_spawn_result_replaces_the_subagents_message() {
         let event = spawn_result(agent_response());
-        let mut expected = agent_response();
-        expected["content"] = serde_json::json!([{"type": "text", "text": "the redacted summary"}]);
-        assert_eq!(
-            render(
-                &event,
-                &HookDecision::ChildReturn {
-                    value: "the redacted summary".to_string(),
-                }
-            ),
-            serde_json::json!({
-                "hookSpecificOutput": {
-                    "hookEventName": "PostToolUse",
-                    "updatedToolOutput": expected,
-                }
-            }),
-        );
         let mut withheld = agent_response();
         withheld["content"] =
             serde_json::json!([{"type": "text", "text": "[appa] the tool result was withheld: nothing crossed"}]);
@@ -1457,12 +1556,22 @@ mod tests {
         assert_eq!(
             render(
                 &event,
-                &HookDecision::ChildReturn {
-                    value: "the redacted summary".to_string(),
+                &HookDecision::Context {
+                    text: "the contract".to_string(),
                 }
             ),
-            serde_json::json!({"decision": "block", "reason": UNSUBSTITUTABLE_RETURN}),
-            "a substitution the harness cannot apply stays withheld",
+            serde_json::json!({}),
+            "a stop has no slot for context",
+        );
+        assert_eq!(
+            render(
+                &event,
+                &HookDecision::ChildReturn {
+                    value: "{\"status\":\"verified\"}".to_string(),
+                }
+            ),
+            serde_json::json!({"decision": "block", "reason": echo("{\"status\":\"verified\"}")}),
+            "a stop is held until the subagent returns the crossing value itself",
         );
         assert_eq!(
             render(

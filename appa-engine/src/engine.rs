@@ -388,6 +388,38 @@ impl Engine {
         view.views(child)?.return_policy_of(child).cloned()
     }
 
+    /// The return policy the fork `parent` prepared carries, before a child is bound to it: what
+    /// the runtime tells the child at its start, read from the view that binds it.
+    pub fn prepared_return_policy(
+        &self,
+        view: &EngineView,
+        parent: &TrajectoryId,
+        fork: &crate::value::ForkId,
+    ) -> Option<ReturnPolicy> {
+        view.views(parent)?.prepared_return_policy(fork).cloned()
+    }
+
+    /// The value `child` crossed most recently: a stop or a spawn result repeating it replays
+    /// that crossing and appends nothing.
+    pub fn latest_return_of(&self, view: &EngineView, child: &TrajectoryId) -> Option<ValueBody> {
+        view.views(child)?
+            .latest_return(child)
+            .map(|returned| returned.body.clone())
+    }
+
+    /// The plan one recorded offer of `trajectory` carries, for the runtime to read what the
+    /// offer's execution must supply.
+    pub fn offer_plan(
+        &self,
+        view: &EngineView,
+        trajectory: &TrajectoryId,
+        offer: &crate::value::OfferId,
+    ) -> Option<plan::ExecutableRemedyPlan> {
+        view.views(trajectory)?
+            .offer(offer)
+            .map(|recorded| recorded.plan.clone())
+    }
+
     /// Where one fork stands: never prepared, prepared and open for binding,
     /// bound to a child, or unbindable because its spawn failed or its parent ended before any
     /// child bound.
@@ -11823,6 +11855,48 @@ mod tests {
     }
 
     #[test]
+    fn the_reserved_route_is_declared_only_with_its_shape() {
+        let e = open_engine(returning_registry(vec![lifting_sanitizer("attest-schema")]));
+        let log = vec![opened(&e)];
+        let blocked = e
+            .handle(
+                &viewing(&e, &log),
+                spawn_batch("marked", Some(crate::transition::SpawnMark::at(0))),
+            )
+            .expect("a marked spawn blocks");
+        let log = [log, appended_facts(blocked)].concat();
+        let attest = SanitizerName::new(SanitizerName::ATTEST_SCHEMA);
+        let offer = opened_offers(&log)
+            .into_iter()
+            .find_map(|(offer, plan)| (plan.return_step() == Some(Some(&attest))).then_some(offer))
+            .expect("the attestation is offered");
+        let execute = |sanitizer| {
+            e.handle(
+                &viewing(&e, &log),
+                EngineEvent::ExecuteOffer(OfferExecution {
+                    trajectory: traj(),
+                    offer,
+                    outcome: OfferOutcome::Approved(Vec::new()),
+                    return_policy: Some(ReturnPolicy {
+                        sanitizer,
+                        ..floor_policy(&e, &log)
+                    }),
+                    offer_nonce: nonce(),
+                    audience: crate::audience::AudienceEvidence::default(),
+                }),
+            )
+        };
+
+        assert!(matches!(
+            execute(named("attest-schema")),
+            Err(crate::transition::TransitionError::ReturnPolicy(
+                plan::ReturnPolicyRefusal::SanitizerMismatch
+            ))
+        ));
+        assert!(execute(Some(ReturnSanitizer::Attest(attest_shape()))).is_ok());
+    }
+
+    #[test]
     fn an_attested_return_crosses_in_canonical_form_at_the_raised_rank() {
         let e = open_engine(returning_registry(vec![lifting_sanitizer("attest-schema")]));
         let child = TrajectoryId::new("child");
@@ -12000,6 +12074,54 @@ mod tests {
                 .views(&traj())
                 .expect("the parent is opened")
                 .returns_by(&child),
+            2
+        );
+    }
+
+    #[test]
+    fn a_return_after_a_resume_is_a_new_crossing_even_when_its_bytes_repeat() {
+        let e = open_engine(returning_registry(vec![]));
+        let child = TrajectoryId::new("child");
+        let log = spawn_family(&e, &child);
+        let first = e
+            .handle(&viewing(&e, &log), report_with(&log, &child, "done", vec![]))
+            .expect("the first return crosses");
+        let log = [log, appended_facts(first)].concat();
+        let fork = fork_in(&log, &child);
+        let resumed = e
+            .handle(
+                &viewing(&e, &log),
+                EngineEvent::BindFork(crate::transition::ForkBinding {
+                    fork,
+                    child: child.clone(),
+                }),
+            )
+            .expect("the same pair binds again as a resume");
+        let log = [log, appended_facts(resumed)].concat();
+
+        let again = e
+            .handle(&viewing(&e, &log), report_with(&log, &child, "done", vec![]))
+            .expect("the resumed child's return crosses");
+        let facts = appended_facts(again);
+        assert!(
+            matches!(
+                facts.as_slice(),
+                [
+                    Fact::ChildReturn { .. },
+                    Fact::ValueAdmitted { .. },
+                    Fact::Boundary {
+                        kind: crate::fact::BoundaryKind::Merge { .. },
+                        ..
+                    }
+                ]
+            ),
+            "a return after a resume is no replay: {facts:?}"
+        );
+        let log = [log, facts].concat();
+        assert_eq!(e.validate_replay(&log), Ok(()));
+        let views = viewing(&e, &log);
+        assert_eq!(
+            views.views(&traj()).expect("the parent is opened").returns_by(&child),
             2
         );
     }

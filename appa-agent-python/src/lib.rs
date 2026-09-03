@@ -4,11 +4,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use appa_runtime::api::{OfferId, RemedyOutcome, Runtime};
+use appa_runtime::api::{LabelSpelling, OfferId, OfferedRemedy, RemedyArguments, RemedyOutcome, Runtime};
 use appa_runtime::config::{Binding, Config, ExternalBindings};
 use appa_runtime::hooks;
 use appa_runtime_api::{
-    Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, SpawnBinding, SpawnRef, ToolOutcome, TrajectoryId,
+    Actor, HookDecision, HookEvent, OfferedReturn, OutcomeBody, ProposedCall, SpawnBinding, SpawnRef, ToolOutcome,
+    TrajectoryId,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::PyRuntimeError;
@@ -16,8 +17,8 @@ use pyo3::prelude::*;
 use pyo3::types::PyString;
 use serde::Serialize;
 
-const BINDING_IDENTITY: &str = "appa-agent-python-v6";
-const RETURN_SCHEMA_ARGUMENT: &str = "return_schema";
+const BINDING_IDENTITY: &str = "appa-agent-python-v7";
+const ATTEST_SCHEMA: &str = "attest-schema";
 const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 const MAX_BODY_BYTES: usize = 256 * 1024;
 const BRIDGE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -125,6 +126,7 @@ enum ChildBranch {
     Live {
         pending: Option<Pending>,
         spawn: ProposedCall,
+        context: Option<String>,
     },
     Spent,
 }
@@ -268,7 +270,7 @@ impl SessionInner {
         match self.children.get_mut(child) {
             None => Err(format!("no child branch {} is open in this session", child.0)),
             Some(ChildBranch::Spent) => Err(format!("the child branch {} has already returned", child.0)),
-            Some(ChildBranch::Live { pending, spawn }) => Ok((pending, spawn)),
+            Some(ChildBranch::Live { pending, spawn, .. }) => Ok((pending, spawn)),
         }
     }
 
@@ -349,7 +351,7 @@ impl SessionInner {
                 *self.slot(child)? = Some(Pending { call: call.clone() });
                 Ok(Decision::Allowed { call, binding })
             }
-            HookDecision::DenyCall { feedback } => Ok(Decision::Blocked { feedback }),
+            HookDecision::DenyCall { feedback, offers } => Ok(Decision::Blocked { feedback, offers }),
             HookDecision::PassControl => Ok(Decision::Control {
                 reply: self.execute_remedy(child, &call),
             }),
@@ -358,15 +360,12 @@ impl SessionInner {
     }
 
     fn execute_remedy(&self, child: Option<&TrajectoryId>, call: &ProposedCall) -> String {
-        let offer = serde_json::from_str::<serde_json::Value>(call.arguments.get())
-            .ok()
-            .and_then(|arguments| arguments.get(OFFER_ARGUMENT)?.as_str().map(str::to_string));
-        let Some(offer) = offer else {
+        let Ok((offer, arguments)) = appa_runtime::api::parse_control_arguments(call.arguments.get()) else {
             return format!("{CONTROL_TOOL} needs an {OFFER_ARGUMENT}, quoted exactly as the feedback surfaced it.");
         };
         match self
             .tokio
-            .block_on(self.runtime.execute_remedy(&self.actor(child), OfferId(offer)))
+            .block_on(self.runtime.execute_remedy_with(&self.actor(child), offer, arguments))
         {
             RemedyOutcome::Authorized { call } => format!(
                 "Authorized. Propose the {} call again with exactly these arguments; \
@@ -394,7 +393,7 @@ impl SessionInner {
         spawn: bool,
     ) -> Result<String, String> {
         encode(match self.decide(child, tool, arguments_json, spawn)? {
-            Decision::Blocked { feedback } => CheckResponse::Blocked { feedback },
+            Decision::Blocked { feedback, .. } => CheckResponse::Blocked { feedback },
             Decision::Control { reply } => CheckResponse::Control { reply },
             Decision::Allowed { call, binding } => CheckResponse::Allowed {
                 dispatched_tool: call.tool.clone(),
@@ -409,7 +408,7 @@ impl SessionInner {
             return Err("dispatch requires a bridge URL; use check and report for framework-owned tools".to_string());
         };
         match self.decide(None, tool, arguments_json, false)? {
-            Decision::Blocked { feedback } => encode(DispatchResponse::Blocked { feedback }),
+            Decision::Blocked { feedback, .. } => encode(DispatchResponse::Blocked { feedback }),
             Decision::Control { reply } => encode(DispatchResponse::Control { reply }),
             Decision::Allowed { call, .. } => {
                 let outcome = self
@@ -495,7 +494,7 @@ impl SessionInner {
     /// `binding` is the fork the spawn released; a harness whose child-start
     /// signal names no spawn call passes `None` and the runtime ties the
     /// child to the family's one spawn in flight.
-    fn open_child(&mut self, child: TrajectoryId, binding: Option<&str>) -> Result<(), String> {
+    fn open_child(&mut self, child: TrajectoryId, binding: Option<&str>) -> Result<Option<String>, String> {
         if self.closed {
             return Err("the session is closed".to_string());
         }
@@ -512,21 +511,39 @@ impl SessionInner {
             Some(binding) => SpawnRef::Binding(SpawnBinding(binding.to_string())),
             None => SpawnRef::InFlight,
         };
-        match self.event(HookEvent::ChildStart {
+        // The start answers with what the child must know about its return, if anything.
+        let context = match self.event(HookEvent::ChildStart {
             root: self.trajectory.clone(),
             child: child.clone(),
             spawn: reference,
         })? {
-            HookDecision::Ack => {
-                self.children.insert(child, ChildBranch::Live { pending: None, spawn });
-                Ok(())
-            }
-            other => Err(format!("the runtime answered a child start with {other:?}")),
-        }
+            HookDecision::Ack => None,
+            HookDecision::Context { text } => Some(text),
+            other => return Err(format!("the runtime answered a child start with {other:?}")),
+        };
+        self.children.insert(
+            child,
+            ChildBranch::Live {
+                pending: None,
+                spawn,
+                context: context.clone(),
+            },
+        );
+        Ok(context)
     }
 
-    /// Propose this session's spawn tool and open the child it releases.
-    fn spawn_child(&mut self, child: TrajectoryId, arguments_json: &str) -> Result<String, String> {
+    /// Propose this session's spawn tool and open the child it releases. The
+    /// spawn is held until the parent declares the child's return policy;
+    /// this harness declares it from its own arguments — attested against
+    /// `return_schema` where one is given, crossing as spoken otherwise, the
+    /// floor at this session's current label either way — and proposes the
+    /// spawn again.
+    fn spawn_child(
+        &mut self,
+        child: TrajectoryId,
+        arguments_json: &str,
+        return_schema: Option<serde_json::Value>,
+    ) -> Result<String, String> {
         let tool = self
             .spawn_tool
             .clone()
@@ -534,8 +551,18 @@ impl SessionInner {
         if self.children.contains_key(&child) {
             return Err(format!("the child branch {} is already open in this session", child.0));
         }
-        match self.decide(None, &tool, arguments_json, true)? {
-            Decision::Blocked { feedback } => encode(SpawnResponse::Blocked { feedback }),
+        let decision = match self.decide(None, &tool, arguments_json, true)? {
+            Decision::Blocked { feedback, offers } => match self.declare_return(&offers, return_schema)? {
+                Some(declared) => self.decide(None, &tool, declared.arguments.get(), true)?,
+                None => Decision::Blocked {
+                    feedback,
+                    offers: Vec::new(),
+                },
+            },
+            decision => decision,
+        };
+        match decision {
+            Decision::Blocked { feedback, .. } => encode(SpawnResponse::Blocked { feedback }),
             Decision::Control { reply } => encode(SpawnResponse::Control { reply }),
             Decision::Allowed { call, binding: None } => {
                 // The release prepared no fork, so no child exists to open. The
@@ -559,6 +586,7 @@ impl SessionInner {
                 call,
                 binding: Some(binding),
             } => {
+                // The child handle carries what the runtime told the child at its start.
                 self.open_child(child.clone(), Some(&binding.0))?;
                 encode(SpawnResponse::Opened {
                     child_id: child.0,
@@ -569,9 +597,55 @@ impl SessionInner {
         }
     }
 
-    /// Submit a child's return. One event crosses the value, ends the child
-    /// branch, and closes the parent's spawn dispatch — the runtime owns all
-    /// three, so the parent never holds the child's raw bytes.
+    /// The parent's return declaration for the child it spawns, taken from the
+    /// spawn's block. `None` where the block offers no return declaration: it
+    /// is an ordinary block, delivered as one.
+    fn declare_return(
+        &self,
+        offers: &[OfferedRemedy],
+        return_schema: Option<serde_json::Value>,
+    ) -> Result<Option<ProposedCall>, String> {
+        if !offers.iter().any(|offer| offer.returns.is_some()) {
+            return Ok(None);
+        }
+        let route = match return_schema {
+            Some(_) => OfferedReturn::Sanitized {
+                sanitizer: ATTEST_SCHEMA.to_string(),
+            },
+            None => OfferedReturn::AsSpoken,
+        };
+        let Some(offer) = offers.iter().find(|offer| offer.returns.as_ref() == Some(&route)) else {
+            return Err(format!(
+                "the policy registers no `{ATTEST_SCHEMA}` sanitizer, so the child's return cannot be attested \
+                 against a schema"
+            ));
+        };
+        let arguments = RemedyArguments {
+            label: Some(LabelSpelling::default()),
+            return_schema,
+        };
+        match self.tokio.block_on(self.runtime.execute_remedy_with(
+            &self.actor(None),
+            OfferId(offer.id.clone()),
+            arguments,
+        )) {
+            RemedyOutcome::Authorized { call } => Ok(Some(call)),
+            RemedyOutcome::Declined { feedback } | RemedyOutcome::NoAnswer { feedback } => {
+                Err(format!("the return declaration was not taken: {feedback}"))
+            }
+            RemedyOutcome::Refused { detail } => Err(format!("the return declaration was refused: {detail}")),
+            RemedyOutcome::Substituted { .. } | RemedyOutcome::Returned { .. } => {
+                Err("the return declaration answered with something other than an approval".to_string())
+            }
+        }
+    }
+
+    /// Submit a child's return. The child's stop checks it under the fork's
+    /// return policy; what the runtime names as crossing in place of the
+    /// child's words — a canonical rendering, a sanitizer's derivation — this
+    /// harness returns on the child's behalf, which crosses it. The spawn's
+    /// result then closes the parent's dispatch with the crossed value, and
+    /// the branch is spent.
     fn finish_child(&mut self, child: &TrajectoryId, value: Option<String>) -> Result<String, String> {
         if self.closed {
             return Err("the session is closed".to_string());
@@ -584,7 +658,16 @@ impl SessionInner {
             ));
         }
         let spawn = spawn.clone();
-        let said = value.clone();
+        let (crossing, disposition) = match self.stop(child, value.clone())? {
+            HookDecision::Ack => (value, ReturnDisposition::Crossed),
+            HookDecision::ChildReturn { value } => match self.stop(child, Some(value.clone()))? {
+                HookDecision::Ack => (Some(value), ReturnDisposition::Substituted),
+                other => return Err(format!("the runtime answered the echoed return with {other:?}")),
+            },
+            // A held return keeps the branch live: the child may return again.
+            HookDecision::Block { reason } => return encode(ReturnResponse::Blocked { feedback: reason }),
+            other => return Err(format!("the runtime answered a child return with {other:?}")),
+        };
         let decision = self.event(HookEvent::SpawnResult {
             actor: self.actor(None),
             call: spawn,
@@ -592,23 +675,31 @@ impl SessionInner {
                 body: OutcomeBody::Unavailable,
             },
             child: Some(child.clone()),
-            value,
+            value: crossing.clone(),
         })?;
-        // The runtime closed the parent's spawn dispatch on every answer it
-        // gives here, so the branch is spent whether the return crossed or not.
         self.pending = None;
         self.children.insert(child.clone(), ChildBranch::Spent);
         encode(match decision {
             HookDecision::Ack => ReturnResponse::Returned {
-                value: said,
-                disposition: ReturnDisposition::Crossed,
+                value: crossing,
+                disposition,
             },
-            HookDecision::ChildReturn { value } => ReturnResponse::Returned {
-                value: Some(value),
-                disposition: ReturnDisposition::Substituted,
+            // A void return closes the spawn with nothing carried; the placeholder
+            // is the parent's tool result, not a value.
+            HookDecision::ReplaceOutput { .. } if crossing.is_none() => ReturnResponse::Returned {
+                value: None,
+                disposition,
             },
             HookDecision::Block { reason } => ReturnResponse::Blocked { feedback: reason },
-            other => return Err(format!("the runtime answered a child return with {other:?}")),
+            other => return Err(format!("the runtime answered a spawn result with {other:?}")),
+        })
+    }
+
+    fn stop(&self, child: &TrajectoryId, value: Option<String>) -> Result<HookDecision, String> {
+        self.event(HookEvent::ChildEnd {
+            root: self.trajectory.clone(),
+            child: child.clone(),
+            value,
         })
     }
 
@@ -631,6 +722,7 @@ impl SessionInner {
 enum Decision {
     Blocked {
         feedback: String,
+        offers: Vec<OfferedRemedy>,
     },
     Allowed {
         call: ProposedCall,
@@ -680,11 +772,10 @@ impl ToolInput {
 /// the harness runs it, and claiming coverage would be a claim this process cannot
 /// keep.
 ///
-/// Naming a spawn tool declares child-context control and a confined child
-/// return. The confined return this process does keep: `finish` hands back only
+/// Naming a spawn tool declares child-context control. `finish` hands back only
 /// what the runtime says crossed, so the parent never receives the child's raw
-/// bytes. Child-context control it cannot check — that each child really runs on
-/// its own model context is the embedding harness's to keep.
+/// bytes; that each child really runs on its own model context is the embedding
+/// harness's to keep, not this process's to check.
 fn compose_policy(
     policy_toml: &str,
     tools: &[ToolInput],
@@ -720,7 +811,6 @@ fn compose_policy(
     }
     if spawn_tool.is_some() {
         deployment.insert("context_control".to_string(), toml::Value::Boolean(true));
-        deployment.insert("confined_child_return".to_string(), toml::Value::Boolean(true));
     }
     table.insert("deployment".to_string(), toml::Value::Table(deployment));
     Ok(policy)
@@ -845,25 +935,14 @@ fn arguments_text(arguments: Option<&Bound<'_, PyAny>>) -> PyResult<String> {
     }
 }
 
-/// The spawn call's arguments, with the parent's authored `return_schema`
-/// placed where the engine reads it.
-fn spawn_arguments(arguments: Option<&Bound<'_, PyAny>>, return_schema: Option<&Bound<'_, PyAny>>) -> PyResult<String> {
-    let text = arguments_text(arguments)?;
-    let Some(return_schema) = return_schema else {
-        return Ok(text);
-    };
-    let mut object: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&text)
-        .map_err(|error| AppaError::new_err(format!("the spawn arguments must be a JSON object: {error}")))?;
-    if object.contains_key(RETURN_SCHEMA_ARGUMENT) {
-        return Err(AppaError::new_err(
-            "the spawn arguments already carry a return_schema; pass it once",
-        ));
-    }
-    let schema: serde_json::Value = serde_json::from_str(&json_text(return_schema)?)
-        .map_err(|error| AppaError::new_err(format!("the return schema is not JSON: {error}")))?;
-    object.insert(RETURN_SCHEMA_ARGUMENT.to_string(), schema);
-    serde_json::to_string(&object)
-        .map_err(|error| AppaError::new_err(format!("could not encode the spawn arguments: {error}")))
+/// The parent's authored `return_schema`, as JSON.
+fn return_schema_value(return_schema: Option<&Bound<'_, PyAny>>) -> PyResult<Option<serde_json::Value>> {
+    return_schema
+        .map(|schema| {
+            serde_json::from_str(&json_text(schema)?)
+                .map_err(|error| AppaError::new_err(format!("the return schema is not JSON: {error}")))
+        })
+        .transpose()
 }
 
 fn with<T>(inner: &Arc<Mutex<SessionInner>>, act: impl FnOnce(&mut SessionInner) -> Result<T, String>) -> PyResult<T> {
@@ -937,7 +1016,9 @@ impl Session {
     /// Propose this session's spawn tool and open the child it releases.
     /// Returns the proposal's decision and, when it opened one, the branch.
     /// A spawn the policy blocks is a decision, not an error, so the branch is
-    /// `None` there.
+    /// `None` there. With `return_schema` the child's return is attested
+    /// against it; without, it crosses as the child spoke it. Either way the
+    /// child may narrow no further than this session stands now.
     #[pyo3(signature = (child_id, return_schema=None, arguments=None))]
     fn spawn_child(
         &self,
@@ -946,9 +1027,14 @@ impl Session {
         return_schema: Option<&Bound<'_, PyAny>>,
         arguments: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<(String, Option<ChildSession>)> {
-        let arguments = spawn_arguments(arguments, return_schema)?;
+        let arguments = arguments_text(arguments)?;
+        let return_schema = return_schema_value(return_schema)?;
         let child = TrajectoryId(child_id.to_string());
-        let decision = py.detach(|| with(&self.inner, |inner| inner.spawn_child(child.clone(), &arguments)))?;
+        let decision = py.detach(|| {
+            with(&self.inner, |inner| {
+                inner.spawn_child(child.clone(), &arguments, return_schema.clone())
+            })
+        })?;
         let opened = with(&self.inner, |inner| Ok(inner.children.contains_key(&child)))?;
         Ok((decision, opened.then(|| self.branch(child))))
     }
@@ -960,7 +1046,11 @@ impl Session {
     #[pyo3(signature = (child_id, binding=None))]
     fn open_child(&self, py: Python<'_>, child_id: &str, binding: Option<&str>) -> PyResult<ChildSession> {
         let child = TrajectoryId(child_id.to_string());
-        py.detach(|| with(&self.inner, |inner| inner.open_child(child.clone(), binding)))?;
+        py.detach(|| {
+            with(&self.inner, |inner| {
+                inner.open_child(child.clone(), binding).map(|_| ())
+            })
+        })?;
         Ok(self.branch(child))
     }
 
@@ -1010,6 +1100,17 @@ impl ChildSession {
     #[getter]
     fn child_id(&self) -> &str {
         &self.child.0
+    }
+
+    /// What the runtime told this child about its return when it started, for
+    /// the harness to put in front of the child's model: the schema an attested
+    /// return must match. `None` where the return crosses as spoken.
+    #[getter]
+    fn context(&self) -> PyResult<Option<String>> {
+        with(&self.inner, |inner| match inner.children.get(&self.child) {
+            Some(ChildBranch::Live { context, .. }) => Ok(context.clone()),
+            Some(ChildBranch::Spent) | None => Ok(None),
+        })
     }
 
     #[pyo3(signature = (tool, arguments=None))]
@@ -1206,7 +1307,6 @@ delta    = {}
             .get("deployment")
             .expect("a spawn tool declares a deployment in the framework profile");
         assert_eq!(deployment["context_control"].as_bool(), Some(true));
-        assert_eq!(deployment["confined_child_return"].as_bool(), Some(true));
         assert!(
             deployment.get("dispatch").is_none(),
             "the framework profile still runs its own tools",
@@ -1221,7 +1321,6 @@ delta    = {}
         let deployment = composed.get("deployment").expect("both profiles declare one");
         assert_eq!(deployment["dispatch"].as_str(), Some("enforced"));
         assert_eq!(deployment["context_control"].as_bool(), Some(true));
-        assert_eq!(deployment["confined_child_return"].as_bool(), Some(true));
     }
 
     const CHILD_POLICY: &str = r#"
@@ -1247,12 +1346,15 @@ name = "attest-schema"
 on   = ["tool_output"]
 [sanitizer.permits]
 trust = { from = "suspicious", to = "trusted" }
-
-[child]
-return_sanitizer = "attest-schema"
 "#;
 
-    const SCHEMA: &str = r#"{"return_schema":{"type":"object","properties":{"status":{"type":"string","enum":["verified","rejected"]}},"required":["status"]}}"#;
+    fn schema() -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "type": "object",
+            "properties": {"status": {"type": "string", "enum": ["verified", "rejected"]}},
+            "required": ["status"],
+        }))
+    }
 
     fn child_session() -> SessionInner {
         SessionInner::open(
@@ -1274,7 +1376,7 @@ return_sanitizer = "attest-schema"
     /// the narrowing the read surfaces.
     fn quarantined() -> SessionInner {
         let mut session = child_session();
-        assert_eq!(kind(&session.spawn_child(child(), SCHEMA).unwrap()), "opened");
+        assert_eq!(kind(&session.spawn_child(child(), "{}", schema()).unwrap()), "opened");
 
         let blocked = session.check(Some(&child()), "read_external", "{}", false).unwrap();
         assert_eq!(kind(&blocked), "blocked");
@@ -1354,7 +1456,7 @@ return_sanitizer = "attest-schema"
     #[test]
     fn a_child_holding_an_open_call_does_not_return() {
         let mut session = child_session();
-        assert_eq!(kind(&session.spawn_child(child(), SCHEMA).unwrap()), "opened");
+        assert_eq!(kind(&session.spawn_child(child(), "{}", schema()).unwrap()), "opened");
         assert_eq!(
             kind(
                 &session
@@ -1385,7 +1487,7 @@ return_sanitizer = "attest-schema"
     #[test]
     fn the_parent_may_not_close_the_spawn_its_child_still_owes() {
         let mut session = child_session();
-        assert_eq!(kind(&session.spawn_child(child(), SCHEMA).unwrap()), "opened");
+        assert_eq!(kind(&session.spawn_child(child(), "{}", schema()).unwrap()), "opened");
 
         let reported = session.root_report(Some("done"), false).unwrap_err();
         assert!(reported.contains("finish"), "got: {reported}");
@@ -1417,9 +1519,19 @@ return_sanitizer = "attest-schema"
     }
 
     #[test]
+    fn a_void_return_closes_the_spawn_with_nothing_carried() {
+        let mut session = quarantined();
+        let answered: serde_json::Value = serde_json::from_str(&session.finish_child(&child(), None).unwrap()).unwrap();
+        assert_eq!(answered["kind"], "returned");
+        assert!(answered["value"].is_null(), "got: {answered}");
+        let error = session.finish_child(&child(), None).unwrap_err();
+        assert!(error.contains("already returned"), "got: {error}");
+    }
+
+    #[test]
     fn a_session_that_names_no_spawn_tool_opens_no_child() {
         let mut session = session(None);
-        let error = session.spawn_child(child(), "{}").unwrap_err();
+        let error = session.spawn_child(child(), "{}", None).unwrap_err();
         assert!(error.contains("no spawn tool"), "got: {error}");
     }
 
@@ -1445,7 +1557,7 @@ return_sanitizer = "attest-schema"
         session.root_check("read_external", "{}").unwrap();
         session.root_report(Some("untrusted"), false).unwrap();
 
-        let answered = session.spawn_child(child(), SCHEMA).unwrap();
+        let answered = session.spawn_child(child(), "{}", schema()).unwrap();
         assert_eq!(kind(&answered), "blocked");
         assert!(session.children.is_empty(), "a refused spawn opens no branch");
         assert!(session.pending.is_none(), "a refused spawn owes no outcome");

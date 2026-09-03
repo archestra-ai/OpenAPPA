@@ -380,6 +380,7 @@ fn replay(entries: &[AuditEntry]) {
             }
             AuditEvent::Merged => eprintln!("appa: [{at}] merged a child return"),
             AuditEvent::VoidReturn => eprintln!("appa: [{at}] ended with a void return"),
+            AuditEvent::Resumed { seed } => eprintln!("appa: [{at}] resumed at {}/{}", seed.trust, seed.audience),
         }
     }
 }

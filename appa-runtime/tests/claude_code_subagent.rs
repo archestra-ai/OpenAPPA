@@ -3,10 +3,10 @@ use common::{offers, repo_root};
 
 use std::path::Path;
 
-use appa_runtime::api::{AuditEvent, RemedyOutcome, Runtime, TrajectoryId};
+use appa_runtime::api::{AuditEvent, LabelSpelling, OfferId, RemedyArguments, RemedyOutcome, Runtime, TrajectoryId};
 use appa_runtime::config::Config;
 use appa_runtime::hooks;
-use appa_runtime_api::Actor;
+use appa_runtime_api::{Actor, HookDecision, HookEvent};
 
 /// One recorded Claude Code session: the hook bodies it delivered, in
 /// order, scrubbed of local paths.
@@ -162,10 +162,18 @@ fn returns(runtime: &Runtime, root: &TrajectoryId) -> Vec<Option<String>> {
 }
 
 /// Replay `events` as recorded, asserting each answers as the recording
-/// had it: every call released, every other hook without an opinion.
+/// had it: every call released, every other hook without an opinion. The
+/// parent's spawn is declared as spoken first unless a test declared it already.
 async fn replay(runtime: &Runtime, events: &[serde_json::Value]) {
     for event in events {
         let name = event["hook_event_name"].as_str().expect("each event names its hook");
+        if is_parent_spawn(event) {
+            match hooks::handle(runtime, parsed(event)).await {
+                HookDecision::DenyCall { .. } => declare_spawn(runtime, event, None, as_spoken()).await,
+                HookDecision::AllowCall { spawn: Some(_) } => continue,
+                other => panic!("the recorded spawn answered {other:?}"),
+            }
+        }
         let (status, answer) = call(runtime, event).await;
         assert_eq!(status, 200, "{name} answered {answer}");
         match name {
@@ -182,6 +190,65 @@ async fn replay(runtime: &Runtime, events: &[serde_json::Value]) {
 fn blocked(answer: &serde_json::Value) -> &str {
     assert_eq!(answer["decision"], "block", "{answer}");
     answer["reason"].as_str().expect("a block carries its reason")
+}
+
+fn parsed(event: &serde_json::Value) -> HookEvent {
+    let body = serde_json::to_vec(event).expect("the event serializes");
+    (appa_adapter_claude_code::codec().parse)(&body)
+        .expect("the recorded event parses")
+        .expect("the recorded event maps to a hook event")
+}
+
+/// The parent's own Agent call: the spawn the return menu gates.
+fn is_parent_spawn(event: &serde_json::Value) -> bool {
+    event["hook_event_name"] == "PreToolUse" && event["tool_name"] == "Agent" && event.get("agent_id").is_none()
+}
+
+/// The bare declaration: the return crosses as spoken, floored at the parent's current label.
+fn as_spoken() -> RemedyArguments {
+    RemedyArguments {
+        label: Some(LabelSpelling::default()),
+        return_schema: None,
+    }
+}
+
+fn floored_at(trust: &str) -> RemedyArguments {
+    RemedyArguments {
+        label: Some(LabelSpelling {
+            trust: Some(trust.to_string()),
+            audience: None,
+        }),
+        return_schema: None,
+    }
+}
+
+/// Propose the recorded spawn: blocked on the return menu, the parent declares the
+/// return through `route` (none: as spoken) with `arguments`. The re-proposed spawn
+/// then releases, as `replay` asserts.
+async fn declare_spawn(runtime: &Runtime, spawn: &serde_json::Value, route: Option<&str>, arguments: RemedyArguments) {
+    let HookEvent::ToolCall { actor, .. } = parsed(spawn) else {
+        panic!("the spawn is a tool call");
+    };
+    let decision = hooks::handle(runtime, parsed(spawn)).await;
+    let HookDecision::DenyCall { offers, .. } = decision else {
+        panic!("a marked spawn blocks until its return is declared, got {decision:?}");
+    };
+    let offer = offers
+        .iter()
+        .find(|offer| {
+            offer.returns.as_ref().map(|offered| match offered {
+                appa_runtime_api::OfferedReturn::AsSpoken => None,
+                appa_runtime_api::OfferedReturn::Sanitized { sanitizer } => Some(sanitizer.as_str()),
+            }) == Some(route)
+        })
+        .expect("the menu offers the requested return route");
+    let declared = runtime
+        .execute_remedy_with(&actor, OfferId(offer.id.clone()), arguments)
+        .await;
+    assert!(
+        matches!(declared, RemedyOutcome::Authorized { .. }),
+        "the declaration approves the spawn, got {declared:?}"
+    );
 }
 
 #[tokio::test]
@@ -209,8 +276,8 @@ async fn the_synchronous_recording_crosses_the_return_at_the_subagents_stop() {
     let (status, answer) = call(&runtime, &hook(&events, "PreToolUse", Some("Bash"), true)).await;
     assert_eq!(status, 200);
     assert_eq!(
-        answer["hookSpecificOutput"]["permissionDecision"], "deny",
-        "the returned subagent proposes nothing more: {answer}"
+        answer["hookSpecificOutput"]["permissionDecision"], "allow",
+        "a return leaves the subagent live to work on: {answer}"
     );
     let (status, answer) = call(&runtime, &as_root(hook(&events, "PreToolUse", Some("Bash"), true))).await;
     assert_eq!(status, 200);
@@ -253,7 +320,7 @@ async fn the_asynchronous_recording_returns_while_the_parent_is_free() {
 }
 
 #[tokio::test]
-async fn a_repeated_stop_answers_as_before_and_a_different_return_is_blocked() {
+async fn a_repeated_stop_answers_as_before_and_a_different_return_crosses_again() {
     let runtime = deployment("", "", "delta = {}");
     let root = ASYNC.root();
     let events = ASYNC.events();
@@ -272,13 +339,22 @@ async fn a_repeated_stop_answers_as_before_and_a_different_return_is_blocked() {
     let mut other = re_fired(stop);
     other["last_assistant_message"] = serde_json::json!("a different report");
     let (status, answer) = call(&runtime, &other).await;
-    assert_eq!(status, 200, "{answer}");
-    blocked(&answer);
-    assert_eq!(returns(&runtime, &root), vec![None], "a child returns once");
+    assert_eq!(
+        (status, answer),
+        (200, serde_json::json!({})),
+        "a later stop with something new is a later return"
+    );
+    assert_eq!(
+        returns(&runtime, &root),
+        vec![None, None],
+        "a child returns as often as it stops with something new"
+    );
 }
 
+/// Claude Code's Agent result names the subagent by id; when the start hook
+/// never came, the result is where the child binds to the spawn in flight.
 #[tokio::test]
-async fn a_stop_from_a_child_the_family_never_saw_start_is_blocked() {
+async fn an_agent_result_binds_the_child_whose_start_never_came() {
     let runtime = deployment("", "", "delta = {}");
     let root = ASYNC.root();
     let events = ASYNC.events();
@@ -286,8 +362,26 @@ async fn a_stop_from_a_child_the_family_never_saw_start_is_blocked() {
     let ack = hook(&events, "PostToolUse", Some("Agent"), false);
 
     replay(&runtime, &events[..start]).await;
+    assert_eq!(forks(&runtime, &root), 0, "no start yet, no binding");
     replay(&runtime, std::slice::from_ref(&ack)).await;
-    assert_eq!(forks(&runtime, &root), 0, "no start, no binding");
+    assert_eq!(forks(&runtime, &root), 1, "the Agent result bound the child it names");
+
+    let stop = child_stop(&events);
+    let (status, answer) = call(&runtime, &stop).await;
+    assert_eq!(
+        (status, answer),
+        (200, serde_json::json!({})),
+        "the bound child's stop crosses"
+    );
+    assert_eq!(returns(&runtime, &root), vec![None]);
+}
+
+#[tokio::test]
+async fn a_stop_with_no_spawn_at_all_is_blocked() {
+    let runtime = deployment("", "", "delta = {}");
+    let root = ASYNC.root();
+    let events = ASYNC.events();
+    replay(&runtime, &events[..1]).await;
 
     let stop = child_stop(&events);
     for attempt in [stop.clone(), re_fired(stop)] {
@@ -299,17 +393,46 @@ async fn a_stop_from_a_child_the_family_never_saw_start_is_blocked() {
     }
 }
 
-/// The subagent read something the policy ranks as suspicious, so its
-/// return would narrow the parent. The stop is blocked and the subagent
-/// held while the parent, free since the launch acknowledgement, decides;
-/// once the parent accepts the narrowing the held stop crosses.
+/// The subagent's read ranks as suspicious. Under the floor the parent declared as
+/// spoken — its own trusted label — the subagent is offered no acceptance: nothing it
+/// admits may fall below what its return could carry.
 #[tokio::test]
-async fn a_narrowing_return_is_held_at_the_stop_until_the_parent_accepts_it() {
+async fn a_subagent_under_the_parents_own_floor_cannot_accept_a_suspicious_read() {
+    let runtime = deployment("", "", "delta = { trust = \"suspicious\" }");
+    let events = ASYNC.events();
+    let ack = index_of(&events, &hook(&events, "PostToolUse", Some("Agent"), false));
+    replay(&runtime, &events[..=ack]).await;
+
+    let read = hook(&events, "PreToolUse", Some("Bash"), true);
+    let (status, answer) = call(&runtime, &read).await;
+    assert_eq!(status, 200);
+    assert_eq!(answer["hookSpecificOutput"]["permissionDecision"], "deny", "{answer}");
+    let reason = answer["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("the block carries its reason");
+    assert!(
+        offers(reason).is_empty(),
+        "no acceptance below the declared floor is offered: {reason}"
+    );
+}
+
+/// The parent declared at the spawn that it takes a suspicious return. The subagent
+/// accepts its suspicious read, its stop crosses at once, and the parent stands
+/// narrowed to the floor it declared.
+#[tokio::test]
+async fn a_parent_that_declared_a_suspicious_floor_takes_the_narrowing_return_at_the_stop() {
     let runtime = deployment("", "", "delta = { trust = \"suspicious\" }");
     let root = ASYNC.root();
     let child = ASYNC.child();
     let events = ASYNC.events();
     let ack = index_of(&events, &hook(&events, "PostToolUse", Some("Agent"), false));
+    declare_spawn(
+        &runtime,
+        &hook(&events, "PreToolUse", Some("Agent"), false),
+        None,
+        floored_at("suspicious"),
+    )
+    .await;
     replay(&runtime, &events[..=ack]).await;
 
     let read = hook(&events, "PreToolUse", Some("Bash"), true);
@@ -335,67 +458,76 @@ async fn a_narrowing_return_is_held_at_the_stop_until_the_parent_accepts_it() {
 
     let stop = child_stop(&events);
     let (status, answer) = call(&runtime, &stop).await;
-    assert_eq!(status, 200, "{answer}");
-    let reason = blocked(&answer).to_string();
-    assert!(returns(&runtime, &root).is_empty(), "the held return crossed nothing");
-    let (status, answer) = call(&runtime, &re_fired(stop.clone())).await;
-    assert_eq!(status, 200, "{answer}");
-    blocked(&answer);
-
-    let acceptance = offers(&reason)
-        .pop()
-        .expect("the held return offers the parent its acceptance");
-    let acting_root = Actor {
-        root: root.clone(),
-        child: None,
-    };
-    let RemedyOutcome::Returned { value } = runtime.execute_remedy(&acting_root, acceptance).await else {
-        panic!("the parent's acceptance crosses the held return");
-    };
-    assert_eq!(Some(value.as_str()), stop["last_assistant_message"].as_str());
-    assert_eq!(returns(&runtime, &root), vec![None]);
-
-    let (status, answer) = call(&runtime, &re_fired(stop)).await;
     assert_eq!(
         (status, answer),
         (200, serde_json::json!({})),
-        "the re-fired stop finds its return crossed and lets the subagent finish"
+        "the return crosses at the stop: the parent settled the narrowing at the spawn"
+    );
+    assert_eq!(returns(&runtime, &root), vec![None]);
+    assert_eq!(
+        runtime.status(&root).expect("the root answers").trust,
+        "suspicious",
+        "the crossing narrowed the parent to the floor it declared"
     );
 }
 
-/// The parent receives the subagent's message through a channel no hook
-/// rewrites, so a deployment whose policy would put a sanitized return in
-/// the parent's hands is refused before the runtime serves it. Should one
-/// reach the dispatcher anyway, the stop fails closed.
+/// The parent routed the return through a sanitizer at the spawn. The subagent's
+/// stop is held with the sanitized message to return instead; its next stop with
+/// exactly that message crosses.
 #[tokio::test]
-async fn a_return_the_policy_would_sanitize_blocks_the_stop() {
+async fn a_return_routed_through_a_sanitizer_is_echoed_sanitized_before_it_crosses() {
     let runtime = deployment(
-        r#"confined_child_return = true
-
+        r#"
 [[policy.sanitizer]]
 name = "redactor"
 on = ["tool_output"]
 permits = { audience = { from = ["internal"], to = ["public"] } }
-
-[policy.child]
-return_sanitizer = "redactor"
 "#,
         "[externals.sanitizers.redactor]\nbuiltin = \"redact-email\"\n",
         "delta = {}",
     );
+    let root = SYNC.root();
     let events = SYNC.events();
+    let start = index_of(&events, &hook(&events, "SubagentStart", None, true));
     let stop = index_of(&events, &child_stop(&events));
-    replay(&runtime, &events[..stop]).await;
+    declare_spawn(
+        &runtime,
+        &hook(&events, "PreToolUse", Some("Agent"), false),
+        Some("redactor"),
+        as_spoken(),
+    )
+    .await;
+    replay(&runtime, &events[..start]).await;
+    let (status, answer) = call(&runtime, &events[start]).await;
+    assert_eq!(status, 200, "{answer}");
+    assert!(
+        answer["hookSpecificOutput"]["additionalContext"].is_string(),
+        "the start tells the subagent its return goes through the sanitizer: {answer}"
+    );
+    replay(&runtime, &events[start + 1..stop]).await;
 
     let mut stop = events[stop].clone();
     stop["last_assistant_message"] = serde_json::json!("one file; ask bob@example.com for more");
+    let HookDecision::ChildReturn { value } = hooks::handle(&runtime, parsed(&stop)).await else {
+        panic!("the stop is held with the sanitized message to return");
+    };
+    assert!(!value.contains("bob@example.com"), "the raw address is gone: {value}");
     let (status, answer) = call(&runtime, &stop).await;
     assert_eq!(status, 200, "{answer}");
-    let reason = blocked(&answer);
     assert!(
-        !reason.contains("bob@example.com"),
-        "the raw return is not echoed: {reason}"
+        !blocked(&answer).contains("bob@example.com"),
+        "the raw return is not echoed: {answer}"
     );
+    assert!(returns(&runtime, &root).is_empty(), "nothing crossed yet");
+
+    stop["last_assistant_message"] = serde_json::json!(value);
+    let (status, answer) = call(&runtime, &stop).await;
+    assert_eq!(
+        (status, answer),
+        (200, serde_json::json!({})),
+        "the echoed message crosses"
+    );
+    assert_eq!(returns(&runtime, &root), vec![Some("redactor".to_string())]);
 }
 
 #[tokio::test]

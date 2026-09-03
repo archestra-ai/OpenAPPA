@@ -56,11 +56,14 @@ def test_the_parent_keeps_its_own_trust_while_the_child_spends_its_own(session: 
     ],
 )
 def test_a_return_outside_the_bound_shape_crosses_nothing(session: Session, case: str, value):
+    """A refused return keeps the child live to return again; here it returns
+    nothing, and the parent is as it was."""
     child = quarantined(session)
 
     answered = decision(child.finish(value))
     assert answered["kind"] == "blocked", f"{case} must not cross: {answered}"
 
+    assert decision(child.finish())["value"] is None
     delivered = decision(session.check("deliver_result", {"text": "done"}))
     assert delivered["kind"] == "allowed", "a refused return leaves the parent as it was"
 

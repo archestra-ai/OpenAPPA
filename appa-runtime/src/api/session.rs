@@ -11,7 +11,7 @@ use crate::consult::{
 };
 use crate::engine::{
     AuthorityVerdict, EngineDecision, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Feedback, ForkStatus,
-    Liveness, Next, OfferNonce, OpenDispatch, Presentation, engine_id,
+    Liveness, Next, OfferNonce, OpenDispatch, Presentation, RemedyArguments, engine_id,
 };
 use crate::external::ConsultOutcome;
 
@@ -111,9 +111,24 @@ pub(crate) enum LateOpen {
 
 enum SpawnPlan {
     Outcome,
-    Return(TrajectoryId),
+    Bind {
+        fork: appa_engine::value::ForkId,
+        child: TrajectoryId,
+    },
+    Replay,
+    Withheld,
     Close(EventError),
 }
+
+/// The spawn result carried a message the child never returned at a stop: the harness
+/// ended the child itself (a turn cap, a kill) and delivered what it had. Nothing crossed.
+const UNCHECKED_RETURN: &str = "[appa] the subagent ended outside the return check and its message is withheld; \
+                                nothing from it crossed into this session";
+
+/// A child that ended by returning nothing is held on any later message: nothing it says
+/// now can cross, and an empty stop lets it go.
+const ENDED_CHILD: &str = "[appa] this subagent ended without a return; nothing it says now can cross. Stop with an \
+                           empty final message.";
 
 fn outcome_decision(decision: EngineDecision) -> Result<ToolResultDecision, EventError> {
     match decision.then {
@@ -133,6 +148,7 @@ fn outcome_decision(decision: EngineDecision) -> Result<ToolResultDecision, Even
 fn return_decision(decision: EngineDecision) -> Result<ChildReturnDecision, EventError> {
     match decision.then {
         Next::PresentToModel(Presentation::Value { value }) => Ok(ChildReturnDecision::Returned { value }),
+        Next::PresentToModel(Presentation::Staged { value }) => Ok(ChildReturnDecision::Staged { value }),
         Next::PresentToModel(Presentation::NoValue) => Ok(ChildReturnDecision::NoValue),
         Next::PresentToModel(Presentation::Blocked { feedback, .. }) => Ok(ChildReturnDecision::Blocked { feedback }),
         _ => Err(EventError::UnexpectedDecision),
@@ -301,6 +317,7 @@ impl Session {
                     tracing::debug!(trajectory = %self.trajectory.0, "call blocked");
                     Ok(ToolCallDecision::Deny {
                         feedback: join_feedback(feedback),
+                        offers: feedback.iter().flat_map(|entry| entry.offers.clone()).collect(),
                     })
                 }
                 _ => Err(EventError::UnexpectedDecision),
@@ -403,6 +420,15 @@ impl Session {
         .await
     }
 
+    /// The spawn call's own result, keyed on where its fork stands and on
+    /// the child the harness names. A prepared fork binds to the named
+    /// child here: the harness's acknowledgement can land before the
+    /// child's start, and a parallel spawn is told apart by name. A bound
+    /// fork's result closes the dispatch; a message it carries either
+    /// repeats the child's latest crossed return, and replays it, or was
+    /// never checked at a stop — the harness delivered content the child
+    /// never returned — and is withheld from the parent with nothing
+    /// admitted.
     pub async fn on_spawn_result(
         &self,
         call: ProposedCall,
@@ -411,95 +437,98 @@ impl Session {
         value: Option<String>,
     ) -> Result<SpawnResultDecision, EventError> {
         let outcome = self.cap_outcome(outcome);
-        // The attempt that commits is the one whose plan the delivery below
-        // follows, so each attempt overwrites what the last one wrote.
-        let mut plan: Option<SpawnPlan> = None;
-        let decision = self
-            .drive_with_evidence(
-                |context, evidence| {
-                    let open = context.open_dispatches();
-                    let dispatch = match classify_report(&call, || context.canonical_bytes(&call), &open) {
-                        Ok(dispatch) => dispatch,
-                        Err(case) => return Err(self.refuse_report(case, &call, &open)),
-                    };
-                    let fork = appa_engine::value::ForkId::of(&dispatch);
-                    let next = match context.fork_status(&fork) {
-                        _ if matches!(outcome, ToolOutcome::Indeterminate) => SpawnPlan::Outcome,
-                        ForkStatus::Unprepared => SpawnPlan::Outcome,
-                        ForkStatus::Bound(bound) => match &child {
-                            Some(child) if engine_id(child) == bound => SpawnPlan::Return(child.clone()),
-                            _ => SpawnPlan::Close(EventError::BindingMismatch),
-                        },
-                        ForkStatus::Prepared | ForkStatus::Failed | ForkStatus::ParentEnded => {
-                            SpawnPlan::Close(EventError::SpawnNotTaken)
-                        }
-                    };
-                    let event = match &next {
-                        SpawnPlan::Outcome => EngineEvent::ToolOutcome {
-                            dispatch,
-                            outcome: outcome.clone(),
-                            evidence,
-                            entropy: fresh_entropy(),
-                        },
-                        SpawnPlan::Return(child) => EngineEvent::ChildReturn {
-                            child: child.clone(),
-                            value: value.clone(),
-                            evidence,
-                            entropy: fresh_entropy(),
-                        },
-                        SpawnPlan::Close(refusal) => EngineEvent::ToolOutcome {
-                            dispatch,
-                            outcome: ToolOutcome::Failure {
-                                message: refusal.to_string(),
+        // At most two engine events: the binding, then the result on the bound fork.
+        for _ in 0..2 {
+            // The attempt that commits is the one whose plan the delivery below
+            // follows, so each attempt overwrites what the last one wrote.
+            let mut plan: Option<SpawnPlan> = None;
+            let decision = self
+                .drive_with_evidence(
+                    |context, evidence| {
+                        let open = context.open_dispatches();
+                        let dispatch = match classify_report(&call, || context.canonical_bytes(&call), &open) {
+                            Ok(dispatch) => dispatch,
+                            Err(case) => return Err(self.refuse_report(case, &call, &open)),
+                        };
+                        let fork = appa_engine::value::ForkId::of(&dispatch);
+                        let next = match (context.fork_status(&fork), &child) {
+                            _ if matches!(outcome, ToolOutcome::Indeterminate) => SpawnPlan::Outcome,
+                            (ForkStatus::Unprepared, _) => SpawnPlan::Outcome,
+                            (ForkStatus::Prepared, Some(child)) => SpawnPlan::Bind {
+                                fork: fork.clone(),
+                                child: child.clone(),
                             },
-                            evidence,
-                            entropy: fresh_entropy(),
-                        },
-                    };
-                    plan = Some(next);
-                    Ok(event)
+                            (ForkStatus::Prepared, None) | (ForkStatus::Failed | ForkStatus::ParentEnded, _) => {
+                                SpawnPlan::Close(EventError::SpawnNotTaken)
+                            }
+                            (ForkStatus::Bound(bound), Some(child)) if engine_id(child) == bound => match &value {
+                                None => SpawnPlan::Outcome,
+                                Some(said) if context.latest_return(child).as_deref() == Some(said.as_str()) => {
+                                    SpawnPlan::Replay
+                                }
+                                Some(_) => SpawnPlan::Withheld,
+                            },
+                            (ForkStatus::Bound(_), _) => SpawnPlan::Close(EventError::BindingMismatch),
+                        };
+                        let event = match &next {
+                            SpawnPlan::Outcome => EngineEvent::ToolOutcome {
+                                dispatch,
+                                outcome: outcome.clone(),
+                                evidence,
+                                entropy: fresh_entropy(),
+                            },
+                            SpawnPlan::Bind { fork, child } => EngineEvent::BindFork {
+                                fork: fork.clone(),
+                                child: child.clone(),
+                            },
+                            SpawnPlan::Replay | SpawnPlan::Withheld => EngineEvent::ToolOutcome {
+                                dispatch,
+                                outcome: ToolOutcome::Success {
+                                    body: OutcomeBody::Unavailable,
+                                },
+                                evidence,
+                                entropy: fresh_entropy(),
+                            },
+                            SpawnPlan::Close(refusal) => EngineEvent::ToolOutcome {
+                                dispatch,
+                                outcome: ToolOutcome::Failure {
+                                    message: refusal.to_string(),
+                                },
+                                evidence,
+                                entropy: fresh_entropy(),
+                            },
+                        };
+                        plan = Some(next);
+                        Ok(event)
+                    },
+                    None,
+                )
+                .await?;
+            // The engine decided on an event this handler built from the view.
+            match plan.expect("the spawn result is typed before the engine decides") {
+                SpawnPlan::Outcome => return outcome_decision(decision).map(SpawnResultDecision::Outcome),
+                SpawnPlan::Close(refusal) => return Err(refusal),
+                SpawnPlan::Bind { child, .. } => match decision.then {
+                    Next::Done => {
+                        tracing::debug!(trajectory = %self.trajectory.0, child = %child.0, "the spawn result bound its child");
+                    }
+                    _ => return Err(EventError::UnexpectedDecision),
                 },
-                None,
-            )
-            .await;
-        let decision = match (&plan, decision) {
-            (_, Ok(decision)) => decision,
-            (
-                Some(SpawnPlan::Return(_)),
-                Err(refusal @ (EventError::TrajectoryEnded | EventError::ChildDispatchOpen)),
-            ) => {
-                return Err(self.close_spawn(&call, refusal).await);
-            }
-            (_, Err(error)) => return Err(error),
-        };
-        // The engine decided on an event this handler built from the view.
-        match plan.expect("the spawn result is typed before the engine decides") {
-            SpawnPlan::Outcome => outcome_decision(decision).map(SpawnResultDecision::Outcome),
-            SpawnPlan::Close(refusal) => Err(refusal),
-            SpawnPlan::Return(_) => {
-                let decision = return_decision(decision)?;
-                let close = match &decision {
-                    ChildReturnDecision::Returned { .. } | ChildReturnDecision::NoValue => ToolOutcome::Success {
-                        body: OutcomeBody::Unavailable,
-                    },
-                    ChildReturnDecision::Blocked { feedback } => ToolOutcome::Failure {
-                        message: feedback.clone(),
-                    },
-                };
-                self.report_outcome(&call, &close).await?;
-                Ok(SpawnResultDecision::Return(decision))
+                SpawnPlan::Replay => {
+                    outcome_decision(decision)?;
+                    return Ok(SpawnResultDecision::Return(ChildReturnDecision::Returned {
+                        value: value.expect("a replay repeats a delivered message"),
+                    }));
+                }
+                SpawnPlan::Withheld => {
+                    outcome_decision(decision)?;
+                    return Ok(SpawnResultDecision::Return(ChildReturnDecision::Blocked {
+                        feedback: UNCHECKED_RETURN.to_string(),
+                    }));
+                }
             }
         }
-    }
-
-    async fn close_spawn(&self, call: &ProposedCall, refusal: EventError) -> EventError {
-        let close = ToolOutcome::Failure {
-            message: refusal.to_string(),
-        };
-        match self.report_outcome(call, &close).await {
-            Ok(_) => refusal,
-            Err(error) => error,
-        }
+        Err(EventError::UnexpectedDecision)
     }
 
     /// The model called the `execute_remedy_plan` MCP tool. Executes one
@@ -509,6 +538,7 @@ impl Session {
     pub async fn on_remedy(
         &self,
         offer: OfferId,
+        arguments: RemedyArguments,
         elicitation: Option<&Elicitation>,
     ) -> Result<RemedyDecision, EventError> {
         let trajectory = self.trajectory.clone();
@@ -521,6 +551,7 @@ impl Session {
                     Ok(EngineEvent::ExecuteOffer {
                         trajectory: trajectory.clone(),
                         offer: offer.clone(),
+                        arguments: arguments.clone(),
                         evidence,
                         entropy: fresh_entropy(),
                     })
@@ -550,11 +581,26 @@ impl Session {
     /// A child agent started. `spawn` names the prepared fork the
     /// child binds to: the [`super::SpawnBinding`] the parent's spawn release
     /// handed the harness, or — for a harness whose start signal carries no
-    /// reference to the spawn call — the family's one spawn in flight. The
-    /// engine's `BindFork` opens the child before its first engine event; the
-    /// child exists exactly when the log's `ForkOpened` does.
+    /// reference to the spawn call — the fork already bound to this child, else
+    /// the family's one spawn in flight. The engine's `BindFork` opens the
+    /// child before its first engine event; the child exists exactly when the
+    /// log's `ForkOpened` does. A start for a child already bound is the
+    /// parent addressing it again: the parent's current label flows into the
+    /// child, and a return derivation the child never echoed is dropped.
+    #[cfg(test)]
     pub fn on_child_start(&self, id: TrajectoryId, spawn: SpawnRef) -> Result<Session, EventError> {
-        self.bind_child(id, spawn).map(|(session, _)| session)
+        self.start_child(id, spawn).map(|(child, _)| child)
+    }
+
+    /// [`Self::on_child_start`] plus the contract the child works under: what its return must
+    /// look like, where the fork's policy shapes it. Nothing for a child whose return crosses as
+    /// spoken. Read from the view that binds the child, so the start rebuilds nothing twice.
+    pub fn start_child(&self, id: TrajectoryId, spawn: SpawnRef) -> Result<(Session, Option<String>), EventError> {
+        let child = id.clone();
+        self.bind_child(id, |context| match &spawn {
+            SpawnRef::Binding(binding) => crate::engine::parse_fork(binding).ok_or(EventError::SpawnNotTaken),
+            SpawnRef::InFlight => context.in_flight_fork(&child),
+        })
     }
 
     /// Open a child whose start hook never arrived, or has not arrived yet:
@@ -563,36 +609,38 @@ impl Session {
     /// dispatcher whether the refused event was the missing start's, and is
     /// worth running once more, or the child's own answer.
     pub(crate) fn open_late(&self, child: TrajectoryId) -> Result<LateOpen, EventError> {
-        self.bind_child(child, SpawnRef::InFlight).map(|(_, opened)| opened)
+        match self.liveness_of(&child)? {
+            Liveness::Unopened => {
+                let id = child.clone();
+                self.bind_child(id, |context| context.in_flight_fork(&child))
+                    .map(|_| LateOpen::Opened)
+            }
+            Liveness::Live | Liveness::Ended => Ok(LateOpen::AlreadyOpen),
+        }
     }
 
-    fn bind_child(&self, id: TrajectoryId, spawn: SpawnRef) -> Result<(Session, LateOpen), EventError> {
+    fn bind_child(
+        &self,
+        id: TrajectoryId,
+        fork: impl Fn(&Decided<'_>) -> Result<appa_engine::value::ForkId, EventError>,
+    ) -> Result<(Session, Option<String>), EventError> {
         let child = id.clone();
         let opened = self.inner.log(&self.root)?;
         let policy = self.inner.resolve_policy(&self.deployment, &opened)?;
+        let mut contract = None;
         let decision = self.drive(&policy, Some(opened), true, |context| {
-            let fork = match &spawn {
-                SpawnRef::Binding(binding) => {
-                    let Some(fork) = crate::engine::parse_fork(binding) else {
-                        return Err(EventError::SpawnNotTaken);
-                    };
-                    fork
-                }
-                SpawnRef::InFlight => context.in_flight_fork(&child)?,
-            };
+            let fork = fork(context)?;
             match context.fork_status(&fork) {
                 ForkStatus::Unprepared | ForkStatus::Failed | ForkStatus::ParentEnded => Err(EventError::SpawnNotTaken),
-                ForkStatus::Prepared | ForkStatus::Bound(_) => Ok(EngineEvent::BindFork {
-                    fork,
-                    child: child.clone(),
-                }),
+                ForkStatus::Prepared | ForkStatus::Bound(_) => {
+                    contract = context.fork_return_contract(&fork);
+                    Ok(EngineEvent::BindFork {
+                        fork,
+                        child: child.clone(),
+                    })
+                }
             }
         })?;
-        // The same pair again appends nothing: the child was already open.
-        let opened = match decision.append {
-            Some(_) => LateOpen::Opened,
-            None => LateOpen::AlreadyOpen,
-        };
         match decision.then {
             // The child rides the parent event's snapshot, not a fresh one.
             Next::Done => Ok((
@@ -602,7 +650,7 @@ impl Session {
                     id,
                     self.root.clone(),
                 ),
-                opened,
+                contract,
             )),
             _ => Err(EventError::UnexpectedDecision),
         }
@@ -620,16 +668,24 @@ impl Session {
     /// without running it, which is the same abandonment as proposing
     /// past it.
     ///
-    /// A child that already returned replays instead of ending again: the
-    /// value it returned crosses nothing twice and answers as it did, any
-    /// other value is refused. A harness may deliver the same stop more
-    /// than once; a second, different return would be a second crossing,
-    /// which a child never has.
+    /// A child may stop more than once: each stop is judged under the
+    /// fork's return policy as its own crossing, and a stop repeating the
+    /// latest crossed value replays it, appending nothing. A child that
+    /// ended by returning nothing has nothing left to cross: an empty stop
+    /// replays, a message is held until the child gives it up.
     pub async fn on_child_end(&self, value: Option<String>) -> Result<ChildReturnDecision, EventError> {
-        if self.liveness()? == Liveness::Ended {
-            return self.replay_child_end(value);
+        let log = self.inner.log(&self.root)?;
+        let policy = self.inner.resolve_policy(&self.deployment, &log)?;
+        let view = policy.engine().rebuild_view(&log).map_err(EventError::from)?;
+        if policy.engine().liveness(&view, &self.trajectory) == Liveness::Ended {
+            return Ok(match value {
+                None => ChildReturnDecision::NoValue,
+                Some(_) => ChildReturnDecision::Blocked {
+                    feedback: ENDED_CHILD.to_string(),
+                },
+            });
         }
-        self.settle_open_call().await?;
+        self.settle_open_call(&policy, &view).await?;
         let child = self.trajectory.clone();
         let decision = self
             .drive_with_evidence(
@@ -641,7 +697,6 @@ impl Session {
                         child: child.clone(),
                         value: value.clone(),
                         evidence,
-                        entropy: fresh_entropy(),
                     })
                 },
                 None,
@@ -651,41 +706,17 @@ impl Session {
         return_decision(decision)
     }
 
-    /// The return of a child that already ended, decided by the engine's
-    /// own replay of the log: the recorded value again is the recorded
-    /// crossing, appended nowhere; another value is `ChildAlreadyReturned`.
-    /// Enters nothing — the entering guard would refuse the ended branch
-    /// before the engine could compare.
-    fn replay_child_end(&self, value: Option<String>) -> Result<ChildReturnDecision, EventError> {
-        let child = self.trajectory.clone();
-        let log = self.inner.log(&self.root)?;
-        let policy = self.inner.resolve_policy(&self.deployment, &log)?;
-        let decision = self
-            .drive(&policy, Some(log), false, |_| {
-                Ok(EngineEvent::ChildReturn {
-                    child: child.clone(),
-                    value: value.clone(),
-                    evidence: Vec::new(),
-                    entropy: fresh_entropy(),
-                })
-            })
-            .map_err(|error| match error {
-                EventError::TrajectoryEnded => EventError::ChildAlreadyReturned,
-                other => other,
-            })?;
-        return_decision(decision)
-    }
-
     /// Close whatever call this child still has open before it returns.
     /// A substituted release stands until the harness runs it or the
     /// model proposes past it; a child that ends has done neither and
     /// abandons it. Any other open release got no outcome hook and closes
     /// as unreported, exactly as a turn end closes it.
-    async fn settle_open_call(&self) -> Result<(), EventError> {
-        let log = self.inner.log(&self.root)?;
-        let policy = self.inner.resolve_policy(&self.deployment, &log)?;
-        let view = policy.engine().rebuild_view(&log).map_err(EventError::from)?;
-        if let Some(open) = policy.engine().substituted_release(&view, &self.trajectory) {
+    async fn settle_open_call(
+        &self,
+        policy: &crate::engine::PolicyEngine<'_>,
+        view: &EngineView,
+    ) -> Result<(), EventError> {
+        if let Some(open) = policy.engine().substituted_release(view, &self.trajectory) {
             self.abandon_open(&unrun_substitution()).await?;
             tracing::debug!(
                 trajectory = %self.trajectory.0,
@@ -695,7 +726,7 @@ impl Session {
             );
             return Ok(());
         }
-        if let Some(open) = policy.engine().open_dispatches(&view, &self.trajectory).pop() {
+        if let Some(open) = policy.engine().open_dispatches(view, &self.trajectory).pop() {
             self.abandon_open(&ToolOutcome::Indeterminate).await?;
             tracing::debug!(
                 trajectory = %self.trajectory.0,
@@ -707,11 +738,11 @@ impl Session {
         Ok(())
     }
 
-    fn liveness(&self) -> Result<Liveness, EventError> {
+    fn liveness_of(&self, trajectory: &TrajectoryId) -> Result<Liveness, EventError> {
         let log = self.inner.log(&self.root)?;
         let policy = self.inner.resolve_policy(&self.deployment, &log)?;
         let view = policy.engine().rebuild_view(&log).map_err(EventError::from)?;
-        Ok(policy.engine().liveness(&view, &self.trajectory))
+        Ok(policy.engine().liveness(&view, trajectory))
     }
 
     fn cap_outcome(&self, outcome: ToolOutcome) -> ToolOutcome {
@@ -1057,8 +1088,18 @@ impl Decided<'_> {
         self.engine().offer_pursuer(self.view, offer)
     }
 
+    /// What a child bound to `fork` is told at its start, where the fork's policy shapes its return.
+    fn fork_return_contract(&self, fork: &appa_engine::value::ForkId) -> Option<String> {
+        self.engine()
+            .fork_return_contract(self.view, &self.session.trajectory, fork)
+    }
+
     fn fork_status(&self, fork: &appa_engine::value::ForkId) -> ForkStatus {
         self.engine().fork_status(self.view, fork)
+    }
+
+    fn latest_return(&self, child: &TrajectoryId) -> Option<String> {
+        self.engine().latest_return(self.view, child)
     }
 
     fn in_flight_fork(&self, child: &TrajectoryId) -> Result<appa_engine::value::ForkId, EventError> {
@@ -1162,12 +1203,105 @@ context_control = true
         }
     }
 
-    async fn open_child(session: &mut Session, spawn: ProposedCall, child: TrajectoryId) -> Session {
-        let ToolCallDecision::Allow { spawn: Some(binding) } =
-            session.on_tool_call(spawn, true).await.expect("the spawn releases")
+    /// Spawn with the child's return declared: the marked spawn blocks on the return
+    /// menu, the parent picks the plan routing the return through `sanitizer` (none: as
+    /// spoken) floored at `label`, and the approved spawn releases with its fork.
+    async fn declare_spawn(
+        session: &Session,
+        spawn: ProposedCall,
+        sanitizer: Option<&str>,
+        label: crate::engine::LabelSpelling,
+    ) -> SpawnBinding {
+        let ToolCallDecision::Deny { offers, .. } =
+            session.on_tool_call(spawn, true).await.expect("the spawn is judged")
+        else {
+            panic!("a marked spawn blocks until its return is declared");
+        };
+        let quoted = offers
+            .iter()
+            .find(|offer| {
+                offer.returns.as_ref().map(|route| match route {
+                    appa_runtime_api::OfferedReturn::AsSpoken => None,
+                    appa_runtime_api::OfferedReturn::Sanitized { sanitizer } => Some(sanitizer.as_str()),
+                }) == Some(sanitizer)
+            })
+            .map(|offer| OfferId(offer.id.clone()))
+            .expect("the menu offers the requested return route");
+        let log = session.inner.log(&session.root).expect("the log reads");
+        let offer = crate::engine::resolve_rendered(&log, &quoted).expect("the quoted id resolves");
+        let RemedyDecision::Authorized { call } = session
+            .on_remedy(
+                offer,
+                RemedyArguments {
+                    label: Some(label),
+                    return_schema: None,
+                },
+                None,
+            )
+            .await
+            .expect("the declaration executes")
+        else {
+            panic!("a return declaration approves the spawn");
+        };
+        let ToolCallDecision::Allow { spawn: Some(binding) } = session
+            .on_tool_call(call.proposed(), true)
+            .await
+            .expect("the approved spawn releases")
         else {
             panic!("a context-controlled spawn releases a fork binding");
         };
+        binding
+    }
+
+    /// The bare declaration: the return crosses as spoken, floored at the parent's
+    /// current label.
+    async fn declared_spawn(session: &Session, spawn: ProposedCall) -> SpawnBinding {
+        declare_spawn(session, spawn, None, crate::engine::LabelSpelling::default()).await
+    }
+
+    async fn open_child(session: &mut Session, spawn: ProposedCall, child: TrajectoryId) -> Session {
+        let binding = declared_spawn(session, spawn).await;
+        session
+            .on_child_start(child, SpawnRef::Binding(binding))
+            .expect("the fork binds and the child opens")
+    }
+
+    fn floor_trust(trust: &str) -> crate::engine::LabelSpelling {
+        crate::engine::LabelSpelling {
+            trust: Some(trust.to_string()),
+            audience: None,
+        }
+    }
+
+    fn floor_audience(audience: &[&str]) -> crate::engine::LabelSpelling {
+        crate::engine::LabelSpelling {
+            trust: None,
+            audience: Some(audience.iter().map(|reader| reader.to_string()).collect()),
+        }
+    }
+
+    /// Open a child whose return the parent floored at `floor`, crossing as spoken.
+    async fn open_child_floored(
+        session: &mut Session,
+        spawn: ProposedCall,
+        child: TrajectoryId,
+        floor: crate::engine::LabelSpelling,
+    ) -> Session {
+        let binding = declare_spawn(session, spawn, None, floor).await;
+        session
+            .on_child_start(child, SpawnRef::Binding(binding))
+            .expect("the fork binds and the child opens")
+    }
+
+    /// Open a child whose return the parent routed through `sanitizer`, floored at `label`.
+    async fn open_child_via(
+        session: &mut Session,
+        spawn: ProposedCall,
+        child: TrajectoryId,
+        sanitizer: &str,
+        label: crate::engine::LabelSpelling,
+    ) -> Session {
+        let binding = declare_spawn(session, spawn, Some(sanitizer), label).await;
         session
             .on_child_start(child, SpawnRef::Binding(binding))
             .expect("the fork binds and the child opens")
@@ -1389,7 +1523,10 @@ name = "execute_remedy_plan"
             .clone();
         let offer = runtime.resolve_in(&root(), &quoted).expect("the quoted id resolves").0;
         assert!(matches!(
-            session.on_remedy(offer, None).await.expect("the sanitize offer binds"),
+            session
+                .on_remedy(offer, RemedyArguments::default(), None)
+                .await
+                .expect("the sanitize offer binds"),
             RemedyDecision::Authorized { .. },
         ));
         assert_eq!(
@@ -1689,14 +1826,17 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
             let offer = latest_offer(&runtime);
             let log_before = runtime.log_facts(&root());
             let got = session
-                .on_remedy(offer.clone(), None)
+                .on_remedy(offer.clone(), RemedyArguments::default(), None)
                 .await
                 .expect("the no-answer is delivered");
             assert!(matches!(got, RemedyDecision::NoAnswer { .. }), "got {got:?}");
             let log_after = runtime.log_facts(&root());
             assert_eq!(log_before.len(), log_after.len(), "an abstention appends no fact",);
             assert!(matches!(
-                session.on_remedy(offer, None).await.expect("the offer is still live"),
+                session
+                    .on_remedy(offer, RemedyArguments::default(), None)
+                    .await
+                    .expect("the offer is still live"),
                 RemedyDecision::NoAnswer { .. },
             ));
         }
@@ -1714,11 +1854,14 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
         let offer = latest_offer(&runtime);
         runtime.store().fail_commit_after(0);
         assert!(matches!(
-            session.on_remedy(offer.clone(), None).await,
+            session.on_remedy(offer.clone(), RemedyArguments::default(), None).await,
             Err(EventError::Storage(_)),
         ));
         assert!(matches!(
-            session.on_remedy(offer, None).await.expect("the retry executes"),
+            session
+                .on_remedy(offer, RemedyArguments::default(), None)
+                .await
+                .expect("the retry executes"),
             RemedyDecision::Authorized { .. },
         ));
     }
@@ -1916,9 +2059,9 @@ starting_label = { audience = ["alice@corp.example"] }
         let child = TrajectoryId("cc:root:child".to_string());
         let child_session = open_child(&mut session, fetch(serde_json::json!({"a": 1})), child.clone()).await;
         child_session
-            .on_child_end(Some("done".to_string()))
+            .on_child_end(None)
             .await
-            .expect("the child returns");
+            .expect("the child ends with no return");
 
         let error = refuse(
             &child,
@@ -1942,7 +2085,6 @@ starting_label = { audience = ["alice@corp.example"] }
                     child: child.clone(),
                     value: value.clone(),
                     evidence: Vec::new(),
-                    entropy: fresh_entropy(),
                 },
             );
             assert!(
@@ -2026,54 +2168,44 @@ context_control = false
                 value: "all done".to_string()
             },
         );
-        assert!(matches!(
-            runtime.live(&root(), &TrajectoryId("cc:child".to_string())),
-            Err(EventError::TrajectoryEnded),
-        ));
+        assert!(
+            runtime.live(&root(), &TrajectoryId("cc:child".to_string())).is_ok(),
+            "a return leaves the child live"
+        );
     }
 
+    /// The parent declared it takes a suspicious return; the child's tainted return
+    /// crosses as spoken, narrows the parent, and the parent's trusted-floor sink blocks.
     #[tokio::test]
     async fn a_child_returns_crossing_narrows_the_parent_and_charges_its_sink() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
-        let child = open_child(
+        let mut child = open_child_floored(
             &mut session,
             fetch(serde_json::json!({"a": 9})),
             TrajectoryId("cc:child".to_string()),
+            floor_trust("suspicious"),
         )
         .await;
-        let mut child = child;
         admit_success(&runtime, &mut child, taint(serde_json::json!({"a": 1}))).await;
 
-        // The raw return narrows the parent, so the crossing is staged behind the
-        // parent's own acceptance instead of merging silently.
-        let staged = child
+        let returned = child
             .on_child_end(Some("summary of untrusted data".to_string()))
             .await
-            .expect("the staged return is delivered");
-        assert!(
-            matches!(staged, crate::api::ChildReturnDecision::Blocked { .. }),
-            "a narrowing return is staged, not crossed: {staged:?}"
-        );
-        let quoted = runtime
-            .minted_offers(&root(), &root())
-            .first()
-            .expect("the stage surfaced the parent's acceptance")
-            .clone();
-        let offer = runtime.resolve_in(&root(), &quoted).expect("the quoted id resolves").0;
+            .expect("the return crosses");
         assert_eq!(
-            session.on_remedy(offer, None).await.expect("the acceptance executes"),
-            RemedyDecision::Returned {
+            returned,
+            crate::api::ChildReturnDecision::Returned {
                 value: "summary of untrusted data".to_string()
             },
-            "accepting the narrowing crosses the staged return"
+            "a return within the declared floor crosses as spoken"
         );
-        assert!(matches!(
-            runtime.live(&root(), &TrajectoryId("cc:child".to_string())),
-            Err(EventError::TrajectoryEnded),
-        ));
+        assert!(
+            runtime.live(&root(), &TrajectoryId("cc:child".to_string())).is_ok(),
+            "a return leaves the child live"
+        );
 
         session
             .on_tool_result(
@@ -2088,7 +2220,7 @@ context_control = false
         assert_eq!(
             runtime.status(&root()).expect("the root answers").trust,
             "suspicious",
-            "the merged crossing narrowed the parent"
+            "the crossing narrowed the parent"
         );
         let decision = session
             .on_tool_call(
@@ -2105,7 +2237,6 @@ context_control = false
             "the crossed narrowing must charge the parent's send, got {decision:?}"
         );
     }
-
     const ATTENTION: &str = r#"
 version = 2
 
@@ -2157,7 +2288,7 @@ attention = ["irreversible"]
         let offer = surfaced_offer(&runtime);
 
         let authorized = session
-            .on_remedy(offer.clone(), None)
+            .on_remedy(offer.clone(), RemedyArguments::default(), None)
             .await
             .expect("the remedy executes");
         let RemedyDecision::Authorized { call } = authorized else {
@@ -2183,7 +2314,7 @@ attention = ["irreversible"]
         assert_eq!(kept, ToolResultDecision::Keep);
 
         assert!(matches!(
-            session.on_remedy(offer, None).await,
+            session.on_remedy(offer, RemedyArguments::default(), None).await,
             Ok(RemedyDecision::Authorized { .. }),
         ));
 
@@ -2209,7 +2340,10 @@ attention = ["irreversible"]
             .expect("the block is delivered");
         let offer = surfaced_offer(&runtime);
         assert!(matches!(
-            session.on_remedy(offer, None).await.expect("the denial is delivered"),
+            session
+                .on_remedy(offer, RemedyArguments::default(), None)
+                .await
+                .expect("the denial is delivered"),
             RemedyDecision::Declined { .. },
         ));
         let before = runtime.minted_offers(&root(), &root()).len();
@@ -2250,7 +2384,7 @@ attention = ["irreversible"]
 
         assert!(matches!(
             first
-                .on_remedy(first_offer, None)
+                .on_remedy(first_offer, RemedyArguments::default(), None)
                 .await
                 .expect("the first denial is delivered"),
             RemedyDecision::Declined { .. },
@@ -2286,13 +2420,16 @@ attention = ["irreversible"]
         let offer = surfaced_offer(&runtime);
         assert!(matches!(
             session
-                .on_remedy(offer.clone(), None)
+                .on_remedy(offer.clone(), RemedyArguments::default(), None)
                 .await
                 .expect("the no-answer is delivered"),
             RemedyDecision::NoAnswer { .. },
         ));
         assert!(matches!(
-            session.on_remedy(offer, None).await.expect("the offer is still live"),
+            session
+                .on_remedy(offer, RemedyArguments::default(), None)
+                .await
+                .expect("the offer is still live"),
             RemedyDecision::NoAnswer { .. },
         ));
     }
@@ -2312,11 +2449,14 @@ attention = ["irreversible"]
         let offer = surfaced_offer(&runtime);
         runtime.store().fail_commit_after(0);
         assert!(matches!(
-            session.on_remedy(offer.clone(), None).await,
+            session.on_remedy(offer.clone(), RemedyArguments::default(), None).await,
             Err(EventError::Storage(_)),
         ));
         assert!(matches!(
-            session.on_remedy(offer, None).await.expect("the retry executes"),
+            session
+                .on_remedy(offer, RemedyArguments::default(), None)
+                .await
+                .expect("the retry executes"),
             RemedyDecision::Authorized { .. },
         ));
     }
@@ -2340,7 +2480,7 @@ attention = ["irreversible"]
         let session = runtime.session(&root(), &root()).expect("the trajectory reopens");
         assert!(matches!(
             session
-                .on_remedy(offer, None)
+                .on_remedy(offer, RemedyArguments::default(), None)
                 .await
                 .expect("the reopened offer executes"),
             RemedyDecision::Authorized { .. },
@@ -2456,7 +2596,7 @@ context_control = true
         ));
         let accept = surfaced_offer_for(runtime, &root(), trajectory);
         assert!(matches!(
-            session.on_remedy(accept, None).await,
+            session.on_remedy(accept, RemedyArguments::default(), None).await,
             Ok(RemedyDecision::Authorized { .. }),
         ));
         assert_eq!(
@@ -2502,7 +2642,10 @@ context_control = true
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         let hop = narrowed_and_blocked(&runtime, &mut session).await;
 
-        let substituted = session.on_remedy(hop.clone(), None).await.expect("the hop executes");
+        let substituted = session
+            .on_remedy(hop.clone(), RemedyArguments::default(), None)
+            .await
+            .expect("the hop executes");
         let bytes = format!(r#"{{"body":"{REDACTED_BODY}"}}"#).into_bytes();
         assert_eq!(
             substituted,
@@ -2520,7 +2663,10 @@ context_control = true
         );
 
         assert_eq!(
-            session.on_remedy(hop.clone(), None).await.expect("the replay answers"),
+            session
+                .on_remedy(hop.clone(), RemedyArguments::default(), None)
+                .await
+                .expect("the replay answers"),
             substituted,
         );
         assert_eq!(runtime.open_dispatches(&root(), &root()).len(), 1);
@@ -2554,7 +2700,7 @@ context_control = true
         );
         assert!(runtime.open_dispatches(&root(), &root()).is_empty());
         assert!(matches!(
-            session.on_remedy(hop, None).await,
+            session.on_remedy(hop, RemedyArguments::default(), None).await,
             Ok(RemedyDecision::Declined { .. }),
         ));
 
@@ -2594,7 +2740,7 @@ context_control = true
             .await
             .expect("the read is decided");
         session
-            .on_remedy(surfaced_offer(&runtime), None)
+            .on_remedy(surfaced_offer(&runtime), RemedyArguments::default(), None)
             .await
             .expect("the narrowing is accepted");
         session
@@ -2618,7 +2764,7 @@ context_control = true
 
         for _ in 0..2 {
             assert!(matches!(
-                session.on_remedy(hop.clone(), None).await,
+                session.on_remedy(hop.clone(), RemedyArguments::default(), None).await,
                 Ok(RemedyDecision::NoAnswer { .. }),
             ));
             assert!(runtime.open_dispatches(&root(), &root()).is_empty());
@@ -2639,7 +2785,10 @@ context_control = true
         .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         let hop = narrowed_and_blocked(&runtime, &mut session).await;
-        session.on_remedy(hop, None).await.expect("the hop executes");
+        session
+            .on_remedy(hop, RemedyArguments::default(), None)
+            .await
+            .expect("the hop executes");
         assert!(standing_release(&runtime).is_some());
 
         session.on_turn_end().await.expect("the turn end acks");
@@ -2668,7 +2817,10 @@ context_control = true
         .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         let hop = narrowed_and_blocked(&runtime, &mut session).await;
-        session.on_remedy(hop.clone(), None).await.expect("the hop executes");
+        session
+            .on_remedy(hop.clone(), RemedyArguments::default(), None)
+            .await
+            .expect("the hop executes");
         assert!(standing_release(&runtime).is_some());
 
         let other = ProposedCall {
@@ -2696,7 +2848,7 @@ context_control = true
             ToolCallDecision::Allow { spawn: None },
         );
         assert!(matches!(
-            session.on_remedy(hop, None).await,
+            session.on_remedy(hop, RemedyArguments::default(), None).await,
             Ok(RemedyDecision::Declined { .. }),
         ));
     }
@@ -2710,7 +2862,10 @@ context_control = true
                 .expect("the deployment opens");
             let mut session = runtime.create_session(root()).expect("a fresh id opens");
             let hop = narrowed_and_blocked(&runtime, &mut session).await;
-            session.on_remedy(hop, None).await.expect("the hop executes");
+            session
+                .on_remedy(hop, RemedyArguments::default(), None)
+                .await
+                .expect("the hop executes");
         }
         let runtime =
             Runtime::open(substituting_config(SUBSTITUTED_SEND, None), db, None).expect("the deployment reopens");
@@ -2736,7 +2891,10 @@ context_control = true
         .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         let hop = narrowed_and_blocked(&runtime, &mut session).await;
-        session.on_remedy(hop, None).await.expect("the hop executes");
+        session
+            .on_remedy(hop, RemedyArguments::default(), None)
+            .await
+            .expect("the hop executes");
 
         let other = ProposedCall {
             tool: "read_hr".to_string(),
@@ -2772,13 +2930,16 @@ context_control = true
         let hop = narrowed_and_blocked(&runtime, &mut session).await;
 
         assert!(matches!(
-            session.on_remedy(hop, None).await,
+            session.on_remedy(hop, RemedyArguments::default(), None).await,
             Ok(RemedyDecision::Declined { .. }),
         ));
         assert!(runtime.open_dispatches(&root(), &root()).is_empty());
         let approval = latest_offer(&runtime);
         assert_eq!(
-            session.on_remedy(approval, None).await.expect("the approval executes"),
+            session
+                .on_remedy(approval, RemedyArguments::default(), None)
+                .await
+                .expect("the approval executes"),
             RemedyDecision::Authorized {
                 call: ExactCall {
                     tool: "send".to_string(),
@@ -2811,12 +2972,8 @@ on = ["tool_output"]
 [policy.sanitizer.permits]
 audience = { from = ["insider"], to = ["public"] }
 
-[policy.child]
-return_sanitizer = "scrub"
-
 [policy.deployment]
 context_control = true
-confined_child_return = true
 "#;
 
     fn sanitized_config(url: Option<&str>) -> Config {
@@ -2829,28 +2986,50 @@ confined_child_return = true
         config_from(&text)
     }
 
+    fn sanitized_child(runtime: &Runtime) -> (Session, TrajectoryId) {
+        let session = runtime.create_session(root()).expect("a fresh id opens");
+        (session, TrajectoryId("cc:child".to_string()))
+    }
+
     #[tokio::test]
-    async fn a_sanitized_child_return_crosses_as_the_derivation() {
+    async fn a_sanitized_child_return_is_staged_and_crosses_when_the_child_echoes_it() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let url = stub(serde_json::json!({"body": "scrubbed"})).await;
         let runtime = Runtime::open(sanitized_config(Some(&url)), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
-        let child = open_child(
+        let (mut session, child_id) = sanitized_child(&runtime);
+        let child = open_child_via(
             &mut session,
             fetch(serde_json::json!({})),
-            TrajectoryId("cc:child".to_string()),
+            child_id.clone(),
+            "scrub",
+            crate::engine::LabelSpelling::default(),
         )
         .await;
-        let returned = child
+        let staged = child
             .on_child_end(Some("raw with pii".to_string()))
             .await
-            .expect("the sanitized return crosses");
+            .expect("the sanitized return is staged");
+        assert_eq!(
+            staged,
+            crate::api::ChildReturnDecision::Staged {
+                value: "scrubbed".to_string()
+            },
+            "the child is handed the derivation to echo",
+        );
+        let returned = child
+            .on_child_end(Some("scrubbed".to_string()))
+            .await
+            .expect("the echo crosses");
         assert_eq!(
             returned,
             crate::api::ChildReturnDecision::Returned {
                 value: "scrubbed".to_string()
             },
+        );
+        assert!(
+            runtime.live(&root(), &child_id).is_ok(),
+            "a return leaves the child live"
         );
     }
 
@@ -2860,22 +3039,28 @@ confined_child_return = true
         let url = stub(serde_json::json!({"body": "scrubbed"})).await;
         let runtime = Runtime::open(sanitized_config(Some(&url)), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
-        let child = open_child(
+        let (mut session, child_id) = sanitized_child(&runtime);
+        let child = open_child_via(
             &mut session,
             fetch(serde_json::json!({})),
-            TrajectoryId("cc:child".to_string()),
+            child_id,
+            "scrub",
+            crate::engine::LabelSpelling::default(),
         )
         .await;
         child
             .on_child_end(Some("raw with pii".to_string()))
             .await
-            .expect("the sanitized return crosses");
+            .expect("the sanitized return is staged");
+        child
+            .on_child_end(Some("scrubbed".to_string()))
+            .await
+            .expect("the echo crosses");
 
         let before = runtime.log_basis(&root());
 
         let replayed = child
-            .on_child_end(Some("raw with pii".to_string()))
+            .on_child_end(Some("scrubbed".to_string()))
             .await
             .expect("the duplicate replays the recorded crossing");
         assert_eq!(
@@ -2889,16 +3074,18 @@ confined_child_return = true
     }
 
     #[tokio::test]
-    async fn a_sanitizer_with_no_answer_withholds_the_crossing_and_ends_the_branch() {
+    async fn a_sanitizer_with_no_answer_withholds_the_crossing_and_keeps_the_child_live() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let url = stub(serde_json::json!(42)).await;
         let runtime = Runtime::open(sanitized_config(Some(&url)), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
-        let child = open_child(
+        let (mut session, child_id) = sanitized_child(&runtime);
+        let child = open_child_via(
             &mut session,
             fetch(serde_json::json!({})),
-            TrajectoryId("cc:child".to_string()),
+            child_id.clone(),
+            "scrub",
+            crate::engine::LabelSpelling::default(),
         )
         .await;
         let blocked = child
@@ -2908,10 +3095,10 @@ confined_child_return = true
         let crate::api::ChildReturnDecision::Blocked { .. } = blocked else {
             panic!("a no-answer sanitizer must withhold the crossing");
         };
-        assert!(matches!(
-            runtime.live(&root(), &TrajectoryId("cc:child".to_string())),
-            Err(EventError::TrajectoryEnded),
-        ));
+        assert!(
+            runtime.live(&root(), &child_id).is_ok(),
+            "the child is held at its stop and may return again"
+        );
     }
 
     const ATTESTED_CHILD: &str = r#"
@@ -2925,7 +3112,6 @@ trust = { from = "suspicious", to = "trusted" }
 
 [policy.deployment]
 context_control = true
-confined_child_return = true
 "#;
 
     const ATTESTED_CHILD_COMPOSED: &str = r#"
@@ -2939,24 +3125,6 @@ trust = { from = "suspicious", to = "trusted" }
 
 [deployment]
 context_control = true
-confined_child_return = true
-"#;
-
-    const ATTEST_BOUND_CHILD: &str = r#"
-version = 2
-
-[[policy.sanitizer]]
-name = "attest-schema"
-on = ["tool_output"]
-[policy.sanitizer.permits]
-trust = { from = "suspicious", to = "trusted" }
-
-[policy.child]
-return_sanitizer = "attest-schema"
-
-[policy.deployment]
-context_control = true
-confined_child_return = true
 "#;
 
     fn attested_config(policy: &str, binding: Option<&str>) -> Config {
@@ -2989,19 +3157,6 @@ confined_child_return = true
             ),
             Err(OpenError::UnsupportedPolicy(_)),
         ));
-    }
-
-    #[test]
-    fn a_child_bound_attest_schema_opens() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        assert!(
-            Runtime::open(
-                attested_config(ATTEST_BOUND_CHILD, None),
-                dir.path().join("appa.db"),
-                None
-            )
-            .is_ok()
-        );
     }
 
     #[test]
@@ -3114,7 +3269,10 @@ confined_results = ["leak"]
         let offers = runtime.minted_offers(&root(), &root());
         let quoted = offers.last().expect("the block surfaced offers").clone();
         let offer = runtime.resolve_in(&root(), &quoted).expect("the quoted id resolves").0;
-        let authorized = session.on_remedy(offer, None).await.expect("the offer executes");
+        let authorized = session
+            .on_remedy(offer, RemedyArguments::default(), None)
+            .await
+            .expect("the offer executes");
         assert!(matches!(authorized, RemedyDecision::Authorized { .. }));
         assert_eq!(
             session
@@ -3231,12 +3389,8 @@ on = ["tool_output"]
 [policy.sanitizer.permits]
 audience = { from = ["insider"], to = ["public"] }
 
-[policy.child]
-return_sanitizer = "scrub"
-
 [policy.deployment]
 context_control = true
-confined_child_return = true
 "#;
 
     fn partly_cleared_child_config(url: &str) -> Config {
@@ -3245,31 +3399,21 @@ confined_child_return = true
         ))
     }
 
-    #[tokio::test]
-    async fn a_partly_cleared_child_return_is_staged_with_its_own_remedies() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let url = stub(serde_json::json!({"body": "scrubbed"})).await;
-        let runtime = Runtime::open(partly_cleared_child_config(&url), dir.path().join("appa.db"), None)
-            .expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
-        let child = open_child(
-            &mut session,
-            fetch(serde_json::json!({})),
-            TrajectoryId("cc:child".to_string()),
-        )
-        .await;
+    /// A child routed through `scrub` whose own browsing narrowed it to suspicious.
+    async fn narrowed_child(runtime: &Runtime, session: &mut Session, floor: crate::engine::LabelSpelling) -> Session {
+        let child_id = TrajectoryId("cc:child".to_string());
+        let child = open_child_via(session, fetch(serde_json::json!({})), child_id.clone(), "scrub", floor).await;
         let browse = ProposedCall {
             tool: "browse".to_string(),
             arguments: raw(serde_json::json!({})),
         };
-        let child_id = TrajectoryId("cc:child".to_string());
         assert!(matches!(
             child.on_tool_call(browse.clone(), false).await,
             Ok(ToolCallDecision::Deny { .. })
         ));
-        let offer = surfaced_offer_for(&runtime, &root(), &child_id);
+        let offer = surfaced_offer_for(runtime, &root(), &child_id);
         assert!(matches!(
-            child.on_remedy(offer, None).await,
+            child.on_remedy(offer, RemedyArguments::default(), None).await,
             Ok(RemedyDecision::Authorized { .. })
         ));
         assert_eq!(
@@ -3291,22 +3435,42 @@ confined_child_return = true
                 .expect("the result admits into the child"),
             ToolResultDecision::Keep,
         );
+        child
+    }
 
-        let before = runtime.minted_offers(&root(), &root()).len();
-        let crossing = child
+    #[tokio::test]
+    async fn a_parent_that_declared_a_lower_floor_takes_the_sanitized_return_and_narrows() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let url = stub(serde_json::json!({"body": "scrubbed"})).await;
+        let runtime = Runtime::open(partly_cleared_child_config(&url), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let child = narrowed_child(&runtime, &mut session, floor_trust("suspicious")).await;
+
+        let staged = child
             .on_child_end(Some("raw with pii".to_string()))
             .await
-            .expect("the staged return is delivered");
-        let crate::api::ChildReturnDecision::Blocked { feedback } = crossing else {
-            panic!("a return the sanitizer only partly cleared is staged, not crossed: {crossing:?}");
-        };
-        assert!(
-            !feedback.contains("raw with pii"),
-            "the raw return never reaches the parent: {feedback}",
+            .expect("the sanitized return is staged");
+        assert_eq!(
+            staged,
+            crate::api::ChildReturnDecision::Staged {
+                value: "scrubbed".to_string()
+            },
         );
-        assert!(
-            runtime.minted_offers(&root(), &root()).len() > before,
-            "the stage surfaced the parent's own remedy for the residual narrowing",
+        let returned = child
+            .on_child_end(Some("scrubbed".to_string()))
+            .await
+            .expect("the echo crosses");
+        assert_eq!(
+            returned,
+            crate::api::ChildReturnDecision::Returned {
+                value: "scrubbed".to_string()
+            },
+        );
+        assert_eq!(
+            runtime.status(&root()).expect("the root answers").trust,
+            "suspicious",
+            "the crossing narrowed the parent to the floor it declared",
         );
     }
 
@@ -3378,7 +3542,10 @@ context_control = true
                 .clone();
             let offer = runtime.resolve_in(&root(), &quoted).expect("the quoted id resolves").0;
             assert!(matches!(
-                session.on_remedy(offer, None).await.expect("the acceptance executes"),
+                session
+                    .on_remedy(offer, RemedyArguments::default(), None)
+                    .await
+                    .expect("the acceptance executes"),
                 RemedyDecision::Authorized { .. },
             ));
             assert_eq!(
@@ -3478,10 +3645,7 @@ context_control = true
             TrajectoryId("cc:child".to_string()),
         )
         .await;
-        child
-            .on_child_end(Some("done".to_string()))
-            .await
-            .expect("the child returns");
+        child.on_child_end(None).await.expect("the child ends with no return");
 
         let error = child
             .on_tool_call(fetch(serde_json::json!({"a": 2})), false)
@@ -3498,7 +3662,13 @@ context_control = true
             Runtime::open(config_with(MARKED, None), dir.path().join("appa.db"), None).expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         let child_id = TrajectoryId("cc:child".to_string());
-        let mut child = open_child(&mut session, fetch(serde_json::json!({"a": 1})), child_id.clone()).await;
+        let mut child = open_child_floored(
+            &mut session,
+            fetch(serde_json::json!({"a": 1})),
+            child_id.clone(),
+            floor_trust("suspicious"),
+        )
+        .await;
         admit_success(&runtime, &mut child, mark()).await;
 
         let child_status = runtime
@@ -3517,8 +3687,39 @@ context_control = true
         assert!(runtime.status(&child_id).is_none(), "the status read is root-only");
     }
 
+    /// The floor the parent declared bounds the child too: a narrowing below it has no
+    /// acceptance to offer, so nothing the child admits can fall below what may cross.
+    #[tokio::test]
+    async fn a_child_under_its_parents_floor_is_offered_no_narrowing_below_it() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime =
+            Runtime::open(config_with(MARKED, None), dir.path().join("appa.db"), None).expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let child_id = TrajectoryId("cc:child".to_string());
+        let child = open_child(&mut session, fetch(serde_json::json!({"a": 1})), child_id.clone()).await;
+
+        let decision = child.on_tool_call(mark(), false).await.expect("the block is delivered");
+        let ToolCallDecision::Deny { offers, .. } = decision else {
+            panic!("a narrowing below the floor blocks, got {decision:?}");
+        };
+        assert!(
+            offers.is_empty(),
+            "no acceptance is offered below the floor the parent declared: {offers:?}"
+        );
+        assert!(runtime.minted_offers(&root(), &child_id).is_empty());
+    }
+
     fn child(name: &str) -> TrajectoryId {
         TrajectoryId(format!("cc:{name}"))
+    }
+
+    fn resumed_count(runtime: &Runtime) -> usize {
+        runtime
+            .audit(&root())
+            .expect("the audit reads")
+            .into_iter()
+            .filter(|entry| matches!(entry.event, crate::api::AuditEvent::Resumed { .. }))
+            .count()
     }
 
     fn fork_opened_count(runtime: &Runtime) -> usize {
@@ -3538,10 +3739,7 @@ context_control = true
     }
 
     async fn release_spawn(session: &mut Session, spawn: ProposedCall) -> SpawnBinding {
-        match session.on_tool_call(spawn, true).await.expect("the spawn is decided") {
-            ToolCallDecision::Allow { spawn: Some(binding) } => binding,
-            other => panic!("a context-controlled spawn releases a fork binding, got {other:?}"),
-        }
+        declared_spawn(session, spawn).await
     }
 
     #[tokio::test]
@@ -3563,11 +3761,12 @@ context_control = true
         session
             .on_child_start(child("c1"), SpawnRef::InFlight)
             .expect("the same child named as the spawn in flight is the same act");
-        assert_eq!(
+        assert_ne!(
             runtime.log_basis(&root()),
             after_open,
-            "a repeated start appends nothing"
+            "a repeated start resumes the child under the parent's current label"
         );
+        assert_eq!(resumed_count(&runtime), 2, "each repeated start is one resume");
         assert_eq!(fork_opened_count(&runtime), 1);
 
         let error = session
@@ -3721,10 +3920,7 @@ context_control = true
             .await
             .expect("the nested spawn dispatch closes, its fork still prepared");
         assert!(!dispatch_open(&runtime, &child("c1")));
-        first
-            .on_child_end(Some("done early".to_string()))
-            .await
-            .expect("the child's end crosses");
+        first.on_child_end(None).await.expect("the child ends with no return");
 
         let error = session
             .on_child_start(child("orphan"), SpawnRef::Binding(orphaned))
@@ -3739,10 +3935,10 @@ context_control = true
                 fetch(serde_json::json!({"a": 1})),
                 agent_response(),
                 Some(child("c1")),
-                Some("done early".to_string()),
+                None,
             )
             .await
-            .expect("the ended child's message replays and the spawn closes");
+            .expect("the ended child's spawn closes with nothing to cross");
         release_spawn(&mut session, fetch(serde_json::json!({"a": 3}))).await;
         session
             .on_child_start(child("c2"), SpawnRef::InFlight)
@@ -3756,43 +3952,6 @@ context_control = true
                 r#"{"agentId":"c1","content":[{"type":"text","text":"all done"}]}"#.to_string(),
             ),
         }
-    }
-
-    #[tokio::test]
-    async fn a_spawn_result_naming_the_bound_child_crosses_its_return_and_closes_the_spawn() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
-            .expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
-        release_spawn(&mut session, fetch(serde_json::json!({"a": 1}))).await;
-        session
-            .on_child_start(child("c1"), SpawnRef::InFlight)
-            .expect("the child opens");
-
-        let decision = session
-            .on_spawn_result(
-                fetch(serde_json::json!({"a": 1})),
-                agent_response(),
-                Some(child("c1")),
-                Some("all done".to_string()),
-            )
-            .await
-            .expect("the return crosses");
-        assert_eq!(
-            decision,
-            SpawnResultDecision::Return(ChildReturnDecision::Returned {
-                value: "all done".to_string()
-            }),
-        );
-        assert!(
-            matches!(runtime.live(&root(), &child("c1")), Err(EventError::TrajectoryEnded)),
-            "the child ended at its return",
-        );
-        assert!(!dispatch_open(&runtime, &root()), "the spawn dispatch closed");
-        session
-            .on_tool_call(fetch(serde_json::json!({"a": 2})), false)
-            .await
-            .expect("the parent proposes again");
     }
 
     #[tokio::test]
@@ -3862,14 +4021,14 @@ context_control = true
                 value: "done".to_string()
             }
         );
-        assert!(matches!(
-            runtime.live(&root(), &child("c1")),
-            Err(EventError::TrajectoryEnded)
-        ));
+        assert!(
+            runtime.live(&root(), &child("c1")).is_ok(),
+            "a return leaves the child live"
+        );
     }
 
     #[tokio::test]
-    async fn a_spawn_result_for_an_ended_child_replays_the_same_message_and_refuses_another() {
+    async fn a_spawn_result_for_a_returned_child_replays_its_return_and_withholds_another() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
@@ -3917,7 +4076,7 @@ context_control = true
             .on_child_end(Some("the first message".to_string()))
             .await
             .expect("the child's own end crosses");
-        let error = session
+        let decision = session
             .on_spawn_result(
                 fetch(serde_json::json!({"a": 3})),
                 agent_response(),
@@ -3925,12 +4084,18 @@ context_control = true
                 Some("a second message".to_string()),
             )
             .await
-            .expect_err("a second return for an ended child crosses nothing");
-        assert!(matches!(error, EventError::TrajectoryEnded), "got {error:?}");
-        assert!(!error.is_operational());
+            .expect("a message the child never returned is withheld");
         assert!(
-            !dispatch_open(&runtime, &root()),
-            "the spawn dispatch closed as a failure"
+            matches!(
+                decision,
+                SpawnResultDecision::Return(ChildReturnDecision::Blocked { .. })
+            ),
+            "got {decision:?}"
+        );
+        assert!(!dispatch_open(&runtime, &root()), "the spawn dispatch closed");
+        assert!(
+            runtime.live(&root(), &child("c2")).is_ok(),
+            "the child is still live to return again"
         );
     }
 
@@ -3981,15 +4146,17 @@ context_control = true
         assert!(!dispatch_open(&runtime, &root()));
     }
 
+    /// A spawn result naming a child the family never saw start binds it there,
+    /// as the harness's own bind by agent id at the spawn's return.
     #[tokio::test]
-    async fn a_spawn_result_before_any_child_bound_closes_the_spawn_unbindable() {
+    async fn a_spawn_result_naming_an_unstarted_child_binds_it_and_closes_the_spawn() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         let binding = release_spawn(&mut session, fetch(serde_json::json!({"a": 1}))).await;
 
-        let error = session
+        let decision = session
             .on_spawn_result(
                 fetch(serde_json::json!({"a": 1})),
                 agent_response(),
@@ -3997,27 +4164,22 @@ context_control = true
                 None,
             )
             .await
-            .expect_err("no child bound: nothing crosses");
-        assert!(matches!(error, EventError::SpawnNotTaken), "got {error:?}");
-        assert!(!error.is_operational());
-        assert!(
-            !dispatch_open(&runtime, &root()),
-            "the spawn dispatch closed as a failure"
-        );
+            .expect("the spawn result binds the child and closes");
+        assert_eq!(decision, SpawnResultDecision::Outcome(ToolResultDecision::Keep));
+        assert!(!dispatch_open(&runtime, &root()), "the spawn dispatch closed");
+        assert!(opened(&runtime, &child("c1")), "the spawn result opened the child");
+        assert!(runtime.live(&root(), &child("c1")).is_ok(), "the child is live");
 
-        let error = session
-            .on_child_start(child("c1"), SpawnRef::InFlight)
-            .err()
-            .expect("nothing is in flight");
-        assert!(matches!(error, EventError::SpawnNotTaken), "got {error:?}");
-        let error = session
+        session
             .on_child_start(child("c1"), SpawnRef::Binding(binding))
+            .expect("the late start is the same act");
+        let error = session
+            .on_child_start(child("c2"), SpawnRef::InFlight)
             .err()
-            .expect("the failed spawn's fork is unbindable");
+            .expect("nothing else is in flight");
         assert!(matches!(error, EventError::SpawnNotTaken), "got {error:?}");
-        assert!(!opened(&runtime, &child("c1")), "no child opened");
+        assert!(!opened(&runtime, &child("c2")), "no second child opened");
     }
-
     #[tokio::test]
     async fn a_spawn_result_on_an_unforked_call_is_an_ordinary_outcome() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
@@ -4049,11 +4211,13 @@ context_control = true
         assert!(matches!(error, EventError::UnknownDispatch), "got {error:?}");
     }
 
+    /// The spawn result carries a message the child never returned at a stop: the
+    /// harness ended the child itself and delivered what it had. Nothing crosses, and
+    /// the spawn closes with no value.
     #[tokio::test]
-    async fn a_withheld_return_closes_the_spawn_as_a_failure() {
+    async fn a_spawn_result_carrying_an_unreturned_message_withholds_it_and_closes_the_spawn() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let url = stub(serde_json::json!(42)).await;
-        let runtime = Runtime::open(sanitized_config(Some(&url)), dir.path().join("appa.db"), None)
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         release_spawn(&mut session, fetch(serde_json::json!({}))).await;
@@ -4066,10 +4230,10 @@ context_control = true
                 fetch(serde_json::json!({})),
                 agent_response(),
                 Some(child("c1")),
-                Some("raw with pii".to_string()),
+                Some("never returned at a stop".to_string()),
             )
             .await
-            .expect("the withheld return is delivered");
+            .expect("the withheld message is delivered");
         assert!(
             matches!(
                 decision,
@@ -4077,9 +4241,10 @@ context_control = true
             ),
             "got {decision:?}",
         );
+        assert!(!dispatch_open(&runtime, &root()), "the spawn dispatch closed");
         assert!(
-            !dispatch_open(&runtime, &root()),
-            "the spawn dispatch closed as a failure"
+            runtime.status(&root()).expect("the root answers").trust == "trusted",
+            "nothing crossed into the parent"
         );
         session
             .on_tool_call(fetch(serde_json::json!({})), false)
@@ -4129,17 +4294,18 @@ context_control = true
             !dispatch_open(&runtime, &child("c1")),
             "nothing stays open on the child"
         );
-        assert!(matches!(
-            runtime.live(&root(), &child("c1")),
-            Err(EventError::TrajectoryEnded)
-        ));
+        assert!(
+            runtime.live(&root(), &child("c1")).is_ok(),
+            "a return ends nothing: the child may be addressed again"
+        );
     }
 
-    /// A harness may deliver the same stop twice. The recorded return
-    /// answers again without a second crossing; any other return is a
-    /// second crossing, which a child never has.
+    /// A harness may deliver the same stop twice, and a child may stop
+    /// again with something new. The latest crossed value answers again
+    /// without a second crossing; another value is a crossing of its own;
+    /// an empty stop ends the child.
     #[tokio::test]
-    async fn a_second_end_of_a_returned_child_replays_the_same_value_and_refuses_another() {
+    async fn a_second_end_of_a_returned_child_replays_the_same_value_and_crosses_another() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
@@ -4163,18 +4329,29 @@ context_control = true
         );
         assert_eq!(runtime.log_basis(&root()), before, "the replay appended nothing");
 
-        for value in [Some("something else".to_string()), None] {
-            let error = child_session
-                .on_child_end(value)
+        let decision = child_session
+            .on_child_end(Some("something else".to_string()))
+            .await
+            .expect("a different return crosses on its own");
+        assert_eq!(
+            decision,
+            ChildReturnDecision::Returned {
+                value: "something else".to_string()
+            }
+        );
+        assert_ne!(runtime.log_basis(&root()), before, "the second crossing appended");
+
+        assert_eq!(
+            child_session
+                .on_child_end(None)
                 .await
-                .expect_err("a different return does not cross");
-            assert!(matches!(error, EventError::ChildAlreadyReturned), "got {error:?}");
-            assert!(
-                !error.is_operational(),
-                "the refusal blocks the stop rather than failing it"
-            );
-        }
-        assert_eq!(runtime.log_basis(&root()), before, "the refusals appended nothing");
+                .expect("an empty stop ends the child"),
+            ChildReturnDecision::NoValue
+        );
+        assert!(matches!(
+            runtime.live(&root(), &child("c1")),
+            Err(EventError::TrajectoryEnded)
+        ));
     }
 
     /// The harness refused the released call at its permission prompt,
@@ -4324,10 +4501,16 @@ context_control = true
         )
         .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
-        let mut child_session = open_child(&mut session, fetch(serde_json::json!({"a": 1})), child("c1")).await;
+        let mut child_session = open_child_floored(
+            &mut session,
+            fetch(serde_json::json!({"a": 1})),
+            child("c1"),
+            floor_audience(&["hr"]),
+        )
+        .await;
         let hop = narrowed_and_blocked_on(&runtime, &mut child_session, &child("c1")).await;
         assert!(matches!(
-            child_session.on_remedy(hop, None).await,
+            child_session.on_remedy(hop, RemedyArguments::default(), None).await,
             Ok(RemedyDecision::Substituted { .. }),
         ));
         assert!(
@@ -4354,14 +4537,17 @@ context_control = true
             )),
             "the substituted call closed as abandoned",
         );
-        assert!(matches!(
-            runtime.live(&root(), &child("c1")),
-            Err(EventError::TrajectoryEnded)
-        ));
+        assert!(
+            runtime.live(&root(), &child("c1")).is_ok(),
+            "a return leaves the child live"
+        );
     }
 
+    /// The child never stopped — a call of its own is still open — so the message the
+    /// spawn result carries was never checked at a stop: it is withheld and the spawn
+    /// closes with no value, the child's own call untouched.
     #[tokio::test]
-    async fn a_spawn_result_for_a_child_with_a_call_open_crosses_nothing_and_closes_the_spawn() {
+    async fn a_spawn_result_for_a_child_with_a_call_open_withholds_its_message_and_closes_the_spawn() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
@@ -4375,7 +4561,7 @@ context_control = true
             .await
             .expect("the child's call releases");
 
-        let error = session
+        let decision = session
             .on_spawn_result(
                 fetch(serde_json::json!({"a": 1})),
                 agent_response(),
@@ -4383,25 +4569,20 @@ context_control = true
                 Some("all done".to_string()),
             )
             .await
-            .expect_err("the return does not cross");
-        assert!(matches!(error, EventError::ChildDispatchOpen), "got {error:?}");
-        assert!(!error.is_operational());
+            .expect("the unreturned message is withheld");
+        assert!(
+            matches!(
+                decision,
+                SpawnResultDecision::Return(ChildReturnDecision::Blocked { .. })
+            ),
+            "got {decision:?}"
+        );
         assert!(
             runtime
                 .log_facts(&root())
                 .iter()
                 .all(|fact| !matches!(fact, appa_engine::fact::Fact::ChildReturn { .. })),
             "nothing crossed",
-        );
-        assert!(
-            runtime.log_facts(&root()).iter().any(|fact| matches!(
-                fact,
-                appa_engine::fact::Fact::DispatchClosed {
-                    outcome: appa_engine::fact::CloseOutcome::Failure,
-                    ..
-                }
-            )),
-            "the spawn dispatch closed as a failure",
         );
         assert!(!dispatch_open(&runtime, &root()), "the spawn dispatch closed");
         assert!(dispatch_open(&runtime, &child("c1")), "the child's dispatch stays open");
@@ -4411,7 +4592,6 @@ context_control = true
             .await
             .expect("the parent proposes again");
     }
-
     /// A loopback authority that answers the same ruling every time and
     /// counts the requests it saw, so a test can pin how many
     /// round-trips one event takes.
@@ -4637,7 +4817,13 @@ context_control = true
         let runtime = open_runtime(&dir);
         let session = runtime.create_session(root()).expect("a fresh id opens");
         assert!(matches!(
-            session.on_remedy(OfferId("o1:cc:root:never".to_string()), None).await,
+            session
+                .on_remedy(
+                    OfferId("o1:cc:root:never".to_string()),
+                    RemedyArguments::default(),
+                    None
+                )
+                .await,
             Err(EventError::UnknownOffer),
         ));
         assert!(only_the_opening(&runtime), "a refused offer appends nothing");
@@ -4661,7 +4847,7 @@ context_control = true
 
         assert!(matches!(
             session
-                .on_remedy(latest_offer(&runtime), None)
+                .on_remedy(latest_offer(&runtime), RemedyArguments::default(), None)
                 .await
                 .expect("the approval is delivered"),
             RemedyDecision::Authorized { .. },

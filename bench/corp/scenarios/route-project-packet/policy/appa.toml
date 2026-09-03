@@ -82,7 +82,6 @@ annotator = "packet-share-acl"
 [policy.deployment]
 context_control = true
 dispatch = "enforced"
-confined_child_return = true
 confined_results = ["search_finance", "read_finance", "create_finance", "send_email", "share_legal_packet"]
 
 # --- registered externals ---------------------------------------------------

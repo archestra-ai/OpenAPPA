@@ -158,13 +158,7 @@ fn shipped_command() -> String {
         .as_str()
         .expect("the PreToolUse hook carries a command")
         .to_string();
-    for event in [
-        "UserPromptSubmit",
-        "PostToolUse",
-        "SubagentStart",
-        "SubagentStop",
-        "PostToolUseFailure",
-    ] {
+    for event in ["PostToolUse", "SubagentStart", "SubagentStop", "PostToolUseFailure"] {
         let entry = &hooks["hooks"][event][0]["hooks"][0]["command"];
         assert_eq!(
             entry.as_str(),
@@ -185,6 +179,17 @@ fn shipped_command() -> String {
             "the {event} hook is no longer the non-blocking turn-end command",
         );
     }
+    // A prompt is refused while a subagent definition declares maxTurns: the
+    // scan runs before the post, under the same guard and blocking exit.
+    assert_eq!(
+        hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"].as_str(),
+        Some(
+            command
+                .replace("; sh", "; sh \"${CLAUDE_PLUGIN_ROOT}/hooks/scan-agents.sh\" && sh")
+                .as_str()
+        ),
+        "the UserPromptSubmit hook is no longer the shared command plus the agent scan",
+    );
     assert_eq!(
         hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"].as_str(),
         Some(

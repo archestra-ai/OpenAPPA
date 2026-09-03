@@ -312,9 +312,8 @@ OpenAPPA rejects a `null` anywhere, an unknown key anywhere, an empty `audience`
 The `[deployment]` table declares the capabilities of your hosting environment—such as starting security labels, enforced execution points, raw output withholding, and child branch isolation.
 
 During policy load, OpenAPPA validates that all declared constructs are supported by the deployment. If a policy requires a capability the deployment lacks, loading fails with an explicit error:
-- A `tool_output` sanitizer requires an application point the deployment can withhold: a tool listed in `confined_results`, or the child-return crossing (`confined_child_return = true`).
+- A `tool_output` sanitizer requires an application point the deployment can withhold: a tool listed in `confined_results`, or — under `context_control` — a child's return.
 - A tool listed in `confined_results` requires a deployment that can withhold raw results. A provider-run tool cannot be listed: its result reaches the model inside the inference call, before any host could withhold it. A coverage entry must name a tool the policy covers; with a wildcard, every name qualifies.
-- A `[child]` section requires child context isolation.
 - Provider-run tools (tools executed directly inside a provider inference call) may declare only a static `delta`: no `requires`, no `annotator`, and no argument selectors.
 
 Uncovered vectors are explicitly declared in the deployment configuration so security leaders can audit them, rather than silently degrading guarantees.
@@ -480,7 +479,7 @@ on   = ["tool_output"]
 trust = { from = "suspicious", to = "trusted" } # Instead of `audience`, never alongside it
 
 [deployment]
-confined_child_return = true                    # The child-return crossing is an application point
+context_control = true                          # A child's return is an application point
 ```
 
 When a tool result would narrow the trajectory label, OpenAPPA checks if a registered `tool_output` sanitizer can improve the label. If selected, the host withholds the raw result and runs the sanitizer. If the cleaned derivation prevents narrowing, it enters the trajectory label. If residual narrowing remains, the agent can accept the residual or apply another compatible sanitizer. A sanitizer whose declared transition cannot improve the label is never offered.
@@ -489,7 +488,7 @@ Like an authority, a sanitizer can name `tags`: it then applies only to values w
 
 At `tool_input`, the sanitizer derives a replacement for the whole argument set of one call, and the harness dispatches exactly the substituted bytes. This substitution can satisfy an unmet `contains` audience requirement, but cannot clear a `within` or trust requirement (`within` bounds the trajectory's own reach, and rewriting arguments does not change the decision to invoke the tool). A rewritten call is judged by the ordered contract its rewritten arguments select: the sanitizer's `tags` must reach that contract too, and its effects and requirements apply. An annotation binds the exact call, so a rewrite of an annotator-backed tool is annotated afresh, whichever contract it selects; membership answers are pinned to the act, so the substituted call is judged under the same pinned evidence.
 
-To enforce automated return sanitization across all child sub-executions, policies can bind a default return sanitizer:
+A parent declares what a child's return may carry when it spawns the child. Under `context_control`, a spawn is held until the parent takes one plan from the block's menu: the first plan takes the return as spoken; each plan after it routes the return through one registered `tool_output` sanitizer without `tags`, in registry order. Every plan takes a `label`, the lowest label the parent accepts from the return (`{}` for the parent's own); the `attest-schema` plan also takes `return_schema`. The declaration bounds the child: it can narrow no further than the declared floor, or, on a sanitized route, than the sanitizer lifts back to it. The child learns the declared shape when it starts, and returns by ending its turn. A return the declaration does not cover is blocked at the child with the reason, and the child may stop again with what does cross.
 
 ```toml
 [[sanitizer]]
@@ -500,16 +499,16 @@ on   = ["tool_output"]
 audience = { from = ["finance"], to = ["public"] }
 
 [deployment]
-context_control       = true        # [child] needs child context isolation
-confined_child_return = true
+context_control = true              # Children run on their own context; their returns are an application point
+```
 
-[child]
-return_sanitizer = "pii-redactor"   # Forces all child sub-execution returns through pii-redactor
+```json
+{ "offer_id": "<the pii-redactor plan>", "label": {} }
 ```
 
 The reserved builtin `attest-schema` validates structured sub-agent returns without altering data bytes. It safely raises trust from `suspicious` to `trusted` when:
 1. All returned fields are strictly shape-bounded (numbers, booleans, fixed enums, bounded formats; no free text).
-2. The schema structure was bound before the sub-agent read untrusted data.
+2. The parent declared the schema at the spawn, before the sub-agent read untrusted data.
 3. The parent agent had trusted status when spawning the sub-agent.
 
 ```toml
@@ -522,7 +521,11 @@ hint = "Verifies the sub-agent returned valid structured data matching the schem
 trust = { from = "suspicious", to = "trusted" }
 
 [deployment]
-confined_child_return = true
+context_control = true
+```
+
+```json
+{ "offer_id": "<the attest-schema plan>", "label": {}, "return_schema": { "type": "object", "properties": { "days_allowed": { "type": "integer", "minimum": 0 } }, "required": ["days_allowed"] } }
 ```
 
 Registering `name = "attest-schema"` is sufficient; OpenAPPA applies it natively without an `[externals]` entry (binding one is a load error).

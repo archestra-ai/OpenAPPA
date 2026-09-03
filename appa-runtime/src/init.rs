@@ -13,7 +13,6 @@ use thiserror::Error;
 
 use crate::config::{Config, ConfigError};
 use crate::plugin_bundle::{self, Deployment, Endpoint, PluginBundleError, PluginSource, Population};
-use crate::runtime_cli::{Adapter, refuse_unsubstitutable_returns};
 
 const MARKETPLACE: &str = "appa";
 const PLUGIN: &str = "appa-runtime@appa";
@@ -36,8 +35,6 @@ pub enum InitError {
     WriteFile { path: PathBuf, source: std::io::Error },
     #[error("the deployment config {path} does not load: {source}")]
     UnloadableConfig { path: PathBuf, source: Box<ConfigError> },
-    #[error("the deployment config {path} cannot serve Claude Code: {reason}")]
-    UnusableConfig { path: PathBuf, reason: String },
     #[error("Claude's plugin registry at {path} is invalid: {message}")]
     PluginRegistry { path: PathBuf, message: String },
     #[error("Claude installed {PLUGIN}, but its installed plugin directory is unavailable")]
@@ -1043,12 +1040,6 @@ fn verify_config(path: &Path) -> Result<ComposedPolicy, InitError> {
             });
         }
     };
-    refuse_unsubstitutable_returns(Adapter::ClaudeCode, config.policy_file().value()).map_err(|reason| {
-        InitError::UnusableConfig {
-            path: path.to_path_buf(),
-            reason,
-        }
-    })?;
     Ok(ComposedPolicy::Key(crate::engine::policy_file_key(
         config.policy_file().bytes(),
     )))
@@ -2475,21 +2466,6 @@ mod tests {
         )
         .expect("the config is written");
         config
-    }
-
-    #[test]
-    fn a_config_the_runtime_could_not_serve_stops_init() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let config = config_declaring(
-            directory.path(),
-            "[policy.deployment]\ncontext_control = true\nconfined_child_return = true\n\
-             [[policy.tool]]\nname = \"Agent\"\ndelta = {}\n",
-        );
-
-        assert!(
-            matches!(verify_config(&config), Err(InitError::UnusableConfig { .. })),
-            "a return the runtime cannot substitute must stop init, as it stops the runtime"
-        );
     }
 
     #[test]

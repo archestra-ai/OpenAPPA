@@ -141,6 +141,12 @@ pub struct Projection {
     bound: BTreeMap<ForkId, TrajectoryId>,
     fork_of: BTreeMap<TrajectoryId, ForkId>,
     child_returns: Vec<ReturnedChild>,
+    /// Values returned per child so far: the occurrence its next crossing mints.
+    returns_by: BTreeMap<TrajectoryId, u32>,
+    /// Children addressed again since their latest return: what such a child says next is a
+    /// new crossing, whatever its bytes, because it may answer a different errand at a
+    /// different label.
+    resumed_since_return: BTreeSet<TrajectoryId>,
     /// The label each resumed child last inherited from its parent, folded beside its fork seed.
     resumed: BTreeMap<TrajectoryId, Label>,
     ended: BTreeSet<TrajectoryId>,
@@ -208,6 +214,8 @@ impl Projection {
             bound: BTreeMap::new(),
             fork_of: BTreeMap::new(),
             child_returns: Vec::new(),
+            returns_by: BTreeMap::new(),
+            resumed_since_return: BTreeSet::new(),
             resumed: BTreeMap::new(),
             ended: BTreeSet::new(),
             bound_sanitizers: BTreeMap::new(),
@@ -258,6 +266,8 @@ impl Projection {
             bound,
             fork_of,
             child_returns,
+            returns_by,
+            resumed_since_return,
             resumed,
             ended,
             bound_sanitizers,
@@ -533,6 +543,8 @@ impl Projection {
                         id: id.clone(),
                         value: value.clone(),
                     });
+                    *returns_by.entry(id.child().clone()).or_insert(0) += 1;
+                    resumed_since_return.remove(id.child());
                     candidates.remove(&SubjectKey::Return(id.clone()));
                 }
                 Fact::Boundary { trajectory, kind } => match kind {
@@ -542,10 +554,8 @@ impl Projection {
                     }
                     BoundaryKind::Resume { seed } => {
                         resumed.insert(trajectory.clone(), seed.clone());
-                        let occurrence = child_returns
-                            .iter()
-                            .filter(|returned| returned.id.child() == trajectory)
-                            .count() as u32;
+                        resumed_since_return.insert(trajectory.clone());
+                        let occurrence = returns_by.get(trajectory).copied().unwrap_or(0);
                         candidates.remove(&SubjectKey::Return(ChildReturnId::new(trajectory.clone(), occurrence)));
                     }
                 },
@@ -971,8 +981,12 @@ impl Views<'_> {
     }
 
     /// The value `child` crossed most recently, if any: a stop repeating it is a replay of that
-    /// crossing, never a second one.
+    /// crossing, never a second one. A child addressed again since has no replayable return:
+    /// what it says next crosses anew, at the label it stands at then.
     pub(crate) fn latest_return(&self, child: &TrajectoryId) -> Option<&LabeledValue> {
+        if self.projection.resumed_since_return.contains(child) {
+            return None;
+        }
         self.projection
             .child_returns
             .iter()
@@ -983,11 +997,15 @@ impl Views<'_> {
 
     /// How many values `child` has already returned — the occurrence its next crossing mints.
     pub(crate) fn returns_by(&self, child: &TrajectoryId) -> u32 {
+        self.projection.returns_by.get(child).copied().unwrap_or(0)
+    }
+
+    /// The return policy a fork this trajectory prepared carries, before a child is bound to it.
+    pub(crate) fn prepared_return_policy(&self, fork: &ForkId) -> Option<&ReturnPolicy> {
         self.projection
-            .child_returns
-            .iter()
-            .filter(|returned| returned.id.child() == child)
-            .count() as u32
+            .prepared
+            .get(fork)
+            .map(|prepared| &prepared.return_policy)
     }
 
     /// Has this branch ended its errand by its void terminal? A value crossing ends nothing:

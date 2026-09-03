@@ -24,10 +24,12 @@ version = 2
 
 # Starting a subagent is this harness's spawn: the deployment controls the
 # child's context (`[policy.deployment]` below), so the subagent runs as a
-# child trajectory. Its final message is checked when the subagent stops:
-# a message that may not cross keeps the subagent running until it
-# returns one that may. A sanitized (substituted) return is not available
-# on this harness.
+# child trajectory. The spawn is held until the session declares what the
+# subagent's final message may carry — as it is, floored at a label, or
+# through a registered sanitizer such as `attest-schema` below — and that
+# message is checked when the subagent stops: one that may not cross keeps
+# the subagent running, with the reason or the exact text to return, until
+# it stops with one that may.
 [[policy.tool]]
 name = "Agent"
 delta = {}
@@ -215,6 +217,18 @@ effects = []
 [[policy.tool]]
 name = "*"
 annotator = "claude-code.undeclared-tool"
+
+# The reserved builtin sanitizer of a structured subagent return. The
+# session declares a JSON schema of bounded fields when it starts the
+# subagent; a final message that matches it crosses at the session's own
+# trust instead of the rank the subagent's reads left it at. It runs in
+# the runtime itself and needs no externals entry.
+[[policy.sanitizer]]
+name = "attest-schema"
+on = ["tool_output"]
+
+[policy.sanitizer.permits]
+trust = { from = "suspicious", to = "trusted" }
 
 # The deployment controls what a subagent starts from: the harness gives
 # every subagent exactly the prompt the parent's spawn call carried, and

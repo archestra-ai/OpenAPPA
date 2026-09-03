@@ -50,7 +50,6 @@ effects = { contains = ["hr.reviewed"] }
 [policy.deployment]
 context_control = true
 dispatch = "enforced"
-confined_child_return = true
 confined_results = ["search_hr", "read_hr", "create_hr", "send_email"]
 
 # --- registered externals ---------------------------------------------------

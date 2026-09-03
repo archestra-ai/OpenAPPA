@@ -228,6 +228,11 @@ impl TrustChain {
         self.ranks.get(trust.rank() as usize).map(String::as_str)
     }
 
+    /// Every rank name, lowest first.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.ranks.iter().map(String::as_str)
+    }
+
     pub fn len(&self) -> usize {
         self.ranks.len()
     }

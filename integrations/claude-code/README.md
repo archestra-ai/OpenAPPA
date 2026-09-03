@@ -14,11 +14,18 @@ finish. Each hook posts the event to the runtime process and blocks the
 action unless the process answers yes. The hooks fail closed: while the
 process is down, every action in a protected session is blocked —
 silence never means yes. A subagent started with the `Agent` tool runs
-as a child of the session: its own tool calls are checked the same way,
-and its final message is checked when the subagent stops. A stop whose
-message may not cross is refused, and the subagent keeps running until
-it returns an admissible message; the parent then receives that message
-unchanged.
+as a child of the session. The spawn is held until the session declares
+what the subagent's final message may carry: as it is, floored at a
+label, or through a sanitizer such as the schema attestation. The
+subagent's own tool calls are checked the same way, and its final
+message is checked when it stops. A stop whose message may not cross is
+refused with the reason, or with the exact text to return when a
+sanitizer rewrote it, and the subagent keeps running until it stops with
+a message that crosses; the parent then receives that message unchanged.
+A subagent definition that declares `maxTurns` blocks the session's
+prompts: Claude Code ends such a subagent without the return check. The
+project and user agent directories and the installed plugins are
+scanned; agents passed on the command line are not.
 
 ## What is here
 

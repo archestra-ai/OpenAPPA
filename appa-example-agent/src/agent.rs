@@ -4,7 +4,7 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use appa_runtime::api::{OfferId, RemedyOutcome, Runtime};
+use appa_runtime::api::{RemedyOutcome, Runtime};
 use appa_runtime::hooks;
 use appa_runtime_api::{
     Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, SpawnBinding, SpawnRef, ToolOutcome, TrajectoryId,
@@ -226,11 +226,15 @@ impl Frame {
         }
     }
 
-    fn child(&self, id: TrajectoryId, errand: String) -> Self {
+    /// The child's opening: its errand, then what the runtime told it about its
+    /// return at the start.
+    fn child(&self, id: TrajectoryId, errand: String, context: Option<String>) -> Self {
+        let mut transcript = vec![WireMessage::user(errand)];
+        transcript.extend(context.map(WireMessage::system));
         Frame {
             id,
             depth: self.depth + 1,
-            transcript: vec![WireMessage::user(errand)],
+            transcript,
             pending: VecDeque::new(),
         }
     }
@@ -306,8 +310,9 @@ impl Run<'_> {
                     child,
                     call: spawn,
                     errand,
+                    context,
                 }) => {
-                    let opened = frame.child(child, errand.clone());
+                    let opened = frame.child(child, errand.clone(), context);
                     parents.push(Suspended {
                         frame,
                         call: spawn,
@@ -406,6 +411,13 @@ impl Run<'_> {
             },
         )
         .await;
+        if self.marks_spawn(&proposed) {
+            // A spawn this harness cannot open is refused here: the runtime's return
+            // menu would only cost the model a round for a child that never starts.
+            if let Err(unavailable) = self.budget.fork_availability(frame.depth) {
+                return Ok(Answered::Reply(unopened_child(unavailable).to_string()));
+            }
+        }
         let event = HookEvent::ToolCall {
             actor: self.actor(frame),
             call: proposed.clone(),
@@ -467,20 +479,11 @@ impl Run<'_> {
             };
             return self.report(frame, id, call, outcome).await.map(Answered::Reply);
         };
-        match self.budget.charge_fork(frame.depth) {
-            Ok(()) => {}
-            Err(ForkUnavailable::DepthLimit) => {
-                let outcome = ToolOutcome::Failure {
-                    message: "no child was opened: this trajectory is at its child-depth limit".to_string(),
-                };
-                return self.report(frame, id, call, outcome).await.map(Answered::Reply);
-            }
-            Err(ForkUnavailable::RunLimit) => {
-                let outcome = ToolOutcome::Failure {
-                    message: "no child was opened: this run's child capacity is spent".to_string(),
-                };
-                return self.report(frame, id, call, outcome).await.map(Answered::Reply);
-            }
+        if let Err(unavailable) = self.budget.charge_fork(frame.depth) {
+            let outcome = ToolOutcome::Failure {
+                message: unopened_child(unavailable).to_string(),
+            };
+            return self.report(frame, id, call, outcome).await.map(Answered::Reply);
         }
         let child = TrajectoryId(format!("{}:c{}", self.root.0, self.budget.forks()));
         let event = HookEvent::ChildStart {
@@ -488,8 +491,19 @@ impl Run<'_> {
             child: child.clone(),
             spawn: SpawnRef::Binding(binding),
         };
-        self.expect_ack(event).await?;
-        Ok(Answered::Spawned { child, call, errand })
+        // The start answers with what the child must know about its return, if anything.
+        let context = match hooks::handle(&self.agent.runtime, event).await {
+            HookDecision::Ack => None,
+            HookDecision::Context { text } => Some(text),
+            HookDecision::Refuse { detail } => return Err(StopReason::Refused(detail)),
+            other => return Err(unexpected("a child start", &other)),
+        };
+        Ok(Answered::Spawned {
+            child,
+            call,
+            errand,
+            context,
+        })
     }
 
     async fn return_to_parent(
@@ -504,8 +518,21 @@ impl Run<'_> {
             value: said.clone(),
         };
         let (outcome, crossed) = match hooks::handle(&self.agent.runtime, event).await {
-            HookDecision::Ack => (spawn_closed(), said),
-            HookDecision::ChildReturn { value } => (spawn_closed(), Some(value)),
+            HookDecision::Ack | HookDecision::Context { .. } => (spawn_closed(), said),
+            // The runtime names what crosses; this harness speaks for the child
+            // and returns it on the child's behalf, which crosses it.
+            HookDecision::ChildReturn { value } => {
+                let echoed = HookEvent::ChildEnd {
+                    root: self.root.clone(),
+                    child: child.id.clone(),
+                    value: Some(value.clone()),
+                };
+                match hooks::handle(&self.agent.runtime, echoed).await {
+                    HookDecision::Ack => (spawn_closed(), Some(value)),
+                    HookDecision::Refuse { detail } => return Err(StopReason::Refused(detail)),
+                    other => return Err(unexpected("an echoed child return", &other)),
+                }
+            }
             HookDecision::Block { reason } => {
                 self.record(&parent.frame, Record::ReturnBlocked { reason: reason.clone() })
                     .await;
@@ -600,16 +627,16 @@ impl Run<'_> {
         id: &CallId,
         call: &ProposedCall,
     ) -> Result<Answered, StopReason> {
-        let offer = serde_json::from_str::<serde_json::Value>(call.arguments.get())
-            .ok()
-            .and_then(|arguments| arguments.get("offer_id")?.as_str().map(str::to_string));
-        let Some(offer) = offer else {
-            return Ok(Answered::Reply(format!(
-                "{CONTROL_TOOL} needs an offer_id, quoted exactly as the feedback surfaced it."
-            )));
+        let (offer, arguments) = match appa_runtime::api::parse_control_arguments(call.arguments.get()) {
+            Ok(parsed) => parsed,
+            Err(_) => {
+                return Ok(Answered::Reply(format!(
+                    "{CONTROL_TOOL} needs an offer_id, quoted exactly as the feedback surfaced it."
+                )));
+            }
         };
         let acting = self.actor(frame);
-        let reply = match self.agent.runtime.execute_remedy(&acting, OfferId(offer)).await {
+        let reply = match self.agent.runtime.execute_remedy_with(&acting, offer, arguments).await {
             RemedyOutcome::Authorized { call } => {
                 self.record(
                     frame,
@@ -790,7 +817,15 @@ enum Answered {
         child: TrajectoryId,
         call: ProposedCall,
         errand: String,
+        context: Option<String>,
     },
+}
+
+fn unopened_child(unavailable: ForkUnavailable) -> &'static str {
+    match unavailable {
+        ForkUnavailable::DepthLimit => "no child was opened: this trajectory is at its child-depth limit",
+        ForkUnavailable::RunLimit => "no child was opened: this run's child capacity is spent",
+    }
 }
 
 fn errand_of(call: &ProposedCall, key: &ArgumentKey) -> String {

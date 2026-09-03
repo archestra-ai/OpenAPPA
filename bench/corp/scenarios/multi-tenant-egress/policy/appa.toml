@@ -55,7 +55,6 @@ annotator = "mailbox-tenant-readers"
 [policy.deployment]
 context_control = true
 dispatch = "enforced"
-confined_child_return = true
 confined_results = ["search_vendor", "read_vendor", "create_vendor", "send_email"]
 
 # --- registered externals ---------------------------------------------------

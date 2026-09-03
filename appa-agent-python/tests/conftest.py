@@ -32,9 +32,6 @@ name = "attest-schema"
 on   = ["tool_output"]
 [sanitizer.permits]
 trust = { from = "suspicious", to = "trusted" }
-
-[child]
-return_sanitizer = "attest-schema"
 """
 
 TOOLS = ["delegate", "read_ticket", "memory_write", "deliver_result"]
@@ -99,6 +96,18 @@ def accept_narrowing(branch, tool: str, arguments: dict | None = None) -> dict:
     taken = decision(branch.check("execute_remedy_plan", {"offer_id": offer}))
     assert taken["kind"] == "control", taken
     return decision(branch.check(tool, arguments))
+
+
+def declare_spawn(session, arguments: dict) -> dict:
+    """Propose the spawn and declare its return as spoken, floored at the
+    session's current label: the first plan the block lists. Answers the
+    re-proposed spawn's decision, released with its fork binding."""
+    refused = decision(session.check("delegate", arguments, spawn=True))
+    assert refused["kind"] == "blocked", refused
+    offer = offer_id(refused["feedback"])
+    taken = decision(session.check("execute_remedy_plan", {"offer_id": offer, "label": {}}))
+    assert taken["kind"] == "control", taken
+    return decision(session.check("delegate", arguments, spawn=True))
 
 
 def offer_id(feedback: str) -> str:

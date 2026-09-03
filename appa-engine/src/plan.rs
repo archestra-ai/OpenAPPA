@@ -1021,6 +1021,11 @@ pub(crate) fn declared_return_policy(
                 false => Err(ReturnPolicyRefusal::AttestUnavailable),
             }
         }
+        // The reserved route attests a shape: naming it without one would take the
+        // generic sanitizer path, which validates nothing.
+        Some(crate::fact::ReturnSanitizer::Named(name)) if name.is_attest_schema() => {
+            Err(ReturnPolicyRefusal::SanitizerMismatch)
+        }
         Some(crate::fact::ReturnSanitizer::Named(name)) => match registry.sanitizer(name) {
             Some(registered) if registered.on.output && registered.applies_to(&[]) => Ok(()),
             _ => Err(ReturnPolicyRefusal::SanitizerUnavailable),

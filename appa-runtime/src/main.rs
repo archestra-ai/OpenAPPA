@@ -82,50 +82,6 @@ impl Adapter {
     }
 }
 
-/// On Claude Code a subagent's final message reaches the parent through
-/// a channel no hook can rewrite: the stop hook can only let it cross
-/// or keep the subagent running. A deployment whose policy would put
-/// something else in the parent's hands — a confined return, or a
-/// return sanitizer — cannot be enforced here and is refused before it
-/// serves, rather than silently degrading to a block.
-pub(crate) fn refuse_unsubstitutable_returns(adapter: Adapter, policy: &toml::Value) -> Result<(), String> {
-    match adapter {
-        Adapter::ClaudeCode => {
-            let deployment = |key: &str| {
-                policy
-                    .get("deployment")
-                    .and_then(|deployment| deployment.get(key))
-                    .and_then(toml::Value::as_bool)
-                    .unwrap_or(false)
-            };
-            if !deployment("context_control") {
-                return Ok(());
-            }
-            if deployment("confined_child_return") {
-                return Err(
-                    "this deployment sets `deployment.confined_child_return`, but on Claude Code a \
-                    subagent's return cannot be replaced by the fork's view: the runtime can only let the \
-                    return cross or keep the subagent running. Remove the setting."
-                        .to_string(),
-                );
-            }
-            let sanitizes = policy
-                .get("child")
-                .and_then(|child| child.get("return_sanitizer"))
-                .is_some();
-            if sanitizes {
-                return Err(
-                    "this deployment declares `[policy.child] return_sanitizer`, but on Claude Code a \
-                    subagent's return cannot be replaced by a sanitized one: the runtime can only let the \
-                    return cross or keep the subagent running. Remove the sanitizer."
-                        .to_string(),
-                );
-            }
-            Ok(())
-        }
-    }
-}
-
 fn log_level(verbose: u8) -> &'static str {
     match verbose {
         0 => "info",
@@ -194,7 +150,6 @@ struct AppState {
     runtime: Arc<Runtime>,
     codec: Codec,
     config: PathBuf,
-    adapter: Adapter,
     executable: Option<ExecutableAtStart>,
 }
 
@@ -248,8 +203,6 @@ fn health_answer(stale: bool, pid: u32) -> String {
 async fn reload(State(state): State<AppState>) -> Result<axum::Json<Reloaded>, (axum::http::StatusCode, String)> {
     let config = Config::load(&state.config)
         .map_err(|error| (axum::http::StatusCode::UNPROCESSABLE_ENTITY, error.to_string()))?;
-    refuse_unsubstitutable_returns(state.adapter, config.policy_file().value())
-        .map_err(|refusal| (axum::http::StatusCode::UNPROCESSABLE_ENTITY, refusal))?;
     match state.runtime.reload(config) {
         Ok(reloaded) => Ok(axum::Json(reloaded)),
         Err(refusal) => {
@@ -322,10 +275,6 @@ async fn serve(args: Args) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    if let Err(refusal) = refuse_unsubstitutable_returns(args.adapter, config.policy_file().value()) {
-        eprintln!("appa runtime: {refusal}");
-        return ExitCode::FAILURE;
-    }
     let runtime = match Runtime::open(config, args.db, args.modules_dir) {
         Ok(runtime) => Arc::new(runtime),
         Err(error) => {
@@ -338,7 +287,6 @@ async fn serve(args: Args) -> ExitCode {
         runtime: Arc::clone(&runtime),
         codec: args.adapter.codec(),
         config: config_path,
-        adapter: args.adapter,
         executable: ExecutableAtStart::of_this_process(),
     };
     let app = axum::Router::new()
@@ -407,46 +355,6 @@ mod tests {
         assert!(require_loopback(&"[::1]:8787".parse().expect("parses")).is_ok());
         assert!(require_loopback(&"0.0.0.0:8787".parse().expect("parses")).is_err());
         assert!(require_loopback(&"192.168.1.10:8787".parse().expect("parses")).is_err());
-    }
-
-    #[test]
-    fn a_context_controlling_deployment_may_not_substitute_a_subagents_return() {
-        let examples = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../integrations/claude-code/examples");
-        for name in ["claude-code.appa.toml", "claude-code-hitl.appa.toml"] {
-            let path = examples.join(name);
-            let config = Config::load(&path).unwrap_or_else(|error| panic!("{name} does not load: {error}"));
-            let policy = config.policy_file().value();
-            assert!(
-                refuse_unsubstitutable_returns(Adapter::ClaudeCode, policy).is_ok(),
-                "{name}"
-            );
-
-            let mut confined = policy.clone();
-            confined["deployment"]
-                .as_table_mut()
-                .expect("the deployment is a table")
-                .insert("confined_child_return".to_string(), toml::Value::Boolean(true));
-            assert!(
-                refuse_unsubstitutable_returns(Adapter::ClaudeCode, &confined).is_err(),
-                "{name}: a confined return has no channel on this harness"
-            );
-
-            let mut sanitized = policy.clone();
-            sanitized
-                .as_table_mut()
-                .expect("the policy is a table")
-                .insert("child".to_string(), toml::toml! { return_sanitizer = "scrub" }.into());
-            assert!(
-                refuse_unsubstitutable_returns(Adapter::ClaudeCode, &sanitized).is_err(),
-                "{name}: a sanitized return has no channel on this harness"
-            );
-
-            sanitized["deployment"]["context_control"] = toml::Value::Boolean(false);
-            assert!(
-                refuse_unsubstitutable_returns(Adapter::ClaudeCode, &sanitized).is_ok(),
-                "{name}: without context control there are no child returns to substitute"
-            );
-        }
     }
 
     #[test]

@@ -44,13 +44,16 @@ use appa_engine::contract::{
 pub(crate) use appa_engine::engine::ForkStatus;
 use appa_engine::engine::{Engine, EngineError};
 use appa_engine::execute::{AuthorityEvidence, AuthorityReview};
-use appa_engine::fact::{BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ReturnDerivation};
+use appa_engine::fact::{
+    BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ReturnDerivation, ReturnPolicy, ReturnSanitizer,
+};
 use appa_engine::label::{Audience, Clause, DeclaredAudience, Label, ReaderId, SymbolicAtom, Trust};
 use appa_engine::names::MarkName;
 use appa_engine::plan::{ExecutableRemedyPlan, PlanId, PlannedBlock, RemedyPlan, RequiredRuling};
 use appa_engine::profile::PolicyFileKey as EnginePolicyFileKey;
 use appa_engine::projection::Views;
 use appa_engine::registry::TrustChain;
+use appa_engine::shape::{ReturnMismatch, ReturnShape};
 use appa_engine::transition::Blocked as CoreBlocked;
 /// The engine's own validated view is the runtime's too: the runtime adds no
 /// wrapper, because everything it would carry beside the log is already on
@@ -75,6 +78,7 @@ use crate::consult::{
     AnnotationAnswer, AnnotationDeclaration, AuthorityAnswer, AuthorityArtifact, AuthorityDeclaration, HistoryEntry,
     Requirement, Ruling, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint, WireAudience,
 };
+use appa_runtime_api::{OfferedRemedy, OfferedReturn};
 
 /// One fresh 256-bit random number per act that can surface offers; the
 /// runtime mixes it into every `OfferId` it mints.
@@ -97,7 +101,7 @@ pub struct ReleasedCall {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Feedback {
     pub text: String,
-    pub offers: Vec<OfferId>,
+    pub offers: Vec<OfferedRemedy>,
 }
 
 /// One external consult the session must resolve before the same semantic
@@ -237,6 +241,7 @@ pub enum EngineEvent {
     ExecuteOffer {
         trajectory: TrajectoryId,
         offer: OfferId,
+        arguments: RemedyArguments,
         evidence: Vec<ExternalEvidence>,
         entropy: OfferNonce,
     },
@@ -248,8 +253,24 @@ pub enum EngineEvent {
         child: TrajectoryId,
         value: Option<String>,
         evidence: Vec<ExternalEvidence>,
-        entropy: OfferNonce,
     },
+}
+
+/// What `execute_remedy_plan` carries beside the offer id: the floor the child's return may
+/// narrow the declaring trajectory to and, for an attesting plan, the schema the return must
+/// match. Read only when the offered plan declares a return; every other plan ignores them.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RemedyArguments {
+    pub label: Option<LabelSpelling>,
+    pub return_schema: Option<serde_json::Value>,
+}
+
+/// A label as the policy dialect spells a `delta`: a trust rank name and an audience list. An
+/// omitted dimension keeps the declaring trajectory's current value.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct LabelSpelling {
+    pub trust: Option<String>,
+    pub audience: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -271,12 +292,28 @@ pub enum Next {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Presentation {
     KeepOutput,
-    ReplaceOutput { placeholder: String },
-    Value { value: String },
-    Declined { feedback: String },
-    NoAnswer { feedback: String },
+    ReplaceOutput {
+        placeholder: String,
+    },
+    Value {
+        value: String,
+    },
+    /// A child's return the fork's sanitizer derived, crossing when the child returns
+    /// exactly it.
+    Staged {
+        value: String,
+    },
+    Declined {
+        feedback: String,
+    },
+    NoAnswer {
+        feedback: String,
+    },
     NoValue,
-    Blocked { feedback: String, offers: Vec<OfferId> },
+    Blocked {
+        feedback: String,
+        offers: Vec<OfferId>,
+    },
 }
 
 /// One engine interaction's outcome, as the session drives it: the records to
@@ -314,6 +351,10 @@ pub enum EngineRefusal {
     Unbindable,
     #[error("tool {tool} is not declared in this policy and no wildcard covers it; the call is refused before it runs")]
     UndeclaredTool { tool: String },
+    /// The offer's execution came without what its plan needs, or with an argument the
+    /// policy cannot read. Nothing is appended; the offer stands.
+    #[error("{detail}")]
+    Arguments { detail: String },
 }
 
 /// One trajectory's current label rendered for a display surface — the
@@ -390,6 +431,11 @@ pub enum AuditEvent {
     },
     Merged,
     VoidReturn,
+    /// The parent addressed its bound child again: the parent's label as it stood flowed into
+    /// the child.
+    Resumed {
+        seed: AuditLabel,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -785,9 +831,7 @@ impl RuntimeEngine {
             Fact::Denial { authority, .. } => AuditEvent::Denied {
                 authority: terminal_safe(authority.as_str()),
             },
-            Fact::Acceptance { narrowing, .. }
-            | Fact::ChildReturnAcceptance { narrowing, .. }
-            | Fact::CandidateAccepted { narrowing, .. } => AuditEvent::Narrowed {
+            Fact::Acceptance { narrowing, .. } | Fact::CandidateAccepted { narrowing, .. } => AuditEvent::Narrowed {
                 from: self.render_label(&narrowing.from)?,
                 to: self.render_label(&narrowing.to)?,
             },
@@ -807,6 +851,9 @@ impl RuntimeEngine {
             Fact::Boundary { kind, .. } => match kind {
                 BoundaryKind::Merge { .. } => AuditEvent::Merged,
                 BoundaryKind::VoidReturn => AuditEvent::VoidReturn,
+                BoundaryKind::Resume { seed } => AuditEvent::Resumed {
+                    seed: self.render_label(seed)?,
+                },
             },
             Fact::TrajectoryOpened { .. } | Fact::ProposalBatchDecided { .. } => return Some(None),
             Fact::OfferOpened { .. }
@@ -816,10 +863,7 @@ impl RuntimeEngine {
             | Fact::CallApproved { .. }
             | Fact::CallApprovalConsumed { .. }
             | Fact::BasisAdvanced { .. } => return Some(None),
-            Fact::ForkPrepared { .. }
-            | Fact::ForkOpened { .. }
-            | Fact::ReturnSubmitted { .. }
-            | Fact::ReturnRejected { .. } => return Some(None),
+            Fact::ForkPrepared { .. } | Fact::ForkOpened { .. } => return Some(None),
         };
         Some(Some(event))
     }
@@ -846,16 +890,12 @@ impl RuntimeEngine {
             EngineEvent::ExecuteOffer {
                 trajectory: owner,
                 offer,
+                arguments,
                 evidence,
                 entropy,
-            } => self.execute_offer(view, &owner, &offer, &evidence, &entropy),
+            } => self.execute_offer(view, &owner, &offer, &arguments, &evidence, &entropy),
             EngineEvent::BindFork { fork, child } => self.bind_fork(view, &fork, &child),
-            EngineEvent::ChildReturn {
-                child,
-                value,
-                evidence,
-                entropy,
-            } => self.child_return(view, &child, value, &evidence, &entropy),
+            EngineEvent::ChildReturn { child, value, evidence } => self.child_return(view, &child, value, &evidence),
         }
     }
 
@@ -933,11 +973,11 @@ impl RuntimeEngine {
             Err(error) => return Err(proposal_refusal(error)),
         };
         let append = decision.append.map(ValidatedFactBatch::into_unsealed);
-        let then = self.deliver_proposals(decision.follow_up)?;
+        let then = self.deliver_proposals(decision.follow_up, &views.current_label())?;
         Ok(EngineDecision { append, then })
     }
 
-    fn deliver_proposals(&self, follow_up: FollowUp) -> Result<Next, EngineRefusal> {
+    fn deliver_proposals(&self, follow_up: FollowUp, label: &Label) -> Result<Next, EngineRefusal> {
         match follow_up {
             FollowUp::Proposals {
                 released: releases,
@@ -953,7 +993,7 @@ impl RuntimeEngine {
                     });
                 }
                 if let Some(block) = blocked.into_iter().next() {
-                    let feedback = self.block_delivery(&block);
+                    let feedback = self.block_delivery(&block, label);
                     return Ok(Next::ModelResponse {
                         invocations: Vec::new(),
                         feedback: vec![feedback],
@@ -975,18 +1015,42 @@ impl RuntimeEngine {
         }
     }
 
-    fn block_delivery(&self, block: &CoreBlocked) -> Feedback {
-        let (text, offers) = self.rendered_block(block);
+    fn block_delivery(&self, block: &CoreBlocked, label: &Label) -> Feedback {
+        let (text, offers) = self.rendered_block(block, label);
+        let offers = offers
+            .into_iter()
+            .map(|offer| {
+                let returns = block
+                    .offers
+                    .iter()
+                    .find(|(id, _)| offer_id(id) == offer)
+                    .and_then(|(_, plan)| {
+                        block.block.plans.iter().find_map(|candidate| match candidate {
+                            RemedyPlan::Executable(executable) if executable.id == *plan => {
+                                executable.return_step().map(|sanitizer| match sanitizer {
+                                    None => OfferedReturn::AsSpoken,
+                                    Some(name) => OfferedReturn::Sanitized {
+                                        sanitizer: name.as_str().to_string(),
+                                    },
+                                })
+                            }
+                            _ => None,
+                        })
+                    });
+                OfferedRemedy { id: offer.0, returns }
+            })
+            .collect();
         Feedback { text, offers }
     }
 
-    fn rendered_block(&self, block: &CoreBlocked) -> (String, Vec<OfferId>) {
+    fn rendered_block(&self, block: &CoreBlocked, label: &Label) -> (String, Vec<OfferId>) {
         let offers: Vec<(OfferId, PlanId)> = block
             .offers
             .iter()
             .map(|(offer, plan)| (offer_id(offer), *plan))
             .collect();
-        let text = block_feedback(&block.block, &offers, self.engine.registry().trust_chain());
+        let chain = self.engine.registry().trust_chain();
+        let text = block_feedback(&block.block, &offers, chain, &label_spelling(chain, label));
         (text, offers.into_iter().map(|(offer, _)| offer).collect())
     }
 
@@ -1063,6 +1127,7 @@ impl RuntimeEngine {
         view: &EngineView,
         trajectory: &TrajectoryId,
         offer: &OfferId,
+        arguments: &RemedyArguments,
         evidence: &[ExternalEvidence],
         entropy: &OfferNonce,
     ) -> Result<EngineDecision, EngineRefusal> {
@@ -1077,6 +1142,9 @@ impl RuntimeEngine {
                 detail: "executing an offer for a trajectory the log has not opened".to_string(),
             });
         };
+        let return_policy = self
+            .declared_return_policy(view, &owner, &views, &engine_offer, arguments)
+            .map_err(|detail| EngineRefusal::Arguments { detail })?;
         let outcome = match self
             .engine
             .offer_consults(view, &owner, &engine_offer)
@@ -1169,6 +1237,7 @@ impl RuntimeEngine {
             trajectory: engine_id(trajectory),
             offer: engine_offer,
             outcome,
+            return_policy,
             offer_nonce: engine_nonce(entropy),
             audience: act.payload.clone(),
         };
@@ -1192,6 +1261,14 @@ impl RuntimeEngine {
                         .to_string(),
                 ));
             }
+            // A return declaration the engine will not hold a child to: the floor is not one
+            // this trajectory can set, or the declaration does not fit the plan. The offer
+            // stands for a corrected declaration.
+            Err(TransitionError::ReturnPolicy(refusal)) => {
+                return Ok(no_answer(format!(
+                    "[appa] the return declaration is refused: {refusal}; the offer stands and may be executed again"
+                )));
+            }
             Err(error) => return Err(offer_refusal(error)),
         };
         let append = decision.append.map(ValidatedFactBatch::into_unsealed);
@@ -1206,19 +1283,16 @@ impl RuntimeEngine {
             FollowUp::Offer(OfferFollowUp::Invalidated) => Next::PresentToModel(Presentation::Declined {
                 feedback: "[appa] the state changed and this offer no longer applies; re-propose the call".to_string(),
             }),
-            FollowUp::Offer(OfferFollowUp::Denied { block }) => Next::PresentToModel(self.offer_block_delivery(&block)),
+            FollowUp::Offer(OfferFollowUp::Denied { block }) => {
+                Next::PresentToModel(self.offer_block_delivery(&block, &views.current_label()))
+            }
             FollowUp::Offer(OfferFollowUp::Substituted { block }) => {
-                Next::PresentToModel(self.offer_block_delivery(&block))
+                Next::PresentToModel(self.offer_block_delivery(&block, &views.current_label()))
             }
             FollowUp::Offer(OfferFollowUp::Staged(confined)) => Next::PresentToModel(self.stage_delivery(
                 "[appa] the cleaned result still narrows this session.",
                 &confined.residual,
                 &confined.offers,
-            )),
-            FollowUp::Offer(OfferFollowUp::ReturnStaged(stage)) => Next::PresentToModel(self.stage_delivery(
-                "[appa] the child's return still narrows this session.",
-                &stage.residual,
-                &stage.offers,
             )),
             FollowUp::Offer(OfferFollowUp::Released(release)) => Next::InvokeTool(released(&release)),
             FollowUp::Offer(OfferFollowUp::Settled(_)) => Next::PresentToModel(Presentation::Declined {
@@ -1295,9 +1369,109 @@ impl RuntimeEngine {
         AuthorityOutcome::Outcome(OfferOutcome::Approved(approvals))
     }
 
-    fn offer_block_delivery(&self, block: &CoreBlocked) -> Presentation {
-        let (feedback, offers) = self.rendered_block(block);
+    fn offer_block_delivery(&self, block: &CoreBlocked, label: &Label) -> Presentation {
+        let (feedback, offers) = self.rendered_block(block, label);
         Presentation::Blocked { feedback, offers }
+    }
+
+    /// The return policy an offer's execution declares, where its plan ends in a return step:
+    /// the floor, spelled as a delta over this trajectory's current label, and the schema an
+    /// attesting plan needs. A plan with no return step takes none, whatever was passed.
+    fn declared_return_policy(
+        &self,
+        view: &EngineView,
+        owner: &EngineTrajectoryId,
+        views: &Views,
+        offer: &EngineOfferId,
+        arguments: &RemedyArguments,
+    ) -> Result<Option<ReturnPolicy>, String> {
+        let Some(step) = self
+            .engine
+            .offer_plan(view, owner, offer)
+            .and_then(|plan| plan.return_step().map(|sanitizer| sanitizer.cloned()))
+        else {
+            return Ok(None);
+        };
+        let Some(spelling) = &arguments.label else {
+            return Err(
+                "this plan declares the subagent's return: pass `label`, the lowest label this session \
+                        accepts from the return (omit a dimension to keep this session's current value)"
+                    .to_string(),
+            );
+        };
+        let current = views.current_label();
+        let delta = appa_policy::parse_delta(
+            spelling.trust.as_deref(),
+            spelling.audience.as_deref(),
+            self.engine.registry().trust_chain(),
+            "label",
+        )
+        .map_err(|error| format!("`label` is not a label this policy spells: {error}"))?;
+        let floor = Label {
+            trust: delta.trust.unwrap_or(current.trust),
+            audience: delta
+                .audience
+                .map(|declared| Audience::of_declared(&declared))
+                .unwrap_or(current.audience),
+        };
+        let sanitizer = match step {
+            None => None,
+            Some(name) if name.is_attest_schema() => {
+                let Some(schema) = &arguments.return_schema else {
+                    return Err(
+                        "this plan attests the subagent's return: pass `return_schema`, the JSON schema the return \
+                         must match"
+                            .to_string(),
+                    );
+                };
+                let shape = ReturnShape::compile(schema)
+                    .map_err(|error| format!("`return_schema` does not compile to a return shape: {error}"))?;
+                Some(ReturnSanitizer::Attest(shape))
+            }
+            Some(name) => Some(ReturnSanitizer::Named(name)),
+        };
+        Ok(Some(ReturnPolicy { floor, sanitizer }))
+    }
+
+    /// What a starting child is told about its return: the schema an attesting fork holds it
+    /// to, or the sanitizer that rewrites it and the echo that follows. A bare floor tells the
+    /// child nothing it could act on.
+    pub(crate) fn fork_return_contract(
+        &self,
+        view: &EngineView,
+        parent: &TrajectoryId,
+        fork: &appa_engine::value::ForkId,
+    ) -> Option<String> {
+        let policy = self.engine.prepared_return_policy(view, &engine_id(parent), fork)?;
+        match policy.sanitizer? {
+            ReturnSanitizer::Attest(shape) => Some(format!(
+                "[appa] Your final message is checked when you stop: it must be one JSON object matching this \
+                 schema, and nothing else. A stop that does not match is blocked with the reason; a stop that \
+                 matches but is not in canonical form is blocked with the exact bytes to return, and you return \
+                 them verbatim.\nSchema: {}",
+                shape.normalized()
+            )),
+            ReturnSanitizer::Named(name) => Some(format!(
+                "[appa] Your final message is checked when you stop, and sanitizer {} rewrites it before the \
+                 parent receives it. The first stop is blocked with the rewritten message; return it verbatim \
+                 as your next final message.",
+                terminal_safe(name.as_str())
+            )),
+        }
+    }
+
+    /// The value `child` crossed most recently, as the harness would deliver it.
+    pub(crate) fn latest_return(&self, view: &EngineView, child: &TrajectoryId) -> Option<String> {
+        self.engine
+            .latest_return_of(view, &engine_id(child))
+            .map(|body| body.as_str().to_string())
+    }
+
+    fn label_text(&self, label: &Label) -> String {
+        match self.render_label(label) {
+            Some(rendered) => format!("{}/{}", rendered.trust, rendered.audience),
+            None => "an unnamed label".to_string(),
+        }
     }
 
     /// One staged delivery: the narrowing the model must still accept,
@@ -1341,13 +1515,15 @@ impl RuntimeEngine {
         }
     }
 
+    /// One child's stop. The engine decides what crosses: the value merged, the derivation
+    /// staged for the child to echo, or nothing. A stop held below the floor or outside the
+    /// fork's shape is blocked with the reason.
     fn child_return(
         &self,
         view: &EngineView,
         child: &TrajectoryId,
         value: Option<String>,
         evidence: &[ExternalEvidence],
-        entropy: &OfferNonce,
     ) -> Result<EngineDecision, EngineRefusal> {
         let fork = self
             .engine
@@ -1380,10 +1556,15 @@ impl RuntimeEngine {
                 fork: fork.clone(),
                 submission: submission.clone(),
                 evidence: sanitizer_evidence(evidence),
-                offer_nonce: engine_nonce(entropy),
                 audience: act.payload.clone(),
             };
             self.engine.handle(view, CoreEvent::ChildReturn(report))
+        };
+        let blocked = |feedback: String| {
+            Ok(EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
+                feedback,
+                offers: Vec::new(),
+            })))
         };
         let decision = match judge(evidence) {
             Ok(decision) => decision,
@@ -1393,6 +1574,21 @@ impl RuntimeEngine {
                     AudienceConsult::Unresolved(detail) => withheld(&detail),
                 };
             }
+            Err(TransitionError::ReturnBelowFloor { floor }) => {
+                return blocked(format!(
+                    "[appa] your final message cannot cross: this session's label fell below the floor the parent \
+                     set for your return ({}). Nothing this session holds now can cross; stop with an empty final \
+                     message to end without a return.",
+                    self.label_text(&floor)
+                ));
+            }
+            Err(TransitionError::ReturnShapeMismatch(mismatch)) => {
+                let policy = self.engine.return_policy_of(view, &engine_id(child));
+                return blocked(shape_feedback(&mismatch, policy.as_ref()));
+            }
+            Err(TransitionError::SanitizerUnapplicable) => {
+                return withheld("the return sanitizer's derivation was not usable");
+            }
             Err(error) => return Err(child_refusal(error)),
         };
         let append = decision.append.map(ValidatedFactBatch::into_unsealed);
@@ -1400,16 +1596,10 @@ impl RuntimeEngine {
             FollowUp::Child(ChildFollowUp::Merged { admitted }) => Next::PresentToModel(Presentation::Value {
                 value: admitted.as_str().to_string(),
             }),
-            FollowUp::Child(ChildFollowUp::Ended) => Next::PresentToModel(Presentation::NoValue),
-            FollowUp::Child(ChildFollowUp::Pending(stage)) => Next::PresentToModel(self.stage_delivery(
-                "[appa] the child's return still narrows this session.",
-                &stage.residual,
-                &stage.offers,
-            )),
-            FollowUp::Child(ChildFollowUp::Rejected { reason }) => Next::PresentToModel(Presentation::Blocked {
-                feedback: format!("[appa] the child's return could not cross: {reason:?}"),
-                offers: Vec::new(),
+            FollowUp::Child(ChildFollowUp::Staged { derived }) => Next::PresentToModel(Presentation::Staged {
+                value: derived.as_str().to_string(),
             }),
+            FollowUp::Child(ChildFollowUp::Ended) => Next::PresentToModel(Presentation::NoValue),
             FollowUp::Child(ChildFollowUp::Resolve(request)) => self.resolve_or_withhold(
                 view,
                 &engine_id(child),
@@ -2269,9 +2459,6 @@ fn malformed_feedback(error: &EngineError) -> String {
         EngineError::ProviderRunTool(tool) => format!(
             "[appa] tool {tool} is provider-run: it executes inside the inference call and cannot be proposed as a tool call"
         ),
-        EngineError::InvalidReturnSchema(error) => {
-            format!("[appa] invalid call: return_schema does not compile to a canonical shape: {error}")
-        }
         error => format!("[appa] invalid call: {error}"),
     }
 }
@@ -2497,7 +2684,75 @@ fn declared_count(audience: &DeclaredAudience) -> String {
     }
 }
 
-fn remedy_instruction(plan: &ExecutableRemedyPlan, id: &OfferId) -> String {
+fn shape_feedback(mismatch: &ReturnMismatch, policy: Option<&ReturnPolicy>) -> String {
+    let schema = policy
+        .and_then(|policy| policy.sanitizer.as_ref())
+        .and_then(ReturnSanitizer::shape)
+        .map(|shape| shape.normalized().to_string())
+        .unwrap_or_default();
+    format!(
+        "[appa] your final message must be one JSON object matching the schema the parent set, and nothing else; \
+         it was refused: {mismatch}\nSchema: {schema}"
+    )
+}
+
+/// A label in the spelling `execute_remedy_plan` takes for a return floor. An audience that is
+/// an intersection of clauses has no one-list spelling; the trust rank alone is shown then, and
+/// the omitted dimension keeps the trajectory's current value.
+fn label_spelling(chain: &TrustChain, label: &Label) -> String {
+    let quoted = |text: &str| format!("\"{}\"", terminal_safe(text));
+    let top = Trust::new((chain.len() - 1) as u8);
+    let trust = chain
+        .name_of(if label.trust == Trust::new(u8::MAX) {
+            top
+        } else {
+            label.trust
+        })
+        .map(quoted)
+        .unwrap_or_else(|| "\"<rank>\"".to_string());
+    let audience = if label.audience.is_public() {
+        Some(vec!["public".to_string()])
+    } else {
+        match label.audience.clauses().collect::<Vec<_>>().as_slice() {
+            [clause] => Some(crate::consult::clause_entries(clause)),
+            _ => None,
+        }
+    };
+    match audience {
+        Some(entries) => format!(
+            "{{trust: {trust}, audience: [{}]}}",
+            entries.iter().map(|entry| quoted(entry)).collect::<Vec<_>>().join(", ")
+        ),
+        None => format!("{{trust: {trust}}}"),
+    }
+}
+
+fn return_instruction(sanitizer: Option<&appa_engine::names::SanitizerName>, id: &OfferId, floor: &str) -> String {
+    let id = terminal_safe(&id.0);
+    match sanitizer {
+        None => format!(
+            "  - Declare the lowest label this session accepts from the subagent's return, then propose the spawn \
+             again. This session's label now is {floor}: an omitted dimension keeps it, a lower one lets the \
+             return narrow this session that far.\n    execute_remedy_plan(offer_id: \"{id}\", label: {floor})"
+        ),
+        Some(name) if name.is_attest_schema() => format!(
+            "  - Attest the subagent's return: declare the floor and the JSON schema its return must match (a \
+             closed object schema; a string leaf carries `enum`, `const`, or `format`). The return crosses at the \
+             attestation's label.\n    execute_remedy_plan(offer_id: \"{id}\", label: {floor}, return_schema: \
+             {{type: \"object\", ...}})"
+        ),
+        Some(name) => format!(
+            "  - Have sanitizer {} rewrite the subagent's return before this session receives it, and declare the \
+             floor.\n    execute_remedy_plan(offer_id: \"{id}\", label: {floor})",
+            terminal_safe(name.as_str())
+        ),
+    }
+}
+
+fn remedy_instruction(plan: &ExecutableRemedyPlan, id: &OfferId, floor: &str) -> String {
+    if let Some(sanitizer) = plan.return_step() {
+        return return_instruction(sanitizer, id, floor);
+    }
     let needs_approval = !plan.required.is_empty();
     let action = match (needs_approval, plan.narrowing().is_some(), plan.sanitizer()) {
         (true, _, Some(sanitizer)) => {
@@ -2520,7 +2775,7 @@ fn remedy_instruction(plan: &ExecutableRemedyPlan, id: &OfferId) -> String {
     )
 }
 
-fn remedy_lines(planned: &PlannedBlock, offers: &[(OfferId, PlanId)]) -> Vec<String> {
+fn remedy_lines(planned: &PlannedBlock, offers: &[(OfferId, PlanId)], floor: &str) -> Vec<String> {
     planned
         .plans
         .iter()
@@ -2528,7 +2783,7 @@ fn remedy_lines(planned: &PlannedBlock, offers: &[(OfferId, PlanId)]) -> Vec<Str
             RemedyPlan::Executable(plan) => offers
                 .iter()
                 .find(|(_, offered)| *offered == plan.id)
-                .map(|(id, _)| remedy_instruction(plan, id)),
+                .map(|(id, _)| remedy_instruction(plan, id, floor)),
             RemedyPlan::Redispatch(redispatch) => Some(format!(
                 "  - Run {} first; it clears: {}.",
                 terminal_safe(redispatch.tool().as_str()),
@@ -2538,13 +2793,23 @@ fn remedy_lines(planned: &PlannedBlock, offers: &[(OfferId, PlanId)]) -> Vec<Str
         .collect()
 }
 
-fn block_feedback(planned: &PlannedBlock, offers: &[(OfferId, PlanId)], chain: &TrustChain) -> String {
+fn block_feedback(planned: &PlannedBlock, offers: &[(OfferId, PlanId)], chain: &TrustChain, floor: &str) -> String {
     let mut reasons = Vec::new();
     for gap in &planned.raw.requirement_gaps {
         reasons.push(terminal_safe(&gap_text(gap)));
     }
     if let Some(narrowing) = &planned.raw.narrowing {
         reasons.extend(narrowing_feedback(narrowing, chain));
+    }
+    if planned.plans.iter().any(|plan| match plan {
+        RemedyPlan::Executable(plan) => plan.return_step().is_some(),
+        RemedyPlan::Redispatch(_) => false,
+    }) {
+        reasons.push(format!(
+            "This call starts a subagent, and this session has not declared what its return may carry. The policy's \
+             trust ranks, lowest first: {}.",
+            chain.names().map(terminal_safe).collect::<Vec<_>>().join(" < ")
+        ));
     }
 
     let mut lines = vec![
@@ -2554,7 +2819,7 @@ fn block_feedback(planned: &PlannedBlock, offers: &[(OfferId, PlanId)], chain: &
     ];
     lines.extend(reasons.into_iter().map(|reason| format!("  - {reason}")));
 
-    let remedies = remedy_lines(planned, offers);
+    let remedies = remedy_lines(planned, offers, floor);
     if !remedies.is_empty() {
         lines.push(String::new());
         lines.push("Continue:".to_string());
@@ -2593,7 +2858,7 @@ mod tests {
             r#"
                 version = 2
                 [deployment]
-                confined_child_return = true
+                context_control = true
                 [[tool]]
                 name = "fetch"
                 parameters = { type = "object", properties = { url = { type = "string" } }, required = ["url"] }
@@ -2944,10 +3209,10 @@ mod tests {
             (OfferId("offer-for-3".to_string()), PlanId::new(3)),
         ];
         assert_eq!(
-            remedy_lines(&planned, &offers),
+            remedy_lines(&planned, &offers, "{}"),
             vec![
-                remedy_instruction(&plan(3), &offers[1].0),
-                remedy_instruction(&plan(8), &offers[0].0),
+                remedy_instruction(&plan(3), &offers[1].0, "{}"),
+                remedy_instruction(&plan(8), &offers[0].0, "{}"),
             ],
             "the plan with no offer is not shown; the rest carry their own offer"
         );

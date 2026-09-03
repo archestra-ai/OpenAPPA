@@ -154,8 +154,6 @@ class NativeSession:
                 dispatched_tool = response["dispatched_tool"]
                 dispatched_arguments = response["dispatched_arguments"]
                 expected_arguments = dict(arguments or {})
-                if return_schema is not None:
-                    expected_arguments["return_schema"] = return_schema
                 if (
                     child is not None
                     and opened_id == child_id
@@ -345,9 +343,9 @@ class NativeChildSession:
         if self._pending is not None:
             raise NativeProtocolError("cannot finish while a native child call is pending")
         raw = self._child.finish(value)
-        self._finished = True
         response = NativeSession._decode(raw)
         match response.get("kind"):
+            # A held return keeps the child live: it may return again.
             case "blocked":
                 blocked = _blocked(response, NativeSession._has_remedy)
                 if blocked is not None:
@@ -356,6 +354,7 @@ class NativeChildSession:
                 returned = response["value"]
                 disposition = response["disposition"]
                 if (returned is None or isinstance(returned, str)) and disposition in {"crossed", "substituted"}:
+                    self._finished = True
                     return Returned(returned, disposition)
         raise NativeProtocolError("native child finish response has an invalid envelope")
 

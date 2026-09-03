@@ -132,6 +132,10 @@ pub enum HookDecision {
     /// cause.
     DenyCall {
         feedback: String,
+        /// The remedies the block offers, in the order the feedback lists
+        /// them, for a harness that routes one itself rather than through
+        /// the model's control call.
+        offers: Vec<OfferedRemedy>,
     },
     Block {
         reason: String,
@@ -139,18 +143,44 @@ pub enum HookDecision {
     ReplaceOutput {
         output: String,
     },
-    /// The child's return crosses as `value` and not as the child
-    /// spelled it — a `return_sanitizer` produced it. A
-    /// return that crosses unchanged answers `Ack`, so this variant
-    /// names a substitution and never merely a crossing. A harness with
-    /// no way to substitute the return where the parent receives it
-    /// cannot enforce it.
+    /// What crosses to the parent is `value`, not the child's message as
+    /// it spelled it: a shaped return crosses in canonical form, and a
+    /// sanitized one as the sanitizer's derivation. A harness that
+    /// delivers the child's own words has the child return `value`
+    /// verbatim — the next stop that carries it crosses and answers
+    /// `Ack`; a harness that speaks for the child returns `value` on its
+    /// behalf the same way. A return that crosses as spoken answers
+    /// `Ack`, so this variant never merely reports a crossing.
     ChildReturn {
         value: String,
+    },
+    /// The event is acknowledged, and `text` goes to the actor it names
+    /// as context the harness hands that actor: at a child's start, the
+    /// return contract the child works under.
+    Context {
+        text: String,
     },
     Refuse {
         detail: String,
     },
+}
+
+/// One remedy a block offers: the id `execute_remedy_plan` takes and,
+/// where the plan declares a child's return, how that return crosses.
+/// `None` for a plan that declares no return.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OfferedRemedy {
+    pub id: String,
+    pub returns: Option<OfferedReturn>,
+}
+
+/// How a return-declaring plan crosses the child's return: as the child
+/// spoke it, or through the registered sanitizer named (`attest-schema`
+/// attests a schema the declaration supplies).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OfferedReturn {
+    AsSpoken,
+    Sanitized { sanitizer: String },
 }
 
 /// A refusal at the parse stage, before any event exists. `Unreadable`
@@ -171,4 +201,11 @@ pub enum ParseRefusal {
 pub struct Codec {
     pub parse: fn(&[u8]) -> Result<Option<HookEvent>, ParseRefusal>,
     pub render: fn(&HookEvent, &HookDecision) -> serde_json::Value,
+    /// The children of the actor's family a call's arguments name by
+    /// the harness's own on-disk spellings of a child's transcript or
+    /// output file. The runtime refuses the call when one names a child
+    /// the family opened: a child's words reach its parent through the
+    /// checked return only. A recognizer of the default spellings, not a
+    /// guarantee that no other path reaches the file.
+    pub names_children: fn(&Actor, &ProposedCall) -> Vec<TrajectoryId>,
 }
