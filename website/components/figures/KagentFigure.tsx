@@ -7,10 +7,13 @@ import { logoPixelData } from "@/components/Logo";
 /* Integration figure: a protected kagent declarative agent on Kubernetes.
    Every tool call passes through the Google ADK plugin gate (AppaPluginKagent)
    to OpenAPPA before execution.
-   Call 1: Allowed secret read narrows trajectory audience to [ops].
-   Call 2: Blocked leak — sending ops data to public sink is blocked.
-   Call 3: Full Human-in-the-Loop flow to completion — destructive action suspends,
-           operator clicks Approve in kagent UI, and deployment restarts. */
+   Call 1: The confidential read is denied — admitting the secret would narrow
+           the session audience to [ops] — and the agent accepts the narrowing
+           through execute_remedy_plan, after which the read crosses.
+   Call 2: Blocked leak — the [ops] session cannot post to the public sink.
+   Call 3: Full Human-in-the-Loop flow to completion — the destructive action is
+           denied, the agent runs the offered plan, the operator clicks Approve
+           in the kagent UI, and the deployment restarts. */
 
 const W = 900;
 const H = 400;
@@ -21,46 +24,66 @@ const POD = { x: 24, y: 40, w: 230, h: 250 };
 const GATE = { x: 334, y: 40, w: 232, h: 250 };
 const RUNTIME = { x: 646, y: 40, w: 230, h: 250 };
 
+/* The eight hook events both plugins feed, numbered as
+   writing-an-integration.md numbers them. ChildEnd and SpawnResult are the
+   return gate: a delegated child stops through the APPA-owned appa_return
+   tool, which posts ChildEnd, and the parent's SpawnResult replays exactly
+   the bytes that crossed. */
 const HOOK_ROWS = [
   "SessionStart",
-  "UserPrompt",
-  "BeforeTool (PreTool)",
-  "AfterTool (PostTool)",
-  "A2ASpawn (Child)",
+  "Prompt",
+  "ToolCall",
+  "ToolResult",
   "TurnEnd",
+  "ChildStart",
+  "ChildEnd",
+  "SpawnResult",
 ];
-const rowY = (i: number) => GATE.y + 50 + i * 28;
-const PRE = 2; // BeforeTool row
-const RAIL_Y = rowY(PRE);
+const HOOK_PER_COL = 4;
+const rowX = (i: number) => GATE.x + 14 + Math.floor(i / HOOK_PER_COL) * 104;
+const rowY = (i: number) => GATE.y + 48 + (i % HOOK_PER_COL) * 24;
+const CALL_ROW = 2; // ToolCall: the row the rail enters and leaves on
+const RAIL_Y = rowY(CALL_ROW);
 
 const CARD = { w: 198, h: 32 };
 const CARD_X = POD.x + 16;
 const CARD_Y = RAIL_Y - CARD.h / 2;
 
-/* Beat boundaries for the three cycles */
+/* Beat boundaries for the three cycles. One round trip is prep, call, post,
+   back, done; call 1 adds the remedy round trip the deny offers. */
+type Beat = {
+  prep: number[];
+  call: number[];
+  post: number[];
+  back: number[];
+  done: number;
+};
 const CALL_1 = {
-  prep: [0.02, 0.07],
-  call: [0.07, 0.14],
-  post: [0.15, 0.22],
-  back: [0.23, 0.29],
-  done: 0.30,
+  prep: [0.02, 0.06],
+  call: [0.06, 0.12],
+  post: [0.13, 0.19],
+  back: [0.20, 0.26],
+  deny: 0.27,
+  remedy: [0.30, 0.36],
+  release: [0.37, 0.43],
+  done: 0.44,
 };
 const CALL_2 = {
-  prep: [0.33, 0.38],
-  call: [0.38, 0.45],
-  post: [0.46, 0.53],
-  back: [0.54, 0.60],
-  done: 0.61,
+  prep: [0.47, 0.51],
+  call: [0.51, 0.57],
+  post: [0.58, 0.63],
+  back: [0.64, 0.69],
+  done: 0.70,
 };
 const CALL_3 = {
-  prep: [0.64, 0.69],
-  call: [0.69, 0.75],
-  post: [0.76, 0.81],
-  back: [0.82, 0.86],
-  review: [0.86, 0.93],
-  vouch: [0.93, 0.96],
-  auth: [0.96, 0.98],
-  done: 0.98,
+  prep: [0.73, 0.77],
+  call: [0.77, 0.82],
+  post: [0.83, 0.87],
+  back: [0.88, 0.91],
+  review: [0.91, 0.95],
+  vouch: [0.95, 0.97],
+  auth: [0.97, 0.99],
+  done: 0.99,
 };
 
 function drawLogo(ctx: CanvasRenderingContext2D, th: Theme, x: number, y: number, capPx: number) {
@@ -76,7 +99,7 @@ function renderCallCycle(
   ctx: CanvasRenderingContext2D,
   th: Theme,
   t: number,
-  beat: typeof CALL_1,
+  beat: Beat,
   toolLabel: string,
   toolColor: string,
   answerText: string,
@@ -117,6 +140,7 @@ function draw(ctx: CanvasRenderingContext2D, t: number, th: Theme) {
 
   const runtimeBusy =
     (t > CALL_1.post[0] && t < CALL_1.back[1]) ||
+    (t > CALL_1.remedy[0] && t < CALL_1.release[1]) ||
     (t > CALL_2.post[0] && t < CALL_2.back[1]) ||
     (t > CALL_3.post[0] && t < CALL_3.back[1]) ||
     (t > CALL_3.vouch[0] && t < CALL_3.auth[1]);
@@ -176,10 +200,10 @@ function draw(ctx: CanvasRenderingContext2D, t: number, th: Theme) {
   ctx.font = font(13, 600);
   ctx.fillText("AppaPluginKagent", GATE.x + 14, GATE.y + 20);
   HOOK_ROWS.forEach((name, i) => {
-    const active = i === PRE && (t > CALL_1.call[0] || t > CALL_2.call[0] || t > CALL_3.call[0]);
+    const active = i === CALL_ROW && (t > CALL_1.call[0] || t > CALL_2.call[0] || t > CALL_3.call[0]);
     ctx.fillStyle = active ? th.accent : th.textWeak;
     ctx.font = font(11.5, active ? 600 : 400);
-    ctx.fillText(name, GATE.x + 14, rowY(i));
+    ctx.fillText(name, rowX(i), rowY(i));
   });
 
   /* 3. OpenAPPA Runtime */
@@ -206,13 +230,25 @@ function draw(ctx: CanvasRenderingContext2D, t: number, th: Theme) {
   });
 
   /* Calls 1 and 2 */
-  renderCallCycle(ctx, th, t, CALL_1, "read_secret(db)", th.accent, "allow", th.accent, th.accentBg);
-  renderCallCycle(ctx, th, t, CALL_2, "post_status(leak)", th.danger, "block", th.danger, th.dangerBg);
+  renderCallCycle(ctx, th, t, CALL_1, "read_secret(payments-provider)", th.warn, "deny", th.danger, th.dangerBg);
+  // The agent takes the offer the deny quoted: the reserved call crosses to the runtime.
+  const remedyF = seg(t, CALL_1.remedy[0], CALL_1.remedy[1]);
+  if (remedyF > 0 && remedyF < 1) {
+    const chipX = lerp(GATE.x + GATE.w, RUNTIME.x, ease(remedyF));
+    chip(ctx, chipX, RAIL_Y, "execute_remedy_plan", th.warn, th.warnBg, th.mono);
+  }
+  // The narrowing is spent, so the re-proposed read is released into an [ops] session.
+  const releaseF = seg(t, CALL_1.release[0], CALL_1.release[1]);
+  if (releaseF > 0 && releaseF < 1) {
+    const chipX = lerp(RUNTIME.x, GATE.x + GATE.w, ease(releaseF));
+    chip(ctx, chipX, RAIL_Y, "authorized · [ops]", th.accent, th.accentBg, th.mono);
+  }
+  renderCallCycle(ctx, th, t, CALL_2, "post_status_update", th.danger, "block", th.danger, th.dangerBg);
 
   /* Call 3: Full Human-in-the-Loop lifecycle */
   // 3a. Initial tool proposal
   const c3Appear = ease(seg(t, CALL_3.prep[0], CALL_3.prep[1]));
-  const c3Fade = seg(t, 0.99, 1.0);
+  const c3Fade = seg(t, 0.995, 1.0);
   if (t >= CALL_3.prep[0] && c3Fade < 1) {
     drawCard(
       ctx,
@@ -249,7 +285,7 @@ function draw(ctx: CanvasRenderingContext2D, t: number, th: Theme) {
   const reviewProgress = seg(t, CALL_3.review[0], CALL_3.review[1]);
   if (reviewProgress > 0 && t < CALL_3.auth[1]) {
     const cardAlpha = reviewProgress < 0.2 ? ease(reviewProgress * 5) : t > CALL_3.vouch[1] ? 1 - ease(seg(t, CALL_3.vouch[1], CALL_3.auth[1])) : 1;
-    const isClicked = t >= 0.90;
+    const isClicked = t >= CALL_3.vouch[0];
 
     ctx.save();
     ctx.globalAlpha = cardAlpha;
@@ -314,12 +350,21 @@ function draw(ctx: CanvasRenderingContext2D, t: number, th: Theme) {
   }
 
   /* Verdict markers at the gate */
-  // Call 1: Allowed checkmark
-  if (t >= CALL_1.done && t < CALL_2.prep[0]) {
-    ctx.fillStyle = th.accent;
-    ctx.font = font(16, 700);
+  // Call 1: a deny cross that becomes a check once the narrowing is accepted
+  const c1Settled = t >= CALL_1.release[1];
+  if (t >= CALL_1.deny && t < CALL_2.prep[0]) {
+    ctx.save();
+    ctx.fillStyle = c1Settled ? th.accentBg : th.dangerBg;
+    ctx.strokeStyle = c1Settled ? th.accent : th.danger;
+    ctx.beginPath();
+    ctx.arc(GATE.x + GATE.w + 14, RAIL_Y, 10, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = c1Settled ? th.accent : th.danger;
+    ctx.font = font(12, 700);
     ctx.textAlign = "center";
-    ctx.fillText("✓", GATE.x + GATE.w + 14, RAIL_Y - 14);
+    ctx.fillText(c1Settled ? "✓" : "✕", GATE.x + GATE.w + 14, RAIL_Y + 0.5);
+    ctx.restore();
     ctx.textAlign = "left";
   }
   // Call 2: Blocked cross
@@ -377,13 +422,19 @@ function draw(ctx: CanvasRenderingContext2D, t: number, th: Theme) {
   ctx.textBaseline = "middle";
 
   const notesList = [
-    { at: CALL_1.done, text: "✓ allowed — secret read narrows session audience to [ops]", color: "accent" as const },
-    { at: CALL_2.done, text: "✕ blocked — ops data cannot leak into public sink post_status_update", color: "danger" as const },
+    {
+      at: CALL_1.deny,
+      text: c1Settled
+        ? "✓ narrowing accepted — execute_remedy_plan spends the session's reach, then the read crosses"
+        : "✕ denied at the read — admitting the secret would narrow the session audience to [ops]",
+      color: c1Settled ? ("accent" as const) : ("danger" as const),
+    },
+    { at: CALL_2.done, text: "✕ blocked — [ops] data cannot leak into the public sink post_status_update", color: "danger" as const },
     {
       at: CALL_3.back[1],
       text: isApproved
-        ? "✓ approved & executed — operator confirmed in kagent UI; deployment restarted"
-        : "⏸ review — restart_deployment suspends until operator approval in kagent UI",
+        ? "✓ approved & executed — the operator ruled in kagent UI; the re-proposed restart ran"
+        : "⏸ review — the deny offers the oncall plan; execute_remedy_plan waits on the operator",
       color: isApproved ? ("accent" as const) : ("warn" as const),
     },
   ];
@@ -400,5 +451,5 @@ function draw(ctx: CanvasRenderingContext2D, t: number, th: Theme) {
 }
 
 export function KagentFigure() {
-  return <Figure draw={draw} designW={W} designH={H} durationMs={16000} />;
+  return <Figure draw={draw} designW={W} designH={H} durationMs={20000} />;
 }

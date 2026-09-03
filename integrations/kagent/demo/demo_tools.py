@@ -1,8 +1,12 @@
 """The demo cluster-ops toolset: canned data, real hazards.
 
-A small MCP server (streamable HTTP) exposing the tools the example
-policy names (`integrations/kagent/examples/kagent.appa.toml`). The
-data is canned so every scenario replays exactly. The hazards are
+A small MCP server (streamable HTTP) exposing ten cluster-ops tools,
+each of which the demo policy names
+(`integrations/kagent/demo/chart/files/demo.appa.toml`). The example
+policy (`integrations/kagent/examples/kagent.appa.toml`) names seven of
+them and `ask_user`, so under it the runtime refuses `lookup_runbook`,
+`scale_deployment` and `rollback_deployment` at the `ToolCall` hook.
+The data is canned so every scenario replays exactly. The hazards are
 real: `read_secret` returns real secret material, `get_pod_logs`
 returns text written to steer the reader, and `check_status_page`
 carries a prompt-injection attempt. What the gated agent may do with

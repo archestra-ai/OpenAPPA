@@ -4,15 +4,100 @@ on:
   push:
     branches: [main]
   pull_request:
+    # `labeled` carries the run-e2e label that starts the live e2e subset.
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
   group: "ci-${{ github.event.pull_request.number || github.ref }}"
-  cancel-in-progress: true
+  # A label event queues behind the run in flight and never cancels it.
+  # The run-e2e label must not restart the macOS, Windows and Rust jobs.
+  cancel-in-progress: ${{ github.event.action != 'labeled' }}
 
 jobs:
+  # Each kagent job below runs only when its own inputs change. The other
+  # jobs stay unconditional because they cover the whole workspace.
+  changes:
+    name: Changed Paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read # the checkout below reads the repository on a push
+      pull-requests: read # the filter reads the pull request file list
+    outputs:
+      python: ${{ steps.filter.outputs.python }}
+      go: ${{ steps.filter.outputs.go }}
+      chart: ${{ steps.filter.outputs.chart }}
+      integration: ${{ steps.filter.outputs.integration }}
+      e2e: ${{ steps.filter.outputs.e2e }}
+    steps:
+      # A pull request reads its file list from the API and needs no
+      # checkout. Every other event diffs with git and needs the history.
+      - name: Checkout project
+        if: github.event_name != 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      # The action declares only its `changes` output. It sets the
+      # per-filter outputs at run time, so the job maps each one above.
+      - name: Detect changed paths
+        id: filter
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          filters: |
+            python: &python
+              - 'integrations/kagent/appa-kagent-adk/**'
+              - 'integrations/kagent/tests/**'
+              - 'integrations/kagent/fixtures/**'
+              - '.github/workflows/ci.yml'
+            go:
+              - 'integrations/kagent/appa-kagent-adk-go/**'
+              - 'integrations/kagent/fixtures/**'
+              - '.github/workflows/ci.yml'
+            chart:
+              - 'integrations/kagent/demo/chart/**'
+              - '.github/workflows/ci.yml'
+            integration: &integration
+              - *python
+              - 'integrations/kagent/examples/**'
+              - 'integrations/kagent/demo/demo_tools.py'
+              - 'integrations/kagent/demo/mocks/**'
+              - 'integrations/kagent/demo/chart/files/**'
+              # The suite hardcodes the prose and tool lists these
+              # templates render, verbatim (tests/conftest.py).
+              - 'integrations/kagent/demo/chart/templates/**'
+              - 'appa-runtime/**'
+              - 'appa-runtime-api/**'
+              - 'appa-engine/**'
+              - 'appa-eventlog/**'
+              - 'appa-policy/**'
+              - 'appa-builtin/**'
+              - 'appa-adapter-kagent/**'
+              - 'appa-adapter-claude-code/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+            e2e:
+              - *integration
+              - 'integrations/kagent/**'
+              - 'appa-example-agent/**'
+              - 'appa-agent-python/**'
+              - 'bench/**'
+              - 'website-chat-playground/**'
+              - 'batteries/**'
+              - 'website/content/docs/contracts.md'
+              # The published image compiles a digest of the plugin
+              # tree into the binary; these are the rest of the roots
+              # appa-runtime/src/plugin_layout.rs maps.
+              - 'integrations/claude-code/**'
+              - 'integrations/appa-guide/**'
+              # The root ignore file shapes the quickstart build context.
+              - '.dockerignore'
+
   plugin-checks:
     name: Plugin Checks
     runs-on: ubuntu-latest
@@ -311,6 +396,8 @@ jobs:
 
   kagent-python-checks:
     name: kagent Python Checks
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -327,8 +414,8 @@ jobs:
 
       - name: appa-kagent-adk lint
         run: |
-          uv run --project integrations/kagent/appa-kagent-adk ruff check integrations/kagent/appa-kagent-adk/src integrations/kagent/appa-kagent-adk/tests
-          uv run --project integrations/kagent/appa-kagent-adk ruff format --check integrations/kagent/appa-kagent-adk/src integrations/kagent/appa-kagent-adk/tests
+          uv run --project integrations/kagent/appa-kagent-adk ruff check integrations/kagent/appa-kagent-adk/src integrations/kagent/appa-kagent-adk/tests integrations/kagent/tests
+          uv run --project integrations/kagent/appa-kagent-adk ruff format --check integrations/kagent/appa-kagent-adk/src integrations/kagent/appa-kagent-adk/tests integrations/kagent/tests
 
       - name: appa-kagent-adk tests, locked lane
         run: uv run --project integrations/kagent/appa-kagent-adk pytest integrations/kagent/appa-kagent-adk/tests
@@ -345,6 +432,8 @@ jobs:
 
   kagent-go-checks:
     name: kagent Go Checks
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
@@ -371,3 +460,304 @@ jobs:
 
       - name: go test
         run: go test ./...
+
+  kagent-chart-checks:
+    name: kagent Chart Checks
+    needs: changes
+    if: needs.changes.outputs.chart == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Lint the chart render script
+        run: shellcheck -s sh integrations/kagent/demo/chart/tests/render-test.sh
+
+      - name: Lint the demo chart
+        run: helm lint integrations/kagent/demo/chart
+
+      # The name-collision refusal and the quoting of scalar-looking names
+      # run only where something renders the chart, so this job does.
+      - name: Render the demo chart
+        run: sh integrations/kagent/demo/chart/tests/render-test.sh
+
+  # The deterministic A2A matrix: the real runtime, the real plugin, the real
+  # kagent executor, mock externals and a scripted model. No cluster, no key.
+  kagent-integration:
+    name: kagent Integration Matrix
+    needs: changes
+    if: needs.changes.outputs.integration == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Setup Rust
+        run: rustup show
+
+      # The suite drives a real appa runtime, so this job builds the binary
+      # and caches the build. The other Rust jobs build without a cache.
+      - name: Cache the Rust build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Build the runtime binary
+        run: cargo build --package appa --locked
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+
+      # The suite starts the runtime, the mock externals and the demo tools,
+      # and serves both agents on loopback ports. Only the model is scripted.
+      # It writes the trajectory database and one log per process under its
+      # temporary directory, so `--basetemp` names the directory to upload.
+      - name: kagent integration matrix, kagent v0.9.12 lane
+        env:
+          APPA_INTEGRATION: "1"
+          APPA_BIN: ${{ github.workspace }}/target/debug/appa
+          APPA_INTEGRATION_BASETEMP: ${{ runner.temp }}/appa-integration
+        run: >
+          uv run --project integrations/kagent/appa-kagent-adk
+          --with "kagent-adk @ git+https://github.com/kagent-dev/kagent@v0.9.12#subdirectory=python/packages/kagent-adk"
+          --with "a2a-sdk>=0.3.23,<0.4" --with "google-adk==1.31.1" --with "mcp>=1.25,<2"
+          pytest integrations/kagent/tests -q --basetemp "$APPA_INTEGRATION_BASETEMP"
+
+      - name: Upload the trajectory database and the process logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: kagent-integration-logs
+          path: ${{ runner.temp }}/appa-integration
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # The live subset runs on demand only, and it carries NO same-named
+  # placeholder job. GitHub treats a skipped check run as satisfying a
+  # required status check, so the real job reports its own name when its
+  # `if` is false and nothing waits on a context that never arrives. A
+  # same-named twin would report skipped beside a real failure and
+  # satisfy the requirement anyway, which is how a twin masks red e2e.
+  #
+  # Informational: five A2A cases against a real model on a kind cluster.
+  # `continue-on-error` keeps a flaky model or a rate limit out of the gate.
+  #
+  # The steps below own the runner. The scripts under e2e/ci own the stack:
+  #   kind-up.sh    loads the three `:ci` images into the cluster. It keeps
+  #                 the cluster the action above creates.
+  #   install.sh    installs kagent and the demo chart, then waits for rollout.
+  #   run-subset.sh port-forwards the agent and the mocks, runs the cases,
+  #                 and writes the model and the timings to the step summary.
+  # Each script reads the environment this job exports. e2e/ci/README.md
+  # documents the same three commands for a laptop or a dev VM.
+  kagent-e2e-subset:
+    name: kagent E2E Subset
+    needs: changes
+    # A pull request runs the subset when it carries the label and it
+    # changes an e2e path. A fork never reads the OpenRouter key.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (contains(github.event.pull_request.labels.*.name, 'run-e2e') ||
+      github.event.label.name == 'run-e2e') &&
+      needs.changes.outputs.e2e == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    continue-on-error: true
+    env:
+      KIND_CLUSTER: appa-e2e
+      KAGENT_VERSION: "0.9.12"
+      APPA_E2E_NAMESPACE: kagent
+      APPA_E2E_IMAGE_TAG: ci
+      # The load leaves each image in the daemon and in the cluster node,
+      # so the script drops the daemon copy.
+      APPA_E2E_PRUNE_DAEMON_IMAGES: "1"
+      # One endpoint serves the agents and the policy's sanitizers. This
+      # free model advertises the tools, response_format and structured
+      # outputs that the sanitizer consult needs.
+      APPA_E2E_MODEL: nvidia/nemotron-3-super-120b-a12b:free
+      APPA_E2E_BASE_URL: https://openrouter.ai/api/v1
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      # The runner has 14 GB of disk. The quickstart image is copied three
+      # times: into BuildKit, into the daemon, then into the kind node.
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+          sudo docker image prune --all --force
+          df -h /
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      # These three builds read the cache the images job writes. They never
+      # write it: two jobs writing one scope in one run overwrite each other.
+      - name: Build the quickstart image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: integrations/kagent/appa-kagent-quickstart/Dockerfile
+          tags: appa-kagent-quickstart:${{ env.APPA_E2E_IMAGE_TAG }}
+          load: true
+          push: false
+          cache-from: type=gha,scope=appa-kagent-quickstart
+
+      - name: Build the demo tools image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: integrations/kagent/demo
+          tags: appa-demo-tools:${{ env.APPA_E2E_IMAGE_TAG }}
+          load: true
+          push: false
+          cache-from: type=gha,scope=appa-demo-tools
+
+      - name: Build the demo mocks image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: integrations/kagent/demo/mocks
+          tags: appa-demo-mocks:${{ env.APPA_E2E_IMAGE_TAG }}
+          load: true
+          push: false
+          cache-from: type=gha,scope=appa-demo-mocks
+
+      - name: Reclaim the build cache
+        run: |
+          docker buildx prune --all --force
+          df -h /
+
+      - name: Create the kind cluster
+        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
+        with:
+          cluster_name: ${{ env.KIND_CLUSTER }}
+
+      - name: Load the images into the cluster
+        run: bash integrations/kagent/e2e/ci/kind-up.sh
+
+      - name: Install kagent and the demo chart
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: bash integrations/kagent/e2e/ci/install.sh
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+
+      - name: Run the five A2A cases
+        run: bash integrations/kagent/e2e/ci/run-subset.sh
+
+      # The job already failed here, so a failing diagnostic command must not
+      # replace the real failure.
+      - name: Collect cluster diagnostics
+        if: failure()
+        env:
+          DIAGNOSTICS_DIR: ${{ runner.temp }}/kagent-e2e-diagnostics
+        run: |
+          mkdir -p "$DIAGNOSTICS_DIR"
+          kubectl get pods -A -o wide > "$DIAGNOSTICS_DIR/pods.txt" 2>&1 || true
+          kubectl describe pods -n "$APPA_E2E_NAMESPACE" > "$DIAGNOSTICS_DIR/describe.txt" 2>&1 || true
+          for pod in $(kubectl get pods -n "$APPA_E2E_NAMESPACE" -o name || true); do
+            kubectl logs -n "$APPA_E2E_NAMESPACE" "$pod" --all-containers --tail=2000 \
+              > "$DIAGNOSTICS_DIR/${pod##*/}.log" 2>&1 || true
+          done
+          df -h /
+
+      - name: Upload the cluster diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: kagent-e2e-subset-diagnostics
+          path: ${{ runner.temp }}/kagent-e2e-diagnostics
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # The five published images build here on every change that can break
+  # them. Publishing itself happens in release.yml.
+  #
+  # The quickstart image compiles the runtime in release mode with no cargo
+  # cache inside the build, so the timeout allows a cold four-core build.
+  kagent-images-build:
+    name: kagent Images Build
+    needs: changes
+    if: needs.changes.outputs.e2e == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+          sudo docker image prune --all --force
+          df -h /
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      # One cache scope per image: a shared scope keeps only the last build.
+      # The quickstart exports the final stage alone. Its builder stage
+      # recompiles on any change under integrations, so a full export of it
+      # would spend the repository cache quota for nothing.
+      - name: Build the quickstart image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: integrations/kagent/appa-kagent-quickstart/Dockerfile
+          tags: appa-kagent-quickstart:ci
+          push: false
+          cache-from: type=gha,scope=appa-kagent-quickstart
+          cache-to: type=gha,mode=min,scope=appa-kagent-quickstart
+
+      - name: Build the python plugin image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: integrations/kagent/appa-kagent-adk
+          tags: appa-kagent-adk:ci
+          push: false
+          cache-from: type=gha,scope=appa-kagent-adk
+          cache-to: type=gha,mode=max,scope=appa-kagent-adk
+
+      - name: Build the go plugin image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: integrations/kagent/appa-kagent-adk-go
+          tags: appa-kagent-adk-go:ci
+          push: false
+          cache-from: type=gha,scope=appa-kagent-adk-go
+          cache-to: type=gha,mode=max,scope=appa-kagent-adk-go
+
+      - name: Build the demo tools image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: integrations/kagent/demo
+          tags: appa-demo-tools:ci
+          push: false
+          cache-from: type=gha,scope=appa-demo-tools
+          cache-to: type=gha,mode=max,scope=appa-demo-tools
+
+      - name: Build the demo mocks image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: integrations/kagent/demo/mocks
+          tags: appa-demo-mocks:ci
+          push: false
+          cache-from: type=gha,scope=appa-demo-mocks
+          cache-to: type=gha,mode=max,scope=appa-demo-mocks

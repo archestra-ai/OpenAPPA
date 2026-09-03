@@ -2,18 +2,18 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: appa-runtime-policy
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ .Release.Namespace | quote }}
   labels:
     {{- include "appa-demo.labels" . | nindent 4 }}
 data:
   demo.appa.toml: |
-{{ .Files.Get "files/demo.appa.toml" | indent 4 }}
+{{ include "appa-demo.policy" . | indent 4 }}
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: appa-runtime-relay
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ .Release.Namespace | quote }}
   labels:
     {{- include "appa-demo.labels" . | nindent 4 }}
 data:

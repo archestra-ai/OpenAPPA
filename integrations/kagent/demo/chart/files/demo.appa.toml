@@ -120,14 +120,16 @@ delta = {}
 # --- the delegated child ---
 
 # The log-analyst agent, called as a tool: the deployment's spawn. On
-# kagent an agent runs as a child only under a contract that names it —
-# the wildcard covers no spawn — so the release-manager agent both
-# parents also list, named by no entry here, is denied at every
-# delegation. Its
-# branch narrows independently of the parent, and its return crosses
-# at the parent's gate. kagent dispatches an agent tool as
-# `<namespace>__NS__<agent name>` with underscores — declare that
-# spelling, the one the wire carries.
+# kagent an agent runs as a child only under a contract that names it.
+# The wildcard covers no spawn. So the release-manager agent, which
+# both parents also list and no entry here names, is denied at every
+# delegation. The child's branch narrows independently of the parent.
+# Its return crosses at the parent's gate. kagent dispatches an agent
+# tool as `<namespace>__NS__<agent name>`, hyphens as underscores.
+# Declare that spelling, the one the wire carries. The chart fills the
+# three sentinels when it renders this file (templates/_helpers.tpl).
+# The NAMESPACE sentinel comes from the release namespace, CHILD from
+# `agents.childName`, and CHILD_GO from `agents.go.childName`.
 [[policy.tool]]
 name = "kagent__NS__log_analyst"
 delta = {}
@@ -248,6 +250,10 @@ builtin = "llm"
 builtin = "llm"
 
 # The one model profile every `builtin = "llm"` binding consults.
+# The values here are the chart defaults, so this file loads as it
+# stands and CI opens it. The chart substitutes them per release
+# (`appa-demo.policy`), and adds a `url` line when `llm.url` names an
+# endpoint; without one the provider's own default applies.
 [externals.llm]
 provider = "openai"
 model = "gpt-4.1-mini"
