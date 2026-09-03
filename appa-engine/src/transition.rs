@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::audience::AudienceEvidence;
-use crate::candidate::{CallStage, ConfinedFrom, DerivedCandidate, DerivedVia, SanitizerLineage};
+use crate::candidate::{CallStage, ConfinedFrom, DerivedCandidate, SanitizerLineage};
 use crate::check::{CheckOutcome, Gap, Narrowing};
 use crate::contract::ToolAnnotation;
 use crate::engine::Engine;
@@ -478,6 +478,12 @@ impl From<crate::label::MembershipNeeded> for TransitionError {
     }
 }
 
+impl From<crate::label::MembershipNeeded> for TransitionRefusal {
+    fn from(needed: crate::label::MembershipNeeded) -> TransitionRefusal {
+        TransitionRefusal::UnansweredDecision { needed: needed.needed }
+    }
+}
+
 /// One engine interaction's outcome: the sealed batch to append against its basis
 /// revision, and the one typed follow-up package. The runtime appends the whole batch
 /// before it performs any follow-up item.
@@ -705,10 +711,15 @@ pub enum TransitionRefusal {
     SplitAdmission,
     #[error("an admitted value does not carry the label its source derives")]
     ForgedLabel,
-    #[error(
-        "a record persists audience evidence other than what its operation consumed, or claims a decision its pinned evidence cannot answer"
-    )]
+    #[error("a record persists audience evidence or an annotation other than what its operation consumed")]
     ForgedEvidence,
+    #[error("a record pins audience evidence its operation could not have consumed: {0}")]
+    ForeignEvidence(#[from] crate::audience::EvidenceRefusal),
+    #[error(
+        "a record claims a decision its pinned evidence cannot answer: {}",
+        needed.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+    )]
+    UnansweredDecision { needed: Vec<crate::label::SymbolicAtom> },
     #[error("a second value is admitted for one dispatch or child return")]
     RepeatAdmission,
     #[error("admitted value names a dispatch not opened earlier in the log")]
@@ -857,19 +868,6 @@ impl Remedy {
     }
 }
 
-/// The per-act operation-scope audit: the union of the pinned evidence the act's records
-/// carry, the asks their validations re-made (plus the deterministic gate atoms the live act
-/// answered), and the pins of the records the act continues. Settled when the act closes:
-/// every pinned entry must be an inherited pin or answer a collected ask — the same
-/// `only_requested` test the live act passed, so a log cannot smuggle evidence no operation
-/// requested.
-#[derive(Default)]
-struct ActAudit {
-    evidence: AudienceEvidence,
-    inherited: AudienceEvidence,
-    reads: BTreeSet<crate::label::SymbolicAtom>,
-}
-
 /// The one sequential transition validator. It admits records one at a time against the
 /// state the records before them built, and folds each admitted record into that state through
 /// [`Projection::fold`] — the same fold a held view advances by, so validation and projection can
@@ -897,7 +895,7 @@ pub(crate) struct Sequence<'a> {
     owing: Option<Owed>,
     substituted: Option<Substitution>,
     /// Interior mutability because contributions come from `&self` validation helpers.
-    audit: std::cell::RefCell<ActAudit>,
+    audit: std::cell::RefCell<crate::audience::ActLedger>,
 }
 
 struct Substitution {
@@ -1193,11 +1191,11 @@ impl<'a> Sequence<'a> {
             Fact::CandidateDerived {
                 trajectory,
                 subject,
-                via,
+                sanitizer,
                 derived,
                 lineage,
                 evidence,
-            } => self.candidate_derived(trajectory, subject, via, derived, lineage, evidence)?,
+            } => self.candidate_derived(trajectory, subject, sanitizer, derived, lineage, evidence)?,
             Fact::CandidateAccepted {
                 trajectory,
                 subject,
@@ -1426,12 +1424,12 @@ impl<'a> Sequence<'a> {
         match act {
             crate::basis::DecidedAct::Offer(offer) => {
                 if let Some(recorded) = views.offer(offer) {
-                    self.audit_inherit(&recorded.evidence);
+                    self.audit_inherit(&recorded.evidence)?;
                 }
             }
             crate::basis::DecidedAct::Outcome(dispatch) => {
                 if let Some(pinned) = views.dispatch_evidence(dispatch) {
-                    self.audit_inherit(pinned);
+                    self.audit_inherit(pinned)?;
                 }
             }
             _ => {}
@@ -1464,7 +1462,7 @@ impl<'a> Sequence<'a> {
                 let context = self.context(expansions);
                 let CheckOutcome::Block(block) =
                     crate::check::evaluate(&contract, views, candidate, &stage, role, &context)
-                        .map_err(|_| TransitionRefusal::ForgedEvidence)?
+                        .map_err(TransitionRefusal::from)?
                 else {
                     return Err(TransitionRefusal::UnbackedOffer);
                 };
@@ -1490,7 +1488,7 @@ impl<'a> Sequence<'a> {
                 )
                 // A recorded act whose pinned evidence leaves an enumeration read undecided
                 // reconstructed a menu the evidence cannot back.
-                .map_err(|_| TransitionRefusal::ForgedEvidence)?
+                .map_err(TransitionRefusal::from)?
                 .plans
                 .iter()
                 .filter_map(crate::plan::RemedyPlan::executable)
@@ -1535,7 +1533,7 @@ impl<'a> Sequence<'a> {
                     floor.as_ref(),
                     &self.context(expansions),
                 )
-                .map_err(|_| TransitionRefusal::ForgedEvidence)
+                .map_err(TransitionRefusal::from)
             }
             // A child return is never planned: it crosses at the child's stop or is refused there.
             crate::basis::SubjectKey::Return(_) => Err(TransitionRefusal::ForeignOffer),
@@ -1552,7 +1550,7 @@ impl<'a> Sequence<'a> {
         let views = self.projection.view(trajectory);
         let recorded = ending_offer(&views, trajectory, offer)?;
         // The executing act inherits the accepted offer's pinned evidence.
-        self.audit_inherit(&recorded.evidence);
+        self.audit_inherit(&recorded.evidence)?;
         let (basis, subject) = (recorded.basis, recorded.subject.clone());
         let owed = match (&subject, recorded.plan.hop().is_some()) {
             (SubjectKey::Call { .. }, false) => Owed::Approval(*offer),
@@ -1664,7 +1662,7 @@ impl<'a> Sequence<'a> {
         if !evidence.contains(&recorded.evidence) {
             return Err(TransitionRefusal::ForgedEvidence);
         }
-        self.audit_inherit(&recorded.evidence);
+        self.audit_inherit(&recorded.evidence)?;
         // The live approval act answered its whole deterministic gate — the standing block's
         // atoms and the chosen plan's — before ruling; mirror the same ask here.
         let stage = views.call_stage(&recorded.subject);
@@ -2182,7 +2180,8 @@ impl<'a> Sequence<'a> {
             &act,
         )
         .map_err(|refusal| match refusal {
-            crate::engine::ComposeRefusal::MembershipNeeded(_) => TransitionRefusal::ForgedEvidence,
+            crate::engine::ComposeRefusal::MembershipNeeded(needed) => needed.into(),
+            crate::engine::ComposeRefusal::Evidence(refusal) => refusal.into(),
             crate::engine::ComposeRefusal::Malformed(error) => match error {
                 crate::engine::EngineError::InvalidCall(error) => TransitionRefusal::InvalidPayload(error),
                 crate::engine::EngineError::UnknownTool(tool) | crate::engine::EngineError::ProviderRunTool(tool) => {
@@ -2309,7 +2308,7 @@ impl<'a> Sequence<'a> {
             }
             Obligation::Consuming(offer) => {
                 let approval = views.approval(&offer).ok_or(TransitionRefusal::UnknownApproval)?;
-                self.audit_inherit(&approval.evidence);
+                self.audit_inherit(&approval.evidence)?;
                 let lands =
                     !approval.rulings.is_empty() || approval.acceptance.is_some() || approval.sanitizer.is_some();
                 match (lands, remedy) {
@@ -2336,7 +2335,7 @@ impl<'a> Sequence<'a> {
                                     name,
                                     &self.context(expansions),
                                 )
-                                .map_err(|_| TransitionRefusal::ForgedEvidence)?,
+                                .map_err(TransitionRefusal::from)?,
                             },
                             evidence: (!approval.rulings.is_empty() || approval.sanitizer.is_some())
                                 .then(|| evidence.clone()),
@@ -2352,7 +2351,7 @@ impl<'a> Sequence<'a> {
                 return match checked {
                     Ok(CheckOutcome::Block(_)) => Ok(()),
                     Ok(CheckOutcome::Allow) => Err(TransitionRefusal::UnreleasedDispatch),
-                    Err(_) => Err(TransitionRefusal::ForgedEvidence),
+                    Err(needed) => Err(needed.into()),
                 };
             }
             Obligation::Free => {}
@@ -2364,7 +2363,7 @@ impl<'a> Sequence<'a> {
             Ok(CheckOutcome::Allow) if remedy.is_some() => Err(TransitionRefusal::DanglingRemedy),
             Ok(CheckOutcome::Allow) => Ok(()),
             Ok(CheckOutcome::Block(_)) => Err(TransitionRefusal::UnreleasedDispatch),
-            Err(_) => Err(TransitionRefusal::ForgedEvidence),
+            Err(needed) => Err(needed.into()),
         }
     }
 
@@ -2545,7 +2544,6 @@ impl<'a> Sequence<'a> {
                 ReturnDerivation::Sanitized {
                     sanitizer: named,
                     raw_digest,
-                    transition,
                 },
             ) => {
                 if sanitizer.name() != *named {
@@ -2556,9 +2554,6 @@ impl<'a> Sequence<'a> {
                     .registry()
                     .sanitizer(named)
                     .ok_or_else(|| TransitionRefusal::UnknownSanitizer(named.as_str().to_string()))?;
-                if registered.transition.applied() != *transition {
-                    return Err(TransitionRefusal::SanitizerUnapplicable);
-                }
                 match sanitizer {
                     ReturnSanitizer::Attest(shape) => {
                         match shape.validate(value.body.as_str()) {
@@ -2573,7 +2568,7 @@ impl<'a> Sequence<'a> {
                         match registered.derive_output(&fold, &[], &self.context(&expansions)) {
                             Ok(Some(label)) => label,
                             Ok(None) => return Err(TransitionRefusal::SanitizerUnapplicable),
-                            Err(_) => return Err(TransitionRefusal::ForgedEvidence),
+                            Err(needed) => return Err(needed.into()),
                         }
                     }
                     // The staging act derived and validated the label with its own pinned
@@ -2666,54 +2661,47 @@ impl<'a> Sequence<'a> {
     /// The membership answers a record's pinned primitives recompute to. Every pinned entry
     /// must belong to a registered source: junk or foreign evidence never validates, whatever
     /// answers it would add. The one funnel every evidence-carrying record passes, so it also
-    /// unions the evidence into the open act's operation-scope audit.
+    /// pins the evidence into the open act's ledger.
     fn recorded_expansions(&self, evidence: &AudienceEvidence) -> Result<Expansions, TransitionRefusal> {
         let expansions = self
             .engine
             .registry()
             .audience()
             .expansions(evidence)
-            .map_err(|_| TransitionRefusal::ForgedEvidence)?;
-        let mut audit = self.audit.borrow_mut();
-        let union = evidence.inheriting(&audit.evidence);
-        audit.evidence = union;
+            .map_err(TransitionRefusal::from)?;
+        self.audit.borrow_mut().pin(evidence).map_err(TransitionRefusal::from)?;
         Ok(expansions)
     }
 
-    /// Fold a validation context's asks into the open act's audit, after the record's
+    /// Fold a validation context's asks into the open act's ledger, after the record's
     /// re-derivations ran over it.
     fn audit_reads(&self, expansions: &Expansions) {
-        self.audit.borrow_mut().reads.extend(expansions.reads());
+        self.audit.borrow_mut().read(expansions.reads());
     }
 
     /// Contribute the deterministic gate atoms the live act answered before this record's
     /// decision ran — a validation that re-derives less than the live gates demanded still
     /// justifies the evidence those gates gathered.
     fn audit_atoms(&self, atoms: impl IntoIterator<Item = crate::label::SymbolicAtom>) {
-        self.audit.borrow_mut().reads.extend(atoms);
+        self.audit.borrow_mut().read(atoms);
     }
 
     /// Count `pins` — entries pinned by a record the open act continues — as inherited.
-    fn audit_inherit(&self, pins: &AudienceEvidence) {
-        let mut audit = self.audit.borrow_mut();
-        let merged = audit.inherited.inheriting(pins);
-        audit.inherited = merged;
+    fn audit_inherit(&self, pins: &AudienceEvidence) -> Result<(), TransitionRefusal> {
+        self.audit.borrow_mut().inherit(pins).map_err(TransitionRefusal::from)
     }
 
-    /// Settle the open act's operation-scope audit: every pinned entry is an inherited pin
-    /// or answers a collected ask, exactly the test the live act passed.
+    /// Settle the open act's ledger: every pinned entry is an inherited pin or answers a
+    /// collected ask, exactly the test the live act passed.
     fn settle_audit(&self) -> Result<(), TransitionRefusal> {
         let audit = std::mem::take(&mut *self.audit.borrow_mut());
-        let reads: Vec<crate::label::SymbolicAtom> = audit.reads.into_iter().collect();
-        self.engine
-            .registry()
-            .audience()
-            .only_requested(&audit.evidence, &audit.inherited, &reads)
+        audit
+            .settle(self.engine.registry().audience())
             .map_err(|refusal| match refusal {
                 crate::audience::EvidenceRefusal::UnrequestedEvidence { entry } => {
                     TransitionRefusal::UnrequestedEvidence { entry }
                 }
-                _ => TransitionRefusal::ForgedEvidence,
+                other => TransitionRefusal::ForeignEvidence(other),
             })
     }
 
@@ -2758,24 +2746,17 @@ impl<'a> Sequence<'a> {
         &mut self,
         trajectory: &TrajectoryId,
         subject: &crate::basis::SubjectKey,
-        via: &DerivedVia,
+        sanitizer: &SanitizerName,
         derived: &DerivedCandidate,
         lineage: &SanitizerLineage,
         evidence: &AudienceEvidence,
     ) -> Result<(), TransitionRefusal> {
         let expansions = self.recorded_expansions(evidence)?;
-        let DerivedVia {
-            name: sanitizer,
-            transition,
-        } = via;
         let registered = self
             .engine
             .registry()
             .sanitizer(sanitizer)
             .ok_or_else(|| TransitionRefusal::UnknownSanitizer(sanitizer.as_str().to_string()))?;
-        if registered.transition.applied() != *transition {
-            return Err(TransitionRefusal::SanitizerUnapplicable);
-        }
         let (dispatch, source, from, value, residual) = match derived {
             DerivedCandidate::Call {
                 source,
@@ -2832,7 +2813,7 @@ impl<'a> Sequence<'a> {
                 if recorded.plan.hop() != Some(sanitizer) || &recorded.subject != subject {
                     return Err(TransitionRefusal::UnbackedOffer);
                 }
-                self.audit_inherit(&recorded.evidence);
+                self.audit_inherit(&recorded.evidence)?;
                 let current = views.candidate(subject).ok_or(TransitionRefusal::UnknownOffer)?;
                 let DerivedCandidate::Result {
                     value: predecessor,
@@ -2862,7 +2843,7 @@ impl<'a> Sequence<'a> {
         let label = match registered.derive_output(&from_label, &contract.tags, &self.context(&expansions)) {
             Ok(Some(label)) => label,
             Ok(None) => return Err(TransitionRefusal::SanitizerUnapplicable),
-            Err(_) => return Err(TransitionRefusal::ForgedEvidence),
+            Err(needed) => return Err(needed.into()),
         };
         if value.label != label {
             return Err(TransitionRefusal::ForgedLabel);
@@ -2880,7 +2861,7 @@ impl<'a> Sequence<'a> {
             self.derived.insert(dispatch.clone(), Derived::Sanitized(value.clone()));
         }
         if let Some(pinned) = views.dispatch_evidence(dispatch) {
-            self.audit_inherit(pinned);
+            self.audit_inherit(pinned)?;
         }
         self.audit_reads(&expansions);
         Ok(())
@@ -2927,7 +2908,7 @@ impl<'a> Sequence<'a> {
         let label = match registered.derive_output(&fold, &[], &self.context(expansions)) {
             Ok(Some(label)) => label,
             Ok(None) => return Err(TransitionRefusal::SanitizerUnapplicable),
-            Err(_) => return Err(TransitionRefusal::ForgedEvidence),
+            Err(needed) => return Err(needed.into()),
         };
         if value.label != label {
             return Err(TransitionRefusal::ForgedLabel);
@@ -3030,7 +3011,7 @@ impl<'a> Sequence<'a> {
             match registered.derive_input(&stage.released(&views.current_label()), &before_contract.tags, &context) {
                 Ok(Some(derived)) => derived,
                 Ok(None) => return Err(TransitionRefusal::SanitizerUnapplicable),
-                Err(_) => return Err(TransitionRefusal::ForgedEvidence),
+                Err(needed) => return Err(needed.into()),
             };
         if label != &derived {
             return Err(TransitionRefusal::ForgedLabel);
@@ -3042,8 +3023,8 @@ impl<'a> Sequence<'a> {
             return Err(TransitionRefusal::UnbackedOffer);
         };
         let next = CallStage::substituting(derived, lineage.clone());
-        let after = crate::check::evaluate(&contract, &views, call, &next, role, &context)
-            .map_err(|_| TransitionRefusal::ForgedEvidence)?;
+        let after =
+            crate::check::evaluate(&contract, &views, call, &next, role, &context).map_err(TransitionRefusal::from)?;
         if !crate::plan::substitution_helps(&before, &after) {
             return Err(TransitionRefusal::SanitizerUnapplicable);
         }
@@ -3056,7 +3037,7 @@ impl<'a> Sequence<'a> {
         // The live hop's act gated the standing block's whole atom set before offering.
         let role = views.call_role(subject);
         self.audit_atoms(crate::plan::block_atoms(registry, &before_contract, &before, role));
-        self.audit_inherit(&recorded.evidence);
+        self.audit_inherit(&recorded.evidence)?;
         self.audit_reads(expansions);
         Ok(())
     }

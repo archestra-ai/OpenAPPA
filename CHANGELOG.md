@@ -1,5 +1,73 @@
 # Changelog
 
+## [0.7.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.7.0...v0.7.1) (2026-09-02)
+
+
+### Bug Fixes
+
+* **release:** make packaged runtime verification portable ([#155](https://github.com/archestra-ai/OpenAPPA/issues/155)) ([903fd5b](https://github.com/archestra-ai/OpenAPPA/commit/903fd5b7ce18144a0507ccda53d4302ba255da92))
+
+## [0.7.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.6.1...v0.7.0) (2026-09-02)
+
+
+### ⚠ BREAKING CHANGES
+
+* an audience source's token moves from OPENAPPA_<PROVIDER>_TOKEN to APPA_PROVIDER_<PROVIDER>_TOKEN.
+* a verified-email principal is the bare address; logs and policies spelling email:<address> refuse.
+* replace dynamic resolvers, casts, and Unknown with the Annotator boundary ([#122](https://github.com/archestra-ai/OpenAPPA/issues/122))
+
+### Features
+
+* **cli:** make appa own Claude Code initialization ([#111](https://github.com/archestra-ai/OpenAPPA/issues/111)) ([4c43d6d](https://github.com/archestra-ai/OpenAPPA/commit/4c43d6d4a9417b1daaf1418c2f82e0ab425b9b29))
+* first-class symbolic audiences and battery-backed audience sources ([#134](https://github.com/archestra-ai/OpenAPPA/issues/134)) ([426df5f](https://github.com/archestra-ai/OpenAPPA/commit/426df5fa30fcfd1d7fbfdb05e59ada4267b39b34))
+* **install:** add a curl | sh installer for release binaries ([#152](https://github.com/archestra-ai/OpenAPPA/issues/152)) ([d02542d](https://github.com/archestra-ai/OpenAPPA/commit/d02542db1166243cb76d81ed5b56a63a1666b502))
+* nightly defended-vs-empty canary benchmark ([#123](https://github.com/archestra-ai/OpenAPPA/issues/123)) ([3c827db](https://github.com/archestra-ai/OpenAPPA/commit/3c827db6ef1968337382a62ecb4ba31d16b34be1))
+* replace dynamic resolvers, casts, and Unknown with the Annotator boundary ([#122](https://github.com/archestra-ai/OpenAPPA/issues/122)) ([9b1dfff](https://github.com/archestra-ai/OpenAPPA/commit/9b1dfff9f6dc55b3b8c102212fc2df8ca229621e))
+
+
+### Bug Fixes
+
+* archestra-style Slack board for the canary verdict ([#124](https://github.com/archestra-ai/OpenAPPA/issues/124)) ([c0aefd4](https://github.com/archestra-ai/OpenAPPA/commit/c0aefd4d705e538baff3c0b684af66a453a9d8c6))
+* **bench:** answer channel is not an attack sink; generous nightly timeouts ([#126](https://github.com/archestra-ai/OpenAPPA/issues/126)) ([df69b8a](https://github.com/archestra-ai/OpenAPPA/commit/df69b8a1adf9206cc2923b95fadd17f9d26224ae))
+* **bench:** label finance search statically; provider faults do not red the canary ([#129](https://github.com/archestra-ai/OpenAPPA/issues/129)) ([237e718](https://github.com/archestra-ai/OpenAPPA/commit/237e718fb5dbcf3993a63bf07a82a102606ef7ad))
+* bind a command external's credential to that command ([#140](https://github.com/archestra-ai/OpenAPPA/issues/140)) ([310ab67](https://github.com/archestra-ai/OpenAPPA/commit/310ab67c6b7945a76333c1f812ce88bdbb4d68ec))
+* drop first-visit email popup, fix mobile drawer overflow, formal cookie notice ([#120](https://github.com/archestra-ai/OpenAPPA/issues/120)) ([7ca3466](https://github.com/archestra-ai/OpenAPPA/commit/7ca3466bdffba8e00dfa4b1f09b44fdf6f5aca61))
+* **example-agent:** separate an elapsed request deadline from a transport fault ([#130](https://github.com/archestra-ai/OpenAPPA/issues/130)) ([89c6b1f](https://github.com/archestra-ai/OpenAPPA/commit/89c6b1f8f15852504438e12de41d532938245761))
+* **init:** automate matching plugin installs and runtime recovery ([#137](https://github.com/archestra-ai/OpenAPPA/issues/137)) ([f6ebe37](https://github.com/archestra-ai/OpenAPPA/commit/f6ebe37cf48d1b3eff4c8eea5c800e35959d7bd1))
+* **init:** install the plugin and binary as one coherent bundle ([#127](https://github.com/archestra-ai/OpenAPPA/issues/127)) ([71b5080](https://github.com/archestra-ai/OpenAPPA/commit/71b5080ad2a49e21493887c5bf71a45c620e924f))
+* **init:** run the runtime's startup refusals before the runtime starts ([#142](https://github.com/archestra-ai/OpenAPPA/issues/142)) ([c5fd66a](https://github.com/archestra-ai/OpenAPPA/commit/c5fd66ac35eca8fd52f0971f3a2257dfa693e8a2))
+* **release:** sync shared workspace version ([#125](https://github.com/archestra-ai/OpenAPPA/issues/125)) ([977006e](https://github.com/archestra-ai/OpenAPPA/commit/977006ef5379928add87c003e5a6f3bf9b2c22c4))
+* remove /landing2 experiment ([#121](https://github.com/archestra-ai/OpenAPPA/issues/121)) ([ae1b656](https://github.com/archestra-ai/OpenAPPA/commit/ae1b656e0721c737b8655788fe435667f620f092))
+* **runtime:** close at the next prompt a call an interrupted turn left open ([#138](https://github.com/archestra-ai/OpenAPPA/issues/138)) ([0d56bb9](https://github.com/archestra-ai/OpenAPPA/commit/0d56bb9fab2dbf3df4439975975644bb631b0a34))
+* **runtime:** consult budgets and policy reconciliation on init ([#146](https://github.com/archestra-ai/OpenAPPA/issues/146)) ([c8d7e8a](https://github.com/archestra-ai/OpenAPPA/commit/c8d7e8a20bf90ea88edccc735e562a09858a84d2))
+* **runtime:** name APPA in the outstanding-call refusal ([#136](https://github.com/archestra-ai/OpenAPPA/issues/136)) ([b62639d](https://github.com/archestra-ai/OpenAPPA/commit/b62639ddc64ba09b28531e08cc41b395071fea05))
+* **runtime:** render an inhabited enum for an empty mandate vocabulary ([#141](https://github.com/archestra-ai/OpenAPPA/issues/141)) ([d2f3f47](https://github.com/archestra-ai/OpenAPPA/commit/d2f3f47ac910c5948ba669af9f8fc0fee4aeafd9))
+
+
+### Documentation
+
+* AppaPluginKagent rename and remedy-plan execution coverage ([#149](https://github.com/archestra-ai/OpenAPPA/issues/149)) ([098f3c6](https://github.com/archestra-ai/OpenAPPA/commit/098f3c61bea571df68ac96b3e3a14a2275521996))
+* cover annotators and label flow in the kagent docs ([#150](https://github.com/archestra-ai/OpenAPPA/issues/150)) ([70f26e2](https://github.com/archestra-ai/OpenAPPA/commit/70f26e293e4b28d55a4bb6dacad41f2fffe78979))
+* cover both runtimes in the kagent proposal and fix the plan link ([#145](https://github.com/archestra-ai/OpenAPPA/issues/145)) ([1ae2e87](https://github.com/archestra-ai/OpenAPPA/commit/1ae2e877f0dde13977626b72495c754ad0d0a754))
+* drop the proposal wrapper from the Batteries page ([#131](https://github.com/archestra-ai/OpenAPPA/issues/131)) ([48e5c46](https://github.com/archestra-ai/OpenAPPA/commit/48e5c46910f244061ff754a46b9f50f2f1212aa7))
+* finalize the kagent proposal on the no-fork ADK plugin lane ([#139](https://github.com/archestra-ai/OpenAPPA/issues/139)) ([87e96b9](https://github.com/archestra-ai/OpenAPPA/commit/87e96b934d7d3062440fe88396785bdb0b104d7b))
+* give the kagent runtime images their own names ([#147](https://github.com/archestra-ai/OpenAPPA/issues/147)) ([64393be](https://github.com/archestra-ai/OpenAPPA/commit/64393be0b124438afbb76d8c3636913e7a387e80))
+* kagent target matrix, per-ADK mappings, quickstart, and a leaner proposal page ([#148](https://github.com/archestra-ai/OpenAPPA/issues/148)) ([2f2ab64](https://github.com/archestra-ai/OpenAPPA/commit/2f2ab645e0a86615a58015155855f09adc14c313))
+* **kagent:** cover out-of-band ADK flows and boundary-review fixes ([#151](https://github.com/archestra-ai/OpenAPPA/issues/151)) ([b4e6270](https://github.com/archestra-ai/OpenAPPA/commit/b4e627020e706896dfa4cf5b7cc6dbc03bf2a4fd))
+* keep Google ADK unmodified in the kagent proposal ([#133](https://github.com/archestra-ai/OpenAPPA/issues/133)) ([d87d6f8](https://github.com/archestra-ai/OpenAPPA/commit/d87d6f822fdde2968d607b05f2be4c6140b67342))
+* propose the kagent integration ([#113](https://github.com/archestra-ai/OpenAPPA/issues/113)) ([9a66708](https://github.com/archestra-ai/OpenAPPA/commit/9a6670840a3f03eee7e31e8206f96a0a0bd7e27b))
+* redesign kagent integration for dynamic ADK plugins ([#128](https://github.com/archestra-ai/OpenAPPA/issues/128)) ([77230bb](https://github.com/archestra-ai/OpenAPPA/commit/77230bbb177d72ac740173036b715ff2b3f1ae24))
+* redraw the kagent diagrams and split the plan by lane and runtime ([#144](https://github.com/archestra-ai/OpenAPPA/issues/144)) ([5babba6](https://github.com/archestra-ai/OpenAPPA/commit/5babba600ceff754d9e87810c923fe150d0c7620))
+* reorganize docs nav categories ([#132](https://github.com/archestra-ai/OpenAPPA/issues/132)) ([fec0ffe](https://github.com/archestra-ai/OpenAPPA/commit/fec0ffe2f2e4cc8659a9600a0d9c7f221bea9da4))
+* reorganize nav — Batteries to Deep Dive, Integrations category, kAgent title ([fec0ffe](https://github.com/archestra-ai/OpenAPPA/commit/fec0ffe2f2e4cc8659a9600a0d9c7f221bea9da4))
+* retarget the kagent proposal to stable kagent v0.9.12 ([#143](https://github.com/archestra-ai/OpenAPPA/issues/143)) ([ba9c549](https://github.com/archestra-ai/OpenAPPA/commit/ba9c5497bfb81088654910a5f1b6d02be6ff90c8))
+* split kagent adapter from appa-runtime ([#135](https://github.com/archestra-ai/OpenAPPA/issues/135)) ([c0facc4](https://github.com/archestra-ai/OpenAPPA/commit/c0facc49e32950b72d7f8afb98f22c35f91dbcab))
+
+
+### Code Refactoring
+
+* consolidate the day's merges ([#153](https://github.com/archestra-ai/OpenAPPA/issues/153)) ([e13c408](https://github.com/archestra-ai/OpenAPPA/commit/e13c408782a6ebe39159215e40e2ec84cfcb7155))
+
 ## [0.6.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.6.0...v0.6.1) (2026-08-28)
 
 

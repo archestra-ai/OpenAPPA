@@ -69,6 +69,29 @@ pub enum SpawnRef {
     InFlight,
 }
 
+/// A person's ruling the harness obtained itself for the offer a
+/// control call quotes. A harness whose review channel is its own —
+/// where the runtime's elicitation reaches no person — shows the
+/// [`Review`] text and returns the answer here; the runtime spends it
+/// as the human authority's answer for that one execution, exactly as
+/// an elicitation's Accept or Decline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ruling {
+    Approve,
+    Deny,
+}
+
+/// An offer whose plan consults a human authority, with the review as
+/// the person reads it — the consult artifact alone: the authority and
+/// its hint, the exact tool, the canonical arguments, and what the
+/// ruling covers. Nothing the model said is in it, and the person's
+/// answer never passes back through the model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Review {
+    pub offer: String,
+    pub text: String,
+}
+
 /// One hook event in the runtime's vocabulary. The adapter maps each
 /// of its harness's hooks onto exactly one variant — or onto no event
 /// at all for hooks the deployment does not gate.
@@ -90,6 +113,9 @@ pub enum HookEvent {
         actor: Actor,
         call: ProposedCall,
         spawn: bool,
+        /// A ruling the harness already obtained for the offer this
+        /// control call quotes; `None` on every ordinary call.
+        ruling: Option<Ruling>,
     },
     ToolResult {
         actor: Actor,
@@ -136,6 +162,9 @@ pub enum HookDecision {
         /// them, for a harness that routes one itself rather than through
         /// the model's control call.
         offers: Vec<OfferedRemedy>,
+        /// The offers whose plans consult a human authority, for a
+        /// harness that reviews through its own channel.
+        review: Vec<Review>,
     },
     Block {
         reason: String,

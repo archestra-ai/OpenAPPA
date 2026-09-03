@@ -1,0 +1,16 @@
+[package]
+name = "appa-adapter-kagent"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+appa-runtime-api = { path = "../appa-runtime-api" }
+serde = { workspace = true }
+# `raw_value` carries a proposed call's arguments as the bytes the plugin
+# sent — the same passthrough rule appa-runtime-api states.
+serde_json = { workspace = true, features = ["raw_value"] }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

@@ -79,7 +79,7 @@ impl RemedyService {
         // The trajectory this act belongs to was named by the hook that
         // preceded it. Without one there is nothing to serve, and guessing
         // would be choosing a trajectory for the caller.
-        let Some(acting) = self.runtime.take_vouched(&quoted) else {
+        let Some((acting, ruling)) = self.runtime.take_vouched(&quoted) else {
             return render(RemedyOutcome::Refused {
                 detail: "no live offer with this id exists".to_string(),
             });
@@ -87,7 +87,7 @@ impl RemedyService {
         let elicitation = Elicitation::new(request, self.runtime.review_timeout());
         render(
             self.runtime
-                .remedy(&acting, quoted, arguments, Some(&elicitation))
+                .remedy(&acting, quoted, arguments, Some(&elicitation), ruling)
                 .await,
         )
     }
@@ -325,7 +325,7 @@ mod tests {
         }
         assert_eq!(
             runtime.take_vouched(&quoted),
-            Some(acting(root.0.as_str())),
+            Some((acting(root.0.as_str()), None)),
             "a repeated hook is one caller"
         );
         assert!(runtime.take_vouched(&quoted).is_none());
@@ -347,6 +347,7 @@ mod tests {
                 arguments: raw(serde_json::json!({ "offer_id": quoted.0 })),
             },
             spawn: false,
+            ruling: None,
         }
     }
 }

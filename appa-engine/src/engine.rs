@@ -5,7 +5,7 @@ use thiserror::Error;
 use crate::admit::{self, AdmitError, ResultAdmission};
 use crate::audience::AudienceEvidence;
 use crate::branch::{self, BranchError};
-use crate::candidate::{CallStage, ConfinedFrom, DerivedCandidate, DerivedVia, SanitizerLineage};
+use crate::candidate::{CallStage, ConfinedFrom, DerivedCandidate, SanitizerLineage};
 use crate::check::{self, CallRole, CheckOutcome, Narrowing, RawBlock};
 use crate::contract::ToolAnnotation;
 use crate::execute::{self, PlanError};
@@ -245,11 +245,7 @@ impl Engine {
             EngineEvent::BindFork(binding) => self.decide_binding(view, &binding),
             EngineEvent::ExecuteOffer(execution) => self.decide_offer(view, &execution, &act),
         }?;
-        // The operation-scope test, after the decision's reads are complete: every pinned
-        // entry is inherited or answers an ask this act actually made.
-        self.registry
-            .audience()
-            .only_requested(&act.evidence, &act.inherited.borrow(), &act.expansions.reads())?;
+        act.settle(self.registry.audience())?;
         Ok(decision)
     }
 
@@ -263,14 +259,14 @@ impl Engine {
             EngineEvent::ExecuteOffer(execution) => {
                 let views = projection.view(&execution.trajectory);
                 match views.offer(&execution.offer) {
-                    Some(offer) => (execution.audience.inheriting(&offer.evidence), offer.evidence.clone()),
+                    Some(offer) => (execution.audience.inheriting(&offer.evidence)?, offer.evidence.clone()),
                     None => (execution.audience.clone(), AudienceEvidence::default()),
                 }
             }
             EngineEvent::Outcome(report) => {
                 let views = projection.view(report.dispatch.trajectory());
                 match views.dispatch_evidence(&report.dispatch) {
-                    Some(pinned) => (report.audience.inheriting(pinned), pinned.clone()),
+                    Some(pinned) => (report.audience.inheriting(pinned)?, pinned.clone()),
                     None => (report.audience.clone(), AudienceEvidence::default()),
                 }
             }
@@ -288,11 +284,7 @@ impl Engine {
         inherited: AudienceEvidence,
     ) -> Result<ActEvidence, TransitionError> {
         let expansions = self.registry.audience().expansions(&evidence)?;
-        Ok(ActEvidence {
-            evidence,
-            expansions,
-            inherited: std::cell::RefCell::new(inherited),
-        })
+        Ok(ActEvidence::new(evidence, expansions, inherited))
     }
 
     fn context<'e>(&'e self, act: &'e ActEvidence) -> MembershipContext<'e> {
@@ -574,7 +566,7 @@ impl Engine {
                     child,
                     LabeledValue::new(body.clone(), fold),
                     ReturnDerivation::Raw,
-                    act.pinned(),
+                    act.pinned().clone(),
                 );
                 Ok(EngineDecision {
                     append: Some(self.decided(view, return_act(&views, child), facts)?),
@@ -615,9 +607,8 @@ impl Engine {
                     ReturnDerivation::Sanitized {
                         sanitizer: name,
                         raw_digest: RawResultDigest::of(body.as_str().as_bytes()),
-                        transition: registered.transition.applied(),
                     },
-                    act.pinned(),
+                    act.pinned().clone(),
                 );
                 Ok(EngineDecision {
                     append: Some(self.decided(view, return_act(&views, child), facts)?),
@@ -649,9 +640,8 @@ impl Engine {
                         ReturnDerivation::Sanitized {
                             sanitizer: name.clone(),
                             raw_digest: *source,
-                            transition: registered.transition.applied(),
                         },
-                        act.pinned(),
+                        act.pinned().clone(),
                     );
                     return Ok(EngineDecision {
                         append: Some(self.decided(view, return_act(&views, child), facts)?),
@@ -693,10 +683,7 @@ impl Engine {
                 let mut facts = vec![Fact::CandidateDerived {
                     trajectory: parent.clone(),
                     subject,
-                    via: DerivedVia {
-                        name: name.clone(),
-                        transition: registered.transition.applied(),
-                    },
+                    sanitizer: name.clone(),
                     derived: DerivedCandidate::Return {
                         source: digest,
                         value: value.clone(),
@@ -704,7 +691,7 @@ impl Engine {
                     lineage: SanitizerLineage::default()
                         .extend(name.clone())
                         .expect("an empty lineage spends no sanitizer yet"),
-                    evidence: act.pinned(),
+                    evidence: act.pinned().clone(),
                 }];
                 // A derivation equal to the submission needs no echo: it crosses now.
                 if derived == body {
@@ -715,9 +702,8 @@ impl Engine {
                         ReturnDerivation::Sanitized {
                             sanitizer: name.clone(),
                             raw_digest: digest,
-                            transition: registered.transition.applied(),
                         },
-                        act.pinned(),
+                        act.pinned().clone(),
                     ));
                     return Ok(EngineDecision {
                         append: Some(self.decided(view, return_act(&views, child), facts)?),
@@ -834,7 +820,7 @@ impl Engine {
                         if let Some(registered) = self.registry.sanitizer(&sanitizer) {
                             require_atoms(act, registered.needed_atoms(self.registry.audience().providers()))?;
                         }
-                        let (transition, candidate, lineage) = crate::admit::bound_candidate(
+                        let (candidate, lineage) = crate::admit::bound_candidate(
                             &self.registry,
                             &views,
                             dispatch,
@@ -848,6 +834,7 @@ impl Engine {
                             AdmitError::SanitizerTransitionUnmet | AdmitError::SanitizerBindingMismatch => {
                                 TransitionError::SanitizerUnapplicable
                             }
+                            AdmitError::MembershipNeeded(needed) => TransitionError::from(needed),
                             other => unreachable!("the outcome path derives what the log already proved: {other}"),
                         })?;
                         let DerivedCandidate::Result { residual: Some(_), .. } = &candidate else {
@@ -873,13 +860,10 @@ impl Engine {
                             Fact::CandidateDerived {
                                 trajectory: views.trajectory().clone(),
                                 subject: crate::basis::SubjectKey::ConfinedResult(dispatch.clone()),
-                                via: DerivedVia {
-                                    name: sanitizer,
-                                    transition,
-                                },
+                                sanitizer,
                                 derived: candidate,
                                 lineage,
-                                evidence: act.pinned(),
+                                evidence: act.pinned().clone(),
                             },
                             act,
                         );
@@ -906,12 +890,13 @@ impl Engine {
             call,
             admission,
             &self.context(act),
-            &act.evidence,
+            &act.pinned(),
         )
         .map_err(|error| match error {
             AdmitError::SanitizerTransitionUnmet | AdmitError::SanitizerBindingMismatch => {
                 TransitionError::SanitizerUnapplicable
             }
+            AdmitError::MembershipNeeded(needed) => TransitionError::from(needed),
             other => unreachable!("the outcome path admits what the log already proved: {other}"),
         })?;
         let admitted = batch.iter().find_map(|fact| match fact {
@@ -1226,10 +1211,10 @@ impl Engine {
         if recorded.evidence != batch.audience {
             return Err(TransitionError::BatchIdentityConflict);
         }
-        act.inherit(&recorded.evidence);
-        let under = self.act_evidence(act.evidence.inheriting(&recorded.evidence), AudienceEvidence::default())?;
+        act.inherit(&recorded.evidence)?;
+        let under = self.act_evidence(act.inheriting(&recorded.evidence)?, AudienceEvidence::default())?;
         let follow_up = self.decided_follow_up(views, batch, &proposals, &recorded.released, &under)?;
-        act.expansions.absorb_reads(&under.expansions);
+        act.absorb(&under);
         Ok(Some(EngineDecision {
             append: None,
             follow_up,
@@ -1288,7 +1273,7 @@ impl Engine {
                             batch: batch.id.clone(),
                             position: position as u32,
                             effects: contract.emits.clone(),
-                            evidence: act.pinned(),
+                            evidence: act.pinned().clone(),
                         },
                     }
                 })
@@ -1334,6 +1319,7 @@ impl Engine {
         .map_err(|refusal| match refusal {
             ComposeRefusal::Malformed(error) => TransitionError::Call(error),
             ComposeRefusal::MembershipNeeded(needed) => TransitionError::from(needed),
+            ComposeRefusal::Evidence(refusal) => TransitionError::ForeignEvidence(refusal),
         })?;
 
         let released: Vec<Released> = composed
@@ -1356,7 +1342,7 @@ impl Engine {
             // The act's own pinned answers: batch payload, compared on repeat. A release that
             // spends an approval reads under the approval's pins too, but those are the
             // approval record's — replay re-merges them from it.
-            evidence: act.pinned(),
+            evidence: act.pinned().clone(),
         });
         facts.extend(composed.iter().flatten().flat_map(|release| release.facts.clone()));
         // What this decision moves, derived before the offers that have to record where it lands.
@@ -1541,7 +1527,7 @@ impl Engine {
                 subject: subject.clone(),
                 plan: executable.clone(),
                 basis,
-                evidence: under.pinned(),
+                evidence: under.pinned().clone(),
             });
         }
         (block_id, ids, facts)
@@ -1578,8 +1564,8 @@ impl Engine {
             .map(|(position, call)| {
                 let subject = subject_at(position);
                 let pinned = views.candidate_evidence(&subject);
-                act.inherit(&pinned);
-                let under = self.act_evidence(act.evidence.inheriting(&pinned), AudienceEvidence::default())?;
+                act.inherit(pinned)?;
+                let under = self.act_evidence(act.inheriting(pinned)?, AudienceEvidence::default())?;
                 Ok((views.standing_call(&subject).unwrap_or(call), under))
             })
             .collect::<Result<_, TransitionError>>()?;
@@ -1665,7 +1651,7 @@ impl Engine {
             }
         }
         for (_, under) in &standing {
-            act.expansions.absorb_reads(&under.expansions);
+            act.absorb(under);
         }
         Ok(FollowUp::Proposals {
             released,
@@ -1835,7 +1821,7 @@ impl Engine {
             call,
             ResultAdmission::CandidateAccepted { offer: execution.offer },
             &self.context(act),
-            &act.evidence,
+            &act.pinned(),
         )
         .unwrap_or_else(|error| unreachable!("the confined stage admits what the log already proved: {error}"));
         facts.extend(admitted);
@@ -1896,10 +1882,7 @@ impl Engine {
         facts.push(Fact::CandidateDerived {
             trajectory: views.trajectory().clone(),
             subject: crate::basis::SubjectKey::ConfinedResult(dispatch.clone()),
-            via: crate::candidate::DerivedVia {
-                name: sanitizer.clone(),
-                transition: registered.transition.applied(),
-            },
+            sanitizer: sanitizer.clone(),
             derived: DerivedCandidate::Result {
                 dispatch: dispatch.clone(),
                 source: source_digest,
@@ -1908,7 +1891,7 @@ impl Engine {
                 residual,
             },
             lineage,
-            evidence: act.pinned(),
+            evidence: act.pinned().clone(),
         });
         if staged {
             let (batch, confined) = self.staged(
@@ -1939,7 +1922,7 @@ impl Engine {
             call,
             ResultAdmission::CandidateAdmissible,
             &self.context(act),
-            &act.evidence,
+            &act.pinned(),
         )
         .unwrap_or_else(|error| unreachable!("the confined stage admits what this act just derived: {error}"));
         facts.extend(admitted);
@@ -2046,13 +2029,10 @@ impl Engine {
         facts.push(Fact::CandidateDerived {
             trajectory: trajectory.clone(),
             subject: recorded.subject.clone(),
-            via: DerivedVia {
-                name: sanitizer.clone(),
-                transition: registered.transition.applied(),
-            },
+            sanitizer: sanitizer.clone(),
             derived,
             lineage,
-            evidence: under.pinned(),
+            evidence: under.pinned().clone(),
         });
         let staged = Sequence::advance_of(self, view, &facts);
         let act = crate::basis::DecidedAct::Offer(execution.offer);
@@ -2111,10 +2091,10 @@ impl Engine {
             // The candidate may stand under another contract than the offer was planned on; the
             // atoms that contract reads were pinned by the hop that derived it.
             let pinned = views.candidate_evidence(&recorded.subject);
-            act.inherit(&pinned);
-            let under = self.act_evidence(act.evidence.inheriting(&pinned), AudienceEvidence::default())?;
+            act.inherit(pinned)?;
+            let under = self.act_evidence(act.inheriting(pinned)?, AudienceEvidence::default())?;
             let reblocked = self.reblocked(views, recorded, execution, &under)?;
-            act.expansions.absorb_reads(&under.expansions);
+            act.absorb(&under);
             return Ok(match reblocked {
                 Some(block) => OfferFollowUp::Substituted { block: Box::new(block) },
                 None => OfferFollowUp::Invalidated,
@@ -2381,7 +2361,7 @@ impl Engine {
             sanitizer: recorded.plan.sanitizer().cloned(),
             return_policy,
             basis: views.basis_after(&advance, &subject),
-            evidence: act.pinned(),
+            evidence: act.pinned().clone(),
         });
         let batch = self.declaring(crate::basis::DecidedAct::Offer(execution.offer), advance, facts);
         Ok(EngineDecision {
@@ -2700,7 +2680,7 @@ fn approved_release(
         authority: given.authority.clone(),
         covers: given.covers.clone(),
         reviewed: given.reviewed.clone(),
-        evidence: act.pinned(),
+        evidence: act.pinned().clone(),
     }));
     if let Some(sanitizer) = &approval.sanitizer {
         facts.push(Fact::OutputSanitizerBound {
@@ -2711,7 +2691,7 @@ fn approved_release(
             contribution: crate::plan::bound_contribution(registry, contract, sanitizer, &context)
                 .expect("the compose gate answers a spent approval's sanitizer atoms")
                 .expect("a prepared approval binds an output sanitizer enumeration found applicable"),
-            evidence: act.pinned(),
+            evidence: act.pinned().clone(),
         });
     }
     facts
@@ -2814,7 +2794,7 @@ pub(crate) fn opened_dispatch(
         receiving: current.clone(),
         proposed_effects: contract.emits.clone(),
         annotation: call.annotation().cloned(),
-        evidence: act.pinned(),
+        evidence: act.pinned().clone(),
         subject,
     };
     (dispatch, fact)
@@ -2852,48 +2832,65 @@ impl ComposingBatch<'_> {
 pub(crate) enum ComposeRefusal {
     Malformed(EngineError),
     MembershipNeeded(crate::label::MembershipNeeded),
+    Evidence(crate::audience::EvidenceRefusal),
 }
 
-/// One act's audience reading: the merged pinned evidence its records persist, the
-/// membership answers that evidence recomputes to, and the inherited pins — entries earlier
-/// records of this chain already pinned, which the operation-scope test excuses. Built only
-/// through validation, so a context over it always reads admissible answers.
+/// One act's audience reading: the membership answers its merged pinned evidence recomputes
+/// to, over the act's operation-scope ledger. Built only through validation, so a context
+/// over it always reads admissible answers. Interior mutability on the ledger: overlay
+/// contexts built mid-decision discover pins and asks the act-building event could not name.
 #[derive(Clone, Debug)]
 pub(crate) struct ActEvidence {
-    evidence: AudienceEvidence,
     expansions: Expansions,
-    inherited: std::cell::RefCell<AudienceEvidence>,
+    ledger: std::cell::RefCell<crate::audience::ActLedger>,
 }
 
 impl ActEvidence {
-    /// Assemble from parts a caller validated together: the transition validator recomputes
-    /// `expansions` from `evidence` before building this. The validator runs its own
-    /// per-act operation-scope audit, so no inherited pins are carried here.
-    pub(crate) fn validated(evidence: AudienceEvidence, expansions: Expansions) -> ActEvidence {
+    fn new(evidence: AudienceEvidence, expansions: Expansions, inherited: AudienceEvidence) -> ActEvidence {
         ActEvidence {
-            evidence,
             expansions,
-            inherited: std::cell::RefCell::default(),
+            ledger: std::cell::RefCell::new(crate::audience::ActLedger::of(evidence, inherited)),
         }
     }
 
-    /// The evidence a record of this act pins.
-    pub(crate) fn pinned(&self) -> AudienceEvidence {
-        self.evidence.clone()
+    /// Assemble from parts a caller validated together: the transition validator recomputes
+    /// `expansions` from `evidence` before building this. The validator keeps its own
+    /// per-act ledger, so no inherited pins are carried here.
+    pub(crate) fn validated(evidence: AudienceEvidence, expansions: Expansions) -> ActEvidence {
+        ActEvidence::new(evidence, expansions, AudienceEvidence::default())
     }
 
-    /// The context's answers and ask log, for the validator's per-act audit.
+    /// The evidence a record of this act pins.
+    pub(crate) fn pinned(&self) -> std::cell::Ref<'_, AudienceEvidence> {
+        std::cell::Ref::map(self.ledger.borrow(), crate::audience::ActLedger::evidence)
+    }
+
+    /// The act's pinned answers merged with `fresh`, read without snapshotting them first.
+    fn inheriting(&self, fresh: &AudienceEvidence) -> Result<AudienceEvidence, crate::audience::EvidenceRefusal> {
+        self.ledger.borrow().evidence().inheriting(fresh)
+    }
+
+    /// The context's answers and ask log, for the validator's per-act ledger.
     pub(crate) fn expansions(&self) -> &Expansions {
         &self.expansions
     }
 
     /// Count `pins` — entries a record this act continues already pinned — as inherited, so
-    /// the operation-scope test excuses them. Interior mutability: overlay contexts built
-    /// mid-decision discover pins the act-building event could not name.
-    fn inherit(&self, pins: &AudienceEvidence) {
-        let mut inherited = self.inherited.borrow_mut();
-        let merged = inherited.inheriting(pins);
-        *inherited = merged;
+    /// the operation-scope test excuses them.
+    fn inherit(&self, pins: &AudienceEvidence) -> Result<(), crate::audience::EvidenceRefusal> {
+        self.ledger.borrow_mut().inherit(pins)
+    }
+
+    /// Count an overlay context's asks as this act's: it read on the act's behalf.
+    fn absorb(&self, overlay: &ActEvidence) {
+        self.ledger.borrow_mut().read(overlay.expansions.reads());
+    }
+
+    /// The operation-scope test, after the decision's reads are complete.
+    fn settle(&self, audience: &crate::audience::AudienceRegistry) -> Result<(), crate::audience::EvidenceRefusal> {
+        let mut ledger = self.ledger.borrow_mut();
+        ledger.read(self.expansions.reads());
+        ledger.settle(audience)
     }
 }
 
@@ -2908,7 +2905,7 @@ pub(crate) fn membership_context<'e>(registry: &'e Registry, act: &'e ActEvidenc
 fn require_atoms(act: &ActEvidence, atoms: impl IntoIterator<Item = SymbolicAtom>) -> Result<(), TransitionError> {
     let mut needed: Vec<SymbolicAtom> = atoms
         .into_iter()
-        .filter(|atom| act.expansions.members(atom).is_none())
+        .filter(|atom| !act.expansions.answered(atom))
         .collect();
     if needed.is_empty() {
         return Ok(());
@@ -2970,12 +2967,15 @@ pub(crate) fn compose_batch<'a>(
             });
             let under = match spends.and_then(|offer| views.approval(&offer)) {
                 Some(prepared) => {
-                    act.inherit(&prepared.evidence);
-                    let merged = act.evidence.inheriting(&prepared.evidence);
+                    act.inherit(&prepared.evidence).map_err(ComposeRefusal::Evidence)?;
+                    let merged = act
+                        .pinned()
+                        .inheriting(&prepared.evidence)
+                        .map_err(ComposeRefusal::Evidence)?;
                     let expansions = registry
                         .audience()
                         .expansions(&merged)
-                        .expect("two validated evidence sets merge into a validated one");
+                        .map_err(ComposeRefusal::Evidence)?;
                     std::borrow::Cow::Owned(ActEvidence::validated(merged, expansions))
                 }
                 None => std::borrow::Cow::Borrowed(act),
@@ -2987,7 +2987,7 @@ pub(crate) fn compose_batch<'a>(
                 needed.extend(
                     approval_atoms(registry, prepared)
                         .into_iter()
-                        .filter(|atom| under.expansions.members(atom).is_none()),
+                        .filter(|atom| !under.expansions.answered(atom)),
                 );
             }
             per_call.push((under, spends));
@@ -3077,7 +3077,7 @@ pub(crate) fn compose_batch<'a>(
                 consumes,
                 prepares_fork,
                 facts,
-                evidence: under.pinned(),
+                evidence: under.pinned().clone(),
             }
         };
         if position + 1 < proposals.len() || refused {
@@ -3091,7 +3091,7 @@ pub(crate) fn compose_batch<'a>(
     // operation-scope justification must count those asks.
     for (under, _) in &per_call {
         if let std::borrow::Cow::Owned(under) = under {
-            act.expansions.absorb_reads(&under.expansions);
+            act.absorb(under);
         }
     }
     Ok(composed)
@@ -10668,42 +10668,8 @@ mod tests {
         ReaderId::new(format!("{local}@corp.com"))
     }
 
-    #[test]
-    fn a_public_placeholder_argument_is_the_public_audience() {
-        let e = audience_engine(vec![], known(TRUSTED, Audience::restricted([ReaderId::new("auditor")])));
-        let restricted = vec![opened(&e)];
-        let decision = e
-            .handle(
-                &viewing(&e, &restricted),
-                batch("b1", Vec::new(), vec![send_to("public")]),
-            )
-            .expect("the batch decides");
-        let (released, blocked) = answered(&decision);
-        assert!(released.is_empty());
-        assert_eq!(
-            blocked[0].block.raw.requirement_gaps,
-            vec![crate::check::Gap::Includes {
-                recipients: DeclaredAudience::Public
-            }]
-        );
-        assert!(
-            blocked[0].offers.is_empty(),
-            "no authority holds a reader ceiling, so nothing covers a Public recipient"
-        );
-
-        let e = audience_engine(vec![], known(TRUSTED, Audience::public()));
-        let public = vec![opened(&e)];
-        let decision = e
-            .handle(&viewing(&e, &public), batch("b2", Vec::new(), vec![send_to("public")]))
-            .expect("the batch decides");
-        let (released, blocked) = answered(&decision);
-        assert_eq!(tool_names(released), ["send"]);
-        assert!(blocked.is_empty());
-    }
-
-    #[test]
-    fn a_public_reader_ceiling_covers_a_public_placeholder_recipient() {
-        let officer = crate::authority::Authority {
+    fn public_ceiling_officer() -> crate::authority::Authority {
+        crate::authority::Authority {
             name: AuthorityName::new("officer"),
             mandate: crate::authority::Mandate {
                 reader_ceiling: Some(DeclaredAudience::literal(Audience::public())),
@@ -10711,20 +10677,51 @@ mod tests {
             },
             scope: crate::authority::Scope::default(),
             hint: None,
-        };
-        let e = audience_engine(
-            vec![officer],
-            known(TRUSTED, Audience::restricted([ReaderId::new("auditor")])),
-        );
-        let restricted = vec![opened(&e)];
-        let decision = e
-            .handle(
-                &viewing(&e, &restricted),
-                batch("b1", Vec::new(), vec![send_to("public")]),
-            )
-            .expect("the batch decides");
-        let (_, blocked) = answered(&decision);
-        assert_eq!(blocked[0].offers.len(), 1, "one ruling plan names the officer");
+        }
+    }
+
+    #[test]
+    fn a_public_placeholder_argument_is_the_public_audience() {
+        let auditor = || Audience::restricted([ReaderId::new("auditor")]);
+        for (case, authorities, label, released, offers) in [
+            (
+                "no authority holds a reader ceiling, so nothing covers a Public recipient",
+                vec![],
+                auditor(),
+                vec![],
+                0,
+            ),
+            ("a public label releases", vec![], Audience::public(), vec!["send"], 0),
+            (
+                "a public reader ceiling offers one ruling plan",
+                vec![public_ceiling_officer()],
+                auditor(),
+                vec![],
+                1,
+            ),
+        ] {
+            let e = audience_engine(authorities, known(TRUSTED, label));
+            let log = vec![opened(&e)];
+            let decision = e
+                .handle(&viewing(&e, &log), batch("b1", Vec::new(), vec![send_to("public")]))
+                .expect("the batch decides");
+            let (released_calls, blocked) = answered(&decision);
+            assert_eq!(tool_names(released_calls), released, "{case}");
+            match blocked {
+                [] => assert_eq!(offers, 0, "{case}"),
+                [block] => {
+                    assert_eq!(
+                        block.block.raw.requirement_gaps,
+                        vec![crate::check::Gap::Includes {
+                            recipients: DeclaredAudience::Public
+                        }],
+                        "{case}"
+                    );
+                    assert_eq!(block.offers.len(), offers, "{case}");
+                }
+                more => panic!("{case}: one proposal blocks at most once, got {more:?}"),
+            }
+        }
     }
 
     #[test]
@@ -10826,6 +10823,17 @@ mod tests {
             Err(crate::audience::Unroutable::UnknownGroup(_))
         ));
 
+        let decision = e
+            .handle(&viewing(&e, &log), batch("b4", Vec::new(), vec![send_to("@")]))
+            .expect("a malformed spelling still decides");
+        assert!(answered(&decision).0.is_empty());
+    }
+
+    #[test]
+    fn evidence_is_scoped_to_the_asked_atoms_and_the_registered_sources() {
+        let e = audience_engine(vec![], known(TRUSTED, Audience::restricted([corp_reader("alice")])));
+        let log = vec![opened(&e)];
+
         // Evidence outside the registered sources is refused, not ignored.
         let foreign = source_evidence(vec![crate::audience::SourceClaims {
             provider: "github".to_string(),
@@ -10865,11 +10873,6 @@ mod tests {
             .handle(&viewing(&e, &log), evidenced_batch("b3", vec![send_to("@team")], exact))
             .expect("the asked answers decide");
         assert_eq!(tool_names(answered(&decision).0), ["send"]);
-
-        let decision = e
-            .handle(&viewing(&e, &log), batch("b4", Vec::new(), vec![send_to("@")]))
-            .expect("a malformed spelling still decides");
-        assert!(answered(&decision).0.is_empty());
     }
 
     #[test]
@@ -10999,7 +11002,9 @@ mod tests {
                     *evidence = crate::audience::AudienceEvidence::default();
                 }
             }),
-            Err(TransitionRefusal::ForgedEvidence),
+            Err(TransitionRefusal::UnansweredDecision {
+                needed: vec![group_atom("team")]
+            }),
             "a decision over an unanswered symbolic audience claims answers it does not pin"
         );
     }
@@ -11058,6 +11063,139 @@ mod tests {
             e.validate_replay(&[log, tampered].concat()),
             Err(TransitionRefusal::ForgedEvidence),
             "an approval that drops the offer's pins is forged"
+        );
+    }
+
+    /// A record pinning evidence the act could not have consumed names why: a selector
+    /// answered twice is the duplicate, not an unspecified forgery.
+    #[test]
+    fn replay_names_the_refusal_of_a_duplicated_pin() {
+        let officer = crate::authority::Authority {
+            name: AuthorityName::new("officer"),
+            mandate: crate::authority::Mandate {
+                reader_ceiling: Some(DeclaredAudience::literal(Audience::public())),
+                ..crate::authority::Mandate::default()
+            },
+            scope: crate::authority::Scope::default(),
+            hint: None,
+        };
+        let e = audience_engine(
+            vec![officer],
+            known(TRUSTED, Audience::restricted([corp_reader("alice")])),
+        );
+        let opening = vec![opened(&e)];
+        let mut blocked = appended_facts(
+            e.handle(
+                &viewing(&e, &opening),
+                evidenced_batch(
+                    "b1",
+                    vec![send_to("@wide")],
+                    source_evidence(vec![user_group("wide", wide_as_reported())]),
+                ),
+            )
+            .expect("the batch decides"),
+        );
+        for fact in &mut blocked {
+            if let Fact::ProposalBatchDecided { evidence, .. } = fact {
+                let again = evidence.sources[0].clone();
+                evidence.sources.push(again);
+            }
+        }
+        assert_eq!(
+            e.validate_replay(&[opening, blocked].concat()),
+            Err(TransitionRefusal::ForeignEvidence(
+                crate::audience::EvidenceRefusal::DuplicateSelector {
+                    provider: "slack".to_string(),
+                    selector: "user-group/wide".to_string(),
+                }
+            ))
+        );
+    }
+
+    fn wide_as_reported() -> Vec<crate::audience::MemberClaims> {
+        vec![
+            slack_member("slack:UA", Some("alice@corp.com")),
+            slack_member("slack:UC", Some("carol@other.com")),
+        ]
+    }
+
+    /// The officer's approval, armed over `wide` reported as alice and an outsider, for a
+    /// proposal whose own evidence the test supplies: the spend reads that evidence under the
+    /// approval's pins.
+    fn spending_under_pins(fresh: crate::audience::AudienceEvidence) -> Result<EngineDecision, TransitionError> {
+        let officer = crate::authority::Authority {
+            name: AuthorityName::new("officer"),
+            mandate: crate::authority::Mandate {
+                reader_ceiling: Some(DeclaredAudience::literal(Audience::public())),
+                ..crate::authority::Mandate::default()
+            },
+            scope: crate::authority::Scope::default(),
+            hint: None,
+        };
+        let alice = Audience::restricted([corp_reader("alice")]);
+        let e = audience_engine(vec![officer], known(TRUSTED, alice.clone()));
+        let opening = vec![opened(&e)];
+        let pinned = source_evidence(vec![user_group("wide", wide_as_reported())]);
+        let blocked = appended_facts(
+            e.handle(
+                &viewing(&e, &opening),
+                evidenced_batch("b1", vec![send_to("@wide")], pinned),
+            )
+            .expect("the batch decides"),
+        );
+        let (offer, plan) = opened_offers(&blocked)[0].clone();
+        let log = [opening, blocked].concat();
+        let approved = appended_facts(
+            execute_offer(
+                &e,
+                &log,
+                offer,
+                OfferOutcome::Approved(evidence_for(offer, &plan, "send", partial(TRUSTED, alice))),
+            )
+            .expect("the officer's ruling arms the call"),
+        );
+        let log = [log, approved].concat();
+        e.handle(&viewing(&e, &log), evidenced_batch("b2", vec![send_to("@wide")], fresh))
+    }
+
+    /// A fresh answer for a key the approval pinned is read under the pin: the same answer
+    /// again is fine, a different one is a contradiction the spend refuses — never an entry
+    /// silently dropped in favour of the pin.
+    #[test]
+    fn a_spend_refuses_a_fresh_answer_that_contradicts_a_pinned_key() {
+        let same = source_evidence(vec![user_group("wide", wide_as_reported())]);
+        assert!(
+            spending_under_pins(same).is_ok(),
+            "restating the pin is not a contradiction"
+        );
+        let contradicting = source_evidence(vec![user_group(
+            "wide",
+            vec![slack_member("slack:UB", Some("bob@corp.com"))],
+        )]);
+        assert!(matches!(
+            spending_under_pins(contradicting),
+            Err(TransitionError::ForeignEvidence(
+                crate::audience::EvidenceRefusal::ContradictedPin { .. }
+            ))
+        ));
+    }
+
+    /// Two admissible evidence sets can still disagree once merged — the pinned selector and
+    /// a fresh one report the same member under different verified addresses. The spend
+    /// refuses the merged reading as it refuses any other conflicting claim.
+    #[test]
+    fn a_spend_refuses_a_merged_reading_whose_claims_conflict() {
+        let conflicting = source_evidence(vec![user_group(
+            "narrow",
+            vec![slack_member("slack:UA", Some("mallory@other.com"))],
+        )]);
+        assert_eq!(
+            spending_under_pins(conflicting).err(),
+            Some(TransitionError::ForeignEvidence(
+                crate::audience::EvidenceRefusal::ConflictingClaims {
+                    id: "slack:UA".to_string()
+                }
+            ))
         );
     }
 
@@ -12661,11 +12799,28 @@ mod tests {
             );
             assert_eq!(
                 routes(source_evidence(vec![
-                    user_group("board", vec![slack_member("slack:UA", Some("alice@corp.com"))]),
-                    user_group("team", vec![slack_member("slack:UA", Some("alice@corp.com"))]),
+                    user_group("board", vec![]),
+                    user_group("team", vec![])
                 ])),
                 recorded,
-                "fresh answers that would lift the cap change nothing: the answers the block consumed stand"
+                "restating the answers the block consumed reads them once"
+            );
+            assert!(
+                matches!(
+                    e.recovery_routes(
+                        &view,
+                        &subject,
+                        &source_evidence(vec![user_group(
+                            "team",
+                            vec![slack_member("slack:UA", Some("alice@corp.com"))]
+                        )]),
+                        RouteDepth::ONE
+                    ),
+                    Err(crate::route::RouteError::Evidence(
+                        crate::audience::EvidenceRefusal::ContradictedPin { .. }
+                    ))
+                ),
+                "a fresh answer that would lift the cap contradicts the answer the block consumed"
             );
             assert!(matches!(
                 e.recovery_routes(
@@ -12957,6 +13112,89 @@ mod tests {
             assert_eq!(identity(&forward), identity(&backward));
         }
 
+        fn declassify_to(to: DeclaredAudience) -> crate::authority::Sanitizer {
+            crate::authority::Sanitizer {
+                name: SanitizerName::new("declassify"),
+                on: crate::authority::SanitizerPoints {
+                    input: false,
+                    output: true,
+                },
+                transition: crate::authority::DeclaredTransition::Audience {
+                    from_includes: DeclaredAudience::restricted([]),
+                    to,
+                },
+                scope: crate::authority::Scope::default(),
+                hint: None,
+            }
+        }
+
+        /// A return declared through `declassify` at the spawn, derived, echoed and merged,
+        /// then read back from its wire form.
+        fn sanitized_return_log(e: &Engine) -> Vec<Fact> {
+            let child = TrajectoryId::new("child");
+            let opened_log = vec![opened(e)];
+            let policy = ReturnPolicy {
+                sanitizer: Some(ReturnSanitizer::Named(SanitizerName::new("declassify"))),
+                ..floor_policy(e, &opened_log)
+            };
+            let log = [opened_log.clone(), spawn_family_at(e, &opened_log, &child, policy)].concat();
+            let body = ValueBody::new("what I found");
+            let evidence = vec![Evidence::Sanitizer {
+                sanitizer: SanitizerName::new("declassify"),
+                source: RawResultDigest::of(body.as_str().as_bytes()),
+                derived: ValueBody::new("clean"),
+            }];
+            let derived = e
+                .handle(
+                    &viewing(e, &log),
+                    child_report_with(&log, &child, &body, evidence, no_answers()),
+                )
+                .expect("the derivation stands as the candidate");
+            let log = [log, appended_facts(derived)].concat();
+            let echoed = e
+                .handle(
+                    &viewing(e, &log),
+                    child_report_with(&log, &child, &ValueBody::new("clean"), vec![], no_answers()),
+                )
+                .expect("the echoed derivation crosses");
+            let log = [log, appended_facts(echoed)].concat();
+            let wire = serde_json::to_string(&log).expect("facts serialize");
+            serde_json::from_str(&wire).expect("facts deserialize")
+        }
+
+        /// A derivation record names its sanitizer and the transition it applied is the
+        /// registry's: the same policy replays the record from its wire form, and a policy
+        /// whose sanitizer transitions differ is another policy, refused as a whole.
+        #[test]
+        fn a_sanitizers_transition_is_policy_identity_not_a_records_claim() {
+            let identity = |cfg: &RegistryConfig| {
+                let profile = crate::profile::DeploymentProfile::declare(crate::profile::covering_declaration(cfg))
+                    .expect("the covering declaration declares");
+                crate::profile::identity_of(cfg, &profile)
+            };
+            let to_public = returning_with_sources(vec![declassify_to(DeclaredAudience::Public)]);
+            let to_alice = returning_with_sources(vec![declassify_to(DeclaredAudience::restricted([corp_reader(
+                "alice",
+            )]))]);
+            assert_ne!(identity(&to_public), identity(&to_alice));
+
+            let e = open_engine(to_public);
+            let log = sanitized_return_log(&e);
+            assert!(log.iter().any(|fact| matches!(
+                fact,
+                Fact::ChildReturn {
+                    derivation: ReturnDerivation::Sanitized { .. },
+                    ..
+                }
+            )));
+            assert_eq!(e.validate_replay(&log), Ok(()));
+            assert_ne!(
+                open_engine(to_alice).validate_replay(&log),
+                Ok(()),
+                "a changed transition is another policy"
+            );
+        }
+
         fn child_report_with(
             log: &[Fact],
             child: &TrajectoryId,
@@ -13035,22 +13273,10 @@ mod tests {
                 FollowUp::Child(ChildFollowUp::Staged { derived: clean.clone() })
             );
             let facts = appended_facts(staged);
-            let Some(via) = facts.iter().find_map(|fact| match fact {
-                Fact::CandidateDerived { via, .. } => Some(via.clone()),
-                _ => None,
-            }) else {
-                panic!("the derivation stands as the candidate")
-            };
-            assert_eq!(
-                via,
-                DerivedVia {
-                    name: SanitizerName::new("declassify"),
-                    transition: crate::authority::Transition::Audience {
-                        from_includes: DeclaredAudience::restricted([]),
-                        to: symbolic("team"),
-                    },
-                }
-            );
+            assert!(facts.iter().any(|fact| matches!(
+                fact,
+                Fact::CandidateDerived { sanitizer, .. } if sanitizer == &SanitizerName::new("declassify")
+            )));
             let log = [log, facts].concat();
             assert_eq!(e.validate_replay(&log), Ok(()));
             let subject = crate::basis::SubjectKey::Return(ChildReturnId::new(child.clone(), 0));

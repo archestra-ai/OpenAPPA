@@ -346,12 +346,13 @@ impl SessionInner {
             actor: self.actor(child),
             call: call.clone(),
             spawn,
+            ruling: None,
         })? {
             HookDecision::AllowCall { spawn: binding } => {
                 *self.slot(child)? = Some(Pending { call: call.clone() });
                 Ok(Decision::Allowed { call, binding })
             }
-            HookDecision::DenyCall { feedback, offers } => Ok(Decision::Blocked { feedback, offers }),
+            HookDecision::DenyCall { feedback, offers, .. } => Ok(Decision::Blocked { feedback, offers }),
             HookDecision::PassControl => Ok(Decision::Control {
                 reply: self.execute_remedy(child, &call),
             }),

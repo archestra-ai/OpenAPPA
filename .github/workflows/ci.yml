@@ -30,14 +30,18 @@ jobs:
             integrations/claude-code/plugin/hooks/hook.sh \
             integrations/claude-code/plugin/hooks/appa-paths.sh \
             integrations/claude-code/plugin/statusline.sh \
-            scripts/appa-stage-plugin-bundle.sh
+            scripts/appa-stage-plugin-bundle.sh \
+            scripts/appa-install.sh \
+            scripts/appa-install-test.sh
 
       - name: Lint plugin shell scripts
         run: |
           shellcheck -x -s sh integrations/claude-code/plugin/hooks/ensure-runtime.sh \
             integrations/claude-code/plugin/hooks/hook.sh \
             integrations/claude-code/plugin/hooks/appa-paths.sh \
-            scripts/appa-stage-plugin-bundle.sh
+            scripts/appa-stage-plugin-bundle.sh \
+            scripts/appa-install.sh \
+            scripts/appa-install-test.sh
 
       # The Windows hook implementation had no check of any kind until a
       # review found a fail-open bug in it. `pwsh` is preinstalled on the
@@ -83,6 +87,26 @@ jobs:
           test "$cargo_version" = "$version"
           test "$plugin_version" = "$version"
 
+  installer-checks:
+    name: Installer Checks (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      # The installer runs with whatever sh, tar, curl and digest tool the
+      # user's platform ships, so its cases run on each supported one.
+      - name: Installer cases
+        run: sh scripts/appa-install-test.sh
+
   rust-checks:
     name: Rust Checks
     runs-on: ubuntu-latest
@@ -109,6 +133,31 @@ jobs:
       - name: Rust tests
         run: cargo test --workspace --locked
 
+  replay-examples:
+    name: Replay Examples
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Setup Rust
+        run: rustup show
+
+      # Every directory under examples/tests is one policy and one trace file.
+      # The test suite pins them too; this runs the command line end to end,
+      # the way a policy author would, and fails on the first example that
+      # does not pass.
+      - name: Replay the shipped examples
+        run: |
+          cargo build --locked --package appa
+          for dir in examples/tests/*/; do
+            ./target/debug/appa replay --config "${dir}appa.toml" "$dir"
+          done
+
   macos-deployment-checks:
     name: macOS Deployment Checks
     runs-on: macos-15
@@ -124,16 +173,80 @@ jobs:
         run: rustup show
 
       # Only what is platform-specific here: the config and data directory
-      # rules, the proc_pidpath process discovery the stop set verifies with,
-      # and the hooks a materialized deployment renders. Not a second full
-      # workspace check, clippy and test run.
+      # rules, the process ownership check init stops a runtime with, and the
+      # hooks a materialized deployment renders. Not a second full workspace
+      # check, clippy and test run.
       - name: Deployment tests
         run: |
-          cargo test --locked --package appa --lib init:: -- --include-ignored --skip real_claude
+          cargo test --locked --package appa --lib init::
           cargo test --locked --package appa --lib plugin_bundle::
           cargo test --locked --package appa --test init_cli
           cargo test --locked --package appa --test plugin_hooks
           cargo test --locked --package appa --test rendered_hooks
+
+  windows-deployment-checks:
+    name: Windows Deployment Checks
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Setup Rust
+        run: rustup show
+
+      - name: Build runtime
+        run: cargo build --locked --package appa
+
+      # Start from an empty directory, as the release package check does. The
+      # generated policy must both open and omit the subprocess fallback this
+      # platform cannot serve.
+      - name: Verify fresh deployment
+        shell: pwsh
+        run: |
+          $work = Join-Path $env:RUNNER_TEMP "appa-windows-deployment"
+          New-Item -ItemType Directory -Path $work | Out-Null
+          $stdout = Join-Path $work "runtime.stdout.log"
+          $stderr = Join-Path $work "runtime.stderr.log"
+          $start = @{
+            FilePath = Join-Path $PWD "target/debug/appa.exe"
+            ArgumentList = @("runtime")
+            WorkingDirectory = $work
+            PassThru = $true
+            RedirectStandardOutput = $stdout
+            RedirectStandardError = $stderr
+          }
+          $process = Start-Process @start
+          try {
+            $healthy = $false
+            for ($attempt = 0; $attempt -lt 30; $attempt++) {
+              try {
+                $health = Invoke-RestMethod -Uri "http://127.0.0.1:8787/health" -TimeoutSec 1
+                if ("$health".Trim() -eq "ok") {
+                  $healthy = $true
+                  break
+                }
+              } catch {
+                $process.Refresh()
+                if ($process.HasExited) { break }
+              }
+              Start-Sleep -Seconds 1
+            }
+            if (-not $healthy) {
+              if (Test-Path $stderr) { Get-Content $stderr }
+              throw "Fresh Windows runtime did not become healthy"
+            }
+            $policy = Get-Content (Join-Path $work "appa.toml") -Raw
+            if ($policy -match 'builtin = "claude-code"' -or $policy -match '(?m)^name = "\*"\r?$') {
+              throw "Fresh Windows policy contains the unsupported Claude subprocess fallback"
+            }
+          } finally {
+            $process.Refresh()
+            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+          }
 
   python-binding-checks:
     name: Python Binding Checks
@@ -202,3 +315,66 @@ jobs:
 
       - name: AgentThreatBench tests
         run: uv run --project bench/agentthreatbench pytest bench/agentthreatbench/tests
+
+  kagent-python-checks:
+    name: kagent Python Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+
+      - name: appa-kagent-adk lint
+        run: |
+          uv run --project integrations/kagent/appa-kagent-adk ruff check integrations/kagent/appa-kagent-adk/src integrations/kagent/appa-kagent-adk/tests
+          uv run --project integrations/kagent/appa-kagent-adk ruff format --check integrations/kagent/appa-kagent-adk/src integrations/kagent/appa-kagent-adk/tests
+
+      - name: appa-kagent-adk tests, locked lane
+        run: uv run --project integrations/kagent/appa-kagent-adk pytest integrations/kagent/appa-kagent-adk/tests
+
+      # The stable kagent v0.9.12 lane: the pinned kagent-adk with its own
+      # resolution (google-adk 1.31.1, a2a-sdk 0.3.x). The entrypoint tests
+      # run only here; they skip on the bare lane above.
+      - name: appa-kagent-adk tests, kagent v0.9.12 lane
+        run: >
+          uv run --project integrations/kagent/appa-kagent-adk
+          --with "kagent-adk @ git+https://github.com/kagent-dev/kagent@v0.9.12#subdirectory=python/packages/kagent-adk"
+          --with "a2a-sdk>=0.3.23,<0.4" --with "google-adk==1.31.1" --with "mcp>=1.25,<2"
+          pytest integrations/kagent/appa-kagent-adk/tests
+
+  kagent-go-checks:
+    name: kagent Go Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: integrations/kagent/appa-kagent-adk-go
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: integrations/kagent/appa-kagent-adk-go/go.mod
+          cache-dependency-path: integrations/kagent/appa-kagent-adk-go/go.sum
+
+      - name: gofmt
+        run: test -z "$(gofmt -l .)"
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...

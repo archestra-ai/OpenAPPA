@@ -77,11 +77,9 @@ pub(crate) struct RecordedOffer {
     pub(crate) end: Option<OfferEnd>,
 }
 
-/// The live derived candidate of one subject, with the transformer that claimed it and the chain
-/// that produced it.
+/// The live derived candidate of one subject, with the chain that produced it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RecordedCandidate {
-    pub(crate) via: crate::candidate::DerivedVia,
     pub(crate) derived: DerivedCandidate,
     pub(crate) lineage: SanitizerLineage,
     /// The pinned audience evidence the hop that derived this candidate consumed: what a
@@ -491,7 +489,6 @@ impl Projection {
                 }
                 Fact::CandidateDerived {
                     subject,
-                    via,
                     derived,
                     lineage,
                     evidence,
@@ -500,7 +497,6 @@ impl Projection {
                     candidates.insert(
                         subject.clone(),
                         RecordedCandidate {
-                            via: via.clone(),
                             derived: derived.clone(),
                             lineage: lineage.clone(),
                             evidence: match derived {
@@ -1169,12 +1165,16 @@ impl Views<'_> {
 
     /// The pinned audience evidence the hop that derived this subject's candidate consumed;
     /// empty for a subject no hop has touched.
-    pub(crate) fn candidate_evidence(&self, subject: &SubjectKey) -> AudienceEvidence {
+    pub(crate) fn candidate_evidence(&self, subject: &SubjectKey) -> &AudienceEvidence {
+        const NONE: &AudienceEvidence = &AudienceEvidence {
+            sources: Vec::new(),
+            lookups: Vec::new(),
+            identity: Vec::new(),
+        };
         self.projection
             .candidates
             .get(subject)
-            .map(|held| held.evidence.clone())
-            .unwrap_or_default()
+            .map_or(NONE, |held| &held.evidence)
     }
 
     /// The call this subject stands on now: the candidate an input hop derived, or the proposal

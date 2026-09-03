@@ -7,14 +7,6 @@ use crate::label::Label;
 use crate::names::SanitizerName;
 use crate::value::{DispatchId, LabeledValue, OfferId, RawResultDigest, ResolvedCall};
 
-/// The transformer whose application one candidate record audits: the sanitizer that derived
-/// the value, and the resolved transition it applied.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DerivedVia {
-    pub name: SanitizerName,
-    pub transition: crate::authority::Transition,
-}
-
 /// The sanitizers a candidate's chain has already spent, in application order.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "Vec<SanitizerName>", into = "Vec<SanitizerName>")]

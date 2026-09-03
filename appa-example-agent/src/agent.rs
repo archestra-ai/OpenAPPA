@@ -14,7 +14,7 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 use crate::budget::{Exhausted, ForkUnavailable, Limits, RunBudget};
-use crate::provider::OpenAiCompatible;
+use crate::provider::{OpenAiCompatible, ProviderError};
 use crate::record::{CallId, Record, Recorded};
 use crate::tools::{CONTROL_TOOL, ToolCatalogue, ToolShim};
 use crate::wire::{ChatCompletionRequest, WireMessage, WireToolCall};
@@ -93,7 +93,7 @@ pub enum StopReason {
     #[error("the run exhausted its budget")]
     BudgetExhausted,
     #[error("inference failed: {0}")]
-    InferenceFailed(String),
+    InferenceFailed(ProviderError),
     #[error("the runtime refused the run: {0}")]
     Refused(String),
 }
@@ -422,6 +422,7 @@ impl Run<'_> {
             actor: self.actor(frame),
             call: proposed.clone(),
             spawn: self.marks_spawn(&proposed),
+            ruling: None,
         };
         match hooks::handle(&self.agent.runtime, event).await {
             HookDecision::AllowCall { spawn } => self.run_released(frame, &id, proposed, spawn).await,
@@ -706,6 +707,7 @@ impl Run<'_> {
             actor: self.actor(frame),
             call: call.clone(),
             spawn: self.marks_spawn(&call),
+            ruling: None,
         };
         match hooks::handle(&self.agent.runtime, event).await {
             HookDecision::AllowCall { spawn } => self.run_released(frame, id, call, spawn).await,
@@ -743,7 +745,7 @@ impl Run<'_> {
                         }
                         Ok(completion.message)
                     }
-                    Ok(Err(error)) => Err(StopReason::InferenceFailed(error.to_string())),
+                    Ok(Err(error)) => Err(StopReason::InferenceFailed(error)),
                     Err(_) => Err(StopReason::BudgetExhausted),
                 }
             }
@@ -773,7 +775,7 @@ impl Run<'_> {
                         }
                         Ok(completion.message.content)
                     }
-                    Ok(Err(error)) => Err(StopReason::InferenceFailed(error.to_string())),
+                    Ok(Err(error)) => Err(StopReason::InferenceFailed(error)),
                     Err(_) => Ok(None),
                 }
             }

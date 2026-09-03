@@ -615,7 +615,7 @@ An endpoint or a command answers `{"version": 1, "answer": { … }}`. `version` 
 
 A model answer can do what the kind allows any implementation: an authority's ruling stays within `permits`, an annotation within its annotator's mandate, and a sanitizer's derivation carries exactly the `permits` transition. A model sanitizer deserves a second look: `permits` caps the label the derivation claims, not the bytes the model leaves in it, so keep its transition narrow and its `hint` exact.
 
-`[externals.claude_code]` tunes the subscription transport: `command` sets the executable, `model` pins the model, and `timeout_ms` gives a consult its own budget. Each consult is one `claude -p` process in safe mode with no tools, no project settings, no session persistence, a fresh temporary working directory, and every `APPA_*` variable removed from its environment. At most four run at once per runtime.
+`[externals.claude_code]` tunes the subscription transport: `command` sets the executable, `model` pins the model, and `timeout_ms` gives a consult its own budget. Each consult is one `claude -p` process in safe mode with no tools, no project settings, no session persistence, a fresh temporary working directory, the CLI's optional background traffic disabled, and every `APPA_*` variable removed from its environment. At most four run at once per runtime.
 
 `[externals.llm]` is the API-key transport, one profile per deployment:
 

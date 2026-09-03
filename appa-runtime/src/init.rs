@@ -12,19 +12,20 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::config::{Config, ConfigError};
+use crate::default_config;
 use crate::plugin_bundle::{self, Deployment, Endpoint, PluginBundleError, PluginSource, Population};
 
 const MARKETPLACE: &str = "appa";
 const PLUGIN: &str = "appa-runtime@appa";
 const RECOVERY_PREFIX: &str = ".appa-init-recovery-";
-const DEFAULT_CONFIG: &str = include_str!("../../integrations/claude-code/examples/claude-code.appa.toml");
-
 #[derive(Debug, Error)]
 pub enum InitError {
     #[error("cannot find the current executable: {0}")]
     CurrentExecutable(std::io::Error),
     #[error("cannot find a home directory; set HOME or the relevant APPA directory variables")]
     MissingHome,
+    #[error("cannot make the directory override {path} absolute: {source}")]
+    AbsolutePath { path: PathBuf, source: std::io::Error },
     #[error("the `claude` command is unavailable: {0}")]
     ClaudeUnavailable(std::io::Error),
     #[error("`claude {command}` failed: {message}")]
@@ -49,10 +50,12 @@ pub enum InitError {
     MissingPluginFile(PathBuf),
     #[error("the installed Claude plugin could not start `appa runtime`: {0}")]
     Starter(String),
-    #[error("the runtime at {endpoint} is not this installed build: {message}")]
+    #[error("a different Appa runtime is already running at {endpoint}; {message}")]
     RuntimeIdentity { endpoint: String, message: String },
-    #[error("a previous appa runtime (pid {pid}) is still executing {path}; stop it and rerun init")]
-    RuntimeSurvived { pid: i32, path: PathBuf },
+    #[error("the appa runtime (pid {pid}) still answers {endpoint} after being stopped; stop it and rerun init")]
+    RuntimeSurvived { pid: i32, endpoint: String },
+    #[error("the runtime at {endpoint} does not answer for its policy: {message}")]
+    PolicyKey { endpoint: String, message: String },
     #[error("the runtime at {endpoint} refused to serve {path}: {message}")]
     ReloadRefused {
         endpoint: String,
@@ -61,7 +64,7 @@ pub enum InitError {
     },
     #[error(transparent)]
     PluginBundle(#[from] PluginBundleError),
-    #[error("{operation}; restoring the previous Claude Code plugin also failed: {recovery}")]
+    #[error("{operation}; restoring the previous installation also failed: {recovery}")]
     PluginRecovery {
         operation: Box<InitError>,
         recovery: Box<InitError>,
@@ -150,13 +153,20 @@ struct DeploymentPaths {
 /// entirely at hook time, so it is made absolute here, once, before any of that.
 /// This is lexical: no `canonicalize`, no case folding, consistent with
 /// refusing rather than normalizing elsewhere.
-fn absolute_directory(path: PathBuf) -> PathBuf {
-    std::path::absolute(&path).unwrap_or(path)
+fn absolute_directory(path: PathBuf) -> Result<PathBuf, InitError> {
+    std::path::absolute(&path).map_err(|source| InitError::AbsolutePath { path, source })
 }
 
 /// The platform config file used by installed deployments and `appa describe`.
 pub fn installed_config_path() -> PathBuf {
-    installed_config_dir().map_or_else(|| PathBuf::from("appa.toml"), |dir| dir.join("appa.toml"))
+    match installed_config_dir() {
+        Ok(Some(directory)) => directory.join("appa.toml"),
+        Ok(None) => PathBuf::from("appa.toml"),
+        Err(error) => {
+            tracing::warn!(%error, "falling back to the working directory for the config path");
+            PathBuf::from("appa.toml")
+        }
+    }
 }
 
 /// Install the plugin belonging to this binary's own release into Claude Code,
@@ -175,7 +185,7 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
     let source = PluginSource::resolve(explicit_source)?;
     let paths = deployment_paths()?;
     let installations = installed_plugin_installations(&paths.claude_dir)?;
-    let marketplaces = run_claude(["plugin", "marketplace", "list"])?;
+    let marketplaces = run_claude(["plugin", "marketplace", "list"], None)?;
 
     // 2. Directories, and the config that survives every upgrade.
     for directory in [&paths.install_dir, &paths.config_dir, &paths.data_dir] {
@@ -193,8 +203,8 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
     })?;
     let config = paths.config_dir.join("appa.toml");
     let config_outcome = match create_default_config(&config)? {
-        true => ConfigOutcome::Created,
-        false => offer_config_rewrite(&config)?,
+        ConfigOutcome::Kept => offer_config_rewrite(&config)?,
+        created => created,
     };
     let composed_policy = verify_config(&config)?;
 
@@ -238,15 +248,12 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
         })?,
     };
 
-    // 4. Clear the endpoint before anything is mutated. A verified runtime at a
-    //    retired install path that will not stop aborts init here, rather than
-    //    leaving a new plugin registered against an old runtime that a rerun
-    //    cannot dislodge.
+    // 4. Clear the endpoint before anything is mutated. A runtime that will not
+    //    stop aborts init here, rather than leaving a new plugin registered
+    //    against an old runtime that a rerun cannot dislodge.
     progress("checking the runtime endpoint");
-    clear_retired_runtime(&paths)?;
-    //    A previous install may have been unlinked before init ran. Its process
-    //    still owns the endpoint, and its authenticated health answer names the
-    //    stale pid even though no pathname remains for the retired-path scan.
+    //    A runtime whose binary an install replaced on disk still owns the
+    //    endpoint, and its health answer names the stale pid.
     clear_stale_endpoint(&endpoint)?;
     //    A healthy runtime from another build is stopped only after an explicit
     //    confirmation and only when it identifies a same-user appa pid.
@@ -262,28 +269,32 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
     // 6. The Claude switch, the binary, and the runtime this plugin is being
     //    bound to: one transaction. Verification is inside it, because a plugin
     //    left registered against a runtime that failed verification is exactly
-    //    the skew this bundle exists to prevent.
+    //    the skew this bundle exists to prevent. Every step records what it
+    //    changed, and a failure unwinds those changes in reverse before the
+    //    plugin switch itself is undone.
     progress("updating the Claude Code plugin");
-    let switch = replace_plugin(&deployment.root, &marketplaces, &installations)
-        .and_then(|()| install_runtime(&appa, &deployed_appa))
-        .and_then(|()| remove_legacy_runtime(&appa, &paths))
-        .and_then(|()| installed_plugin_root(&paths.claude_dir))
-        .and_then(|plugin_root| {
-            install_statusline(&plugin_root, &paths)?;
-            progress("starting the runtime");
-            start_runtime(&plugin_root, &deployed_appa, &config, &endpoint)
-        })
-        //    The runtime this plugin is bound to must also be serving this
-        //    deployment's policy, so the reconcile is inside the transaction:
-        //    a refusal here means the endpoint belongs to someone else, and a
-        //    plugin left registered against it is the same skew as a plugin left
-        //    registered against a runtime that failed verification. A decline is
-        //    not a refusal — it answers `Ok` and the install stands.
-        .and_then(|()| reconcile_policy(&endpoint, &config, &composed_policy));
+    let mut compensation = Compensation::default();
+    let switch = replace_plugin(&deployment.root, &marketplaces, &installations).and_then(|()| {
+        switch_over(
+            &appa,
+            &deployed_appa,
+            &config,
+            &composed_policy,
+            &endpoint,
+            &paths,
+            &mut compensation,
+        )
+    });
     let runtime_outcome = match switch {
-        Ok(outcome) => outcome,
+        Ok(outcome) => {
+            compensation.commit();
+            outcome
+        }
         Err(operation) => {
-            if let Err(recovery_error) = undo_plugin_switch(recovery.as_ref(), launcher_dir) {
+            // Both recoveries are attempted; the first failure is the one reported.
+            let unwound = compensation.unwind();
+            let restored = undo_plugin_switch(recovery.as_ref(), launcher_dir);
+            if let Err(recovery_error) = unwound.and(restored) {
                 return Err(InitError::PluginRecovery {
                     operation: Box::new(operation),
                     recovery: Box::new(recovery_error),
@@ -297,20 +308,157 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
     //    absent on a first install and disabled on an upgrade, so a session
     //    started against a half-installed bundle cannot be a protected one.
     install_clappa(launcher_dir)?;
-    cleanup_plugin_recoveries(&paths.data_dir);
-
-    // 8. Anything left on PATH that this init did not deploy is named, never
-    //    removed: it is the user's file to keep or drop.
-    let stale_path_copy = stale_path_copy(&paths, &deployed_appa);
+    cleanup_plugin_recovery(recovery.as_ref());
 
     Ok(render_receipt(
         &source_label(&source, &deployment),
         &config,
         config_outcome,
         runtime_outcome,
-        stale_path_copy.as_deref(),
         std::io::stdout().is_terminal() && env::var_os("NO_COLOR").is_none(),
     ))
+}
+
+/// The steps after the Claude switch, each recording what it changed.
+///
+/// The runtime this plugin is bound to must also be serving this deployment's
+/// policy, so the reconcile is inside the transaction: a refusal there means the
+/// endpoint belongs to someone else, and a plugin left registered against it is
+/// the same skew as a plugin left registered against a runtime that failed
+/// verification. A decline is not a refusal: it answers `Ok` and the install
+/// stands.
+fn switch_over(
+    appa: &Path,
+    deployed_appa: &Path,
+    config: &Path,
+    composed_policy: &ComposedPolicy,
+    endpoint: &Endpoint,
+    paths: &DeploymentPaths,
+    compensation: &mut Compensation,
+) -> Result<RuntimeOutcome, InitError> {
+    install_runtime(appa, deployed_appa, compensation)?;
+    let plugin_root = installed_plugin_root(&paths.claude_dir)?;
+    install_statusline(&plugin_root, paths, compensation)?;
+    progress("starting the runtime");
+    // A runtime answering `ok` here was running before this init and stays the
+    // user's; anything the starter brings up after silence is init's to stop.
+    let running_before = endpoint_health(endpoint)?.is_some_and(|answer| answer == "ok");
+    start_runtime(&plugin_root)?;
+    let pid = verify_runtime_deployment(deployed_appa, config, endpoint)?;
+    if !running_before {
+        compensation.record(Undo::Runtime {
+            pid,
+            endpoint: endpoint.clone(),
+        });
+    }
+    reconcile_policy(endpoint, config, composed_policy)
+}
+
+/// What the switch has changed on disk and in process state, so a failure can
+/// put each change back in reverse order. The plugin registration itself is
+/// undone separately by [`undo_plugin_switch`].
+#[derive(Default)]
+struct Compensation {
+    done: Vec<Undo>,
+}
+
+enum Undo {
+    /// The deployed binary's bytes before install_runtime replaced them, copied
+    /// aside to `previous`; `None` when no binary was deployed.
+    Binary { target: PathBuf, previous: Option<PathBuf> },
+    /// A file the statusline install rewrote, with its bytes from before; `None`
+    /// when it did not exist.
+    File { path: PathBuf, before: Option<Vec<u8>> },
+    /// A runtime this init started and verified as this deployment's.
+    Runtime { pid: i32, endpoint: Endpoint },
+}
+
+impl Compensation {
+    fn record(&mut self, undo: Undo) {
+        self.done.push(undo);
+    }
+
+    /// Put back every recorded change, last first. Every step is attempted; the
+    /// first failure is the one reported.
+    fn unwind(self) -> Result<(), InitError> {
+        let mut first_failure = None;
+        for undo in self.done.into_iter().rev() {
+            if let Err(error) = undo.apply() {
+                tracing::warn!(%error, "an init rollback step failed");
+                first_failure.get_or_insert(error);
+            }
+        }
+        first_failure.map_or(Ok(()), Err)
+    }
+
+    /// The install stands: drop the binary snapshot.
+    fn commit(self) {
+        for undo in self.done {
+            if let Undo::Binary {
+                previous: Some(previous),
+                ..
+            } = undo
+                && let Err(error) = fs::remove_file(&previous)
+            {
+                tracing::warn!(path = %previous.display(), %error, "cannot remove the binary snapshot");
+            }
+        }
+    }
+}
+
+impl Undo {
+    fn apply(self) -> Result<(), InitError> {
+        match self {
+            Undo::Binary { target, previous } => {
+                let install = |source| InitError::InstallRuntime {
+                    path: target.clone(),
+                    source,
+                };
+                match previous {
+                    Some(previous) => {
+                        #[cfg(windows)]
+                        if target.exists() {
+                            stop_windows_processes_at(&target)?;
+                            fs::remove_file(&target).map_err(install)?;
+                        }
+                        fs::rename(&previous, &target).map_err(install)
+                    }
+                    None => remove_if_present(&target).map_err(install),
+                }
+            }
+            Undo::File { path, before } => {
+                let write = |source| InitError::WriteFile {
+                    path: path.clone(),
+                    source,
+                };
+                match before {
+                    Some(bytes) => fs::write(&path, bytes).map_err(write),
+                    None => remove_if_present(&path).map_err(write),
+                }
+            }
+            Undo::Runtime { pid, endpoint } => stop_owned_appa_runtime(pid, &endpoint),
+        }
+    }
+}
+
+fn remove_if_present(path: &Path) -> std::io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+/// The bytes at `path` before init rewrites it, or `None` when it is absent.
+fn file_before(path: &Path) -> Result<Option<Vec<u8>>, InitError> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(InitError::WriteFile {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
 }
 
 fn progress(message: &str) {
@@ -327,19 +475,11 @@ fn source_label(source: &PluginSource, deployment: &Deployment) -> String {
     format!("{origin} -> {}", friendly_path(&deployment.root))
 }
 
-/// A copy of `appa` at the retired install path, which earlier versions
-/// deployed to and which may still shadow this build on PATH.
-fn stale_path_copy(paths: &DeploymentPaths, deployed: &Path) -> Option<PathBuf> {
-    let retired = paths.install_dir.join(appa_filename());
-    (retired.is_file() && !same_file(&retired, deployed)).then_some(retired)
-}
-
 fn render_receipt(
     adapter: &str,
     config: &Path,
     config_outcome: ConfigOutcome,
     runtime_outcome: RuntimeOutcome,
-    stale_path_copy: Option<&Path>,
     color: bool,
 ) -> String {
     let title = if color {
@@ -369,12 +509,6 @@ fn render_receipt(
     // version, so a session running across an upgrade keeps talking to the
     // runtime it started with.
     receipt.push_str("\nRestart any running `clappa` session to pick this up.\n");
-    if let Some(stale) = stale_path_copy {
-        receipt.push_str(&format!(
-            "\nA previous appa remains at {}. It is not used any more and may shadow\nthis build on PATH; remove it when you are ready.\n",
-            friendly_path(stale),
-        ));
-    }
     receipt.push_str("\nNext: run `clappa`, then `/appa-guide init`.\n");
     receipt
 }
@@ -392,26 +526,21 @@ fn friendly_path(path: &Path) -> String {
     )
 }
 
-fn marketplace_manifest(path: &Path) -> PathBuf {
-    path.join(".claude-plugin/marketplace.json")
-}
-
 fn deployment_paths() -> Result<DeploymentPaths, InitError> {
     let home = user_home();
-    let config_dir = installed_config_dir().ok_or(InitError::MissingHome)?;
-    let data_dir = installed_data_dir().ok_or(InitError::MissingHome)?;
+    let config_dir = installed_config_dir()?.ok_or(InitError::MissingHome)?;
+    let data_dir = installed_data_dir()?.ok_or(InitError::MissingHome)?;
     let install_dir = if let Some(path) = env::var_os("APPA_INSTALL_DIR") {
-        absolute_directory(PathBuf::from(path))
+        absolute_directory(PathBuf::from(path))?
     } else if cfg!(windows) {
         data_dir.join("bin")
     } else {
         home.as_ref().ok_or(InitError::MissingHome)?.join(".local/bin")
     };
-    let claude_dir = env::var_os("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .map(absolute_directory)
-        .or_else(|| home.map(|path| path.join(".claude")))
-        .ok_or(InitError::MissingHome)?;
+    let claude_dir = match env::var_os("CLAUDE_CONFIG_DIR") {
+        Some(path) => absolute_directory(PathBuf::from(path))?,
+        None => home.ok_or(InitError::MissingHome)?.join(".claude"),
+    };
     Ok(DeploymentPaths {
         install_dir,
         config_dir,
@@ -433,300 +562,52 @@ fn user_home() -> Option<PathBuf> {
     })
 }
 
-fn installed_config_dir() -> Option<PathBuf> {
+fn installed_config_dir() -> Result<Option<PathBuf>, InitError> {
     if let Some(path) = env::var_os("APPA_CONFIG_DIR") {
-        return Some(absolute_directory(PathBuf::from(path)));
+        return absolute_directory(PathBuf::from(path)).map(Some);
     }
     #[cfg(target_os = "macos")]
-    return env::var_os("HOME")
+    return Ok(env::var_os("HOME")
         .map(PathBuf::from)
-        .map(|home| home.join("Library/Application Support/appa"));
+        .map(|home| home.join("Library/Application Support/appa")));
     #[cfg(target_os = "windows")]
-    return env::var_os("APPDATA").map(PathBuf::from).map(|path| path.join("appa"));
+    return Ok(env::var_os("APPDATA").map(PathBuf::from).map(|path| path.join("appa")));
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    env::var_os("XDG_CONFIG_HOME")
+    Ok(env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .map(|path| path.join("appa"))
         .or_else(|| {
             env::var_os("HOME")
                 .map(PathBuf::from)
                 .map(|home| home.join(".config/appa"))
-        })
+        }))
 }
 
-fn installed_data_dir() -> Option<PathBuf> {
+fn installed_data_dir() -> Result<Option<PathBuf>, InitError> {
     if let Some(path) = env::var_os("APPA_DATA_DIR") {
-        return Some(absolute_directory(PathBuf::from(path)));
+        return absolute_directory(PathBuf::from(path)).map(Some);
     }
     #[cfg(target_os = "macos")]
-    return env::var_os("HOME")
+    return Ok(env::var_os("HOME")
         .map(PathBuf::from)
-        .map(|home| home.join("Library/Application Support/appa"));
+        .map(|home| home.join("Library/Application Support/appa")));
     #[cfg(target_os = "windows")]
-    return env::var_os("LOCALAPPDATA")
+    return Ok(env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
-        .map(|path| path.join("appa"));
+        .map(|path| path.join("appa")));
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    env::var_os("XDG_DATA_HOME")
+    Ok(env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .map(|path| path.join("appa"))
         .or_else(|| {
             env::var_os("HOME")
                 .map(PathBuf::from)
                 .map(|home| home.join(".local/share/appa"))
-        })
+        }))
 }
 
 fn appa_filename() -> &'static str {
     if cfg!(windows) { "appa.exe" } else { "appa" }
-}
-
-fn legacy_runtime_filename() -> &'static str {
-    if cfg!(windows) {
-        "appa-runtime.exe"
-    } else {
-        "appa-runtime"
-    }
-}
-
-fn remove_legacy_runtime(appa: &Path, paths: &DeploymentPaths) -> Result<(), InitError> {
-    let mut targets = vec![paths.install_dir.join(legacy_runtime_filename())];
-    if let Some(parent) = appa.parent() {
-        let sibling = parent.join(legacy_runtime_filename());
-        if sibling != targets[0] {
-            targets.push(sibling);
-        }
-    }
-    for target in targets {
-        // A Unix process can keep running after Cargo has unlinked its executable. Scan the
-        // two exact retired install paths even when no directory entry remains, then remove any
-        // file that is left. Windows keeps the file present while the process is running, so a
-        // missing path cannot be a live legacy runtime.
-        if cfg!(windows) && !target.exists() {
-            continue;
-        }
-        stop_legacy_runtime_at(&target)?;
-        if !target.exists() {
-            continue;
-        }
-        #[cfg(unix)]
-        fs::remove_file(&target).map_err(|source| InitError::InstallRuntime {
-            path: target.clone(),
-            source,
-        })?;
-        #[cfg(windows)]
-        fs::remove_file(&target).map_err(|source| InitError::InstallRuntime { path: target, source })?;
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn stop_legacy_runtime_at(target: &Path) -> Result<(), InitError> {
-    let Ok(output) = Command::new("ps").args(["-axo", "pid=,command="]).output() else {
-        return Ok(());
-    };
-    if !output.status.success() {
-        // Process discovery is a migration convenience. Restricted environments may deny ps;
-        // continue the install and let runtime identity verification reject a surviving daemon.
-        return Ok(());
-    }
-    let written = target.to_string_lossy();
-    let mut stopped = Vec::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let line = line.trim_start();
-        let Some((pid, command)) = line.split_once(char::is_whitespace) else {
-            continue;
-        };
-        let command = command.trim_start();
-        let is_target =
-            |path: &str| command == path || command.strip_prefix(path).is_some_and(|rest| rest.starts_with(' '));
-        if !is_target(&written) {
-            continue;
-        }
-        let Ok(pid) = pid.parse::<i32>() else {
-            continue;
-        };
-        // The exact executable path is one of APPA's two retired install locations.
-        // A process owned by another user cannot be signalled by this process.
-        if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() != std::io::ErrorKind::NotFound {
-                return Err(InitError::InstallRuntime {
-                    path: target.to_path_buf(),
-                    source: error,
-                });
-            }
-        }
-        stopped.push(pid);
-    }
-    if !stopped.is_empty() {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while std::time::Instant::now() < deadline && stopped.iter().any(|pid| unsafe { libc::kill(*pid, 0) == 0 }) {
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn stop_legacy_runtime_at(target: &Path) -> Result<(), InitError> {
-    // Legacy cleanup removes the file next, and a surviving process surfaces
-    // there as a failed removal.
-    stop_windows_processes_at(target, "appa-runtime").map(drop)
-}
-
-/// Stop any runtime executing the retired install path before anything is
-/// mutated.
-///
-/// The pathname stop set is exact: `<install_dir>/appa`, the path an init with
-/// the environment resolving as it does now would have deployed to. A runtime
-/// whose executable was already unlinked cannot match that path; the subsequent
-/// endpoint check reclaims it only when `/health` explicitly answers
-/// `stale <pid>` and the pid passes the starter's ownership/name check. A
-/// healthy runtime from another install remains foreign and is never stopped.
-///
-/// A verified target that survives termination aborts init, because the
-/// fingerprint backstop runs after the Claude switch: proceeding would register
-/// the new plugin against an old runtime, and a rerun would find the same
-/// surviving process and do the same thing again.
-fn clear_retired_runtime(paths: &DeploymentPaths) -> Result<(), InitError> {
-    let retired = paths.install_dir.join(appa_filename());
-    match stop_processes_executing(&retired)?.first() {
-        Some(&pid) => Err(InitError::RuntimeSurvived { pid, path: retired }),
-        None => Ok(()),
-    }
-}
-
-/// The subcommand a managed runtime is started with, by every starter and by
-/// init itself. It is what distinguishes a runtime from any other invocation of
-/// the same binary.
-#[cfg(unix)]
-const RUNTIME_SUBCOMMAND: &str = "runtime";
-
-/// Terminate every managed runtime whose executable *is* `target`, and return
-/// those still alive afterwards.
-///
-/// Two conditions, and a candidate needs both. The executable must be the
-/// retired path, verified against the operating system's own answer for that
-/// pid, because `ps` reports argv and argv is spoofable. And argv must name the
-/// `runtime` subcommand, because the retired binary is also what a concurrent
-/// `appa init` or an in-flight `appa hook` is executing, and terminating those
-/// would interrupt work that has nothing to do with the runtime being replaced.
-/// Argv is only ever narrowing here: it can excuse a process from the stop set,
-/// never admit one the executable check rejected.
-///
-/// Windows applies the executable condition alone. Reading another process's
-/// command line there needs a CIM query rather than `Get-Process`, and the same
-/// helper serves legacy cleanup, whose binary had no subcommand at all.
-#[cfg(unix)]
-fn stop_processes_executing(target: &Path) -> Result<Vec<i32>, InitError> {
-    let Ok(output) = Command::new("ps").args(["-axo", "pid=,command="]).output() else {
-        return Ok(Vec::new());
-    };
-    if !output.status.success() {
-        // Restricted environments may deny ps. Continue, and let the fingerprint
-        // check report whatever is answering.
-        return Ok(Vec::new());
-    }
-    let Some(identity) = file_identity(target) else {
-        return Ok(Vec::new());
-    };
-
-    // init itself commonly runs from the retired path -- that is what a user
-    // typing `~/.local/bin/appa init claude-code` does -- and it is in the stop
-    // set by every other measure, so it is excluded by pid.
-    let own = std::process::id() as i32;
-    let mut signalled = Vec::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let Some((pid, arguments)) = line.trim_start().split_once(char::is_whitespace) else {
-            continue;
-        };
-        let Ok(pid) = pid.parse::<i32>() else {
-            continue;
-        };
-        if pid == own {
-            continue;
-        }
-        // A whole token, so a path that merely contains the word does not match.
-        // The starter runs `<binary> runtime --listen <addr>`, and a binary path
-        // carrying spaces splits into tokens that are all still not `runtime`.
-        if !arguments.split_whitespace().any(|token| token == RUNTIME_SUBCOMMAND) {
-            continue;
-        }
-        match executable_of(pid) {
-            Some(executable) if file_identity(&executable) == Some(identity) => {}
-            // Not this executable, or unreadable: report and skip.
-            _ => continue,
-        }
-        if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() != std::io::ErrorKind::NotFound {
-                return Err(InitError::InstallRuntime {
-                    path: target.to_path_buf(),
-                    source: error,
-                });
-            }
-            continue;
-        }
-        signalled.push(pid);
-    }
-
-    if signalled.is_empty() {
-        return Ok(Vec::new());
-    }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while std::time::Instant::now() < deadline {
-        signalled.retain(|pid| unsafe { libc::kill(*pid, 0) == 0 });
-        if signalled.is_empty() {
-            return Ok(Vec::new());
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    signalled.retain(|pid| unsafe { libc::kill(*pid, 0) == 0 });
-    Ok(signalled)
-}
-
-/// OS file identity, so a runtime launched through a symlinked install path is
-/// not wrongly excluded. On Unix `(dev, ino)` is exact, and it identifies hard
-/// links to one file as that file.
-#[cfg(unix)]
-fn file_identity(path: &Path) -> Option<(u64, u64)> {
-    use std::os::unix::fs::MetadataExt;
-
-    let metadata = fs::metadata(path).ok()?;
-    Some((metadata.dev(), metadata.ino()))
-}
-
-/// The executable a pid is actually running, from the operating system rather
-/// than from its own argv.
-#[cfg(target_os = "linux")]
-fn executable_of(pid: i32) -> Option<PathBuf> {
-    fs::read_link(format!("/proc/{pid}/exe")).ok()
-}
-
-#[cfg(target_os = "macos")]
-fn executable_of(pid: i32) -> Option<PathBuf> {
-    // PROC_PIDPATHINFO_MAXSIZE
-    const MAX: usize = 4 * libc::PATH_MAX as usize;
-
-    let mut buffer = vec![0u8; MAX];
-    let written = unsafe { libc::proc_pidpath(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
-    if written <= 0 {
-        return None;
-    }
-    buffer.truncate(written as usize);
-    Some(PathBuf::from(String::from_utf8(buffer).ok()?))
-}
-
-#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
-fn executable_of(_pid: i32) -> Option<PathBuf> {
-    // No portable primitive here: report and skip rather than kill on argv.
-    None
-}
-
-#[cfg(windows)]
-fn stop_processes_executing(target: &Path) -> Result<Vec<i32>, InitError> {
-    stop_windows_processes_at(target, "appa")
 }
 
 /// The comparison operand on Windows: the fully resolved path, folded for the
@@ -745,12 +626,14 @@ fn windows_identity(path: &Path) -> Option<String> {
     Some(text.strip_prefix(r"\\?\").unwrap_or(text).to_lowercase())
 }
 
-/// Whether two paths name the same file, resolving symlinks.
+/// Whether two paths name the same existing file, resolving symlinks. On Unix
+/// `(dev, ino)` identity also names hard links to one file as that file.
 fn same_file(left: &Path, right: &Path) -> bool {
     #[cfg(unix)]
     {
-        match (file_identity(left), file_identity(right)) {
-            (Some(left), Some(right)) => left == right,
+        use std::os::unix::fs::MetadataExt;
+        match (fs::metadata(left), fs::metadata(right)) {
+            (Ok(left), Ok(right)) => left.dev() == right.dev() && left.ino() == right.ino(),
             _ => false,
         }
     }
@@ -763,13 +646,29 @@ fn same_file(left: &Path, right: &Path) -> bool {
     }
 }
 
-fn install_runtime(source: &Path, target: &Path) -> Result<(), InitError> {
-    if source.canonicalize().ok() == target.canonicalize().ok() && target.exists() {
+/// Copy the binary to its deployed path, keeping the bytes it replaces beside it
+/// as `appa.prev` until the install stands.
+fn install_runtime(source: &Path, target: &Path, compensation: &mut Compensation) -> Result<(), InitError> {
+    if same_file(source, target) {
         return Ok(());
     }
+    let previous = if target.exists() {
+        let snapshot = target.with_extension("prev");
+        fs::copy(target, &snapshot).map_err(|source| InitError::InstallRuntime {
+            path: snapshot.clone(),
+            source,
+        })?;
+        Some(snapshot)
+    } else {
+        None
+    };
+    compensation.record(Undo::Binary {
+        target: target.to_path_buf(),
+        previous,
+    });
     #[cfg(windows)]
     if target.exists() {
-        stop_windows_processes_at(target, "appa")?;
+        stop_windows_processes_at(target)?;
         fs::remove_file(target).map_err(|source| InitError::InstallRuntime {
             path: target.to_path_buf(),
             source,
@@ -790,11 +689,11 @@ fn install_runtime(source: &Path, target: &Path) -> Result<(), InitError> {
             source,
         });
     if let Err(error) = permissions {
-        let _ = fs::remove_file(&temporary);
+        discard_file(&temporary);
         return Err(error);
     }
     if let Err(source) = fs::rename(&temporary, target) {
-        let _ = fs::remove_file(&temporary);
+        discard_file(&temporary);
         return Err(InitError::InstallRuntime {
             path: target.to_path_buf(),
             source,
@@ -803,23 +702,22 @@ fn install_runtime(source: &Path, target: &Path) -> Result<(), InitError> {
     Ok(())
 }
 
-/// Terminate every `process_name` process whose resolved executable is
-/// `target`, and answer with those still alive afterwards.
+/// Terminate every `appa` process whose resolved executable is `target`, and
+/// answer with those still alive afterwards.
 ///
-/// PowerShell only enumerates and stops. The comparison happens here, so
-/// Windows and Unix apply the same rule and neither swallows a discovery or
-/// termination failure the way `-ErrorAction SilentlyContinue` did.
+/// PowerShell only enumerates and stops. The comparison happens here, so a
+/// discovery or termination failure surfaces instead of being swallowed.
 #[cfg(windows)]
-fn stop_windows_processes_at(target: &Path, process_name: &str) -> Result<Vec<i32>, InitError> {
+fn stop_windows_processes_at(target: &Path) -> Result<Vec<i32>, InitError> {
     let Some(identity) = windows_identity(target) else {
         // A path that will not resolve is reported and skipped, never killed.
         return Ok(Vec::new());
     };
 
     let listed = powershell(
-        "Get-Process -Name $env:APPA_STOP_NAME -ErrorAction SilentlyContinue | \
+        "Get-Process -Name appa -ErrorAction SilentlyContinue | \
          ForEach-Object { \"$($_.Id)`t$($_.Path)\" }",
-        [("APPA_STOP_NAME", process_name.to_owned())],
+        [],
     )?;
 
     let own = std::process::id() as i32;
@@ -831,7 +729,7 @@ fn stop_windows_processes_at(target: &Path, process_name: &str) -> Result<Vec<i3
         let Ok(pid) = pid.trim().parse::<i32>() else {
             continue;
         };
-        // init commonly runs from the retired path itself.
+        // init may itself be running from the target path.
         if pid == own {
             continue;
         }
@@ -894,10 +792,19 @@ fn powershell<const N: usize>(command: &str, environment: [(&str, String); N]) -
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn create_default_config(path: &Path) -> Result<bool, InitError> {
+/// Remove a file this init wrote and abandons. Nothing it protects is lost
+/// with it, so a failure is noted beside the error being returned.
+fn discard_file(path: &Path) {
+    if let Err(error) = fs::remove_file(path) {
+        tracing::warn!(path = %path.display(), %error, "cannot remove a file init abandoned");
+    }
+}
+
+/// Seed the config from this build's default, or keep the one already there.
+fn create_default_config(path: &Path) -> Result<ConfigOutcome, InitError> {
     let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
         Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(ConfigOutcome::Kept),
         Err(source) => {
             return Err(InitError::WriteFile {
                 path: path.to_path_buf(),
@@ -905,20 +812,23 @@ fn create_default_config(path: &Path) -> Result<bool, InitError> {
             });
         }
     };
-    if let Err(source) = file.write_all(DEFAULT_CONFIG.as_bytes()).and_then(|()| file.sync_all()) {
+    if let Err(source) = file
+        .write_all(default_config::text().as_bytes())
+        .and_then(|()| file.sync_all())
+    {
         drop(file);
-        let _ = fs::remove_file(path);
+        discard_file(path);
         return Err(InitError::WriteFile {
             path: path.to_path_buf(),
             source,
         });
     }
-    Ok(true)
+    Ok(ConfigOutcome::Created)
 }
 
 /// The policy version this build's default config declares.
 fn template_policy_version() -> i64 {
-    policy_version(DEFAULT_CONFIG).expect("the bundled default config declares an integer policy version")
+    policy_version(&default_config::text()).expect("the bundled default config declares an integer policy version")
 }
 
 /// The `[policy] version` of one config's own text, before any include composes.
@@ -930,11 +840,26 @@ fn policy_version(text: &str) -> Option<i64> {
         .as_integer()
 }
 
+/// Find a backup name without replacing an earlier backup.
+fn available_backup_path(path: &Path) -> PathBuf {
+    let backup = path.with_extension("toml.bak");
+    if !backup.exists() {
+        return backup;
+    }
+    for number in 1.. {
+        let candidate = path.with_extension(format!("toml.bak.{number}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!("an unsigned integer always has another value")
+}
+
 /// Offer to replace a config authored against an older policy model.
 ///
 /// The config is the user's, and init keeps it across every upgrade. A policy
 /// version below this build's is the one mechanical signal that it was authored
-/// against a model this build no longer writes, so it is also the only drift
+/// against an older model than this build writes, so it is also the only drift
 /// init asks about. Only a terminal is asked, and the answer defaults to no: a
 /// rewrite discards every edit the file carries, the include lines that bind
 /// batteries included, and keeps them only in the backup.
@@ -963,17 +888,45 @@ fn offer_config_rewrite_with(
         Some(found) if found < template => {}
         _ => return Ok(ConfigOutcome::Kept),
     }
-    let backup = path.with_extension("toml.bak");
-    if !confirm_rewrite(path, &backup, input, output)? {
+    let backup = available_backup_path(path);
+    let rewrite = Confirmation {
+        question: format!(
+            "appa: {} uses an older policy format. This version of Appa uses policy version {template}.\n\
+             Replace it with the new default policy? Your existing file will be backed up to {},\n\
+             without replacing any existing backup.",
+            friendly_path(path),
+            friendly_path(&backup),
+        ),
+        default: Answer::No,
+    };
+    let prompt = |source| InitError::WriteFile {
+        path: path.to_path_buf(),
+        source,
+    };
+    if rewrite.ask(input, output).map_err(prompt)? == Answer::No {
         return Ok(ConfigOutcome::Kept);
     }
+    // Reserve this unused name before moving the user's file. `rename` can replace a
+    // destination, so reserving it makes that replacement safe and prevents an
+    // existing backup from being lost.
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&backup)
+        .map_err(|source| InitError::WriteFile {
+            path: backup.clone(),
+            source,
+        })?;
     // The original moves aside whole, so nothing here can leave a half-written
     // policy in place: the new file is written under `create_new` and removed
     // again if that write fails, and a failure puts the original back.
-    fs::rename(path, &backup).map_err(|source| InitError::WriteFile {
-        path: backup.clone(),
-        source,
-    })?;
+    if let Err(source) = fs::rename(path, &backup) {
+        discard_file(&backup);
+        return Err(InitError::WriteFile {
+            path: backup.clone(),
+            source,
+        });
+    }
     match create_default_config(path) {
         Ok(_) => Ok(ConfigOutcome::Rewritten),
         Err(written) => match fs::rename(&backup, path) {
@@ -986,31 +939,40 @@ fn offer_config_rewrite_with(
     }
 }
 
-fn confirm_rewrite(
-    path: &Path,
-    backup: &Path,
-    input: &mut impl BufRead,
-    output: &mut impl Write,
-) -> Result<bool, InitError> {
-    let prompt = |source| InitError::WriteFile {
-        path: path.to_path_buf(),
-        source,
-    };
-    write!(
-        output,
-        "appa: {} was authored against an older policy model than this build writes.\n\
-         Rewrite it from this build's default? Your file, its include lines and every edit\n\
-         in it, is kept only at {}, replacing whatever is there. [y/N] ",
-        friendly_path(path),
-        friendly_path(backup),
-    )
-    .and_then(|()| output.flush())
-    .map_err(prompt)?;
-    let mut answer = String::new();
-    if input.read_line(&mut answer).map_err(prompt)? == 0 {
-        return Ok(false);
+/// What a yes-or-no question resolves to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Answer {
+    Yes,
+    No,
+}
+
+/// A yes-or-no question put to the person running init, with the answer an
+/// empty line means; the prompt capitalizes that choice.
+struct Confirmation {
+    question: String,
+    default: Answer,
+}
+
+impl Confirmation {
+    /// Ask on `output` and read one line from `input`. End of input, where no
+    /// one is there to answer, is a no whatever the default.
+    fn ask(&self, input: &mut impl BufRead, output: &mut impl Write) -> std::io::Result<Answer> {
+        let choices = match self.default {
+            Answer::Yes => "[Y/n]",
+            Answer::No => "[y/N]",
+        };
+        write!(output, "{} {choices} ", self.question)?;
+        output.flush()?;
+        let mut answer = String::new();
+        if input.read_line(&mut answer)? == 0 {
+            return Ok(Answer::No);
+        }
+        Ok(match answer.trim().to_ascii_lowercase().as_str() {
+            "" => self.default,
+            "y" | "yes" => Answer::Yes,
+            _ => Answer::No,
+        })
     }
-    Ok(matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
 }
 
 /// The config the runtime will be started against, put through the runtime's
@@ -1045,26 +1007,20 @@ fn verify_config(path: &Path) -> Result<ComposedPolicy, InitError> {
     )))
 }
 
-fn run_claude<const N: usize>(arguments: [&str; N]) -> Result<Output, InitError> {
-    run_claude_in(arguments, None)
-}
-
-fn run_claude_in<const N: usize>(arguments: [&str; N], directory: Option<&Path>) -> Result<Output, InitError> {
-    run_claude_os_in(arguments.map(OsStr::new), directory)
-}
-
-fn run_claude_os<const N: usize>(arguments: [&OsStr; N]) -> Result<Output, InitError> {
-    run_claude_os_in(arguments, None)
-}
-
-fn run_claude_os_in<const N: usize>(arguments: [&OsStr; N], directory: Option<&Path>) -> Result<Output, InitError> {
+/// Run one `claude` command, from `directory` when a project-scoped plugin
+/// installation names one, and answer with its output only when it succeeded.
+fn run_claude<A: AsRef<OsStr>>(
+    arguments: impl IntoIterator<Item = A>,
+    directory: Option<&Path>,
+) -> Result<Output, InitError> {
+    let arguments: Vec<A> = arguments.into_iter().collect();
     let command = arguments
         .iter()
-        .map(|argument| argument.to_string_lossy())
+        .map(|argument| argument.as_ref().to_string_lossy())
         .collect::<Vec<_>>()
         .join(" ");
     let mut process = Command::new("claude");
-    process.args(arguments);
+    process.args(&arguments);
     if let Some(directory) = directory {
         process.current_dir(directory);
     }
@@ -1078,14 +1034,6 @@ fn run_claude_os_in<const N: usize>(arguments: [&OsStr; N], directory: Option<&P
         command,
         message: if stderr.is_empty() { stdout } else { stderr },
     })
-}
-
-fn output_text(output: &Output) -> String {
-    format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    )
 }
 
 fn is_appa_marketplace_line(line: &str) -> bool {
@@ -1182,21 +1130,29 @@ fn replace_plugin(
     installations: &[PluginInstallation],
 ) -> Result<(), InitError> {
     for installation in installations {
-        run_claude_in(
+        run_claude(
             ["plugin", "uninstall", PLUGIN, "--scope", &installation.scope, "--yes"],
             installation.project_path.as_deref(),
         )?;
     }
-    if output_text(marketplaces).lines().any(is_appa_marketplace_line) {
-        run_claude(["plugin", "marketplace", "remove", MARKETPLACE])?;
+    let listed = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&marketplaces.stdout),
+        String::from_utf8_lossy(&marketplaces.stderr)
+    );
+    if listed.lines().any(is_appa_marketplace_line) {
+        run_claude(["plugin", "marketplace", "remove", MARKETPLACE], None)?;
     }
-    run_claude_os([
-        OsStr::new("plugin"),
-        OsStr::new("marketplace"),
-        OsStr::new("add"),
-        deployment.as_os_str(),
-    ])?;
-    run_claude(["plugin", "install", PLUGIN, "--scope", "user"])?;
+    run_claude(
+        [
+            OsStr::new("plugin"),
+            OsStr::new("marketplace"),
+            OsStr::new("add"),
+            deployment.as_os_str(),
+        ],
+        None,
+    )?;
+    run_claude(["plugin", "install", PLUGIN, "--scope", "user"], None)?;
     Ok(())
 }
 
@@ -1225,7 +1181,7 @@ fn prepare_plugin_recovery(
         "plugins": [{ "name": "appa-runtime", "source": "./plugin" }]
     }))
     .expect("the recovery marketplace is valid JSON");
-    let manifest_path = marketplace_manifest(&marketplace);
+    let manifest_path = marketplace.join(".claude-plugin/marketplace.json");
     fs::write(&manifest_path, manifest).map_err(|source| InitError::WriteFile {
         path: manifest_path,
         source,
@@ -1280,29 +1236,40 @@ fn undo_plugin_switch(recovery: Option<&PluginRecovery>, launcher_dir: &Path) ->
     match recovery {
         Some(recovery) => restore_plugin(recovery).and_then(|()| install_clappa(launcher_dir).map(drop)),
         None => {
-            run_claude(["plugin", "uninstall", PLUGIN, "--scope", "user", "--yes"])?;
-            run_claude(["plugin", "marketplace", "remove", MARKETPLACE])?;
+            run_claude(["plugin", "uninstall", PLUGIN, "--scope", "user", "--yes"], None)?;
+            run_claude(["plugin", "marketplace", "remove", MARKETPLACE], None)?;
             Ok(())
         }
     }
 }
 
+/// Put the installation this init replaced back from its rollback source.
+/// Clearing whatever the failed switch left registered is best effort: what
+/// matters is that the add and the installs that follow succeed.
 fn restore_plugin(recovery: &PluginRecovery) -> Result<(), InitError> {
     for installation in &recovery.installations {
-        let _ = run_claude_in(
+        let cleared = run_claude(
             ["plugin", "uninstall", PLUGIN, "--scope", &installation.scope, "--yes"],
             installation.project_path.as_deref(),
         );
+        if let Err(error) = cleared {
+            tracing::warn!(scope = %installation.scope, %error, "cannot clear the plugin before restoring it");
+        }
     }
-    let _ = run_claude(["plugin", "marketplace", "remove", MARKETPLACE]);
-    run_claude_os([
-        OsStr::new("plugin"),
-        OsStr::new("marketplace"),
-        OsStr::new("add"),
-        recovery.marketplace.as_os_str(),
-    ])?;
+    if let Err(error) = run_claude(["plugin", "marketplace", "remove", MARKETPLACE], None) {
+        tracing::warn!(%error, "cannot clear the marketplace before restoring it");
+    }
+    run_claude(
+        [
+            OsStr::new("plugin"),
+            OsStr::new("marketplace"),
+            OsStr::new("add"),
+            recovery.marketplace.as_os_str(),
+        ],
+        None,
+    )?;
     for installation in &recovery.installations {
-        run_claude_in(
+        run_claude(
             ["plugin", "install", PLUGIN, "--scope", &installation.scope],
             installation.project_path.as_deref(),
         )?;
@@ -1310,14 +1277,13 @@ fn restore_plugin(recovery: &PluginRecovery) -> Result<(), InitError> {
     Ok(())
 }
 
-fn cleanup_plugin_recoveries(data_dir: &Path) {
-    let Ok(entries) = fs::read_dir(data_dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        if entry.file_name().to_string_lossy().starts_with(RECOVERY_PREFIX) {
-            let _ = fs::remove_dir_all(entry.path());
-        }
+/// Remove this invocation's rollback source. Another init's, live or crashed,
+/// is not this one's to judge.
+fn cleanup_plugin_recovery(recovery: Option<&PluginRecovery>) {
+    if let Some(recovery) = recovery
+        && let Err(error) = fs::remove_dir_all(&recovery.marketplace)
+    {
+        tracing::warn!(path = %recovery.marketplace.display(), %error, "cannot remove the rollback source");
     }
 }
 
@@ -1371,7 +1337,13 @@ fn install_disabled_clappa(install_dir: &Path) -> Result<(), InitError> {
     Ok(())
 }
 
-fn install_statusline(plugin_root: &Path, paths: &DeploymentPaths) -> Result<(), InitError> {
+/// Install the platform statusline and point Claude's settings at it, unless a
+/// statusline that is not APPA's is configured, which is left alone.
+fn install_statusline(
+    plugin_root: &Path,
+    paths: &DeploymentPaths,
+    compensation: &mut Compensation,
+) -> Result<(), InitError> {
     #[cfg(windows)]
     let (source, target) = (
         plugin_root.join("statusline.ps1"),
@@ -1405,6 +1377,12 @@ fn install_statusline(plugin_root: &Path, paths: &DeploymentPaths) -> Result<(),
         .and_then(Value::as_str);
     if existing.is_some_and(|command| !command.contains("appa-statusline")) {
         return Ok(());
+    }
+    for path in [&target, &settings_path] {
+        compensation.record(Undo::File {
+            path: path.clone(),
+            before: file_before(path)?,
+        });
     }
 
     fs::copy(&source, &target).map_err(|source| InitError::WriteFile {
@@ -1447,7 +1425,9 @@ fn install_statusline(plugin_root: &Path, paths: &DeploymentPaths) -> Result<(),
     Ok(())
 }
 
-fn start_runtime(plugin_root: &Path, runtime: &Path, config: &Path, endpoint: &Endpoint) -> Result<(), InitError> {
+/// Run the installed plugin's starter, which brings up the deployed runtime
+/// when nothing healthy answers the endpoint.
+fn start_runtime(plugin_root: &Path) -> Result<(), InitError> {
     #[cfg(windows)]
     let mut command = {
         let starter = plugin_root.join("hooks/hook.ps1");
@@ -1479,7 +1459,7 @@ fn start_runtime(plugin_root: &Path, runtime: &Path, config: &Path, endpoint: &E
         .output()
         .map_err(|error| InitError::Starter(error.to_string()))?;
     if output.status.success() {
-        return verify_runtime_deployment(runtime, config, endpoint);
+        return Ok(());
     }
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
     Err(InitError::Starter(if stderr.is_empty() {
@@ -1499,11 +1479,12 @@ enum EndpointOwner {
     /// Nothing answered, or what answered serves no fingerprint. Before the
     /// start this is the ordinary case; after it, it is a failure.
     Unidentified,
-    /// The binary whose bytes were offered for comparison.
-    Deployment,
-    /// A different build. New runtimes name their pid; an older runtime may
-    /// return only its digest and remains ineligible for automatic stopping.
-    Foreign { pid: Option<i32> },
+    /// The binary whose bytes were offered for comparison, serving this
+    /// configuration, in the process it names.
+    Deployment { pid: i32 },
+    /// A different build or a different configuration, naming the pid that
+    /// serves it.
+    Foreign { pid: i32 },
 }
 
 fn endpoint_health(endpoint: &Endpoint) -> Result<Option<String>, InitError> {
@@ -1535,11 +1516,10 @@ fn stale_pid(answer: &str) -> Option<i32> {
 /// Stop the exact stale APPA runtime named by the endpoint before classifying
 /// any remaining responder as foreign.
 ///
-/// This covers an unlinked Unix executable: pathname identity is unavailable,
-/// but the runtime's own health protocol still names its pid. The pid is not
-/// trusted by itself; init applies the same same-user/process-name check as the
-/// shipped starter before sending a signal. An `ok`, malformed, or absent
-/// health answer never grants shutdown authority.
+/// The runtime's own health protocol names its pid. The pid is not trusted by
+/// itself; init applies the same same-user/process-name check as the shipped
+/// starter before sending a signal. An `ok`, malformed, or absent health answer
+/// never grants shutdown authority.
 fn clear_stale_endpoint(endpoint: &Endpoint) -> Result<(), InitError> {
     let Some(answer) = endpoint_health(endpoint)? else {
         return Ok(());
@@ -1568,7 +1548,7 @@ fn clear_stale_endpoint(endpoint: &Endpoint) -> Result<(), InitError> {
             });
         }
     }
-    terminate_appa_pid(pid)?;
+    terminate_owned_appa_runtime(pid, endpoint)?;
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while std::time::Instant::now() < deadline {
@@ -1586,11 +1566,52 @@ fn clear_stale_endpoint(endpoint: &Endpoint) -> Result<(), InitError> {
             }
         }
     }
-    #[cfg(unix)]
-    let path = executable_of(pid).unwrap_or_else(|| PathBuf::from(format!("pid {pid} at {}", endpoint.url())));
-    #[cfg(windows)]
-    let path = PathBuf::from(format!("pid {pid} at {}", endpoint.url()));
-    Err(InitError::RuntimeSurvived { pid, path })
+    Err(InitError::RuntimeSurvived {
+        pid,
+        endpoint: endpoint.url().to_owned(),
+    })
+}
+
+/// Signal `pid`, confirming immediately before that it is still this user's
+/// appa runtime: the check-to-signal window is what a forged answer would use.
+fn terminate_owned_appa_runtime(pid: i32, endpoint: &Endpoint) -> Result<(), InitError> {
+    if !is_owned_appa_runtime(pid)? {
+        return Err(InitError::RuntimeIdentity {
+            endpoint: endpoint.url().to_owned(),
+            message: format!("pid {pid} is not this user's appa runtime; not stopping it"),
+        });
+    }
+    terminate_appa_pid(pid)
+}
+
+/// Stop a runtime this init started, and wait for its process to go.
+fn stop_owned_appa_runtime(pid: i32, endpoint: &Endpoint) -> Result<(), InitError> {
+    terminate_owned_appa_runtime(pid, endpoint)?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if !process_exists(pid) {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    Err(InitError::RuntimeSurvived {
+        pid,
+        endpoint: endpoint.url().to_owned(),
+    })
+}
+
+#[cfg(unix)]
+fn process_exists(pid: i32) -> bool {
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+#[cfg(windows)]
+fn process_exists(pid: i32) -> bool {
+    powershell(
+        "if (Get-Process -Id $env:APPA_STALE_PID -ErrorAction SilentlyContinue) { 'alive' }",
+        [("APPA_STALE_PID", pid.to_string())],
+    )
+    .is_ok_and(|answer| answer.trim() == "alive")
 }
 
 #[cfg(unix)]
@@ -1633,7 +1654,7 @@ fn terminate_appa_pid(pid: i32) -> Result<(), InitError> {
         return Ok(());
     }
     Err(InitError::InstallRuntime {
-        path: executable_of(pid).unwrap_or_else(|| PathBuf::from(format!("pid {pid}"))),
+        path: PathBuf::from(format!("pid {pid}")),
         source,
     })
 }
@@ -1708,61 +1729,55 @@ fn endpoint_owner(binary: &Path, config: &Path, endpoint: &Endpoint) -> Result<E
         return Ok(EndpointOwner::Unidentified);
     }
     let answer = String::from_utf8_lossy(&output.stdout);
-    Ok(classify_endpoint_owner(&expected, config, &answer))
+    classify_endpoint_owner(&expected, config, endpoint, &answer)
 }
 
 /// A process is this deployment only when it names both this build and this configuration.
 /// Anything else — a different build, a different config, or an answer that names no
 /// config at all — is another deployment, to be stopped before this install proceeds.
-fn classify_endpoint_owner(expected: &str, config: &Path, answer: &str) -> EndpointOwner {
+/// Either way the answer must name the pid that serves it: a runtime that cannot be
+/// stopped by pid can be neither cleared nor rolled back.
+fn classify_endpoint_owner(
+    expected: &str,
+    config: &Path,
+    endpoint: &Endpoint,
+    answer: &str,
+) -> Result<EndpointOwner, InitError> {
     let (identity, rest) = answer.split_once('\n').unwrap_or((answer, ""));
     let mut fields = identity.split_whitespace();
     let actual = fields.next().unwrap_or_default();
-    let pid = fields.next().and_then(positive_pid);
+    let pid = fields
+        .next()
+        .and_then(positive_pid)
+        .ok_or_else(|| InitError::RuntimeIdentity {
+            endpoint: endpoint.url().to_owned(),
+            message: "the answering runtime does not identify its pid; stop it and rerun init".to_owned(),
+        })?;
     // Everything after the first newline is the path, less the one the transport appends:
     // a config path may itself hold a newline, and splitting again would truncate it.
     let serves = rest.strip_suffix('\n').unwrap_or(rest);
     if actual == expected && !serves.is_empty() && Path::new(serves) == config {
-        EndpointOwner::Deployment
+        Ok(EndpointOwner::Deployment { pid })
     } else {
-        EndpointOwner::Foreign { pid }
+        Ok(EndpointOwner::Foreign { pid })
     }
 }
 
-fn confirm_stop(pid: i32, endpoint: &Endpoint) -> Result<bool, InitError> {
+fn confirm_stop(pid: i32, endpoint: &Endpoint) -> Result<Answer, InitError> {
+    let stop = Confirmation {
+        question: format!(
+            "appa: another appa deployment (pid {pid}) owns {}. Stop it and continue?",
+            endpoint.url()
+        ),
+        default: Answer::Yes,
+    };
     let stdin = std::io::stdin();
     let stderr = std::io::stderr();
-    confirm_stop_with(pid, endpoint, &mut stdin.lock(), &mut stderr.lock())
-}
-
-fn confirm_stop_with(
-    pid: i32,
-    endpoint: &Endpoint,
-    input: &mut impl BufRead,
-    output: &mut impl Write,
-) -> Result<bool, InitError> {
-    write!(
-        output,
-        "appa: another appa deployment (pid {pid}) owns {}. Stop it and continue? [Y/n] ",
-        endpoint.url()
-    )
-    .and_then(|()| output.flush())
-    .map_err(|source| InitError::RuntimeIdentity {
-        endpoint: endpoint.url().to_owned(),
-        message: format!("cannot ask permission to stop pid {pid}: {source}"),
-    })?;
-    let mut answer = String::new();
-    if input
-        .read_line(&mut answer)
+    stop.ask(&mut stdin.lock(), &mut stderr.lock())
         .map_err(|source| InitError::RuntimeIdentity {
             endpoint: endpoint.url().to_owned(),
-            message: format!("cannot read permission to stop pid {pid}: {source}"),
-        })?
-        == 0
-    {
-        return Ok(false);
-    }
-    Ok(matches!(answer.trim().to_ascii_lowercase().as_str(), "" | "y" | "yes"))
+            message: format!("cannot ask permission to stop pid {pid}: {source}"),
+        })
 }
 
 /// Clear a foreign owner while Claude and the launcher are still untouched.
@@ -1773,15 +1788,8 @@ fn confirm_stop_with(
 /// immediately before signalling to close the prompt-to-kill race.
 fn clear_foreign_endpoint(binary: &Path, config: &Path, endpoint: &Endpoint) -> Result<(), InitError> {
     match endpoint_owner(binary, config, endpoint)? {
-        EndpointOwner::Deployment | EndpointOwner::Unidentified => Ok(()),
-        EndpointOwner::Foreign { pid: None } => Err(InitError::RuntimeIdentity {
-            endpoint: endpoint.url().to_owned(),
-            message: "another appa deployment owns this endpoint, but that runtime does not identify its pid; stop it and rerun init"
-                .to_owned(),
-        }),
-        EndpointOwner::Foreign { pid: Some(pid) } => {
-            clear_confirmed_foreign_with(binary, config, endpoint, pid, confirm_stop)
-        }
+        EndpointOwner::Deployment { .. } | EndpointOwner::Unidentified => Ok(()),
+        EndpointOwner::Foreign { pid } => clear_confirmed_foreign_with(binary, config, endpoint, pid, confirm_stop),
     }
 }
 
@@ -1790,7 +1798,7 @@ fn clear_confirmed_foreign_with(
     config: &Path,
     endpoint: &Endpoint,
     pid: i32,
-    confirm: impl FnOnce(i32, &Endpoint) -> Result<bool, InitError>,
+    confirm: impl FnOnce(i32, &Endpoint) -> Result<Answer, InitError>,
 ) -> Result<(), InitError> {
     if !is_owned_appa_runtime(pid)? {
         return Err(InitError::RuntimeIdentity {
@@ -1800,7 +1808,7 @@ fn clear_confirmed_foreign_with(
             ),
         });
     }
-    if !confirm(pid, endpoint)? {
+    if confirm(pid, endpoint)? == Answer::No {
         return Err(InitError::RuntimeIdentity {
             endpoint: endpoint.url().to_owned(),
             message: format!("another appa deployment (pid {pid}) still owns this endpoint; init cancelled"),
@@ -1808,8 +1816,8 @@ fn clear_confirmed_foreign_with(
     }
     match endpoint_owner(binary, config, endpoint)? {
         EndpointOwner::Unidentified => return Ok(()),
-        EndpointOwner::Deployment => return Ok(()),
-        EndpointOwner::Foreign { pid: Some(current) } if current == pid => {}
+        EndpointOwner::Deployment { .. } => return Ok(()),
+        EndpointOwner::Foreign { pid: current } if current == pid => {}
         EndpointOwner::Foreign { .. } => {
             return Err(InitError::RuntimeIdentity {
                 endpoint: endpoint.url().to_owned(),
@@ -1817,13 +1825,7 @@ fn clear_confirmed_foreign_with(
             });
         }
     }
-    if !is_owned_appa_runtime(pid)? {
-        return Err(InitError::RuntimeIdentity {
-            endpoint: endpoint.url().to_owned(),
-            message: format!("pid {pid} changed identity after approval; not stopping it"),
-        });
-    }
-    terminate_appa_pid(pid)?;
+    terminate_owned_appa_runtime(pid, endpoint)?;
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while std::time::Instant::now() < deadline {
@@ -1832,11 +1834,10 @@ fn clear_confirmed_foreign_with(
             Some(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
         }
     }
-    #[cfg(unix)]
-    let path = executable_of(pid).unwrap_or_else(|| PathBuf::from(format!("pid {pid} at {}", endpoint.url())));
-    #[cfg(windows)]
-    let path = PathBuf::from(format!("pid {pid} at {}", endpoint.url()));
-    Err(InitError::RuntimeSurvived { pid, path })
+    Err(InitError::RuntimeSurvived {
+        pid,
+        endpoint: endpoint.url().to_owned(),
+    })
 }
 
 /// Reconcile the policy a surviving runtime serves with the file this init validated.
@@ -1850,10 +1851,10 @@ fn reconcile_policy(
     config: &Path,
     composed: &ComposedPolicy,
 ) -> Result<RuntimeOutcome, InitError> {
-    let Some(divergence) = policy_divergence(composed, serving_policy_key(endpoint).as_deref()) else {
+    let Some(divergence) = policy_divergence(composed, &serving_policy_key(endpoint)?) else {
         return Ok(RuntimeOutcome::Healthy);
     };
-    if !confirm_reload(config, divergence)? {
+    if confirm_reload(config, divergence)? == Answer::No {
         return Ok(RuntimeOutcome::OlderPolicy);
     }
     reload_policy(endpoint, config)?;
@@ -1863,13 +1864,10 @@ fn reconcile_policy(
 /// Why a serving runtime may not be answering under the file this init validated, or
 /// `None` when it demonstrably is.
 ///
-/// A runtime that does not answer for its policy leaves nothing to reconcile at all: init
-/// cannot reach it to compare or to reload, so it stays quiet. A config init cannot compose
-/// is the opposite case — the runtime can be asked, and only a person can decide, so the
-/// question is put rather than answered by assumption. The reload itself resolves the
+/// A config init cannot compose is not settled by assumption: the runtime can be asked,
+/// and only a person can decide, so the question is put. The reload itself resolves the
 /// secret where the runtime runs, which is the environment that has it.
-fn policy_divergence(composed: &ComposedPolicy, serving: Option<&str>) -> Option<Divergence> {
-    let serving = serving?;
+fn policy_divergence(composed: &ComposedPolicy, serving: &str) -> Option<Divergence> {
     match composed {
         ComposedPolicy::Key(key) if key == serving => None,
         ComposedPolicy::Key(_) => Some(Divergence::Serving),
@@ -1877,18 +1875,26 @@ fn policy_divergence(composed: &ComposedPolicy, serving: Option<&str>) -> Option
     }
 }
 
-/// The policy key the endpoint answers under, or `None` when it does not answer for one.
-fn serving_policy_key(endpoint: &Endpoint) -> Option<String> {
+/// The policy key the endpoint answers under. A runtime that does not answer for one
+/// cannot be reconciled, and a plugin bound to it is the skew init exists to prevent.
+fn serving_policy_key(endpoint: &Endpoint) -> Result<String, InitError> {
+    let refused = |message: String| InitError::PolicyKey {
+        endpoint: endpoint.url().to_owned(),
+        message,
+    };
     let output = Command::new("curl")
-        .args(["--fail", "--silent", "--max-time", "2"])
+        .args(["--fail", "--silent", "--show-error", "--max-time", "2"])
         .arg(endpoint.join("/policy-key"))
         .output()
-        .ok()?;
+        .map_err(|error| refused(error.to_string()))?;
     if !output.status.success() {
-        return None;
+        return Err(refused(String::from_utf8_lossy(&output.stderr).trim().to_owned()));
     }
     let key = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    (!key.is_empty()).then_some(key)
+    if key.is_empty() {
+        return Err(refused("the answer names no policy key".to_owned()));
+    }
+    Ok(key)
 }
 
 /// Ask the running runtime to serve the configuration on disk.
@@ -1915,21 +1921,11 @@ fn reload_policy(endpoint: &Endpoint, config: &Path) -> Result<(), InitError> {
 
 /// A terminal is asked; anything else reloads. A script that just wrote a config wants it
 /// serving, and there is no one there to answer.
-fn confirm_reload(config: &Path, divergence: Divergence) -> Result<bool, InitError> {
+fn confirm_reload(config: &Path, divergence: Divergence) -> Result<Answer, InitError> {
     let stdin = std::io::stdin();
     if !stdin.is_terminal() {
-        return Ok(true);
+        return Ok(Answer::Yes);
     }
-    let stderr = std::io::stderr();
-    confirm_reload_with(config, divergence, &mut stdin.lock(), &mut stderr.lock())
-}
-
-fn confirm_reload_with(
-    config: &Path,
-    divergence: Divergence,
-    input: &mut impl BufRead,
-    output: &mut impl Write,
-) -> Result<bool, InitError> {
     let prompt = |source| InitError::WriteFile {
         path: config.to_path_buf(),
         source,
@@ -1937,7 +1933,7 @@ fn confirm_reload_with(
     let config = friendly_path(config);
     // Each case states exactly what init established, and no more: one knows the running
     // runtime serves something else, the other knows only that it cannot tell.
-    let question = match divergence {
+    let established = match divergence {
         Divergence::Serving => {
             format!("appa: the running runtime still serves the policy it started with, not {config}.")
         }
@@ -1946,26 +1942,24 @@ fn confirm_reload_with(
              whether the running runtime already serves it."
         ),
     };
-    write!(
-        output,
-        "{question}\nReload it now? Sessions open right now keep the deployment they started with. [Y/n] ",
-    )
-    .and_then(|()| output.flush())
-    .map_err(prompt)?;
-    let mut answer = String::new();
-    if input.read_line(&mut answer).map_err(prompt)? == 0 {
-        return Ok(false);
-    }
-    Ok(matches!(answer.trim().to_ascii_lowercase().as_str(), "" | "y" | "yes"))
+    let reload = Confirmation {
+        question: format!(
+            "{established}\nReload it now? Sessions open right now keep the deployment they started with."
+        ),
+        default: Answer::Yes,
+    };
+    let stderr = std::io::stderr();
+    reload.ask(&mut stdin.lock(), &mut stderr.lock()).map_err(prompt)
 }
 
 /// The endpoint answers for this deployment: this build, serving this configuration.
-fn verify_runtime_deployment(runtime: &Path, config: &Path, endpoint: &Endpoint) -> Result<(), InitError> {
+/// Answers with the pid of the process serving it.
+fn verify_runtime_deployment(runtime: &Path, config: &Path, endpoint: &Endpoint) -> Result<i32, InitError> {
     match endpoint_owner(runtime, config, endpoint)? {
-        EndpointOwner::Deployment => Ok(()),
+        EndpointOwner::Deployment { pid } => Ok(pid),
         EndpointOwner::Unidentified => Err(InitError::RuntimeIdentity {
             endpoint: endpoint.url().to_owned(),
-            message: "the answering process exposes no binary fingerprint; stop it and rerun init".to_owned(),
+            message: "stop it, then run `appa init` again.".to_owned(),
         }),
         EndpointOwner::Foreign { .. } => Err(InitError::RuntimeIdentity {
             endpoint: endpoint.url().to_owned(),
@@ -1978,14 +1972,12 @@ fn verify_runtime_deployment(runtime: &Path, config: &Path, endpoint: &Endpoint)
 mod tests {
     use super::*;
 
-    /// A stand-in the stop set can actually find and signal.
+    /// A stand-in the ownership check can find and the signal can reach.
     ///
     /// macOS kills a copied platform binary outright -- a copy of `/bin/sh` or
     /// `/bin/sleep` dies with SIGKILL before it runs a single instruction -- so
-    /// a test built on one would pass without ever exercising the stop set,
-    /// because a killed process is also a stopped one. `perl` copies and runs,
-    /// and can be told to ignore SIGTERM, which is the case that must abort
-    /// init rather than be assumed gone.
+    /// a test built on one would pass without ever exercising the stop,
+    /// because a killed process is also a stopped one. `perl` copies and runs.
     #[cfg(unix)]
     const STAND_IN: &str = "/usr/bin/perl";
 
@@ -1994,15 +1986,14 @@ mod tests {
     const RUNTIME_ARGUMENTS: &[&str] = &["runtime", "--listen", "127.0.0.1:8787"];
 
     /// A process whose executable really *is* `at`, started with `arguments`, so
-    /// verification finds it there rather than taking a spoofable argv on trust
-    /// and the stop set sees the argv it decides on.
+    /// the ownership check sees the process name it decides on.
     ///
     /// The stand-in is reaped on its own thread. A dead child that nobody has
     /// waited for is a zombie, and `kill(pid, 0)` still succeeds on one, so
     /// without the reaper these tests could not tell a stopped process from a
-    /// running one. In production the retired runtime is never init's child.
+    /// running one. In production a stopped runtime is never init's child.
     #[cfg(unix)]
-    fn process_executing(at: &Path, ignores_sigterm: bool, arguments: &[&str]) -> Option<i32> {
+    fn process_executing(at: &Path, arguments: &[&str]) -> Option<i32> {
         use std::os::unix::fs::PermissionsExt;
 
         if !Path::new(STAND_IN).is_file() {
@@ -2018,10 +2009,9 @@ mod tests {
         // reports as alive, so checking the pid would accept a process that
         // never ran.
         let ready = at.with_extension("ready");
-        let disposition = if ignores_sigterm { "$SIG{TERM} = 'IGNORE'; " } else { "" };
-        let script = format!("{disposition}open(my $f, '>', $ARGV[0]) or die; close $f; sleep 30");
+        let script = "open(my $f, '>', $ARGV[0]) or die; close $f; sleep 30";
         let mut child = Command::new(at)
-            .args(["-e", &script])
+            .args(["-e", script])
             .arg(&ready)
             .args(arguments)
             .spawn()
@@ -2049,14 +2039,9 @@ mod tests {
         unsafe { libc::kill(pid, 0) == 0 }
     }
 
-    #[cfg(unix)]
-    fn health_answers(answers: Vec<String>) -> Endpoint {
-        recorded_answers(answers).0
-    }
-
-    /// The same loopback fixture, with the request lines it served. A probe's path is part
-    /// of the contract it has with the runtime, so a test that cares which endpoint init
-    /// asks reads them; one that only cares how an answer parses takes `health_answers`.
+    /// A loopback fixture serving `answers` in turn, with the request lines it served. A
+    /// probe's path is part of the contract it has with the runtime, so a test that cares
+    /// which endpoint init asks reads them.
     #[cfg(unix)]
     fn recorded_answers(answers: Vec<String>) -> (Endpoint, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
         use std::io::{Read, Write};
@@ -2111,71 +2096,71 @@ mod tests {
 
     #[test]
     fn only_this_build_serving_this_config_is_this_deployment() {
+        let endpoint = Endpoint::parse("http://127.0.0.1:8787").expect("the endpoint parses");
+        let classify = |expected: &str, config: &Path, answer: &str| {
+            classify_endpoint_owner(expected, config, &endpoint, answer).expect("the answer classifies")
+        };
         let mine = Path::new("/home/user/config/appa.toml");
         assert_eq!(
-            classify_endpoint_owner("same", mine, "same 42\n/home/user/config/appa.toml"),
-            EndpointOwner::Deployment
+            classify("same", mine, "same 42\n/home/user/config/appa.toml"),
+            EndpointOwner::Deployment { pid: 42 }
         );
         // The build alone never settles it: one build serves as many deployments as there
         // are configurations, and each is a stranger to the others.
         assert_eq!(
-            classify_endpoint_owner("same", mine, "same 42\n/home/other/config/appa.toml"),
-            EndpointOwner::Foreign { pid: Some(42) }
+            classify("same", mine, "same 42\n/home/other/config/appa.toml"),
+            EndpointOwner::Foreign { pid: 42 }
         );
         // A path with spaces is one path, not two fields.
         let spaced = Path::new("/home/user/Application Support/appa.toml");
         assert_eq!(
-            classify_endpoint_owner("same", spaced, "same 42\n/home/user/Application Support/appa.toml"),
-            EndpointOwner::Deployment
+            classify("same", spaced, "same 42\n/home/user/Application Support/appa.toml"),
+            EndpointOwner::Deployment { pid: 42 }
         );
         // On Unix a directory name may hold a newline, so the path is read as the whole
         // remainder of the answer the runtime composes — and a transport that appends a
         // newline of its own does not turn one deployment into a stranger.
         let newlined = Path::new("/home/user/two\nlines/appa.toml");
         assert_eq!(
-            classify_endpoint_owner("same", newlined, "same 42\n/home/user/two\nlines/appa.toml"),
-            EndpointOwner::Deployment
+            classify("same", newlined, "same 42\n/home/user/two\nlines/appa.toml"),
+            EndpointOwner::Deployment { pid: 42 }
         );
         assert_eq!(
-            classify_endpoint_owner("same", mine, "same 42\n/home/user/config/appa.toml\n"),
-            EndpointOwner::Deployment
+            classify("same", mine, "same 42\n/home/user/config/appa.toml\n"),
+            EndpointOwner::Deployment { pid: 42 }
         );
         assert_eq!(
-            classify_endpoint_owner("same", mine, "different 42\n/home/user/config/appa.toml"),
-            EndpointOwner::Foreign { pid: Some(42) }
+            classify("same", mine, "different 42\n/home/user/config/appa.toml"),
+            EndpointOwner::Foreign { pid: 42 }
         );
         // An answer that names no configuration cannot claim to be this deployment, and
-        // one that names no pid cannot be stopped without one.
-        assert_eq!(
-            classify_endpoint_owner("same", mine, "same 42"),
-            EndpointOwner::Foreign { pid: Some(42) }
-        );
-        assert_eq!(
-            classify_endpoint_owner("same", mine, "different"),
-            EndpointOwner::Foreign { pid: None }
-        );
+        // one that names no pid cannot be stopped, so it is refused outright.
+        assert_eq!(classify("same", mine, "same 42"), EndpointOwner::Foreign { pid: 42 });
+        assert!(matches!(
+            classify_endpoint_owner("same", mine, &endpoint, "different"),
+            Err(InitError::RuntimeIdentity { .. })
+        ));
     }
 
     #[test]
-    fn stopping_a_foreign_runtime_requires_a_y_or_default_yes_answer() {
-        let endpoint = Endpoint::parse("http://127.0.0.1:8787").expect("the endpoint parses");
-        for answer in ["y\n", "YES\n", "\n"] {
-            let mut output = Vec::new();
-            assert!(
-                confirm_stop_with(42, &endpoint, &mut answer.as_bytes(), &mut output).expect("the answer reads"),
-                "{answer:?} approves"
-            );
-            assert!(
-                String::from_utf8(output)
-                    .unwrap()
-                    .contains("Stop it and continue? [Y/n]")
-            );
-        }
-        for answer in ["n\n", "no\n", "anything else\n", ""] {
-            assert!(
-                !confirm_stop_with(42, &endpoint, &mut answer.as_bytes(), &mut Vec::new()).expect("the answer reads"),
-                "{answer:?} refuses"
-            );
+    fn an_empty_answer_takes_the_default_and_end_of_input_refuses() {
+        let ask = |default: Answer, answer: &str| {
+            let confirmation = Confirmation {
+                question: "continue?".to_owned(),
+                default,
+            };
+            confirmation
+                .ask(&mut answer.as_bytes(), &mut Vec::new())
+                .expect("the answer reads")
+        };
+        for default in [Answer::Yes, Answer::No] {
+            for answer in ["y\n", "YES\n", " yes \n"] {
+                assert_eq!(ask(default, answer), Answer::Yes, "{answer:?} under {default:?}");
+            }
+            for answer in ["n\n", "no\n", "anything else\n", ""] {
+                assert_eq!(ask(default, answer), Answer::No, "{answer:?} under {default:?}");
+            }
+            assert_eq!(ask(default, "\n"), default);
         }
     }
 
@@ -2183,67 +2168,46 @@ mod tests {
     fn a_serving_runtime_is_reconciled_only_when_agreement_is_not_established() {
         let key = |key: &str| ComposedPolicy::Key(key.to_string());
         assert_eq!(
-            policy_divergence(&key("composed"), Some("serving")),
+            policy_divergence(&key("composed"), "serving"),
             Some(Divergence::Serving)
         );
         // An install that changed nothing must ask nothing.
-        assert_eq!(policy_divergence(&key("same"), Some("same")), None);
+        assert_eq!(policy_divergence(&key("same"), "same"), None);
         // A config this process cannot compose is unsettled, never settled: assuming
         // agreement here is what would leave an older policy serving unremarked.
         assert_eq!(
-            policy_divergence(&ComposedPolicy::Unknowable, Some("serving")),
+            policy_divergence(&ComposedPolicy::Unknowable, "serving"),
             Some(Divergence::Unestablished)
         );
-        // A runtime that answers for no policy cannot be compared or reloaded, so there
-        // is nothing to put to the user either way.
-        assert_eq!(policy_divergence(&key("composed"), None), None);
-        assert_eq!(policy_divergence(&ComposedPolicy::Unknowable, None), None);
     }
 
     #[test]
-    fn reloading_a_lagging_runtime_requires_a_y_or_default_yes_answer() {
-        let config = PathBuf::from("/home/user/config/appa.toml");
-        for divergence in [Divergence::Serving, Divergence::Unestablished] {
-            for answer in ["y\n", "YES\n", "\n"] {
-                assert!(
-                    confirm_reload_with(&config, divergence, &mut answer.as_bytes(), &mut Vec::new())
-                        .expect("the answer reads"),
-                    "{answer:?} approves under {divergence:?}"
-                );
-            }
-            for answer in ["n\n", "no\n", "anything else\n", ""] {
-                assert!(
-                    !confirm_reload_with(&config, divergence, &mut answer.as_bytes(), &mut Vec::new())
-                        .expect("the answer reads"),
-                    "{answer:?} refuses under {divergence:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn a_serving_policy_key_is_read_only_when_the_endpoint_answers_one() {
+    fn a_serving_policy_key_is_read_from_the_policy_route() {
         let (endpoint, asked) = recorded_answers(vec!["c54f1509".to_string()]);
-        assert_eq!(serving_policy_key(&endpoint).as_deref(), Some("c54f1509"));
+        assert_eq!(serving_policy_key(&endpoint).expect("the key reads"), "c54f1509");
         assert_eq!(
             asked.lock().expect("the request recorder is never poisoned").as_slice(),
             ["GET /policy-key HTTP/1.1".to_string()],
             "the probe reads the policy route, and reads it without mutating"
         );
+    }
 
-        // A runtime predating the route answers nothing usable, and an unbound port
-        // answers not at all. Both leave init with no key rather than a wrong one.
-        let blank = health_answers(vec![String::new()]);
-        assert_eq!(serving_policy_key(&blank), None);
+    /// A runtime that answers nothing usable, and a port nothing answers on, both
+    /// refuse init: a plugin bound to a runtime whose policy cannot be established is
+    /// the skew init exists to prevent.
+    #[test]
+    fn a_runtime_that_does_not_answer_for_its_policy_refuses_init() {
+        let blank = recorded_answers(vec![String::new()]).0;
+        assert!(matches!(serving_policy_key(&blank), Err(InitError::PolicyKey { .. })));
         let unbound = Endpoint::parse("http://127.0.0.1:1").expect("the endpoint parses");
-        assert_eq!(serving_policy_key(&unbound), None);
+        assert!(matches!(serving_policy_key(&unbound), Err(InitError::PolicyKey { .. })));
     }
 
     #[test]
     fn a_matching_policy_key_reconciles_without_asking_or_reloading() {
         // One answer is served: the key probe. A reload would need a second connection,
         // so reaching one at all would hang rather than pass.
-        let endpoint = health_answers(vec!["agreed".to_string()]);
+        let endpoint = recorded_answers(vec!["agreed".to_string()]).0;
         let config = PathBuf::from("/home/user/config/appa.toml");
         assert_eq!(
             reconcile_policy(&endpoint, &config, &ComposedPolicy::Key("agreed".to_string()))
@@ -2271,17 +2235,17 @@ mod tests {
     fn an_approved_foreign_appa_runtime_is_stopped() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let foreign = directory.path().join("foreign/appa");
-        let Some(pid) = process_executing(&foreign, false, RUNTIME_ARGUMENTS) else {
+        let Some(pid) = process_executing(&foreign, RUNTIME_ARGUMENTS) else {
             return;
         };
         let candidate = directory.path().join("candidate-appa");
         fs::write(&candidate, "a different candidate build").expect("the candidate binary exists");
-        let endpoint = health_answers(vec![format!("different-fingerprint {pid}")]);
+        let endpoint = recorded_answers(vec![format!("different-fingerprint {pid}")]).0;
 
         let config = directory.path().join("appa.toml");
         clear_confirmed_foreign_with(&candidate, &config, &endpoint, pid, |approved_pid, _| {
             assert_eq!(approved_pid, pid);
-            Ok(true)
+            Ok(Answer::Yes)
         })
         .expect("the approved foreign runtime stops");
 
@@ -2292,12 +2256,12 @@ mod tests {
     #[test]
     fn init_reclaims_an_unlinked_runtime_named_by_its_stale_health_answer() {
         let directory = tempfile::tempdir().expect("temporary directory");
-        let retired = directory.path().join("bin/appa");
-        let Some(pid) = process_executing(&retired, false, RUNTIME_ARGUMENTS) else {
+        let replaced = directory.path().join("bin/appa");
+        let Some(pid) = process_executing(&replaced, RUNTIME_ARGUMENTS) else {
             return;
         };
-        fs::remove_file(&retired).expect("the installed binary is unlinked while its runtime remains");
-        let endpoint = health_answers(vec![format!("stale {pid}"), format!("stale {pid}")]);
+        fs::remove_file(&replaced).expect("the installed binary is unlinked while its runtime remains");
+        let endpoint = recorded_answers(vec![format!("stale {pid}"), format!("stale {pid}")]).0;
 
         clear_stale_endpoint(&endpoint).expect("init stops its stale unlinked runtime");
 
@@ -2309,119 +2273,16 @@ mod tests {
     fn a_spoofed_stale_pid_does_not_grant_process_shutdown() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let other = directory.path().join("bin/not-appa");
-        let Some(pid) = process_executing(&other, false, RUNTIME_ARGUMENTS) else {
+        let Some(pid) = process_executing(&other, RUNTIME_ARGUMENTS) else {
             return;
         };
-        let endpoint = health_answers(vec![format!("stale {pid}")]);
+        let endpoint = recorded_answers(vec![format!("stale {pid}")]).0;
 
         let refused = clear_stale_endpoint(&endpoint);
 
         assert!(matches!(refused, Err(InitError::RuntimeIdentity { .. })));
         assert!(still_running(pid), "a non-appa process was terminated");
         unsafe { libc::kill(pid, libc::SIGKILL) };
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_runtime_at_the_retired_path_is_stopped() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let retired = directory.path().join("bin/appa");
-        let Some(pid) = process_executing(&retired, false, RUNTIME_ARGUMENTS) else {
-            return;
-        };
-
-        let survivors = stop_processes_executing(&retired).expect("the stop set runs");
-
-        assert!(survivors.is_empty(), "a stoppable runtime was reported as surviving");
-        assert!(!still_running(pid), "the runtime at the retired path is still running",);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_runtime_at_another_path_is_left_alone() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        // What an init run under a different APPA_INSTALL_DIR or APPA_DATA_DIR
-        // leaves behind: a path this environment never computes.
-        let elsewhere = directory.path().join("other-install/appa");
-        let Some(pid) = process_executing(&elsewhere, false, RUNTIME_ARGUMENTS) else {
-            return;
-        };
-        let retired = directory.path().join("bin/appa");
-        fs::create_dir_all(retired.parent().expect("a parent")).expect("the retired directory");
-        fs::copy(STAND_IN, &retired).expect("the retired binary exists but runs nothing");
-
-        let survivors = stop_processes_executing(&retired).expect("the stop set runs");
-
-        assert!(survivors.is_empty());
-        assert!(
-            still_running(pid),
-            "a runtime outside the stop set must be left running, not killed",
-        );
-        unsafe { libc::kill(pid, libc::SIGKILL) };
-    }
-
-    /// What a second `appa init`, or an `appa hook` in flight, looks like: the
-    /// retired executable, doing something that is not serving the endpoint.
-    /// Terminating it would interrupt work unrelated to the runtime being
-    /// replaced -- and killing a concurrent init mid-switch is the worst of
-    /// them, because the Claude plugin replacement it is performing is not
-    /// atomic.
-    #[cfg(unix)]
-    #[test]
-    fn another_invocation_of_the_retired_binary_is_left_alone() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let retired = directory.path().join("bin/appa");
-        let Some(pid) = process_executing(&retired, false, &["init", "claude-code"]) else {
-            return;
-        };
-
-        let survivors = stop_processes_executing(&retired).expect("the stop set runs");
-
-        assert!(survivors.is_empty());
-        assert!(
-            still_running(pid),
-            "the stop set signalled a process that is not a runtime",
-        );
-        unsafe { libc::kill(pid, libc::SIGKILL) };
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_verified_runtime_that_refuses_to_die_is_reported() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let retired = directory.path().join("bin/appa");
-        // Ignores SIGTERM, which is exactly the case that must abort init
-        // rather than let a new plugin bind to an old runtime.
-        let Some(pid) = process_executing(&retired, true, RUNTIME_ARGUMENTS) else {
-            return;
-        };
-
-        let survivors = stop_processes_executing(&retired).expect("the stop set runs");
-
-        assert_eq!(
-            survivors,
-            vec![pid],
-            "a verified target that outlived SIGTERM must be reported, not assumed gone",
-        );
-        unsafe { libc::kill(pid, libc::SIGKILL) };
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn cleanup_stops_an_unlinked_legacy_runtime() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        // The retired daemon was its own binary and took no subcommand; legacy
-        // cleanup matches on the executable path alone.
-        let target = directory.path().join("appa-runtime");
-        let Some(pid) = process_executing(&target, false, &[]) else {
-            return;
-        };
-        fs::remove_file(target.with_extension("ready")).expect("the readiness marker is removed");
-        fs::remove_file(&target).expect("Cargo unlinks the installed legacy executable");
-
-        stop_legacy_runtime_at(&target).expect("legacy cleanup succeeds");
-
-        assert!(!still_running(pid), "cleanup must stop the unlinked process");
     }
 
     #[test]
@@ -2436,7 +2297,10 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let config = directory.path().join("appa.toml");
 
-        assert!(create_default_config(&config).expect("the default config is written"));
+        assert_eq!(
+            create_default_config(&config).expect("the default config is written"),
+            ConfigOutcome::Created
+        );
         verify_config(&config).expect("the config init writes composes");
 
         let ahead = template_policy_version() + 1;
@@ -2511,7 +2375,10 @@ mod tests {
         }
 
         assert_eq!(answer_rewrite(&config, "y\n").0, ConfigOutcome::Rewritten);
-        assert_eq!(fs::read_to_string(&config).ok(), Some(DEFAULT_CONFIG.to_string()));
+        assert_eq!(
+            fs::read_to_string(&config).ok(),
+            Some(default_config::text().into_owned())
+        );
         assert_eq!(fs::read_to_string(&backup).ok(), Some(authored));
         verify_config(&config).expect("the rewritten config composes");
     }
@@ -2520,12 +2387,18 @@ mod tests {
     fn a_current_config_is_never_offered_for_rewrite() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let config = directory.path().join("appa.toml");
-        assert!(create_default_config(&config).expect("the default config is written"));
+        assert_eq!(
+            create_default_config(&config).expect("the default config is written"),
+            ConfigOutcome::Created
+        );
 
         let (outcome, prompt) = answer_rewrite(&config, "y\n");
         assert!(prompt.is_empty(), "no offer is made");
         assert_eq!(outcome, ConfigOutcome::Kept);
-        assert_eq!(fs::read_to_string(&config).ok(), Some(DEFAULT_CONFIG.to_string()));
+        assert_eq!(
+            fs::read_to_string(&config).ok(),
+            Some(default_config::text().into_owned())
+        );
         assert!(!directory.path().join("appa.toml.bak").exists());
     }
 
@@ -2539,7 +2412,6 @@ mod tests {
             &config,
             ConfigOutcome::Kept,
             RuntimeOutcome::Healthy,
-            None,
             false,
         );
 
@@ -2557,7 +2429,6 @@ mod tests {
             &config,
             ConfigOutcome::Kept,
             RuntimeOutcome::Healthy,
-            None,
             true,
         );
         assert!(colored.starts_with("\u{1b}[1;32m✓ OpenAPPA initialized\u{1b}[0m"));

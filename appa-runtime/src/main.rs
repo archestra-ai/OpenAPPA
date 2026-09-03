@@ -18,10 +18,9 @@ use sha2::{Digest, Sha256};
 
 use crate::api::{Reloaded, Runtime};
 use crate::config::Config;
+use crate::default_config;
 use crate::{hooks, mcp};
 use appa_runtime_api::Codec;
-
-const DEFAULT_CONFIG: &str = include_str!("../../integrations/claude-code/examples/claude-code.appa.toml");
 
 fn ensure_default_config(path: &Path) -> io::Result<bool> {
     let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
@@ -29,7 +28,10 @@ fn ensure_default_config(path: &Path) -> io::Result<bool> {
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
         Err(error) => return Err(error),
     };
-    if let Err(error) = file.write_all(DEFAULT_CONFIG.as_bytes()).and_then(|()| file.sync_all()) {
+    if let Err(error) = file
+        .write_all(default_config::text().as_bytes())
+        .and_then(|()| file.sync_all())
+    {
         drop(file);
         let _ = fs::remove_file(path);
         return Err(error);
@@ -72,12 +74,23 @@ fn require_loopback(addr: &SocketAddr) -> Result<(), String> {
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum Adapter {
     ClaudeCode,
+    Kagent,
 }
 
 impl Adapter {
+    /// kagent's spawns are other agents called as tools: a child runs only under a contract
+    /// that names the agent. Claude Code's `Task` keeps the wildcard's cover.
+    fn spawn_coverage(self) -> crate::api::SpawnCoverage {
+        match self {
+            Adapter::ClaudeCode => crate::api::SpawnCoverage::Wildcard,
+            Adapter::Kagent => crate::api::SpawnCoverage::Declared,
+        }
+    }
+
     fn codec(self) -> Codec {
         match self {
             Adapter::ClaudeCode => appa_adapter_claude_code::codec(),
+            Adapter::Kagent => appa_adapter_kagent::codec(),
         }
     }
 }
@@ -276,7 +289,7 @@ async fn serve(args: Args) -> ExitCode {
         }
     };
     let runtime = match Runtime::open(config, args.db, args.modules_dir) {
-        Ok(runtime) => Arc::new(runtime),
+        Ok(runtime) => Arc::new(runtime.with_spawn_coverage(args.adapter.spawn_coverage())),
         Err(error) => {
             eprintln!("appa runtime: {error}");
             return ExitCode::FAILURE;
@@ -331,15 +344,9 @@ mod tests {
         assert!(ensure_default_config(&path).expect("default config is created"));
         assert_eq!(
             fs::read_to_string(&path).expect("default config is readable"),
-            DEFAULT_CONFIG
+            default_config::text()
         );
         Config::load(&path).expect("the embedded default config validates");
-        assert!(
-            DEFAULT_CONFIG.contains("name = \"claude-code.undeclared-tool\"")
-                && DEFAULT_CONFIG.contains("name = \"*\"")
-                && DEFAULT_CONFIG.contains("annotator = \"claude-code.undeclared-tool\""),
-            "a fresh Claude Code deployment carries its explicit compatibility fallback"
-        );
 
         fs::write(&path, "existing deployment").expect("existing config is replaced by the test");
         assert!(!ensure_default_config(&path).expect("existing config is preserved"));

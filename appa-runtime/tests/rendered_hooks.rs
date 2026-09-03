@@ -18,7 +18,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 
-use appa_runtime::plugin_bundle::{Endpoint, Population, materialize};
+use appa_runtime::plugin_bundle::{DEFAULT_ENDPOINT_URL, Endpoint, Population, materialize};
 
 mod common;
 use common::stage_bundle;
@@ -251,4 +251,70 @@ fn the_session_start_starter_starts_the_binary_its_deployment_installed() {
         started.is_file(),
         "the starter did not execute the binary its paths file names",
     );
+}
+
+/// Every UTF-8 file under `root`, with its path, so an assertion can sweep the
+/// whole deployment rather than a list of files someone remembered.
+fn text_files(root: &Path) -> Vec<(std::path::PathBuf, String)> {
+    let mut files = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory).expect("the deployment is readable") {
+            let path = entry.expect("the entry is readable").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if let Ok(text) = fs::read_to_string(&path) {
+                files.push((path, text));
+            }
+        }
+    }
+    files
+}
+
+#[test]
+fn a_materialized_endpoint_reaches_every_consumer_of_the_default_literal() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = directory.path();
+    let source = stage_bundle(root);
+    let endpoint = dead_endpoint();
+    assert_ne!(endpoint.url(), DEFAULT_ENDPOINT_URL);
+
+    let deployment = materialize(
+        Population::Tree(&source),
+        &root.join("data/deployments"),
+        &root.join("data/bin/appa"),
+        &root.join("config/appa.toml"),
+        &root.join("data"),
+        &endpoint,
+    )
+    .expect("the deployment materializes");
+
+    // The hooks learn the endpoint by sourcing the rendered paths file.
+    let sourced = Command::new("sh")
+        .arg("-c")
+        .arg(". \"$1\" && printf '%s' \"$APPA_ENDPOINT\"")
+        .arg("sh")
+        .arg(deployment.root.join("plugin/hooks/appa-paths.sh"))
+        .env("APPA_ENDPOINT", DEFAULT_ENDPOINT_URL)
+        .output()
+        .expect("the paths file sources");
+    assert_eq!(String::from_utf8_lossy(&sourced.stdout), endpoint.url());
+
+    // The MCP registration and the statusline read the literal themselves.
+    let mcp: serde_json::Value =
+        serde_json::from_slice(&fs::read(deployment.root.join("plugin/.mcp.json")).expect("the MCP registration"))
+            .expect("the MCP registration parses");
+    assert_eq!(
+        mcp["mcpServers"]["appa"]["url"],
+        format!("${{APPA_RUNTIME_URL:-{}}}/mcp", endpoint.url())
+    );
+    let statusline = fs::read_to_string(deployment.root.join("plugin/statusline.sh")).expect("the statusline");
+    assert!(statusline.contains(endpoint.url()));
+
+    let stale: Vec<_> = text_files(&deployment.root)
+        .into_iter()
+        .filter(|(_, text)| text.contains(DEFAULT_ENDPOINT_URL))
+        .map(|(path, _)| path)
+        .collect();
+    assert!(stale.is_empty(), "the default endpoint survived rendering in {stale:?}");
 }

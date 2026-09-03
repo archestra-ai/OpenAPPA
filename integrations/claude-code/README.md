@@ -52,12 +52,15 @@ that binary. Release builds carry an immutable tag and artifact digest; clean
 checkout builds carry an immutable commit and plugin-tree digest. The result
 does not depend on the working directory.
 
-From a release binary, that digest is baked in. The artifact is downloaded once,
-verified against the digest before anything outside a temporary file changes,
-and cached, so a later init needs no network:
+From a release binary, that digest is baked in. The installer verifies the
+checksum of the binary for Linux or macOS and places it in `~/.local/bin`
+(Windows: unpack the zip from the releases page). Init then downloads the
+artifact once, verifies it against the digest before anything outside a
+temporary file changes, and caches it, so a later init needs no network:
 
 ```sh
-appa init claude-code
+curl -fsSL https://openappa.com/install.sh | sh
+~/.local/bin/appa init claude-code
 ```
 
 A clean checkout build downloads the source archive for its exact commit,
@@ -216,7 +219,8 @@ Claude usage, so nothing runs it automatically.
 
 ## Upgrade
 
-Install the new `appa` package, then rerun `appa init claude-code`. Init replaces
+Rerun the installer (or `cargo install` from the new checkout), then rerun
+`appa init claude-code`. Init replaces
 the deployed runtime and the APPA marketplace together, always as one bundle,
 and preserves policy and database files.
 
@@ -241,8 +245,8 @@ claude plugin uninstall appa-runtime
 claude plugin marketplace remove appa
 pkill -f 'appa runtime'
 rm -rf ~/.local/share/appa/bin ~/.local/share/appa/deployments ~/.local/share/appa/cache
-rm -f ~/.cargo/bin/clappa ~/.local/bin/appa-statusline.sh
-cargo uninstall appa
+rm -f ~/.local/bin/appa ~/.local/bin/clappa ~/.local/bin/appa-statusline.sh
+rm -f ~/.cargo/bin/clappa && cargo uninstall appa   # checkout builds only
 
 # drop the statusline entry appa init wrote, and keep one of your own:
 jq 'if (.statusLine.command? // "") | test("appa-statusline") then del(.statusLine) else . end' \

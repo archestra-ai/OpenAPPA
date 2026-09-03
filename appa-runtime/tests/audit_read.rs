@@ -108,6 +108,7 @@ async fn propose(runtime: &Arc<Runtime>, within: Option<&TrajectoryId>, call: Pr
             actor: actor(within),
             call,
             spawn: false,
+            ruling: None,
         },
     )
     .await
@@ -150,6 +151,7 @@ async fn open_child(
                 actor: actor(None),
                 call,
                 spawn: true,
+                ruling: None,
             },
         )
     };

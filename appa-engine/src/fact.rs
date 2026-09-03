@@ -2,9 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::authority::Transition;
 use crate::basis::SubjectKey;
-use crate::candidate::{DerivedCandidate, DerivedVia, SanitizerLineage};
+use crate::candidate::{DerivedCandidate, SanitizerLineage};
 use crate::check::{Gap, Narrowing};
 use crate::execute::AuthorityReview;
 use crate::label::Label;
@@ -62,15 +61,14 @@ impl ReturnPolicy {
 }
 
 /// How a child's returned value crossed to the parent — the audit half of [`Fact::ChildReturn`]. A
-/// sanitized crossing records the declared transition and the raw submission's digest; the raw
-/// text itself stays confined in the child.
+/// sanitized crossing records the sanitizer and the raw submission's digest; the transition it
+/// applied is the registry's, and the raw text itself stays confined in the child.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReturnDerivation {
     Raw,
     Sanitized {
         sanitizer: SanitizerName,
         raw_digest: RawResultDigest,
-        transition: Transition,
     },
 }
 
@@ -297,10 +295,12 @@ pub enum Fact {
         #[serde(default, skip_serializing_if = "crate::audience::AudienceEvidence::is_empty")]
         evidence: crate::audience::AudienceEvidence,
     },
+    /// One sanitizer's derivation of a subject's value; the transition it applied is the
+    /// registry's, recomputed at replay.
     CandidateDerived {
         trajectory: TrajectoryId,
         subject: SubjectKey,
-        via: DerivedVia,
+        sanitizer: SanitizerName,
         derived: DerivedCandidate,
         lineage: SanitizerLineage,
         #[serde(default, skip_serializing_if = "crate::audience::AudienceEvidence::is_empty")]

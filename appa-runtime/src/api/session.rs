@@ -209,31 +209,13 @@ impl Session {
         &self.trajectory
     }
 
-    /// The user submitted a prompt. The prompt text is not an engine
-    /// event: nothing is reported to the engine, nothing is recorded,
-    /// and offer freshness stays the engine's judgment — a stale offer
-    /// declines at execution by live re-plan.
-    ///
-    /// The prompt is still the second signal that the previous turn is
-    /// over. Claude Code sends no `Stop` hook for a turn the user
-    /// interrupted, so a call left open by that turn would reach here
-    /// unclosed and refuse the first proposal of the new turn. The
-    /// prompt closes it exactly as the turn end would have.
-    pub async fn on_prompt(&self) -> Result<(), EventError> {
-        self.close_unreported("the prompt").await
-    }
-
-    /// The actor finished a turn. A call still open here got no outcome
+    /// The actor's turn is over. A call still open here got no outcome
     /// hook and will never get one: Claude Code reports none for a call
-    /// refused at its permission prompt. Left open it refuses every
-    /// later proposal as a second call in flight, for the life of the
-    /// trajectory.
-    pub async fn on_turn_end(&self) -> Result<(), EventError> {
-        self.close_unreported("the turn end").await
-    }
-
-    /// Close the call the previous turn left open. Two hooks reach
-    /// here: the turn end, and the next prompt when no turn end came.
+    /// refused at its permission prompt, and none for a turn the user
+    /// interrupted. Left open it refuses every later proposal as a
+    /// second call in flight, for the life of the trajectory. Two
+    /// hooks reach here: the turn end, and the first tool call after a
+    /// prompt that no turn end preceded.
     ///
     /// The close is `Indeterminate`, not a failure. What the runtime
     /// observed is the absence of a report, which does not say whether
@@ -245,9 +227,9 @@ impl Session {
     ///
     /// Not an engine event when nothing is carried, which is every
     /// ordinary turn: the view is read, no fact is appended.
-    async fn close_unreported(&self, at: &'static str) -> Result<(), EventError> {
+    pub async fn on_turn_end(&self) -> Result<(), EventError> {
         let Some(open) = self.carried_call()? else {
-            tracing::debug!(trajectory = %self.trajectory.0, at, "no call outstanding");
+            tracing::debug!(trajectory = %self.trajectory.0, "no call outstanding");
             return Ok(());
         };
         self.abandon_open(&ToolOutcome::Indeterminate).await?;
@@ -255,7 +237,6 @@ impl Session {
             trajectory = %self.trajectory.0,
             dispatch = ?open.id,
             tool = %open.tool,
-            at,
             "call closed as unreported",
         );
         Ok(())
@@ -286,6 +267,12 @@ impl Session {
         if let Some(open) = self.substituted_release(&call)? {
             return self.claim_or_abandon(call, open).await;
         }
+        if spawn && self.inner.spawn_coverage() == super::SpawnCoverage::Declared && !self.names_tool(&call.tool)? {
+            tracing::debug!(trajectory = %self.trajectory.0, tool = %call.tool, "spawn denied: the policy names no such agent");
+            return Err(EventError::UndeclaredSpawn {
+                tool: call.tool.clone(),
+            });
+        }
         let decision = self
             .drive_with_evidence(
                 |_, evidence| {
@@ -296,6 +283,7 @@ impl Session {
                         spawn,
                     })
                 },
+                None,
                 None,
             )
             .await?;
@@ -318,12 +306,21 @@ impl Session {
                     Ok(ToolCallDecision::Deny {
                         feedback: join_feedback(feedback),
                         offers: feedback.iter().flat_map(|entry| entry.offers.clone()).collect(),
+                        review: join_review(feedback, &self.deployment.externals),
                     })
                 }
                 _ => Err(EventError::UnexpectedDecision),
             },
             _ => Err(EventError::UnexpectedDecision),
         }
+    }
+
+    /// Whether the serving policy writes a contract for this tool's exact name — the
+    /// wildcard does not count. What a spawn needs under [`super::SpawnCoverage::Declared`].
+    fn names_tool(&self, tool: &str) -> Result<bool, EventError> {
+        let log = self.inner.log(&self.root)?;
+        let policy = self.inner.resolve_policy(&self.deployment, &log)?;
+        Ok(policy.engine().names_tool(tool))
     }
 
     fn substituted_release(&self, call: &ProposedCall) -> Result<Option<Standing>, EventError> {
@@ -391,6 +388,7 @@ impl Session {
                 })
             },
             None,
+            None,
         )
         .await
     }
@@ -415,6 +413,7 @@ impl Session {
                     entropy: fresh_entropy(),
                 })
             },
+            None,
             None,
         )
         .await
@@ -502,6 +501,7 @@ impl Session {
                         Ok(event)
                     },
                     None,
+                    None,
                 )
                 .await?;
             // The engine decided on an event this handler built from the view.
@@ -540,6 +540,7 @@ impl Session {
         offer: OfferId,
         arguments: RemedyArguments,
         elicitation: Option<&Elicitation>,
+        ruling: Option<appa_runtime_api::Ruling>,
     ) -> Result<RemedyDecision, EventError> {
         let trajectory = self.trajectory.clone();
         let decision = self
@@ -557,6 +558,7 @@ impl Session {
                     })
                 },
                 elicitation,
+                ruling,
             )
             .await?;
 
@@ -700,6 +702,7 @@ impl Session {
                     })
                 },
                 None,
+                None,
             )
             .await?;
 
@@ -772,6 +775,7 @@ impl Session {
         &self,
         mut event: impl FnMut(&Decided<'_>, Vec<ExternalEvidence>) -> Result<EngineEvent, EventError>,
         elicitation: Option<&Elicitation>,
+        ruling: Option<appa_runtime_api::Ruling>,
     ) -> Result<EngineDecision, EventError> {
         let opened = self.inner.log(&self.root)?;
         let policy = self.inner.resolve_policy(&self.deployment, &opened)?;
@@ -800,21 +804,21 @@ impl Session {
                         // Batch-terminal: join_all settles every sibling first; any
                         // no-answer then aborts the invocation, discarding the
                         // siblings' answers, before another engine round or any append.
-                        let consults = requests.into_iter().map(|request| self.consult(request, None));
+                        let consults = requests.into_iter().map(|request| self.consult(request, None, None));
                         for answered in futures_util::future::join_all(consults).await {
                             evidence.push(answered?);
                         }
                     }
                     Some(_) => {
                         for request in requests {
-                            let answered = self.consult(request, elicitation).await?;
+                            let answered = self.consult(request, elicitation, ruling).await?;
                             evidence.push(answered);
                         }
                     }
                 },
                 _ => return Ok(decision),
             }
-            if evidence == carried {
+            if evidence.len() == carried.len() {
                 return Err(EventError::UnexpectedDecision);
             }
         }
@@ -891,6 +895,7 @@ impl Session {
         &self,
         request: ExternalRequest,
         elicitation: Option<&Elicitation>,
+        ruling: Option<appa_runtime_api::Ruling>,
     ) -> Result<ExternalEvidence, EventError> {
         Ok(match &request {
             ExternalRequest::Authority {
@@ -906,7 +911,7 @@ impl Session {
                         artifact: artifact.clone(),
                     },
                 };
-                let verdict = match self.deployment.externals.consult(&consult, elicitation).await {
+                let verdict = match self.deployment.externals.consult(&consult, elicitation, ruling).await {
                     ConsultOutcome::Answer(answer) => AuthorityVerdict::from_wire(&answer),
                     ConsultOutcome::NoAnswer(_) => AuthorityVerdict::Abstain,
                 };
@@ -929,7 +934,7 @@ impl Session {
                         artifact: artifact.clone(),
                     },
                 };
-                let derived = match self.deployment.externals.consult(&consult, None).await {
+                let derived = match self.deployment.externals.consult(&consult, None, None).await {
                     ConsultOutcome::Answer(answer) => SanitizerAnswer::from_wire(&answer).map(|answer| answer.body),
                     ConsultOutcome::NoAnswer(_) => None,
                 };
@@ -952,7 +957,7 @@ impl Session {
                         artifact: AnnotationArtifact { args: args.clone() },
                     },
                 };
-                let answer = match self.deployment.externals.consult(&consult, None).await {
+                let answer = match self.deployment.externals.consult(&consult, None, None).await {
                     ConsultOutcome::Answer(answer) => {
                         AnnotationAnswer::from_wire(&answer, declaration).ok_or_else(|| {
                             crate::external::NoAnswerReason::MalformedAnswer(
@@ -1000,7 +1005,7 @@ impl Session {
                         },
                     },
                 };
-                let members = match self.deployment.externals.consult(&consult, None).await {
+                let members = match self.deployment.externals.consult(&consult, None, None).await {
                     ConsultOutcome::Answer(answer) => MembersAnswer::from_wire(&answer).map(|answer| answer.members),
                     ConsultOutcome::NoAnswer(_) => None,
                 };
@@ -1024,7 +1029,7 @@ impl Session {
                         artifact: AudienceSourceArtifact::Member { member: member.clone() },
                     },
                 };
-                let claims = match self.deployment.externals.consult(&consult, None).await {
+                let claims = match self.deployment.externals.consult(&consult, None, None).await {
                     ConsultOutcome::Answer(answer) => LookupAnswer::from_wire(&answer).map(|answer| answer.claims),
                     ConsultOutcome::NoAnswer(_) => None,
                 };
@@ -1041,7 +1046,7 @@ impl Session {
                         artifact: claims.clone(),
                     },
                 };
-                let principal = match self.deployment.externals.consult(&consult, None).await {
+                let principal = match self.deployment.externals.consult(&consult, None, None).await {
                     ConsultOutcome::Answer(answer) => PrincipalAnswer::from_wire(&answer)
                         .map(|answer| appa_engine::label::ReaderId::new(answer.principal)),
                     ConsultOutcome::NoAnswer(_) => None,
@@ -1112,6 +1117,29 @@ impl Decided<'_> {
             _ => Err(EventError::SpawnAmbiguous),
         }
     }
+}
+
+/// The reviews a harness with its own channel shows: one per offer whose plan consults a
+/// `hitl` authority, the texts of several such authorities joined. Authorities of every
+/// other backend answer themselves and need no person here.
+fn join_review(feedback: &[Feedback], externals: &crate::external::ExternalServices) -> Vec<appa_runtime_api::Review> {
+    let mut reviews: Vec<appa_runtime_api::Review> = Vec::new();
+    for pending in feedback.iter().flat_map(|entry| entry.review.iter()) {
+        if !externals.is_hitl(&pending.authority) {
+            continue;
+        }
+        match reviews.iter_mut().find(|review| review.offer == pending.offer.0) {
+            Some(review) => {
+                review.text.push_str("\n\n");
+                review.text.push_str(&pending.text);
+            }
+            None => reviews.push(appa_runtime_api::Review {
+                offer: pending.offer.0.clone(),
+                text: pending.text.clone(),
+            }),
+        }
+    }
+    reviews
 }
 
 fn join_feedback(feedback: &[Feedback]) -> String {
@@ -1236,6 +1264,7 @@ context_control = true
                     label: Some(label),
                     return_schema: None,
                 },
+                None,
                 None,
             )
             .await
@@ -1524,7 +1553,7 @@ name = "execute_remedy_plan"
         let offer = runtime.resolve_in(&root(), &quoted).expect("the quoted id resolves").0;
         assert!(matches!(
             session
-                .on_remedy(offer, RemedyArguments::default(), None)
+                .on_remedy(offer, RemedyArguments::default(), None, None)
                 .await
                 .expect("the sanitize offer binds"),
             RemedyDecision::Authorized { .. },
@@ -1826,7 +1855,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
             let offer = latest_offer(&runtime);
             let log_before = runtime.log_facts(&root());
             let got = session
-                .on_remedy(offer.clone(), RemedyArguments::default(), None)
+                .on_remedy(offer.clone(), RemedyArguments::default(), None, None)
                 .await
                 .expect("the no-answer is delivered");
             assert!(matches!(got, RemedyDecision::NoAnswer { .. }), "got {got:?}");
@@ -1834,7 +1863,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
             assert_eq!(log_before.len(), log_after.len(), "an abstention appends no fact",);
             assert!(matches!(
                 session
-                    .on_remedy(offer, RemedyArguments::default(), None)
+                    .on_remedy(offer, RemedyArguments::default(), None, None)
                     .await
                     .expect("the offer is still live"),
                 RemedyDecision::NoAnswer { .. },
@@ -1854,12 +1883,14 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
         let offer = latest_offer(&runtime);
         runtime.store().fail_commit_after(0);
         assert!(matches!(
-            session.on_remedy(offer.clone(), RemedyArguments::default(), None).await,
+            session
+                .on_remedy(offer.clone(), RemedyArguments::default(), None, None)
+                .await,
             Err(EventError::Storage(_)),
         ));
         assert!(matches!(
             session
-                .on_remedy(offer, RemedyArguments::default(), None)
+                .on_remedy(offer, RemedyArguments::default(), None, None)
                 .await
                 .expect("the retry executes"),
             RemedyDecision::Authorized { .. },
@@ -2288,7 +2319,7 @@ attention = ["irreversible"]
         let offer = surfaced_offer(&runtime);
 
         let authorized = session
-            .on_remedy(offer.clone(), RemedyArguments::default(), None)
+            .on_remedy(offer.clone(), RemedyArguments::default(), None, None)
             .await
             .expect("the remedy executes");
         let RemedyDecision::Authorized { call } = authorized else {
@@ -2314,7 +2345,7 @@ attention = ["irreversible"]
         assert_eq!(kept, ToolResultDecision::Keep);
 
         assert!(matches!(
-            session.on_remedy(offer, RemedyArguments::default(), None).await,
+            session.on_remedy(offer, RemedyArguments::default(), None, None).await,
             Ok(RemedyDecision::Authorized { .. }),
         ));
 
@@ -2341,7 +2372,7 @@ attention = ["irreversible"]
         let offer = surfaced_offer(&runtime);
         assert!(matches!(
             session
-                .on_remedy(offer, RemedyArguments::default(), None)
+                .on_remedy(offer, RemedyArguments::default(), None, None)
                 .await
                 .expect("the denial is delivered"),
             RemedyDecision::Declined { .. },
@@ -2384,7 +2415,7 @@ attention = ["irreversible"]
 
         assert!(matches!(
             first
-                .on_remedy(first_offer, RemedyArguments::default(), None)
+                .on_remedy(first_offer, RemedyArguments::default(), None, None)
                 .await
                 .expect("the first denial is delivered"),
             RemedyDecision::Declined { .. },
@@ -2420,14 +2451,14 @@ attention = ["irreversible"]
         let offer = surfaced_offer(&runtime);
         assert!(matches!(
             session
-                .on_remedy(offer.clone(), RemedyArguments::default(), None)
+                .on_remedy(offer.clone(), RemedyArguments::default(), None, None)
                 .await
                 .expect("the no-answer is delivered"),
             RemedyDecision::NoAnswer { .. },
         ));
         assert!(matches!(
             session
-                .on_remedy(offer, RemedyArguments::default(), None)
+                .on_remedy(offer, RemedyArguments::default(), None, None)
                 .await
                 .expect("the offer is still live"),
             RemedyDecision::NoAnswer { .. },
@@ -2449,12 +2480,14 @@ attention = ["irreversible"]
         let offer = surfaced_offer(&runtime);
         runtime.store().fail_commit_after(0);
         assert!(matches!(
-            session.on_remedy(offer.clone(), RemedyArguments::default(), None).await,
+            session
+                .on_remedy(offer.clone(), RemedyArguments::default(), None, None)
+                .await,
             Err(EventError::Storage(_)),
         ));
         assert!(matches!(
             session
-                .on_remedy(offer, RemedyArguments::default(), None)
+                .on_remedy(offer, RemedyArguments::default(), None, None)
                 .await
                 .expect("the retry executes"),
             RemedyDecision::Authorized { .. },
@@ -2480,7 +2513,7 @@ attention = ["irreversible"]
         let session = runtime.session(&root(), &root()).expect("the trajectory reopens");
         assert!(matches!(
             session
-                .on_remedy(offer, RemedyArguments::default(), None)
+                .on_remedy(offer, RemedyArguments::default(), None, None)
                 .await
                 .expect("the reopened offer executes"),
             RemedyDecision::Authorized { .. },
@@ -2596,7 +2629,7 @@ context_control = true
         ));
         let accept = surfaced_offer_for(runtime, &root(), trajectory);
         assert!(matches!(
-            session.on_remedy(accept, RemedyArguments::default(), None).await,
+            session.on_remedy(accept, RemedyArguments::default(), None, None).await,
             Ok(RemedyDecision::Authorized { .. }),
         ));
         assert_eq!(
@@ -2643,7 +2676,7 @@ context_control = true
         let hop = narrowed_and_blocked(&runtime, &mut session).await;
 
         let substituted = session
-            .on_remedy(hop.clone(), RemedyArguments::default(), None)
+            .on_remedy(hop.clone(), RemedyArguments::default(), None, None)
             .await
             .expect("the hop executes");
         let bytes = format!(r#"{{"body":"{REDACTED_BODY}"}}"#).into_bytes();
@@ -2664,7 +2697,7 @@ context_control = true
 
         assert_eq!(
             session
-                .on_remedy(hop.clone(), RemedyArguments::default(), None)
+                .on_remedy(hop.clone(), RemedyArguments::default(), None, None)
                 .await
                 .expect("the replay answers"),
             substituted,
@@ -2700,7 +2733,7 @@ context_control = true
         );
         assert!(runtime.open_dispatches(&root(), &root()).is_empty());
         assert!(matches!(
-            session.on_remedy(hop, RemedyArguments::default(), None).await,
+            session.on_remedy(hop, RemedyArguments::default(), None, None).await,
             Ok(RemedyDecision::Declined { .. }),
         ));
 
@@ -2740,7 +2773,7 @@ context_control = true
             .await
             .expect("the read is decided");
         session
-            .on_remedy(surfaced_offer(&runtime), RemedyArguments::default(), None)
+            .on_remedy(surfaced_offer(&runtime), RemedyArguments::default(), None, None)
             .await
             .expect("the narrowing is accepted");
         session
@@ -2764,7 +2797,9 @@ context_control = true
 
         for _ in 0..2 {
             assert!(matches!(
-                session.on_remedy(hop.clone(), RemedyArguments::default(), None).await,
+                session
+                    .on_remedy(hop.clone(), RemedyArguments::default(), None, None)
+                    .await,
                 Ok(RemedyDecision::NoAnswer { .. }),
             ));
             assert!(runtime.open_dispatches(&root(), &root()).is_empty());
@@ -2786,7 +2821,7 @@ context_control = true
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         let hop = narrowed_and_blocked(&runtime, &mut session).await;
         session
-            .on_remedy(hop, RemedyArguments::default(), None)
+            .on_remedy(hop, RemedyArguments::default(), None, None)
             .await
             .expect("the hop executes");
         assert!(standing_release(&runtime).is_some());
@@ -2818,7 +2853,7 @@ context_control = true
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         let hop = narrowed_and_blocked(&runtime, &mut session).await;
         session
-            .on_remedy(hop.clone(), RemedyArguments::default(), None)
+            .on_remedy(hop.clone(), RemedyArguments::default(), None, None)
             .await
             .expect("the hop executes");
         assert!(standing_release(&runtime).is_some());
@@ -2848,7 +2883,7 @@ context_control = true
             ToolCallDecision::Allow { spawn: None },
         );
         assert!(matches!(
-            session.on_remedy(hop, RemedyArguments::default(), None).await,
+            session.on_remedy(hop, RemedyArguments::default(), None, None).await,
             Ok(RemedyDecision::Declined { .. }),
         ));
     }
@@ -2863,7 +2898,7 @@ context_control = true
             let mut session = runtime.create_session(root()).expect("a fresh id opens");
             let hop = narrowed_and_blocked(&runtime, &mut session).await;
             session
-                .on_remedy(hop, RemedyArguments::default(), None)
+                .on_remedy(hop, RemedyArguments::default(), None, None)
                 .await
                 .expect("the hop executes");
         }
@@ -2892,7 +2927,7 @@ context_control = true
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         let hop = narrowed_and_blocked(&runtime, &mut session).await;
         session
-            .on_remedy(hop, RemedyArguments::default(), None)
+            .on_remedy(hop, RemedyArguments::default(), None, None)
             .await
             .expect("the hop executes");
 
@@ -2930,14 +2965,14 @@ context_control = true
         let hop = narrowed_and_blocked(&runtime, &mut session).await;
 
         assert!(matches!(
-            session.on_remedy(hop, RemedyArguments::default(), None).await,
+            session.on_remedy(hop, RemedyArguments::default(), None, None).await,
             Ok(RemedyDecision::Declined { .. }),
         ));
         assert!(runtime.open_dispatches(&root(), &root()).is_empty());
         let approval = latest_offer(&runtime);
         assert_eq!(
             session
-                .on_remedy(approval, RemedyArguments::default(), None)
+                .on_remedy(approval, RemedyArguments::default(), None, None)
                 .await
                 .expect("the approval executes"),
             RemedyDecision::Authorized {
@@ -3270,7 +3305,7 @@ confined_results = ["leak"]
         let quoted = offers.last().expect("the block surfaced offers").clone();
         let offer = runtime.resolve_in(&root(), &quoted).expect("the quoted id resolves").0;
         let authorized = session
-            .on_remedy(offer, RemedyArguments::default(), None)
+            .on_remedy(offer, RemedyArguments::default(), None, None)
             .await
             .expect("the offer executes");
         assert!(matches!(authorized, RemedyDecision::Authorized { .. }));
@@ -3413,7 +3448,7 @@ context_control = true
         ));
         let offer = surfaced_offer_for(runtime, &root(), &child_id);
         assert!(matches!(
-            child.on_remedy(offer, RemedyArguments::default(), None).await,
+            child.on_remedy(offer, RemedyArguments::default(), None, None).await,
             Ok(RemedyDecision::Authorized { .. })
         ));
         assert_eq!(
@@ -3543,7 +3578,7 @@ context_control = true
             let offer = runtime.resolve_in(&root(), &quoted).expect("the quoted id resolves").0;
             assert!(matches!(
                 session
-                    .on_remedy(offer, RemedyArguments::default(), None)
+                    .on_remedy(offer, RemedyArguments::default(), None, None)
                     .await
                     .expect("the acceptance executes"),
                 RemedyDecision::Authorized { .. },
@@ -4510,7 +4545,9 @@ context_control = true
         .await;
         let hop = narrowed_and_blocked_on(&runtime, &mut child_session, &child("c1")).await;
         assert!(matches!(
-            child_session.on_remedy(hop, RemedyArguments::default(), None).await,
+            child_session
+                .on_remedy(hop, RemedyArguments::default(), None, None)
+                .await,
             Ok(RemedyDecision::Substituted { .. }),
         ));
         assert!(
@@ -4664,58 +4701,6 @@ context_control = true
     }
 
     #[tokio::test]
-    async fn a_prompt_records_nothing() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_runtime(&dir);
-        let session = runtime.create_session(root()).expect("a fresh id opens");
-        session.on_prompt().await.expect("a prompt with nothing open acks");
-        assert!(only_the_opening(&runtime));
-    }
-
-    /// The user interrupted the turn: the call got no outcome hook and
-    /// the turn got no `Stop` hook. The next prompt closes the call, so
-    /// the new turn's first proposal releases.
-    #[tokio::test]
-    async fn a_prompt_closes_a_call_an_interrupted_turn_left_open() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
-            .expect("the deployment opens");
-        let session = runtime.create_session(root()).expect("a fresh id opens");
-        session
-            .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
-            .await
-            .expect("the call releases");
-        assert!(matches!(
-            session.on_tool_call(fetch(serde_json::json!({"a": 2})), false).await,
-            Err(EventError::CallOutstanding),
-        ));
-
-        session.on_prompt().await.expect("the prompt closes it");
-
-        assert!(runtime.open_dispatches(&root(), &root()).is_empty());
-        assert!(
-            runtime
-                .audit(&root())
-                .expect("the audit reads")
-                .iter()
-                .any(|entry| matches!(
-                    &entry.event,
-                    crate::engine::AuditEvent::Closed {
-                        outcome: crate::engine::DispatchOutcome::Unknown
-                    }
-                )),
-            "the unreported dispatch closed as unknown, not as a run that failed"
-        );
-        assert_eq!(
-            session
-                .on_tool_call(fetch(serde_json::json!({"a": 2})), false)
-                .await
-                .expect("the new turn proposes freely"),
-            ToolCallDecision::Allow { spawn: None },
-        );
-    }
-
-    #[tokio::test]
     async fn a_decision_whose_append_fails_never_acts() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_runtime(&dir);
@@ -4821,6 +4806,7 @@ context_control = true
                 .on_remedy(
                     OfferId("o1:cc:root:never".to_string()),
                     RemedyArguments::default(),
+                    None,
                     None
                 )
                 .await,
@@ -4847,7 +4833,7 @@ context_control = true
 
         assert!(matches!(
             session
-                .on_remedy(latest_offer(&runtime), RemedyArguments::default(), None)
+                .on_remedy(latest_offer(&runtime), RemedyArguments::default(), None, None)
                 .await
                 .expect("the approval is delivered"),
             RemedyDecision::Authorized { .. },

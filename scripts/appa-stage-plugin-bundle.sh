@@ -7,9 +7,9 @@
 # appa-plugin-<version>.tar.gz, and `appa init claude-code` accepts exactly the
 # bytes whose SHA-256 its own build baked in.
 #
-# `plugin_bundle::validate_tree` is the single definition of the shape this must
-# produce, and it runs against this script's real output in the init and
-# rendered-hook tests, so a bundle that loses a required file fails CI here
+# `plugin_layout::REPOSITORY_MAPPINGS` is the single definition of what this
+# copies, and a runtime unit test digests this script's real output against the
+# mapping's, so a release bundle that drifts from what init stages fails CI here
 # rather than at someone's install.
 set -eu
 

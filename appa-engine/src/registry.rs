@@ -1326,20 +1326,13 @@ fn check_selector(
     spec: &SelectorSpec,
     context: impl Fn() -> String,
 ) -> Result<(), LoadError> {
-    let fault = match registry.templates(&spec.provider) {
-        None => Unroutable::UnknownProvider(spec.provider.clone()),
-        Some(templates) if !templates.iter().any(|template| template.matches(&spec.selector)) => {
-            Unroutable::UnknownSelector {
-                provider: spec.provider.clone(),
-                selector: spec.selector.clone(),
-            }
-        }
-        Some(_) => return Ok(()),
-    };
-    Err(LoadError::UnroutableAudience {
-        context: context(),
-        fault,
-    })
+    registry
+        .route_selector(&spec.provider, &spec.selector)
+        .map(|_| ())
+        .map_err(|fault| LoadError::UnroutableAudience {
+            context: context(),
+            fault,
+        })
 }
 
 /// Every group reference a policy declaration writes must resolve at load: a named audience

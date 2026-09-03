@@ -57,7 +57,9 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
             let _: TrajectoryId = root;
             let _: Option<TrajectoryId> = child;
         }
-        HookEvent::ToolCall { actor: _, call, spawn } => {
+        HookEvent::ToolCall {
+            actor: _, call, spawn, ..
+        } => {
             let ProposedCall { tool, arguments } = call;
             let _: String = tool;
             let _: Box<serde_json::value::RawValue> = arguments;
@@ -104,7 +106,7 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
         HookDecision::AllowCall { spawn } => {
             let _: Option<SpawnBinding> = spawn;
         }
-        HookDecision::DenyCall { feedback, offers } => {
+        HookDecision::DenyCall { feedback, offers, .. } => {
             let _: String = feedback;
             for offer in offers {
                 let _: (String, Option<appa_runtime_api::OfferedReturn>) = (offer.id, offer.returns);
