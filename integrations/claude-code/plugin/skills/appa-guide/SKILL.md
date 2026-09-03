@@ -60,8 +60,9 @@ For tools not covered by root or a battery:
 
 ### 4. Proposal & Execution
 - **Proposal structure**:
+  - Treat this as a fresh setup: the starting configuration comes from default config, so present the proposed starting policy directly. **Do not frame this as a comparison against "current settings"** (the user has not configured any settings yet).
   - Batteries to add (one sentence each).
-  - Uncovered tools behavior & unchanged critical rules.
+  - Proposed behavior for uncovered tools (data privacy, public sinks, human review).
   - Undetected/uninspected servers noted clearly without altering their rules.
   - Line: `OpenAPPA pieces: <primitives>`
   - Section `Needed for this to work` if authorities/prerequisites are missing.
