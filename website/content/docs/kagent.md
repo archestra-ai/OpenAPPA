@@ -276,7 +276,7 @@ Covered: declarative agents on both runtimes. Not covered: BYO agents and the ka
 
 The demo chart also installs an `appa-guide` agent: the OpenAPPA guide skill attached through kagent's git-ref skills, the kagent tool server's k8s tools, and the shared runtime as its own gate. Open its chat and say `init`.
 
-The skill is one `SKILL.md` that routes by host to a reference file. On kagent it reads the policy ConfigMap, inventories every `RemoteMCPServer` from `status.discoveredTools` and every `Agent`'s declared tools, proposes contracts in plain English, and waits for chat approval. The apply then writes the ConfigMap through `k8s_apply_manifest` — the fleet policy puts that call behind `attention = ["human-approval"]`, so the kagent Approve/Reject card is the human sign-off — waits for the mounted policy to sync, and reloads the runtime. Any host with the same tools can run the same skill; the agent is only packaging.
+The skill is one `SKILL.md` that routes by host to a reference file — the same composable package Claude Code ships as `/appa-guide`, with `references/kagent.md` beside its Claude Code reference. On kagent it reads the policy ConfigMap, inventories every `RemoteMCPServer` from `status.discoveredTools` and every `Agent`'s declared tools, proposes contracts in plain English, and waits for chat approval. The apply then writes the ConfigMap through `k8s_apply_manifest` — the fleet policy puts that call behind `attention = ["human-approval"]`, so the kagent Approve/Reject card is the human sign-off — waits for the mounted policy to sync, and reloads the runtime. Any host with the same tools can run the same skill; the agent is only packaging.
 
 ### Try it
 
