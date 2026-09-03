@@ -43,7 +43,7 @@ Choose one mode (ask user if not specified in request):
 ### 1. Inventory & Inspection
 - Run `appa describe --config <live-path>` to inspect current config state, batteries, authorities, and audience sources.
 - Read root config preserving comments and existing rules.
-- Gather MCP tools via `claude mcp list` and tools active in session (`mcp__<server>__<tool>` and `mcp__plugin_<plugin>_<server>__<tool>`). Note any server whose tools cannot be inspected.
+- Gather MCP tools via `claude mcp list` and tools active in session (`mcp__<server>__<tool>` and `mcp__plugin_<plugin>_<server>__<tool>`). Note any server whose tools cannot be inspected. Exclude APPA's own control tool (`*execute_remedy_plan`), which is handled internally by the runtime.
 
 ### 2. Match Batteries
 - Check `<marketplace-root>/batteries/` matching batteries by tool names inside their `appa.toml` (not directory name).
