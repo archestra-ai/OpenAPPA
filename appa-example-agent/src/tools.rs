@@ -29,6 +29,14 @@ impl ToolCatalogue {
         ToolCatalogue { tools }
     }
 
+    /// Remove the runtime control tool for a host that deliberately offers no
+    /// remedy path. Policy checks still run; blocked host calls simply remain
+    /// blocked.
+    pub(crate) fn without_control_tool(mut self) -> Self {
+        self.tools.retain(|tool| tool.function.name != CONTROL_TOOL);
+        self
+    }
+
     /// Build one request's catalogue, omitting a host tool that cannot run in
     /// the current frame. The control tool remains available: recovery is
     /// trajectory-local and stays useful inside a child.
@@ -178,5 +186,17 @@ mod tests {
             .map(|tool| tool.function.name)
             .collect();
         assert_eq!(names, vec!["read_hr".to_string(), CONTROL_TOOL.to_string()]);
+    }
+
+    #[test]
+    fn the_control_tool_can_be_removed_for_a_no_remedy_host() {
+        let catalogue =
+            ToolCatalogue::new(vec![WireTool::new("read_hr", "read", serde_json::json!({}))]).without_control_tool();
+        let names: Vec<String> = catalogue
+            .advertised_without(None)
+            .into_iter()
+            .map(|tool| tool.function.name)
+            .collect();
+        assert_eq!(names, vec!["read_hr".to_string()]);
     }
 }

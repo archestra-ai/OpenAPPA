@@ -2,7 +2,7 @@
 
 Fixed configurations, all driven through the demos' existing CLIs — the bench
 adds no flags of its own. One shared model (``--model``) keeps the comparison
-defense-vs-defense: the appa agent guarded, branching-disabled (the ablation),
+defense-vs-defense: the appa agent guarded, branching-disabled, remedy-disabled,
 and open, plus FIDES middleware-only, native auto-hide, and unmediated modes.
 """
 
@@ -61,9 +61,9 @@ class Agent:
 
 AGENTS: dict[str, Agent] = {
     # The appa agent is appa-corp-agent: the full appa-example-agent loop with
-    # the registered fork tool live. A child's final message is its return. The
-    # ablation arm proves branching is what the fork scenarios pay for, and
-    # the open arm is the undefended baseline on the same loop.
+    # the registered fork tool and runtime remedies live. The two ablations
+    # independently remove each recovery mechanism while retaining the same
+    # guarded policy; the open arm removes policy restrictions.
     "appa": Agent(
         name="appa",
         executable=APPA_CORP_AGENT_BIN,
@@ -76,6 +76,13 @@ AGENTS: dict[str, Agent] = {
         policy_target=PolicyTarget.APPA_GUARDED,
         policy_file=POLICIES_DIR / "appa.toml",
         extra_args=("--max-forks", "0"),
+    ),
+    "appa-noremedy": Agent(
+        name="appa-noremedy",
+        executable=APPA_CORP_AGENT_BIN,
+        policy_target=PolicyTarget.APPA_GUARDED,
+        policy_file=POLICIES_DIR / "appa.toml",
+        extra_args=("--no-remedies",),
     ),
     "appa-open": Agent(
         name="appa-open",

@@ -8,12 +8,13 @@ A benchmark comparing defense systems for LLM agents—**OpenAPPA** and Microsof
 
 ## Benchmark Overview
 
-The benchmark evaluates six agent configurations across identical task scenarios. Each agent runs a demo CLI application paired with a specific defense configuration:
+The benchmark evaluates seven agent configurations across identical task scenarios. Each agent runs a demo CLI application paired with a specific defense configuration:
 
 | Agent | CLI / Target | Defense Configuration | Description |
 |-------|--------------|-----------------------|-------------|
 | `appa` | `appa-corp-agent` | `policies/appa.toml` | OpenAPPA with active live branching (the registered `fork` tool; a child's final message is its return) |
 | `appa-nofork` | `appa-corp-agent --max-forks 0` | `policies/appa.toml` | OpenAPPA with branching disabled (ablation study) |
+| `appa-noremedy` | `appa-corp-agent --no-remedies` | `policies/appa.toml` | OpenAPPA with remedy plans disabled and blocked calls left blocked (ablation study) |
 | `appa-open` | `appa-corp-agent` | `policies/open.toml` | Undefended baseline (no policy restrictions) |
 | `fides-middleware` | `corp-agent-fides --mode middleware-only` | FIDES policy, automatic hiding disabled | Label tracking and policy enforcement with raw untrusted results visible to the planner |
 | `fides-native` | `corp-agent-fides --mode native-auto-hide` | FIDES policy with automatic hiding | Native FIDES automatic hiding and quarantine tools |
@@ -21,7 +22,7 @@ The benchmark evaluates six agent configurations across identical task scenarios
 
 ### Key Principles
 - **Baselines (`-open`)**: Show agent behavior without security enforcement.
-- **Ablation (`appa-nofork`)**: Isolates the specific contribution of process branching under identical execution loops and policy rules.
+- **Ablations (`appa-nofork`, `appa-noremedy`)**: Independently isolate process branching and remedy plans under identical execution loops and policy rules.
 - **Controlled Environment**: All agents run with the same underlying model (configurable via `--model`, defaulting to `openai/gpt-5.6-luna`), ensuring performance differences reflect defense capabilities.
 
 ---
