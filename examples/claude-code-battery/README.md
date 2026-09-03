@@ -14,8 +14,7 @@ examples/claude-code-battery/
 
 batteries/
 ├── claude-code/
-│   ├── appa.toml
-│   └── read-sensitivity.py
+│   └── appa.toml
 └── slack/
     └── appa.toml
 ```
@@ -29,10 +28,10 @@ Authority used by the Slack battery and the local Bash override.
 
 The root demonstrates two customizations. It bypasses the shipped Bash model
 classifier for `cargo test` and requires fresh `hitl` attention. It also
-replaces the shipped `Read` default with `local.read-sensitivity`, implemented
+replaces the shipped `Read` rules with `local.read-sensitivity`, implemented
 by the script in `local/`.
-The local annotator keeps `.env.example` Public, restricts other dot-prefixed
-paths, and additionally restricts `clients/`.
+The local annotator asks a person before any dot-prefixed path other than
+`.env.example` is read, and before anything under `clients/`.
 
 This command-based example requires a Unix system.
 
@@ -40,7 +39,7 @@ The Claude Code battery sends every Bash command to the Claude Code model
 builtin. The model annotates the command before dispatch: its output label and
 its required trust and audience.
 
-The `Read` rule invokes `read-sensitivity.py` for one call. OpenAPPA writes
+The local `Read` rule invokes `read-sensitivity.py` for one call. OpenAPPA writes
 one JSON consult to standard input, reads one JSON answer from standard
 output, and waits for the command to exit. An annotator that maps no `inputs`
 receives the complete tool call in `args` — `name`, `description` when the
@@ -52,32 +51,22 @@ network sandbox. A Claude Code deployment must use an OS sandbox to deny
 network access and protect credentials and OpenAPPA files. Network ingress
 should use `WebFetch` instead of Bash `curl`.
 
-The Claude Code battery also labels `Read` results through
-`read-sensitivity.py`. Hidden paths, credential and private-key names, system
-secret locations, and sensitive symlink targets are private. Other paths are
-Public.
+The Claude Code battery labels `Read` results with static rules: hidden
+paths, credential and private-key names, and system secret locations narrow
+the session to `self`, the requester. Other paths keep its label. The root
+rule here replaces those rules.
 
 The Slack battery needs no script. Every message needs trusted data and fresh
 `hitl` attention. A deployment lets a channel through by adding a rule for it
-in the root config. Channel-history results are private.
-
-Run the Read annotator directly:
-
-```sh
-cd examples/claude-code-battery
-printf '%s\n' '{"version":1,"kind":"annotation","name":"claude-code.read-sensitivity","declaration":{"inputs":[],"trust_ranks":["suspicious","trusted"],"audiences":["private"],"attention_marks":["hitl"],"effects":[]},"artifact":{"args":{"name":"Read","description":"Reads a file and returns its contents.","arguments":{"file_path":".env"}}}}' \
-  | python3 ../../batteries/claude-code/read-sensitivity.py
-```
-
-The result restricts `.env` to `private`. Replace `.env` with
-`README.md` to get a Public audience.
+in the root config. Channel-history results are `internal`.
 
 Run the local replacement annotator directly:
 
 ```sh
-printf '%s\n' '{"version":1,"kind":"annotation","name":"local.read-sensitivity","declaration":{"inputs":[],"trust_ranks":["suspicious","trusted"],"audiences":["private"],"attention_marks":["hitl"],"effects":[]},"artifact":{"args":{"name":"Read","description":"Reads a file and returns its contents.","arguments":{"file_path":"clients/acme.txt"}}}}' \
+cd examples/claude-code-battery
+printf '%s\n' '{"version":1,"kind":"annotation","name":"local.read-sensitivity","declaration":{"inputs":[],"trust_ranks":["suspicious","trusted"],"audiences":[],"attention_marks":["hitl"],"effects":[]},"artifact":{"args":{"name":"Read","description":"Reads a file and returns its contents.","arguments":{"file_path":"clients/acme.txt"}}}}' \
   | python3 ./local/read-sensitivity.py
 ```
 
-The result restricts `clients/acme.txt`. `.env.example` is the explicit local
-exception and returns a Public audience.
+The result requires fresh `hitl` attention for `clients/acme.txt`.
+`.env.example` is the explicit local exception and requires nothing.

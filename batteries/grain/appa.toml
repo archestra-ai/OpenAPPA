@@ -2,7 +2,7 @@
 #
 # What a meeting tool returns was said by the people in the meeting,
 # including outside participants, so it is untrusted and stays with the
-# readers who may see Grain data (`private`). Writes that stay in
+# organization's members (`internal`). Writes that stay in
 # the workspace need only that the data going in is Grain data. Sharing a
 # collection with anyone who has the link, inviting people, and changing
 # seats, teams, or settings need a person. The root config supplies the
@@ -11,189 +11,189 @@
 [policy]
 version = 2
 
-# --- meeting content: private to Grain readers ---
+# --- meeting content: internal ---
 
 [[policy.tool]]
 name = "mcp__claude_ai_Grain__list_meetings"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Grain__list_attended_meetings"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Grain__fetch_meeting"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Grain__fetch_meeting_transcript"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Grain__fetch_meeting_notes"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Grain__fetch_meeting_action_items"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Grain__fetch_user_recording_notes"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Grain__search_in_transcripts"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Grain__fetch_meeting_coaching_feedback"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Grain__list_coaching_feedback"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Grain__list_clips"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Grain__list_collections"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Grain__fetch_collection"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Grain__list_stories"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Grain__fetch_story"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Grain__search_companies"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Grain__search_persons"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Grain__get_dossier_for_company"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Grain__list_all_deals"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Grain__list_open_deals"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Grain__fetch_deal"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
-# --- workspace directory and settings: private ---
+# --- workspace directory and settings: internal ---
 
 [[policy.tool]]
 name = "mcp__claude_ai_Grain__list_workspace_users"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Grain__list_smart_topics"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Grain__list_team_settings"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Grain__list_user_settings"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Grain__my_settings"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Grain__my_team"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Grain__myself"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Grain__workspace_settings"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 [[policy.tool]]
 name = "mcp__claude_ai_Grain__workspace_seat_info"
 
 [policy.tool.delta]
-audience = ["private"]
+audience = ["internal"]
 
 # --- links: turns ids into URLs, carries no content ---
 
@@ -209,7 +209,7 @@ delta = {}
 
 [policy.tool.requires]
 trust = "trusted"
-audience = { within = ["private"] }
+audience = { within = ["internal"] }
 
 [[policy.tool]]
 name = "mcp__claude_ai_Grain__create_story"
@@ -217,7 +217,7 @@ delta = {}
 
 [policy.tool.requires]
 trust = "trusted"
-audience = { within = ["private"] }
+audience = { within = ["internal"] }
 
 [[policy.tool]]
 name = "mcp__claude_ai_Grain__add_clips_to_story"
@@ -225,7 +225,7 @@ delta = {}
 
 [policy.tool.requires]
 trust = "trusted"
-audience = { within = ["private"] }
+audience = { within = ["internal"] }
 
 [[policy.tool]]
 name = "mcp__claude_ai_Grain__create_collection"
@@ -233,7 +233,7 @@ delta = {}
 
 [policy.tool.requires]
 trust = "trusted"
-audience = { within = ["private"] }
+audience = { within = ["internal"] }
 
 [[policy.tool]]
 name = "mcp__claude_ai_Grain__add_recordings_to_collection"
@@ -241,7 +241,7 @@ delta = {}
 
 [policy.tool.requires]
 trust = "trusted"
-audience = { within = ["private"] }
+audience = { within = ["internal"] }
 
 [[policy.tool]]
 name = "mcp__claude_ai_Grain__tag_meetings"
@@ -249,7 +249,7 @@ delta = {}
 
 [policy.tool.requires]
 trust = "trusted"
-audience = { within = ["private"] }
+audience = { within = ["internal"] }
 
 [[policy.tool]]
 name = "mcp__claude_ai_Grain__create_smart_topic"
@@ -257,7 +257,7 @@ delta = {}
 
 [policy.tool.requires]
 trust = "trusted"
-audience = { within = ["private"] }
+audience = { within = ["internal"] }
 
 # --- sharing outward: a person decides ---
 

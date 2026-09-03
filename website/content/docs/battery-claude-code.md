@@ -15,8 +15,8 @@ This battery covers Claude Code's built-in `Read` and `Bash` tools. Batteries ca
 
 | Tool | Contract |
 |---|---|
-| `Read` | A local Python annotator marks sensitive paths private and other paths public. |
-| `Bash` | Before a command runs, the Claude Code model records what data it needs and what its output can contain. |
+| `Read` | Static rules narrow the session to `self`, the requester, when a hidden path, a credential file, a private key, or a system secret location is read. |
+| `Bash` | A command naming one of the same paths is refused outright. Before every other command runs, the Claude Code model decides the trust and fresh attention it requires and labels its output for trust. Its mandate names no reader, so who may see a command's output is the session's label, not the model's choice. |
 
 The default config created by `appa init claude-code` handles tools that the battery does not name.
 
@@ -25,13 +25,11 @@ The default config created by `appa init claude-code` handles tools that the bat
 ```text
 claude-code/
 |-- appa.toml
-|-- README.md
-|-- read-sensitivity.py
-`-- test_read_sensitivity.py
+`-- README.md
 ```
 
-The path annotator checks hidden paths, credential files, private keys, system-secret locations, and sensitive symbolic-link targets.
+The `Read` rules match a path as written, absolute or relative, so a hidden name and its relative spelling are both covered.
 
-The Bash annotator describes the data a command needs and returns. It does not isolate the command from your computer.
+The Bash annotator describes the data a command needs and returns. Neither tool isolates a command from your computer.
 
 Use a sandbox to protect credentials and network access.

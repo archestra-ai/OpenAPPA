@@ -15,7 +15,7 @@ Your root config must define an Authority named `hitl` for these approvals.
 
 ## Tool behavior
 
-- Reads and searches return private data. OpenAPPA keeps their existing trust level.
+- Reads and searches return `internal` data, the built-in audience of the organization's members. OpenAPPA keeps their existing trust level.
 - Adding a reaction or saving a personal draft requires trusted data and no approval.
 - Messages, canvases, channels, and other visible changes require trusted data and approval every time.
 

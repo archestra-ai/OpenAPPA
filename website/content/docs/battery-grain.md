@@ -15,7 +15,7 @@ Your root config must define an Authority named `hitl` for actions that need a p
 
 ## Tool behavior
 
-- Meeting content, directories, and settings return private data.
+- Meeting content, directories, and settings return `internal` data, the built-in audience of the organization's members.
 - Resolving a URL has no extra restrictions.
 - Writes within the workspace require trusted data.
 - Public sharing, invitations, seat assignments, team changes, and workspace administration require approval every time.

@@ -16,8 +16,7 @@ Keep each battery and its annotator scripts together:
 ```text
 batteries/
 |-- claude-code/
-|   |-- appa.toml
-|   `-- read-sensitivity.py
+|   `-- appa.toml
 `-- slack/
     `-- appa.toml
 ```
@@ -74,39 +73,38 @@ Text inside parentheses matches arguments. Write one or more `argument:pattern` 
 
 A bare tool name is the default. It matches when no earlier rule did.
 
-Slack history uses the same first-match rule. The battery keeps all history private. A root rule can mark one channel as untrusted, for example a channel shared with people outside your company:
+Slack history uses the same first-match rule. The battery labels all history `internal`, the built-in audience of the organization's members. A root rule can mark one channel as untrusted, for example a channel shared with people outside your company:
 
 ```toml
 # root config: a shared channel may contain outsiders' words
 [[policy.tool]]
 name = "mcp__claude_ai_Slack__slack_read_channel(channel_id:C0SHARED*)"
-delta = { trust = "suspicious", audience = ["private"] }
+delta = { trust = "suspicious", audience = ["internal"] }
 
-# shipped battery: every other channel is private and keeps its trust
+# shipped battery: every other channel is internal and keeps its trust
 [[policy.tool]]
 name = "mcp__claude_ai_Slack__slack_read_channel"
-delta = { audience = ["private"] }
+delta = { audience = ["internal"] }
 ```
 
 ## Use annotators in batteries
 
 A battery can ship an annotator script beside its config. See [Annotators](/contracts#annotators) for what annotators receive and return.
 
-A tool rule that uses an annotator must not set a static `delta`, `requires`, or `effects`. The annotator returns the call's complete contract.
-
-The battery connects the annotator name to its script:
+A tool rule that names an annotator carries no static `delta`, `requires`, or `effects`: the annotator produces the call's complete contract. The battery binds the annotator name to its script. An annotation names literal readers only, never `self` or `internal`, so a battery that labels organization or requester data writes static rules for it; an annotator decides trust and attention. This one asks a person before a hidden file is read:
 
 ```toml
 [[policy.annotator]]
-name = "claude-code.read-sensitivity"
-audiences = ["private"]
+name = "local.read-attention"
+audiences = []
+marks = ["hitl"]
 
 [[policy.tool]]
 name = "Read"
-annotator = "claude-code.read-sensitivity"
+annotator = "local.read-attention"
 
-[externals.annotators."claude-code.read-sensitivity"]
-command = ["python3", "./read-sensitivity.py"]
+[externals.annotators."local.read-attention"]
+command = ["python3", "./read-attention.py"]
 ```
 
 ### Run a local annotator
@@ -118,13 +116,13 @@ Other platforms reject script commands when the config loads.
 Consult:
 
 ```json
-{"version":1,"kind":"annotation","name":"claude-code.read-sensitivity","declaration":{"inputs":[],"trust_ranks":["suspicious","trusted"],"audiences":["private"],"attention_marks":[],"effects":[]},"artifact":{"args":{"name":"Read","arguments":{"file_path":".env"}}}}
+{"version":1,"kind":"annotation","name":"local.read-attention","declaration":{"inputs":[],"trust_ranks":["suspicious","trusted"],"audiences":[],"attention_marks":["hitl"],"effects":[]},"artifact":{"args":{"name":"Read","arguments":{"file_path":".env"}}}}
 ```
 
 Answer:
 
 ```json
-{"version":1,"answer":{"delta":{"audience":["private"]},"requires":{"history":[],"attention":[]},"emits":[]}}
+{"version":1,"answer":{"delta":{},"requires":{"history":[],"attention":["hitl"]},"emits":[]}}
 ```
 
 The annotator can be any program. Here is a Python example:
@@ -136,14 +134,14 @@ from pathlib import PurePath
 
 request = json.load(sys.stdin)
 file_path = request["artifact"]["args"]["arguments"]["file_path"]
-audience = ["private"] if PurePath(file_path).name.startswith(".") else "public"
+attention = ["hitl"] if PurePath(file_path).name.startswith(".") else []
 
 json.dump(
     {
         "version": 1,
         "answer": {
-            "delta": {"audience": audience},
-            "requires": {"history": [], "attention": []},
+            "delta": {},
+            "requires": {"history": [], "attention": attention},
             "emits": [],
         },
     },
@@ -165,7 +163,7 @@ Script changes apply on the next call. No restart is needed.
 
 Annotators do not have their own order. The first matching tool rule decides which annotator, if any, runs.
 
-A rule written above the rule that names an annotator wins without running it. Here `README.md` is public by rule; every other path asks the annotator:
+A rule written above the rule that names an annotator wins without running it. Here `README.md` is read without a question; every other path asks the annotator:
 
 ```toml
 [[policy.tool]]
@@ -173,26 +171,28 @@ name = "Read(file_path:README.md)"
 delta = {}
 
 [[policy.annotator]]
-name = "claude-code.read-sensitivity"
-audiences = ["private"]
+name = "local.read-attention"
+audiences = []
+marks = ["hitl"]
 
 [[policy.tool]]
 name = "Read"
-annotator = "claude-code.read-sensitivity"
+annotator = "local.read-attention"
 
-[externals.annotators."claude-code.read-sensitivity"]
-command = ["python3", "./read-sensitivity.py"]
+[externals.annotators."local.read-attention"]
+command = ["python3", "./read-attention.py"]
 ```
 
-`README.md` matches the first rule, so `read-sensitivity.py` does not run.
+`README.md` matches the first rule, so `read-attention.py` does not run.
 
-The annotator returns `["private"]` for hidden paths, credential and private-key
-names, system-secret locations, and sensitive symlink targets. It returns
-`"public"` for other paths.
+The Claude Code battery labels `Read` with static rules of the same shape:
+hidden paths, credential and private-key names, and system secret locations
+narrow the session to `self`, the requester; other paths keep its label.
 
 The Claude Code battery also sends each Bash call to its built-in model
 annotator. The annotator produces the command's complete contract: the
-output's trust and audience and the call's trust and audience requirements.
+output's trust and the call's trust and attention requirements. Its mandate
+names no reader, so the audience of a command's output is the session's.
 
 This check is not an operating-system sandbox. Bash can read files
 and open network connections. Use a sandbox to protect credentials and network
@@ -214,16 +214,17 @@ version = 2
 [[policy.tool]]
 name = "Bash(command:kubectl)"
 requires = { attention = ["blocked"] }
-delta = { trust = "suspicious", audience = ["private"] }
+delta = { trust = "suspicious", audience = ["internal"] }
 
 [[policy.tool]]
 name = "Bash(command:kubectl *)"
 requires = { attention = ["blocked"] }
-delta = { trust = "suspicious", audience = ["private"] }
+delta = { trust = "suspicious", audience = ["internal"] }
 
 [[policy.annotator]]
 name = "local.read-sensitivity"
-audiences = ["private"]
+audiences = []
+marks = ["hitl"]
 
 [[policy.tool]]
 name = "Read"
@@ -233,9 +234,9 @@ annotator = "local.read-sensitivity"
 command = ["python3", "./local/read-sensitivity.py"]
 ```
 
-No Authority permits `blocked`, so OpenAPPA refuses both `kubectl` calls. It
-cannot offer a remedy. Every other Bash call reaches the battery's model
-annotator. The root also uses a local script for `Read`.
+No authority permits `blocked`, so both `kubectl` contracts have no remedy.
+Every other Bash call reaches the battery's model annotator. The root also
+replaces the battery's `Read` rules with a local script.
 
 The battery files stay unchanged.
 
