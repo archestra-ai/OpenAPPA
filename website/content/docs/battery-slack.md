@@ -7,9 +7,7 @@ sidebar: false
 breadcrumb: Slack
 ---
 
-The Slack battery covers all 19 tools in the claude.ai Slack connector. It asks a person to approve messages and other visible changes.
-
-Your root config must define an Authority named `hitl` for these approvals.
+The Slack battery covers all 19 tools in the claude.ai Slack connector. Writes require trusted data bounded to `internal`.
 
 [View the battery source](https://github.com/archestra-ai/OpenAPPA/tree/main/batteries/slack).
 
@@ -17,7 +15,7 @@ Your root config must define an Authority named `hitl` for these approvals.
 
 - Reads and searches return `internal` data, the built-in audience of the organization's members. OpenAPPA keeps their existing trust level.
 - Adding a reaction or saving a personal draft requires trusted data and no approval.
-- Messages, canvases, channels, and other visible changes require trusted data and approval every time.
+- Messages, canvases, channels, and other visible changes require trusted data bounded to `internal` (`audience = { within = ["internal"] }`), enabling autonomous agent posting while keeping requester secrets (`self`) out.
 
 To change how one tool or channel works, add a more specific rule to the root config. Root rules run before battery rules.
 

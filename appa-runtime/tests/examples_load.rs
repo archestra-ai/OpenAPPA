@@ -168,7 +168,12 @@ async fn the_battery_judges_relative_credentials_and_offers_review_for_public_re
         HookDecision::Ack
     );
 
-    for command in ["cat .netrc", "cat ~/.ssh/id_ed25519", "cat /home/me/.aws/credentials"] {
+    for command in [
+        "cat .env",
+        "cat .netrc",
+        "cat ~/.ssh/id_ed25519",
+        "cat /home/me/.aws/credentials",
+    ] {
         let refused = propose(&runtime, call("Bash", "command", command)).await;
         let HookDecision::DenyCall { offers, .. } = refused else {
             panic!("`{command}` is refused, got {refused:?}");

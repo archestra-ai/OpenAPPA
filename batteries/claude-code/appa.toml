@@ -9,61 +9,91 @@
 [policy]
 version = 2
 
-# --- Bash: a command naming the requester's credentials is refused ---
+# --- Bash: commands naming requester credentials require token-exposed ---
 
-# One contract judges one call, and a compound command could read a secret and
-# send it in the same call, so a command that names a credential path is
-# refused outright. `blocked` is a mark no authority grants: the refusal has
-# no remedy. This is known-path blocking, not containment: `env`, an
-# interpreter, or an unlisted path still reach a secret without naming it.
+# We have no good sanitizer for tokens at the moment. A command naming a
+# credential path requires the `token-exposed` mark. Because no authority
+# permits `token-exposed` today and no token sanitizer yet covers it, the call
+# is refused before secrets reach the model. In the future, a token sanitizer
+# can permit `token-exposed` by redacting or masking values.
+[[policy.tool]]
+name = "Bash(command:*.env*)"
+requires = { attention = ["token-exposed"] }
+delta = {}
+
 [[policy.tool]]
 name = "Bash(command:*.claude.json*)"
-requires = { attention = ["blocked"] }
+requires = { attention = ["token-exposed"] }
 delta = {}
 
 [[policy.tool]]
 name = "Bash(command:*.credentials.json*)"
-requires = { attention = ["blocked"] }
+requires = { attention = ["token-exposed"] }
 delta = {}
 
 [[policy.tool]]
 name = "Bash(command:*.ssh/*)"
-requires = { attention = ["blocked"] }
+requires = { attention = ["token-exposed"] }
 delta = {}
 
 [[policy.tool]]
 name = "Bash(command:*.aws/credentials*)"
-requires = { attention = ["blocked"] }
+requires = { attention = ["token-exposed"] }
 delta = {}
 
 [[policy.tool]]
 name = "Bash(command:*.netrc*)"
-requires = { attention = ["blocked"] }
+requires = { attention = ["token-exposed"] }
 delta = {}
 
 [[policy.tool]]
 name = "Bash(command:*.config/gh/hosts.yml*)"
-requires = { attention = ["blocked"] }
+requires = { attention = ["token-exposed"] }
 delta = {}
 
 [[policy.tool]]
 name = "Bash(command:*id_rsa*)"
-requires = { attention = ["blocked"] }
+requires = { attention = ["token-exposed"] }
 delta = {}
 
 [[policy.tool]]
 name = "Bash(command:*id_ed25519*)"
-requires = { attention = ["blocked"] }
+requires = { attention = ["token-exposed"] }
 delta = {}
 
 [[policy.tool]]
 name = "Bash(command:*/proc/*environ*)"
-requires = { attention = ["blocked"] }
+requires = { attention = ["token-exposed"] }
 delta = {}
 
 [[policy.tool]]
 name = "Bash(command:*/Library/Keychains/*)"
-requires = { attention = ["blocked"] }
+requires = { attention = ["token-exposed"] }
+delta = {}
+
+[[policy.tool]]
+name = "Bash(command:*.docker/config.json*)"
+requires = { attention = ["token-exposed"] }
+delta = {}
+
+[[policy.tool]]
+name = "Bash(command:*.git-credentials*)"
+requires = { attention = ["token-exposed"] }
+delta = {}
+
+[[policy.tool]]
+name = "Bash(command:*.kube/*)"
+requires = { attention = ["token-exposed"] }
+delta = {}
+
+[[policy.tool]]
+name = "Bash(command:*.npmrc*)"
+requires = { attention = ["token-exposed"] }
+delta = {}
+
+[[policy.tool]]
+name = "Bash(command:*.pypirc*)"
+requires = { attention = ["token-exposed"] }
 delta = {}
 
 # The default model Annotator generates every other command's complete contract

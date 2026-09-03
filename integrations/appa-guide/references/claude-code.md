@@ -117,7 +117,15 @@ proposal configures an audience source for it.
 Create root rules only for installed tools that neither the root config nor a
 matched battery covers.
 
-- The built-in audience chain is `self` ⊆ `internal` ⊆ `public`.
+- **IFC monoids first**: Always express security guarantees using Information
+  Flow Control (IFC) monoids (`trust` lattice and `self` ⊆ `internal` ⊆ `public`
+  audience chain). Effects (`emits`, `requires.history`) are a hacky workaround
+  for event sequencing, not the primary algebra; avoid them when label bounding
+  suffices. Do not use synthetic attention marks (`blocked`) or default `hitl`
+  to fake boundaries; keep autonomous execution unblocked for trusted data
+  flowing within its legitimate audience.
+- The built-in audience chain is `self` ⊆ `internal` ⊆ `public`: `self` is the
+  person running the session, `internal` their organization.
 - A tool that reads the requester's private data uses
   `delta = { audience = ["self"] }`.
 - A tool that reads organization-wide data uses
@@ -127,8 +135,13 @@ matched battery covers.
   explicit audience source.
 - Annotator outputs can specify only literal readers, not `self` or `internal`.
   Use a static contract when output belongs to a built-in audience.
-- A tool that publishes, posts, sends, shares, or uploads requires data that
-  may be public: `requires = { audience = { contains = ["public"] } }`.
+- A tool that publishes, posts, sends, shares, or uploads beyond the machine
+  requires data that may be public: `requires = { audience = { contains = ["public"] } }`.
+- A tool that communicates within the organization (e.g. posting internal Slack
+  messages or workspace items) requires trusted data that includes `internal`:
+  `requires = { trust = "trusted", audience = { contains = ["internal"] } }`. This
+  keeps autonomous agent flow unblocked for public or internal data while preventing
+  requester secrets (`self`) from leaking.
 - A clearly public read or a tool whose result carries no data uses
   `delta = {}`.
 - Every new tool entry needs `delta`, including entries with `requires`. Never

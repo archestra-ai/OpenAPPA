@@ -16,7 +16,7 @@ This battery covers Claude Code's built-in `Read` and `Bash` tools. Batteries ca
 | Tool | Contract |
 |---|---|
 | `Read` | Static rules narrow the session to `self`, the requester, when a hidden path, a credential file, a private key, or a system secret location is read. |
-| `Bash` | A command naming one of the same paths is refused outright. Before every other command runs, the Claude Code model decides the trust and fresh attention it requires and labels its output for trust. Its mandate names no reader, so who may see a command's output is the session's label, not the model's choice. |
+| `Bash` | A command naming a credential path requires the `token-exposed` mark and is refused before secrets reach the model. Before every other command runs, the Claude Code model decides the trust and fresh attention it requires and labels its output for trust. Its mandate names no reader, so who may see a command's output is the session's label, not the model's choice. |
 
 The default config created by `appa init claude-code` handles tools that the battery does not name.
 
