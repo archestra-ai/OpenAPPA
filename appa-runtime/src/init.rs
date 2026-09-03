@@ -143,10 +143,10 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
     };
 
     // 4. Clear the endpoint before anything is mutated. A verified runtime at a
-    //    retired install path that will not stop aborts init here, rather than
+    //    managed install path that will not stop aborts init here, rather than
     //    leaving a new plugin registered against an old runtime that a rerun
     //    cannot dislodge.
-    clear_retired_runtime(&paths)?;
+    clear_managed_runtimes(&paths)?;
     //    Whatever still answers must be the build this init installs. A foreign
     //    responder cannot be stopped from here, so it is refused now, while
     //    Claude and the launcher are still untouched.
@@ -454,27 +454,29 @@ fn stop_legacy_runtime_at(target: &Path) -> Result<(), InitError> {
     stop_windows_processes_at(target, "appa-runtime").map(drop)
 }
 
-/// Stop any runtime executing the retired install path before anything is
-/// mutated.
+/// Stop any runtime executing a managed install path before anything is mutated.
 ///
-/// The stop set is exact: `<install_dir>/appa`, the path an init with the
-/// environment resolving as it does now would have deployed to. Managed
-/// stopping and default-endpoint ownership are bounded to that. A runtime left
-/// by an init run under a different `APPA_INSTALL_DIR` or `APPA_DATA_DIR`
-/// executes a path this init never computes, so it is not in the stop set;
-/// `verify_runtime_binary` reports it as a foreign responder and leaves it
-/// running.
+/// The stop set is exact: `<data_dir>/bin/appa`, where current init deploys the
+/// harness binary, and `<install_dir>/appa`, where earlier init versions
+/// deployed it. Managed stopping and default-endpoint ownership are bounded to
+/// those paths. A runtime left by an init run under a different
+/// `APPA_INSTALL_DIR` or `APPA_DATA_DIR` executes a path this init never
+/// computes. It is not in the stop set; `verify_runtime_binary` reports it as a
+/// foreign responder and leaves it running.
 ///
 /// A verified target that survives termination aborts init, because the
 /// fingerprint backstop runs after the Claude switch: proceeding would register
 /// the new plugin against an old runtime, and a rerun would find the same
 /// surviving process and do the same thing again.
-fn clear_retired_runtime(paths: &DeploymentPaths) -> Result<(), InitError> {
+fn clear_managed_runtimes(paths: &DeploymentPaths) -> Result<(), InitError> {
+    let deployed = paths.data_dir.join("bin").join(appa_filename());
     let retired = paths.install_dir.join(appa_filename());
-    match stop_processes_executing(&retired)?.first() {
-        Some(&pid) => Err(InitError::RuntimeSurvived { pid, path: retired }),
-        None => Ok(()),
+    for target in [deployed, retired] {
+        if let Some(&pid) = stop_processes_executing(&target)?.first() {
+            return Err(InitError::RuntimeSurvived { pid, path: target });
+        }
     }
+    Ok(())
 }
 
 /// The subcommand a managed runtime is started with, by every starter and by
@@ -1381,6 +1383,30 @@ mod tests {
     fn still_running(pid: i32) -> bool {
         std::thread::sleep(std::time::Duration::from_millis(300));
         unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn init_stops_the_runtime_at_the_current_deployment_path() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let data = directory.path().join("data");
+        let deployed = data.join("bin/appa");
+        let Some(pid) = process_executing(&deployed, false, RUNTIME_ARGUMENTS) else {
+            return;
+        };
+        let paths = DeploymentPaths {
+            install_dir: directory.path().join("retired-bin"),
+            config_dir: directory.path().join("config"),
+            data_dir: data,
+            claude_dir: directory.path().join("claude"),
+        };
+
+        clear_managed_runtimes(&paths).expect("managed runtimes stop");
+
+        assert!(
+            !still_running(pid),
+            "the runtime at the current deployment path is still running"
+        );
     }
 
     #[cfg(unix)]
