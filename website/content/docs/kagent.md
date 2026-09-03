@@ -111,6 +111,14 @@ kubectl rollout restart deployment -n kagent -l app.kubernetes.io/managed-by=kag
 
 Your existing agents now route every tool call through OpenAPPA policy enforcement.
 
+## Configure policy with appa-guide
+
+The demo chart installs an `appa-guide` agent. It attaches the OpenAPPA guide skill through kagent's git-ref skills. It also provides the kagent tool server's Kubernetes tools. The shared runtime gates the guide agent's own tool calls. Open its chat and say `init`.
+
+The canonical skill lives at `integrations/appa-guide`. Its `SKILL.md` routes to `references/claude-code.md` or `references/kagent.md`. kagent clones that directory directly. Claude packaging stages the same directory at its required plugin path. On kagent, the skill reads the policy ConfigMap. It inventories `RemoteMCPServer.status.discoveredTools` and each `Agent` tool declaration. It proposes contracts in plain English and waits for chat approval.
+
+The skill applies the ConfigMap through `k8s_apply_manifest`. The fleet policy requires `attention = ["human-approval"]` for that call. Therefore, the kagent Approve / Reject card is the human decision. The skill then waits for the mounted policy to update and reloads the runtime. Any host with the same tools can run this skill. The pre-configured agent is only a convenience.
+
 ## 1. Try a blocked flow (Data leak prevention)
 
 In the [kagent dashboard](https://kagent.dev/docs/kagent/observability/launch-ui/), inspect how OpenAPPA stops sensitive data from leaving the cluster.

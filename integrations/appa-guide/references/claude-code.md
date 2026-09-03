@@ -1,57 +1,10 @@
----
-name: appa-guide
-description: Guide a user through configuring OpenAPPA for Claude Code. Use for an initial sync of installed tools, after MCP servers change, or when the user wants to adjust how OpenAPPA treats a tool, data source, destination, battery, or approval.
----
+# Claude Code
 
-OpenAPPA configuration helper. Request: $ARGUMENTS
+You run in a Claude Code session protected by the appa plugin. This
+reference carries the Claude Code mechanics; the router skill you came
+from carries the mode and the shared rules.
 
-## Mode
-
-Use one mode:
-
-- **`init`** — inspect the installed tools and build a useful starting config.
-- **`adjust`** — help the user make changes to an existing config.
-
-If the request already makes the mode clear, start there. Otherwise show these
-two choices in one short message and wait. Do not run both modes together.
-If the user chooses `adjust` without describing the change, ask what they want
-OpenAPPA to do differently.
-
-## Rules that apply in both modes
-
-- The root config is the user's source of truth. Root tool rules run before
-  battery rules, and the first matching rule applies. Keep every root rule
-  unless the user explicitly approves changing or removing it.
-- A battery supplies maintained defaults. Never edit a battery. Override it
-  with a root rule.
-- Read before proposing. Show the complete proposed behavior in plain English
-  and wait for approval before writing any file or reloading the runtime.
-- Make the smallest change that achieves the request. Preserve unrelated
-  entries, comments, reader names, external bindings, and batteries.
-- Use short sentences. Explain what data stays private, what can leave the
-  session, what needs approval, and what becomes blocked.
-- Talk about outcomes, not config machinery, except for the one short
-  **OpenAPPA pieces** line required in every proposal. Do not mention include
-  lists, rule ordering, TOML fields, reader names, labels, or authority wiring
-  unless the user explicitly asks for technical details. Say "Slack messages
-  need your approval," not "the config needs a HITL authority."
-- Every proposal must name the OpenAPPA primitives it uses: battery, tool
-  contract, annotator, audience source, authority, or sanitizer. When a
-  command or service implements a primitive, state which one. For example:
-  "OpenAPPA pieces: tool contract and an annotator backed by `gh`."
-- Use ordinary descriptions, not invented category names. Never say "stale
-  root rules." If relevant, say: "These tools are in your config but were not
-  detected in this session: <names>. I'll leave them unchanged."
-- Show TOML only when the user asks for it.
-- Ask one focused question at a time. Do not make the user classify every tool
-  when its name and description already make the answer clear.
-- Configure the installed OpenAPPA only. The marketplace's `installLocation`
-  may be a local checkout; read only its installed battery files and contract
-  guide named below. Never search that checkout, inspect source code, tests,
-  Git history, or implementation details. Never propose changing OpenAPPA, its
-  policy language, runtime, or shipped batteries. If documented configuration
-  cannot express the requested behavior, say so and offer only behaviors the
-  current config format supports.
+## Read sources
 
 For OpenAPPA configuration, read only:
 
@@ -62,9 +15,12 @@ For OpenAPPA configuration, read only:
   `<marketplace-root>/website/content/docs/contracts.md`.
 
 If the installed marketplace content is missing or these sources do not
-establish the syntax or behavior, stop and report an incomplete installation.
-Do not fetch a different OpenAPPA version or search the repository for an
-answer.
+establish the syntax or behavior, stop and report an incomplete
+installation. Do not fetch a different OpenAPPA version or search the
+repository for an answer. The marketplace's `installLocation` may be a
+local checkout; read only its installed battery files and contract
+guide. Never search that checkout, inspect source code, tests, Git
+history, or implementation details.
 
 ## Find the live config
 
@@ -100,7 +56,7 @@ The runtime address is
 1. Run `appa describe --config <live-path>` before reading or changing
    the config. It is read-only and succeeds when the config is missing or
    invalid. Record its config state, effective policy tools, included battery
-   names, audience sources, and named audiences. Treat its
+   names, referenced groups, and membership resolver/binding status. Treat its
    session integrations, tools, and accounts as unavailable when it says so;
    never turn an unavailable fact into an empty inventory.
 2. Read the root config. Record its tool rules and included batteries, and
@@ -142,7 +98,7 @@ When proposing a battery, give it exactly one short sentence that says what it
 covers, what protection it adds, and any important assumption. Keep it under
 20 words. Examples:
 
-> Slack battery — Keeps Slack data inside your organization and asks before publishing it.
+> Slack battery — Keeps Slack data private and asks before publishing it.
 >
 > GitHub battery — Assumes every repository is public and prevents private data from leaking to GitHub.
 
@@ -152,29 +108,21 @@ the user asks.
 
 Check what each matched battery expects the root config to provide. Record
 anything missing that the battery or complete config needs in order to work.
-A proposal may name a group only when `appa describe` lists it under
-`Named audiences:`, or when the user establishes it during this flow with a
-configured audience source. A registered source does not prove that an
-arbitrary plausible group name exists.
+A proposal may mention only groups listed under `Referenced groups:` by
+`appa describe`, or a group the user explicitly establishes during this flow
+with a concrete resolver. A registered membership resolver does not prove
+that an arbitrary plausible group name exists.
 
 ### Cover the remaining tools
 
 Create root rules only for installed tools that neither the root config nor a
 matched battery covers.
 
-- Who may see a value is the built-in audience chain `self` ⊆ `internal` ⊆
-  `public`: `self` is the person running the session, `internal` their
-  organization. A tool that reads the requester's own data — credentials,
-  personal mail, private messages — labels it `self`:
-  `delta = { audience = ["self"] }`. A tool that reads organization-wide data
-  labels it `internal`: `delta = { audience = ["internal"] }`. Both work
-  without an audience source; a source is needed only when a rule names an
-  individual recipient that must be checked against them. Never substitute
-  an invented reader such as `"private"`, `@company`, or `@employees`, and
-  never use a group `appa describe` does not list.
-- An annotator's answer may name literal readers only, never `self` or
-  `internal`. A tool whose result is the requester's or the organization's
-  data therefore gets a static rule, not an annotator.
+- A tool that reads personal or authenticated data may return data for a
+  configured `@self`. Organization-wide data may return data for a configured
+  `@internal`. If the suitable group was not reported by `appa describe`,
+  leave the tool blocked and explain the missing resolver. Never substitute
+  `"private"`, `@company`, `@employees`, or another plausible reader or group.
 - A tool that publishes, posts, sends, shares, or uploads requires data that
   may be public: `requires = { audience = { contains = ["public"] } }`.
 - A clearly public read or a tool whose result carries no data uses
@@ -192,15 +140,18 @@ Wait for the answer before showing the proposal. This answer does not replace
 the approval required below. If nothing is unclear, do not ask.
 
 For Gmail, match only exact tools visible in this session whose names start
-with `mcp__claude_ai_Gmail__`; do not assume a fixed connector tool list. Mail
-the requester reads is `self` data; a rule that names a recipient
-(`contains = ["$to"]`) can be checked against `self` or `internal` only through
-a configured audience source. An email domain is never a source: `internal`
-is fed by a directory (`google-workspace:full-members`, `slack:full-members`,
-`github:org/<org>/members`), and Gmail by itself feeds nothing. Without a
-source, say that recipient-checked sends are refused as unanswerable and
-leave them so; do not invent a group. This boundary answer is separate from
-approval to write or install anything.
+with `mcp__claude_ai_Gmail__`; do not assume a fixed connector tool list. If
+the connected account is not exposed, include the account and intended data
+boundary in the one grouped ambiguity question. A non-consumer email domain
+is only a candidate boundary and still needs confirmation. Never suggest
+`gmail.com` or another consumer-mail domain as `@internal`.
+
+Confirmation alone does not create a working domain-backed group. The current
+membership resolver must expand a group to concrete reader IDs, so Gmail by
+itself cannot implement `@internal` from a domain. Require a real directory
+resolver that can enumerate those readers; otherwise leave internal-dependent
+tools blocked and say why. This boundary answer is separate from approval to
+write or install anything.
 
 ### Propose, then apply
 
@@ -213,19 +164,9 @@ Group the proposal by server. Show:
   wildcard tool rule (`name = "*"`) when the config has one, refused otherwise;
 - every configured MCP server whose tools could not be detected.
 
-Add one short **OpenAPPA pieces** line that names every primitive the proposal
-uses. Do not list file plumbing such as include paths.
-
-Do not mention config entries that were not detected unless they affect the
-user's requested outcome.
-
 Name each configured MCP server that could not be inspected and say: "<server>
 is configured, but I could not inspect its tools in this session." Do not omit
 the server or fold it into a list of individual tools.
-
-When tools named in the config were not detected, use their exact names and
-say only that they were not detected in this session and will be left
-unchanged. Do not call them stale, removed, obsolete, or uninstalled.
 
 At the end of the proposal, add **Needed for this to work** when any required
 support is missing. Group every missing requirement there and propose the
@@ -238,7 +179,7 @@ End with: **Approve, or tell me what to change.** Wait for the reply.
 After approval:
 
 1. Run `appa describe --config <live-path>` again. If the config,
-   batteries, audience sources, or named audiences changed since the
+   batteries, referenced groups, or membership wiring changed since the
    proposal, revise the proposal and ask for approval again.
 2. Copy each approved battery directory beside the root config under
    `batteries/<name>/` and add its `appa.toml` to the root `include` list. Use
@@ -260,7 +201,7 @@ If the requested outcome is ambiguous, ask one focused question and wait. Do
 not guess.
 
 1. Run `appa describe --config <live-path>`. Record the config state, batteries,
-   policy tools, audience sources, and named audiences. Keep session tools
+   policy tools, referenced groups, and membership wiring. Keep session tools
    and accounts unavailable when the command says they are unavailable.
 2. Read the root config and only the included files relevant to the requested
    changes.
@@ -271,13 +212,12 @@ not guess.
    incomplete installation. Do not guess syntax, fetch another version, search
    for an OpenAPPA checkout, or inspect source code.
 4. Explain three things: what happens now, what you propose, and the practical
-   effect. Add one short **OpenAPPA pieces** line naming every primitive used.
-   Ask only for a decision that changes the result.
+   effect. Ask only for a decision that changes the result.
 5. If a battery would help, propose it with the same one-sentence rule used in
    `init` mode. Existing root rules still take priority.
 6. End with: **Approve, or tell me what to change.** Wait for the reply.
 7. Run `appa describe --config <live-path>` again. If the config, batteries,
-   audience sources, or named audiences changed since the proposal, revise
+   referenced groups, or membership wiring changed since the proposal, revise
    the proposal and ask for approval again.
 8. Copy each newly approved battery directory from the installed marketplace
    beside the root config under `batteries/<name>/`, add its `appa.toml` to the
@@ -304,19 +244,7 @@ The runtime checks the whole config before installing it. If reload is
 refused, the previous config keeps serving. Explain the error plainly and fix
 it. Ask for approval again if the fix changes the behavior the user approved.
 
-After a successful reload, give a brief human-readable summary of the behavior
-now in effect. Use one to three short sentences or bullets. Say what information
-is now treated as private or suspicious and where private information can or
-cannot go. For example:
-
-> Information from shared Slack channels is now treated as suspicious.
->
-> Private information cannot be sent to public GitHub repositories.
-
-Do not lead with rule counts, file paths, TOML, backups, or primitive names.
-Mention an important remaining limitation in one short sentence when needed.
-
-If the config changed, add:
+After a successful reload, add:
 
 > Start a new `clappa` session to use the updated policy; this session keeps
 > the policy it started with.

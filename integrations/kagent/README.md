@@ -39,6 +39,9 @@ A self-contained container image bundling both Python and Go runtimes together w
 ### 4. Codec Crate (`appa-adapter-kagent`)
 The Rust codec crate located at `crates/appa-adapter-kagent` (in the workspace root). It is compiled directly into `appa-runtime` and parses wire events sent by `AppaPluginKagent`.
 
+### 5. Guide Skill (`../appa-guide/`)
+The host-neutral `appa-guide` skill routes to a Claude Code or kagent reference. The demo attaches the canonical directory through kagent `gitRefs` and supplies the stock `k8s_*` tools. Applying a policy requires the kagent Approve / Reject card.
+
 ## Quickstart
 
 ### Deploy kagent with OpenAPPA
@@ -74,6 +77,8 @@ kubectl port-forward -n kagent svc/kagent-ui 8901:80
 ```
 
 Open [http://localhost:8901](http://localhost:8901) to explore 16 pre-seeded demonstration chats showcasing data exfiltration blocks, untrusted ingress quarantine, human-in-the-loop approvals, and multi-agent delegation.
+
+Open `http://localhost:8901/agents/kagent/appa-guide/chat` and say `init` to inspect the installed tools and propose the fleet policy. The agent waits for chat approval before it requests the enforced approval card.
 
 ## Building from Source
 
