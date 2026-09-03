@@ -8,8 +8,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use super::paths::DeploymentPaths;
-#[cfg(windows)]
-use super::powershell;
 use super::{Compensation, InitError, MARKETPLACE, PLUGIN, RECOVERY_PREFIX, Undo, file_before, install_clappa};
 
 /// Run one `claude` command, from `directory` when a project-scoped plugin

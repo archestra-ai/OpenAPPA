@@ -6,6 +6,9 @@ use std::env;
 use std::fs;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
+// Only the PowerShell helpers below spawn a process; nothing else in this module does.
+#[cfg(windows)]
+use std::process::Command;
 use thiserror::Error;
 
 mod claude;

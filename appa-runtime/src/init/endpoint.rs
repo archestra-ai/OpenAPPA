@@ -1,9 +1,12 @@
 //! Who owns the runtime endpoint, and what init may do about it.
 
 use crate::plugin_bundle::Endpoint;
+#[cfg(unix)]
 use std::ffi::OsStr;
 use std::io::IsTerminal;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 use std::process::{Command, Output};
 
 use super::config::ComposedPolicy;
@@ -566,6 +569,7 @@ pub(super) fn verify_runtime_deployment(runtime: &Path, config: &Path, endpoint:
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::PathBuf;
 
     use super::*;
 
