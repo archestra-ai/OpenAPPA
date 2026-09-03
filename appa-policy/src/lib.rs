@@ -185,7 +185,7 @@ impl ToolCallSource {
 
 /// One registered `[[annotator]]` as the runtime consumes it: the deployer's instruction,
 /// the stock builtin it names, if any, and the input mapping its consult artifacts carry.
-/// An empty mapping sends the complete argument object beside the call's tool context.
+/// An empty mapping sends the complete call.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AnnotatorBinding {
     pub hint: Option<Hint>,
@@ -591,8 +591,7 @@ struct RawAnnotator {
     /// The stock model transport this Annotator carries: `"claude-code"` or `"llm"`. An
     /// Annotator without it is bound by the deployment under `[externals.annotators]`.
     builtin: Option<String>,
-    /// The consult inputs, each a `$tool_call` source. Omitted sends the complete argument
-    /// object beside the call's tool context.
+    /// The consult inputs, each a `$tool_call` source. Omitted sends the complete call.
     inputs: Option<BTreeMap<String, String>>,
     /// The trust ranks a produced annotation may write. Omitted admits every chain rank.
     ranks: Option<Vec<String>>,

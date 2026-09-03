@@ -57,16 +57,18 @@ class ReadSensitivityTests(unittest.TestCase):
             "kind": "annotation",
             "name": "claude-code.read-sensitivity",
             "declaration": {
-                "inputs": {},
+                "inputs": [],
                 "trust_ranks": ["suspicious", "trusted"],
                 "audiences": ["private"],
                 "attention_marks": [],
                 "effects": [],
             },
             "artifact": {
-                "tool": "Read",
-                "description": "Reads a file and returns its contents.",
-                "args": {"file_path": "/workspace/.env"},
+                "args": {
+                    "name": "Read",
+                    "description": "Reads a file and returns its contents.",
+                    "arguments": {"file_path": "/workspace/.env"},
+                }
             },
         }
         result = subprocess.run(

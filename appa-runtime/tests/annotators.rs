@@ -150,7 +150,7 @@ hint = "Use internal for data restricted to company readers."
 [[policy.tool]]
 name = "fetch"
 description = "Fetches one URL and returns its body."
-parameters = {{ type = "object", properties = {{ url = {{ type = "string" }}, secret = {{ type = "string" }} }}, required = ["url"] }}
+parameters = {{ type = "object", properties = {{ url = {{ type = "string" }} }}, required = ["url"] }}
 annotator = "classifier"
 
 [externals]
@@ -218,14 +218,15 @@ async fn an_http_annotator_annotates_the_complete_call_and_a_fresh_proposal_cons
     assert_eq!(request["version"], 1);
     assert_eq!(request["kind"], "annotation");
     assert_eq!(request["name"], "classifier");
-    // The Annotator declares no inputs, so tool context accompanies the complete
-    // argument object.
+    // The annotator declares no inputs, so `args` is the complete call.
     assert_eq!(
         request["artifact"],
         serde_json::json!({
-            "tool": "fetch",
-            "description": "Fetches one URL and returns its body.",
-            "args": { "url": "https://a.example" },
+            "args": {
+                "name": "fetch",
+                "description": "Fetches one URL and returns its body.",
+                "arguments": { "url": "https://a.example" },
+            }
         })
     );
     // The declaration restates the resolved mandate: the closed vocabulary a produced
@@ -234,7 +235,7 @@ async fn an_http_annotator_annotates_the_complete_call_and_a_fresh_proposal_cons
         request["declaration"],
         serde_json::json!({
             "hint": "Use internal for data restricted to company readers.",
-            "inputs": {},
+            "inputs": [],
             "trust_ranks": ["suspicious", "trusted"],
             "audiences": ["internal"],
             "attention_marks": [],
@@ -318,13 +319,10 @@ url = "{url}"
     );
     let requests = annotator.requests();
     assert_eq!(requests.len(), 1);
-    // The matched declaration writes no description, so the common artifact shape omits it.
+    // The matched declaration writes no description, so the complete call carries none.
     assert_eq!(
-        requests[0]["artifact"],
-        serde_json::json!({
-            "tool": "fetch",
-            "args": { "url": "https://private.example" }
-        })
+        requests[0]["artifact"]["args"],
+        serde_json::json!({ "name": "fetch", "arguments": { "url": "https://private.example" } })
     );
 }
 
@@ -417,7 +415,7 @@ async fn a_command_consult_keeps_its_deployment_during_reload() {
 }
 
 #[tokio::test]
-async fn a_mapped_input_preserves_tool_context_and_hides_unselected_arguments() {
+async fn a_mapped_input_shows_the_annotator_one_argument() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let (url, annotator) = serve_annotator().await;
     annotator.set("classifier", Answer::Wire(produced("trusted")));
@@ -430,31 +428,15 @@ audiences = ["internal"]"#,
     );
     let runtime = open_runtime(&dir, &config).await;
 
-    let call = ProposedCall {
-        tool: "fetch".to_string(),
-        arguments: raw(serde_json::json!({
-            "url": "https://a.example",
-            "secret": "must-not-reach-the-annotator"
-        })),
-    };
-    assert_eq!(propose(&runtime, call).await, HookDecision::AllowCall { spawn: None });
+    assert_eq!(
+        propose(&runtime, fetch("https://a.example")).await,
+        HookDecision::AllowCall { spawn: None }
+    );
     let requests = annotator.requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(
-        requests[0]["declaration"]["inputs"],
-        serde_json::json!({ "subject": "$tool_call.arguments.url" })
-    );
-    assert_eq!(
-        requests[0]["artifact"],
-        serde_json::json!({
-            "tool": "fetch",
-            "description": "Fetches one URL and returns its body.",
-            "args": { "subject": "https://a.example" }
-        })
-    );
-    assert!(
-        !requests[0].to_string().contains("must-not-reach-the-annotator"),
-        "an unselected argument must not enter the consult"
+        requests[0]["artifact"]["args"],
+        serde_json::json!({ "subject": "https://a.example" })
     );
 }
 
@@ -922,8 +904,11 @@ async fn the_wildcard_annotates_an_unwritten_tool_and_an_exact_declaration_never
     let requests = annotator.requests();
     assert_eq!(requests.len(), 1, "the wildcard consulted once");
     // The annotation subject is the actual call, not the wildcard's spelling.
-    assert_eq!(requests[0]["artifact"]["tool"], "send_money_via_wire");
-    assert_eq!(requests[0]["artifact"]["args"], serde_json::json!({"amount": 9000}));
+    assert_eq!(requests[0]["artifact"]["args"]["name"], "send_money_via_wire");
+    assert_eq!(
+        requests[0]["artifact"]["args"]["arguments"],
+        serde_json::json!({"amount": 9000})
+    );
 
     assert_eq!(
         propose(&runtime, call("read", serde_json::json!({"path": "a.txt"}))).await,

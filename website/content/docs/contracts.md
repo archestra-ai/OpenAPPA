@@ -110,7 +110,7 @@ An `[[annotator]]` declares three things. Its optional `hint` explains the polic
 
 #### Example: pass the complete call
 
-Omit `inputs` to pass the complete argument object. Every artifact also carries the tool name and its policy-declared description, when present.
+Omit `inputs` to pass the complete tool call: its name, its description when the tool declares one, and its arguments.
 
 ```toml
 [[annotator]]
@@ -128,16 +128,18 @@ The annotator receives this consult artifact:
 
 ```json
 {
-  "tool": "Bash",
-  "description": "Runs one shell command and returns its output.",
   "args": {
-    "command": "git push origin main",
-    "timeout": 60000
+    "name": "Bash",
+    "description": "Runs one shell command and returns its output.",
+    "arguments": {
+      "command": "git push origin main",
+      "timeout": 60000
+    }
   }
 }
 ```
 
-This form does not need a tool parameter schema. A tool without a `description` omits that artifact field.
+This form does not need a tool parameter schema. It does not need a `description`: a tool without one sends `name` and `arguments` only.
 
 #### Example: pass one argument
 
@@ -151,12 +153,11 @@ hint      = "finance may read billing records. support may read records assigned
 
 [[tool]]
 name       = "get_customer"
-description = "Reads one customer record."
 parameters = { type = "object", properties = { customer_id = { type = "string" } }, required = ["customer_id"] }
 annotator  = "classify-customer"
 ```
 
-The artifact identifies `get_customer` and carries its description. Its `args` contains only `{"subject":"..."}`. Unselected arguments do not cross the consult boundary. The answer is still the complete contract for the call.
+The annotator receives only `customer_id`, under the name `subject`. Its answer is still the complete contract for the call.
 
 #### Example: cover the long tail with a wildcard
 
@@ -205,7 +206,7 @@ An annotator maps each declared input from the proposed call. `$tool_call` is th
 | `$tool_call.arguments` | Complete argument object |
 | `$tool_call.arguments.<name>` | One top-level argument |
 
-Every annotation artifact carries the tool name and its policy-declared description, when present. With no `inputs`, `args` is the complete argument object. With an input mapping, `args` contains only the selected values under their aliases. The declaration maps each alias to its `$tool_call` source. `$tool_call.description` needs a tool `description`. A single argument needs a tool parameter schema. The schema must mark that top-level argument as required.
+An annotator with no `inputs` receives `$tool_call` as its `args`. `$tool_call.description` needs a tool `description`; `$tool_call` does not, and omits the key when there is none. A single argument needs a tool parameter schema, and the schema must mark that top-level argument as required. The annotator then receives whatever JSON value the call carries under that name.
 
 #### Implementing an annotator
 
@@ -226,7 +227,7 @@ hint    = "Use internal for company-only data and suspicious for data from unvet
 
 The mandate is the ceiling policy review relies on, whichever transport serves the annotator: every transport passes the same exact-shape and mandate validation before an annotation is admitted.
 
-The consult declaration carries the hint, input mapping, and resolved mandate. The artifact carries tool context and selected argument data. For the one-argument example above:
+The consult declaration carries the hint, input names, and resolved mandate. Its artifact is `args`. For the one-argument example above:
 
 ```json
 {
@@ -235,31 +236,25 @@ The consult declaration carries the hint, input mapping, and resolved mandate. T
   "name": "classify-customer",
   "declaration": {
     "hint": "finance may read billing records. support may read records assigned to a support case.",
-    "inputs": { "subject": "$tool_call.arguments.customer_id" },
+    "inputs": ["subject"],
     "trust_ranks": ["suspicious", "trusted"],
     "audiences": ["finance", "support"],
     "attention_marks": [],
     "effects": []
   },
-  "artifact": {
-    "tool": "get_customer",
-    "description": "Reads one customer record.",
-    "args": { "subject": "cust-7" }
-  }
+  "artifact": { "args": { "subject": "cust-7" } }
 }
 ```
 
 | Key | Meaning |
 |---|---|
 | `declaration.hint` | The deployer's optional instruction for policy-specific classification. It grants nothing outside the mandate. |
-| `declaration.inputs` | Each input alias and its `$tool_call` source. Empty when `args` is the complete argument object. |
+| `declaration.inputs` | The declared input names. Empty when the annotator reads the complete call. |
 | `declaration.trust_ranks` | The mandate's trust ranks, least-trusted first. A trust value must name one of these. |
 | `declaration.audiences` | The mandate's readers. A restricted audience value may name these only. |
 | `declaration.attention_marks` | The mandate's attention marks. An attention value must name these only. |
 | `declaration.effects` | The mandate's effect kinds. An `emits` or history value must name these only. |
-| `artifact.tool` | The proposed tool name. |
-| `artifact.description` | The policy-declared tool description, when present. |
-| `artifact.args` | The complete argument object, or only mapped values under their input aliases. |
+| `artifact.args` | The data the input mapping selected, under the declared input names. Without a mapping, the complete call: `name`, `description` when declared, and `arguments`. |
 
 The consult carries nothing about the trajectory: no current label, no rank, no reader ids, and no history.
 
@@ -557,14 +552,14 @@ Every transport receives one JSON object per consult:
 | `version` | The consult shape. It is `1`. |
 | `kind` | `authority`, `sanitizer`, `annotation`, or `membership`. |
 | `name` | The registered name, for one service that answers for several. |
-| `declaration` | The policy-authored half: a component's `hint` and `permits`, or an Annotator's hint, input mapping, and mandate. The agent never writes it. |
-| `artifact` | The judged value: a call and its unmet requirements, a body to rewrite, an Annotator's tool context and arguments, or a group name. |
+| `declaration` | The policy-authored half: a component's `hint` and `permits`, or an Annotator's hint, input names, and mandate. The agent never writes it. |
+| `artifact` | The judged value: a call and its unmet requirements, a body to rewrite, an Annotator's `args`, or a group name. |
 
 | Kind | `declaration` | `artifact` | `answer` |
 |---|---|---|---|
 | `authority` | `hint`, `permits` | `tool`, `arguments`, `requirements` | `ruling` (`approve` or `deny`), optional `reason` |
 | `sanitizer` | `hint`, `on`, `permits`, `parameters` (for `tool_input`) | `tool` (when known), `body` | `body` |
-| `annotation` | `hint`, `inputs`, `trust_ranks`, `audiences`, `attention_marks`, `effects` | `tool`, optional `description`, `args` | `delta`, `requires`, `emits` |
+| `annotation` | `hint`, `inputs`, `trust_ranks`, `audiences`, `attention_marks`, `effects` | `args` | `delta`, `requires`, `emits` |
 | `membership` | empty | `group` | `readers` |
 
 The consult never carries the trajectory: no current label, no rank, no reader ids, no history, no user turn. A component judges the artifact against its own declaration and nothing else.

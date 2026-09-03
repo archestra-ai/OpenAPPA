@@ -929,7 +929,7 @@ mod tests {
             body: ConsultBody::Annotation {
                 declaration: AnnotationDeclaration {
                     hint: Some("Classify customer records for the declared audiences.".to_string()),
-                    inputs: BTreeMap::new(),
+                    inputs: vec![],
                     trust_ranks: vec!["suspicious".to_string(), "trusted".to_string()],
                     audiences: vec![
                         "public".to_string(),
@@ -939,11 +939,7 @@ mod tests {
                     attention_marks: vec!["privacy-review".to_string(), "review".to_string()],
                     effects: vec!["email".to_string()],
                 },
-                artifact: AnnotationArtifact {
-                    tool: "lookup_customer".to_string(),
-                    description: Some("Looks one customer up.".to_string()),
-                    args,
-                },
+                artifact: AnnotationArtifact { args },
             },
         }
     }
@@ -1167,9 +1163,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             request["declaration"]["hint"],
             "Classify customer records for the declared audiences."
         );
-        assert_eq!(request["declaration"]["inputs"], serde_json::json!({}));
-        assert_eq!(request["artifact"]["tool"], "lookup_customer");
-        assert_eq!(request["artifact"]["description"], "Looks one customer up.");
+        assert_eq!(request["declaration"]["inputs"], serde_json::json!([]));
         assert_eq!(request["artifact"]["args"], serde_json::json!({"path": "notes.txt"}));
         assert_eq!(
             std::fs::read_to_string(dir.path().join("argument.txt")).unwrap(),

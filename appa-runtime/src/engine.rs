@@ -72,9 +72,8 @@ use std::collections::BTreeMap;
 use crate::api::OutcomeBody;
 pub(crate) use crate::api::{OfferId, ProposedCall, SpawnBinding, ToolOutcome, TrajectoryId};
 use crate::consult::{
-    AnnotationAnswer, AnnotationArtifact, AnnotationDeclaration, AuthorityAnswer, AuthorityArtifact,
-    AuthorityDeclaration, HistoryEntry, Requirement, Ruling, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint,
-    WireAudience,
+    AnnotationAnswer, AnnotationDeclaration, AuthorityAnswer, AuthorityArtifact, AuthorityDeclaration, HistoryEntry,
+    Requirement, Ruling, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint, WireAudience,
 };
 
 /// One fresh 256-bit random number per act that can surface offers; the
@@ -123,7 +122,8 @@ pub enum ExternalRequest {
         annotator: String,
         call: appa_engine::value::CanonicalDigest,
         declaration: AnnotationDeclaration,
-        artifact: AnnotationArtifact,
+        /// The consult artifact: the complete call, or one value per declared input.
+        args: serde_json::Value,
     },
     Membership {
         resolver: String,
@@ -1485,7 +1485,7 @@ impl RuntimeEngine {
                 annotator: annotator.as_str().to_string(),
                 call: digest,
                 declaration: self.annotation_declaration(annotator, binding),
-                artifact: annotation_artifact(binding, declaration, resolved),
+                args: annotation_args(&binding.inputs, declaration, resolved),
             }]));
         };
         Ok(PinnedAnnotation::new(
@@ -1495,8 +1495,8 @@ impl RuntimeEngine {
         ))
     }
 
-    /// What one annotation consult declares: the Annotator's trusted hint, input mapping,
-    /// and resolved mandate vocabulary.
+    /// What one annotation consult declares: the Annotator's trusted hint, resolved mandate
+    /// vocabulary, and the input names its artifact carries.
     fn annotation_declaration(
         &self,
         annotator: &appa_engine::names::AnnotatorName,
@@ -1509,11 +1509,7 @@ impl RuntimeEngine {
             .expect("declarations name only registered annotators");
         AnnotationDeclaration {
             hint: binding.hint.as_ref().map(|hint| hint.as_str().to_string()),
-            inputs: binding
-                .inputs
-                .iter()
-                .map(|(input, source)| (input.clone(), source.spelling()))
-                .collect(),
+            inputs: binding.inputs.keys().cloned().collect(),
             trust_ranks: mandate
                 .trust_ranks()
                 .filter_map(|trust| chain.name_of(trust).map(str::to_string))
@@ -1813,20 +1809,9 @@ struct CallAnswers {
     memberships: Vec<PinnedMembership>,
 }
 
-/// The consult artifact an annotation request carries: tool context beside the complete
-/// canonical argument object or one value per declared input.
-fn annotation_artifact(
-    binding: &appa_policy::AnnotatorBinding,
-    declaration: &ToolDeclaration,
-    resolved: &ResolvedCall,
-) -> AnnotationArtifact {
-    AnnotationArtifact {
-        tool: resolved.tool().as_str().to_string(),
-        description: declaration.description().map(str::to_string),
-        args: annotation_args(&binding.inputs, declaration, resolved),
-    }
-}
-
+/// The consult artifact an annotation request carries: the complete call — its proposed
+/// name, the declaration's description when the policy wrote one, and the canonical
+/// arguments — or one value per declared input.
 fn annotation_args(
     inputs: &BTreeMap<String, appa_policy::ToolCallSource>,
     declaration: &ToolDeclaration,
@@ -1842,7 +1827,7 @@ fn annotation_args(
         serde_json::Value::Object(call)
     };
     if inputs.is_empty() {
-        return resolved.arguments().clone();
+        return complete();
     }
     let mut args = serde_json::Map::new();
     for (input, source) in inputs {
@@ -2403,9 +2388,7 @@ mod tests {
         Resolution, RuntimeEngine, SanitizerSubject, TrajectoryId, audience_wire, engine_id, remedy_instruction,
         remedy_lines, terminal_safe,
     };
-    use crate::consult::{
-        AnnotationAnswer, AnnotationArtifact, HistoryEntry, RequiredAudienceAnswer, SanitizerPoint, WireAudience,
-    };
+    use crate::consult::{AnnotationAnswer, HistoryEntry, RequiredAudienceAnswer, SanitizerPoint, WireAudience};
     use appa_engine::contract::{AudienceRequirement, HistoryRequirement, RecipientSpec};
     use appa_engine::fact::{EffectKind, EffectSet};
     use appa_engine::groups::DeclaredAudience;
@@ -2640,19 +2623,18 @@ mod tests {
                         annotator,
                         call: digest,
                         declaration,
-                        artifact,
+                        args,
                     },
                 ] => {
                     assert_eq!(annotator, "classifier");
-                    // The Annotator maps no inputs, so tool context accompanies the complete
-                    // argument object.
+                    // The annotator maps no inputs, so `args` is the complete call.
                     assert_eq!(
-                        artifact,
-                        &AnnotationArtifact {
-                            tool: "lookup".to_string(),
-                            description: Some("Looks one record up.".to_string()),
-                            args: serde_json::json!({"nested": {"id": 7}, "deep": true}),
-                        }
+                        args,
+                        &serde_json::json!({
+                            "name": "lookup",
+                            "description": "Looks one record up.",
+                            "arguments": {"nested": {"id": 7}, "deep": true},
+                        })
                     );
                     // The declaration carries the mandate's complete vocabulary and nothing of
                     // the trajectory: no current label and no call-specific requirements.

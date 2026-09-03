@@ -63,7 +63,7 @@ const TERMS = {
   "[membership]":
     "The one registration every @name group resolves through. A group mention without it is a load error. Its name binds under [externals.membership.<name>] to an endpoint or a command; no builtin serves a directory.",
   inputs:
-    "The call data an annotator reads, expressed as an alias-to-$tool_call-source mapping. Without a mapping, artifact.args contains the complete argument object. Every artifact also carries the tool name and its policy-declared description, when present.",
+    "The values an annotator reads, each mapped from $tool_call on its declaration. Without an explicit mapping, the annotator reads the complete tool call: name, description when declared, and arguments.",
   ranks:
     "In an annotator's mandate: the trust ranks its answers may write in delta.trust and requires.trust. Omitted, every rank in the trust chain.",
   audiences:
@@ -77,9 +77,9 @@ const TERMS = {
   "[externals.<kind>.<name>]":
     "One deployment binding: a registered authority or sanitizer bound to exactly one of url, command, or builtin; a membership resolver, or an annotator without a declared builtin, bound to url or command. A binding without a registration refuses the deployment, and so does an unbound sanitizer, annotator, or membership resolver; an unbound authority returns no answer.",
   declaration:
-    "The policy-authored half of a consult: a component's hint and permits, or an annotator's hint, input mapping, and mandate vocabulary. The agent never writes it.",
+    "The policy-authored half of a consult: a component's hint and permits, or an annotator's hint, input names, and mandate vocabulary. The agent never writes it.",
   artifact:
-    "The judged half of a consult: a call and its unmet requirements, a body to rewrite, an annotator's tool context and argument data, or a group name. Never the trajectory.",
+    "The judged half of a consult: a call and its unmet requirements, a body to rewrite, an annotator's args, or a group name. Never the trajectory.",
   internal:
     "An example reader for restricted internal data. Reading internal data closes off public destinations.",
   "{public, trusted}":
