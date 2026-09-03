@@ -9,9 +9,7 @@ import { useEffect, useRef, useState } from "react";
 const AUDIO_SRC = "/brand/openappa-pronunciation.mp3";
 
 /* The play triangle, drawn on the same pixel grid as the wordmark: an 8-cell
-   column of 3px steps rather than a smooth hypotenuse. Used twice — as the
-   glyph in the button, and (as a data URI, in globals.css) as the cursor over
-   it. */
+   column of 3px steps rather than a smooth hypotenuse. */
 const TRIANGLE =
   "M6 0 L9 0 L9 3 L12 3 L12 6 L15 6 L15 9 L18 9 L18 15 L15 15 L15 18 L12 18 L12 21 L9 21 L9 24 L6 24 Z";
 

@@ -1116,18 +1116,6 @@ samp {
    "How to spell it" — hero pronunciation button
    ———————————————————————————————————————————————— */
 
-/* The whole point of the control is the play affordance, so the pointer
-   itself becomes the play triangle — the same stepped shape the button draws,
-   baked into a cursor image.
-
-   Sized and anchored like a pointer, not like an icon: 16px tall (just under
-   the system arrow, which is what stops it reading as a sticker stuck to the
-   mouse) with the hotspot on its top-left vertex, so it points from the same
-   corner every other cursor does and never covers the label it sits on.
-
-   Two copies because a cursor is a bitmap, not a themed element: it cannot
-   read --text-strong, so the dark theme gets an inverted one. `pointer` is
-   the fallback if the image is refused. */
 .spell-it {
   display: inline-flex;
   align-items: center;
@@ -1143,11 +1131,7 @@ samp {
   letter-spacing: 0.01em;
   color: var(--text-weak);
   transition: color 0.12s ease;
-  cursor: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20width%3D%2720%27%20height%3D%2720%27%20viewBox%3D%270%200%2020%2020%27%3E%3Cpath%20transform%3D%27translate%282%202%29%27%20d%3D%27M0%200%20L2%200%20L2%202%20L4%202%20L4%204%20L6%204%20L6%206%20L8%206%20L8%2010%20L6%2010%20L6%2012%20L4%2012%20L4%2014%20L2%2014%20L2%2016%20L0%2016%20Z%27%20fill%3D%27%231c1a17%27%20stroke%3D%27%23fcfbf7%27%20stroke-width%3D%272%27%20stroke-linejoin%3D%27miter%27%20paint-order%3D%27stroke%27%20shape-rendering%3D%27crispEdges%27%2F%3E%3C%2Fsvg%3E") 2 2, pointer;
-}
-
-.dark .spell-it {
-  cursor: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20width%3D%2720%27%20height%3D%2720%27%20viewBox%3D%270%200%2020%2020%27%3E%3Cpath%20transform%3D%27translate%282%202%29%27%20d%3D%27M0%200%20L2%200%20L2%202%20L4%202%20L4%204%20L6%204%20L6%206%20L8%206%20L8%2010%20L6%2010%20L6%2012%20L4%2012%20L4%2014%20L2%2014%20L2%2016%20L0%2016%20Z%27%20fill%3D%27%23fcfbf7%27%20stroke%3D%27%231c1a17%27%20stroke-width%3D%272%27%20stroke-linejoin%3D%27miter%27%20paint-order%3D%27stroke%27%20shape-rendering%3D%27crispEdges%27%2F%3E%3C%2Fsvg%3E") 2 2, pointer;
+  cursor: pointer;
 }
 
 /* The glyph is the only colored thing, and only while it matters: idle it is
