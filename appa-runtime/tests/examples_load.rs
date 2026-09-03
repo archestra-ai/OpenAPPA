@@ -46,9 +46,9 @@ fn the_complete_battery_example_opens() {
     opens(&repo_root().join("examples/claude-code-battery/appa.toml"));
 }
 
-#[cfg(unix)]
 /// The initialized default with the Claude Code battery included, as `appa init` composes
 /// them: the battery's rules run before the default's.
+#[cfg(unix)]
 fn composed_with_the_battery(dir: &tempfile::TempDir) -> Config {
     let battery_dir = dir.path().join("batteries/claude-code");
     std::fs::create_dir_all(&battery_dir).expect("the battery directory is created");
@@ -72,6 +72,7 @@ fn composed_with_the_battery(dir: &tempfile::TempDir) -> Config {
     Config::load(&root).expect("the initialized config and battery compose")
 }
 
+#[cfg(unix)]
 #[test]
 fn the_initialized_default_composes_with_the_claude_code_battery() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
@@ -118,6 +119,7 @@ fn call(tool: &str, argument: &str, value: &str) -> ProposedCall {
 /// A credential named relatively — `.env`, `cat .netrc` — is judged like its absolute
 /// spelling: the read narrows the session to `self`, after which a public sink is out of
 /// reach, and the command is refused with no remedy.
+#[cfg(unix)]
 #[tokio::test]
 async fn the_battery_judges_relative_credential_paths_like_absolute_ones() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
@@ -136,6 +138,16 @@ async fn the_battery_judges_relative_credential_paths_like_absolute_ones() {
             panic!("`{command}` is refused, got {refused:?}");
         };
         assert!(offers.is_empty(), "`{command}` is refused without a remedy");
+    }
+
+    for path in ["./README.md", "../src/main.rs", "src/.gitignore/../main.rs"] {
+        let ordinary = call("Read", "file_path", path);
+        assert_eq!(
+            propose(&runtime, ordinary.clone()).await,
+            HookDecision::AllowCall { spawn: None },
+            "`{path}` is an ordinary read: a dot in a relative path is not a hidden name"
+        );
+        ran(&runtime, ordinary).await;
     }
 
     let read = call("Read", "file_path", ".env");

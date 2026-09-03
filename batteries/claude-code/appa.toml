@@ -83,18 +83,151 @@ annotator = "claude-code.bash-requirements"
 
 # --- Read: the requester's own secrets are `self` data ---
 
-# Reading a hidden path, a credential file, a private key, or a system secret
-# location narrows the session to `self`. A selector matches the argument as
-# written, not the resolved path or its case, so a symlink or an alias (`~`,
-# `..`) to one of these reads under its written name: over-narrowing is the
-# safe direction, a spelling these selectors miss is the gap. Every other path
-# keeps the session's label. No rule blocks a read or lowers its trust.
+# Reading a credential file, a private key, or a system secret location
+# narrows the session to `self`. A selector matches the argument as written,
+# absolute (`*/.ssh/*`) or relative (`.ssh/*`), not the resolved path or its
+# case, so a symlink or an alias (`~`, `..`) to one of these reads under its
+# written name. Hidden names are listed one by one: a selector for every
+# dot-prefixed path would also match `./src/main.rs`. Every other path keeps
+# the session's label. No rule blocks a read or lowers its trust.
 [[policy.tool]]
-name = "Read(file_path:*/.*)"
+name = "Read(file_path:*/.env*)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:.*)"
+name = "Read(file_path:.env*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/.ssh/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:.ssh/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/.aws/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:.aws/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/.azure/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:.azure/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/.kube/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:.kube/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/.gnupg/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:.gnupg/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/.docker/config.json)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:.docker/config.json)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/.config/gh/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:.config/gh/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/.config/gcloud/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:.config/gcloud/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/.password-store/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:.password-store/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/.netrc)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:.netrc)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/.git-credentials)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:.git-credentials)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/.npmrc)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:.npmrc)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/.pypirc)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:.pypirc)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/.vault-token)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:.vault-token)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/.claude.json)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:.claude.json)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*/.claude/settings*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:.claude/settings*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:*_history)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
