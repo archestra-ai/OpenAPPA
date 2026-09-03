@@ -217,8 +217,9 @@ pub enum ForkAdvice {
     /// Only requirement gaps: a child starts at the same label, so delegation clears nothing.
     SameLabel,
     /// The block narrows this trajectory. `sanitized_return` when a return sanitizer this
-    /// trajectory may declare raises every dimension the change lowers, so a child's return
-    /// through it leaves this trajectory's label as it is.
+    /// trajectory may declare takes the narrowed value and hands back one this trajectory
+    /// receives unchanged: it admits the narrowed label, and its derivation holds at the
+    /// current label on every dimension.
     Narrowing {
         standing: FloorStanding,
         sanitized_return: bool,
@@ -315,13 +316,7 @@ pub(crate) fn plan(
                 Some(floor) if floor.holds(&narrowing.to) => FloorStanding::Within,
                 Some(_) => FloorStanding::Below,
             },
-            sanitized_return: return_options(registry, floor.as_ref())
-                .into_iter()
-                .flatten()
-                .filter_map(|name| registry.sanitizer(&name))
-                .any(|sanitizer| {
-                    Floor::new(current.clone(), Some(sanitizer.transition.applied())).holds(&narrowing.to)
-                }),
+            sanitized_return: preserving_return_exists(registry, &current, narrowing, floor.as_ref(), context),
         }),
     };
     Ok(PlannedBlock {
@@ -1002,6 +997,36 @@ pub(crate) fn return_options(registry: &Registry, floor: Option<&Floor>) -> Vec<
             .map(|sanitizer| Some(sanitizer.name.clone())),
     );
     options
+}
+
+/// Does a return sanitizer this trajectory may declare take the narrowed value and hand back
+/// one `current` receives unchanged? The sanitizer must admit `narrowing.to` as its declared
+/// `from`, the reserved attestation must fit a fork seeded at `current`, and the derivation
+/// must hold at `current` on both dimensions. A route the child could declare but never
+/// cross, or one whose return still lowers this trajectory, preserves nothing. Advice costs
+/// the block no directory read: a sanitizer whose admission is undecided counts as no route,
+/// and the crossing itself reads the directory when a parent declares it anyway.
+fn preserving_return_exists(
+    registry: &Registry,
+    current: &Label,
+    narrowing: &Narrowing,
+    floor: Option<&Floor>,
+    context: &MembershipContext<'_>,
+) -> bool {
+    let unchanged = Floor::new(current.clone(), None);
+    return_options(registry, floor)
+        .into_iter()
+        .flatten()
+        .filter_map(|name| registry.sanitizer(&name))
+        .filter(|sanitizer| {
+            !sanitizer.name.is_attest_schema()
+                || attest_ceiling(&sanitizer.transition).is_some_and(|ceiling| current.meets_floor(ceiling))
+        })
+        .any(|sanitizer| {
+            sanitizer
+                .derive_output(&narrowing.to, &[], context)
+                .is_ok_and(|derived| derived.is_some_and(|derived| unchanged.holds(&derived)))
+        })
 }
 
 /// Why a parent's declared return policy is not one its spawn's plan can carry.

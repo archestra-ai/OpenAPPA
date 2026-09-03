@@ -11962,6 +11962,57 @@ mod tests {
     }
 
     #[test]
+    fn a_return_sanitizer_that_does_not_admit_the_narrowed_value_is_no_sanitized_route() {
+        let closed_to_suspicious = crate::authority::Sanitizer {
+            transition: crate::authority::DeclaredTransition::Trust {
+                from_floor: TRUSTED,
+                to: TRUSTED,
+            },
+            ..lifting_sanitizer("trusted-only")
+        };
+        let e = open_engine(returning_registry(vec![closed_to_suspicious]));
+        let log = vec![opened(&e)];
+        let read = call("read_suspicious", json!({ "who": "someone" }));
+        let blocked = e
+            .handle(
+                &viewing(&e, &log),
+                batch_on(&traj(), "read", Vec::new(), vec![raw(&read)], None),
+            )
+            .expect("a narrowing read blocks");
+        let ([], [block]) = answered(&blocked) else {
+            panic!("the read blocks, got {:?}", answered(&blocked))
+        };
+        assert_eq!(
+            block.block.fork_advice,
+            Some(crate::plan::ForkAdvice::Narrowing {
+                standing: crate::plan::FloorStanding::Unbound,
+                sanitized_return: false,
+            }),
+            "a sanitizer whose `from` the suspicious value fails would refuse the child's return"
+        );
+
+        let e = open_engine(returning_registry(vec![lifting_sanitizer("redactor")]));
+        let log = vec![opened(&e)];
+        let blocked = e
+            .handle(
+                &viewing(&e, &log),
+                batch_on(&traj(), "read", Vec::new(), vec![raw(&read)], None),
+            )
+            .expect("a narrowing read blocks");
+        let ([], [block]) = answered(&blocked) else {
+            panic!("the read blocks, got {:?}", answered(&blocked))
+        };
+        assert_eq!(
+            block.block.fork_advice,
+            Some(crate::plan::ForkAdvice::Narrowing {
+                standing: crate::plan::FloorStanding::Unbound,
+                sanitized_return: true,
+            }),
+            "a sanitizer admitting the suspicious value and raising it back to trusted is the sanitized route"
+        );
+    }
+
+    #[test]
     fn a_raw_return_crosses_at_the_fold_and_the_child_may_return_again() {
         let e = open_engine(returning_registry(vec![]));
         let child = TrajectoryId::new("child");

@@ -3026,9 +3026,9 @@ fn fork_advice_text(advice: ForkAdvice, remedies_required: bool) -> String {
              change to this session."
         ),
         (FloorStanding::Unbound, false) => format!(
-            "If this trajectory's harness advertises a child-session tool, delegate {delegated} there.\nNo return \
-             sanitizer is registered, so finish there by returning nothing: a returned value applies the same \
-             change to this session."
+            "If this trajectory's harness advertises a child-session tool, delegate {delegated} there.\nNo \
+             registered return sanitizer carries this change back without applying it here, so finish there by \
+             returning nothing: a returned value applies the same change to this session."
         ),
         (FloorStanding::Within, true) => format!(
             "This session is a subagent, and the floor its parent declared allows this change: accept it here.\nTo \
@@ -3048,9 +3048,10 @@ fn fork_advice_text(advice: ForkAdvice, remedies_required: bool) -> String {
         ),
         (FloorStanding::Below, false) => {
             "This session is a subagent, and this change falls below the floor its parent declared: neither this \
-             session nor any subagent started here can accept it, and no return sanitizer is registered.\nDo not \
-             start a subagent for this. Finish without this call, or return a plain note that the work needs a \
-             subagent declared with a lower floor or a return sanitizer, so the parent can start one."
+             session nor any subagent started here can accept it, and no registered return sanitizer carries \
+             this change back without applying it.\nDo not start a subagent for this. Finish without this call, \
+             or return a plain note that the work needs a subagent declared with a lower floor or a return \
+             sanitizer, so the parent can start one."
                 .to_string()
         }
     }
