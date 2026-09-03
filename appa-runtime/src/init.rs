@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use serde_json::{Map, Value};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::config::{Config, ConfigError};
@@ -177,8 +176,9 @@ pub fn installed_config_path() -> PathBuf {
 ///
 /// The sequence is ordered so that nothing outside a temporary file changes
 /// until the plugin source has been resolved and verified, and so that the
-/// endpoint is cleared before any mutation rather than after Claude has been
-/// switched over.
+/// endpoint is cleared before Claude is switched over. Directories, the config
+/// and the deployment are written before that clearing; all three are additive
+/// and none of them is what Claude reads.
 pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
     let appa = env::current_exe().map_err(InitError::CurrentExecutable)?;
     let endpoint = Endpoint::resolve()?;
@@ -251,7 +251,7 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
         })?,
     };
 
-    // 4. Clear the endpoint before anything is mutated. A runtime that will not
+    // 4. Clear the endpoint before Claude is switched over. A runtime that will not
     //    stop aborts init here, rather than leaving a new plugin registered
     //    against an old runtime that a rerun cannot dislodge.
     progress("checking the runtime endpoint");
@@ -313,13 +313,13 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
     install_clappa(launcher_dir)?;
     cleanup_plugin_recovery(recovery.as_ref());
 
-    Ok(render_receipt(
-        &source_label(&source, &deployment),
-        &config,
+    Ok(Receipt {
+        adapter: source_label(&source, &deployment),
+        config,
         config_outcome,
         runtime_outcome,
-        std::io::stdout().is_terminal() && env::var_os("NO_COLOR").is_none(),
-    ))
+    }
+    .render(Style::of_stdout()))
 }
 
 /// The steps after the Claude switch, each recording what it changed.
@@ -478,42 +478,72 @@ fn source_label(source: &PluginSource, deployment: &Deployment) -> String {
     format!("{origin} -> {}", friendly_path(&deployment.root))
 }
 
-fn render_receipt(
-    adapter: &str,
-    config: &Path,
+/// Whether the receipt carries terminal escapes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Style {
+    Plain,
+    Colored,
+}
+
+impl Style {
+    fn of_stdout() -> Self {
+        if std::io::stdout().is_terminal() && env::var_os("NO_COLOR").is_none() {
+            Style::Colored
+        } else {
+            Style::Plain
+        }
+    }
+}
+
+/// What an init decided, before any of it is words.
+///
+/// Everything the receipt can report is a field here, so what init keeps out of
+/// its summary — install paths, deployment digests, the files it wrote — is
+/// absent by construction rather than by a rendering step that must remember to
+/// leave it out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Receipt {
+    /// Where the plugin came from, as the user would name it.
+    adapter: String,
+    config: PathBuf,
     config_outcome: ConfigOutcome,
     runtime_outcome: RuntimeOutcome,
-    color: bool,
-) -> String {
-    let title = if color {
-        "\u{1b}[1;32m✓ OpenAPPA initialized\u{1b}[0m \u{1b}[2mfor Claude Code\u{1b}[0m"
-    } else {
-        "OpenAPPA initialized for Claude Code"
-    };
-    let label = |name: &str| {
-        if color {
-            format!("\u{1b}[1;36m{name:<9}\u{1b}[0m")
+}
+
+impl Receipt {
+    fn render(&self, style: Style) -> String {
+        let colored = style == Style::Colored;
+        let title = if colored {
+            "\u{1b}[1;32m✓ OpenAPPA initialized\u{1b}[0m \u{1b}[2mfor Claude Code\u{1b}[0m"
         } else {
-            format!("{name:<9}")
-        }
-    };
-    let mut receipt = format!(
-        "{title}\n\n  {} {adapter}\n  {} {PLUGIN}\n  {} {}\n  {} {} ({})\n  {} clappa\n",
-        label("Adapter"),
-        label("Plugin"),
-        label("Runtime"),
-        runtime_outcome.as_str(),
-        label("Config"),
-        friendly_path(config),
-        config_outcome.as_str(),
-        label("Launcher"),
-    );
-    // A session loads its hooks at session start, and the hook wire carries no
-    // version, so a session running across an upgrade keeps talking to the
-    // runtime it started with.
-    receipt.push_str("\nRestart any running `clappa` session to pick this up.\n");
-    receipt.push_str("\nNext: run `clappa`, then `/appa-guide init`.\n");
-    receipt
+            "OpenAPPA initialized for Claude Code"
+        };
+        let label = |name: &str| {
+            if colored {
+                format!("\u{1b}[1;36m{name:<9}\u{1b}[0m")
+            } else {
+                format!("{name:<9}")
+            }
+        };
+        let mut receipt = format!(
+            "{title}\n\n  {} {}\n  {} {PLUGIN}\n  {} {}\n  {} {} ({})\n  {} clappa\n",
+            label("Adapter"),
+            self.adapter,
+            label("Plugin"),
+            label("Runtime"),
+            self.runtime_outcome.as_str(),
+            label("Config"),
+            friendly_path(&self.config),
+            self.config_outcome.as_str(),
+            label("Launcher"),
+        );
+        // A session loads its hooks at session start, and the hook wire carries no
+        // version, so a session running across an upgrade keeps talking to the
+        // runtime it started with.
+        receipt.push_str("\nRestart any running `clappa` session to pick this up.\n");
+        receipt.push_str("\nNext: run `clappa`, then `/appa-guide init`.\n");
+        receipt
+    }
 }
 
 fn friendly_path(path: &Path) -> String {
@@ -620,8 +650,8 @@ fn appa_filename() -> &'static str {
 /// return one particular form. `fs::canonicalize` yields the Win32 final path,
 /// whose extended-length prefix is stripped so the two sides can be compared as
 /// written. This is equality of resolved final paths, not file-ID identity, so
-/// two hard links to one file at different paths compare unequal -- a gap named
-/// in the deployment documentation rather than papered over.
+/// two hard links to one file at different paths compare unequal: such a pair is
+/// reported as two deployments rather than one.
 #[cfg(windows)]
 fn windows_identity(path: &Path) -> Option<String> {
     let canonical = fs::canonicalize(path).ok()?;
@@ -1481,8 +1511,10 @@ fn start_runtime(plugin_root: &Path) -> Result<(), InitError> {
 /// Who is answering the endpoint, as far as one probe can establish.
 ///
 /// A healthy runtime left by an init under a different `APPA_INSTALL_DIR` or
-/// `APPA_DATA_DIR` is foreign: named, never killed. Stale runtimes are cleared
-/// before this classification through their separate health protocol.
+/// `APPA_DATA_DIR` is foreign: it is named, and stopped only after the user
+/// confirms it and only when it identifies a same-user `appa` pid. Stale
+/// runtimes are cleared before this classification through their separate
+/// health protocol.
 #[derive(Debug, PartialEq, Eq)]
 enum EndpointOwner {
     /// Nothing answered, or what answered serves no fingerprint. Before the
@@ -1496,15 +1528,28 @@ enum EndpointOwner {
     Foreign { pid: i32 },
 }
 
+/// How long init waits for a runtime it asked to stop, and how often it looks.
+///
+/// Every wait for a stopping runtime uses the same budget: a runtime that outlives
+/// one of them has outlived all of them, and `RuntimeSurvived` means the same thing
+/// wherever it is raised.
+const STOP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+const STOP_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Every question init asks a runtime goes out through here, so the flags that
+/// decide how long init waits and whether curl reports its own failure have one
+/// definition rather than one per question.
+fn ask_endpoint(endpoint: &Endpoint, path: &str, arguments: &[&str]) -> std::io::Result<Output> {
+    Command::new("curl").args(arguments).arg(endpoint.join(path)).output()
+}
+
 fn endpoint_health(endpoint: &Endpoint) -> Result<Option<String>, InitError> {
-    let output = Command::new("curl")
-        .args(["--fail", "--silent", "--max-time", "2"])
-        .arg(endpoint.join("/health"))
-        .output()
-        .map_err(|error| InitError::RuntimeIdentity {
+    let output = ask_endpoint(endpoint, "/health", &["--fail", "--silent", "--max-time", "2"]).map_err(|error| {
+        InitError::RuntimeIdentity {
             endpoint: endpoint.url().to_owned(),
             message: error.to_string(),
-        })?;
+        }
+    })?;
     if !output.status.success() {
         return Ok(None);
     }
@@ -1559,13 +1604,13 @@ fn clear_stale_endpoint(endpoint: &Endpoint) -> Result<(), InitError> {
     }
     terminate_owned_appa_runtime(pid, endpoint)?;
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + STOP_DEADLINE;
     while std::time::Instant::now() < deadline {
         match endpoint_health(endpoint)? {
             None => return Ok(()),
             Some(ref current) if current == "ok" => return Ok(()),
             Some(ref current) if stale_pid(current) == Some(pid) => {
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                std::thread::sleep(STOP_POLL);
             }
             Some(_) => {
                 return Err(InitError::RuntimeIdentity {
@@ -1596,12 +1641,12 @@ fn terminate_owned_appa_runtime(pid: i32, endpoint: &Endpoint) -> Result<(), Ini
 /// Stop a runtime this init started, and wait for its process to go.
 fn stop_owned_appa_runtime(pid: i32, endpoint: &Endpoint) -> Result<(), InitError> {
     terminate_owned_appa_runtime(pid, endpoint)?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + STOP_DEADLINE;
     while std::time::Instant::now() < deadline {
         if !process_exists(pid) {
             return Ok(());
         }
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::thread::sleep(STOP_POLL);
     }
     Err(InitError::RuntimeSurvived {
         pid,
@@ -1721,19 +1766,19 @@ fn terminate_appa_pid(pid: i32) -> Result<(), InitError> {
 /// every install of one build look like the same deployment, which is how an install ends
 /// up reloading, and reporting on, a runtime that is not its own.
 fn endpoint_owner(binary: &Path, config: &Path, endpoint: &Endpoint) -> Result<EndpointOwner, InitError> {
-    let expected = Sha256::digest(fs::read(binary).map_err(|source| InitError::InstallRuntime {
+    let expected = crate::runtime_cli::binary_digest(binary).map_err(|source| InitError::InstallRuntime {
         path: binary.to_path_buf(),
         source,
-    })?);
-    let expected: String = expected.iter().map(|byte| format!("{byte:02x}")).collect();
-    let output = Command::new("curl")
-        .args(["--fail", "--silent", "--max-time", "2"])
-        .arg(endpoint.join("/binary-fingerprint"))
-        .output()
-        .map_err(|error| InitError::RuntimeIdentity {
-            endpoint: endpoint.url().to_owned(),
-            message: error.to_string(),
-        })?;
+    })?;
+    let output = ask_endpoint(
+        endpoint,
+        "/binary-fingerprint",
+        &["--fail", "--silent", "--max-time", "2"],
+    )
+    .map_err(|error| InitError::RuntimeIdentity {
+        endpoint: endpoint.url().to_owned(),
+        message: error.to_string(),
+    })?;
     if !output.status.success() {
         return Ok(EndpointOwner::Unidentified);
     }
@@ -1836,11 +1881,11 @@ fn clear_confirmed_foreign_with(
     }
     terminate_owned_appa_runtime(pid, endpoint)?;
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + STOP_DEADLINE;
     while std::time::Instant::now() < deadline {
         match endpoint_health(endpoint)? {
             None => return Ok(()),
-            Some(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Some(_) => std::thread::sleep(STOP_POLL),
         }
     }
     Err(InitError::RuntimeSurvived {
@@ -1891,11 +1936,12 @@ fn serving_policy_key(endpoint: &Endpoint) -> Result<String, InitError> {
         endpoint: endpoint.url().to_owned(),
         message,
     };
-    let output = Command::new("curl")
-        .args(["--fail", "--silent", "--show-error", "--max-time", "2"])
-        .arg(endpoint.join("/policy-key"))
-        .output()
-        .map_err(|error| refused(error.to_string()))?;
+    let output = ask_endpoint(
+        endpoint,
+        "/policy-key",
+        &["--fail", "--silent", "--show-error", "--max-time", "2"],
+    )
+    .map_err(|error| refused(error.to_string()))?;
     if !output.status.success() {
         return Err(refused(String::from_utf8_lossy(&output.stderr).trim().to_owned()));
     }
@@ -1917,11 +1963,12 @@ fn reload_policy(endpoint: &Endpoint, config: &Path) -> Result<(), InitError> {
         path: config.to_path_buf(),
         message,
     };
-    let output = Command::new("curl")
-        .args(["--fail", "--silent", "--show-error", "--max-time", "10", "-X", "POST"])
-        .arg(endpoint.join("/reload"))
-        .output()
-        .map_err(|error| refused(error.to_string()))?;
+    let output = ask_endpoint(
+        endpoint,
+        "/reload",
+        &["--fail", "--silent", "--show-error", "--max-time", "10", "-X", "POST"],
+    )
+    .map_err(|error| refused(error.to_string()))?;
     if !output.status.success() {
         return Err(refused(String::from_utf8_lossy(&output.stderr).trim().to_owned()));
     }
@@ -2028,12 +2075,12 @@ mod tests {
         let pid = child.id() as i32;
         std::thread::spawn(move || child.wait());
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + STOP_DEADLINE;
         while std::time::Instant::now() < deadline {
             if ready.is_file() {
                 return Some(pid);
             }
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            std::thread::sleep(STOP_POLL);
         }
         // This platform will not run the stand-in at all. Skip rather than
         // report a pass that exercised nothing.
@@ -2425,35 +2472,56 @@ mod tests {
         assert!(!directory.path().join("appa.toml.bak").exists());
     }
 
+    /// A receipt reports a path relative to the home directory it is under, so a
+    /// summary read aloud or pasted into an issue carries no account name.
     #[test]
-    fn receipt_is_compact_and_hides_installation_details() {
-        let config = user_home()
-            .unwrap_or_else(|| PathBuf::from("/home/user"))
-            .join("config/appa.toml");
-        let receipt = render_receipt(
-            "current checkout",
-            &config,
-            ConfigOutcome::Kept,
-            RuntimeOutcome::Healthy,
-            false,
-        );
+    fn a_receipt_shortens_a_path_under_the_home_directory_and_leaves_others_whole() {
+        let Some(home) = user_home() else {
+            return;
+        };
 
-        assert!(receipt.starts_with("OpenAPPA initialized for Claude Code\n\n"));
-        assert!(receipt.contains("Adapter   current checkout"));
-        assert!(receipt.contains("Runtime   healthy"));
-        assert!(receipt.contains("Launcher  clappa"));
-        assert!(receipt.contains("Next: run `clappa`, then `/appa-guide init`."));
-        assert!(!receipt.contains("Statusline"));
-        assert!(!receipt.contains("appa-runtime (healthy)"));
-        assert!(!receipt.contains("\u{1b}["));
+        assert_eq!(friendly_path(&home), "~");
+        assert_eq!(friendly_path(&home.join("config/appa.toml")), "~/config/appa.toml");
+        assert_eq!(friendly_path(Path::new("/etc/appa/appa.toml")), "/etc/appa/appa.toml");
+    }
 
-        let colored = render_receipt(
-            "current checkout",
-            &config,
-            ConfigOutcome::Kept,
-            RuntimeOutcome::Healthy,
-            true,
-        );
-        assert!(colored.starts_with("\u{1b}[1;32m✓ OpenAPPA initialized\u{1b}[0m"));
+    /// `Style` is the only thing that decides whether escapes are emitted, and it
+    /// decides it for the whole receipt rather than per line.
+    #[test]
+    fn only_a_colored_style_puts_escapes_in_a_receipt() {
+        let receipt = Receipt {
+            adapter: "current checkout".to_owned(),
+            config: PathBuf::from("/etc/appa/appa.toml"),
+            config_outcome: ConfigOutcome::Kept,
+            runtime_outcome: RuntimeOutcome::Healthy,
+        };
+
+        assert!(!receipt.render(Style::Plain).contains('\u{1b}'));
+        assert!(receipt.render(Style::Colored).contains('\u{1b}'));
+    }
+
+    /// Every outcome pair a run can end in renders, and no two of them render the
+    /// same receipt: a user cannot be shown "kept" for a config that was rewritten.
+    #[test]
+    fn each_pair_of_outcomes_renders_a_distinct_receipt() {
+        let mut seen = std::collections::HashSet::new();
+        for config_outcome in [ConfigOutcome::Created, ConfigOutcome::Kept, ConfigOutcome::Rewritten] {
+            for runtime_outcome in [
+                RuntimeOutcome::Healthy,
+                RuntimeOutcome::Reloaded,
+                RuntimeOutcome::OlderPolicy,
+            ] {
+                let receipt = Receipt {
+                    adapter: "current checkout".to_owned(),
+                    config: PathBuf::from("/etc/appa/appa.toml"),
+                    config_outcome,
+                    runtime_outcome,
+                };
+                assert!(
+                    seen.insert(receipt.render(Style::Plain)),
+                    "{config_outcome:?} with {runtime_outcome:?} renders as another pair does",
+                );
+            }
+        }
     }
 }
