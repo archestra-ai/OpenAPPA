@@ -7,7 +7,7 @@
 
 use std::fmt;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
@@ -38,7 +38,20 @@ pub fn stage_repository(repository: &Path, destination: &Path) -> io::Result<()>
         let target = destination.join(target);
         copy_entry(&source, &target)?;
     }
+    materialize_claude_guide(destination)?;
     Ok(())
+}
+
+/// Claude Code loads only SKILL.md when a slash command starts. Reading a
+/// reference would itself be a gated `Read` call, so materialize this host's
+/// reference into that file. The canonical package stays decomposed for hosts
+/// such as kagent that load their own reference through their native file tool.
+fn materialize_claude_guide(destination: &Path) -> io::Result<()> {
+    let guide = destination.join("plugin/skills/appa-guide");
+    let reference = fs::read(guide.join("references/claude-code.md"))?;
+    let mut skill = fs::OpenOptions::new().append(true).open(guide.join("SKILL.md"))?;
+    skill.write_all(b"\n\n")?;
+    skill.write_all(&reference)
 }
 
 fn copy_entry(source: &Path, destination: &Path) -> io::Result<()> {
@@ -279,6 +292,22 @@ fn collect(root: &Path, directory: &Path, entries: &mut Vec<StagedEntry>) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_staging_inlines_its_reference_after_the_router() {
+        let directory = tempfile::tempdir().unwrap();
+        let guide = directory.path().join("plugin/skills/appa-guide");
+        fs::create_dir_all(guide.join("references")).unwrap();
+        fs::write(guide.join("SKILL.md"), "router\n").unwrap();
+        fs::write(guide.join("references/claude-code.md"), "# Claude Code\nflow\n").unwrap();
+
+        materialize_claude_guide(directory.path()).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(guide.join("SKILL.md")).unwrap(),
+            "router\n\n\n# Claude Code\nflow\n"
+        );
+    }
 
     #[test]
     fn portable_path_uses_forward_slashes() {

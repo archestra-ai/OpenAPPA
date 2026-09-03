@@ -28,6 +28,10 @@ fn the_router_routes_by_host_and_carries_the_shared_rules() {
         router.contains("k8s_get_resources"),
         "the router detects the kagent host"
     );
+    assert!(
+        router.contains("Do not call `Read`"),
+        "Claude bootstraps without a gated tool call"
+    );
     assert!(router.contains("`init`") && router.contains("`adjust`"));
     for shared in [
         "Never edit a battery",

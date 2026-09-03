@@ -14,8 +14,10 @@ guess its content.
 ## Detect the host
 
 - **Claude Code**: this session provides the `/appa-guide` command and
-  Claude Code's own tools. Read `references/claude-code.md` and follow
-  it.
+  Claude Code's own tools. Claude packaging appends
+  `references/claude-code.md` to this `SKILL.md`; continue at its
+  `# Claude Code` section below. Do not call `Read` to load the
+  reference.
 - **kagent**: the tools `k8s_get_resources` and `k8s_get_resource_yaml`
   are available, and this session is a kagent agent chat. Read
   `references/kagent.md` and follow it.
