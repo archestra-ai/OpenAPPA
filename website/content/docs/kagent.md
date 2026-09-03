@@ -272,6 +272,12 @@ Delegation is off by default. The wildcard entry covers every ordinary call the 
 
 Covered: declarative agents on both runtimes. Not covered: BYO agents and the kagent sandbox kinds.
 
+### Configure the fleet
+
+The demo chart also installs an `appa-guide` agent: the OpenAPPA guide skill attached through kagent's git-ref skills, the kagent tool server's k8s tools, and the shared runtime as its own gate. Open its chat and say `init`.
+
+The skill is one `SKILL.md` that routes by host to a reference file. On kagent it reads the policy ConfigMap, inventories every `RemoteMCPServer` from `status.discoveredTools` and every `Agent`'s declared tools, proposes contracts in plain English, and waits for chat approval. The apply then writes the ConfigMap through `k8s_apply_manifest` — the fleet policy puts that call behind `attention = ["human-approval"]`, so the kagent Approve/Reject card is the human sign-off — waits for the mounted policy to sync, and reloads the runtime. Any host with the same tools can run the same skill; the agent is only packaging.
+
 ### Try it
 
 The demo is a Helm chart, [integrations/kagent/demo/chart](https://github.com/archestra-ai/OpenAPPA/tree/main/integrations/kagent/demo/chart): a gated `cluster-ops` agent with a delegated `log-analyst`, the shared `appa-runtime` with its relay and mock externals in one pod, the demo tools, and every demo case pre-seeded as a real chat in the kagent dashboard — an ordinary read, the exfiltration ask that leaks nothing, the agent taking a sanitized remedy on its own, the chat steering it to accept the change or to decline, a forged offer, the on-call approval, the annotator, the release window in and out of window, the remote change board approving, denying and staying silent, delegation, a delegation the policy never names, and gated ingress. It installs into any cluster running kagent 0.9.12 with `controller.agentImage` set to `appa-kagent-quickstart`; the model key is the one input, in a value or pasted in the dashboard afterwards — the Secret is named after the ModelConfig, so the dashboard's Models → Edit flow supplies it. The default image references name this repository's release tags; the chart README shows how to build the images from source and point the image values at your own registry.

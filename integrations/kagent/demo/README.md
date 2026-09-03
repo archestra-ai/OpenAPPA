@@ -24,7 +24,10 @@ helm upgrade --install appa-kagent-demo ./integrations/kagent/demo/chart \
 kubectl -n kagent port-forward svc/kagent-ui 8901:8080
 ```
 
-Then open `http://localhost:8901/agents/kagent/cluster-ops/chat`. The
+Then open `http://localhost:8901/agents/kagent/cluster-ops/chat`. Say
+`init` in `http://localhost:8901/agents/kagent/appa-guide/chat` to
+inventory cluster MCP tools and propose fleet policy; the apply raises
+the kagent Approve card, and a new gated chat uses the reloaded policy. The
 showcase chats are already there — replay them in
 [SCENARIOS.md](SCENARIOS.md) terms, or run your own: the exfiltration
 ask is denied at the secret read and leaks nothing, the crash-log

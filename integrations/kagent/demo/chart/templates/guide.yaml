@@ -1,0 +1,52 @@
+{{- if .Values.guide.enabled }}
+# The appa-guide agent: packaging around the routing skill at
+# integrations/skills/appa-guide. The skill (git-ref attached) does the
+# configuring; this agent guarantees its prerequisites — the kagent tool
+# server's k8s tools, the shared runtime as its own gate, and the model.
+# The fleet policy puts k8s_apply_manifest behind human-approval, so the
+# apply raises kagent's Approve/Reject card.
+apiVersion: kagent.dev/v1alpha2
+kind: Agent
+metadata:
+  name: appa-guide
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "appa-demo.labels" . | nindent 4 }}
+spec:
+  type: Declarative
+  description: Configure OpenAPPA for this cluster. Say init or adjust.
+  skills:
+    gitRefs:
+      - url: {{ .Values.guide.skill.git.url | quote }}
+        ref: {{ .Values.guide.skill.git.ref | quote }}
+        path: {{ .Values.guide.skill.git.path | quote }}
+        name: {{ .Values.guide.skill.name | quote }}
+  declarative:
+    systemMessage: |
+      You configure OpenAPPA for this kagent cluster. When the operator
+      says init or adjust, or asks to configure tools or policy, invoke
+      the appa-guide skill and follow it exactly; it directs you to
+      references/kagent.md — read that file with read_file before you
+      act. Work only through your k8s tools and read_file. Do not
+      change the policy until the operator approves the proposal in
+      chat; applying then raises the kagent Approve card. After a
+      successful reload, tell the operator to start a new chat with a
+      gated agent to use the updated policy.
+    modelConfig: {{ .Values.modelConfig.name }}
+    tools:
+      - type: McpServer
+        mcpServer:
+          name: {{ .Values.guide.toolServer | quote }}
+          kind: RemoteMCPServer
+          toolNames:
+            - k8s_get_resources
+            - k8s_get_resource_yaml
+            - k8s_apply_manifest
+            - k8s_execute_command
+    deployment:
+      env:
+        - name: APPA_RUNTIME_URL
+          value: {{ include "appa-demo.runtimeUrl" . | quote }}
+        - name: APPA_KAGENT_OPENAI_REASONING_EFFORT
+          value: {{ .Values.runtime.reasoningEffort | quote }}
+{{- end }}

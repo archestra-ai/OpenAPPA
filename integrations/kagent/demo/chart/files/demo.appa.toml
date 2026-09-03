@@ -147,6 +147,43 @@ delta = {}
 name = "appa_memory_persist"
 delta = {}
 
+# --- the configuring actor: the appa-guide agent ---
+# The guide agent runs the routing skill against these tools. Reads are
+# unrestricted; the policy write sits behind a person (kagent's Approve
+# card is the oncall authority's channel), and exec needs trusted data.
+# The skill's file helpers that it never uses (bash, write_file,
+# edit_file) stay undeclared, so they are refused.
+[[policy.tool]]
+name = "k8s_get_resources"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_get_resource_yaml"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_apply_manifest"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["human-approval"]
+
+[[policy.tool]]
+name = "k8s_execute_command"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+
+[[policy.tool]]
+name = "appa-guide"
+delta = {}
+
+[[policy.tool]]
+name = "read_file"
+delta = {}
+
 # The runtime can withhold these tools' results and deliver a sanitized
 # derivation instead (the after-tool replacement the plugin enforces) —
 # the application point the output sanitizers register on.

@@ -343,6 +343,9 @@ jobs:
           --with "a2a-sdk>=0.3.23,<0.4" --with "google-adk==1.31.1" --with "mcp>=1.25,<2"
           pytest integrations/kagent/appa-kagent-adk/tests
 
+      - name: appa-guide skill tests
+        run: uv run --project integrations/kagent/appa-kagent-adk pytest integrations/skills/appa-guide/tests
+
   kagent-go-checks:
     name: kagent Go Checks
     runs-on: ubuntu-latest
