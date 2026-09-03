@@ -1,14 +1,76 @@
 # Optional Claude Code rules for Bash and Read.
+#
+# Order matters: the first matching rule wins, so the argument-selected
+# credential rules come before the bare `Bash` and `Read` rules. A name written
+# with a selector is declared, and a call no selector matches is refused rather
+# than sent to a root's `*` fallback, so the bare rules at the end of each
+# group are what keep ordinary commands and reads running.
 
 [policy]
 version = 2
 
-# The stock model annotator produces Bash's complete contract before dispatch:
-# the trust rank of its output and the trust and review marks the command
-# requires. `audiences = []` closes the mandate to `public`: an annotation
-# names literal readers only, never `self` or `internal`, so who may see a
-# command's output is decided by static rules in the root config, not by the
-# model.
+# --- Bash: a command naming the requester's credentials is refused ---
+
+# One contract judges one call, and a compound command could read a secret and
+# send it in the same call, so a command that names a credential path is
+# refused outright. `blocked` is a mark no authority grants: the refusal has
+# no remedy. This is known-path blocking, not containment: `env`, an
+# interpreter, or an unlisted path still reach a secret without naming it.
+[[policy.tool]]
+name = "Bash(command:*.claude.json*)"
+requires = { attention = ["blocked"] }
+delta = {}
+
+[[policy.tool]]
+name = "Bash(command:*.credentials.json*)"
+requires = { attention = ["blocked"] }
+delta = {}
+
+[[policy.tool]]
+name = "Bash(command:*.ssh/*)"
+requires = { attention = ["blocked"] }
+delta = {}
+
+[[policy.tool]]
+name = "Bash(command:*.aws/credentials*)"
+requires = { attention = ["blocked"] }
+delta = {}
+
+[[policy.tool]]
+name = "Bash(command:*.netrc*)"
+requires = { attention = ["blocked"] }
+delta = {}
+
+[[policy.tool]]
+name = "Bash(command:*.config/gh/hosts.yml*)"
+requires = { attention = ["blocked"] }
+delta = {}
+
+[[policy.tool]]
+name = "Bash(command:*id_rsa*)"
+requires = { attention = ["blocked"] }
+delta = {}
+
+[[policy.tool]]
+name = "Bash(command:*id_ed25519*)"
+requires = { attention = ["blocked"] }
+delta = {}
+
+[[policy.tool]]
+name = "Bash(command:*/proc/*environ*)"
+requires = { attention = ["blocked"] }
+delta = {}
+
+[[policy.tool]]
+name = "Bash(command:*/Library/Keychains/*)"
+requires = { attention = ["blocked"] }
+delta = {}
+
+# The stock model annotator produces every other command's complete contract
+# before dispatch: the trust rank of its output and the trust and review marks
+# the command requires. `audiences = []` closes the mandate to `public`: an
+# annotation names literal readers only, never `self` or `internal`, so who
+# may see a command's output is decided by static rules, not by the model.
 [[policy.annotator]]
 name = "claude-code.bash-requirements"
 builtin = "claude-code"
@@ -19,17 +81,20 @@ name = "Bash"
 description = "Runs one shell command and returns its output."
 annotator = "claude-code.bash-requirements"
 
-# Reading the requester's own secrets narrows the session to `self`: hidden
-# paths, credential files, private keys, and system secret locations. A
-# selector matches the argument as written, not the resolved path or its
-# case, so a symlink or an alias (`~`, `..`) to one of these reads under its
-# written name: over-narrowing is the safe direction, a spelling these
-# selectors miss is the gap. Every other path keeps the session's label. No
-# rule blocks a read or lowers its trust. The list is kept short on purpose:
-# every audience-narrowing rule counts against the planner cap of every
-# annotated tool it is composed with.
+# --- Read: the requester's own secrets are `self` data ---
+
+# Reading a hidden path, a credential file, a private key, or a system secret
+# location narrows the session to `self`. A selector matches the argument as
+# written, not the resolved path or its case, so a symlink or an alias (`~`,
+# `..`) to one of these reads under its written name: over-narrowing is the
+# safe direction, a spelling these selectors miss is the gap. Every other path
+# keeps the session's label. No rule blocks a read or lowers its trust.
 [[policy.tool]]
 name = "Read(file_path:*/.*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:.*)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
@@ -41,15 +106,15 @@ name = "Read(file_path:*secrets*)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:*/auth.json)"
+name = "Read(file_path:*auth.json)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:*/token)"
+name = "Read(file_path:*token)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:*/token.json)"
+name = "Read(file_path:*token.json)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
@@ -62,6 +127,10 @@ delta = { audience = ["self"] }
 
 [[policy.tool]]
 name = "Read(file_path:*/id_*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "Read(file_path:id_*)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]

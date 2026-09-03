@@ -17,87 +17,22 @@
 # Who may see a value is the built-in audience chain `self` ⊆ `internal`
 # ⊆ `public`: `self` is the person running this session, `internal` their
 # organization, `public` the unrestricted state every session starts in.
-# Reading the requester's own credentials narrows the session to `self`;
-# the tools that publish or transmit beyond this machine require `public`,
-# so a narrowed session cannot reach them. The chain works without a
+# The tools that publish or transmit beyond this machine require `public`,
+# so a session narrowed by a battery's reads — the Claude Code battery
+# labels the requester's credentials `self`, the Slack battery labels
+# channel history `internal` — cannot reach them. The chain works without a
 # directory: `self` and `internal` are symbolic, and only a rule naming an
 # individual recipient needs a source to check them (see the end of this
-# file).
+# file). Bash and Read are not named here on purpose: a name written with
+# an argument selector is declared, and a call no selector matches is
+# refused rather than sent to the `*` fallback, so their rules live in the
+# battery beside its bare `Bash` and `Read` rules.
 #
 # The built-in tool set varies by Claude Code version; regenerate the
 # list from a live session when it drifts.
 
 [policy]
 version = 2
-
-# --- the requester's credentials on this machine: `self` data ---
-
-# Order matters: the first matching contract wins, so these argument-selected
-# rules come before the plain tool rules and the `*` fallback below. Reading a
-# credential with Read narrows the session to `self`. A Bash command that names
-# one is refused outright — one contract judges one call, and a compound
-# command could read and send in the same call. `blocked` is a mark no
-# authority grants, so the refusal has no remedy. This is known-path blocking,
-# not containment: `env`, an interpreter, or an unlisted path still reach a
-# secret without naming it.
-
-[[policy.tool]]
-name = "Read(file_path:*/.claude.json)"
-delta = { audience = ["self"] }
-
-[[policy.tool]]
-name = "Read(file_path:*/.claude/*settings.json)"
-delta = { audience = ["self"] }
-
-[[policy.tool]]
-name = "Read(file_path:*.credentials.json)"
-delta = { audience = ["self"] }
-
-[[policy.tool]]
-name = "Read(file_path:*/.ssh/*)"
-delta = { audience = ["self"] }
-
-[[policy.tool]]
-name = "Read(file_path:*/.aws/credentials)"
-delta = { audience = ["self"] }
-
-[[policy.tool]]
-name = "Read(file_path:*/.netrc)"
-delta = { audience = ["self"] }
-
-[[policy.tool]]
-name = "Read(file_path:*/.config/gh/hosts.yml)"
-delta = { audience = ["self"] }
-
-[[policy.tool]]
-name = "Bash(command:*/.claude.json*)"
-requires = { attention = ["blocked"] }
-delta = {}
-
-[[policy.tool]]
-name = "Bash(command:*.credentials.json*)"
-requires = { attention = ["blocked"] }
-delta = {}
-
-[[policy.tool]]
-name = "Bash(command:*/.ssh/*)"
-requires = { attention = ["blocked"] }
-delta = {}
-
-[[policy.tool]]
-name = "Bash(command:*/.aws/credentials*)"
-requires = { attention = ["blocked"] }
-delta = {}
-
-[[policy.tool]]
-name = "Bash(command:*/.netrc*)"
-requires = { attention = ["blocked"] }
-delta = {}
-
-[[policy.tool]]
-name = "Bash(command:*/.config/gh/hosts.yml*)"
-requires = { attention = ["blocked"] }
-delta = {}
 
 # --- tools whose results stay inside the session's trust boundary ---
 

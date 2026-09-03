@@ -1,10 +1,13 @@
 mod common;
-use common::repo_root;
+use common::{actor, last_offer, propose, ran, raw, repo_root, root};
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use appa_runtime::api::Runtime;
+use appa_runtime::api::{RemedyOutcome, Runtime};
 use appa_runtime::config::Config;
+use appa_runtime::hooks;
+use appa_runtime_api::{HookDecision, HookEvent, ProposedCall};
 
 fn toml_files(dir: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
@@ -44,9 +47,9 @@ fn the_complete_battery_example_opens() {
 }
 
 #[cfg(unix)]
-#[test]
-fn the_initialized_default_composes_with_the_claude_code_battery() {
-    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+/// The initialized default with the Claude Code battery included, as `appa init` composes
+/// them: the battery's rules run before the default's.
+fn composed_with_the_battery(dir: &tempfile::TempDir) -> Config {
     let battery_dir = dir.path().join("batteries/claude-code");
     std::fs::create_dir_all(&battery_dir).expect("the battery directory is created");
 
@@ -66,7 +69,13 @@ fn the_initialized_default_composes_with_the_claude_code_battery() {
     )
     .expect("the initialized config includes the battery");
 
-    let config = Config::load(&root).expect("the initialized config and battery compose");
+    Config::load(&root).expect("the initialized config and battery compose")
+}
+
+#[test]
+fn the_initialized_default_composes_with_the_claude_code_battery() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let config = composed_with_the_battery(&dir);
     let tools = config.policy_file().value()["tool"]
         .as_array()
         .expect("the composed tools are an array");
@@ -85,9 +94,67 @@ fn the_initialized_default_composes_with_the_claude_code_battery() {
         .iter()
         .filter(|tool| tool["name"].as_str() == Some("Read"))
         .collect::<Vec<_>>();
-    assert_eq!(read.len(), 1, "the plain Read rule composes once, after the battery's selectors");
-    assert!(read[0].get("annotator").is_none(), "Read is static: no annotator names a reader");
+    assert_eq!(
+        read.len(),
+        1,
+        "the plain Read rule composes once, after the battery's selectors"
+    );
+    assert!(
+        read[0].get("annotator").is_none(),
+        "Read is static: no annotator names a reader"
+    );
 
     let database = dir.path().join("appa.db");
     Runtime::open(config, database, None).expect("the composed deployment opens");
+}
+
+fn call(tool: &str, argument: &str, value: &str) -> ProposedCall {
+    ProposedCall {
+        tool: tool.to_string(),
+        arguments: raw(serde_json::json!({ argument: value })),
+    }
+}
+
+/// A credential named relatively — `.env`, `cat .netrc` — is judged like its absolute
+/// spelling: the read narrows the session to `self`, after which a public sink is out of
+/// reach, and the command is refused with no remedy.
+#[tokio::test]
+async fn the_battery_judges_relative_credential_paths_like_absolute_ones() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let config = composed_with_the_battery(&dir);
+    let runtime = Arc::new(
+        Runtime::open(config, dir.path().join("appa.db"), None).expect("the composed deployment opens"),
+    );
+    assert_eq!(
+        hooks::handle(&runtime, HookEvent::SessionStart { root: root() }).await,
+        HookDecision::Ack
+    );
+
+    for command in ["cat .netrc", "cat ~/.ssh/id_ed25519", "cat /home/me/.aws/credentials"] {
+        let refused = propose(&runtime, call("Bash", "command", command)).await;
+        let HookDecision::DenyCall { offers, .. } = refused else {
+            panic!("`{command}` is refused, got {refused:?}");
+        };
+        assert!(offers.is_empty(), "`{command}` is refused without a remedy");
+    }
+
+    let read = call("Read", "file_path", ".env");
+    let narrowing = propose(&runtime, read.clone()).await;
+    let HookDecision::DenyCall { feedback, .. } = narrowing else {
+        panic!("reading `.env` is offered as a narrowing to `self`, got {narrowing:?}");
+    };
+    assert!(matches!(
+        runtime.execute_remedy(&actor(), last_offer(&feedback)).await,
+        RemedyOutcome::Authorized { .. }
+    ));
+    assert_eq!(propose(&runtime, read.clone()).await, HookDecision::AllowCall { spawn: None });
+    ran(&runtime, read).await;
+
+    assert!(
+        matches!(
+            propose(&runtime, call("Artifact", "file_path", "page.html")).await,
+            HookDecision::DenyCall { .. }
+        ),
+        "a session narrowed to `self` cannot publish"
+    );
 }
