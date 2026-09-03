@@ -116,7 +116,6 @@ jobs:
         run: cargo build --release --locked --package appa --target "$TARGET"
 
       - name: Verify release version
-        if: inputs.expected_version != ''
         env:
           EXECUTABLE: ${{ matrix.executable }}
           EXPECTED_VERSION: ${{ inputs.expected_version }}
@@ -182,22 +181,39 @@ jobs:
           mkdir verify
           tar -xzf "dist/${ARCHIVE}" -C verify
           cd verify
-          test -x appa
-          ./appa init claude-code --help >/dev/null
-          # [profile.release] pins debug-assertions = false, so neither
-          # debug-only seam is readable here. A release binary that honoured
-          # them could be pointed at another release's plugin.
-          hostile=$(APPA_PLUGIN_SHA256=$(printf 'a%.0s' {1..64}) \
-            APPA_RELEASE_BASE_URL=http://127.0.0.1:9 \
-            APPA_SOURCE_ARCHIVE_BASE_URL=http://127.0.0.1:9 \
-            APPA_ENDPOINT=http://127.0.0.1:9999 \
-            ./appa init claude-code 2>&1 || true)
+          test -x "./${EXECUTABLE}"
+          "./${EXECUTABLE}" init claude-code --help >/dev/null
+
+          # Every debug-only seam is read through one gate that
+          # [profile.release] pins shut, so a released binary must ignore a
+          # malformed APPA_ENDPOINT and carry on; one that refuses the value
+          # read it, and could be pointed at another release's plugin.
+          #
+          # init exits non-zero on both outcomes, so its output is the
+          # assertion and the exit code is discarded. The progress line is
+          # printed immediately after the endpoint resolves, which makes its
+          # presence the proof that the seam was ignored. Every output is
+          # classified, including the unrecognised one: this probe used to pass
+          # on an empty answer, which is how it stayed inert for four releases.
+          hostile=$(APPA_ENDPOINT=http://127.0.0.1:0 "./${EXECUTABLE}" init claude-code 2>&1 || true)
           case "$hostile" in
-            *"development build"*|*"127.0.0.1:9"*)
-              echo "::error::the released binary honoured a debug-only seam: $hostile"
+            *"is not a usable runtime endpoint"*)
+              echo "::error::the released binary honoured APPA_ENDPOINT: ${hostile}"
+              exit 1
+              ;;
+            "appa init: "*) ;;
+            *)
+              echo "::error::init stopped before the probe could prove anything: ${hostile}"
               exit 1
               ;;
           esac
+
+          if command -v sha256sum >/dev/null 2>&1; then
+            expected_digest=$(sha256sum "./${EXECUTABLE}" | cut -d' ' -f1)
+          else
+            expected_digest=$(shasum -a 256 "./${EXECUTABLE}" | cut -d' ' -f1)
+          fi
+
           "./${EXECUTABLE}" runtime >runtime.stdout.log 2>runtime.stderr.log &
           runtime_pid=$!
           cleanup() {
@@ -209,6 +225,15 @@ jobs:
             if health="$(curl --fail --silent --max-time 1 http://127.0.0.1:8787/health 2>/dev/null)"; then
               test "$health" = "ok"
               test -s appa.toml
+              # Health alone only proves something holds the port. The
+              # fingerprint route answers with the running executable's own
+              # digest, so it proves the responder is the binary just unpacked.
+              served_digest=$(curl --fail --silent --max-time 5 \
+                http://127.0.0.1:8787/binary-fingerprint | head -n 1 | cut -d' ' -f1)
+              if [ "$served_digest" != "$expected_digest" ]; then
+                echo "::error::127.0.0.1:8787 is not this build: answered ${served_digest:-nothing}, expected ${expected_digest}"
+                exit 1
+              fi
               exit 0
             fi
             kill -0 "$runtime_pid" 2>/dev/null || break
@@ -260,33 +285,47 @@ jobs:
             if (-not (Test-Path (Join-Path $package "appa.toml"))) {
               throw "Extracted runtime did not create appa.toml"
             }
-            $cli = Join-Path $package "appa.exe"
+            $cli = Join-Path $package $env:EXECUTABLE
             if (-not (Test-Path $cli)) {
-              throw "Extracted package does not contain appa.exe"
+              throw "Extracted package does not contain $env:EXECUTABLE"
+            }
+            # Health alone only proves something holds the port. The fingerprint
+            # route answers with the running executable's own digest, so it
+            # proves the responder is the binary just unpacked.
+            $expectedDigest = (Get-FileHash -Path $cli -Algorithm SHA256).Hash.ToLower()
+            $answer = Invoke-RestMethod -Uri "http://127.0.0.1:8787/binary-fingerprint" -TimeoutSec 5
+            if ("$answer" -notmatch "^(?<digest>[0-9a-f]{64}) ") {
+              throw "127.0.0.1:8787 did not answer with a build fingerprint: $answer"
+            }
+            if ($Matches.digest -ne $expectedDigest) {
+              throw "127.0.0.1:8787 is not this build: answered $($Matches.digest), expected $expectedDigest"
             }
             & $cli init claude-code --help | Out-Null
             if ($LASTEXITCODE -ne 0) {
-              throw "Extracted appa.exe does not expose init claude-code"
+              throw "Extracted $env:EXECUTABLE does not expose init claude-code"
             }
-            # A released binary must ignore both debug-only seams: the digest
-            # it accepts is compiled in, so a hostile environment cannot point
-            # it at another release's plugin.
-            $env:APPA_PLUGIN_SHA256 = "a" * 64
-            $env:APPA_RELEASE_BASE_URL = "http://127.0.0.1:9"
-            $env:APPA_SOURCE_ARCHIVE_BASE_URL = "http://127.0.0.1:9"
-            $env:APPA_ENDPOINT = "http://127.0.0.1:9999"
+            # Every debug-only seam is read through one gate that
+            # [profile.release] pins shut, so a released binary must ignore a
+            # malformed APPA_ENDPOINT and carry on; one that refuses the value
+            # read it, and could be pointed at another release's plugin.
+            #
+            # The progress line is printed immediately after the endpoint
+            # resolves, which makes its presence the proof that the seam was
+            # ignored. All three outcomes are classified, the unrecognised one
+            # included: this probe used to pass on an empty answer, which is how
+            # it stayed inert for four releases.
+            $env:APPA_ENDPOINT = "http://127.0.0.1:0"
             $hostile = (& $cli init claude-code 2>&1 | Out-String)
-            $env:APPA_PLUGIN_SHA256 = $null
-            $env:APPA_RELEASE_BASE_URL = $null
-            $env:APPA_SOURCE_ARCHIVE_BASE_URL = $null
             $env:APPA_ENDPOINT = $null
-            if ($hostile -match "development build" -or $hostile -match "127\.0\.0\.1:9") {
-              throw "the released binary honoured a debug-only seam: $hostile"
+            if ($hostile -match "is not a usable runtime endpoint") {
+              throw "the released binary honoured APPA_ENDPOINT: $hostile"
             }
-            # The plugin asset is uploaded only after every matrix job passes,
-            # so this probe normally exits non-zero on the first publication
-            # attempt. Its output is the assertion; do not let the expected
-            # native exit code become the PowerShell step's exit code.
+            if ("$hostile" -notmatch "^appa init: ") {
+              throw "init stopped before the probe could prove anything: $hostile"
+            }
+            # init exits non-zero on the path just proven correct, so the
+            # expected native exit code is cleared here and only here, after the
+            # classification above has already thrown on every other outcome.
             $global:LASTEXITCODE = 0
           } finally {
             $process.Refresh()
