@@ -13,8 +13,7 @@ on:
         type: string
       expected_version:
         description: Version the built binary must report
-        required: false
-        default: ""
+        required: true
         type: string
       plugin_sha256:
         description: SHA-256 of the plugin artifact these binaries must accept
@@ -22,55 +21,42 @@ on:
         type: string
 permissions: {}
 
-concurrency:
-  group: build-appa-runtime-${{ inputs.release_ref }}
-  cancel-in-progress: false
-
 jobs:
   build:
-    name: Build ${{ matrix.os }} ${{ matrix.arch }}
+    name: Build ${{ matrix.target }}
     strategy:
       fail-fast: false
       matrix:
         include:
+          # Both Linux runners are pinned to 22.04 because the packaged binary
+          # must load on glibc 2.34; a newer image links a newer symbol set and
+          # fails the baseline check below.
           - runner: ubuntu-22.04
-            os: Linux
-            arch: amd64
             target: x86_64-unknown-linux-gnu
             executable: appa
             asset: appa-x86_64-unknown-linux-gnu
             archive: appa-x86_64-unknown-linux-gnu.tar.gz
           - runner: ubuntu-22.04-arm
-            os: Linux
-            arch: arm64
             target: aarch64-unknown-linux-gnu
             executable: appa
             asset: appa-aarch64-unknown-linux-gnu
             archive: appa-aarch64-unknown-linux-gnu.tar.gz
           - runner: macos-15-intel
-            os: macOS
-            arch: amd64
             target: x86_64-apple-darwin
             executable: appa
             asset: appa-x86_64-apple-darwin
             archive: appa-x86_64-apple-darwin.tar.gz
           - runner: macos-15
-            os: macOS
-            arch: arm64
             target: aarch64-apple-darwin
             executable: appa
             asset: appa-aarch64-apple-darwin
             archive: appa-aarch64-apple-darwin.tar.gz
           - runner: windows-latest
-            os: Windows
-            arch: amd64
             target: x86_64-pc-windows-msvc
             executable: appa.exe
             asset: appa-x86_64-pc-windows-msvc
             archive: appa-x86_64-pc-windows-msvc.zip
           - runner: windows-11-arm
-            os: Windows
-            arch: arm64
             target: aarch64-pc-windows-msvc
             executable: appa.exe
             asset: appa-aarch64-pc-windows-msvc

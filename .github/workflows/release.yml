@@ -14,10 +14,6 @@ on:
         description: Existing version without the v prefix (for example, 0.2.0)
         required: false
         type: string
-      tag_name:
-        description: Existing release tag (for example, v0.2.0)
-        required: false
-        type: string
 
 permissions: {}
 
@@ -62,7 +58,6 @@ jobs:
           GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
           INPUT_PUBLISH_EXISTING_RELEASE: ${{ inputs.publish_existing_release }}
-          INPUT_TAG_NAME: ${{ inputs.tag_name }}
           INPUT_VERSION: ${{ inputs.version }}
         run: |
           if [ "$INPUT_PUBLISH_EXISTING_RELEASE" = "true" ]; then
@@ -70,8 +65,7 @@ jobs:
               echo "::error::version is required and must be a release version"
               exit 1
             fi
-            tag_name=${INPUT_TAG_NAME:-v${INPUT_VERSION}}
-            test "$tag_name" = "v${INPUT_VERSION}"
+            tag_name=v${INPUT_VERSION}
             is_draft=$(gh release view "$tag_name" --json isDraft --jq '.isDraft')
             if [ "$is_draft" != "true" ]; then
               echo "::error::${tag_name} is not a draft release"
