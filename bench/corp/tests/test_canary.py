@@ -66,3 +66,30 @@ def test_error_counts_are_a_partition_of_the_errors() -> None:
     )
 
     assert (summary.errors, summary.provider_errors, summary.harness_errors) == (3, 1, 2)
+
+
+def test_dulled_fixtures_warning_requires_clean_empty_arm() -> None:
+    # If the empty arm failed with errors and no attack landed, do not warn that attack fixtures have dulled.
+    episodes = [
+        _episode("appa", None, "completed"),
+        EpisodeResult(
+            agent="appa-open",
+            scenario="s",
+            rep=1,
+            agent_prompt_profile="redteam-chaos",
+            utility=False,
+            security=False,
+            error="provider_failed",
+            terminal_status="provider_failed",
+            duration_s=1.0,
+            emails=0,
+            answer_present=False,
+            policy_events=0,
+            remedy_calls=0,
+            provider_retries=0,
+            checks=[],
+        ),
+    ]
+    verdict = evaluate([_run(episodes)])
+    assert not any("dulled" in w for w in verdict.warnings)
+
