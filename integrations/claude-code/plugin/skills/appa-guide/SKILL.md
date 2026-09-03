@@ -1,6 +1,7 @@
 ---
 name: appa-guide
 description: Guide a user through configuring OpenAPPA for Claude Code. Use for an initial sync of installed tools, after MCP servers change, or when the user wants to adjust how OpenAPPA treats a tool, data source, destination, battery, or approval.
+argument-hint: "init|adjust"
 ---
 
 OpenAPPA configuration helper. Request: $ARGUMENTS
