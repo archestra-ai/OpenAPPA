@@ -103,9 +103,10 @@ The runtime address is
 1. Run `appa describe --config <live-path>` before reading or changing
    the config. It is read-only and succeeds when the config is missing or
    invalid. Record its config state, effective policy tools, included battery
-   names, audience sources, and named audiences. Treat its
-   session integrations, tools, and accounts as unavailable when it says so;
-   never turn an unavailable fact into an empty inventory.
+   names, authority implementations and permits, audience sources, and named
+   audiences. Treat its session integrations, tools, and accounts as
+   unavailable when it says so; never turn an unavailable fact into an empty
+   inventory.
 2. Read the root config. Record its tool rules and included batteries, and
    preserve its comments. If `appa describe` and the file disagree, stop and
    report the mismatch instead of guessing.
@@ -184,6 +185,38 @@ matched battery covers.
   `delta = {}`.
 - Every new tool entry needs `delta`, including entries with `requires`.
 
+### Make disclosure review complete
+
+An audience requirement determines whether the trajectory already permits the
+destination; a fresh-attention requirement requires a fresh authority ruling
+on every call. The checks are independent. An attention permit cannot clear an
+audience gap.
+
+During `init`, check every current or proposed contract that can require the
+public audience. If `appa describe` lists a `builtin hitl` authority that
+permits attention but cannot review public audience expansion, propose
+expanding that authority to review the disclosure. Keep its name, binding,
+tags, and existing permits. If tags restrict the authority, clarify that its
+disclosure reviews remain limited to matching tools. If multiple authorities
+qualify and the choice changes who reviews the call, ask one focused question.
+
+Do not interpret a missing audience permit alone as an intentional hard
+denial. Preserve a hard denial only if the user explicitly requested it, if a
+root rule or comment says that the disclosure cannot be remedied, or if a mark
+is deliberately unserved, such as `blocked`. Never assign an unserved mark to
+an authority unless the user requests to make those calls reviewable.
+
+Do not add `requires.attention` solely to trigger review for an audience
+expansion. The audience gap routes to an authorized reviewer on its own. Keep
+or add attention only when the call requires independent review regardless of
+destination.
+
+In the proposal, describe the outcome rather than the wiring: "When a call
+would disclose private session data publicly, OpenAPPA will show you the exact
+call and ask whether to allow that disclosure once." If the user explicitly
+chose a hard denial, state that the disclosure remains blocked with no
+approval option.
+
 ### Ask about ambiguity
 
 Use tool names and descriptions when their behavior is clear. If you still
@@ -241,15 +274,18 @@ End with: **Approve, or tell me what to change.** Wait for the reply.
 After approval:
 
 1. Run `appa describe --config <live-path>` again. If the config,
-   batteries, audience sources, or named audiences changed since the
-   proposal, revise the proposal and ask for approval again.
+   batteries, authorities, audience sources, or named audiences changed since
+   the proposal, revise the proposal and ask for approval again.
 2. Copy each approved battery directory beside the root config under
    `batteries/<name>/` and add its `appa.toml` to the root `include` list. Use
    the installed marketplace clone so supporting scripts stay on the same
    APPA version. Leave an existing copied battery unchanged unless the user
    asked to refresh it.
 3. Add any root support the battery requires, such as its human-approval
-   authority. This is part of making the approved behavior work; describe the
+   authority. When an existing `builtin hitl` authority already handles the
+   relevant attention mark but cannot review public audiences, expand its
+   permits instead of adding another authority. Do not modify an explicit hard
+   denial. This is part of making the approved behavior work; describe the
    behavior to the user, not this wiring.
 4. Add the approved uncovered-tool rules to the root config. Do not remove
    overlapping root rules; they intentionally override batteries.
@@ -263,8 +299,9 @@ If the requested outcome is ambiguous, ask one focused question and wait. Do
 not guess.
 
 1. Run `appa describe --config <live-path>`. Record the config state, batteries,
-   policy tools, audience sources, and named audiences. Keep session tools
-   and accounts unavailable when the command says they are unavailable.
+   policy tools, authority implementations and permits, audience sources, and
+   named audiences. Keep session tools and accounts unavailable when the
+   command says they are unavailable.
 2. Read the root config and only the included files relevant to the requested
    changes.
 3. For policy syntax or behavior that the current config does not demonstrate,
@@ -280,8 +317,8 @@ not guess.
    `init` mode. Existing root rules still take priority.
 6. End with: **Approve, or tell me what to change.** Wait for the reply.
 7. Run `appa describe --config <live-path>` again. If the config, batteries,
-   audience sources, or named audiences changed since the proposal, revise
-   the proposal and ask for approval again.
+   authorities, audience sources, or named audiences changed since the
+   proposal, revise the proposal and ask for approval again.
 8. Copy each newly approved battery directory from the installed marketplace
    beside the root config under `batteries/<name>/`, add its `appa.toml` to the
    root `include` list, and add any root support it requires. Leave an existing
@@ -308,6 +345,14 @@ refusals. Keep `builtin`, `inputs`, and mandate bounds unchanged unless the user
 approves changing them. A hint can select only values that the mandate admits.
 Add any Authority or other support those values need, and include it in the
 proposal.
+
+When a user wants to make a call blocked by an audience mismatch reviewable,
+prefer an audience requirement and an authority permitted to review that
+expansion. Reuse an existing `builtin hitl` authority if it is the intended
+reviewer. Do not add an attention mark solely to route the review. Keep an
+existing attention requirement when it represents a distinct per-call review;
+if user intent is unclear and removing it would change behavior, ask one
+focused question.
 
 ## Reload and finish
 

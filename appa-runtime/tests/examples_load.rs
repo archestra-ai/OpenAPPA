@@ -143,11 +143,11 @@ fn call(tool: &str, argument: &str, value: &str) -> ProposedCall {
 }
 
 /// A credential named relatively — `.env`, `cat .netrc` — is judged like its absolute
-/// spelling: the read narrows the session to `self`, after which a public sink is out of
-/// reach, and the command is refused with no remedy.
+/// spelling. A Bash call naming one is refused without a remedy. A Read narrows the
+/// trajectory to `self`, after which a public sink requires an exact-call human review.
 #[cfg(unix)]
 #[tokio::test]
-async fn the_battery_judges_relative_credential_paths_like_absolute_ones() {
+async fn the_battery_judges_relative_credentials_and_offers_review_for_public_release() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let config = composed_with_the_battery(&dir);
     let runtime =
@@ -190,11 +190,25 @@ async fn the_battery_judges_relative_credential_paths_like_absolute_ones() {
     );
     ran(&runtime, read).await;
 
+    let publication = propose(&runtime, call("Artifact", "file_path", "page.html")).await;
+    let HookDecision::DenyCall {
+        feedback,
+        offers,
+        review,
+    } = publication
+    else {
+        panic!("a trajectory narrowed to `self` requires review before publishing: {publication:?}");
+    };
+    assert_eq!(
+        offers.len(),
+        1,
+        "the default authority can review the audience expansion"
+    );
+    assert_eq!(review.len(), 1, "the offer is backed by the default human authority");
+    assert!(feedback.contains("Request approval"));
+    assert!(review[0].text.contains("page.html"), "the review shows the exact call");
     assert!(
-        matches!(
-            propose(&runtime, call("Artifact", "file_path", "page.html")).await,
-            HookDecision::DenyCall { .. }
-        ),
-        "a session narrowed to `self` cannot publish"
+        review[0].text.contains("public"),
+        "the review shows the audience expansion it covers"
     );
 }

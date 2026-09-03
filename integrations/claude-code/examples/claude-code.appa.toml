@@ -274,14 +274,16 @@ trust = { from = "suspicious", to = "trusted" }
 [policy.deployment]
 context_control = true
 
-# Batteries can require fresh `hitl` attention before a tool runs. This
-# authority asks the person running the Claude Code session and can satisfy
-# that requirement for one tool call.
+# Batteries and Annotators can require fresh `hitl` attention or a wider
+# audience before a tool runs. This authority shows the person running the
+# Claude Code session the exact call and can approve those gaps for that call.
+# Approval does not change the trajectory's label or authorize later calls.
 [[policy.authority]]
 name = "hitl"
-hint = "Ask the person running this session."
+hint = "Ask the person running this session to review the exact call and any required audience expansion."
 
 [policy.authority.permits]
+audience_missing = ["public"]
 attention = ["hitl"]
 
 [externals]

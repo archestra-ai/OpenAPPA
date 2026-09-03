@@ -54,7 +54,7 @@ use appa_engine::plan::{
 };
 use appa_engine::profile::PolicyFileKey as EnginePolicyFileKey;
 use appa_engine::projection::Views;
-use appa_engine::registry::TrustChain;
+use appa_engine::registry::{Registry, TrustChain};
 use appa_engine::shape::{ReturnMismatch, ReturnShape};
 use appa_engine::transition::Blocked as CoreBlocked;
 /// The engine's own validated view is the runtime's too: the runtime adds no
@@ -1099,8 +1099,8 @@ impl RuntimeEngine {
             .iter()
             .map(|(offer, plan)| (offer_id(offer), *plan))
             .collect();
-        let chain = self.engine.registry().trust_chain();
-        let text = block_feedback(&block.block, &offers, chain, bounds);
+        let registry = self.engine.registry();
+        let text = block_feedback(&block.block, &offers, registry, bounds);
         let review = self.pending_reviews(block, &offers);
         (text, offers.into_iter().map(|(offer, _)| offer).collect(), review)
     }
@@ -2963,12 +2963,40 @@ fn remedy_lines(planned: &PlannedBlock, offers: &[(OfferId, PlanId)], spelling: 
 fn block_feedback(
     planned: &PlannedBlock,
     offers: &[(OfferId, PlanId)],
-    chain: &TrustChain,
+    registry: &Registry,
     bounds: &ReturnBounds,
 ) -> String {
+    let chain = registry.trust_chain();
     let mut reasons = Vec::new();
     for gap in &planned.raw.requirement_gaps {
         reasons.push(terminal_safe(&gap_text(gap)));
+    }
+    let public_expansion_required = planned.raw.requirement_gaps.iter().any(|gap| {
+        matches!(
+            gap,
+            appa_engine::check::Gap::Includes {
+                recipients: DeclaredAudience::Public
+            }
+        )
+    });
+    let fresh_review_available = planned.raw.requirement_gaps.iter().any(|gap| match gap {
+        appa_engine::check::Gap::Attention(mark) => registry
+            .authorities()
+            .iter()
+            .any(|authority| authority.mandate.attends.contains(mark)),
+        _ => false,
+    });
+    let public_expansion_reviewable = registry.authorities().iter().any(|authority| {
+        matches!(
+            authority.mandate.reader_ceiling.as_ref(),
+            Some(DeclaredAudience::Public)
+        )
+    });
+    if public_expansion_required && fresh_review_available && !public_expansion_reviewable {
+        reasons.push(
+            "Fresh review is configured for this call, but no authority can review the required expansion to the public audience."
+                .to_string(),
+        );
     }
     if let Some(narrowing) = &planned.raw.narrowing {
         reasons.extend(narrowing_feedback(narrowing, chain));
@@ -3085,10 +3113,11 @@ fn fork_advice_text(advice: ForkAdvice, remedies_required: bool) -> String {
 mod tests {
     use super::{
         EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Next, OfferId, OfferNonce, ProposedCall,
-        Resolution, RuntimeEngine, SanitizerSubject, TrajectoryId, audience_wire, engine_id, remedy_instruction,
-        remedy_lines, terminal_safe,
+        Resolution, ReturnBounds, RuntimeEngine, SanitizerSubject, TrajectoryId, audience_wire, block_feedback,
+        engine_id, remedy_instruction, remedy_lines, terminal_safe,
     };
     use crate::consult::{AnnotationAnswer, HistoryEntry, RequiredAudienceAnswer, SanitizerPoint, WireAudience};
+    use appa_engine::check::{Gap, RawBlock};
     use appa_engine::contract::{AudienceRequirement, HistoryRequirement, RecipientSpec};
     use appa_engine::fact::{EffectKind, EffectSet};
     use appa_engine::label::{Audience, DeclaredAudience, ReaderId, Trust};
@@ -3464,6 +3493,54 @@ mod tests {
             ],
             "the plan with no offer is not shown; the rest carry their own offer"
         );
+    }
+
+    #[test]
+    fn block_explains_when_fresh_review_cannot_cover_public_audience_expansion() {
+        let feedback = |audience_reviewable: bool| {
+            let audience_permit = if audience_reviewable {
+                "audience_missing = [\"public\"]"
+            } else {
+                ""
+            };
+            let policy = appa_policy::Config::from_toml_str(&format!(
+                r#"
+                    version = 2
+                    [[authority]]
+                    name = "reviewer"
+                    [authority.permits]
+                    {audience_permit}
+                    attention = ["hitl"]
+                "#
+            ))
+            .expect("the authority policy compiles");
+            let planned = PlannedBlock {
+                raw: RawBlock {
+                    requirement_gaps: vec![
+                        Gap::Includes {
+                            recipients: DeclaredAudience::Public,
+                        },
+                        Gap::Attention(MarkName::new("hitl")),
+                    ],
+                    narrowing: None,
+                },
+                plans: vec![],
+                fork_advice: None,
+            };
+            block_feedback(
+                &planned,
+                &[],
+                policy.registry(),
+                &ReturnBounds {
+                    label: appa_engine::label::Label::top(),
+                    lowest: Trust::new(0),
+                },
+            )
+        };
+        let diagnostic = "Fresh review is configured for this call, but no authority can review the required expansion to the public audience.";
+
+        assert!(feedback(false).contains(diagnostic));
+        assert!(!feedback(true).contains(diagnostic));
     }
 
     fn restricted(ids: &[&str]) -> Audience {

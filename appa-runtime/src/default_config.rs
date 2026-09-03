@@ -45,6 +45,23 @@ mod tests {
     }
 
     #[test]
+    fn default_human_authority_can_review_public_audience_expansion() {
+        let root: toml::Value = toml::from_str(TEMPLATE).expect("the default config is TOML");
+        let policy = toml::to_string(&root["policy"]).expect("the default policy renders");
+        let compiled = appa_policy::Config::from_toml_str(&policy).expect("the default policy compiles");
+        let authority = compiled
+            .registry()
+            .authority(&appa_engine::names::AuthorityName::new("hitl"))
+            .expect("the default registers the human authority");
+
+        assert!(matches!(
+            authority.mandate.reader_ceiling,
+            Some(appa_engine::label::DeclaredAudience::Public)
+        ));
+        assert_eq!(authority.mandate.attends, [appa_engine::names::MarkName::new("hitl")]);
+    }
+
+    #[test]
     fn platforms_without_the_claude_subprocess_fail_closed_on_undeclared_tools() {
         let config = for_platform(false);
         assert!(!config.contains("name = \"claude-code.bash-requirements\""));
