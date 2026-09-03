@@ -1,7 +1,10 @@
 //! The hook dispatcher: one typed `HookEvent` in, one `HookDecision`
 //! out.
 
+use std::time::Instant;
+
 use appa_runtime_api::{Actor, Codec, HookDecision, HookEvent, ParseRefusal, ProposedCall, Ruling, TrajectoryId};
+use tracing::Instrument;
 
 use crate::api::{
     ChildReturnDecision, EventError, LateOpen, OfferId, Runtime, Session, SpawnResultDecision, ToolCallDecision,
@@ -13,18 +16,124 @@ use crate::api::{
 /// non-2xx status makes the hook command exit 2, which blocks the
 /// action — hooks fail closed.
 pub async fn answer(runtime: &Runtime, codec: &Codec, body: &[u8]) -> (u16, serde_json::Value) {
+    let started = Instant::now();
     let event = match (codec.parse)(body) {
         Ok(Some(event)) => event,
-        Ok(None) => return (200, serde_json::json!({})),
-        Err(ParseRefusal::Unreadable { detail }) => return (400, serde_json::json!({ "error": detail })),
-        Err(ParseRefusal::Malformed { detail }) => return (409, serde_json::json!({ "error": detail })),
+        Ok(None) => {
+            crate::telemetry::record_hook("ignored", "ack", started.elapsed().as_secs_f64());
+            return (200, serde_json::json!({}));
+        }
+        Err(ParseRefusal::Unreadable { detail }) => {
+            observe_parse_refusal("unreadable", started.elapsed().as_secs_f64());
+            return (400, serde_json::json!({ "error": detail }));
+        }
+        Err(ParseRefusal::Malformed { detail }) => {
+            observe_parse_refusal("malformed", started.elapsed().as_secs_f64());
+            return (409, serde_json::json!({ "error": detail }));
+        }
     };
-    let decision = handle(runtime, event.clone()).await;
-    let status = match decision {
-        HookDecision::Refuse { .. } => 409,
-        _ => 200,
-    };
-    (status, (codec.render)(&event, &decision))
+    let observation = HookObservation::from(&event);
+    let span = tracing::info_span!(
+        "appa.hook",
+        "appa.hook.event" = observation.event,
+        "appa.trajectory.id" = %observation.root,
+        "appa.trajectory.child_id" = observation.child.as_deref().unwrap_or(""),
+        "gen_ai.conversation.id" = %observation.root,
+        "gen_ai.tool.name" = observation.tool.as_deref().unwrap_or(""),
+        "appa.decision" = tracing::field::Empty,
+        "error.type" = tracing::field::Empty,
+        "otel.status_code" = tracing::field::Empty,
+    );
+    async move {
+        let decision = handle(runtime, event.clone()).await;
+        let decision_name = decision_name(&decision);
+        tracing::Span::current().record("appa.decision", decision_name);
+        if matches!(decision, HookDecision::Refuse { .. }) {
+            tracing::Span::current().record("error.type", "appa.runtime.refusal");
+            tracing::Span::current().record("otel.status_code", "ERROR");
+        }
+        tracing::info!(
+            "appa.hook.event" = observation.event,
+            "appa.trajectory.id" = %observation.root,
+            "appa.trajectory.child_id" = observation.child.as_deref().unwrap_or(""),
+            "gen_ai.conversation.id" = %observation.root,
+            "gen_ai.tool.name" = observation.tool.as_deref().unwrap_or(""),
+            "appa.decision" = decision_name,
+            "hook decision"
+        );
+        crate::telemetry::record_hook(observation.event, decision_name, started.elapsed().as_secs_f64());
+        let status = match decision {
+            HookDecision::Refuse { .. } => 409,
+            _ => 200,
+        };
+        (status, (codec.render)(&event, &decision))
+    }
+    .instrument(span)
+    .await
+}
+
+struct HookObservation {
+    event: &'static str,
+    root: String,
+    child: Option<String>,
+    tool: Option<String>,
+}
+
+impl From<&HookEvent> for HookObservation {
+    fn from(event: &HookEvent) -> Self {
+        match event {
+            HookEvent::SessionStart { root } => Self::new("session_start", root, None, None),
+            HookEvent::Prompt { actor, .. } => Self::actor("prompt", actor, None),
+            HookEvent::TurnEnd { actor } => Self::actor("turn_end", actor, None),
+            HookEvent::ToolCall { actor, call, .. } => Self::actor("tool_call", actor, Some(&call.tool)),
+            HookEvent::ToolResult { actor, call, .. } => Self::actor("tool_result", actor, Some(&call.tool)),
+            HookEvent::ChildStart { root, child, .. } => Self::new("child_start", root, Some(child), None),
+            HookEvent::ChildEnd { root, child, .. } => Self::new("child_end", root, Some(child), None),
+            HookEvent::SpawnResult { actor, call, .. } => Self::actor("spawn_result", actor, Some(&call.tool)),
+        }
+    }
+}
+
+impl HookObservation {
+    fn actor(event: &'static str, actor: &Actor, tool: Option<&str>) -> Self {
+        Self::new(event, &actor.root, actor.child.as_ref(), tool)
+    }
+
+    fn new(event: &'static str, root: &TrajectoryId, child: Option<&TrajectoryId>, tool: Option<&str>) -> Self {
+        Self {
+            event,
+            root: root.0.clone(),
+            child: child.map(|id| id.0.clone()),
+            tool: tool.map(str::to_owned),
+        }
+    }
+}
+
+fn decision_name(decision: &HookDecision) -> &'static str {
+    match decision {
+        HookDecision::Ack => "ack",
+        HookDecision::AllowCall { .. } => "allow",
+        HookDecision::PassControl => "pass_control",
+        HookDecision::DenyCall { .. } => "deny",
+        HookDecision::Block { .. } => "block",
+        HookDecision::ReplaceOutput { .. } => "replace_output",
+        HookDecision::ChildReturn { .. } => "replace_child_return",
+        HookDecision::Refuse { .. } => "refuse",
+    }
+}
+
+fn observe_parse_refusal(kind: &'static str, elapsed_seconds: f64) {
+    let span = tracing::info_span!(
+        "appa.hook",
+        "appa.hook.event" = "parse",
+        "appa.decision" = "refuse",
+        "error.type" = kind,
+        "otel.status_code" = "ERROR",
+    );
+    span.in_scope(|| {
+        tracing::warn!("error.type" = kind, "hook input refused");
+    });
+    crate::telemetry::record_hook("parse", "refuse", elapsed_seconds);
 }
 
 /// Dispatch one typed event to its session and fold the outcome into
@@ -311,6 +420,38 @@ mod tests {
         let path = dir.path().join("appa.toml");
         std::fs::write(&path, text).expect("the fixture writes");
         Config::load(&path).expect("the minimal fixture validates")
+    }
+
+    #[test]
+    fn hook_observation_carries_identity_without_call_data() {
+        let event = HookEvent::ToolCall {
+            actor: Actor {
+                root: TrajectoryId("cc:root".to_string()),
+                child: Some(TrajectoryId("cc:child".to_string())),
+            },
+            call: ProposedCall {
+                tool: "Write".to_string(),
+                arguments: serde_json::value::RawValue::from_string(r#"{"secret":"not telemetry"}"#.to_string())
+                    .expect("valid arguments"),
+            },
+            spawn: false,
+            ruling: None,
+        };
+
+        let observation = HookObservation::from(&event);
+        assert_eq!(observation.event, "tool_call");
+        assert_eq!(observation.root, "cc:root");
+        assert_eq!(observation.child.as_deref(), Some("cc:child"));
+        assert_eq!(observation.tool.as_deref(), Some("Write"));
+        assert!(!format!("{}{:?}", observation.root, observation.tool).contains("not telemetry"));
+    }
+
+    #[test]
+    fn hook_decisions_have_bounded_telemetry_names() {
+        assert_eq!(decision_name(&HookDecision::Ack), "ack");
+        assert_eq!(decision_name(&deny("no".to_string())), "deny");
+        assert_eq!(decision_name(&block("no".to_string())), "block");
+        assert_eq!(decision_name(&refuse("no".to_string())), "refuse");
     }
 
     fn open_runtime(dir: &tempfile::TempDir) -> Runtime {
