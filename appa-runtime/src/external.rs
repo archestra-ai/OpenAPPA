@@ -1003,6 +1003,7 @@ mod tests {
             name: name.to_string(),
             body: ConsultBody::Annotation {
                 declaration: AnnotationDeclaration {
+                    hint: Some("Classify customer records for the declared audiences.".to_string()),
                     inputs: vec![],
                     trust_ranks: vec!["suspicious".to_string(), "trusted".to_string()],
                     audiences: vec![
@@ -1262,6 +1263,11 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
                 .expect("stdin is one JSON request");
         assert_eq!(request["kind"], "annotation");
         assert_eq!(request["name"], "classifier");
+        assert_eq!(
+            request["declaration"]["hint"],
+            "Classify customer records for the declared audiences."
+        );
+        assert_eq!(request["declaration"]["inputs"], serde_json::json!([]));
         assert_eq!(request["artifact"]["args"], serde_json::json!({"path": "notes.txt"}));
         assert_eq!(
             std::fs::read_to_string(dir.path().join("argument.txt")).unwrap(),

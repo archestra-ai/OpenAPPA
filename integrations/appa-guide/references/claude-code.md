@@ -56,9 +56,10 @@ The runtime address is
 1. Run `appa describe --config <live-path>` before reading or changing
    the config. It is read-only and succeeds when the config is missing or
    invalid. Record its config state, effective policy tools, included battery
-   names, referenced groups, and membership resolver/binding status. Treat its
-   session integrations, tools, and accounts as unavailable when it says so;
-   never turn an unavailable fact into an empty inventory.
+   names, authority implementations and permits, audience sources, and named
+   audiences. Treat its session integrations, tools, and accounts as
+   unavailable when it says so; never turn an unavailable fact into an empty
+   inventory.
 2. Read the root config. Record its tool rules and included batteries, and
    preserve its comments. If `appa describe` and the file disagree, stop and
    report the mismatch instead of guessing.
@@ -108,26 +109,37 @@ the user asks.
 
 Check what each matched battery expects the root config to provide. Record
 anything missing that the battery or complete config needs in order to work.
-A proposal may mention only groups listed under `Referenced groups:` by
-`appa describe`, or a group the user explicitly establishes during this flow
-with a concrete resolver. A registered membership resolver does not prove
-that an arbitrary plausible group name exists.
+Only name a group if `appa describe` lists it as a named audience or the
+proposal configures an audience source for it.
 
 ### Cover the remaining tools
 
 Create root rules only for installed tools that neither the root config nor a
 matched battery covers.
 
-- A tool that reads personal or authenticated data may return data for a
-  configured `@self`. Organization-wide data may return data for a configured
-  `@internal`. If the suitable group was not reported by `appa describe`,
-  leave the tool blocked and explain the missing resolver. Never substitute
-  `"private"`, `@company`, `@employees`, or another plausible reader or group.
+- The built-in audience chain is `self` ⊆ `internal` ⊆ `public`.
+- A tool that reads the requester's private data uses
+  `delta = { audience = ["self"] }`.
+- A tool that reads organization-wide data uses
+  `delta = { audience = ["internal"] }`.
+- Static contracts can reference `self` and `internal` without an audience
+  source. Checking a literal recipient against either audience requires an
+  explicit audience source.
+- Annotator outputs can specify only literal readers, not `self` or `internal`.
+  Use a static contract when output belongs to a built-in audience.
 - A tool that publishes, posts, sends, shares, or uploads requires data that
   may be public: `requires = { audience = { contains = ["public"] } }`.
 - A clearly public read or a tool whose result carries no data uses
   `delta = {}`.
-- Every new tool entry needs `delta`, including entries with `requires`.
+- Every new tool entry needs `delta`, including entries with `requires`. Never
+  fabricate reader names, groups, or audiences.
+
+For public-audience requirements, reuse an appropriate `builtin hitl`
+Authority and extend its audience permit instead of adding attention solely
+to route reviews. Preserve hard denials when the operator requested them, a
+root rule or comment declares them, or a mark is intentionally unserved. If
+multiple Authorities can review a disclosure and the choice determines who
+reviews it, ask the operator.
 
 ### Ask about ambiguity
 
@@ -140,29 +152,27 @@ Wait for the answer before showing the proposal. This answer does not replace
 the approval required below. If nothing is unclear, do not ask.
 
 For Gmail, match only exact tools visible in this session whose names start
-with `mcp__claude_ai_Gmail__`; do not assume a fixed connector tool list. If
-the connected account is not exposed, include the account and intended data
-boundary in the one grouped ambiguity question. A non-consumer email domain
-is only a candidate boundary and still needs confirmation. Never suggest
-`gmail.com` or another consumer-mail domain as `@internal`.
-
-Confirmation alone does not create a working domain-backed group. The current
-membership resolver must expand a group to concrete reader IDs, so Gmail by
-itself cannot implement `@internal` from a domain. Require a real directory
-resolver that can enumerate those readers; otherwise leave internal-dependent
-tools blocked and say why. This boundary answer is separate from approval to
-write or install anything.
+with `mcp__claude_ai_Gmail__`; do not assume a fixed connector tool list. Mail
+the requester reads is `self` data. Checking a named recipient against `self`
+or `internal` requires an audience source. An email domain is not an audience
+source: `internal` needs a directory-backed source that can enumerate its
+members. Without one, say recipient-checked sends are refused as unanswerable
+and leave them so. Do not invent a group. This boundary answer is separate
+from approval to write or install anything.
 
 ### Propose, then apply
 
 Group the proposal by server. Show:
 
+- the proposed starting policy, without comparing it to "current settings";
 - batteries to add, each with its one-sentence explanation;
 - existing behavior that stays unchanged, but only when it affects the result;
 - how the remaining installed tools will behave;
 - installed tools the proposal leaves undeclared: annotated call by call by a
   wildcard tool rule (`name = "*"`) when the config has one, refused otherwise;
 - every configured MCP server whose tools could not be detected.
+
+Add one short `OpenAPPA pieces: <primitives>` line.
 
 Name each configured MCP server that could not be inspected and say: "<server>
 is configured, but I could not inspect its tools in this session." Do not omit
@@ -179,16 +189,18 @@ End with: **Approve, or tell me what to change.** Wait for the reply.
 After approval:
 
 1. Run `appa describe --config <live-path>` again. If the config,
-   batteries, referenced groups, or membership wiring changed since the
-   proposal, revise the proposal and ask for approval again.
+   batteries, Authorities, audience sources, or named audiences changed since
+   the proposal, revise the proposal and ask for approval again.
 2. Copy each approved battery directory beside the root config under
    `batteries/<name>/` and add its `appa.toml` to the root `include` list. Use
    the installed marketplace clone so supporting scripts stay on the same
    APPA version. Leave an existing copied battery unchanged unless the user
    asked to refresh it.
 3. Add any root support the battery requires, such as its human-approval
-   authority. This is part of making the approved behavior work; describe the
-   behavior to the user, not this wiring.
+   Authority. If an existing `builtin hitl` Authority handles the relevant
+   attention mark but cannot review public audiences, expand its permits
+   instead of adding another Authority. Do not modify an explicit hard denial.
+   Describe the resulting behavior, not this wiring.
 4. Add the approved uncovered-tool rules to the root config. Do not remove
    overlapping root rules; they intentionally override batteries.
 5. Reload and report the result as described below.
@@ -201,8 +213,9 @@ If the requested outcome is ambiguous, ask one focused question and wait. Do
 not guess.
 
 1. Run `appa describe --config <live-path>`. Record the config state, batteries,
-   policy tools, referenced groups, and membership wiring. Keep session tools
-   and accounts unavailable when the command says they are unavailable.
+   policy tools, Authorities, audience sources, and named audiences. Keep
+   session tools and accounts unavailable when the command says they are
+   unavailable.
 2. Read the root config and only the included files relevant to the requested
    changes.
 3. For policy syntax or behavior that the current config does not demonstrate,
@@ -211,14 +224,15 @@ not guess.
    If it is unavailable or does not answer the question, stop and report an
    incomplete installation. Do not guess syntax, fetch another version, search
    for an OpenAPPA checkout, or inspect source code.
-4. Explain three things: what happens now, what you propose, and the practical
-   effect. Ask only for a decision that changes the result.
+4. Explain what happens now, what you propose, and the practical effect. Add
+   one short `OpenAPPA pieces: <primitives>` line. Ask only for a decision that
+   changes the result.
 5. If a battery would help, propose it with the same one-sentence rule used in
    `init` mode. Existing root rules still take priority.
 6. End with: **Approve, or tell me what to change.** Wait for the reply.
 7. Run `appa describe --config <live-path>` again. If the config, batteries,
-   referenced groups, or membership wiring changed since the proposal, revise
-   the proposal and ask for approval again.
+   Authorities, audience sources, or named audiences changed since the
+   proposal, revise the proposal and ask for approval again.
 8. Copy each newly approved battery directory from the installed marketplace
    beside the root config under `batteries/<name>/`, add its `appa.toml` to the
    root `include` list, and add any root support it requires. Leave an existing
@@ -230,6 +244,19 @@ not guess.
 For several root rules with the same tool name, order matters. Put a narrow
 argument-specific rule before its general fallback. Do not reorder unrelated
 rules.
+
+For an exact Bash command pattern, add a narrow, ordered
+`Bash(command:...)` root contract before its fallback. For semantic command
+interpretation, copy the complete `claude-code.bash-requirements` Annotator
+declaration into the root config and modify its `hint`. Preserve its
+implementation, inputs, and mandate unless the approved behavior requires a
+change. Do not add a broad root `Bash` contract that bypasses the battery's
+credential-path protections.
+
+To make an audience mismatch reviewable, permit the intended Authority to
+review that audience expansion. Do not add attention only to route the review.
+Keep an existing attention requirement when it represents an independent
+per-call review.
 
 ## Reload and finish
 

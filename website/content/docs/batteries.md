@@ -151,7 +151,7 @@ json.dump(
 
 `artifact.args` contains the tool's `name`, `arguments`, and declared `description`. The `Read` rule above has no description, so the consult omits it.
 
-When an annotator maps `inputs`, the consult includes one Value for each input. `declaration` lists the trust ranks, audiences, attention marks, and effects that its answer may use.
+When an annotator maps `inputs`, the consult includes one Value for each input. `declaration` carries the optional `hint`, input names, and mandate vocabulary.
 
 A battery annotator must check the version, `kind`, `name`, tool name, and argument types. It must exit with an error when the input is invalid.
 
@@ -200,7 +200,7 @@ access.
 
 ## Customise a battery
 
-Put your rules in the root config. They run before battery rules, even when they appear below `include`.
+Define tool rules and Annotator customizations in the root config. Root tool rules run before battery rules, even when they appear below `include`. A root Annotator declaration replaces the battery declaration with the same name.
 
 ```toml
 include = [

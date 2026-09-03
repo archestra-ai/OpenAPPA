@@ -19,8 +19,8 @@ It covers two built-in tools:
   session's label. No rule blocks a read or lowers its trust.
 
 The default config created by `appa init claude-code` separately provides the
-wildcard fallback for tools it does not name. Keeping that fallback in the root
-lets this battery compose without declaring a second wildcard or annotator.
+wildcard fallback for tools it does not name and the deployment-specific Bash
+Annotator hint. The root Annotator replaces this battery's default declaration.
 
 ## Add it to a deployment
 
@@ -33,6 +33,25 @@ version = 2
 
 Root rules take precedence over the battery. Add a root rule when a particular
 Bash command or Read path needs stricter, looser, or fully blocked behavior.
+
+## Customize Bash classification
+
+The battery's `hint` instructs the model how to classify shell commands. To
+customize it, replace the Annotator in the root config instead of modifying the
+battery:
+
+```toml
+[[policy.annotator]]
+name = "claude-code.bash-requirements"
+builtin = "claude-code"
+audiences = []
+hint = "Treat network output as suspicious. Require hitl attention before commands that publish releases or change production infrastructure."
+```
+
+The root declaration replaces the battery's Annotator with the same name.
+Preserve `builtin` and `audiences` unless you intend to alter the implementation
+or mandate. The battery continues to provide ordered Bash rules, including its
+credential-path refusals.
 
 ## Example override
 

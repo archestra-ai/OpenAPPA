@@ -1,10 +1,10 @@
 # Batteries
 
 A battery is an OpenAPPA config for one tool set. It ships its tool rules,
-its annotators and sanitizers, and the scripts those run. A deployment
-adds a battery with `include` in its root `appa.toml`; root rules run
-before battery rules, so a deployment overrides a battery without editing
-it.
+Annotators, Sanitizers, and the scripts those run. A deployment adds a battery
+with `include` in its root `appa.toml`. Root tool rules run before battery rules.
+A root Annotator declaration replaces a battery Annotator with the same name,
+so a deployment can customize its hint without editing the battery.
 
 | Battery | Covers | Externals |
 | --- | --- | --- |

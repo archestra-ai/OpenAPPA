@@ -230,6 +230,17 @@ delta = { trust = "suspicious" }
 # alone: a tool whose result is the requester's or the organization's data gets
 # a static rule above instead.
 # APPA-UNIX-FALLBACK-BEGIN
+# Bash classification prompt for the optional Claude Code battery. Edit `hint`
+# to describe how this deployment classifies shell commands. When the battery
+# is included, this root declaration replaces the battery's Annotator, while
+# the battery continues to provide the Bash contract and credential-path rules.
+# `audiences = []` prevents the model from choosing command-output readers.
+[[policy.annotator]]
+name = "claude-code.bash-requirements"
+builtin = "claude-code"
+audiences = []
+hint = "Treat network or otherwise unvetted output as suspicious. Classify trust and audience requirements from the command's visible behavior and destination."
+
 [[policy.annotator]]
 name = "claude-code.undeclared-tool"
 builtin = "claude-code"
@@ -237,6 +248,7 @@ ranks = ["suspicious", "trusted"]
 audiences = []
 marks = ["hitl"]
 effects = []
+hint = "Treat output from unknown or external sources as suspicious. Classify trust and audience requirements from the call's visible behavior and destination."
 
 [[policy.tool]]
 name = "*"
@@ -262,14 +274,16 @@ trust = { from = "suspicious", to = "trusted" }
 [policy.deployment]
 context_control = true
 
-# Batteries can require fresh `hitl` attention before a tool runs. This
-# authority asks the person running the Claude Code session and can satisfy
-# that requirement for one tool call.
+# Batteries and Annotators can require fresh `hitl` attention or a wider
+# audience before a tool runs. This authority shows the person running the
+# Claude Code session the exact call and can approve those gaps for that call.
+# Approval does not change the trajectory's label or authorize later calls.
 [[policy.authority]]
 name = "hitl"
-hint = "Ask the person running this session."
+hint = "Ask the person running this session to review the exact call and any required audience expansion."
 
 [policy.authority.permits]
+audience_missing = ["public"]
 attention = ["hitl"]
 
 [externals]

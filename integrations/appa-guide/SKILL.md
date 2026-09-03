@@ -1,6 +1,7 @@
 ---
 name: appa-guide
 description: Guide an operator through configuring OpenAPPA on the host you run in — Claude Code or a kagent cluster. Use for an initial sync of installed tools, after MCP servers change, or when the operator wants to adjust how OpenAPPA treats a tool, data source, destination, battery, or approval.
+argument-hint: "init|adjust"
 ---
 
 OpenAPPA configuration helper. Request: $ARGUMENTS
@@ -44,10 +45,13 @@ change, ask what they want OpenAPPA to do differently.
   root rule unless the operator explicitly approves changing or removing
   it.
 - A battery supplies maintained defaults. Never edit a battery. Override
-  it with a root rule.
+  a tool contract with a root rule. Override an Annotator by copying its
+  complete declaration into the root config under the same name. Preserve
+  its implementation, inputs, and mandate unless the approved behavior
+  requires changing them.
 - Read before proposing. Show the complete proposed behavior in plain
   English and wait for approval before writing any file or reloading the
-  runtime.
+  runtime. Ask for approval again if a correction changes that behavior.
 - Make the smallest change that achieves the request. Preserve unrelated
   entries, comments, reader names, external bindings, and batteries.
 - Use short sentences. Explain what data stays private, what can leave
@@ -59,7 +63,7 @@ change, ask what they want OpenAPPA to do differently.
   details. Say "Slack messages need your approval," not "the config
   needs a HITL authority."
 - Every proposal must name the OpenAPPA primitives it uses: battery,
-  tool contract, annotator, membership resolver, authority, or
+  tool contract, Annotator, audience source, Authority, or
   sanitizer. When a command or service implements a primitive, state
   which one. For example: "OpenAPPA pieces: tool contract and an
   annotator backed by `gh`."

@@ -95,6 +95,24 @@ fn composed_with_the_battery(dir: &tempfile::TempDir) -> Config {
 fn the_initialized_default_composes_with_the_claude_code_battery() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let config = composed_with_the_battery(&dir);
+    let annotators = config.policy_file().value()["annotator"]
+        .as_array()
+        .expect("the composed Annotators are an array");
+    let bash_annotators = annotators
+        .iter()
+        .filter(|annotator| annotator["name"].as_str() == Some("claude-code.bash-requirements"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        bash_annotators.len(),
+        1,
+        "the root Bash Annotator replaces the battery default"
+    );
+    assert_eq!(
+        bash_annotators[0]["hint"].as_str(),
+        Some(
+            "Treat network or otherwise unvetted output as suspicious. Classify trust and audience requirements from the command's visible behavior and destination."
+        )
+    );
     let tools = config.policy_file().value()["tool"]
         .as_array()
         .expect("the composed tools are an array");
@@ -136,11 +154,11 @@ fn call(tool: &str, argument: &str, value: &str) -> ProposedCall {
 }
 
 /// A credential named relatively — `.env`, `cat .netrc` — is judged like its absolute
-/// spelling: the read narrows the session to `self`, after which a public sink is out of
-/// reach, and the command is refused with no remedy.
+/// spelling. A Bash call naming one is refused without a remedy. A Read narrows the
+/// trajectory to `self`, after which a public sink requires an exact-call human review.
 #[cfg(unix)]
 #[tokio::test]
-async fn the_battery_judges_relative_credential_paths_like_absolute_ones() {
+async fn the_battery_judges_relative_credentials_and_offers_review_for_public_release() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let config = composed_with_the_battery(&dir);
     let runtime =
@@ -183,11 +201,25 @@ async fn the_battery_judges_relative_credential_paths_like_absolute_ones() {
     );
     ran(&runtime, read).await;
 
+    let publication = propose(&runtime, call("Artifact", "file_path", "page.html")).await;
+    let HookDecision::DenyCall {
+        feedback,
+        offers,
+        review,
+    } = publication
+    else {
+        panic!("a trajectory narrowed to `self` requires review before publishing: {publication:?}");
+    };
+    assert_eq!(
+        offers.len(),
+        1,
+        "the default authority can review the audience expansion"
+    );
+    assert_eq!(review.len(), 1, "the offer is backed by the default human authority");
+    assert!(feedback.contains("Request approval"));
+    assert!(review[0].text.contains("page.html"), "the review shows the exact call");
     assert!(
-        matches!(
-            propose(&runtime, call("Artifact", "file_path", "page.html")).await,
-            HookDecision::DenyCall { .. }
-        ),
-        "a session narrowed to `self` cannot publish"
+        review[0].text.contains("public"),
+        "the review shows the audience expansion it covers"
     );
 }
