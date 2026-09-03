@@ -43,7 +43,7 @@ fn free_port() -> u16 {
 }
 
 fn start(config: &Path, db: &Path, port: u16) -> Server {
-    let child = Command::new(env!("CARGO_BIN_EXE_appa"))
+    let child = isolated_runtime_command()
         .arg("runtime")
         .arg("--config")
         .arg(config)
@@ -105,7 +105,7 @@ fn http(url: &str, method: &str, body: Option<&str>) -> Option<String> {
 }
 
 fn expect_startup_refusal(config: &Path, db: &Path, needle: &str) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_appa"))
+    let mut child = isolated_runtime_command()
         .arg("runtime")
         .arg("--config")
         .arg(config)
@@ -142,6 +142,19 @@ fn expect_startup_refusal(config: &Path, db: &Path, needle: &str) {
         stderr.contains(needle),
         "the refusal must name its cause ({needle}); stderr was: {stderr}",
     );
+}
+
+fn isolated_runtime_command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_appa"));
+    for name in [
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+    ] {
+        command.env_remove(name);
+    }
+    command
 }
 
 fn write_config(dir: &Path, text: &str) -> PathBuf {
