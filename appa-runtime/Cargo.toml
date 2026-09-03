@@ -36,6 +36,10 @@ libloading = "0.9"
 libc = "0.2"
 hmac = "0.12"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+opentelemetry = { version = "0.32", features = ["logs", "metrics", "trace"] }
+opentelemetry-appender-tracing = "0.32"
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "logs", "metrics", "reqwest-blocking-client", "trace"] }
+opentelemetry_sdk = { version = "0.32", features = ["logs", "metrics", "trace"] }
 rand = "0.10"
 reqwest = { workspace = true }
 # `server` carries the tool macros' schema derive; `transport-streamable-http-server`
@@ -49,11 +53,12 @@ sha2 = { workspace = true }
 thiserror = { workspace = true }
 tar = "0.4"
 tempfile = "3"
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["signal"] }
 toml = { workspace = true }
 toml_edit = "0.25"
 zip = { version = "6", default-features = false, features = ["deflate-flate2"] }
 tracing = { workspace = true }
+tracing-opentelemetry = { version = "0.33", default-features = false }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 # The report id: a v4 UUID the receiver stores one object under.
