@@ -647,7 +647,7 @@ impl Run<'_> {
                 )
                 .await;
                 format!(
-                    "Authorized. Propose the {} call again with exactly these arguments; \
+                    "Authorized. Call the {} tool again with exactly these arguments; \
                      it will run without a new check: {}",
                     call.tool,
                     call.arguments.get(),

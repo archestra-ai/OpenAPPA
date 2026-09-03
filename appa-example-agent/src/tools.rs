@@ -48,7 +48,8 @@ fn control_tool_schema() -> WireTool {
          quoted exactly. Accepting a narrowing permanently restricts this trajectory, so run any \
          later work that needs its current label before you accept. A plan that declares a \
          subagent's return takes `label`, the lowest label this trajectory accepts from the \
-         return; a plan that attests it also takes `return_schema`.",
+         return; a plan that attests it also takes `return_schema`. After execution succeeds, \
+         re-call the original tool or receive the admitted output.",
         serde_json::json!({
             "type": "object",
             "properties": {

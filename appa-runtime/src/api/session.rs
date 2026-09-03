@@ -128,7 +128,7 @@ const UNCHECKED_RETURN: &str = "[appa] the subagent ended outside the return che
 /// A child that ended by returning nothing is held on any later message: nothing it says
 /// now can cross, and an empty stop lets it go.
 const ENDED_CHILD: &str = "[appa] this subagent ended without a return; nothing it says now can cross. Stop with an \
-                           empty final message.";
+                           empty final message (send no text or explanation).";
 
 fn outcome_decision(decision: EngineDecision) -> Result<ToolResultDecision, EventError> {
     match decision.then {
