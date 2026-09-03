@@ -585,7 +585,7 @@ jobs:
       APPA_E2E_PRUNE_DAEMON_IMAGES: "1"
       # One endpoint serves the agents and the policy's sanitizers. GitHub
       # Models provides the OpenAI-compatible model through the job token.
-      APPA_E2E_MODEL: openai/gpt-4.1
+      APPA_E2E_MODEL: openai/gpt-4.1-mini
       APPA_E2E_BASE_URL: https://models.github.ai/inference
     steps:
       - name: Checkout project
