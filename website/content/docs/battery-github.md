@@ -4,6 +4,7 @@ category: Batteries
 order: 6.63
 description: Rules for the GitHub MCP server's 44 default tools.
 sidebar: false
+breadcrumb: GitHub
 ---
 
 The GitHub battery covers the MCP server's default profile, repository, issue, pull-request, and user-search tools. It assumes repositories are public.

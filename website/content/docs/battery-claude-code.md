@@ -4,6 +4,7 @@ category: Batteries
 order: 6.62
 description: Rules and annotators for Claude Code Read and Bash tools.
 sidebar: false
+breadcrumb: Claude Code tools
 ---
 
 This battery covers Claude Code's built-in `Read` and `Bash` tools. Batteries can also cover tools that do not come from an MCP server.

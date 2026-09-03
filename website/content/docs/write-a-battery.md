@@ -9,10 +9,10 @@ This guide shows MCP server authors how to create and publish a battery for thei
 
 > **Ask your coding agent**
 >
-> Give your coding agent a link to this page and use this prompt:
+> Copy this prompt into your coding agent:
 >
 > ```text
-> Read the OpenAPPA battery guide I linked.
+> Read https://openappa.com/write-a-battery and follow the guide.
 >
 > Inspect the MCP server in this repository.
 > Create a battery for it.
@@ -25,27 +25,11 @@ This guide shows MCP server authors how to create and publish a battery for thei
 
 ## What happens next
 
-Your coding agent reads the server code and documentation. It finds every tool, what arguments it accepts, what it returns, and what it can change.
+1. **Read.** Your agent reads the server code and docs. It lists every tool, its inputs and results, and anything it can change.
+2. **Build.** It creates the battery, tests, documentation page, and catalogue card. It records the exact server version and links each rule to the source that supports it.
+3. **Review.** You open those links, check the rules, resolve any unanswered questions, and submit the pull request.
 
-The agent then:
-
-- creates the battery config and any annotator or audience source scripts;
-- records the exact server version, the tools it covers, and an explanation of each rule;
-- adds the battery documentation page and catalogue card;
-- runs the tests below; and
-- lists anything that the server code does not make clear.
-
-Before you submit the pull request, check:
-
-- The battery covers every tool in the server version it names.
-- The battery identifies every tool that sends data or changes something.
-- Each tool sends data only to the people or services you expect.
-- Each result's `audience` allows only the people who should see it.
-- Results from sources you have not vetted are marked `suspicious`, not `trusted`.
-- The battery asks a person before every action that needs approval.
-- The agent has clearly listed every question it could not answer.
-
-The agent should link each rule to the server code or documentation that supports it. Follow those links to check the list above.
+:::battery-review-checklist:::
 
 ## Add the battery files
 

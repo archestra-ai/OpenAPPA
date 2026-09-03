@@ -629,6 +629,28 @@ samp {
   color: var(--text-weak);
 }
 
+.doc-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+  font-size: 13px;
+  color: var(--text-weak);
+}
+
+.doc-breadcrumb a {
+  color: var(--text-weak);
+  text-decoration: none;
+}
+
+.doc-breadcrumb a:hover {
+  color: var(--accent);
+}
+
+.doc-breadcrumb [aria-current="page"] {
+  color: var(--text);
+}
+
 /* ————————————————————————————————————————————————
    Table of contents
    ———————————————————————————————————————————————— */
@@ -893,9 +915,27 @@ samp {
 
 .battery-card-heading {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 8px;
+}
+
+.battery-card-title {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.battery-card-logo {
+  width: 22px;
+  height: 22px;
+  flex: none;
+  object-fit: contain;
+}
+
+.dark .battery-card-logo-github {
+  filter: invert(1);
 }
 
 .battery-card-arrow {

@@ -4,6 +4,7 @@ category: Batteries
 order: 6.65
 description: Builds audiences from your Google Workspace directory and groups.
 sidebar: false
+breadcrumb: Google Workspace
 ---
 
 The Google Workspace battery reads your Workspace directory to build audiences. It does not contain tool rules yet.

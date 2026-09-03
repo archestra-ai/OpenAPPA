@@ -14,6 +14,7 @@ export interface DocFrontMatter {
   order?: number;
   description?: string;
   sidebar?: boolean;
+  breadcrumb?: string;
 }
 
 export interface DocPage {
@@ -25,6 +26,7 @@ export interface DocPage {
   content: string;
   proposal: boolean;
   sidebar: boolean;
+  breadcrumb?: string;
 }
 
 export interface TocItem {
@@ -54,6 +56,7 @@ export function getAllDocs(): DocPage[] {
       content,
       proposal: PROPOSAL_OPEN.test(content.trimStart().split("\n", 1)[0]),
       sidebar: fm.sidebar ?? true,
+      breadcrumb: fm.breadcrumb,
     };
   });
   return docs.sort((a, b) => a.order - b.order || a.title.localeCompare(b.title));

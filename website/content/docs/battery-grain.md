@@ -4,6 +4,7 @@ category: Batteries
 order: 6.64
 description: Rules for 49 Grain meeting, transcript, deal, and administration tools.
 sidebar: false
+breadcrumb: Grain
 ---
 
 The Grain battery covers 49 tools for recordings, notes, transcripts, deals, clips, stories, collections, and workspace administration.

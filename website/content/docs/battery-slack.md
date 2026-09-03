@@ -4,6 +4,7 @@ category: Batteries
 order: 6.61
 description: Rules for all 19 claude.ai Slack connector tools, with Slack-based audiences.
 sidebar: false
+breadcrumb: Slack
 ---
 
 The Slack battery covers all 19 tools in the claude.ai Slack connector. It asks a person to approve messages and other visible changes.
