@@ -9,7 +9,7 @@ apiVersion: kagent.dev/v1alpha2
 kind: Agent
 metadata:
   name: appa-guide
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ .Release.Namespace | quote }}
   labels:
     {{- include "appa-demo.labels" . | nindent 4 }}
 spec:
@@ -32,7 +32,7 @@ spec:
       chat; applying then raises the kagent Approve card. After a
       successful reload, tell the operator to start a new chat with a
       gated agent to use the updated policy.
-    modelConfig: {{ .Values.modelConfig.name }}
+    modelConfig: {{ .Values.modelConfig.name | quote }}
     tools:
       - type: McpServer
         mcpServer:
@@ -45,6 +45,12 @@ spec:
             - k8s_execute_command
     deployment:
       env:
+        # The image is a drop-in replacement for the stock kagent one and
+        # runs ungated until this reads true. The guide agent applies the
+        # policy ConfigMap through k8s_apply_manifest, which the demo
+        # policy puts behind human-approval, so it must be gated.
+        - name: APPA_ENABLED
+          value: "true"
         - name: APPA_RUNTIME_URL
           value: {{ include "appa-demo.runtimeUrl" . | quote }}
         - name: APPA_KAGENT_OPENAI_REASONING_EFFORT
