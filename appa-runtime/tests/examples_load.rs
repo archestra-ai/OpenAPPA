@@ -1,12 +1,19 @@
 mod common;
-use common::{actor, last_offer, propose, ran, raw, repo_root, root};
+use common::repo_root;
+#[cfg(unix)]
+use common::{actor, last_offer, propose, ran, raw, root};
 
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::sync::Arc;
 
-use appa_runtime::api::{RemedyOutcome, Runtime};
+use appa_runtime::api::Runtime;
+#[cfg(unix)]
+use appa_runtime::api::RemedyOutcome;
 use appa_runtime::config::Config;
+#[cfg(unix)]
 use appa_runtime::hooks;
+#[cfg(unix)]
 use appa_runtime_api::{HookDecision, HookEvent, ProposedCall};
 
 fn toml_files(dir: &Path) -> Vec<PathBuf> {
@@ -109,6 +116,7 @@ fn the_initialized_default_composes_with_the_claude_code_battery() {
     Runtime::open(config, database, None).expect("the composed deployment opens");
 }
 
+#[cfg(unix)]
 fn call(tool: &str, argument: &str, value: &str) -> ProposedCall {
     ProposedCall {
         tool: tool.to_string(),
