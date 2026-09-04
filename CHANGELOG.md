@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.9.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.8.0...v0.9.0) (2026-09-04)
+
+
+### Features
+
+* **k8s:** ship shared appa-runtime Helm deployment ([#199](https://github.com/archestra-ai/OpenAPPA/issues/199)) ([8026fc9](https://github.com/archestra-ai/OpenAPPA/commit/8026fc925ded33254cc2f64ebb343faddb9b6022))
+
+
+### Bug Fixes
+
+* **ci:** align and gate live kagent e2e ([#191](https://github.com/archestra-ai/OpenAPPA/issues/191)) ([2e3c3d2](https://github.com/archestra-ai/OpenAPPA/commit/2e3c3d291493bcac47c63ed8ced2231739fc4855))
+* **engine:** encode policy digests explicitly ([#194](https://github.com/archestra-ai/OpenAPPA/issues/194)) ([4c10285](https://github.com/archestra-ai/OpenAPPA/commit/4c10285c1e4986af46b0b271b20c5efd9534d82b))
+
+
+### Performance Improvements
+
+* **ci:** speed Rust tests and A2A checks ([#192](https://github.com/archestra-ai/OpenAPPA/issues/192)) ([765b48a](https://github.com/archestra-ai/OpenAPPA/commit/765b48aeedf3b93b62dc83b84f7630a604235cc7))
+
+
+### Documentation
+
+* add GitHub battery replay example ([#195](https://github.com/archestra-ai/OpenAPPA/issues/195)) ([a4e28e8](https://github.com/archestra-ai/OpenAPPA/commit/a4e28e8f67211f4b79df98af9a5ff29f7cef2957))
+* clarify battery example link ([#196](https://github.com/archestra-ai/OpenAPPA/issues/196)) ([9fe3889](https://github.com/archestra-ai/OpenAPPA/commit/9fe38892c0c96ad47f1104b17da2b274d9307bf7))
+* link complete battery replay example ([9fe3889](https://github.com/archestra-ai/OpenAPPA/commit/9fe38892c0c96ad47f1104b17da2b274d9307bf7))
+* streamline battery composition guide ([#198](https://github.com/archestra-ai/OpenAPPA/issues/198)) ([9afbcbf](https://github.com/archestra-ai/OpenAPPA/commit/9afbcbffd979da6a31c7fe58f8a08e7825ebb7f4))
+
 ## [0.8.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.7.1...v0.8.0) (2026-09-03)
 
 
