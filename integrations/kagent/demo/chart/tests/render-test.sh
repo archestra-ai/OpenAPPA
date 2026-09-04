@@ -81,6 +81,7 @@ expect_env 1 APPA_CONFIG /etc/appa/demo.appa.toml
 expect 1 '^  name: appa-guide$'
 expect 1 '/skills/appa-guide/references/kagent\.md'
 expect 1 'and limit 0, then follow the complete result'
+expect 1 'all read-only inspection and present the proposal without asking whether'
 expect 1 '^            - name: APPA_GUIDE_RUNTIME_URL$'
 expect 1 '^    name = "skills"$'
 expect 1 '^    name = "kagent__NS__log_analyst"$'

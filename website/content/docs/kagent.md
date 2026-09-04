@@ -287,10 +287,12 @@ spec:
   declarative:
     systemMessage: |
       Configure OpenAPPA for this kagent cluster. For quickstart, init, or adjust,
-      invoke the appa-guide skill. Before any cluster action, use read_file for
-      /skills/appa-guide/references/kagent.md with offset 1 and limit 0, then
-      follow the complete result. Inventory Agents across all namespaces. This
-      Agent runs in kagent; derive each runtime namespace from APPA_RUNTIME_URL.
+      invoke the appa-guide skill exactly once with command appa-guide. Before any
+      cluster action, use read_file for /skills/appa-guide/references/kagent.md
+      with offset 1 and limit 0, then follow the complete result. On init, finish
+      all read-only inspection and present the proposal without asking whether to
+      continue. Inventory Agents across all namespaces. This Agent runs in kagent;
+      derive each runtime namespace from APPA_RUNTIME_URL.
     modelConfig: "default-model-config"
     tools:
       - type: McpServer

@@ -34,6 +34,7 @@ fn the_router_routes_by_host_and_carries_the_shared_rules() {
         "Claude bootstraps without a gated tool call"
     );
     assert!(router.contains("`init`") && router.contains("`adjust`"));
+    assert!(router.contains("Do not ask whether to continue before the proposal"));
     for shared in [
         "Never edit a battery",
         "OpenAPPA pieces",
@@ -122,6 +123,7 @@ fn the_kagent_chart_consumes_this_skill_package() {
     assert!(guide.contains("APPA_RUNTIME_URL"));
     assert!(guide.contains("/skills/appa-guide/references/kagent.md"));
     assert!(guide.contains("offset 1") && guide.contains("limit 0"));
+    assert!(guide.contains("without asking whether"));
 
     let values = fs::read_to_string(chart.join("values.yaml")).expect("the chart values exist");
     assert!(values.contains("integrations/appa-guide"));

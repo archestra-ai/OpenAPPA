@@ -23,6 +23,10 @@ name. It does not parse arguments. Use only the no-argument
 `appa-guide-*` commands named below. Never put spaces or arguments in
 `command`.
 
+For `init`, finish the read-only inspection and present the complete
+proposal without an intermediate confirmation. Approval is required only
+before a write or reload.
+
 ### Read-only fallback
 
 If the write tools are missing, or the target runtime is unreachable,

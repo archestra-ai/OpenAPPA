@@ -44,6 +44,10 @@ battery refresh, health audit, Agent protection, or runtime upgrade, as
 that case. If the operator chooses `adjust` without describing the change,
 ask what they want OpenAPPA to do differently.
 
+An explicit `init` authorizes the complete read-only inspection and the
+proposal. Do not ask whether to continue before the proposal. Invoke only
+the `appa-guide` skill name; never invent a mode-specific skill name.
+
 ## Rules that apply on every host
 
 - The root config is the operator's source of truth. Root tool rules run
