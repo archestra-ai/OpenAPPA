@@ -24,6 +24,7 @@ fn the_router_routes_by_host_and_carries_the_shared_rules() {
     assert!(router.contains("name: appa-guide"));
     assert!(router.contains("references/claude-code.md"));
     assert!(router.contains("/skills/appa-guide/references/kagent.md"));
+    assert!(router.contains("`offset: 1`") && router.contains("`limit: 0`"));
     assert!(
         router.contains("k8s_get_resources"),
         "the router detects the kagent host"
@@ -77,18 +78,19 @@ fn the_kagent_reference_carries_the_full_flow() {
         "k8s_apply_manifest",
         "__NS__",
         "Approve/Reject card",
-        "/reload",
         "/batteries",
         "APPA_CONFIG_CONTENTS",
-        "appa-refresh-batteries --check",
         "Replace only `name`",
         "PersistentVolumeClaim",
+        "Bundled mode batteries",
         "kubelet syncs",
         "Read-only fallback",
         "Approve, or tell me what to change.",
         "## Cluster operations",
         "helm_upgrade",
         "Protect all Agents",
+        "appa-guide-inspect",
+        "appa-guide-reload",
     ] {
         assert!(reference.contains(marker), "the kagent flow names {marker:?}");
     }
@@ -119,6 +121,7 @@ fn the_kagent_chart_consumes_this_skill_package() {
     }
     assert!(guide.contains("APPA_RUNTIME_URL"));
     assert!(guide.contains("/skills/appa-guide/references/kagent.md"));
+    assert!(guide.contains("offset 1") && guide.contains("limit 0"));
 
     let values = fs::read_to_string(chart.join("values.yaml")).expect("the chart values exist");
     assert!(values.contains("integrations/appa-guide"));
@@ -130,6 +133,26 @@ fn the_kagent_chart_consumes_this_skill_package() {
     assert!(
         !policy.contains("name = \"bash\""),
         "the unused skill helpers stay undeclared"
+    );
+}
+
+#[test]
+fn only_the_shared_runtime_image_carries_battery_refresh_helpers() {
+    let root = repo_root();
+    let shared = fs::read_to_string(root.join("appa-runtime/Dockerfile")).expect("read shared runtime image");
+    let bundled = fs::read_to_string(root.join("integrations/kagent/appa-kagent-quickstart/Dockerfile"))
+        .expect("read bundled runtime image");
+
+    for operation in ["inspect", "reload"] {
+        assert!(
+            shared.contains(operation) && bundled.contains(operation),
+            "both runtime modes support {operation}"
+        );
+    }
+    assert!(shared.contains("refresh-check"));
+    assert!(
+        !bundled.contains("refresh-check") && !bundled.contains("appa-refresh-batteries"),
+        "bundled batteries change only with the image"
     );
 }
 

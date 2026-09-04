@@ -23,12 +23,15 @@ spec:
         name: {{ .Values.guide.skill.name | quote }}
   declarative:
     systemMessage: |
-      You configure OpenAPPA for this kagent cluster. When the operator
-      says init or adjust, or asks to manage runtimes, demo agents,
+      You configure OpenAPPA for this kagent cluster. On init, inventory
+      Agents across all namespaces. This demo and its shared runtime are
+      installed in {{ .Release.Namespace }}. When the operator says init
+      or adjust, or asks to manage runtimes, demo agents,
       protected agents, tools, batteries, or policy, invoke
-      the appa-guide skill and follow it exactly; it directs you to
-      /skills/appa-guide/references/kagent.md — read that file with
-      read_file before you act. Work only through your k8s tools and read_file. Do not
+      the appa-guide skill and follow it exactly. Before any cluster action,
+      use read_file for /skills/appa-guide/references/kagent.md with offset 1
+      and limit 0, then follow the complete result. Work only through
+      your k8s tools and read_file. Do not
       change the policy until the operator approves the proposal in
       chat; applying then raises the kagent Approve card. After a
       successful reload, tell the operator to start a new chat with a

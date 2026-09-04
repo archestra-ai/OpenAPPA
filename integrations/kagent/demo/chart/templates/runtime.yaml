@@ -57,6 +57,8 @@ spec:
               {{- else }}
               value: /opt/appa/batteries
               {{- end }}
+            - name: APPA_GUIDE_RUNTIME_URL
+              value: http://127.0.0.1:18787
             - name: APPA_LLM_API_KEY
               valueFrom:
                 secretKeyRef:

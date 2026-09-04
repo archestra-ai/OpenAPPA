@@ -20,8 +20,11 @@ guess its content.
   `# Claude Code` section below. Do not call `Read` to load the
   reference.
 - **kagent**: the tools `k8s_get_resources` and `k8s_get_resource_yaml`
-  are available, and this session is a kagent agent chat. Read
-  `/skills/appa-guide/references/kagent.md` and follow it.
+  are available, and this session is a kagent agent chat. Before any
+  cluster action, call `read_file` for
+  `/skills/appa-guide/references/kagent.md` with `offset: 1` and
+  `limit: 0`. This exact call reads through end of file. Follow the
+  complete result.
 - Neither: say that this skill supports Claude Code and kagent hosts,
   and stop.
 

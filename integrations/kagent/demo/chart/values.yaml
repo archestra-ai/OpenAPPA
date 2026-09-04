@@ -25,7 +25,7 @@ modelConfig:
 # pod. Every demo agent points at the relay.
 runtime:
   image:
-    repository: ghcr.io/archestra-ai/appa-kagent-quickstart
+    repository: ghcr.io/archestra-ai/appa-runtime
     tag: ""            # defaults to the chart's appVersion
     pullPolicy: IfNotPresent
   # Fills the OpenAI model's reasoning_effort when the ModelConfig leaves
@@ -35,7 +35,7 @@ runtime:
   verbosity: ""
   persistence:
     # Keep trajectories and a writable batteries overlay across restarts.
-    # The appa-guide skill refreshes bundled batteries only when this is on.
+    # The appa-guide skill refreshes the release battery layer only when this is on.
     enabled: false
     size: 1Gi
     storageClass: ""

@@ -105,6 +105,8 @@ jobs:
               - 'scripts/appa-install-test.sh'
               - 'scripts/appa-refresh-batteries.py'
               - 'scripts/test_appa_refresh_batteries.py'
+              - 'scripts/appa-guide-runtime.py'
+              - 'scripts/test_appa_guide_runtime.py'
               - '.github/actions/check-release-versions/**'
               - '.github/release-please/**'
               - '.github/workflows/ci.yml'
@@ -234,7 +236,7 @@ jobs:
           done
 
       - name: Test release battery refresh
-        run: python3 -m unittest scripts/test_appa_refresh_batteries.py
+        run: python3 -m unittest scripts/test_appa_refresh_batteries.py scripts/test_appa_guide_runtime.py
 
       - name: Check release versions
         uses: ./.github/actions/check-release-versions

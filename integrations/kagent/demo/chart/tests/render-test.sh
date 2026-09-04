@@ -75,10 +75,13 @@ expect_env() {
 must_render kagent
 expect 2 '/opt/appa/batteries'
 expect 0 '/var/lib/appa/batteries'
+expect 1 'image: ghcr.io/archestra-ai/appa-runtime:0\.10\.0$'
 expect 4 '^kind: Agent$'
 expect_env 1 APPA_CONFIG /etc/appa/demo.appa.toml
 expect 1 '^  name: appa-guide$'
 expect 1 '/skills/appa-guide/references/kagent\.md'
+expect 1 'and limit 0, then follow the complete result'
+expect 1 '^            - name: APPA_GUIDE_RUNTIME_URL$'
 expect 1 '^    name = "skills"$'
 expect 1 '^    name = "kagent__NS__log_analyst"$'
 expect 1 '^    name = "kagent__NS__log_analyst_go"$'

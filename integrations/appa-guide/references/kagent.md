@@ -18,6 +18,10 @@ error. Do not retry the call or route around it.
 
 Use only these. Never kubectl, never bash, never a file write to change
 policy — the policy crosses through `k8s_apply_manifest` or not at all.
+This kagent version passes `k8s_execute_command.command` as one executable
+name. It does not parse arguments. Use only the no-argument
+`appa-guide-*` commands named below. Never put spaces or arguments in
+`command`.
 
 ### Read-only fallback
 
@@ -33,9 +37,15 @@ error.
   way here.
 - Never invent a battery. Propose only batteries `GET /batteries`
   returns. Never edit a battery. Override with a root rule.
-- Refresh batteries only when the runtime pod mounts a
-  PersistentVolumeClaim for its data volume. Without that volume, say
-  so and do not copy files.
+- Battery refresh exists only in shared mode when the runtime pod mounts
+  a PersistentVolumeClaim for its data volume. Bundled mode batteries
+  are image-owned; update them only by upgrading that Agent's image.
+  Without a shared persistent volume, say so and do not copy files.
+- Start discovery with `Agent` resources across all namespaces. Derive
+  every runtime namespace from `APPA_RUNTIME_URL`; never guess `default`
+  or `openappa`. If cross-namespace Agent discovery is unavailable, use
+  the namespace named by the host system message. If neither is
+  available, ask for the Agent namespace and stop.
 
 ## Find each live config
 
@@ -52,40 +62,35 @@ error.
    Otherwise, read the packaged `APPA_CONFIG` file through exec.
 4. In shared mode, read the policy ConfigMap. It is the source of truth.
    Never use its mounted file as source because kubelet syncs it later.
-5. If exec is available, run `appa describe --config <path>` in the
-   runtime container. Pass every recorded directory as a repeated
-   `--batteries-dir`, in order. The result reports config state,
-   included batteries, and policy tools. If it disagrees with the
-   source, stop and report the mismatch.
-6. List batteries from each runtime:
-
-   ```sh
-   python3 -c 'import json,urllib.request; print(json.load(urllib.request.urlopen("http://127.0.0.1:<listen-port>/batteries", timeout=5)))'
-   ```
-
-   In bundled mode, exec into that Agent pod and use port `8787`. In
-   shared mode, use the recorded port. If exec cannot reach a shared
-   runtime, call `/batteries` on its Service. If no route answers, say
-   the inventory is unavailable. Do not call that an empty inventory.
-   The body is `{"batteries":[{"name":"...","tools":["..."]}]}`. An
-   empty list means the runtime has no batteries. Offer only root rules.
+5. If exec is available, invoke `appa-guide-inspect` in the runtime pod.
+   In a multi-container pod, the runtime container must be first because
+   kagent 0.9.12 ignores the tool's `container` field. The command returns
+   the mounted root config, `appa describe`, and `GET /batteries`. Compare
+   its root config with the ConfigMap source. If they disagree after the
+   kubelet sync window, stop and report the mismatch. If the command is
+   unavailable or no route answers, say the description and battery
+   inventory are unavailable. Never treat them as empty and never infer
+   batteries from an image or release name.
 
 ## Inventory
 
-1. List every `RemoteMCPServer`. Each `status.discoveredTools` entry is
-   one tool: its exact wire name and description. A server with no
-   discovered tools is uninspected — never invent its tool list.
-2. List every `Agent`. From `spec.declarative.tools` record each
+1. List every `Agent` across all namespaces. From
+   `spec.declarative.tools` record each
    `McpServer` reference and its `toolNames`, and each `type: Agent`
    delegation. Note agents with skills or `executeCodeBlocks`: they add
    the skill tools and code execution.
-3. Record each `Agent`'s `spec.declarative.deployment.env`. An agent
+2. Record each `Agent`'s `spec.declarative.deployment.env`. An agent
    runs gated only when `APPA_ENABLED` reads `true` there. Unset, empty
    or `false` serves the stock kagent runtime, and no policy applies to
    that agent, whatever `APPA_RUNTIME_URL` says. Any other value
    refuses the start. A gated agent reaches this policy only when its
    `APPA_RUNTIME_URL` names the runtime you found. One that names
    another runtime runs on that runtime's policy.
+3. Fetch only the `RemoteMCPServer` resources referenced by target
+   Agents. Do not load unrelated servers or the servers used only by
+   `appa-guide`. Each `status.discoveredTools` entry is one tool: its
+   exact wire name and description. A server with no discovered tools
+   is uninspected — never invent its tool list.
 4. Cross-check. A `toolNames` entry no server discovered has a name but
    no description; if its boundary is unclear, it belongs in the one
    ambiguity question below.
@@ -132,28 +137,28 @@ Preserve an argument suffix after translation. For example,
 Check what each matched battery expects the root config to provide.
 Record anything missing in **Needed for this to work**.
 
-If the operator asks to refresh batteries, first verify that the data
-volume is a PersistentVolumeClaim. Also verify that the runtime search
-path contains a persisted release directory before the image directory.
-Without both, refuse the refresh and offer to enable persistence.
+If the operator asks to refresh batteries in bundled mode, explain that
+the batteries are image-owned and offer an Agent image upgrade instead.
+In shared mode, first verify that the data volume is a
+PersistentVolumeClaim. Also verify that the runtime search path contains
+a persisted release directory before the image directory. Without both,
+refuse the refresh and offer to enable persistence.
 
-Use `k8s_execute_command` to run `appa-refresh-batteries --check`. It
-prints the latest published stable semver tag and changes nothing. Read
+Use `k8s_execute_command` to invoke `appa-guide-refresh-check`. It
+prints the latest published stable semver tag and records that candidate
+for the later stage. It changes no serving battery or policy. Read
 the current tag from `<release-dir>/.appa-release` when present. Show
-both tags and wait for approval. Then run:
-
-```sh
-appa-refresh-batteries --tag <approved-tag> --target <release-dir> --config <config-path> \
-  --batteries-dir <first-dir> --batteries-dir <second-dir> --batteries-dir <image-dir>
-```
+both tags and wait for approval. Then invoke
+`appa-guide-refresh-stage`. It stages exactly the candidate reported by
+the check.
 
 The command verifies the official plugin archive against that release's
 `SHA256SUMS`. It stages the release and validates the serving root config
 before switching only the release directory. It never changes the
-higher-priority operator overlay. After success, POST
-`/reload`. On success, run `appa-refresh-batteries --commit --target
-<release-dir>`. On refusal, run `appa-refresh-batteries --rollback
---target <release-dir>`. Then read `/batteries` again.
+higher-priority operator overlay. After success, invoke
+`appa-guide-reload`. On success, invoke `appa-guide-refresh-commit`. On
+refusal, invoke `appa-guide-refresh-rollback`. Then invoke
+`appa-guide-inspect` again.
 
 Before a refresh, check for `<data-dir>/.release-batteries.previous`.
 It means an earlier refresh stopped before commit. Reload the staged
@@ -163,7 +168,7 @@ another release over a pending refresh.
 The production chart restores `.release-batteries.previous`
 automatically when a crash leaves the release directory missing. For a
 different deployment that cannot start, mount its PVC in a repair pod
-and run `appa-refresh-batteries --rollback --target <release-dir>`.
+with the OpenAPPA image and invoke `appa-guide-refresh-rollback`.
 
 If persistence is off, inspect StorageClass, PersistentVolume, and
 PersistentVolumeClaim objects. An existing claim must be unused,
@@ -247,12 +252,9 @@ After approval:
    Add each battery as `include = ["batteries/<name>/appa.toml"]`.
 3. In shared mode, update only the ConfigMap policy key. Tell the
    operator that the kagent Approve/Reject card is the enforced sign-off.
-   Apply only on Approve. Wait up to two minutes for the mounted file
-   to equal the ConfigMap, then reload:
-
-   ```sh
-   python3 -c 'import urllib.request; request=urllib.request.Request("http://127.0.0.1:<listen-port>/reload", data=b"", method="POST"); print(urllib.request.urlopen(request, timeout=30).read().decode())'
-   ```
+   Apply only on Approve. Wait up to two minutes, invoking
+   `appa-guide-inspect` in the runtime pod until its root config equals
+   the ConfigMap. Then invoke `appa-guide-reload` in that pod.
 
 4. In bundled mode, update only that Agent's `APPA_CONFIG_CONTENTS`
    environment value with the complete approved TOML. Do not set

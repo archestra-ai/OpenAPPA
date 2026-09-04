@@ -81,11 +81,12 @@ COPY --from=builder /build/target/release/appa /usr/local/bin/appa
 COPY --from=wheel --chown=python:pythongroup /dist/ /tmp/appa-dist/
 COPY --chown=python:pythongroup integrations/kagent/examples/kagent.appa.toml /opt/appa/kagent.appa.toml
 COPY --chown=python:pythongroup batteries /opt/appa/batteries
-COPY --chown=python:pythongroup scripts/appa-refresh-batteries.py /usr/local/bin/appa-refresh-batteries
+COPY --chmod=0755 --chown=python:pythongroup scripts/appa-guide-runtime.py /usr/local/bin/appa-guide-inspect
+COPY --chmod=0755 --chown=python:pythongroup scripts/appa-guide-runtime.py /usr/local/bin/appa-guide-reload
 COPY --chown=python:pythongroup integrations/kagent/appa-kagent-quickstart/entrypoint.sh /opt/appa/entrypoint.sh
 
 RUN uv pip install --python /.kagent/.venv/bin/python --no-deps --offline /tmp/appa-dist/*.whl \
-    && chmod 0755 /usr/local/bin/appa-refresh-batteries /opt/appa/entrypoint.sh
+    && chmod 0755 /opt/appa/entrypoint.sh
 
 ENV APPA_CONFIG=/opt/appa/kagent.appa.toml
 ENV APPA_DB=/.kagent/appa.db

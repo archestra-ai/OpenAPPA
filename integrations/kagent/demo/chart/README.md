@@ -102,7 +102,7 @@ structured outputs.
 | `openai.model` | `gpt-4.1-mini` | The agents' model. |
 | `openai.existingSecret` | `""` | Use an existing Secret with `OPENAI_API_KEY` instead. |
 | `openai.baseUrl` | `""` | Optional OpenAI-compatible endpoint for the agents' model. |
-| `runtime.image.*` | `ghcr.io/archestra-ai/appa-kagent-quickstart:<appVersion>` | The runtime image (also the agents' image, via kagent). Published at each release version. |
+| `runtime.image.*` | `ghcr.io/archestra-ai/appa-runtime:<appVersion>` | The shared runtime image. Published at each release version. |
 | `runtime.reasoningEffort` | `""` | Optionally fills `reasoning_effort` for the OpenAI model when the CRD cannot. |
 | `runtime.persistence.enabled` | `false` | Keep trajectories on a PersistentVolume. |
 | `llm.model` | `gpt-4.1-mini` | The model the policy's sanitizers consult (`[externals.llm]`). |
@@ -156,7 +156,7 @@ the release version: `appa-runtime`, `appa-kagent-quickstart`,
 `appa-kagent-adk-go`. kagent's controller derives the Go runtime image
 under that name.
 
-The chart's image defaults name `appa-kagent-quickstart`,
+The chart's image defaults name `appa-runtime`,
 `appa-demo-tools` and `appa-demo-mocks` in that registry, at the
 chart's `appVersion`. Each release sets `appVersion` to the version it
 publishes, so the defaults name images the registry holds. Point the
@@ -166,17 +166,18 @@ run a tree no release published (or load the images into kind, below).
 ## On kind, from source
 
 ```sh
+docker build -f appa-runtime/Dockerfile -t appa-runtime:dev .
 docker build -f integrations/kagent/appa-kagent-quickstart/Dockerfile -t appa-kagent-quickstart:dev .
 docker build -t appa-demo-tools:dev integrations/kagent/demo
 docker build -t appa-demo-mocks:dev integrations/kagent/demo/mocks
 docker build -t golang-adk:dev integrations/kagent/appa-kagent-adk-go   # the go cell: kagent derives this name
-kind load docker-image appa-kagent-quickstart:dev appa-demo-tools:dev appa-demo-mocks:dev golang-adk:dev --name <cluster>
+kind load docker-image appa-runtime:dev appa-kagent-quickstart:dev appa-demo-tools:dev appa-demo-mocks:dev golang-adk:dev --name <cluster>
 APPA_VERSION=0.10.0 # x-release-please-version
 helm upgrade --install appa-kagent-demo \
   "https://github.com/archestra-ai/OpenAPPA/releases/download/v${APPA_VERSION}/appa-kagent-demo-${APPA_VERSION}.tgz" \
   -n kagent \
   --set openai.apiKey="$OPENAI_API_KEY" \
-  --set runtime.image.repository=docker.io/library/appa-kagent-quickstart --set runtime.image.tag=dev --set runtime.image.pullPolicy=Never \
+  --set runtime.image.repository=docker.io/library/appa-runtime --set runtime.image.tag=dev --set runtime.image.pullPolicy=Never \
   --set tools.image.repository=docker.io/library/appa-demo-tools --set tools.image.tag=dev --set tools.image.pullPolicy=Never \
   --set mocks.image.repository=docker.io/library/appa-demo-mocks --set mocks.image.tag=dev --set mocks.image.pullPolicy=Never
 ```
