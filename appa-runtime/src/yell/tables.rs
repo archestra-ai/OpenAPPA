@@ -922,3 +922,127 @@ pub(crate) fn event_table(event: &Value) -> Option<&'static Table> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::events::{
+        ControlCall, ControlOutcome, ExternalOutcome, ExternalRole, HookKind, HookOutcome, NoAnswerClass, RuntimeEvent,
+        StoreOperation,
+    };
+    use crate::yell::strip::strip;
+    use crate::yell::tokens::{Mode, Tokens};
+
+    fn dispatch() -> appa_engine::value::DispatchId {
+        appa_engine::value::DispatchId::new(
+            appa_engine::value::TrajectoryId::new("cc:session"),
+            serde_json::from_value(serde_json::json!(
+                "38142c4d026dba0e8f82124bf7d95f1edd7f8ab8e348f41fd276ec1af59c1a63"
+            ))
+            .expect("a hex digest parses"),
+            0,
+        )
+    }
+
+    /// Every variant of the runtime's own account, with every optional field present.
+    ///
+    /// The recorded-session fixture in `yell::diagnostic` covers hook events only: a live
+    /// session reaches no external in process, never reloads, and does not fail a store. Those
+    /// four tables would otherwise ship unverified, and a wrong key in one of them is a
+    /// classified field silently turned into drift.
+    fn every_event() -> Vec<RuntimeEvent> {
+        let external = |role, outcome| RuntimeEvent::External {
+            role,
+            name: "the-name".to_string(),
+            outcome,
+            duration_ms: 12,
+            offer: Some("f610dbd5610171965d4de357b2e0acbe".to_string()),
+            dispatch: Some(dispatch()),
+        };
+        vec![
+            RuntimeEvent::Hook {
+                event: HookKind::ToolCall,
+                tool: Some("Bash".to_string()),
+                dispatch: Some(dispatch()),
+                outcome: HookOutcome::Denied,
+                offers: vec!["f86ce7ba8e2e552d".to_string()],
+            },
+            external(ExternalRole::Authority, ExternalOutcome::Answered),
+            external(
+                ExternalRole::Sanitizer,
+                ExternalOutcome::NoAnswer(NoAnswerClass::Timeout),
+            ),
+            external(
+                ExternalRole::Annotator,
+                // The one no-answer class carrying a payload of its own.
+                ExternalOutcome::NoAnswer(NoAnswerClass::NonSuccess { status: 502 }),
+            ),
+            external(
+                ExternalRole::AudienceSource,
+                ExternalOutcome::NoAnswer(NoAnswerClass::ModulePanicked),
+            ),
+            external(ExternalRole::Identity, ExternalOutcome::Answered),
+            RuntimeEvent::Control {
+                call: ControlCall::Remedy {
+                    offer: "f610dbd5610171965d4de357b2e0acbe".to_string(),
+                    dispatch: Some(dispatch()),
+                },
+                outcome: ControlOutcome::Declined,
+                duration_ms: 7,
+            },
+            RuntimeEvent::Reload {
+                policy_key: "a91f".to_string(),
+                changed: true,
+            },
+            RuntimeEvent::StoreError {
+                operation: StoreOperation::Append,
+                class: appa_eventlog::StoreErrorClass::Conflict,
+            },
+        ]
+    }
+
+    #[test]
+    fn every_runtime_event_is_classified() {
+        let mut tokens = Tokens::default();
+        for event in every_event() {
+            let value = serde_json::to_value(&event).expect("a runtime event serializes");
+            let table = event_table(&value).unwrap_or_else(|| panic!("no table for {value}"));
+            let stripped = strip(&value, table, &mut tokens, Mode::Pseudonymized);
+            assert!(
+                stripped.unclassified.is_empty(),
+                "{} is not covered: {:?}",
+                table.name,
+                stripped.unclassified
+            );
+            // The status of a non-success is the one scalar buried two enums deep, so seeing
+            // it proves the nested tables were walked rather than merely matched.
+            if let Some(status) = value.pointer("/outcome/no_answer/non_success/status") {
+                assert_eq!(
+                    stripped.value.pointer("/outcome/no_answer/non_success/status"),
+                    Some(status)
+                );
+            }
+        }
+    }
+
+    /// An external's name belongs to whichever registry its role points at, so the same
+    /// spelling under two roles must not become one token.
+    #[test]
+    fn an_external_name_is_numbered_in_its_own_role_s_class() {
+        let mut tokens = Tokens::default();
+        let mut stripped = |event: &RuntimeEvent| {
+            let value = serde_json::to_value(event).expect("serializes");
+            let table = event_table(&value).expect("a table");
+            strip(&value, table, &mut tokens, Mode::Pseudonymized).value["name"]
+                .as_str()
+                .expect("a token")
+                .to_string()
+        };
+        let events = every_event();
+        let authority = stripped(&events[1]);
+        let sanitizer = stripped(&events[2]);
+        assert_eq!(authority, "authority-1");
+        assert_eq!(sanitizer, "sanitizer-1");
+    }
+}

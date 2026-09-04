@@ -334,6 +334,14 @@ impl Walk<'_> {
                     names.sort_unstable();
                     out.insert(key.clone(), Value::Array(names.into_iter().map(Value::from).collect()));
                 }
+                // A numeric `const` or `enum` is arithmetic, not authored text, and the engine
+                // already emits its members sorted — so it crosses as it stands, in its order.
+                "const" if entry.is_number() => {
+                    out.insert(key.clone(), entry.clone());
+                }
+                "enum" if entry.as_array().is_some_and(|items| items.iter().all(Value::is_number)) => {
+                    out.insert(key.clone(), entry.clone());
+                }
                 "const" => match entry.as_str() {
                     Some(literal) => {
                         let token = self.tokens.token(self.mode, Class::Literal, literal);
@@ -345,6 +353,13 @@ impl Walk<'_> {
                         out.insert(key.clone(), placeholder);
                     }
                 },
+                // A string `enum`, whose members are authored literals. Anything that is
+                // neither all strings nor all numbers is a shape this rule does not know.
+                "enum" if !entry.as_array().is_some_and(|items| items.iter().all(Value::is_string)) => {
+                    let child = format!("{path}.enum");
+                    let placeholder = self.unclassify(&child);
+                    out.insert(key.clone(), placeholder);
+                }
                 "enum" => {
                     let mut members: Vec<String> = entry
                         .as_array()
@@ -368,15 +383,10 @@ impl Walk<'_> {
                     out.insert(key.clone(), nested);
                 }
                 // `type`, `format` (a closed set), and the numeric bounds: engine vocabulary,
-                // not the author's.
-                "type"
-                | "format"
-                | "minimum"
-                | "maximum"
-                | "multipleOf"
-                | "minItems"
-                | "maxItems"
-                | "additionalProperties" => {
+                // not the author's. `additionalProperties` is deliberately absent — the shape
+                // dialect refuses the keyword, so one appearing here is drift, and in JSON
+                // Schema its value may itself be a schema full of authored names.
+                "type" | "format" | "minimum" | "maximum" | "multipleOf" | "minItems" | "maxItems" => {
                     out.insert(key.clone(), entry.clone());
                 }
                 _ => {
@@ -600,6 +610,30 @@ mod tests {
         for authored in ["verdict", "who", "approved", "denied", "finance-team", "nobody meant"] {
             assert!(!rendered.contains(authored), "{authored} still appears in {rendered}");
         }
+    }
+
+    /// The shape dialect's `const` and `enum` take integers as well as strings. Tokenizing a
+    /// number is nonsense, and quietly dropping one would emit a schema the engine cannot
+    /// read back — so numeric literals cross as they stand, in the order the engine sorted.
+    #[test]
+    fn numeric_schema_literals_cross_unchanged() {
+        let stripped = run(serde_json::json!({
+            "shape": {
+                "type": "object",
+                "properties": {
+                    "attempt": { "type": "integer", "enum": [1, 2, 3] },
+                    "version": { "type": "integer", "const": 2 }
+                },
+                "required": ["attempt", "version"]
+            }
+        }));
+        let properties = &stripped.value["shape"]["properties"];
+        let emitted: Vec<&serde_json::Value> = properties.as_object().expect("an object").values().collect();
+        let enums: Vec<&serde_json::Value> = emitted.iter().filter_map(|node| node.get("enum")).collect();
+        assert_eq!(enums, vec![&serde_json::json!([1, 2, 3])]);
+        let consts: Vec<&serde_json::Value> = emitted.iter().filter_map(|node| node.get("const")).collect();
+        assert_eq!(consts, vec![&serde_json::json!(2)]);
+        assert!(stripped.unclassified.is_empty(), "a numeric literal is not drift");
     }
 
     /// Ten or more members is where a naive `-N` spelling stops sorting the way the engine's
