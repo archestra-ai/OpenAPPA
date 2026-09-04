@@ -28,7 +28,7 @@ By default, `appa-runtime` listens on `http://127.0.0.1:8787` (`--listen`) and e
 
 ### Event Log
 
-OpenAPPA reconstructs each trajectory from an append-only event log. The log preserves state across turns: tool dispatches, child branches, authority decisions, and the initial policy.
+To keep track of agent actions and enforce policies, OpenAPPA reconstructs each trajectory from an append-only event log. The log preserves state across turns: tool dispatches, child branches, authority decisions, and the initial policy.
 
 `appa-runtime` persists this log to a local SQLite database (`--db ./appa.db`). Use durable storage when trajectories must resume across runtime restarts.
 
