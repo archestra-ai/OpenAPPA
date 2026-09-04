@@ -34,7 +34,7 @@ To keep track of agent actions and enforce policies, OpenAPPA reconstructs each 
 
 ### Deployment Models
 
-`appa-runtime` works with any agent able to send lifecycle events over HTTP and wait for a decision before continuing—including background workers and interactive chat agents. The integration contract remains identical across deployment models:
+`appa-runtime` works with any agent able to send lifecycle events over HTTP and wait for a decision before continuing—including background running agents or interactive chat agents. The integration contract remains identical across deployment models:
 
 | Placement | Typical use |
 |---|---|
@@ -46,11 +46,11 @@ To keep track of agent actions and enforce policies, OpenAPPA reconstructs each 
 
 ### Benefits for a SaaS Product
 
-OpenAPPA enforces policy independently of the model. If your product lets users connect custom MCP servers, you can let them control where their data may flow. If your product performs agentic work behind the scenes, OpenAPPA prevents the agent from sending that data to destinations the policy does not allow.
+OpenAPPA enforces policy independently of the LLM. If your product lets users connect custom MCP servers, you can let them control where their data may flow. If your product performs agentic work behind the scenes, OpenAPPA prevents the agent from sending that data to destinations the policy does not allow.
 
 ### Benefits for an Enterprise Agent
 
-OpenAPPA lets an organization apply centralized security policies across all of its agents. A policy defines where data may go, how it must be cleaned before it is sent, and who must approve sensitive actions.
+OpenAPPA lets an enterprise apply centralized security policies across its fleet of agents. A policy defines where data may go, how it must be cleaned before it is sent, and who must approve sensitive actions.
 
 ## Add an Integration
 
