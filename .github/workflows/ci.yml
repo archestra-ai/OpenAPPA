@@ -187,11 +187,10 @@ jobs:
 
   # Rust toolchain checks, split so cargo clippy and cargo test run in
   # parallel instead of serializing ~11 min on one runner. `cargo check`
-  # is omitted: clippy --all-targets is a superset. rust-cache uses the
-  # same shared-key the Linux rust jobs restore; only Rust Tests saves,
-  # so parallel jobs do not race two writes of one cache entry. Fresh PR
-  # branches restore the entry Rust Tests writes on main (Actions caches
-  # only flow down from the default branch).
+  # is omitted: clippy --all-targets is a superset. Each rust-cache key is
+  # per job: clippy and test write different target/ trees, so they must
+  # not share one entry. A job that runs on main seeds the key later PRs
+  # restore.
   rust-lint:
     name: Rust Lint
     runs-on: ubuntu-latest
@@ -209,8 +208,7 @@ jobs:
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: rust-workspace
-          save-if: false
+          shared-key: rust-lint
 
       - name: Rust formatting
         run: cargo fmt --all --check
@@ -235,7 +233,7 @@ jobs:
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: rust-workspace
+          shared-key: rust-tests
 
       - name: Rust tests
         run: cargo test --workspace --locked
@@ -276,9 +274,6 @@ jobs:
 
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          shared-key: rust-workspace
-          save-if: false
 
       # Every directory under examples/tests is one policy and one trace file.
       # The test suite pins them too; this runs the command line end to end,
@@ -403,9 +398,6 @@ jobs:
 
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          shared-key: rust-workspace
-          save-if: false
 
       - name: Setup uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
@@ -571,7 +563,8 @@ jobs:
         run: rustup show
 
       # The suite drives a real appa runtime, so this job builds the binary
-      # and caches the build. The other Rust jobs build without a cache.
+      # and caches the build under the default job key. Lint, tests, replay,
+      # and the Python bindings each have their own rust-cache entry.
       - name: Cache the Rust build
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
