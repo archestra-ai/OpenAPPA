@@ -49,17 +49,18 @@ The disabled stock agents are not part of the demo and require their own provide
 ## Install
 
 ```sh
-# From the repository root (or use . from this directory):
-helm upgrade --install appa-kagent-demo ./integrations/kagent/demo/chart \
-  -n kagent --set-string openai.apiKey="$OPENROUTER_API_KEY" \
+APPA_VERSION=0.9.0 # x-release-please-version
+helm upgrade --install appa-kagent-demo \
+  "https://github.com/archestra-ai/OpenAPPA/releases/download/v${APPA_VERSION}/appa-kagent-demo-${APPA_VERSION}.tgz" \
+  -n kagent \
+  --set-string openai.apiKey="$OPENAI_API_KEY" \
   --wait --timeout 10m
 ```
 
 Leave `openai.apiKey` unset to paste the key in the dashboard instead
 (Models → appa-demo-model → Edit); the pods start once the Secret exists.
 `helm upgrade` re-runs the seed Job, which is idempotent.
-The defaults match the public playground: `openai/gpt-5.6-luna` through
-`https://openrouter.ai/api/v1`.
+The default is `gpt-4.1-mini` through the OpenAI API.
 
 The policy names the delegated children by their wire spelling,
 `<namespace>__NS__<child>` with hyphens as underscores
@@ -94,15 +95,15 @@ structured outputs.
 
 | Value | Default | Meaning |
 |---|---|---|
-| `openai.apiKey` | `""` | The OpenRouter key; lands in the Secret named after the ModelConfig. |
-| `openai.model` | `openai/gpt-5.6-luna` | The agents' model. |
+| `openai.apiKey` | `""` | The OpenAI key; lands in the Secret named after the ModelConfig. |
+| `openai.model` | `gpt-4.1-mini` | The agents' model. |
 | `openai.existingSecret` | `""` | Use an existing Secret with `OPENAI_API_KEY` instead. |
-| `openai.baseUrl` | `https://openrouter.ai/api/v1` | The OpenAI-compatible endpoint for the agents' model. |
+| `openai.baseUrl` | `""` | Optional OpenAI-compatible endpoint for the agents' model. |
 | `runtime.image.*` | `ghcr.io/archestra-ai/appa-kagent-quickstart:<appVersion>` | The runtime image (also the agents' image, via kagent). Published at each release version. |
-| `runtime.reasoningEffort` | `none` | Fills `reasoning_effort` for the OpenAI model when the CRD cannot. |
+| `runtime.reasoningEffort` | `""` | Optionally fills `reasoning_effort` for the OpenAI model when the CRD cannot. |
 | `runtime.persistence.enabled` | `false` | Keep trajectories on a PersistentVolume. |
-| `llm.model` | `openai/gpt-5.6-luna` | The model the policy's sanitizers consult (`[externals.llm]`). |
-| `llm.url` | `https://openrouter.ai/api/v1` | The OpenAI-compatible endpoint for that model. |
+| `llm.model` | `gpt-4.1-mini` | The model the policy's sanitizers consult (`[externals.llm]`). |
+| `llm.url` | `""` | Optional OpenAI-compatible endpoint for that model. |
 | `mocks.approvalWindowSeconds` | `25` | How long the change board waits for a ruling, inside the policy's `externals.timeout_ms` (30 s). |
 | `seed.enabled` | `true` | Replay the showcase chats into `cluster-ops` after install. The go twin gets none. |
 | `seed.controllerUrl` | `""` | The kagent controller the seed Job posts to. Empty means `kagent-controller` in the release namespace. |
@@ -167,7 +168,10 @@ docker build -t appa-demo-tools:dev integrations/kagent/demo
 docker build -t appa-demo-mocks:dev integrations/kagent/demo/mocks
 docker build -t golang-adk:dev integrations/kagent/appa-kagent-adk-go   # the go cell: kagent derives this name
 kind load docker-image appa-kagent-quickstart:dev appa-demo-tools:dev appa-demo-mocks:dev golang-adk:dev --name <cluster>
-helm upgrade --install appa-kagent-demo ./integrations/kagent/demo/chart -n kagent \
+APPA_VERSION=0.9.0 # x-release-please-version
+helm upgrade --install appa-kagent-demo \
+  "https://github.com/archestra-ai/OpenAPPA/releases/download/v${APPA_VERSION}/appa-kagent-demo-${APPA_VERSION}.tgz" \
+  -n kagent \
   --set openai.apiKey="$OPENAI_API_KEY" \
   --set runtime.image.repository=docker.io/library/appa-kagent-quickstart --set runtime.image.tag=dev --set runtime.image.pullPolicy=Never \
   --set tools.image.repository=docker.io/library/appa-demo-tools --set tools.image.tag=dev --set tools.image.pullPolicy=Never \

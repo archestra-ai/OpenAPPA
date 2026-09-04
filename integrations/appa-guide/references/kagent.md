@@ -259,6 +259,33 @@ After approval:
    the approved source. Explain the error. Ask again before a fix that
    changes approved behavior.
 
+## Quickstart
+
+Treat `quickstart` as one guided setup, not as several modes the operator
+must invoke separately.
+
+1. Run the live-config and tool inventory. Report runtime reachability,
+   gated and ungated Agents, uninspected servers, policy health, and
+   whether persistent battery storage is available.
+2. Find useful batteries and cover remaining tools exactly as in `init`.
+   Present one complete plain-English policy proposal. End with
+   **Approve, or tell me what to change.** Wait for the response.
+3. After approval, apply and reload exactly as in **Propose, then apply**.
+4. If persistent battery storage is available, run
+   `appa-refresh-batteries --check`. If a newer stable release exists,
+   explain the version change and request approval before installing it.
+   Commit a successful refresh or roll it back on refusal. If storage is
+   not persistent, report that refresh is unavailable and continue.
+5. Re-run the inventory and `appa describe`. Report runtime, policy,
+   battery, Agent, and RemoteMCPServer health. Do not call setup complete
+   while a gated Agent is not ready or a referenced server is unaccepted.
+6. Finish with one concrete next action. When `cluster-ops` exists, direct
+   the operator to its seeded confidential-read chat and state what block
+   or remedy to observe. Otherwise name one ready gated Agent and one of
+   its installed tools whose behavior the active policy demonstrates.
+   Tell the operator where to observe the result in the agent chat and
+   runtime log.
+
 ## Adjust
 
 Start from the operator's requested outcome, not a full rescan. If it

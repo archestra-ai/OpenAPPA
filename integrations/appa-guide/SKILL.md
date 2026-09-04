@@ -1,7 +1,7 @@
 ---
 name: appa-guide
-description: Guide an operator through configuring OpenAPPA on the host you run in — Claude Code or a kagent cluster. Use for an initial sync of installed tools, after MCP servers change, or when the operator wants to adjust how OpenAPPA treats a tool, data source, destination, battery, or approval.
-argument-hint: "init|adjust"
+description: Guide an operator through configuring OpenAPPA on the host you run in — Claude Code or a kagent cluster. Use for a guided quickstart, an initial sync of installed tools, after MCP servers change, or when the operator wants to adjust how OpenAPPA treats a tool, data source, destination, battery, or approval.
+argument-hint: "quickstart|init|adjust"
 ---
 
 OpenAPPA configuration helper. Request: $ARGUMENTS
@@ -29,14 +29,17 @@ guess its content.
 
 Use one mode:
 
+- **`quickstart`** — on kagent, guide the operator through initial policy,
+  batteries, health verification, and one useful protected action.
 - **`init`** — inspect the installed tools and build a useful starting
   config.
 - **`adjust`** — help the operator make changes to an existing config.
 
 If the request already makes the mode clear, start there. Otherwise show
-these two choices in one short message and wait. Do not run both modes
-together. If the operator chooses `adjust` without describing the
-change, ask what they want OpenAPPA to do differently.
+these three choices in one short message and wait. Do not run modes
+together. `quickstart` is available only on kagent; on Claude Code,
+recommend `init` instead. If the operator chooses `adjust` without
+describing the change, ask what they want OpenAPPA to do differently.
 
 ## Rules that apply on every host
 

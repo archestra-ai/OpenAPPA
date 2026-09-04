@@ -115,8 +115,11 @@ Point any declarative agent at `http://appa-runtime.kagent.svc.cluster.local:187
 Deploy the demo chart with your OpenRouter API key:
 
 ```sh
-helm upgrade --install appa-kagent-demo ./demo/chart \
-  -n kagent --set-string openai.apiKey="$OPENROUTER_API_KEY" \
+APPA_VERSION=0.9.0 # x-release-please-version
+helm upgrade --install appa-kagent-demo \
+  "https://github.com/archestra-ai/OpenAPPA/releases/download/v${APPA_VERSION}/appa-kagent-demo-${APPA_VERSION}.tgz" \
+  -n kagent \
+  --set-string openai.apiKey="$OPENAI_API_KEY" \
   --wait --timeout 10m
 ```
 

@@ -39,8 +39,11 @@ helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --set controller.agentImage.tag=0.9.0 # x-release-please-version
 
 # the demo
-helm upgrade --install appa-kagent-demo ./integrations/kagent/demo/chart \
-  -n kagent --set-string openai.apiKey="$OPENROUTER_API_KEY" \
+APPA_VERSION=0.9.0 # x-release-please-version
+helm upgrade --install appa-kagent-demo \
+  "https://github.com/archestra-ai/OpenAPPA/releases/download/v${APPA_VERSION}/appa-kagent-demo-${APPA_VERSION}.tgz" \
+  -n kagent \
+  --set-string openai.apiKey="$OPENAI_API_KEY" \
   --wait --timeout 10m
 kubectl -n kagent port-forward svc/kagent-ui 8901:8080
 ```

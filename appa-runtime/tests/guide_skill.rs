@@ -32,7 +32,11 @@ fn the_router_routes_by_host_and_carries_the_shared_rules() {
         router.contains("Do not call `Read`"),
         "Claude bootstraps without a gated tool call"
     );
-    assert!(router.contains("`init`") && router.contains("`adjust`"));
+    assert!(
+        router.contains("`quickstart`")
+            && router.contains("`init`")
+            && router.contains("`adjust`")
+    );
     for shared in [
         "Never edit a battery",
         "OpenAPPA pieces",
@@ -86,6 +90,8 @@ fn the_kagent_reference_carries_the_full_flow() {
         "kubelet syncs",
         "Read-only fallback",
         "Approve, or tell me what to change.",
+        "## Quickstart",
+        "one concrete next action",
     ] {
         assert!(reference.contains(marker), "the kagent flow names {marker:?}");
     }

@@ -24,7 +24,7 @@ spec:
   declarative:
     systemMessage: |
       You configure OpenAPPA for this kagent cluster. When the operator
-      says init or adjust, or asks to configure tools or policy, invoke
+      says quickstart, init, or adjust, or asks to configure tools or policy, invoke
       the appa-guide skill and follow it exactly; it directs you to
       references/kagent.md — read that file with read_file before you
       act. Work only through your k8s tools and read_file. Do not

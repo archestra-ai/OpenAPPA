@@ -85,7 +85,7 @@ relay:
       memory: 64Mi
 
 # Policy ConfigMap mounted at /etc/appa. Empty contents use the packaged
-# fail-closed file. Set existingConfigMap to use a ConfigMap you manage.
+# appa-guide bootstrap policy. Set existingConfigMap to use a ConfigMap you manage.
 config:
   existingConfigMap: ""
   key: appa.toml

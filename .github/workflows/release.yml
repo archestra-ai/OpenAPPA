@@ -495,7 +495,7 @@ jobs:
           fi
 
   publish-chart:
-    name: Publish appa-runtime chart
+    name: Publish Helm charts
     if: ${{ needs.release-please.outputs.should_publish == 'true' }}
     needs: release-please
     runs-on: ubuntu-latest
@@ -522,12 +522,17 @@ jobs:
           VERSION: ${{ needs.release-please.outputs.version }}
         run: |
           helm lint charts/appa-runtime
+          helm lint integrations/kagent/demo/chart
           mkdir -p dist
           helm package charts/appa-runtime --destination dist
-          chart="dist/appa-runtime-${VERSION}.tgz"
-          test -f "$chart"
-          test "$(helm show chart "$chart" | sed -n 's/^version: *//p')" = "$VERSION"
-          test "$(helm show chart "$chart" | sed -n 's/^appVersion: *//p')" = "$VERSION"
+          helm package integrations/kagent/demo/chart --destination dist
+          for chart in \
+            "dist/appa-runtime-${VERSION}.tgz" \
+            "dist/appa-kagent-demo-${VERSION}.tgz"; do
+            test -f "$chart"
+            test "$(helm show chart "$chart" | sed -n 's/^version: *//p')" = "$VERSION"
+            test "$(helm show chart "$chart" | sed -n 's/^appVersion: *//p')" = "$VERSION"
+          done
 
       - name: Log in to the chart registry
         env:
@@ -538,13 +543,17 @@ jobs:
       - name: Publish the chart
         env:
           VERSION: ${{ needs.release-please.outputs.version }}
-        run: helm push "dist/appa-runtime-${VERSION}.tgz" oci://ghcr.io/archestra-ai/charts
+        run: |
+          helm push "dist/appa-runtime-${VERSION}.tgz" oci://ghcr.io/archestra-ai/charts
+          helm push "dist/appa-kagent-demo-${VERSION}.tgz" oci://ghcr.io/archestra-ai/charts
 
       - name: Upload the chart artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: appa-runtime-chart
-          path: dist/appa-runtime-${{ needs.release-please.outputs.version }}.tgz
+          name: appa-charts
+          path: |
+            dist/appa-runtime-${{ needs.release-please.outputs.version }}.tgz
+            dist/appa-kagent-demo-${{ needs.release-please.outputs.version }}.tgz
           archive: false
           overwrite: true
           if-no-files-found: error
@@ -601,7 +610,7 @@ jobs:
         run: |
           test "$TAG_NAME" = "v${EXPECTED_VERSION}"
           # Six binary-only platform archives, the platform-independent plugin
-          # artifact every binary accepts, and the shared-runtime chart.
+          # artifact every binary accepts, and both Helm charts.
           expected_archives=(
             appa-x86_64-unknown-linux-gnu.tar.gz
             appa-aarch64-unknown-linux-gnu.tar.gz
@@ -611,6 +620,7 @@ jobs:
             appa-aarch64-pc-windows-msvc.zip
             "appa-plugin-${EXPECTED_VERSION}.tar.gz"
             "appa-runtime-${EXPECTED_VERSION}.tgz"
+            "appa-kagent-demo-${EXPECTED_VERSION}.tgz"
           )
           for archive in "${expected_archives[@]}"; do
             test -f "$archive" || {
