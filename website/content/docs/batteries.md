@@ -60,7 +60,7 @@ name = "mcp__claude_ai_Slack__slack_send_message(channel_id:C0ABC*)"
 requires = { trust = "trusted" }
 delta = {}
 
-# shipped battery: everything else needs fresh human approval
+# included battery: everything else needs fresh human approval
 [[policy.tool]]
 name = "mcp__claude_ai_Slack__slack_send_message"
 requires = { trust = "trusted", attention = ["hitl"] }
@@ -75,7 +75,7 @@ In another example, the battery labels all Slack history `internal`. A root rule
 name = "mcp__claude_ai_Slack__slack_read_channel(channel_id:C0SHARED*)"
 delta = { trust = "suspicious", audience = ["internal"] }
 
-# shipped battery: every other channel is internal and keeps its trust
+# included battery: every other channel is internal and keeps its trust
 [[policy.tool]]
 name = "mcp__claude_ai_Slack__slack_read_channel"
 delta = { audience = ["internal"] }
