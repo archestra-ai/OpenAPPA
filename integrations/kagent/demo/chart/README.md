@@ -30,14 +30,29 @@ helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --version 0.9.12 -n kagent \
   --set controller.agentImage.registry=ghcr.io \
   --set controller.agentImage.repository=archestra-ai/appa-kagent-quickstart \
-  --set controller.agentImage.tag=0.9.0 --wait # x-release-please-version
+  --set k8s-agent.enabled=false \
+  --set kgateway-agent.enabled=false \
+  --set istio-agent.enabled=false \
+  --set promql-agent.enabled=false \
+  --set observability-agent.enabled=false \
+  --set argo-rollouts-agent.enabled=false \
+  --set helm-agent.enabled=false \
+  --set cilium-policy-agent.enabled=false \
+  --set cilium-manager-agent.enabled=false \
+  --set cilium-debug-agent.enabled=false \
+  --wait --timeout 10m \
+  --set controller.agentImage.tag=0.9.0 # x-release-please-version
 ```
+
+The disabled stock agents are not part of the demo and require their own provider Secret. The controller, dashboard, and tool services remain enabled.
 
 ## Install
 
 ```sh
+# From the repository root (or use . from this directory):
 helm upgrade --install appa-kagent-demo ./integrations/kagent/demo/chart \
-  -n kagent --set openai.apiKey="$OPENROUTER_API_KEY" --wait
+  -n kagent --set-string openai.apiKey="$OPENROUTER_API_KEY" \
+  --wait --timeout 10m
 ```
 
 Leave `openai.apiKey` unset to paste the key in the dashboard instead
