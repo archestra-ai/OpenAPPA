@@ -904,10 +904,25 @@ impl Runtime {
             .as_ref()
             .map(|policy| policy.engine().vouched_tools())
             .unwrap_or_default();
+        // The rules as *this trajectory* ran under them: the log pins its own policy file, so a
+        // reload since the session opened does not rewrite the rules a report explains. The
+        // bindings around them come from the live deployment instead — they are typed there and
+        // free-form TOML in the file, and a reload that moved them shows as a reload event.
+        let policy_document = toml::from_str::<toml::Value>(&String::from_utf8_lossy(log.policy_file()))
+            .ok()
+            .and_then(|composed| composed.get("policy").cloned());
+        let policy_section = policy_document.map(|document| {
+            (
+                document,
+                deployment.config.externals.clone(),
+                crate::engine::policy_file_key(log.policy_file()),
+            )
+        });
         let source = yell::Source {
             facts: log.facts(),
             events: self.inner.events(&root),
             trust_chain,
+            policy: policy_section,
             vouched,
             parents: yell::branches(log.facts(), view.as_ref(), policy.as_ref()),
             replay_refused,

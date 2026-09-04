@@ -90,6 +90,9 @@ pub(crate) struct Export {
     /// The policy's trust ranks, lowest first, so a reader can read the numeric ranks the
     /// facts carry.
     pub(crate) trust_chain: Vec<String>,
+    /// The rules these decisions were made under, stripped against [`super::policy`]. `None`
+    /// when the policy did not resolve, which `replay_refused` already says out loud.
+    pub(crate) policy: Option<Policy>,
     pub(crate) facts: Vec<FactEntry>,
     pub(crate) runtime_events: Vec<EventEntry>,
     /// Facts older than this were left out to stay inside the byte budget. `None` when the
@@ -107,6 +110,19 @@ pub(crate) struct Export {
     /// unclassified field exists, which aggregate it belongs to, and where it sits — and no
     /// part of what sat there is carried.
     pub(crate) unclassified: Vec<Drift>,
+}
+
+/// The deployment's rules, as far as a report may carry them.
+#[derive(Debug, Serialize)]
+pub(crate) struct Policy {
+    /// The composed `[policy]` table. Carried because a denial means nothing without the
+    /// clause that produced it.
+    pub(crate) document: Value,
+    /// Which names are bound to what kind of external, and none of what they are bound to.
+    pub(crate) externals: super::policy::Externals,
+    /// This policy's identity. Baseline only: it is what would tie two reports to one
+    /// deployment.
+    pub(crate) digest: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -139,6 +155,9 @@ pub(crate) struct Source<'a> {
     pub(crate) facts: &'a [Fact],
     pub(crate) events: crate::events::Events,
     pub(crate) trust_chain: Vec<String>,
+    /// The composed `[policy]` table and the bindings around it, or `None` when the policy did
+    /// not resolve.
+    pub(crate) policy: Option<(toml::Value, crate::config::Externals, String)>,
     /// The tool names the serving policy writes. A tool name in a fact or a hook is the
     /// model's string until this set vouches for it.
     pub(crate) vouched: BTreeSet<String>,
@@ -191,6 +210,21 @@ pub(crate) fn build(source: Source<'_>, mode: Mode) -> Export {
     let mut tokens = Tokens::default();
     let mut unclassified: Vec<Drift> = Vec::new();
     let from = budget_start(source.facts, mode, &source.vouched);
+
+    // The policy is numbered first, so a reader meets a name where it is declared rather than
+    // where it happened to be used.
+    let policy = source.policy.as_ref().map(|(document, externals, digest)| {
+        let stripped = super::policy::strip_policy(document, &mut tokens, mode);
+        record_drift(&mut unclassified, &stripped, "policy");
+        Policy {
+            document: stripped.value,
+            externals: super::policy::strip_externals(externals, &mut tokens, mode),
+            digest: match mode {
+                Mode::Baseline => Some(digest.clone()),
+                Mode::Pseudonymized => None,
+            },
+        }
+    });
 
     let trust_chain = source
         .trust_chain
@@ -247,6 +281,7 @@ pub(crate) fn build(source: Source<'_>, mode: Mode) -> Export {
         branches,
         replay_refused: source.replay_refused,
         trust_chain,
+        policy,
         facts,
         runtime_events,
         truncated_before_seq: (from > 0).then_some(from),
@@ -440,6 +475,15 @@ mod tests {
         );
         assert!(!export.facts.is_empty(), "the replay produced facts");
         assert!(!export.runtime_events.is_empty(), "the replay produced runtime events");
+        // The rules are carried too — a denial means nothing without the clause behind it —
+        // and the assertion above covers their inventory only if they are actually here.
+        let policy = export.policy.expect("the pinned policy is carried");
+        assert!(
+            policy.document["tool"]
+                .as_array()
+                .is_some_and(|tools| !tools.is_empty())
+        );
+        assert!(policy.digest.is_none(), "a fingerprint is baseline only");
     }
 
     /// The property a person is promised when they answer yes to pseudonymization: nothing a

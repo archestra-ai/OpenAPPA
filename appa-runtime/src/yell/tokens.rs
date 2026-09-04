@@ -68,6 +68,10 @@ pub(crate) enum Class {
     Field,
     /// A `const` or `enum` literal in that same agent-authored schema.
     Literal,
+    /// An endpoint a binding points at. Not the deployment's vocabulary but its address: no
+    /// mode spells one. The token still carries the one thing a reader needs — that two
+    /// bindings reach the same service, or that they do not.
+    Url,
 }
 
 impl Class {
@@ -84,7 +88,8 @@ impl Class {
             | Class::Digest
             | Class::Field
             | Class::Literal
-            | Class::Selector => true,
+            | Class::Selector
+            | Class::Url => true,
             Class::Authority
             | Class::Tool
             | Class::Effect
@@ -100,7 +105,7 @@ impl Class {
     }
 
     /// Every class, so that one can be checked against all of them.
-    const ALL: [Class; 18] = [
+    const ALL: [Class; 19] = [
         Class::Trajectory,
         Class::Reader,
         Class::Argument,
@@ -119,6 +124,7 @@ impl Class {
         Class::Identity,
         Class::Field,
         Class::Literal,
+        Class::Url,
     ];
 
     /// Whether a name is spelled the way this report spells its own tokens.
@@ -158,6 +164,7 @@ impl Class {
             Class::Identity => "identity",
             Class::Field => "field",
             Class::Literal => "literal",
+            Class::Url => "url",
         }
     }
 }

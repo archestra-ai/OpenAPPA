@@ -63,6 +63,16 @@ pub(crate) enum Rule {
     /// the stored policy's key. Carried as it stands in [`Mode::Baseline`], dropped under
     /// pseudonymization, where the whole point is that two reports cannot be tied together.
     Fingerprint,
+    /// Prose a deployer wrote: a tool `description`, an authority `hint`. It is the
+    /// deployment's own text and often says exactly why a policy is shaped as it is, so
+    /// Baseline carries it; nothing bounds what a sentence contains, so pseudonymization
+    /// drops it. Behaves as [`Rule::Fingerprint`] does and is named apart from it because the
+    /// reason differs, and the reason is what a table entry has to get right.
+    Prose,
+    /// Carried in no mode. For a field whose presence is worth classifying — so that it
+    /// raises no drift — but whose content may never leave: an endpoint's bearer token, a
+    /// bound command's argv and working directory.
+    Never,
     /// A deployment-defined name, carried through the report's substitution table.
     Token(Class),
     /// A tool name, which is the deployment's vocabulary only when the policy writes it.
@@ -93,6 +103,13 @@ pub(crate) enum Rule {
     /// A scalar string that packs names rather than holding one: `GroupRef`, which
     /// serializes as `"@group"` or `"@provider:selector"`.
     PackedName,
+    /// One entry of an audience list as a *policy* writes it, where four unlike things share
+    /// one slot: the closed words `public`, `self` and `internal`; `@group` or
+    /// `@provider:selector`; `$argument`, naming a tool argument to read recipients from; and
+    /// anything else, which is a reader written out — a person. Each is carried as what it is,
+    /// so a policy's commonest clause stays readable without a literal address riding along
+    /// beside it.
+    AudienceToken,
     /// A return contract, which serializes as a JSON Schema document. Authored text hides in
     /// its property names at every depth, its `required` array, its `const`/`enum` literals,
     /// and its `description` prose.
@@ -124,7 +141,11 @@ impl Rule {
     /// object rather than present and empty; in an array, where there is no key to leave out,
     /// the same rule yields `null`.
     fn omitted(&self, mode: Mode) -> bool {
-        matches!(self, Rule::Fingerprint) && mode == Mode::Pseudonymized
+        match self {
+            Rule::Never => true,
+            Rule::Fingerprint | Rule::Prose => mode == Mode::Pseudonymized,
+            _ => false,
+        }
     }
 }
 
@@ -207,10 +228,11 @@ impl Walk<'_> {
                 Value::Object(_) | Value::Array(_) => self.unclassify(path),
                 scalar => scalar.clone(),
             },
-            Rule::Fingerprint => match self.mode {
+            Rule::Fingerprint | Rule::Prose => match self.mode {
                 Mode::Baseline => self.apply(&Rule::Keep, value, path),
                 Mode::Pseudonymized => Value::Null,
             },
+            Rule::Never => Value::Null,
             Rule::Token(class) => match value.as_str() {
                 Some(raw) => self.token(*class, raw),
                 None => self.unclassify(path),
@@ -263,6 +285,19 @@ impl Walk<'_> {
                 None => self.unclassify(path),
             },
             Rule::PackedName => self.packed_name(value, path),
+            Rule::AudienceToken => match value.as_str() {
+                // The engine's own words for the two ends of the audience chain and for the
+                // universe. A deployment does not choose these spellings.
+                Some("public" | "self" | "internal") => value.clone(),
+                Some(group) if group.starts_with('@') => self.packed_name(value, path),
+                Some(placeholder) => match placeholder.strip_prefix('$') {
+                    Some("") | None => self.token(Class::Reader, placeholder),
+                    Some(argument) => {
+                        Value::String(format!("${}", self.tokens.token(self.mode, Class::Argument, argument)))
+                    }
+                },
+                None => self.unclassify(path),
+            },
             Rule::ReturnSchema => self.return_schema(value, path),
             Rule::Table(table) => self.table(table, value, path),
         }
