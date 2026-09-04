@@ -9,3 +9,6 @@ website
 paper
 docs
 demo/*/world/**/.DS_Store
+batteries/**/__pycache__
+batteries/**/test_*.py
+batteries/test_cross_battery.py
