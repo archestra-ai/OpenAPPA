@@ -349,7 +349,8 @@ func (b *builder) mcpServer(server MCPServerSpec) error {
 		return &InventoryRefusal{Kind: ForeignAuthority, Path: server.Path, Name: server.URL,
 			Detail: fmt.Sprintf("%q is served outside the cluster, and its tools would claim the policy identity "+
 				"mcp/%s/<tool> of the in-cluster %q: an MCP endpoint is named <service>, "+
-				"<service>.<namespace>.svc, <service>.<namespace>.svc.cluster.local, localhost, or 127.0.0.1",
+				"<service>.<namespace>, <service>.<namespace>.svc, <service>.<namespace>.svc.cluster.local, "+
+				"localhost, or 127.0.0.1",
 				server.URL, toolset, toolset)}
 	}
 	if len(server.Tools) == 0 {
@@ -367,6 +368,23 @@ func (b *builder) mcpServer(server MCPServerSpec) error {
 	return nil
 }
 
+// remoteAgent spells one remote agent by the name the entry carries.
+//
+// The identity is the name alone, and the entry's URL binds nothing —
+// unlike an MCP entry, whose toolset is read off its own endpoint. The
+// kagent controller renders both fields from the one Agent object a
+// tool reference resolves to: the name from its object reference and
+// the URL from toolAgentURL of that same object. The reference is a
+// TypedReference (kind, name, namespace) and carries no URL, so no CRD
+// can point a declared agent identity at another endpoint.
+//
+// Reading the identity off the URL instead would refuse two renderings
+// the controller emits: a global proxy rewrites every URL to the proxy
+// host and moves the real one into the x-kagent-host header, and a
+// sandbox agent is reached at the controller's own address under
+// /api/a2a-sandboxes/<ns>/<name>. A hand-written config.json mounted
+// past the controller can still name one agent and reach another (Known
+// gaps in ../IMPLEMENTATION.md).
 func (b *builder) remoteAgent(remote RemoteAgentSpec) error {
 	namespace, agent, marked := strings.Cut(remote.Name, namespaceMark)
 	if !marked || namespace == "" || agent == "" || strings.Contains(agent, namespaceMark) {
@@ -414,8 +432,10 @@ func toolsetOf(host string) (string, bool) {
 // alone, so the same name in another namespace passes, and an
 // ExternalName Service resolves an accepted address to a name outside
 // the cluster. <service>.<namespace> is one form short of a public
-// domain name, and no rule tells the two apart, so the qualified form
-// must carry svc.
+// domain name and nothing here tells the two apart, so it is accepted
+// as the cluster-internal form kagent's own controller reads it as:
+// isInternalK8sURL asks the API server whether that second label is a
+// namespace, which this plugin cannot do.
 func inCluster(host string) bool {
 	host = strings.ToLower(host)
 	if host == "localhost" || host == "127.0.0.1" {
@@ -423,9 +443,9 @@ func inCluster(host string) bool {
 	}
 	labels := strings.Split(host, ".")
 	switch {
-	case len(labels) == 1:
+	case len(labels) <= 2:
 		return true
-	case len(labels) < 3 || labels[2] != "svc":
+	case labels[2] != "svc":
 		return false
 	default:
 		return len(labels) == 3 || strings.Join(labels[3:], ".") == clusterDomain

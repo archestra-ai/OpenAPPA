@@ -48,8 +48,9 @@ import os
 import re
 import string
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib import resources
+from types import MappingProxyType
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -141,16 +142,27 @@ def builtin_manifest() -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class ToolInventory:
-    """The raw ADK tool names of one agent, each with its wire spelling."""
+    """The raw ADK tool names of one agent, each with its wire spelling.
+
+    The forward direction is the whole state. The inverse is derived,
+    never given, so no caller can hand in two mappings that disagree,
+    and both are handed out as read-only views. A forward mapping that
+    is not injective has no inverse — the runtime could name only one
+    of the two raw names back to the model — and it is refused here as
+    ``from_config`` refuses it at the config.
+    """
 
     spellings: Mapping[str, str]
-    names: Mapping[str, str]
-    """The inverse: each wire spelling, back to the name ADK dispatches.
+    names: Mapping[str, str] = field(init=False)
+    """The inverse: each wire spelling, back to the name ADK dispatches."""
 
-    ``from_config`` is the only builder, and it fills both directions as
-    one: a spelling is assigned to at most one raw name, so the inverse
-    loses nothing.
-    """
+    def __post_init__(self) -> None:
+        spellings = dict(self.spellings)
+        names = {spelling: name for name, spelling in spellings.items()}
+        if len(names) != len(spellings):
+            raise ValueError("two raw names of the inventory spell alike, and the inverse would lose one")
+        object.__setattr__(self, "spellings", MappingProxyType(spellings))
+        object.__setattr__(self, "names", MappingProxyType(names))
 
     def spelling(self, name: str) -> str | None:
         """The wire spelling of a raw name, or None for a name outside the inventory."""
@@ -207,7 +219,7 @@ class ToolInventory:
             if enabled[group]:
                 for name in names:
                     builder.add(name, builtin_spelling(name), f"the builtin group {group}")
-        return cls(dict(builder.spellings), dict(builder.names))
+        return cls(builder.spellings)
 
 
 def _entries(raw: Any) -> list[dict[str, Any]]:
@@ -262,7 +274,7 @@ class _Builder:
             raise ConfigRefused(
                 f"{path}: {url!r} is served outside the cluster, and its tools would claim the policy "
                 f"identity mcp/{toolset}/<tool> of the in-cluster {toolset!r} — an MCP endpoint is named "
-                "<service>, <service>.<namespace>.svc, "
+                "<service>, <service>.<namespace>, <service>.<namespace>.svc, "
                 "<service>.<namespace>.svc.cluster.local, localhost, or 127.0.0.1"
             )
         names = server.get("tools")
@@ -279,6 +291,26 @@ class _Builder:
             self.add(name, mcp_spelling(toolset, name), path)
 
     def remote_agent(self, path: str, remote: dict[str, Any]) -> None:
+        """Spell one remote agent by the name the entry carries.
+
+        The identity is the name alone, and the entry's ``url`` binds
+        nothing — unlike an MCP entry, whose toolset is read off its own
+        endpoint. The kagent controller renders both fields from the one
+        Agent object a tool reference resolves to: the name from its
+        object reference and the URL from `toolAgentURL` of that same
+        object. The reference is a `TypedReference` (kind, name,
+        namespace) and carries no URL, so no CRD can point a declared
+        agent identity at another endpoint.
+
+        Reading the identity off the URL instead would refuse two
+        renderings the controller emits: a global proxy rewrites every
+        URL to the proxy host and moves the real one into the
+        ``x-kagent-host`` header, and a sandbox agent is reached at the
+        controller's own address under `/api/a2a-sandboxes/<ns>/<name>`.
+        A hand-written ``config.json`` mounted past the controller can
+        still name one agent and reach another — the Known gaps table of
+        integrations/kagent/IMPLEMENTATION.md.
+        """
         name = remote.get("name")
         if not isinstance(name, str):
             return
@@ -319,13 +351,16 @@ def _in_cluster(host: str) -> bool:
     first label alone, so the same name in another namespace passes,
     and an ``ExternalName`` Service resolves an accepted address to a
     name outside the cluster. ``<service>.<namespace>`` is one form
-    short of a public domain name, and no rule tells the two apart, so
-    the qualified form must carry ``svc``.
+    short of a public domain name and nothing here tells the two apart,
+    so it is accepted as the cluster-internal form kagent's own
+    controller reads it as: `isInternalK8sURL` asks the API server
+    whether that second label is a namespace, which this plugin cannot
+    do.
     """
     if host in _LOOPBACK_HOSTS:
         return True
     match tuple(host.split(".")):
-        case (_,) | (_, _, "svc"):
+        case (_,) | (_, _) | (_, _, "svc"):
             return True
         case (_, _, "svc", *domain):
             return tuple(domain) == _CLUSTER_DOMAIN

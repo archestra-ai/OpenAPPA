@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use appa_runtime_api::{OutcomeBody, ProposedCall, ToolOutcome};
+use thiserror::Error;
 
 use crate::http::{HttpClient, read_body_capped};
 use crate::wire::WireTool;
@@ -20,18 +21,34 @@ pub(crate) fn canonical_tool_name(advertised: &str) -> &str {
     }
 }
 
-/// Host tools combined with the runtime control tool.
+/// Why a host's tools cannot become a catalogue.
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+pub enum CatalogueError {
+    /// The advertised control name belongs to the runtime. A host tool spelled the
+    /// same way would be indistinguishable from the control tool at check time, and
+    /// every call to it would reach the control tool instead, so the catalogue is
+    /// refused rather than rerouting the host's tool.
+    #[error("{ADVERTISED_CONTROL_TOOL} is the reserved control tool name; rename the host tool")]
+    ReservedToolName,
+}
+
+/// Host tools combined with the runtime control tool. Every catalogue that exists
+/// advertises the control tool exactly once, under the name the runtime routes.
 #[derive(Clone, Debug)]
 pub struct ToolCatalogue {
     tools: Vec<WireTool>,
 }
 
 impl ToolCatalogue {
-    /// Builds the catalogue with the control tool appended.
-    pub fn new(tools: Vec<WireTool>) -> Self {
+    /// Builds the catalogue with the control tool appended, or refuses a host tool
+    /// that claims the control tool's advertised name.
+    pub fn new(tools: Vec<WireTool>) -> Result<Self, CatalogueError> {
         let mut tools = tools;
+        if tools.iter().any(|tool| tool.function.name == ADVERTISED_CONTROL_TOOL) {
+            return Err(CatalogueError::ReservedToolName);
+        }
         tools.push(control_tool_schema());
-        ToolCatalogue { tools }
+        Ok(ToolCatalogue { tools })
     }
 
     /// Builds the catalogue excluding a tool that cannot run in the current frame.
@@ -178,7 +195,8 @@ mod tests {
 
     #[test]
     fn the_catalogue_always_carries_the_control_tool() {
-        let catalogue = ToolCatalogue::new(vec![WireTool::new("read_hr", "read", serde_json::json!({}))]);
+        let catalogue = ToolCatalogue::new(vec![WireTool::new("read_hr", "read", serde_json::json!({}))])
+            .expect("no host tool claims the reserved name");
         let names: Vec<String> = catalogue
             .advertised_without(None)
             .into_iter()
@@ -192,12 +210,32 @@ mod tests {
         let catalogue = ToolCatalogue::new(vec![
             WireTool::new("fork", "spawn", serde_json::json!({})),
             WireTool::new("read_hr", "read", serde_json::json!({})),
-        ]);
+        ])
+        .expect("no host tool claims the reserved name");
         let names: Vec<String> = catalogue
             .advertised_without(Some("fork"))
             .into_iter()
             .map(|tool| tool.function.name)
             .collect();
         assert_eq!(names, vec!["read_hr".to_string(), ADVERTISED_CONTROL_TOOL.to_string()]);
+    }
+
+    /// A host tool under the control tool's advertised name has no catalogue to be
+    /// advertised in: every call to that name is routed to the control tool, so the
+    /// host tool would be unreachable and a spawn under it unrecognized.
+    #[test]
+    fn a_host_tool_cannot_claim_the_control_tools_advertised_name() {
+        assert_eq!(
+            ToolCatalogue::new(vec![
+                WireTool::new("read_hr", "read", serde_json::json!({})),
+                WireTool::new(ADVERTISED_CONTROL_TOOL, "the host's own", serde_json::json!({})),
+            ])
+            .err(),
+            Some(CatalogueError::ReservedToolName),
+        );
+        assert_eq!(
+            canonical_tool_name(ADVERTISED_CONTROL_TOOL),
+            appa_runtime_api::CONTROL_TOOL
+        );
     }
 }

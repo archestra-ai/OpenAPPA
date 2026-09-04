@@ -105,7 +105,8 @@ async fn episode(policy: &str, provider: &Provider) -> Episode {
             appa_example_agent::HttpClient::loopback(),
         ),
         ToolShim::new(format!("{origin}{}", shim::TOOLS_PATH)),
-        ToolCatalogue::new(catalogue::advertised(&compiled, true)),
+        ToolCatalogue::new(catalogue::advertised(&compiled, true))
+            .expect("the policy's tools leave the control name to the runtime"),
     )
     .with_head(TranscriptHead::new(vec![WireMessage::system(
         "You are a corporate assistant.",

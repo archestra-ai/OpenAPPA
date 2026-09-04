@@ -181,6 +181,11 @@ func decodeGuarded(raw []byte, skillsFolder string) (*adk.AgentConfig, appakagen
 // spells: every MCP entry with its filter, every remote agent the stock
 // builder wires (one with no URL is skipped, as the builder skips it),
 // and the switches of the builtin groups.
+//
+// A remote agent's URL is read for that one question and then dropped:
+// the policy identity of an agent is its declared name, and the guard
+// binds the two no further. See builder.remoteAgent in inventory.go for
+// why the controller cannot render a name and a URL that disagree.
 func inventorySpec(agentConfig *adk.AgentConfig, skillsFolder string) appakagentadk.InventorySpec {
 	var spec appakagentadk.InventorySpec
 	for index, server := range agentConfig.HttpTools {

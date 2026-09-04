@@ -182,7 +182,7 @@ async fn main() -> anyhow::Result<()> {
             OpenAiConfig::openrouter(args.model.clone(), api_key).with_request_timeout(Duration::from_secs(300)),
         ),
         ToolShim::new(format!("{origin}{}", shim::TOOLS_PATH)),
-        ToolCatalogue::new(catalogue::advertised(&compiled, forking)),
+        ToolCatalogue::new(catalogue::advertised(&compiled, forking))?,
     )
     .with_head(head)
     .with_limits(Limits {

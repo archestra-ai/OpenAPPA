@@ -19,8 +19,9 @@
 //! A person's
 //! [`Ruling`] crosses only under a host that reviews through its own
 //! channel ([`AdapterName::review_channel`]), and there only on the
-//! control call that quotes the offer it answers; under any other host,
-//! or on any other call, the envelope asserting one is refused.
+//! control call that quotes the offer it answers. Under any other host,
+//! on any other call, or on any other event — no other event reads one —
+//! the envelope asserting one is refused.
 //!
 //! The event and decision structs are flat with optional fields rather
 //! than tagged enums because `arguments` is a `RawValue`, which serde's
@@ -493,6 +494,19 @@ impl WireEvent {
         // settled here, on the envelope, before any event exists.
         let ruling = checked_ruling(served.name, self.ruling)?;
         let name = self.event;
+        // A ruling answers the review of an offer a call quotes, so a
+        // tool call is the only event that reads one. Every other event
+        // would carry it past the last reader and drop it, so an
+        // asserted ruling there is refused rather than silently lost.
+        let ruling = match (ruling, name) {
+            (None, _) => None,
+            (Some(ruling), EventName::ToolCall) => Some(ruling),
+            (Some(_), other) => {
+                return Err(malformed(format!(
+                    "a ruling on {other:?}, which is not a tool call and spends no ruling"
+                )));
+            }
+        };
         let root = || -> Result<TrajectoryId, ParseRefusal> {
             match self.root_id.as_deref() {
                 Some(root_id) if !root_id.is_empty() => Ok(served.name.root(root_id)),
@@ -1096,48 +1110,89 @@ mod tests {
     /// A ruling is a person's answer the host obtained itself for the
     /// offer one control call quotes, so it crosses on exactly that
     /// call under exactly that kind of host. Claude Code obtains no
-    /// answer of its own, and an ordinary call has no offer a ruling
-    /// could answer: on either the envelope is refused, never read with
-    /// the asserted ruling dropped.
+    /// answer of its own; an ordinary call has no offer a ruling could
+    /// answer; and no other event reads one at all, so a result, a turn
+    /// end or a ping carrying one asserts what nothing would spend. Each
+    /// is refused on the envelope, never read with the ruling dropped.
     #[test]
     fn a_ruling_crosses_only_on_the_control_call_of_a_host_that_reviews_itself() {
         #[derive(Debug)]
         enum Expected {
             Ruled(Option<Ruling>),
+            /// An event with no ruling to read: it crosses only when none
+            /// is asserted.
+            Crossed,
             Refused,
         }
-        let posted = |adapter: &str, tool: &str, ruling: &str| {
-            format!(
-                r#"{{"protocol":1,"adapter":"{adapter}","event":"tool_call","root_id":"r1","tool":"{tool}","arguments":{{"offer_id":"o1"}}{ruling}}}"#
-            )
+        let posted = |adapter: &str, event: &str, tool: &str, ruling: &str| {
+            let fields = match event {
+                "tool_call" => format!(r#","tool":"{tool}","arguments":{{"offer_id":"o1"}}"#),
+                "tool_result" | "spawn_result" => format!(
+                    r#","tool":"{tool}","arguments":{{"offer_id":"o1"}},"outcome":{{"status":"success","body":{{"content":"done"}}}}"#
+                ),
+                "child_start" | "child_end" => r#","child_id":"c1""#.to_string(),
+                _ => String::new(),
+            };
+            format!(r#"{{"protocol":1,"adapter":"{adapter}","event":"{event}","root_id":"r1"{fields}{ruling}}}"#)
         };
         let approve = r#","ruling":"approve""#;
         let deny = r#","ruling":"deny""#;
         let table = [
             // The host reviews through its own channel and the call is
             // the one that quotes the offer.
-            (&SERVED, CONTROL_RAW, approve, Expected::Ruled(Some(Ruling::Approve))),
-            (&SERVED, CONTROL_RAW, deny, Expected::Ruled(Some(Ruling::Deny))),
-            (&SERVED, CONTROL_RAW, "", Expected::Ruled(None)),
+            (
+                &SERVED,
+                "tool_call",
+                CONTROL_RAW,
+                approve,
+                Expected::Ruled(Some(Ruling::Approve)),
+            ),
+            (
+                &SERVED,
+                "tool_call",
+                CONTROL_RAW,
+                deny,
+                Expected::Ruled(Some(Ruling::Deny)),
+            ),
+            (&SERVED, "tool_call", CONTROL_RAW, "", Expected::Ruled(None)),
             // The same host, an ordinary call: nothing would spend the
             // ruling, so asserting one is refused.
-            (&SERVED, "builtin_read_file", approve, Expected::Refused),
-            (&SERVED, "builtin_read_file", deny, Expected::Refused),
-            (&SERVED, "builtin_read_file", "", Expected::Ruled(None)),
+            (&SERVED, "tool_call", "builtin_read_file", approve, Expected::Refused),
+            (&SERVED, "tool_call", "builtin_read_file", deny, Expected::Refused),
+            (&SERVED, "tool_call", "builtin_read_file", "", Expected::Ruled(None)),
+            // Every other event of that same host: none of them reads a
+            // ruling, so one asserted there is refused rather than dropped.
+            (&SERVED, "tool_result", CONTROL_RAW, approve, Expected::Refused),
+            (&SERVED, "tool_result", "builtin_read_file", deny, Expected::Refused),
+            (&SERVED, "spawn_result", "spawn", approve, Expected::Refused),
+            (&SERVED, "turn_end", "", approve, Expected::Refused),
+            (&SERVED, "turn_end", "", deny, Expected::Refused),
+            (&SERVED, "session_start", "", approve, Expected::Refused),
+            (&SERVED, "child_start", "", approve, Expected::Refused),
+            (&SERVED, "child_end", "", deny, Expected::Refused),
+            (&SERVED, "ping", "", approve, Expected::Refused),
+            // The same events assert nothing and cross.
+            (&SERVED, "tool_result", "builtin_read_file", "", Expected::Crossed),
+            (&SERVED, "turn_end", "", "", Expected::Crossed),
+            (&SERVED, "session_start", "", "", Expected::Crossed),
+            (&SERVED, "child_end", "", "", Expected::Crossed),
+            (&SERVED, "ping", "", "", Expected::Crossed),
             // A host with no review channel of its own.
-            (&CLAUDE_CODE, CONTROL_RAW, approve, Expected::Refused),
-            (&CLAUDE_CODE, CONTROL_RAW, deny, Expected::Refused),
-            (&CLAUDE_CODE, CONTROL_RAW, "", Expected::Ruled(None)),
-            (&CLAUDE_CODE, "builtin_read_file", deny, Expected::Refused),
+            (&CLAUDE_CODE, "tool_call", CONTROL_RAW, approve, Expected::Refused),
+            (&CLAUDE_CODE, "tool_call", CONTROL_RAW, deny, Expected::Refused),
+            (&CLAUDE_CODE, "tool_call", CONTROL_RAW, "", Expected::Ruled(None)),
+            (&CLAUDE_CODE, "tool_call", "builtin_read_file", deny, Expected::Refused),
+            (&CLAUDE_CODE, "turn_end", "", approve, Expected::Refused),
         ];
-        for (served, tool, asserted, expected) in table {
-            let row = posted(served.name.as_str(), tool, asserted);
+        for (served, event, tool, asserted, expected) in table {
+            let row = posted(served.name.as_str(), event, tool, asserted);
             let read = WireEvent::read(row.as_bytes()).expect("reads").into_event(served);
             match (&expected, read) {
                 (Expected::Ruled(ruled), Ok(Some(accepted))) => match accepted.event {
                     HookEvent::ToolCall { ruling, .. } => assert_eq!(ruling, *ruled, "{row}"),
                     other => panic!("{row} crossed as {other:?}"),
                 },
+                (Expected::Crossed, Ok(_)) => {}
                 (Expected::Refused, Err(ParseRefusal::Malformed { .. })) => {}
                 (expected, other) => panic!("{row} is {expected:?}, got {other:?}"),
             }

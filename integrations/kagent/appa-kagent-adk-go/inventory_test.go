@@ -116,6 +116,7 @@ func TestANameTheWireCannotSpellIsRefused(t *testing.T) {
 func TestAnInClusterEndpointNamesItsToolset(t *testing.T) {
 	for _, host := range []string{
 		"demo-tools",
+		"demo-tools.kagent",
 		"demo-tools.kagent.svc",
 		"demo-tools.kagent.svc.cluster.local",
 		"localhost",
@@ -135,10 +136,6 @@ func TestAnInClusterEndpointNamesItsToolset(t *testing.T) {
 // that label would take the policy identity of the in-cluster service.
 func TestAnMCPEndpointOutsideTheClusterIsRefused(t *testing.T) {
 	for _, host := range []string{
-		// A two-label host is one label short of a public domain
-		// name and cannot be told apart from one.
-		"demo-tools.attacker",
-		"demo-tools.io",
 		"demo-tools.attacker.example.com",
 		"demo-tools.kagent.example.com",
 		"demo-tools.kagent.svc.attacker.com",

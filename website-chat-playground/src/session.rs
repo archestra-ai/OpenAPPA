@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use appa_example_agent::wire::{WireMessage, WireTool};
 use appa_example_agent::{
-    Endpoint, HttpClient, OpenAiCompatible, OpenAiConfig, ToolCatalogue, Transcript, TranscriptHead,
+    CatalogueError, Endpoint, HttpClient, OpenAiCompatible, OpenAiConfig, ToolCatalogue, Transcript, TranscriptHead,
 };
 use appa_runtime::api::{OpenError, Runtime, TrajectoryId};
 use appa_runtime::config::{Config, ConfigError};
@@ -111,6 +111,8 @@ pub enum CreateError {
     Open(#[from] Box<OpenError>),
     #[error("composing the deployment: {0}")]
     Deployment(#[from] Box<ConfigError>),
+    #[error("the policy's tools cannot be advertised: {0}")]
+    Catalogue(#[from] CatalogueError),
 }
 
 /// The models the playground may spend the service's key on — the four the
@@ -205,7 +207,7 @@ impl Sessions {
             model: model.to_string(),
             tool_count: checked.tool_count,
             boundary,
-            catalogue: ToolCatalogue::new(advertised),
+            catalogue: ToolCatalogue::new(advertised)?,
             tools_url: format!("{base}{TOOLS_PATH}"),
             approvals,
             derivations,

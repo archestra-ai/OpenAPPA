@@ -15,12 +15,12 @@
 //! # use std::sync::Arc;
 //! # use appa_example_agent::{Agent, ToolCatalogue, ToolShim, OpenAiCompatible};
 //! # use appa_runtime::api::{Runtime, TrajectoryId};
-//! # async fn example(runtime: Arc<Runtime>, tools: Vec<appa_example_agent::wire::WireTool>) {
+//! # async fn example(runtime: Arc<Runtime>, tools: Vec<appa_example_agent::wire::WireTool>) -> Result<(), appa_example_agent::CatalogueError> {
 //! let agent = Agent::new(
 //!     runtime,
 //!     OpenAiCompatible::openrouter("some/model", "sk-..."),
 //!     ToolShim::new("http://127.0.0.1:9000/"),
-//!     ToolCatalogue::new(tools),
+//!     ToolCatalogue::new(tools)?,
 //! );
 //! let outcome = agent
 //!     .run(
@@ -30,6 +30,7 @@
 //!     )
 //!     .await;
 //! # let _ = outcome;
+//! # Ok(())
 //! # }
 //! ```
 
@@ -49,4 +50,4 @@ pub use provider::{
     ProviderError,
 };
 pub use record::{CallId, Record, Recorded};
-pub use tools::{DEFAULT_TOOL_BODY_CAP_BYTES, ToolCatalogue, ToolShim};
+pub use tools::{CatalogueError, DEFAULT_TOOL_BODY_CAP_BYTES, ToolCatalogue, ToolShim};

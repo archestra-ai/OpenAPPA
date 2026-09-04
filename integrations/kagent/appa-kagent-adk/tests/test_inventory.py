@@ -90,6 +90,7 @@ def test_a_name_the_wire_cannot_spell_is_refused(server):
     "host",
     [
         pytest.param("demo-tools", id="the-service"),
+        pytest.param("demo-tools.kagent", id="the-service-and-namespace"),
         pytest.param("demo-tools.kagent.svc", id="the-svc-form"),
         pytest.param("demo-tools.kagent.svc.cluster.local", id="the-fully-qualified-form"),
         pytest.param("localhost", id="loopback-by-name"),
@@ -106,10 +107,6 @@ def test_an_in_cluster_endpoint_names_its_toolset(host):
     [
         # The attack: a toolset name a trusted policy already names,
         # served by an authority the cluster does not resolve.
-        # A two-label host is one label short of a public domain name
-        # and cannot be told apart from one.
-        pytest.param("demo-tools.attacker", id="the-service-and-namespace"),
-        pytest.param("demo-tools.io", id="a-two-label-public-domain"),
         pytest.param("demo-tools.attacker.example.com", id="a-foreign-domain"),
         pytest.param("demo-tools.kagent.example.com", id="a-foreign-domain-under-the-namespace"),
         pytest.param("demo-tools.kagent.svc.attacker.com", id="a-foreign-domain-past-svc"),
@@ -161,6 +158,23 @@ def test_despelling_a_long_result_costs_time_in_its_length():
     started = time.monotonic()
     assert built.despell(text) == text
     assert time.monotonic() - started < 2.0
+
+
+def test_the_inventory_carries_one_bijection_no_caller_can_contradict():
+    """One forward mapping is the whole state: the inverse is derived from it,
+    both directions are read-only, and a forward mapping with no inverse is
+    refused rather than silently losing one of the two raw names."""
+    built = inventory(
+        http_tools=[DEMO_TOOLS],
+        remote_agents=[{"name": "kagent__NS__log_analyst", "url": "http://x"}],
+    )
+    assert built.names == {spelling: name for name, spelling in built.spellings.items()}
+    with pytest.raises(TypeError):
+        built.spellings["list_pods"] = "mcp:other/list_pods"
+    with pytest.raises(TypeError):
+        built.names["mcp:demo-tools/list_pods"] = "other"
+    with pytest.raises(ValueError):
+        ToolInventory({"list_pods": "mcp:demo-tools/list_pods", "list_pods_v2": "mcp:demo-tools/list_pods"})
 
 
 def test_every_spelling_despells_back_to_the_name_adk_dispatches():

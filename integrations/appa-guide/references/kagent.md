@@ -84,7 +84,7 @@ A rule names a tool by its canonical tool id:
   `mcp/<toolset>/<tool>`. The same tool name on two servers is two
   contracts. A gated agent reaches that toolset only at the Kubernetes
   service forms of the same name (`<service>`,
-  `<service>.<namespace>.svc`,
+  `<service>.<namespace>`, `<service>.<namespace>.svc`,
   `<service>.<namespace>.svc.cluster.local`) or at loopback, so the
   endpoint is a cluster service address and not an arbitrary host. The
   name is that first label alone: a service of the same name in another
