@@ -822,7 +822,7 @@ mod tests {
         assert!(closed_as_unknown(&runtime), "the interrupted call closed as unreported");
         assert_eq!(
             runtime.take_vouched(&quoted),
-            None,
+            Err(crate::api::Unvouched::Nobody),
             "the interrupted turn's vouch is released"
         );
 
@@ -1403,7 +1403,7 @@ mod tests {
 
         assert_eq!(
             runtime.take_vouched(&ticket("the hook blocked", true)),
-            Some((
+            Ok((
                 Actor {
                     root: TrajectoryId("cc:s1".to_string()),
                     child: None,
@@ -1422,7 +1422,10 @@ mod tests {
         let runtime = open_runtime(&dir);
         let refused = hook(&runtime, &yell_call("the hook blocked", true)).await;
         assert_ne!(refused.1["hookSpecificOutput"]["permissionDecision"], "allow");
-        assert_eq!(runtime.take_vouched(&ticket("the hook blocked", true)), None);
+        assert_eq!(
+            runtime.take_vouched(&ticket("the hook blocked", true)),
+            Err(crate::api::Unvouched::Nobody)
+        );
     }
 
     /// The standing is for the call the hook saw. A tool that then reports something else is
@@ -1434,9 +1437,10 @@ mod tests {
         let released = hook(&runtime, &yell_call("the hook blocked", true)).await;
         assert_eq!(released.1["hookSpecificOutput"]["permissionDecision"], "allow");
 
-        assert_eq!(runtime.take_vouched(&ticket("the hook blocked", false)), None);
-        assert_eq!(runtime.take_vouched(&ticket("something else", true)), None);
-        assert!(runtime.take_vouched(&ticket("the hook blocked", true)).is_some());
+        let nobody = Err(crate::api::Unvouched::Nobody);
+        assert_eq!(runtime.take_vouched(&ticket("the hook blocked", false)), nobody);
+        assert_eq!(runtime.take_vouched(&ticket("something else", true)), nobody);
+        assert!(runtime.take_vouched(&ticket("the hook blocked", true)).is_ok());
     }
 
     /// One turn's standing, like the control tool's: the harness may decline the call after
@@ -1452,6 +1456,9 @@ mod tests {
             child: None,
         };
         crate::hooks::handle(&runtime, HookEvent::TurnEnd { actor }).await;
-        assert_eq!(runtime.take_vouched(&ticket("the hook blocked", true)), None);
+        assert_eq!(
+            runtime.take_vouched(&ticket("the hook blocked", true)),
+            Err(crate::api::Unvouched::Nobody)
+        );
     }
 }

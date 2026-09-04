@@ -101,7 +101,7 @@ impl RuntimeTools {
         let quoted = OfferId(args.offer_id.clone());
         let arguments = RemedyArguments::from(args);
         // Requires the vouched trajectory from the preceding hook.
-        let Some((acting, ruling)) = self.runtime.take_vouched(&PermitKey::offer(&quoted)) else {
+        let Ok((acting, ruling)) = self.runtime.take_vouched(&PermitKey::offer(&quoted)) else {
             return render(RemedyOutcome::Refused {
                 detail: "no live offer with this id exists".to_string(),
             });
@@ -151,10 +151,20 @@ impl RuntimeTools {
             crate::yell::agent::Outcome::Refused(refusal) => {
                 CallToolResult::error(vec![ContentBlock::text(format!("[appa] {refusal}"))])
             }
-            crate::yell::agent::Outcome::Unvouched => CallToolResult::error(vec![ContentBlock::text(
-                "[appa] This call was not seen by a hook, so there is no session to report on. \
-                 Propose it as an ordinary tool call.",
-            )]),
+            crate::yell::agent::Outcome::Unvouched(crate::api::Unvouched::Nobody) => {
+                CallToolResult::error(vec![ContentBlock::text(
+                    "[appa] This call was not seen by a hook, so there is no session to report on. \
+                     Propose it as an ordinary tool call.",
+                )])
+            }
+            // Retrying the identical call cannot work, so the answer says what to change.
+            crate::yell::agent::Outcome::Unvouched(crate::api::Unvouched::Ambiguous) => {
+                CallToolResult::error(vec![ContentBlock::text(
+                    "[appa] Another session on this machine is reporting the same thing word for \
+                     word, so this call does not say which session it is about. Call again with a \
+                     message that describes your own session.",
+                )])
+            }
             crate::yell::agent::Outcome::Oversize => CallToolResult::error(vec![ContentBlock::text(
                 "[appa] The report is too large to send even with the session left out.",
             )]),
@@ -430,7 +440,7 @@ mod tests {
             "another trajectory's quote is refused where the harness names it: {stranger:?}",
         );
         assert!(
-            runtime.take_vouched(&PermitKey::offer(&quoted)).is_none(),
+            runtime.take_vouched(&PermitKey::offer(&quoted)).is_err(),
             "a refused control act vouches for nobody"
         );
 
@@ -440,16 +450,16 @@ mod tests {
         }
         assert_eq!(
             runtime.take_vouched(&PermitKey::offer(&quoted)),
-            Some((acting(root.0.as_str()), None)),
+            Ok((acting(root.0.as_str()), None)),
             "a repeated hook is one caller"
         );
-        assert!(runtime.take_vouched(&PermitKey::offer(&quoted)).is_none());
+        assert!(runtime.take_vouched(&PermitKey::offer(&quoted)).is_err());
 
         let admitted = crate::hooks::handle(&runtime, control_act(&acting(root.0.as_str()), &quoted)).await;
         assert!(matches!(admitted, HookDecision::PassControl));
         let _ = runtime.execute_remedy(&acting(root.0.as_str()), quoted.clone()).await;
         assert!(
-            runtime.take_vouched(&PermitKey::offer(&quoted)).is_none(),
+            runtime.take_vouched(&PermitKey::offer(&quoted)).is_err(),
             "executing the act spends its vouch on every transport"
         );
     }

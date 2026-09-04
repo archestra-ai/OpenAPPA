@@ -82,6 +82,15 @@ impl PermitKey {
     }
 }
 
+/// Why a runtime-provided tool has no trajectory to act for. The two are different things to
+/// tell a caller: one says no hook saw this call, the other says the call does not identify
+/// which of two sessions made it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Unvouched {
+    Nobody,
+    Ambiguous,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ToolCallDecision {
     Allow {
@@ -1115,16 +1124,22 @@ impl Runtime {
     }
 
     /// The trajectory vouched for this key, taken once, with the ruling its harness
-    /// attached. Two trajectories standing behind one key is not a tie to break: it means
-    /// the key does not identify a caller, and answering either one would put one session's
-    /// standing behind another session's call.
-    pub(crate) fn take_vouched(&self, key: &PermitKey) -> Option<(Actor, Option<appa_runtime_api::Ruling>)> {
+    /// attached.
+    ///
+    /// Two trajectories standing behind one key is not a tie to break: it means the key does
+    /// not identify a caller, and answering either one would put one session's standing
+    /// behind another session's call. That case keeps the record rather than consuming it —
+    /// destroying it would make the *next* identical call look like one nothing vouched for,
+    /// and the two need different answers. The turn's end releases it either way.
+    pub(crate) fn take_vouched(&self, key: &PermitKey) -> Result<(Actor, Option<appa_runtime_api::Ruling>), Unvouched> {
         let mut permits = self.inner.permits.lock().expect("the permit mutex is never poisoned");
-        let mut holders = permits.remove(key)?;
-        (holders.len() == 1).then(|| {
-            let vouch = holders.remove(0);
-            (vouch.actor, vouch.ruling)
-        })
+        let holders = permits.get_mut(key).ok_or(Unvouched::Nobody)?;
+        if holders.len() != 1 {
+            return Err(Unvouched::Ambiguous);
+        }
+        let vouch = holders.remove(0);
+        permits.remove(key);
+        Ok((vouch.actor, vouch.ruling))
     }
 
     /// Drop every vouch this actor still holds. A vouch is recorded when the actor
@@ -1939,7 +1954,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         runtime.vouch(&quoted, &actor, None);
         assert_eq!(
             runtime.take_vouched(&quoted),
-            Some((actor.clone(), None)),
+            Ok((actor.clone(), None)),
             "a standing vouch is what the tool takes"
         );
 
@@ -1947,9 +1962,41 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         crate::hooks::handle(&runtime, appa_runtime_api::HookEvent::TurnEnd { actor: actor.clone() }).await;
         assert_eq!(
             runtime.take_vouched(&quoted),
-            None,
+            Err(Unvouched::Nobody),
             "the turn ended without spending it, so nothing later can"
         );
+    }
+
+    /// Two trajectories behind one key is a key that does not identify a caller. Both are
+    /// refused, and both are told *why* — a caller told "nothing vouched for this" would
+    /// make the identical call again and be told the same thing forever.
+    #[tokio::test]
+    async fn an_ambiguous_vouch_refuses_every_holder_and_says_so() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime =
+            Runtime::open(versioned_policy("first"), dir.path().join("appa.db"), None).expect("the deployment opens");
+        let key = PermitKey::Yell("same-call".to_string());
+        let one = Actor {
+            root: TrajectoryId("cc:one".to_string()),
+            child: None,
+        };
+        let other = Actor {
+            root: TrajectoryId("cc:other".to_string()),
+            child: None,
+        };
+        runtime.vouch(&key, &one, None);
+        runtime.vouch(&key, &other, None);
+
+        assert_eq!(runtime.take_vouched(&key), Err(Unvouched::Ambiguous));
+        assert_eq!(
+            runtime.take_vouched(&key),
+            Err(Unvouched::Ambiguous),
+            "the second caller is told the same thing, not that nobody vouched"
+        );
+
+        // Once one of them is gone the key identifies a caller again.
+        runtime.release_vouches(&other);
+        assert_eq!(runtime.take_vouched(&key), Ok((one, None)));
     }
 
     /// The session-start check refuses on any fault, so the variant it refuses with is

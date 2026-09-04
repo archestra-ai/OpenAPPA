@@ -131,10 +131,17 @@ async fn build(url: &str, message: &YellMessage, mode: Mode) -> Result<Finished,
             status: status.as_u16(),
         });
     }
-    let plain = answer.bytes().await.map_err(|_| UnreachableClass::Timeout)?;
+    // Bounded by what a report may weigh, because whatever is on that port has not earned
+    // the right to decide how much memory this process commits.
+    let plain = client::bounded_body(answer, super::report::MAX_PLAIN_BYTES)
+        .await
+        .map_err(|refusal| match refusal {
+            client::BodyRefusal::Transport => UnreachableClass::Timeout,
+            client::BodyRefusal::TooLarge => UnreachableClass::NotARuntime,
+        })?;
     // Something answered on the runtime's port. Whether it *is* the runtime is a different
     // question, and these bytes are about to be written to disk and offered for sending.
-    Finished::of(plain.to_vec())
+    Finished::of(plain)
         .ok()
         .filter(|finished| is_a_report(&finished.plain))
         .ok_or(UnreachableClass::NotARuntime)
@@ -143,9 +150,15 @@ async fn build(url: &str, message: &YellMessage, mode: Mode) -> Result<Finished,
 /// Whether the answer claims to be the document this build knows how to send.
 ///
 /// A discriminator, not an identity check: it separates the runtime from whatever else may be
-/// listening on that port, and nothing here proves the answer came from a runtime.
+/// listening on that port, and nothing here proves the answer came from a runtime. Read
+/// through a probe rather than a `Value`, so a large document is not also materialized as a
+/// tree of nodes to look at one string.
 fn is_a_report(plain: &[u8]) -> bool {
-    serde_json::from_slice::<serde_json::Value>(plain).is_ok_and(|document| document["schema"] == super::report::SCHEMA)
+    #[derive(serde::Deserialize)]
+    struct Probe {
+        schema: String,
+    }
+    serde_json::from_slice::<Probe>(plain).is_ok_and(|probe| probe.schema == super::report::SCHEMA)
 }
 
 /// `<url>/report`, when `url` is `http://<loopback literal>[:port]` and nothing else.

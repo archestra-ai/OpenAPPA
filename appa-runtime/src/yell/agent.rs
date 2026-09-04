@@ -59,9 +59,9 @@ pub(crate) enum Outcome {
     Sent(Receipt),
     /// The message is not one: empty, or past what a report carries.
     Refused(String),
-    /// No hook vouched for this call, so there is no session to report on and no way to know
-    /// whether the caller is even an agent this runtime serves.
-    Unvouched,
+    /// There is no session to report on: no hook saw this call, or two sessions made a call
+    /// this one cannot be told apart from.
+    Unvouched(crate::api::Unvouched),
     /// The report is over what a receiver accepts even with nothing left to drop.
     Oversize,
     Undeliverable(SendFailure),
@@ -73,8 +73,9 @@ pub(crate) enum Outcome {
 /// question, and a deployment that turned agent reporting on has already answered it. What
 /// may leave is the same either way — the mode chooses only how the names are spelled.
 pub(crate) async fn yell(runtime: &std::sync::Arc<Runtime>, harness: Adapter, args: &YellArgs) -> Outcome {
-    let Some((acting, _)) = runtime.take_vouched(&args.ticket()) else {
-        return Outcome::Unvouched;
+    let acting = match runtime.take_vouched(&args.ticket()) {
+        Ok((acting, _)) => acting,
+        Err(refusal) => return Outcome::Unvouched(refusal),
     };
     let message = match YellMessage::new(&args.message) {
         Ok(message) => message,
