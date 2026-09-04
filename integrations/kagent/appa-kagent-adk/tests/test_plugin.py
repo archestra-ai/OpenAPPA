@@ -6,6 +6,7 @@ emits exactly the mapped wire event, and the answered decision is
 enforced in ADK's own terms — a returned dict, a raise, or a pass.
 """
 
+import asyncio
 import json
 
 import httpx
@@ -358,6 +359,79 @@ async def test_the_run_end_releases_the_scope_it_claimed():
 
 
 # -- the tool gate ----------------------------------------------------
+
+
+async def test_parallel_calls_on_one_branch_run_as_complete_lifecycles():
+    hook = Hook(ALLOW, ACK, ALLOW, ACK)
+    plugin = plugin_over(hook)
+    session = FakeSession("s1")
+    first = dispatch(session, "fc-1")
+    second = dispatch(session, "fc-2")
+
+    assert await plugin.before_tool_callback(tool=FakeTool("first"), tool_args={}, tool_context=first) is None
+    waiting = asyncio.create_task(
+        plugin.before_tool_callback(tool=FakeTool("second"), tool_args={}, tool_context=second)
+    )
+    await asyncio.sleep(0)
+    assert not waiting.done()
+    assert [event["event"] for event in hook.events] == ["tool_call"]
+
+    await plugin.after_tool_callback(tool=FakeTool("first"), tool_args={}, tool_context=first, result={"one": 1})
+    assert await waiting is None
+    await plugin.after_tool_callback(tool=FakeTool("second"), tool_args={}, tool_context=second, result={"two": 2})
+    assert [(event["event"], event.get("tool")) for event in hook.events] == [
+        ("tool_call", "first"),
+        ("tool_result", "first"),
+        ("tool_call", "second"),
+        ("tool_result", "second"),
+    ]
+
+
+async def test_parallel_calls_on_different_branches_stay_independent():
+    hook = Hook(ALLOW, ALLOW, ACK, ACK)
+    plugin = plugin_over(hook)
+    first = dispatch(FakeSession("s1"), "fc-1")
+    second = dispatch(FakeSession("s2"), "fc-2")
+
+    await asyncio.gather(
+        plugin.before_tool_callback(tool=FakeTool("first"), tool_args={}, tool_context=first),
+        plugin.before_tool_callback(tool=FakeTool("second"), tool_args={}, tool_context=second),
+    )
+    assert [event["tool"] for event in hook.events] == ["first", "second"]
+    await plugin.after_tool_callback(tool=FakeTool("first"), tool_args={}, tool_context=first, result={})
+    await plugin.after_tool_callback(tool=FakeTool("second"), tool_args={}, tool_context=second, result={})
+
+
+async def test_a_failed_parallel_call_releases_the_next_call():
+    hook = Hook(ALLOW, ACK, ALLOW, ACK)
+    plugin = plugin_over(hook)
+    session = FakeSession("s1")
+    first = dispatch(session, "fc-1")
+    second = dispatch(session, "fc-2")
+
+    await plugin.before_tool_callback(tool=FakeTool("first"), tool_args={}, tool_context=first)
+    waiting = asyncio.create_task(
+        plugin.before_tool_callback(tool=FakeTool("second"), tool_args={}, tool_context=second)
+    )
+    await asyncio.sleep(0)
+    await plugin.on_tool_error_callback(
+        tool=FakeTool("first"), tool_args={}, tool_context=first, error=RuntimeError("failed")
+    )
+    assert await waiting is None
+    await plugin.after_tool_callback(tool=FakeTool("second"), tool_args={}, tool_context=second, result={})
+
+
+async def test_a_denied_parallel_call_releases_the_next_call():
+    hook = Hook({"decision": "deny_call", "feedback": "blocked"}, ALLOW, ACK)
+    plugin = plugin_over(hook)
+    session = FakeSession("s1")
+    first = dispatch(session, "fc-1")
+    second = dispatch(session, "fc-2")
+
+    denied = await plugin.before_tool_callback(tool=FakeTool("first"), tool_args={}, tool_context=first)
+    assert denied == {"result": "blocked", "appa": "denied"}
+    assert await plugin.before_tool_callback(tool=FakeTool("second"), tool_args={}, tool_context=second) is None
+    await plugin.after_tool_callback(tool=FakeTool("second"), tool_args={}, tool_context=second, result={})
 
 
 async def test_an_allowed_call_passes_and_a_denied_call_answers_the_model():
@@ -1130,6 +1204,95 @@ class CallingModel(BaseLlm):
             yield LlmResponse(content=types.Content(role="model", parts=[types.Part(function_call=call)]))
         else:
             yield LlmResponse(content=types.Content(role="model", parts=[types.Part(text="I could not read it.")]))
+
+
+class ParallelCallingModel(BaseLlm):
+    """A model that proposes two calls in one response, then stops."""
+
+    model: str = "scripted"
+    _cursor: int = 0
+
+    async def generate_content_async(self, llm_request, stream: bool = False):
+        index = self._cursor
+        self._cursor += 1
+        if index == 0:
+            yield LlmResponse(
+                content=types.Content(
+                    role="model",
+                    parts=[
+                        types.Part(function_call=types.FunctionCall(name="read_first", args={})),
+                        types.Part(function_call=types.FunctionCall(name="read_second", args={})),
+                    ],
+                )
+            )
+        else:
+            yield LlmResponse(content=types.Content(role="model", parts=[types.Part(text="done")]))
+
+
+class OneDispatchRuntime:
+    """A runtime fake that refuses a second call before the first result."""
+
+    def __init__(self):
+        self.open = False
+        self.events: list[dict] = []
+
+    def transport(self) -> httpx.MockTransport:
+        def handle(request: httpx.Request) -> httpx.Response:
+            event = json.loads(request.content)
+            self.events.append(event)
+            if event["event"] == "tool_call":
+                if self.open:
+                    return httpx.Response(200, json={"decision": "deny_call", "feedback": "second dispatch"})
+                self.open = True
+                return httpx.Response(200, json=ALLOW)
+            if event["event"] == "tool_result":
+                self.open = False
+            return httpx.Response(200, json=ACK)
+
+        return httpx.MockTransport(handle)
+
+
+async def test_parallel_model_calls_are_serialized_in_a_real_runner():
+    runtime = OneDispatchRuntime()
+    plugin = plugin_over(runtime)
+
+    def read_first() -> dict:
+        return {"first": True}
+
+    def read_second() -> dict:
+        return {"second": True}
+
+    runner = InMemoryRunner(
+        app=App(
+            name="kagent",
+            root_agent=LlmAgent(
+                name="root_agent",
+                model=ParallelCallingModel(),
+                tools=[read_first, read_second],
+            ),
+            plugins=[plugin],
+        )
+    )
+    session = await runner.session_service.create_session(app_name="kagent", user_id="op")
+    try:
+        async for _ in runner.run_async(
+            user_id="op",
+            session_id=session.id,
+            new_message=types.Content(role="user", parts=[types.Part(text="read both")]),
+        ):
+            pass
+    finally:
+        await runner.close()
+
+    assert [(event["event"], event.get("tool")) for event in gated(runtime)] == [
+        ("session_start", None),
+        ("prompt", None),
+        ("tool_call", "read_first"),
+        ("tool_result", "read_first"),
+        ("tool_call", "read_second"),
+        ("tool_result", "read_second"),
+        ("turn_end", None),
+    ]
 
 
 async def test_a_denied_call_reports_once_in_a_real_runner():
