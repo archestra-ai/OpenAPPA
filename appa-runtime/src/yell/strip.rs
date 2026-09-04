@@ -34,6 +34,8 @@
 //! arrays, and packed inside a single scalar string. A rule exists for each, because a rule
 //! for only the first would ship the other three.
 
+use std::collections::BTreeSet;
+
 use serde_json::{Map, Value};
 
 use super::tokens::{Class, Mode, Tokens};
@@ -47,6 +49,10 @@ pub(crate) const UNCLASSIFIED: &str = "<unclassified>";
 /// the very list that reports drift would leak the deployment-defined name it drifted on.
 const DYNAMIC_SEGMENT: &str = "{key}";
 
+/// The longest an unclassified key may be and still keep its spelling. Comfortably longer
+/// than any field name in the workspace and far short of anything worth smuggling.
+const MAX_KEY_BYTES: usize = 64;
+
 /// How one JSON value is carried.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Rule {
@@ -59,6 +65,15 @@ pub(crate) enum Rule {
     Fingerprint,
     /// A deployment-defined name, carried through the report's substitution table.
     Token(Class),
+    /// A tool name, which is the deployment's vocabulary only when the policy writes it.
+    ///
+    /// Every other name in the inventory reaches a fact because a deployment wrote it in a
+    /// policy. A tool name does not have to: the harness announces whatever tool the model
+    /// asked for, and APPA records the hook whether or not that name is declared — which is
+    /// the point, since "APPA refused a tool I never declared" is a common thing to report.
+    /// So the spelling is checked against the policy before Baseline may carry it, and a
+    /// name the policy does not write is tokenized in both modes.
+    VouchedTool,
     /// A value body: replaced by its length, so a reader sees that something large crossed
     /// without seeing any of it.
     BodyBytes,
@@ -121,10 +136,11 @@ impl Table {
 
 /// One place the inventory did not cover.
 ///
-/// Both fields are the walk's own vocabulary — a key path it built and a table name from this
-/// crate — never a key or a value read from the input, so the drift report cannot itself carry
-/// data. `table` is what makes the report actionable: it names the aggregate whose entry list
-/// needs the missing line.
+/// `table` is a table name from this crate. `path` is built from table keys and from the
+/// unclassified key itself, which is what makes a drift report actionable — it names the
+/// aggregate and the field whose entry is missing. That key is admitted only when it is
+/// identifier-shaped (see `Walk::shown_key`), so a path cannot carry a caller's spelling even
+/// though it is assembled from input. No value ever reaches either field.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct Drift {
     pub(crate) path: String,
@@ -142,6 +158,9 @@ pub(crate) struct Stripped {
 struct Walk<'a> {
     tokens: &'a mut Tokens,
     mode: Mode,
+    /// The tool names the serving policy writes. Data, not a callback: the set is resolved
+    /// once per export and read by [`Rule::VouchedTool`].
+    vouched: &'a BTreeSet<String>,
     /// The table currently being walked, so a drift entry names the aggregate and not only
     /// the path.
     table: &'static str,
@@ -194,6 +213,11 @@ impl Walk<'_> {
             },
             Rule::Token(class) => match value.as_str() {
                 Some(raw) => self.token(*class, raw),
+                None => self.unclassify(path),
+            },
+            Rule::VouchedTool => match value.as_str() {
+                Some(raw) if self.vouched.contains(raw) => self.token(Class::Tool, raw),
+                Some(raw) => Value::String(self.tokens.token(Mode::Pseudonymized, Class::Tool, raw)),
                 None => self.unclassify(path),
             },
             Rule::BodyBytes => match value.as_str() {
@@ -295,6 +319,32 @@ impl Walk<'_> {
         }
     }
 
+    /// One authored literal from a return contract, as a token of its own spelling.
+    ///
+    /// Keyed on the literal's canonical JSON so that a number and the string of the same
+    /// digits stay distinct, and so that two schemas naming the same bound share a token.
+    fn literal(&mut self, value: &Value) -> Value {
+        let spelling = serde_json::to_string(value).unwrap_or_else(|_| value.to_string());
+        Value::String(self.tokens.token(self.mode, Class::Literal, &spelling))
+    }
+
+    /// The spelling a key may keep when the inventory does not name it.
+    ///
+    /// Every key that reaches this is a Rust field name or a serde variant name, because
+    /// every map with caller-chosen keys has a rule of its own that tokenizes them. So a key
+    /// that is not identifier-shaped did not come from a struct in this workspace, and its
+    /// spelling is data: it loses its spelling as its value already loses its own. This keeps
+    /// the drift report actionable — a new engine field appears under its real name — without
+    /// letting the drift path become the leak it exists to prevent.
+    fn shown_key(key: &str) -> String {
+        let identifier =
+            !key.is_empty() && key.len() <= MAX_KEY_BYTES && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        match identifier {
+            true => key.to_string(),
+            false => DYNAMIC_SEGMENT.to_string(),
+        }
+    }
+
     /// A return contract's JSON Schema document.
     ///
     /// Re-normalized rather than merely re-serialized: `ReturnShape` refuses any document
@@ -343,65 +393,51 @@ impl Walk<'_> {
                     names.sort_unstable();
                     out.insert(key.clone(), Value::Array(names.into_iter().map(Value::from).collect()));
                 }
-                // A numeric `const` or `enum` is arithmetic, not authored text, and the engine
-                // already emits its members sorted — so it crosses as it stands, in its order.
-                "const" if entry.is_number() => {
-                    out.insert(key.clone(), entry.clone());
+                // Every literal the author wrote, of whatever JSON type. A number is as much
+                // the agent's choice as a string is, and a 64-bit integer bound carries more
+                // of a message than most strings would: `minimum` is a channel, not
+                // arithmetic. So a literal becomes a token of its own spelling, which keeps
+                // "these two schemas bound the same field the same way" legible and carries
+                // none of the value.
+                "const" => {
+                    let token = self.literal(entry);
+                    out.insert(key.clone(), token);
                 }
-                "enum" if entry.as_array().is_some_and(|items| items.iter().all(Value::is_number)) => {
-                    out.insert(key.clone(), entry.clone());
-                }
-                "const" => match entry.as_str() {
-                    Some(literal) => {
-                        let token = self.tokens.token(self.mode, Class::Literal, literal);
-                        out.insert(key.clone(), Value::String(token));
+                "enum" => match entry.as_array() {
+                    Some(items) => {
+                        let mut members: Vec<Value> = items.iter().map(|item| self.literal(item)).collect();
+                        members.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
+                        out.insert(key.clone(), Value::Array(members));
                     }
                     None => {
-                        let child = format!("{path}.const");
+                        let child = format!("{path}.enum");
                         let placeholder = self.unclassify(&child);
                         out.insert(key.clone(), placeholder);
                     }
                 },
-                // A string `enum`, whose members are authored literals. Anything that is
-                // neither all strings nor all numbers is a shape this rule does not know.
-                "enum" if !entry.as_array().is_some_and(|items| items.iter().all(Value::is_string)) => {
-                    let child = format!("{path}.enum");
-                    let placeholder = self.unclassify(&child);
-                    out.insert(key.clone(), placeholder);
-                }
-                "enum" => {
-                    let mut members: Vec<String> = entry
-                        .as_array()
-                        .map(|items| {
-                            items
-                                .iter()
-                                .filter_map(Value::as_str)
-                                .map(|literal| self.tokens.token(self.mode, Class::Literal, literal))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    members.sort_unstable();
-                    out.insert(
-                        key.clone(),
-                        Value::Array(members.into_iter().map(Value::from).collect()),
-                    );
+                // The numeric bounds, which the author also chose. Same reasoning as `const`.
+                "minimum" | "maximum" | "multipleOf" | "minItems" | "maxItems" => {
+                    let token = self.literal(entry);
+                    out.insert(key.clone(), token);
                 }
                 "items" => {
                     let child = format!("{path}.items");
                     let nested = self.return_schema(entry, &child);
                     out.insert(key.clone(), nested);
                 }
-                // `type`, `format` (a closed set), and the numeric bounds: engine vocabulary,
-                // not the author's. `additionalProperties` is deliberately absent — the shape
-                // dialect refuses the keyword, so one appearing here is drift, and in JSON
-                // Schema its value may itself be a schema full of authored names.
-                "type" | "format" | "minimum" | "maximum" | "multipleOf" | "minItems" | "maxItems" => {
+                // `type` and `format` are closed sets the dialect defines, so they are engine
+                // vocabulary rather than the author's. `additionalProperties` is deliberately
+                // absent — the shape dialect refuses the keyword, so one appearing here is
+                // drift, and in JSON Schema its value may itself be a schema full of authored
+                // names.
+                "type" | "format" => {
                     out.insert(key.clone(), entry.clone());
                 }
                 _ => {
-                    let child = format!("{path}.{key}");
+                    let shown = Self::shown_key(key);
+                    let child = format!("{path}.{shown}");
                     let placeholder = self.unclassify(&child);
-                    out.insert(key.clone(), placeholder);
+                    out.insert(shown, placeholder);
                 }
             }
         }
@@ -431,10 +467,11 @@ impl Walk<'_> {
         };
         let mut out = Map::new();
         for (key, entry) in Self::sorted(map) {
+            let shown = Self::shown_key(key);
             let child = if path.is_empty() {
-                key.clone()
+                shown.clone()
             } else {
-                format!("{path}.{key}")
+                format!("{path}.{shown}")
             };
             match table.rule(key) {
                 Some(rule) if rule.omitted(self.mode) => {}
@@ -446,7 +483,7 @@ impl Walk<'_> {
                 // it held, at any depth.
                 None => {
                     let placeholder = self.unclassify(&child);
-                    out.insert(key.clone(), placeholder);
+                    out.insert(shown, placeholder);
                 }
             }
         }
@@ -455,10 +492,17 @@ impl Walk<'_> {
 }
 
 /// Walk one serialized value against a table.
-pub(crate) fn strip(value: &Value, table: &'static Table, tokens: &mut Tokens, mode: Mode) -> Stripped {
+pub(crate) fn strip(
+    value: &Value,
+    table: &'static Table,
+    tokens: &mut Tokens,
+    mode: Mode,
+    vouched: &BTreeSet<String>,
+) -> Stripped {
     let mut walk = Walk {
         tokens,
         mode,
+        vouched,
         table: table.name,
         unclassified: Vec::new(),
     };
@@ -475,16 +519,13 @@ mod tests {
 
     static NESTED: Table = Table {
         name: "Nested",
-        entries: &[
-            ("tool", Rule::Token(Class::Tool)),
-            ("digest", Rule::Token(Class::Digest)),
-        ],
+        entries: &[("tool", Rule::VouchedTool), ("digest", Rule::Token(Class::Digest))],
     };
 
     static ROOT: Table = Table {
         name: "Root",
         entries: &[
-            ("tool", Rule::Token(Class::Tool)),
+            ("tool", Rule::VouchedTool),
             ("reader", Rule::Token(Class::Reader)),
             ("session", Rule::Token(Class::Trajectory)),
             ("digest", Rule::Token(Class::Digest)),
@@ -500,9 +541,15 @@ mod tests {
         ],
     };
 
+    /// The tool names the fixture deployment writes, so a test can put a name the policy
+    /// chose beside one the model invented.
+    fn vouched() -> BTreeSet<String> {
+        ["Bash", "Read"].into_iter().map(str::to_string).collect()
+    }
+
     fn run(value: serde_json::Value) -> Stripped {
         let mut tokens = Tokens::default();
-        strip(&value, &ROOT, &mut tokens, Mode::Pseudonymized)
+        strip(&value, &ROOT, &mut tokens, Mode::Pseudonymized, &vouched())
     }
 
     fn drift(stripped: &Stripped) -> Vec<(&str, &str)> {
@@ -535,7 +582,7 @@ mod tests {
     fn a_fingerprint_survives_the_baseline_and_is_gone_under_pseudonymization() {
         let value = serde_json::json!({ "fingerprint": "a91f", "count": 7 });
         let mut tokens = Tokens::default();
-        let baseline = strip(&value, &ROOT, &mut tokens, Mode::Baseline);
+        let baseline = strip(&value, &ROOT, &mut tokens, Mode::Baseline, &vouched());
         assert_eq!(baseline.value["fingerprint"], "a91f");
 
         let pseudonymized = run(value);
@@ -579,7 +626,7 @@ mod tests {
         });
         for mode in [Mode::Baseline, Mode::Pseudonymized] {
             let mut tokens = Tokens::default();
-            let stripped = strip(&hostile, &ROOT, &mut tokens, mode);
+            let stripped = strip(&hostile, &ROOT, &mut tokens, mode, &vouched());
             let rendered = serde_json::to_string(&stripped.value).expect("serializes");
             for spelled in ["id_rsa", "alice", "corp.example", "/home"] {
                 assert!(!rendered.contains(spelled), "{spelled} escaped in {mode:?}: {rendered}");
@@ -599,7 +646,7 @@ mod tests {
             "digest": "38142c4d026dba0e8f82124bf7d95f1edd7f8ab8e348f41fd276ec1af59c1a63"
         });
         let mut tokens = Tokens::default();
-        let stripped = strip(&value, &ROOT, &mut tokens, Mode::Baseline);
+        let stripped = strip(&value, &ROOT, &mut tokens, Mode::Baseline, &vouched());
         assert_eq!(stripped.value["tool"], "Bash", "the policy's own vocabulary is spelled");
         assert_eq!(stripped.value["reader"], "reader-1");
         assert_eq!(stripped.value["session"], "trajectory-1");
@@ -608,6 +655,67 @@ mod tests {
         for spelled in ["alice", "6906d44d", "38142c4d"] {
             assert!(!rendered.contains(spelled), "{spelled} survived baseline");
         }
+    }
+
+    /// A tool name is the one name in the inventory that need not have come from a policy.
+    /// The harness announces whatever the model asked for, and APPA records the hook either
+    /// way — so Baseline spells the name only when the deployment wrote it.
+    #[test]
+    fn an_undeclared_tool_name_is_the_model_s_string_and_not_the_deployment_s() {
+        let value = serde_json::json!({
+            "tool": "Bash",
+            "nested": { "tool": "/home/alice/.ssh/id_rsa" }
+        });
+        let mut tokens = Tokens::default();
+        let stripped = strip(&value, &ROOT, &mut tokens, Mode::Baseline, &vouched());
+        assert_eq!(stripped.value["tool"], "Bash", "the policy writes this one");
+        let invented = &stripped.value["nested"]["tool"];
+        assert_ne!(*invented, "/home/alice/.ssh/id_rsa");
+        let rendered = serde_json::to_string(&stripped.value).expect("serializes");
+        for spelled in ["id_rsa", "alice", "/home"] {
+            assert!(!rendered.contains(spelled), "{spelled} survived baseline: {rendered}");
+        }
+    }
+
+    /// A wildcard policy writes no tool name at all, so it vouches for none: the report is
+    /// still readable through tokens, and carries none of the model's spellings.
+    #[test]
+    fn a_deployment_that_writes_no_tool_name_spells_none_of_them() {
+        let value = serde_json::json!({ "tool": "Bash", "nested": { "tool": "Bash" } });
+        let mut tokens = Tokens::default();
+        let stripped = strip(&value, &ROOT, &mut tokens, Mode::Baseline, &BTreeSet::new());
+        assert_ne!(stripped.value["tool"], "Bash");
+        assert_eq!(
+            stripped.value["tool"], stripped.value["nested"]["tool"],
+            "one name still reads as one tool"
+        );
+    }
+
+    /// The instantiated selector in a source's answer is not the template the policy wrote:
+    /// `includes($argument)` fills the placeholder from a tool call's argument.
+    #[test]
+    fn an_instantiated_selector_is_caller_data_in_both_modes() {
+        let value = serde_json::json!({ "group": "@directory:group/finance@corp.example" });
+        for mode in [Mode::Baseline, Mode::Pseudonymized] {
+            let mut tokens = Tokens::default();
+            let stripped = strip(&value, &ROOT, &mut tokens, mode, &vouched());
+            let rendered = serde_json::to_string(&stripped.value).expect("serializes");
+            assert!(
+                !rendered.contains("finance") && !rendered.contains("corp.example"),
+                "the selector's spelling survived {mode:?}: {rendered}"
+            );
+        }
+    }
+
+    /// The drift report exists to name a field whose table entry is missing, and every such
+    /// key is a Rust field name. A key that is not one did not come from a struct, so its
+    /// spelling is data and is dropped from the document and the drift path alike.
+    #[test]
+    fn a_hostile_key_loses_its_spelling_even_in_the_drift_report() {
+        let stripped = run(serde_json::json!({ "alice@corp.example": "whatever" }));
+        assert_eq!(drift(&stripped), vec![("{key}", "Root")]);
+        let rendered = serde_json::to_string(&stripped.value).expect("serializes");
+        assert!(!rendered.contains("alice"), "the key survived: {rendered}");
     }
 
     /// A digest correlates within one report exactly as its hex did, which is the only
@@ -680,28 +788,50 @@ mod tests {
         }
     }
 
-    /// The shape dialect's `const` and `enum` take integers as well as strings. Tokenizing a
-    /// number is nonsense, and quietly dropping one would emit a schema the engine cannot
-    /// read back — so numeric literals cross as they stand, in the order the engine sorted.
+    /// The dialect's `const`, `enum` and bounds take integers, and an integer is the widest
+    /// channel in the document: a 64-bit `minimum` carries more than most strings would. The
+    /// agent authors all of it, so a number is tokenized exactly as a string literal is, and
+    /// no digit of it survives in either mode.
     #[test]
-    fn numeric_schema_literals_cross_unchanged() {
-        let stripped = run(serde_json::json!({
+    fn an_authored_number_is_a_literal_and_not_arithmetic() {
+        let smuggled = 4_503_599_627_370_495i64;
+        let shape = serde_json::json!({
             "shape": {
                 "type": "object",
                 "properties": {
                     "attempt": { "type": "integer", "enum": [1, 2, 3] },
-                    "version": { "type": "integer", "const": 2 }
+                    "version": { "type": "integer", "const": 2 },
+                    "size": { "type": "integer", "minimum": smuggled, "maximum": 2 }
                 },
-                "required": ["attempt", "version"]
+                "required": ["attempt", "size", "version"]
             }
-        }));
-        let properties = &stripped.value["shape"]["properties"];
-        let emitted: Vec<&serde_json::Value> = properties.as_object().expect("an object").values().collect();
-        let enums: Vec<&serde_json::Value> = emitted.iter().filter_map(|node| node.get("enum")).collect();
-        assert_eq!(enums, vec![&serde_json::json!([1, 2, 3])]);
-        let consts: Vec<&serde_json::Value> = emitted.iter().filter_map(|node| node.get("const")).collect();
-        assert_eq!(consts, vec![&serde_json::json!(2)]);
-        assert!(stripped.unclassified.is_empty(), "a numeric literal is not drift");
+        });
+        for mode in [Mode::Baseline, Mode::Pseudonymized] {
+            let mut tokens = Tokens::default();
+            let stripped = strip(&shape, &ROOT, &mut tokens, mode, &vouched());
+            let rendered = serde_json::to_string(&stripped.value).expect("serializes");
+            assert!(
+                !rendered.contains("4503599627370495"),
+                "an authored bound crossed in {mode:?}: {rendered}"
+            );
+            assert!(stripped.unclassified.is_empty(), "a literal is classified, not drift");
+
+            // The shape is still legible: three properties, one of them bounded at both ends,
+            // and `2` and `maximum: 4` are the same literal, so they share a token.
+            let properties = stripped.value["shape"]["properties"].clone();
+            let fields = properties.as_object().expect("an object");
+            assert_eq!(fields.len(), 3);
+            let bounded = fields
+                .values()
+                .find(|node| node.get("minimum").is_some())
+                .expect("one property carries bounds");
+            assert_ne!(bounded["minimum"], bounded["maximum"]);
+            let konst = fields
+                .values()
+                .find_map(|node| node.get("const"))
+                .expect("one property is a const");
+            assert_eq!(*konst, bounded["maximum"], "the same number is the same literal");
+        }
     }
 
     /// Ten or more members is where a naive `-N` spelling stops sorting the way the engine's

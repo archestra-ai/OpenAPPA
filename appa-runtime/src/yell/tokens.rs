@@ -52,6 +52,12 @@ pub(crate) enum Class {
     Group,
     Surface,
     Source,
+    /// A selector as a source *answered* it, never as the policy templates it.
+    ///
+    /// A template like `group/<group-address>` is the deployment's; the instantiated
+    /// `group/finance@corp.example` that reaches a fact is not. `includes($argument)` fills
+    /// the placeholder from a tool call's argument, so the spelling is the model's, and no
+    /// template ever reaches a fact for Baseline to spell instead.
     Selector,
     /// A trust rank's policy-given name. Ranks are numeric in a fact; only the chain names them.
     Trust,
@@ -72,7 +78,13 @@ impl Class {
     /// email, a key the model invented and a digest of the arguments are none of them.
     fn always_tokenized(self) -> bool {
         match self {
-            Class::Trajectory | Class::Reader | Class::Argument | Class::Digest | Class::Field | Class::Literal => true,
+            Class::Trajectory
+            | Class::Reader
+            | Class::Argument
+            | Class::Digest
+            | Class::Field
+            | Class::Literal
+            | Class::Selector => true,
             Class::Authority
             | Class::Tool
             | Class::Effect
@@ -82,7 +94,6 @@ impl Class {
             | Class::Group
             | Class::Surface
             | Class::Source
-            | Class::Selector
             | Class::Trust
             | Class::Identity => false,
         }

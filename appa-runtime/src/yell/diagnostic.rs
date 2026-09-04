@@ -23,6 +23,8 @@
 //! document: the envelope a report sends is measured and trimmed against the receiver's real
 //! limits, gzipped, after this builder has run.
 
+use std::collections::BTreeSet;
+
 use serde::Serialize;
 use serde_json::Value;
 
@@ -137,6 +139,9 @@ pub(crate) struct Source<'a> {
     pub(crate) facts: &'a [Fact],
     pub(crate) events: crate::events::Events,
     pub(crate) trust_chain: Vec<String>,
+    /// The tool names the serving policy writes. A tool name in a fact or a hook is the
+    /// model's string until this set vouches for it.
+    pub(crate) vouched: BTreeSet<String>,
     pub(crate) parents: Vec<(String, Option<String>)>,
     pub(crate) replay_refused: Option<ReplayRefusalClass>,
     pub(crate) yelling: Option<TrajectoryId>,
@@ -185,7 +190,7 @@ pub(crate) fn resolve(recent: crate::events::Recent) -> Result<TrajectoryId, Omi
 pub(crate) fn build(source: Source<'_>, mode: Mode) -> Export {
     let mut tokens = Tokens::default();
     let mut unclassified: Vec<Drift> = Vec::new();
-    let from = budget_start(source.facts, mode);
+    let from = budget_start(source.facts, mode, &source.vouched);
 
     let trust_chain = source
         .trust_chain
@@ -206,7 +211,7 @@ pub(crate) fn build(source: Source<'_>, mode: Mode) -> Export {
 
     let mut facts = Vec::with_capacity(source.facts.len() - from);
     for (seq, fact) in source.facts.iter().enumerate().skip(from) {
-        let stripped = strip(&serialized(fact), &tables::FACT, &mut tokens, mode);
+        let stripped = strip(&serialized(fact), &tables::FACT, &mut tokens, mode, &source.vouched);
         record_drift(&mut unclassified, &stripped, "fact");
         facts.push(FactEntry {
             seq,
@@ -218,7 +223,7 @@ pub(crate) fn build(source: Source<'_>, mode: Mode) -> Export {
     for entry in source.events.entries.iter().chain(source.events.deployment.iter()) {
         let event = serialized(&entry.event);
         let stripped = match tables::event_table(&event) {
-            Some(table) => strip(&event, table, &mut tokens, mode),
+            Some(table) => strip(&event, table, &mut tokens, mode, &source.vouched),
             // A variant the inventory does not name carries nothing, exactly as an unnamed key
             // does, and says so.
             None => Stripped {
@@ -257,11 +262,11 @@ pub(crate) fn build(source: Source<'_>, mode: Mode) -> Export {
 ///
 /// The token map here is thrown away: it exists only so the measured bytes are the bytes the
 /// second pass will produce, and reusing it would number tokens newest-first.
-fn budget_start(facts: &[Fact], mode: Mode) -> usize {
+fn budget_start(facts: &[Fact], mode: Mode, vouched: &BTreeSet<String>) -> usize {
     let mut measure = Tokens::default();
     let mut total = 0usize;
     for (index, fact) in facts.iter().enumerate().rev() {
-        let stripped = strip(&serialized(fact), &tables::FACT, &mut measure, mode);
+        let stripped = strip(&serialized(fact), &tables::FACT, &mut measure, mode, vouched);
         total += serde_json::to_string(&stripped.value).map_or(0, |text| text.len()) + ENTRY_OVERHEAD;
         if total > MAX_FACT_BYTES {
             return index + 1;
@@ -471,6 +476,43 @@ mod tests {
         assert!(!rendered.contains(&session), "baseline carries no harness session id");
         for spelled in ["/home/user", "hookrec"] {
             assert!(!rendered.contains(spelled), "{spelled} survived baseline");
+        }
+    }
+
+    /// A tool name reaches the runtime from the hook body, which the harness writes on the
+    /// model's behalf. The model can invent one, and APPA records the hook whether or not the
+    /// policy declares it — so Baseline, which spells the deployment's own vocabulary, must
+    /// not spell this one.
+    ///
+    /// End to end through the real hook path rather than against a fixture table, because the
+    /// question is whether the vouching is wired up, not whether the rule works.
+    #[tokio::test]
+    async fn a_tool_name_the_policy_never_wrote_is_not_spelled_in_baseline() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let (runtime, root) = recorded_session(&dir).await;
+        let invented = "/home/alice/.ssh/id_rsa";
+        crate::hooks::handle(
+            &runtime,
+            appa_runtime_api::HookEvent::ToolCall {
+                actor: appa_runtime_api::Actor {
+                    root: root.clone(),
+                    child: None,
+                },
+                call: appa_runtime_api::ProposedCall {
+                    tool: invented.to_string(),
+                    arguments: serde_json::value::RawValue::from_string("{}".to_string()).expect("valid JSON"),
+                },
+                spawn: false,
+                ruling: None,
+            },
+        )
+        .await;
+
+        let baseline = export(&runtime, &root, Mode::Baseline);
+        let rendered = serde_json::to_string(&baseline).expect("the export serializes");
+        assert!(rendered.contains("Bash"), "a declared name is still spelled");
+        for spelled in [invented, "id_rsa", "alice"] {
+            assert!(!rendered.contains(spelled), "{spelled} survived baseline: {rendered}");
         }
     }
 

@@ -15,9 +15,17 @@
 //!
 //! A long-lived runtime serves many trajectories and an unbounded account of them is a leak.
 //! One byte budget is the real bound; the three counts stop any single trajectory from
-//! crowding out the rest, which a byte budget alone does not do. Every drop is counted and the
-//! highest dropped sequence is kept, so a reader is told exactly where the hole is rather than
-//! being quietly handed a partial history.
+//! crowding out the rest, which a byte budget alone does not do.
+//!
+//! Three of the four bounds drop entries from a list that stays: each counts what it dropped
+//! and keeps the highest dropped sequence, so a reader is told where the hole is rather than
+//! quietly handed a partial history. `MAX_ROOTS` is the exception. It evicts the coldest
+//! trajectory whole, counters and all, and a trajectory that records again afterwards starts
+//! a fresh account reporting no drops. What survives is the sequence: it is one counter for
+//! the whole process, so the account of a trajectory that lost its early entries begins at a
+//! sequence far above zero. That is the signal a reader gets, and it is weaker than the one
+//! the other three bounds give. Keeping a per-root tombstone instead would need a bound of
+//! its own, which is more machinery than a diagnostic buffer earns.
 
 use std::collections::BTreeMap;
 use std::time::SystemTime;

@@ -746,6 +746,21 @@ impl RuntimeEngine {
     /// Whether the policy writes a contract for this tool's exact name. The wildcard does not
     /// count: it covers a name at a proposal, and a spawn under `SpawnCoverage::Declared` needs
     /// the name written.
+    /// Every tool name the policy writes exactly — the spellings the deployment chose, and
+    /// so the only ones a report may carry as spelled.
+    ///
+    /// A name in a hook body or a refused proposal is the model's string: the harness passes
+    /// on whatever the model asked for, and APPA records the hook either way. Under a
+    /// wildcard the policy writes no name at all, so a wildcard deployment vouches for none
+    /// and every tool in its reports is a token.
+    pub(crate) fn vouched_tools(&self) -> std::collections::BTreeSet<String> {
+        self.engine
+            .registry()
+            .tools()
+            .map(|declaration| declaration.name().as_str().to_string())
+            .collect()
+    }
+
     pub(crate) fn names_tool(&self, tool: &str) -> bool {
         let name = appa_engine::value::ToolName::new(tool);
         self.engine.registry().classify(&name) == Some(appa_engine::registry::ToolKind::Declared)

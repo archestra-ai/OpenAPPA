@@ -898,10 +898,17 @@ impl Runtime {
                     .collect()
             })
             .unwrap_or_default();
+        // Which tool spellings the deployment itself chose. Without a policy nothing is
+        // vouched, which is the safe end: every tool name is then a token.
+        let vouched = policy
+            .as_ref()
+            .map(|policy| policy.engine().vouched_tools())
+            .unwrap_or_default();
         let source = yell::Source {
             facts: log.facts(),
             events: self.inner.events(&root),
             trust_chain,
+            vouched,
             parents: yell::branches(log.facts(), view.as_ref(), policy.as_ref()),
             replay_refused,
             yelling,

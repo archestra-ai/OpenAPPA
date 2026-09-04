@@ -234,7 +234,7 @@ static PINNED_ANNOTATION: Table = Table {
 static RESOLVED_CALL: Table = Table {
     name: "ResolvedCall",
     entries: &[
-        ("tool", Rule::Token(Class::Tool)),
+        ("tool", Rule::VouchedTool),
         ("declaration", NUMBER),
         // `CanonicalArguments` serializes as a scalar string of canonical JSON, so the rule
         // parses it before taking its keys.
@@ -302,10 +302,7 @@ static EXECUTABLE_REMEDY_PLAN: Table = Table {
 
 static AUTHORITY_REVIEW: Table = Table {
     name: "AuthorityReview",
-    entries: &[
-        ("tool", Rule::Token(Class::Tool)),
-        ("trajectory_label", Rule::Table(&LABEL)),
-    ],
+    entries: &[("tool", Rule::VouchedTool), ("trajectory_label", Rule::Table(&LABEL))],
 };
 
 static AUTHORITY_EVIDENCE: Table = Table {
@@ -382,7 +379,7 @@ static PROVENANCE_CHILD_RETURN: Table = Table {
 static PROVENANCE_PROVIDER_RUN: Table = Table {
     name: "Provenance::ProviderRun",
     entries: &[
-        ("tool", Rule::Token(Class::Tool)),
+        ("tool", Rule::VouchedTool),
         ("batch", DIGEST),
         ("position", NUMBER),
         ("effects", Rule::Elements(Class::Effect)),
@@ -479,7 +476,7 @@ static PROFILE: Table = Table {
 
 static OPEN_VECTOR_TOOL: Table = Table {
     name: "OpenVector::tool",
-    entries: &[("tool", Rule::Token(Class::Tool))],
+    entries: &[("tool", Rule::VouchedTool)],
 };
 
 static OPEN_VECTOR_SURFACE: Table = Table {
@@ -526,7 +523,7 @@ static DISPATCH_OPENED: Table = Table {
     entries: &[
         ("trajectory", TRAJECTORY),
         ("dispatch", Rule::Table(&DISPATCH_ID)),
-        ("tool", Rule::Token(Class::Tool)),
+        ("tool", Rule::VouchedTool),
         ("declaration", NUMBER),
         ("arguments", Rule::ArgumentKeys),
         ("proposed_label", Rule::Table(&LABEL)),
@@ -825,7 +822,7 @@ static HOOK_EVENT: Table = Table {
     entries: &[
         ("kind", Rule::Keep),
         ("event", Rule::Keep),
-        ("tool", Rule::Token(Class::Tool)),
+        ("tool", Rule::VouchedTool),
         ("dispatch", Rule::Table(&DISPATCH_ID)),
         // Every `HookOutcome` is a unit variant, so this is always a closed-set string.
         ("outcome", Rule::Keep),
@@ -932,6 +929,8 @@ pub(crate) fn event_table(event: &Value) -> Option<&'static Table> {
 mod tests {
     use super::*;
 
+    use std::collections::BTreeSet;
+
     use crate::events::{
         ControlCall, ControlOutcome, ExternalOutcome, ExternalRole, HookKind, HookOutcome, NoAnswerClass, RuntimeEvent,
         StoreOperation,
@@ -1013,7 +1012,7 @@ mod tests {
         for event in every_event() {
             let value = serde_json::to_value(&event).expect("a runtime event serializes");
             let table = event_table(&value).unwrap_or_else(|| panic!("no table for {value}"));
-            let stripped = strip(&value, table, &mut tokens, Mode::Pseudonymized);
+            let stripped = strip(&value, table, &mut tokens, Mode::Pseudonymized, &BTreeSet::new());
             assert!(
                 stripped.unclassified.is_empty(),
                 "{} is not covered: {:?}",
@@ -1039,7 +1038,7 @@ mod tests {
         let mut stripped = |event: &RuntimeEvent| {
             let value = serde_json::to_value(event).expect("serializes");
             let table = event_table(&value).expect("a table");
-            strip(&value, table, &mut tokens, Mode::Pseudonymized).value["name"]
+            strip(&value, table, &mut tokens, Mode::Pseudonymized, &BTreeSet::new()).value["name"]
                 .as_str()
                 .expect("a token")
                 .to_string()
