@@ -1,40 +1,51 @@
-//! The hook dispatcher: one typed `HookEvent` in, one `HookDecision`
-//! out.
+//! The hook dispatcher: one canonical wire event in, one wire decision
+//! out; between them, one typed `HookEvent` and one `HookDecision`.
 
-use appa_runtime_api::{Actor, Codec, HookDecision, HookEvent, ParseRefusal, ProposedCall, Ruling, TrajectoryId};
+use appa_runtime_api::{
+    Accepted, Actor, Adapter, HookDecision, HookEvent, ParseRefusal, ProposedCall, Ruling, TrajectoryId, WireDecision,
+    WireEvent,
+};
 
 use crate::api::{
     ChildReturnDecision, EventError, LateOpen, OfferId, Runtime, Session, SpawnResultDecision, ToolCallDecision,
     ToolResultDecision, is_control_tool,
 };
 
-/// One hook call, wire to wire: parse through the codec, dispatch,
-/// render back, with the HTTP status the answer travels under. A
-/// non-2xx status makes the hook command exit 2, which blocks the
-/// action — hooks fail closed.
-pub async fn answer(runtime: &Runtime, codec: &Codec, body: &[u8]) -> (u16, serde_json::Value) {
-    let event = match (codec.parse)(body) {
-        Ok(Some(event)) => event,
-        Ok(None) => return (200, serde_json::json!({})),
+fn wire(decision: &HookDecision) -> serde_json::Value {
+    serde_json::to_value(WireDecision::of(decision)).expect("a wire decision serializes")
+}
+
+/// One hook call, wire to wire: read the canonical envelope, derive what
+/// the served adapter derives from the raw call, dispatch, answer with
+/// the wire decision and the HTTP status it travels under. A non-2xx
+/// status makes the hook command exit 2, which blocks the action —
+/// hooks fail closed. Nothing about a call is read from the wire beyond
+/// its raw spelling and arguments; the host's own translation happens
+/// on the client side and is not trusted here.
+pub async fn answer(runtime: &Runtime, adapter: &Adapter, body: &[u8]) -> (u16, serde_json::Value) {
+    let accepted = match WireEvent::read(body).and_then(|event| event.into_event(adapter)) {
+        Ok(Some(accepted)) => accepted,
+        Ok(None) => return (200, wire(&HookDecision::Ack)),
         Err(ParseRefusal::Unreadable { detail }) => return (400, serde_json::json!({ "error": detail })),
         Err(ParseRefusal::Malformed { detail }) => return (409, serde_json::json!({ "error": detail })),
     };
-    if let HookEvent::ToolCall { actor, call, .. } = &event {
-        match runtime.opened_among(&actor.root, &(codec.names_children)(actor, call)) {
+    let Accepted { event, names_children } = accepted;
+    if let HookEvent::ToolCall { actor, .. } = &event {
+        match runtime.opened_among(&actor.root, &names_children) {
             Ok(Some(child)) => {
                 tracing::debug!(root = %actor.root.0, child = %child.0, "a call names a family child's transcript");
-                return (200, (codec.render)(&event, &deny(NAMED_TRANSCRIPT.to_string())));
+                return (200, wire(&deny(NAMED_TRANSCRIPT.to_string())));
             }
             Ok(None) => {}
-            Err(error) => return (409, (codec.render)(&event, &refuse(error.to_string()))),
+            Err(error) => return (409, wire(&refuse(error.to_string()))),
         }
     }
-    let decision = handle(runtime, event.clone()).await;
+    let decision = handle(runtime, event).await;
     let status = match decision {
         HookDecision::Refuse { .. } => 409,
         _ => 200,
     };
-    (status, (codec.render)(&event, &decision))
+    (status, wire(&decision))
 }
 
 /// A subagent's words reach its parent through the checked return only; a call that
@@ -340,8 +351,24 @@ mod tests {
     use crate::api::Runtime;
     use crate::config::Config;
 
-    fn codec() -> Codec {
-        appa_adapter_claude_code::codec()
+    /// The client side of the wire, as `appa hook --adapter claude-code` runs it: the
+    /// Claude Code hook JSON these tests are written in is translated onto the wire,
+    /// and the wire decision is rendered back into Claude Code's hook answer.
+    async fn through_the_wire(runtime: &Runtime, claude_hook_json: &[u8]) -> (u16, serde_json::Value) {
+        let codec = appa_adapter_claude_code::codec();
+        let event = match (codec.parse)(claude_hook_json) {
+            Ok(Some(event)) => event,
+            Ok(None) => return (200, serde_json::json!({})),
+            Err(ParseRefusal::Unreadable { detail }) => return (400, serde_json::json!({ "error": detail })),
+            Err(ParseRefusal::Malformed { detail }) => return (409, serde_json::json!({ "error": detail })),
+        };
+        let wire = WireEvent::from_event(appa_runtime_api::AdapterName::ClaudeCode, &event).expect("translates");
+        let body = serde_json::to_vec(&wire).expect("serializes");
+        let (status, answer) = answer(runtime, &appa_adapter_claude_code::adapter(), &body).await;
+        match serde_json::from_value::<WireDecision>(answer.clone()).map(WireDecision::into_decision) {
+            Ok(Ok(decision)) => (status, (codec.render)(&event, &decision)),
+            _ => (status, answer),
+        }
     }
 
     fn config() -> Config {
@@ -385,7 +412,7 @@ mod tests {
     }
 
     async fn call_hook(runtime: &Runtime, body: &[u8]) -> (u16, serde_json::Value) {
-        answer(runtime, &codec(), body).await
+        through_the_wire(runtime, body).await
     }
 
     fn spawn_call() -> crate::api::ProposedCall {

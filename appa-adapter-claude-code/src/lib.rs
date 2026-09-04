@@ -111,15 +111,51 @@
 use serde::Deserialize;
 
 use appa_runtime_api::{
-    Actor, Codec, HookDecision, HookEvent, OutcomeBody, ParseRefusal, ProposedCall, SpawnRef, ToolOutcome, TrajectoryId,
+    Actor, Adapter, AdapterName, CanonicalTool, Codec, Derived, HookDecision, HookEvent, OutcomeBody, ParseRefusal,
+    ProposedCall, SpawnRef, ToolOutcome, TrajectoryId,
 };
 
+/// The client-side shape translation `appa hook --adapter claude-code` runs.
 pub fn codec() -> Codec {
-    Codec {
-        parse,
-        render,
-        names_children,
+    Codec { parse, render }
+}
+
+/// The server-side derivation the runtime applies to every Claude Code call.
+pub fn adapter() -> Adapter {
+    Adapter {
+        name: AdapterName::ClaudeCode,
+        derive,
     }
+}
+
+/// The registered spelling of the runtime's own control tool: the `appa` MCP server
+/// inside the `appa-runtime` plugin. Only this spelling is the control tool; a
+/// lookalike on another server is an ordinary checked call.
+const CONTROL_TOOL_RAW: &str = "mcp__plugin_appa-runtime_appa__execute_remedy_plan";
+
+/// `mcp__<server>__<tool>` → `mcp/<server>/<tool>`, split at the first `__` after the
+/// prefix; anything else → `host/claude-code/<name>`. A spelling outside the canonical
+/// grammar (a server segment containing `__`, a character outside `[A-Za-z0-9_.-]`) is
+/// refused: the map is a bijection over the domain it accepts.
+fn canonical(raw: &str) -> Result<CanonicalTool, ParseRefusal> {
+    let refused = |error: appa_runtime_api::CanonicalToolError| ParseRefusal::Malformed {
+        detail: format!("tool {raw:?} is outside the Claude Code adapter's domain: {error}"),
+    };
+    if raw == CONTROL_TOOL_RAW {
+        return Ok(CanonicalTool::control());
+    }
+    match raw.strip_prefix("mcp__").and_then(|rest| rest.split_once("__")) {
+        Some((server, tool)) => CanonicalTool::of("mcp", server, tool).map_err(refused),
+        None => CanonicalTool::of("host", "claude-code", raw).map_err(refused),
+    }
+}
+
+fn derive(actor: &Actor, call: &ProposedCall) -> Result<Derived, ParseRefusal> {
+    Ok(Derived {
+        canonical: canonical(&call.tool)?,
+        spawn: is_spawn_tool(&call.tool),
+        names_children: names_children(actor, call),
+    })
 }
 
 /// The family children a call's arguments name by Claude Code's own file spellings: a

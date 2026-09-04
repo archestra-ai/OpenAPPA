@@ -20,7 +20,6 @@ use crate::api::{Reloaded, Runtime};
 use crate::config::Config;
 use crate::default_config;
 use crate::{hooks, mcp};
-use appa_runtime_api::Codec;
 
 fn ensure_default_config(path: &Path) -> io::Result<bool> {
     let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
@@ -87,10 +86,11 @@ impl Adapter {
         }
     }
 
-    fn codec(self) -> Codec {
+    /// The derivation the runtime applies to every call of the host it serves.
+    fn served(self) -> appa_runtime_api::Adapter {
         match self {
-            Adapter::ClaudeCode => appa_adapter_claude_code::codec(),
-            Adapter::Kagent => appa_adapter_kagent::codec(),
+            Adapter::ClaudeCode => appa_adapter_claude_code::adapter(),
+            Adapter::Kagent => appa_adapter_kagent::adapter(),
         }
     }
 }
@@ -166,7 +166,7 @@ pub(crate) fn binary_digest(path: &Path) -> io::Result<String> {
 #[derive(Clone)]
 struct AppState {
     runtime: Arc<Runtime>,
-    codec: Codec,
+    adapter: appa_runtime_api::Adapter,
     config: PathBuf,
     executable: Option<ExecutableAtStart>,
 }
@@ -175,7 +175,7 @@ async fn hook(
     State(state): State<AppState>,
     body: axum::body::Bytes,
 ) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
-    let (status, body) = hooks::answer(&state.runtime, &state.codec, &body).await;
+    let (status, body) = hooks::answer(&state.runtime, &state.adapter, &body).await;
     let status = axum::http::StatusCode::from_u16(status).expect("hook answers carry valid status codes");
     (status, axum::Json(body))
 }
@@ -303,7 +303,7 @@ async fn serve(args: Args) -> ExitCode {
 
     let state = AppState {
         runtime: Arc::clone(&runtime),
-        codec: args.adapter.codec(),
+        adapter: args.adapter.served(),
         config: config_path,
         executable: ExecutableAtStart::of_this_process(),
     };

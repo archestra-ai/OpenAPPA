@@ -88,17 +88,61 @@ use appa_runtime_api::{
 };
 
 pub fn codec() -> Codec {
-    Codec {
-        parse,
-        render,
-        names_children,
+    Codec { parse, render }
+}
+
+/// The server-side derivation the runtime applies to every kagent call.
+pub fn adapter() -> appa_runtime_api::Adapter {
+    appa_runtime_api::Adapter {
+        name: appa_runtime_api::AdapterName::Kagent,
+        derive,
     }
 }
 
-/// A kagent child's words reach its parent through the after-tool callback only: no
-/// file on the parent's disk holds its transcript, so no call names one.
-fn names_children(_: &Actor, _: &ProposedCall) -> Vec<TrajectoryId> {
-    Vec::new()
+/// The structured raw spelling the kagent plugin sends, built from the
+/// inventory its entrypoint computes: `mcp:<toolset>/<tool>`,
+/// `agent:<namespace>/<agent>`, `builtin:<name>`, `gate:<name>`, and
+/// `appa:execute_remedy_plan`. A kagent child's words reach its parent
+/// through the after-tool callback only, so no call names a child's
+/// transcript.
+fn derive(_: &Actor, call: &ProposedCall) -> Result<appa_runtime_api::Derived, ParseRefusal> {
+    let raw = call.tool.as_str();
+    let refused = |detail: String| ParseRefusal::Malformed {
+        detail: format!("tool {raw:?} is outside the kagent adapter's domain: {detail}"),
+    };
+    let (canonical, spawn) = match raw.split_once(':') {
+        Some(("appa", "execute_remedy_plan")) => (appa_runtime_api::CanonicalTool::control(), false),
+        Some(("mcp", rest)) => match rest.split_once('/') {
+            Some((toolset, tool)) => (
+                appa_runtime_api::CanonicalTool::of("mcp", toolset, tool).map_err(|error| refused(error.to_string()))?,
+                false,
+            ),
+            None => return Err(refused("mcp: takes <toolset>/<tool>".to_string())),
+        },
+        Some(("agent", rest)) => match rest.split_once('/') {
+            Some((namespace, agent)) => (
+                appa_runtime_api::CanonicalTool::of("agent", namespace, agent)
+                    .map_err(|error| refused(error.to_string()))?,
+                true,
+            ),
+            None => return Err(refused("agent: takes <namespace>/<agent>".to_string())),
+        },
+        Some(("builtin", name)) => (
+            appa_runtime_api::CanonicalTool::of("host", "kagent", name).map_err(|error| refused(error.to_string()))?,
+            false,
+        ),
+        Some(("gate", name)) => (
+            appa_runtime_api::CanonicalTool::of("host", "kagent-gate", name)
+                .map_err(|error| refused(error.to_string()))?,
+            false,
+        ),
+        _ => return Err(refused("expected mcp:, agent:, builtin:, gate:, or appa:execute_remedy_plan".to_string())),
+    };
+    Ok(appa_runtime_api::Derived {
+        canonical,
+        spawn,
+        names_children: Vec::new(),
+    })
 }
 
 #[derive(Debug, Deserialize)]
