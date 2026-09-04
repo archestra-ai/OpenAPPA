@@ -60,8 +60,21 @@ helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --version 0.9.12 -n kagent \
   --set controller.agentImage.registry=ghcr.io \
   --set controller.agentImage.repository=archestra-ai/appa-kagent-quickstart \
-  --set controller.agentImage.tag=0.9.0 --wait # x-release-please-version
+  --set k8s-agent.enabled=false \
+  --set kgateway-agent.enabled=false \
+  --set istio-agent.enabled=false \
+  --set promql-agent.enabled=false \
+  --set observability-agent.enabled=false \
+  --set argo-rollouts-agent.enabled=false \
+  --set helm-agent.enabled=false \
+  --set cilium-policy-agent.enabled=false \
+  --set cilium-manager-agent.enabled=false \
+  --set cilium-debug-agent.enabled=false \
+  --wait --timeout 10m \
+  --set controller.agentImage.tag=0.9.0 # x-release-please-version
 ```
+
+The stock agents are not part of this quickstart and require a separate provider Secret such as `kagent-openai`. These flags disable them while retaining the controller, dashboard, and tool services used below.
 
 ### Gate an agent
 
@@ -103,7 +116,8 @@ Deploy the demo chart with your OpenRouter API key:
 
 ```sh
 helm upgrade --install appa-kagent-demo ./demo/chart \
-  -n kagent --set openai.apiKey="$OPENROUTER_API_KEY" --wait
+  -n kagent --set-string openai.apiKey="$OPENROUTER_API_KEY" \
+  --wait --timeout 10m
 ```
 
 The chart sets `APPA_ENABLED=true` on every agent it renders, so the demo fleet is gated on install.

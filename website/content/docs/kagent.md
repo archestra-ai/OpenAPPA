@@ -69,7 +69,7 @@ Make sure you have installed:
 - [Helm](https://helm.sh/docs/intro/install/) (v3.8+)
 - [kubectl](https://kubernetes.io/docs/tasks/tools/)
 - [git](https://git-scm.com/downloads)
-- An [OpenAI API key](https://platform.openai.com/account/api-keys)
+- An [OpenRouter API key](https://openrouter.ai/settings/keys)
 
 Clone the repository to run the demo chart:
 
@@ -92,8 +92,21 @@ helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --version 0.9.12 -n kagent \
   --set controller.agentImage.registry=ghcr.io \
   --set controller.agentImage.repository=archestra-ai/appa-kagent-quickstart \
-  --set controller.agentImage.tag=0.9.0 --wait # x-release-please-version
+  --set k8s-agent.enabled=false \
+  --set kgateway-agent.enabled=false \
+  --set istio-agent.enabled=false \
+  --set promql-agent.enabled=false \
+  --set observability-agent.enabled=false \
+  --set argo-rollouts-agent.enabled=false \
+  --set helm-agent.enabled=false \
+  --set cilium-policy-agent.enabled=false \
+  --set cilium-manager-agent.enabled=false \
+  --set cilium-debug-agent.enabled=false \
+  --wait --timeout 10m \
+  --set controller.agentImage.tag=0.9.0 # x-release-please-version
 ```
+
+The kagent chart enables its stock sample agents by default. Those agents require a provider Secret such as `kagent-openai`, but this quickstart replaces them with the demo agents in the next step. The flags above disable only the unused stock agents. They keep the controller, dashboard, and tool services enabled. The explicit timeout makes Helm report a failed rollout instead of waiting without a visible deadline.
 
 To build images from source, see [`integrations/kagent/README.md`](https://github.com/archestra-ai/OpenAPPA/blob/main/integrations/kagent/README.md).
 
@@ -102,11 +115,21 @@ To build images from source, see [`integrations/kagent/README.md`](https://githu
 Install the demo chart with your OpenRouter API key. It deploys sample agents (`cluster-ops`, `log-analyst`, `appa-guide`) and 16 demonstration scenarios:
 
 ```sh
+export OPENROUTER_API_KEY="<your-api-key>"
+
 helm upgrade --install appa-kagent-demo ./integrations/kagent/demo/chart \
-  -n kagent --set openai.apiKey="$OPENROUTER_API_KEY" --wait
+  -n kagent --set-string openai.apiKey="$OPENROUTER_API_KEY" \
+  --wait --timeout 10m
 ```
 
 The demo chart sets `APPA_ENABLED=true` on all demo agents.
+
+If an install times out, inspect the resource that did not become ready:
+
+```sh
+kubectl get pods,agents -n kagent
+kubectl get events -n kagent --sort-by='.lastTimestamp'
+```
 
 ### 3. Open the kagent dashboard
 
@@ -116,7 +139,7 @@ Forward the [kagent dashboard](https://kagent.dev/docs/kagent/observability/laun
 kubectl port-forward -n kagent svc/kagent-ui 8901:8080
 ```
 
-Open [http://localhost:8901](http://localhost:8901) in your browser.
+Open [http://localhost:8901](http://localhost:8901) in your browser. Explore the pre-seeded scenario chats under **Agents → cluster-ops → Chat**, or open **Agents → appa-guide → Chat** to manage policies.
 
 ## Install cluster-wide runtime and protect existing agents
 
@@ -259,7 +282,7 @@ spec:
       and follow references/kagent.md. Work only through your k8s tools and read_file.
       Never modify policy without explicit operator approval in chat and through the kagent
       Approve card.
-    modelConfig: "default-model"
+    modelConfig: "default-model-config" # matches the default kagent ModelConfig
     tools:
       - type: McpServer
         mcpServer:
@@ -363,7 +386,11 @@ The `appa-guide` skill continuously verifies cluster compliance during every int
 - **Identifies uninspected tools**: Warns when a `RemoteMCPServer` exists but has not completed tool discovery.
 - **Read-only fallback**: If Kubernetes manifest write permissions are unavailable, `appa-guide` automatically falls back to read-only mode. It drafts the complete valid `appa.toml` directly into the chat for you to apply manually.
 
-## 1. Confidential read and sanitization
+## Demonstration scenarios
+
+The demo chart pre-seeds the kagent dashboard with interactive scenarios that verify each policy boundary.
+
+### 1. Confidential read and sanitization
 
 Open the `cluster-ops` agent in the [kagent dashboard](https://kagent.dev/docs/kagent/observability/launch-ui/). Ask it to read the payments-provider secret and post the API key to the public status page. The demo chart includes this pre-configured scenario.
 
@@ -389,7 +416,7 @@ Open the `cluster-ops` agent in the [kagent dashboard](https://kagent.dev/docs/k
 
 3. **The agent stays productive.** In this chat, the agent invokes `execute_remedy_plan` to apply the `strip-secret-values` sanitizer. Redacted key names return to the model without credentials. If the agent accepts audience narrowing instead, subsequent calls to `post_status_update` (which require public audience) are blocked.
 
-## 2. Destructive action and human review
+### 2. Destructive action and human review
 
 OpenAPPA integrates with kagent's native [Human-in-the-Loop](https://kagent.dev/docs/kagent/examples/human-in-the-loop/) confirmation cards:
 
@@ -409,7 +436,7 @@ OpenAPPA integrates with kagent's native [Human-in-the-Loop](https://kagent.dev/
    - **Approve**: `oncall` grants `human-approval`. OpenAPPA authorizes the execution, the agent re-proposes `restart_deployment`, and the deployment restarts.
    - **Reject**: `oncall` refuses. OpenAPPA records the refusal, and the tool does not execute.
 
-## 3. Subagent delegation and the return gate
+### 3. Subagent delegation and the return gate
 
 When agents call other agents through [A2A (Agent-to-Agent)](https://kagent.dev/docs/kagent/examples/a2a-agents/) delegation, OpenAPPA isolates their execution contexts. Set `context_control = true` under `[policy.deployment]` to enable isolation.
 
