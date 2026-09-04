@@ -2,6 +2,7 @@
 
 import json
 import re
+import time
 from pathlib import Path
 
 import pytest
@@ -148,6 +149,18 @@ def test_two_raw_names_that_spell_alike_are_refused():
                 {"name": "team-a__NS__release_manager", "url": "http://y"},
             ]
         )
+
+
+def test_despelling_a_long_result_costs_time_in_its_length():
+    """A tool result is text the model produced, and one long identifier in it
+    must not cost the agent its event loop: the scan is anchored on the class a
+    spelling starts with, so a run that carries none is walked once. Unanchored
+    it is quadratic — 16 KB took a second, and this input would take minutes."""
+    built = inventory(http_tools=[DEMO_TOOLS])
+    text = "x" * 400_000
+    started = time.monotonic()
+    assert built.despell(text) == text
+    assert time.monotonic() - started < 2.0
 
 
 def test_every_spelling_despells_back_to_the_name_adk_dispatches():

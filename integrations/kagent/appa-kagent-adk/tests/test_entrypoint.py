@@ -99,24 +99,17 @@ def served(monkeypatch) -> list:
     return servers
 
 
-def build_agent(filepath: str):
-    """Build the server, then run the factory the way KAgentApp does."""
-    server = entrypoint.build_server(filepath, RUNTIME_URL)
-    assert server is not None
-    return server
+def test_a_stock_config_builds_and_the_appa_plugin_is_registered_last(config_dir, built_apps):
+    """The deltas are read off the app the entrypoint built, and its own factory
+    is what runs: KAgentApp calls that factory per session, so the agent it
+    returns is the agent the model gets."""
+    entrypoint.build_server(config_dir(CONFIG), RUNTIME_URL)
+    app = built_apps[-1]
 
-
-def test_a_stock_config_builds_and_the_appa_plugin_is_registered_last(config_dir):
-    from kagent.adk import AgentConfig
-    from kagent.core import KAgentConfig
-
-    filepath = config_dir(CONFIG)
-    build_agent(filepath)
-    # The construction deltas are observable on a factory-built agent.
-    agent_config = AgentConfig.model_validate(CONFIG)
-    app_cfg = KAgentConfig()
-    agent = agent_config.to_agent(app_cfg.name, None, False)
+    assert isinstance(app.plugins[-1], AppaPluginKagent), "the gate is the last plugin"
+    agent = app.root_agent_factory()
     assert agent.code_executor is None, "no executeCodeBlocks, no wrapper"
+    assert isinstance(agent.tools[-1], McpToolset), "the reserved toolset is the last tool"
 
 
 def test_an_unknown_field_refuses_the_start(config_dir):
@@ -150,32 +143,16 @@ def test_a_divergent_summarizer_refuses_the_start(config_dir):
         entrypoint.build_server(config_dir(divergent), RUNTIME_URL)
 
 
-def test_the_factory_wraps_code_execution_and_appends_the_reserved_toolset(config_dir):
-    from kagent.adk import AgentConfig
-    from kagent.core import KAgentConfig
+def test_the_factory_wraps_code_execution_and_appends_the_reserved_toolset(config_dir, built_apps):
+    entrypoint.build_server(config_dir({**CONFIG, "execute_code": True}), RUNTIME_URL)
+    app = built_apps[-1]
 
-    config = {**CONFIG, "execute_code": True}
-    filepath = config_dir(config)
-    entrypoint.build_server(filepath, RUNTIME_URL)
-
-    # Replay the factory deltas directly, the way build_server wires them.
-    from appa_kagent_adk import gates
-    from appa_kagent_adk.identity import SessionIdentity
-
-    agent_config = AgentConfig.model_validate(config)
-    app_cfg = KAgentConfig()
-    agent = agent_config.to_agent(app_cfg.name, None, False)
-    assert agent.code_executor is not None, "execute_code installs the sandboxed executor"
-    identity = SessionIdentity()
-    inventory = ToolInventory.from_config(config, environ={})
-    agent.code_executor = gates.GatedCodeExecutor(
-        agent.code_executor, gates.SyncHookGate(RUNTIME_URL, identity, inventory)
-    )
-    assert isinstance(agent.code_executor, GatedCodeExecutor)
-    before = len(agent.tools)
-    agent.tools.append(entrypoint._reserved_toolset(RUNTIME_URL))
-    assert len(agent.tools) == before + 1
+    agent = app.root_agent_factory()
+    assert isinstance(agent.code_executor, GatedCodeExecutor), "the sandboxed executor runs behind the gate"
     reserved = agent.tools[-1]
+    assert isinstance(reserved, McpToolset) and reserved.tool_filter == [RESERVED_TOOL], (
+        "the reserved toolset is appended last"
+    )
     assert reserved._connection_params.timeout == entrypoint.REMEDY_CALL_TIMEOUT_SECONDS, (
         "the remedy call outlasts a parked consult; ADK's five-second default would fail it at the client"
     )

@@ -75,12 +75,18 @@ _SEGMENT_RUN = r"[A-Za-z0-9_-](?:[A-Za-z0-9_.-]*[A-Za-z0-9_-])?"
 # is a name ``despell`` can match back: a boundary period would end the
 # run short, and the spelling could never be found whole.
 _SEGMENT = re.compile(rf"^{_SEGMENT_RUN}$")
+# The classes a wire spelling begins with. Every spelling this module
+# issues carries one, so the scan below anchors on the literal class
+# instead of trying a segment at every character: an unanchored scan
+# backtracks over each identifier it fails to close, which is quadratic
+# in one long colon-free run — and a tool result is enough to carry one.
+_CLASSES = ("mcp", "agent", "builtin", "gate", wire.CONTROL_TOOL.split(":", 1)[0])
 # A wire spelling as it stands in a runtime string: two or three
 # segments, ``class:name`` or ``class:namespace/name``. The inventory
 # alone decides which candidate is a spelling it gave out, and
 # ``despell`` replaces one only where the identifier continues on
 # neither side.
-_SPELLED = re.compile(rf"{_SEGMENT_RUN}:{_SEGMENT_RUN}(?:/{_SEGMENT_RUN})?")
+_SPELLED = re.compile(rf"(?:{'|'.join(_CLASSES)}):{_SEGMENT_RUN}(?:/{_SEGMENT_RUN})?")
 # The cluster-internal authorities an MCP endpoint may carry. The
 # toolset name is the first label of the host, so a host outside the
 # cluster would claim the policy identity of the in-cluster service of
