@@ -7,12 +7,14 @@ import { getAllDocs, type DocPage } from "@/lib/docs";
 
 /* Content backing the MCP server (app/mcp/route.ts) and /llms.txt: read from
    the content/docs *.md files on every call — nothing is cached or prebaked —
-   with figure directives replaced by one-line text stand-ins and pages sliced
+   with visual directives replaced by text stand-ins and pages sliced
    into sections for targeted reads and full-text search. The docs menu is the
    catalog: only pages that appear in it (title + category frontmatter) are
    served. */
 
-const FIGURE_DESCRIPTIONS: Record<string, string> = {
+const DIRECTIVE_DESCRIPTIONS: Record<string, string> = {
+  "battery-catalog":
+    "- [Slack](/battery-slack) — rules for 19 Slack tools, with audiences from Slack users and groups.\n- [Claude Code tools](/battery-claude-code) — rules for Claude Code's Bash and Read tools.\n- [GitHub](/battery-github) — rules for 44 repository, issue, pull request, and user tools.\n- [Grain](/battery-grain) — rules for 49 meeting, transcript, deal, and admin tools.\n- [Google Workspace](/battery-google-workspace) — uses your Workspace directory and groups to build audiences.\n- [Add your own](/write-a-battery) — create and submit policy for an MCP server.",
   "fig-claude-code-hooks":
     "[Animated figure: a protected Claude Code session sends each hook event to OpenAPPA; one tool call comes back allowed, one comes back blocked with safer options.]",
   "fig-connected-agent":
@@ -21,6 +23,8 @@ const FIGURE_DESCRIPTIONS: Record<string, string> = {
     "[Animated figure: the same agent, on another run, pulls another client's call notes into the update — data exfiltration without any attacker.]",
   "fig-guardrail":
     "[Animated figure: the agent runs inside a policy boundary; labeled data crosses in, and outbound flows are checked against contracts before dispatch.]",
+  "fig-kagent":
+    "[Animated figure: a gated kagent agent on Kubernetes sends tool calls through the ADK plugin to OpenAPPA, which answers each of the eight hook events; one call is allowed, one confidential read is denied and then authorized by the remedy the agent runs, and one destructive call waits on an operator.]",
   "fig-label-fold":
     "[Animated figure: labels fold as the agent reads — audience intersects, trust takes the minimum.]",
   "fig-negotiation":
@@ -32,7 +36,7 @@ const FIGURE_DESCRIPTIONS: Record<string, string> = {
 };
 
 function stripDirectives(markdown: string): string {
-  return markdown.replace(/^:::([a-z-]+):::$/gm, (_, name: string) => FIGURE_DESCRIPTIONS[name] ?? "");
+  return markdown.replace(/^:::([a-z-]+):::$/gm, (_, name: string) => DIRECTIVE_DESCRIPTIONS[name] ?? "");
 }
 
 export interface DocSection {

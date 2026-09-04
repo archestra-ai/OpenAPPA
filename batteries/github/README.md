@@ -63,16 +63,18 @@ from = ["github:org/archestra-ai/team/finance"]
 
 [externals.audience.github]
 command = ["python3", "batteries/github/audience-source.py"]
+token_env = "APPA_PROVIDER_GITHUB_TOKEN"
 ```
 
 A command path is resolved against the directory of the config file
 that names it, so write the path as your root config sees the battery.
 
-The script reads its token from `OPENAPPA_GITHUB_TOKEN`. The token needs
-the `read:org` and `user:email` scopes. The runtime strips every
-`APPA_*` variable from a command it runs — its own credentials never
-reach an external — so a source's token must be named outside that
-prefix. Any GitHub error or missing answer stops the operation without
+The script reads its token from `APPA_PROVIDER_GITHUB_TOKEN`, which the
+binding's `token_env` forwards. The token needs the `read:org` and
+`user:email` scopes. A command inherits none of the runtime's `APPA_*`
+namespace — not its wiring, not a bearer token it sends, not another
+command's credential — only the one `APPA_PROVIDER_*` variable its own
+binding names. Any GitHub error or missing answer stops the operation without
 recording a decision; nothing is guessed.
 
 **`test_audience_source.py`** — fixture tests over recorded GitHub REST
@@ -82,7 +84,7 @@ payloads, no network. Run with `python3 test_audience_source.py`.
 
 The default assumes public repositories. For a private repository, add
 root rules that name it (`repo:`), or its whole organisation (`owner:`),
-so its reads come out private and its writes accept private data; the
+so its reads come out `internal` and its writes accept `internal` data; the
 comment at the top of `appa.toml` shows both.
 To make a write ask a person first, add a root rule for that tool with
 `attention = ["hitl"]` in its `requires`. Root rules run first. Nothing

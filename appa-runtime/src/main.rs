@@ -18,10 +18,9 @@ use sha2::{Digest, Sha256};
 
 use crate::api::{Reloaded, Runtime};
 use crate::config::Config;
+use crate::default_config;
 use crate::{hooks, mcp};
 use appa_runtime_api::Codec;
-
-const DEFAULT_CONFIG: &str = include_str!("../../integrations/claude-code/examples/claude-code.appa.toml");
 
 fn ensure_default_config(path: &Path) -> io::Result<bool> {
     let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
@@ -29,7 +28,10 @@ fn ensure_default_config(path: &Path) -> io::Result<bool> {
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
         Err(error) => return Err(error),
     };
-    if let Err(error) = file.write_all(DEFAULT_CONFIG.as_bytes()).and_then(|()| file.sync_all()) {
+    if let Err(error) = file
+        .write_all(default_config::text().as_bytes())
+        .and_then(|()| file.sync_all())
+    {
         drop(file);
         let _ = fs::remove_file(path);
         return Err(error);
@@ -70,59 +72,27 @@ fn require_loopback(addr: &SocketAddr) -> Result<(), String> {
 /// The adapter surface this binary can serve. The one place harness
 /// names appear in this crate: each variant maps to one codec crate.
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-enum Adapter {
+pub(crate) enum Adapter {
     ClaudeCode,
+    Kagent,
 }
 
 impl Adapter {
+    /// kagent's spawns are other agents called as tools: a child runs only under a contract
+    /// that names the agent. Claude Code's `Task` keeps the wildcard's cover.
+    fn spawn_coverage(self) -> crate::api::SpawnCoverage {
+        match self {
+            Adapter::ClaudeCode => crate::api::SpawnCoverage::Wildcard,
+            Adapter::Kagent => crate::api::SpawnCoverage::Declared,
+        }
+    }
+
     fn codec(self) -> Codec {
         match self {
             Adapter::ClaudeCode => appa_adapter_claude_code::codec(),
+            Adapter::Kagent => appa_adapter_kagent::codec(),
         }
     }
-}
-
-fn refuse_unobservable_returns(adapter: Adapter, policy: &toml::Value) -> Result<(), String> {
-    match adapter {
-        Adapter::ClaudeCode => {
-            let controls_context = policy
-                .get("deployment")
-                .and_then(|deployment| deployment.get("context_control"))
-                .and_then(toml::Value::as_bool)
-                .unwrap_or(false);
-            if !controls_context {
-                return Ok(());
-            }
-            let tools = policy
-                .get("tool")
-                .and_then(toml::Value::as_array)
-                .map(Vec::as_slice)
-                .unwrap_or_default();
-            for tool in tools {
-                let Some(name) = tool.get("name").and_then(toml::Value::as_str) else {
-                    continue;
-                };
-                if (name == "Agent" || name == "Task") && !pins_foreground(tool) {
-                    return Err(format!(
-                        "this deployment controls the subagent's context, and its `{name}` tool does not pin \
-                        `run_in_background` to `false` (`parameters.properties.run_in_background.const = false`): a \
-                        background subagent returns where no hook can check it. Pin the argument, as the shipped \
-                        examples do."
-                    ));
-                }
-            }
-            Ok(())
-        }
-    }
-}
-
-fn pins_foreground(tool: &toml::Value) -> bool {
-    tool.get("parameters")
-        .and_then(|parameters| parameters.get("properties"))
-        .and_then(|properties| properties.get("run_in_background"))
-        .and_then(|argument| argument.get("const"))
-        .and_then(toml::Value::as_bool)
-        == Some(false)
 }
 
 fn log_level(verbose: u8) -> &'static str {
@@ -182,7 +152,12 @@ fn current_executable_metadata() -> io::Result<(u64, SystemTime)> {
     Ok((metadata.len(), metadata.modified()?))
 }
 
-fn binary_digest(path: &Path) -> io::Result<String> {
+/// The fingerprint a runtime serves at `/binary-fingerprint`.
+///
+/// `init` computes the same value for the binary it is about to deploy and compares
+/// the two to decide whether the process on the endpoint is its own deployment. The
+/// two sides must render the digest identically, so they share this one definition.
+pub(crate) fn binary_digest(path: &Path) -> io::Result<String> {
     let bytes = fs::read(path)?;
     let digest = Sha256::digest(bytes);
     Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
@@ -193,7 +168,6 @@ struct AppState {
     runtime: Arc<Runtime>,
     codec: Codec,
     config: PathBuf,
-    adapter: Adapter,
     executable: Option<ExecutableAtStart>,
 }
 
@@ -213,16 +187,31 @@ async fn health(State(state): State<AppState>) -> String {
     health_answer(stale, std::process::id())
 }
 
+/// The policy this process serves, so an install can tell whether a runtime it left
+/// running still answers under the configuration on disk. Read-only: reloading is the
+/// caller's separate, deliberate step.
+async fn policy_key(State(state): State<AppState>) -> String {
+    state.runtime.serving_policy_key()
+}
+
+/// Which deployment answers here: the build, the process, and the configuration it serves.
+///
+/// The build alone does not identify a deployment. Two installs of one build are
+/// byte-identical, so an install that compared digests alone would take another
+/// deployment's runtime for its own. The configuration path is what separates them.
 async fn binary_fingerprint(State(state): State<AppState>) -> Result<String, axum::http::StatusCode> {
     state
         .executable
         .as_ref()
-        .map(|executable| binary_fingerprint_answer(&executable.digest, std::process::id()))
+        .map(|executable| binary_fingerprint_answer(&executable.digest, std::process::id(), &state.config))
         .ok_or(axum::http::StatusCode::NOT_FOUND)
 }
 
-fn binary_fingerprint_answer(digest: &str, pid: u32) -> String {
-    format!("{digest} {pid}")
+/// The first line's fields are read positionally, so the configuration follows the first
+/// newline and runs to the end of the answer. A path may hold spaces and, on Unix, newlines;
+/// taking the whole remainder verbatim keeps either from being mistaken for a field break.
+fn binary_fingerprint_answer(digest: &str, pid: u32, config: &Path) -> String {
+    format!("{digest} {pid}\n{}", config.display())
 }
 
 fn health_answer(stale: bool, pid: u32) -> String {
@@ -232,8 +221,6 @@ fn health_answer(stale: bool, pid: u32) -> String {
 async fn reload(State(state): State<AppState>) -> Result<axum::Json<Reloaded>, (axum::http::StatusCode, String)> {
     let config = Config::load(&state.config)
         .map_err(|error| (axum::http::StatusCode::UNPROCESSABLE_ENTITY, error.to_string()))?;
-    refuse_unobservable_returns(state.adapter, config.policy_file().value())
-        .map_err(|refusal| (axum::http::StatusCode::UNPROCESSABLE_ENTITY, refusal))?;
     match state.runtime.reload(config) {
         Ok(reloaded) => Ok(axum::Json(reloaded)),
         Err(refusal) => {
@@ -306,12 +293,8 @@ async fn serve(args: Args) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    if let Err(refusal) = refuse_unobservable_returns(args.adapter, config.policy_file().value()) {
-        eprintln!("appa runtime: {refusal}");
-        return ExitCode::FAILURE;
-    }
     let runtime = match Runtime::open(config, args.db, args.modules_dir) {
-        Ok(runtime) => Arc::new(runtime),
+        Ok(runtime) => Arc::new(runtime.with_spawn_coverage(args.adapter.spawn_coverage())),
         Err(error) => {
             eprintln!("appa runtime: {error}");
             return ExitCode::FAILURE;
@@ -322,12 +305,12 @@ async fn serve(args: Args) -> ExitCode {
         runtime: Arc::clone(&runtime),
         codec: args.adapter.codec(),
         config: config_path,
-        adapter: args.adapter,
         executable: ExecutableAtStart::of_this_process(),
     };
     let app = axum::Router::new()
         .route("/health", get(health))
         .route("/binary-fingerprint", get(binary_fingerprint))
+        .route("/policy-key", get(policy_key))
         .route("/status", get(status))
         .route("/hook", post(hook))
         .route("/reload", post(reload))
@@ -341,7 +324,10 @@ async fn serve(args: Args) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    tracing::info!(listen = %args.listen, "appa-runtime serving /hook, /mcp, /status, /reload, /health, and /binary-fingerprint");
+    tracing::info!(
+        listen = %args.listen,
+        "appa-runtime serving /hook, /mcp, /status, /reload, /health, /binary-fingerprint, and /policy-key"
+    );
     match axum::serve(listener, app).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -363,15 +349,9 @@ mod tests {
         assert!(ensure_default_config(&path).expect("default config is created"));
         assert_eq!(
             fs::read_to_string(&path).expect("default config is readable"),
-            DEFAULT_CONFIG
+            default_config::text()
         );
         Config::load(&path).expect("the embedded default config validates");
-        assert!(
-            DEFAULT_CONFIG.contains("name = \"claude-code.undeclared-tool\"")
-                && DEFAULT_CONFIG.contains("name = \"*\"")
-                && DEFAULT_CONFIG.contains("annotator = \"claude-code.undeclared-tool\""),
-            "a fresh Claude Code deployment carries its explicit compatibility fallback"
-        );
 
         fs::write(&path, "existing deployment").expect("existing config is replaced by the test");
         assert!(!ensure_default_config(&path).expect("existing config is preserved"));
@@ -387,35 +367,6 @@ mod tests {
         assert!(require_loopback(&"[::1]:8787".parse().expect("parses")).is_ok());
         assert!(require_loopback(&"0.0.0.0:8787".parse().expect("parses")).is_err());
         assert!(require_loopback(&"192.168.1.10:8787".parse().expect("parses")).is_err());
-    }
-
-    #[test]
-    fn a_context_controlling_deployment_must_pin_its_subagents_to_the_foreground() {
-        let examples = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../integrations/claude-code/examples");
-        for name in ["claude-code.appa.toml", "claude-code-hitl.appa.toml"] {
-            let path = examples.join(name);
-            let config = Config::load(&path).unwrap_or_else(|error| panic!("{name} does not load: {error}"));
-            let policy = config.policy_file().value();
-            assert!(
-                refuse_unobservable_returns(Adapter::ClaudeCode, policy).is_ok(),
-                "{name}"
-            );
-            let mut unpinned = policy.clone();
-            for tool in unpinned["tool"].as_array_mut().expect("the tools table") {
-                if tool["name"].as_str() == Some("Task") {
-                    tool.as_table_mut().expect("a tool table").remove("parameters");
-                }
-            }
-            assert!(
-                refuse_unobservable_returns(Adapter::ClaudeCode, &unpinned).is_err(),
-                "{name}"
-            );
-            unpinned["deployment"]["context_control"] = toml::Value::Boolean(false);
-            assert!(
-                refuse_unobservable_returns(Adapter::ClaudeCode, &unpinned).is_ok(),
-                "{name}"
-            );
-        }
     }
 
     #[test]
@@ -447,8 +398,12 @@ mod tests {
     }
 
     #[test]
-    fn the_binary_fingerprint_names_the_process_that_serves_it() {
-        assert_eq!(binary_fingerprint_answer("abc123", 41), "abc123 41");
+    fn the_binary_fingerprint_names_the_deployment_that_serves_it() {
+        // The configuration is on its own line so a path holding spaces stays one value.
+        assert_eq!(
+            binary_fingerprint_answer("abc123", 41, Path::new("/home/user/Application Support/appa.toml")),
+            "abc123 41\n/home/user/Application Support/appa.toml"
+        );
     }
 
     #[test]

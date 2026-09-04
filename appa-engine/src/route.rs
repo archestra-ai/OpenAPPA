@@ -44,13 +44,14 @@ use serde::{Deserialize, Serialize};
 use crate::audience::{AudienceEvidence, EvidenceRefusal};
 use crate::basis::SubjectKey;
 use crate::candidate::CallStage;
+use crate::check::CallRole;
 use crate::check::{self, CallReads, CheckOutcome, Gap, Narrowing, RawBlock};
 use crate::contract::{NotStatic, StaticAnnotation, ToolAnnotation};
 use crate::engine::Engine;
 use crate::fact::EffectKind;
 use crate::label::{Audience, Expansions, Label, MembershipContext, MembershipNeeded, SymbolicAtom, WithinAssertions};
 use crate::names::{AuthorityName, SanitizerName};
-use crate::plan::{self, CallRole, ExecutableRemedyPlan, GapPower, RemedyStep};
+use crate::plan::{self, ExecutableRemedyPlan, GapPower, RemedyStep};
 use crate::projection::Views;
 use crate::registry::Registry;
 use crate::value::{CanonicalDigest, ResolvedCall, ToolName};
@@ -93,7 +94,7 @@ impl RecoveryRoute {
                 RouteStep::Derive(sanitizer) | RouteStep::Sanitize(sanitizer) => Some(Contingency::SanitizerResult {
                     sanitizer: sanitizer.clone(),
                 }),
-                RouteStep::Accept(_) => None,
+                RouteStep::Accept(_) | RouteStep::Return(_) => None,
             })
             .collect();
         if contingencies.is_empty() {
@@ -125,6 +126,9 @@ pub enum RouteStep {
         call: CanonicalDigest,
     },
     Sanitize(SanitizerName),
+    /// Declare the child's return policy for a marked spawn: a floor, behind the named untagged
+    /// output sanitizer when one is given.
+    Return(Option<SanitizerName>),
 }
 
 /// `Complete` ends with the blocked call's release. `Prefix` stops earlier, where the next state
@@ -206,6 +210,7 @@ pub(crate) struct BlockContext {
     call: ResolvedCall,
     stage: CallStage,
     role: CallRole,
+    floor: Option<plan::Floor>,
     denied: BTreeSet<AuthorityName>,
     expansions: Expansions,
     raw: RawBlock,
@@ -229,38 +234,37 @@ impl BlockContext {
             .ok_or(RouteError::UnknownSubject)?
             .into_owned();
 
-        // The supplied answers must be admissible on their own — a duplicate or unroutable
-        // claim refuses loudly here, before recorded pins shadow it silently.
-        registry.audience().expansions(answers)?;
         let mut evidence = answers.clone();
         if let Some((_, offers)) = views.pending_block(subject) {
             for (offer, _) in &offers {
                 if let Some(recorded) = views.offer(offer) {
-                    evidence = evidence.inheriting(&recorded.evidence);
+                    evidence = evidence.inheriting(&recorded.evidence)?;
                 }
             }
         }
-        evidence = evidence.inheriting(&decided.evidence);
+        evidence = evidence.inheriting(&decided.evidence)?;
         // A candidate an input hop derived may stand under another contract than the proposal;
         // the atoms that contract reads were pinned by the hop.
-        evidence = evidence.inheriting(&views.candidate_evidence(subject));
+        evidence = evidence.inheriting(views.candidate_evidence(subject))?;
         let expansions = registry.audience().expansions(&evidence)?;
 
         let stage = views.call_stage(subject);
         let role = views.call_role(subject);
         let audience = registry.audience();
         let membership = MembershipContext::new(audience.within_assertions(), audience.providers(), &expansions);
-        let raw = match check::evaluate(&contract, views, &call, &stage, &membership) {
+        let raw = match check::evaluate(&contract, views, &call, &stage, role, &membership) {
             Ok(CheckOutcome::Allow) => return Err(RouteError::NotBlocked),
             Ok(CheckOutcome::Block(raw)) => raw,
             Err(needed) => return Err(needed.into()),
         };
         let denied = views.denied_authorities(&call.digest()).cloned().unwrap_or_default();
+        let floor = plan::floor_of(registry, views);
         Ok(BlockContext {
             contract,
             call,
             stage,
             role,
+            floor,
             denied,
             expansions,
             raw,
@@ -489,7 +493,7 @@ impl<'a> Search<'a> {
             let mut unanswered: Vec<SymbolicAtom> =
                 plan::block_atoms(self.registry, &context.contract, &eval, context.role)
                     .into_iter()
-                    .filter(|atom| self.context.expansions.members(atom).is_none())
+                    .filter(|atom| !self.context.expansions.answered(atom))
                     .collect();
             if !unanswered.is_empty() {
                 unanswered.sort();
@@ -505,6 +509,7 @@ impl<'a> Search<'a> {
                 &context.call,
                 &context.stage,
                 context.role,
+                context.floor.as_ref(),
                 &membership,
             )? {
                 if context.denied.iter().any(|authority| plan.names_authority(authority)) {
@@ -670,6 +675,7 @@ impl<'a> Search<'a> {
                 },
                 RemedyStep::Sanitize(sanitizer) => RouteStep::Sanitize(sanitizer.clone()),
                 RemedyStep::Derive(sanitizer) => RouteStep::Derive(sanitizer.clone()),
+                RemedyStep::Return(sanitizer) => RouteStep::Return(sanitizer.clone()),
             })
             .collect()
     }
@@ -767,7 +773,7 @@ impl<'a> Search<'a> {
                         }
                     }
                 }
-                RouteStep::Precede { .. } | RouteStep::Accept(_) | RouteStep::Sanitize(_) => {}
+                RouteStep::Precede { .. } | RouteStep::Accept(_) | RouteStep::Sanitize(_) | RouteStep::Return(_) => {}
             }
         }
         powers
@@ -1113,7 +1119,14 @@ mod tests {
     fn raw_block(registry: &Registry, views: &Views, call: &ResolvedCall) -> RawBlock {
         let contract = registry.annotation_of(call).unwrap();
         let parts = crate::label::TestContext::default();
-        match check::evaluate(&contract, views, call, &CallStage::default(), &parts.context()) {
+        match check::evaluate(
+            &contract,
+            views,
+            call,
+            &CallStage::default(),
+            CallRole::Ordinary,
+            &parts.context(),
+        ) {
             Ok(CheckOutcome::Block(raw)) => raw,
             other => panic!("expected a block, got {other:?}"),
         }
@@ -1140,6 +1153,7 @@ mod tests {
             call: call.clone(),
             stage: CallStage::default(),
             role: CallRole::Ordinary,
+            floor: None,
             denied: views.denied_authorities(&call.digest()).cloned().unwrap_or_default(),
             expansions: registry.audience().expansions(answers).expect("well-formed answers"),
             raw: raw_block(registry, &views, call),
@@ -1201,6 +1215,8 @@ mod tests {
                 RouteStep::Authorize { authority, .. } => format!("authorize:{}", authority.as_str()),
                 RouteStep::Accept(_) => "accept".to_string(),
                 RouteStep::Sanitize(sanitizer) => format!("sanitize:{}", sanitizer.as_str()),
+                RouteStep::Return(None) => "return".to_string(),
+                RouteStep::Return(Some(sanitizer)) => format!("return:{}", sanitizer.as_str()),
             })
             .collect()
     }
@@ -1760,6 +1776,7 @@ mod tests {
                                     RemedyStep::Accept(narrowing) => RouteStep::Accept(narrowing.clone()),
                                     RemedyStep::Sanitize(sanitizer) => RouteStep::Sanitize(sanitizer.clone()),
                                     RemedyStep::Derive(sanitizer) => RouteStep::Derive(sanitizer.clone()),
+                                    RemedyStep::Return(sanitizer) => RouteStep::Return(sanitizer.clone()),
                                 })
                                 .collect(),
                             RouteOutcome::Complete,

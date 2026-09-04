@@ -99,6 +99,18 @@ enum Backend {
     Hitl,
     ClaudeCode(ClaudeCodeBackend),
     Llm(LlmBackend),
+    /// `appa replay`'s stand-in for the parties a remedy consults: every authority
+    /// approves, every sanitizer returns the body unchanged. No configuration can name it;
+    /// only `Runtime::open_in_memory` installs it, over whatever the deployment bound.
+    StandIn,
+}
+
+fn stand_in_answer(consult: &Consult) -> Result<serde_json::Value, NoAnswerReason> {
+    match &consult.body {
+        ConsultBody::Authority { .. } => Ok(serde_json::json!({ "ruling": "approve" })),
+        ConsultBody::Sanitizer { artifact, .. } => Ok(serde_json::json!({ "body": artifact.body })),
+        _ => Err(NoAnswerReason::Unregistered),
+    }
 }
 
 fn kind_of(section: Section) -> ConsultKind {
@@ -210,7 +222,7 @@ impl ExternalServices {
             command: config.claude_code.command.clone(),
             #[cfg(unix)]
             model: config.claude_code.model.clone(),
-            timeout: config.claude_code.timeout.unwrap_or(config.timeout),
+            timeout: config.claude_code.timeout,
             #[cfg(unix)]
             max_body_bytes: config.max_body_bytes,
         };
@@ -274,11 +286,29 @@ impl ExternalServices {
         })
     }
 
+    /// Whether this authority is the `hitl` builtin — the one consult a harness with
+    /// its own review channel answers itself.
+    pub(crate) fn is_hitl(&self, authority: &str) -> bool {
+        matches!(
+            self.backends
+                .get(&ConsultKind::Authority)
+                .and_then(|table| table.get(authority)),
+            Some(Backend::Hitl)
+        )
+    }
+
     /// One consult of a registered component, dispatched on its configured
     /// implementation. `elicitation` is the open request that asked for a ruling; it is
     /// present only for an authority consult raised inside the remedy tool, and only
-    /// the `hitl` backend reads it.
-    pub async fn consult(&self, consult: &Consult, elicitation: Option<&Elicitation>) -> ConsultOutcome {
+    /// the `hitl` backend reads it. `ruling` is a person's answer the harness obtained
+    /// through its own review channel for this execution; the `hitl` backend spends it
+    /// in place of an elicitation.
+    pub async fn consult(
+        &self,
+        consult: &Consult,
+        elicitation: Option<&Elicitation>,
+        ruling: Option<appa_runtime_api::Ruling>,
+    ) -> ConsultOutcome {
         let kind = consult.kind();
         let name = consult.name.as_str();
         let Some(backend) = self.backends.get(&kind).and_then(|table| table.get(name)) else {
@@ -290,8 +320,17 @@ impl ExternalServices {
             Backend::Command(command) => self.run_command_consult(command, consult).await,
             Backend::Stock(stock) => stock.answer(consult).ok_or(NoAnswerReason::Malformed),
             Backend::Module(module) => self.call_module(module, consult).await,
-            Backend::Hitl => match (elicitation, &consult.body) {
-                (Some(elicitation), ConsultBody::Authority { declaration, artifact }) => {
+            Backend::Hitl => match (ruling, elicitation, &consult.body) {
+                (Some(ruling), _, ConsultBody::Authority { .. }) => {
+                    tracing::debug!(name, ?ruling, "the harness's own reviewer answered this hitl consult");
+                    Ok(serde_json::json!({
+                        "ruling": match ruling {
+                            appa_runtime_api::Ruling::Approve => "approve",
+                            appa_runtime_api::Ruling::Deny => "deny",
+                        }
+                    }))
+                }
+                (None, Some(elicitation), ConsultBody::Authority { declaration, artifact }) => {
                     return elicitation.ask(name, declaration, artifact).await;
                 }
                 // No live request to ask through — a `hitl` authority reachable from
@@ -307,12 +346,31 @@ impl ExternalServices {
                 Some(prompt) => llm.consult(&prompt).await,
                 None => Err(NoAnswerReason::Unregistered),
             },
+            Backend::StandIn => stand_in_answer(consult),
         };
         match answered {
             Ok(answer) => ConsultOutcome::Answer(answer),
             Err(reason) => {
                 tracing::debug!(kind = kind.wire_name(), name, ?reason, "the consult produced no answer");
                 ConsultOutcome::NoAnswer(reason)
+            }
+        }
+    }
+
+    /// Answer every named authority and sanitizer in process, as if the bound party had:
+    /// approve, and the body unchanged. Binding or not, each name is covered.
+    pub(crate) fn stand_in_for_remedies(
+        &mut self,
+        authorities: impl IntoIterator<Item = String>,
+        sanitizers: impl IntoIterator<Item = String>,
+    ) {
+        for (kind, names) in [
+            (ConsultKind::Authority, authorities.into_iter().collect::<Vec<_>>()),
+            (ConsultKind::Sanitizer, sanitizers.into_iter().collect::<Vec<_>>()),
+        ] {
+            let table = self.backends.entry(kind).or_default();
+            for name in names {
+                table.insert(name, Backend::StandIn);
             }
         }
     }
@@ -714,10 +772,23 @@ async fn run_command_process(
         .stderr(Stdio::null())
         .kill_on_drop(true);
     configured.as_std_mut().process_group(0);
+    // The runtime's own namespace stops here: no bearer token it sends, and no wiring
+    // variable, reaches the child. The binding's own provider credential is put back
+    // afterwards, so a command inherits the one variable it reads and no other's.
     for (key, _) in std::env::vars_os() {
-        if key.to_string_lossy().starts_with("APPA_") {
+        if key
+            .to_string_lossy()
+            .starts_with(crate::config::RUNTIME_VARIABLE_PREFIX)
+        {
             configured.env_remove(key);
         }
+    }
+    if let Some((var, credential)) = command
+        .token_env
+        .as_ref()
+        .and_then(|var| std::env::var_os(var).map(|credential| (var, credential)))
+    {
+        configured.env(var, credential);
     }
 
     let child = configured.spawn().map_err(|_| NoAnswerReason::Unreachable)?;
@@ -932,6 +1003,7 @@ mod tests {
             name: name.to_string(),
             body: ConsultBody::Annotation {
                 declaration: AnnotationDeclaration {
+                    hint: Some("Classify customer records for the declared audiences.".to_string()),
                     inputs: vec![],
                     trust_ranks: vec!["suspicious".to_string(), "trusted".to_string()],
                     audiences: vec![
@@ -963,7 +1035,7 @@ mod tests {
 
     async fn resolve(services: &ExternalServices) -> ConsultOutcome {
         services
-            .consult(&audience_consult("slack", "user-group/eng"), None)
+            .consult(&audience_consult("slack", "user-group/eng"), None, None)
             .await
     }
 
@@ -1042,17 +1114,22 @@ mod tests {
 
         assert_eq!(
             services
-                .consult(&authority_consult("security", serde_json::json!({"to": "x"})), None)
+                .consult(
+                    &authority_consult("security", serde_json::json!({"to": "x"})),
+                    None,
+                    None
+                )
                 .await,
             ConsultOutcome::Answer(serde_json::json!({"ruling": "approve"}))
         );
         assert_eq!(
-            services.consult(&sanitizer_consult("channel", "raw"), None).await,
+            services.consult(&sanitizer_consult("channel", "raw"), None, None).await,
             ConsultOutcome::Answer(serde_json::json!({"body": "clean"}))
         );
         let annotation = services
             .consult(
                 &annotation_consult("classifier", serde_json::json!({"customer": {"id": 7}, "deep": true})),
+                None,
                 None,
             )
             .await;
@@ -1100,6 +1177,7 @@ mod tests {
                 "one argument".to_string(),
             ],
             cwd: dir.to_path_buf(),
+            token_env: Some("APPA_PROVIDER_TEST_TOKEN".to_string()),
         };
         config
             .annotators
@@ -1148,6 +1226,7 @@ mod tests {
             .consult(
                 &annotation_consult("classifier", serde_json::json!({"path": "notes.txt"})),
                 None,
+                None,
             )
             .await
     }
@@ -1157,6 +1236,9 @@ mod tests {
     async fn a_command_receives_one_envelope_in_its_directory_and_answers_for_any_kind() {
         let dir = tempfile::tempdir().expect("a fixture directory is created");
         unsafe { std::env::set_var("APPA_COMMAND_TEST_SECRET", "must-not-leak") };
+        unsafe { std::env::set_var("APPA_PROVIDER_TEST_TOKEN", "provider-credential") };
+        // Another battery's credential: in the same namespace, named by no binding here.
+        unsafe { std::env::set_var("APPA_PROVIDER_OTHER_TOKEN", "must-not-leak") };
         let services = command_services(
             dir.path(),
             r#"cat > request.json
@@ -1169,6 +1251,8 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         );
         let outcome = resolve_command(&services).await;
         unsafe { std::env::remove_var("APPA_COMMAND_TEST_SECRET") };
+        unsafe { std::env::remove_var("APPA_PROVIDER_TEST_TOKEN") };
+        unsafe { std::env::remove_var("APPA_PROVIDER_OTHER_TOKEN") };
 
         assert_eq!(
             outcome,
@@ -1179,6 +1263,11 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
                 .expect("stdin is one JSON request");
         assert_eq!(request["kind"], "annotation");
         assert_eq!(request["name"], "classifier");
+        assert_eq!(
+            request["declaration"]["hint"],
+            "Classify customer records for the declared audiences."
+        );
+        assert_eq!(request["declaration"]["inputs"], serde_json::json!([]));
         assert_eq!(request["artifact"]["args"], serde_json::json!({"path": "notes.txt"}));
         assert_eq!(
             std::fs::read_to_string(dir.path().join("argument.txt")).unwrap(),
@@ -1191,13 +1280,14 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         );
         assert_eq!(
             std::fs::read_to_string(dir.path().join("appa-env.txt")).unwrap(),
-            "",
-            "no APPA_* variable reaches a resolver command"
+            "APPA_PROVIDER_TEST_TOKEN=provider-credential\n",
+            "a command inherits the one credential its binding names — not the runtime's own \
+             variables, and not another binding's credential in the same namespace"
         );
 
         // The same command serves an authority: the transport is kind-agnostic.
         let outcome = services
-            .consult(&authority_consult("security", serde_json::json!({})), None)
+            .consult(&authority_consult("security", serde_json::json!({})), None, None)
             .await;
         assert_eq!(
             outcome,
@@ -1255,7 +1345,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         );
         // Far past any pipe buffer: the write can finish only once the child reads, and it never does.
         let consult = annotation_consult("classifier", serde_json::json!({"path": "x".repeat(1 << 20)}));
-        let outcome = services.consult(&consult, None).await;
+        let outcome = services.consult(&consult, None, None).await;
         assert!(matches!(outcome, ConsultOutcome::Answer(_)), "{outcome:?}");
     }
 
@@ -1270,7 +1360,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         let services = command_services(dir.path(), script, 3000, 1 << 20);
         let consult = annotation_consult("classifier", serde_json::json!({"path": "x".repeat(1 << 20)}));
         let started = std::time::Instant::now();
-        let outcome = services.consult(&consult, None).await;
+        let outcome = services.consult(&consult, None, None).await;
         assert!(matches!(outcome, ConsultOutcome::Answer(_)), "{outcome:?}");
         assert!(
             started.elapsed() < Duration::from_secs(2),
@@ -1288,6 +1378,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             AnnotatorImplementation::Command(ResolverCommand {
                 argv: vec!["/definitely/missing/resolver".to_string()],
                 cwd: dir.path().to_path_buf(),
+                token_env: None,
             }),
         );
         assert_eq!(
@@ -1478,6 +1569,8 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         let command = fake_claude(capture.path(), &script);
         // The runtime's own wiring and secrets must not reach the child.
         unsafe { std::env::set_var("APPA_TEST_SECRET_TOKEN", "leaky") };
+        // Not even the credential a `command` external inherits: this consult reads none.
+        unsafe { std::env::set_var("APPA_PROVIDER_TEST_TOKEN", "leaky") };
         let raw = run_claude_code(
             &claude_backend(command, 2000, 65_536),
             &prompt,
@@ -1486,6 +1579,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         .await
         .expect("the fake Claude process returns structured output");
         unsafe { std::env::remove_var("APPA_TEST_SECRET_TOKEN") };
+        unsafe { std::env::remove_var("APPA_PROVIDER_TEST_TOKEN") };
         assert_eq!(raw["delta"]["trust"], "suspicious");
 
         let sent: serde_json::Value =
@@ -1584,17 +1678,17 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         let services = services_declaring(config, declared("judge", AnnotatorBuiltin::ClaudeCode));
         assert_eq!(
             services
-                .consult(&authority_consult("judge", serde_json::json!({})), None)
+                .consult(&authority_consult("judge", serde_json::json!({})), None, None)
                 .await,
             ConsultOutcome::Answer(serde_json::json!({"ruling": "approve", "reason": "fine"}))
         );
         assert!(matches!(
-            services.consult(&sanitizer_consult("judge", "raw"), None).await,
+            services.consult(&sanitizer_consult("judge", "raw"), None, None).await,
             ConsultOutcome::Answer(_)
         ));
         assert!(matches!(
             services
-                .consult(&annotation_consult("judge", serde_json::json!({})), None)
+                .consult(&annotation_consult("judge", serde_json::json!({})), None, None)
                 .await,
             ConsultOutcome::Answer(_)
         ));
@@ -1649,17 +1743,17 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         let services = services_declaring(config, declared("judge", AnnotatorBuiltin::Llm));
         assert_eq!(
             services
-                .consult(&authority_consult("judge", serde_json::json!({})), None)
+                .consult(&authority_consult("judge", serde_json::json!({})), None, None)
                 .await,
             ConsultOutcome::Answer(serde_json::json!({"ruling": "approve", "reason": "fine"}))
         );
         assert!(matches!(
-            services.consult(&sanitizer_consult("judge", "raw"), None).await,
+            services.consult(&sanitizer_consult("judge", "raw"), None, None).await,
             ConsultOutcome::Answer(_)
         ));
         assert!(matches!(
             services
-                .consult(&annotation_consult("judge", serde_json::json!({})), None)
+                .consult(&annotation_consult("judge", serde_json::json!({})), None, None)
                 .await,
             ConsultOutcome::Answer(_)
         ));
@@ -1820,6 +1914,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             .consult(
                 &authority_consult("security", serde_json::json!({"call": "send_message"})),
                 None,
+                None,
             )
             .await;
         assert_eq!(
@@ -1833,7 +1928,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         let services = services(None, 2000, 65536);
         assert_eq!(
             services
-                .consult(&authority_consult("directory", serde_json::json!({})), None)
+                .consult(&authority_consult("directory", serde_json::json!({})), None, None)
                 .await,
             ConsultOutcome::NoAnswer(NoAnswerReason::Unregistered),
         );
@@ -1844,7 +1939,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         let services = services_over(config);
         assert_eq!(
             services
-                .consult(&authority_consult("directory", serde_json::json!({})), None)
+                .consult(&authority_consult("directory", serde_json::json!({})), None, None)
                 .await,
             ConsultOutcome::NoAnswer(NoAnswerReason::NonSuccess { status: 403 }),
         );
@@ -1854,7 +1949,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         config.sanitizers.insert("channel".to_string(), endpoint(&url));
         let services = services_over(config);
         assert_eq!(
-            services.consult(&sanitizer_consult("channel", "x"), None).await,
+            services.consult(&sanitizer_consult("channel", "x"), None, None).await,
             ConsultOutcome::NoAnswer(NoAnswerReason::Malformed),
         );
     }
@@ -1871,13 +1966,13 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         let services = services_over(config);
         assert_eq!(
             services
-                .consult(&authority_consult("auto", serde_json::json!({"call": "x"})), None)
+                .consult(&authority_consult("auto", serde_json::json!({"call": "x"})), None, None)
                 .await,
             ConsultOutcome::Answer(serde_json::json!({"ruling": "approve"})),
         );
         assert_eq!(
             services
-                .consult(&sanitizer_consult("pii", "mail bob@corp.example now"), None)
+                .consult(&sanitizer_consult("pii", "mail bob@corp.example now"), None, None)
                 .await,
             ConsultOutcome::Answer(serde_json::json!({"body": "mail [redacted-email] now"})),
         );
@@ -2003,7 +2098,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
     async fn a_loaded_module_answers_the_consult_with_its_component() {
         let (services, _dir) = module_services("appa-module-fixture", None, "fixture-auth", 65536);
         let outcome = services
-            .consult(&authority_consult("auto", serde_json::json!({"call": "x"})), None)
+            .consult(&authority_consult("auto", serde_json::json!({"call": "x"})), None, None)
             .await;
         assert_eq!(
             outcome,
@@ -2015,16 +2110,16 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
     async fn every_module_failure_is_no_answer_never_a_denial() {
         let (services, _dir) = module_services("appa-module-fixture", None, "fixture-auth", 65536);
         assert_eq!(
-            services.consult(&mode("error"), None).await,
+            services.consult(&mode("error"), None, None).await,
             ConsultOutcome::NoAnswer(NoAnswerReason::ModuleError),
         );
         assert_eq!(
-            services.consult(&mode("panic"), None).await,
+            services.consult(&mode("panic"), None, None).await,
             ConsultOutcome::NoAnswer(NoAnswerReason::ModulePanicked),
         );
         let (small, _dir) = module_services("appa-module-fixture", None, "fixture-auth", 64);
         assert_eq!(
-            small.consult(&mode("big"), None).await,
+            small.consult(&mode("big"), None, None).await,
             ConsultOutcome::NoAnswer(NoAnswerReason::Oversized),
         );
     }
@@ -2034,7 +2129,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         let (services, _dir) = module_services("appa-module-fixture-bad", Some("dishonest-length"), "liar", 65536);
         assert_eq!(
             services
-                .consult(&authority_consult("auto", serde_json::json!({})), None)
+                .consult(&authority_consult("auto", serde_json::json!({})), None, None)
                 .await,
             ConsultOutcome::NoAnswer(NoAnswerReason::Malformed),
         );
@@ -2044,7 +2139,10 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
     async fn the_module_gate_serializes_concurrent_calls() {
         let (services, _dir) = module_services("appa-module-fixture", None, "fixture-auth", 65536);
         let consult = mode("gate");
-        let (first, second) = tokio::join!(services.consult(&consult, None), services.consult(&consult, None));
+        let (first, second) = tokio::join!(
+            services.consult(&consult, None, None),
+            services.consult(&consult, None, None)
+        );
         for outcome in [first, second] {
             match outcome {
                 ConsultOutcome::Answer(answer) => {

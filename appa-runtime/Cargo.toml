@@ -14,6 +14,7 @@ path = "src/bin/appa.rs"
 
 [dependencies]
 appa-adapter-claude-code = { path = "../appa-adapter-claude-code" }
+appa-adapter-kagent = { path = "../appa-adapter-kagent" }
 # The builtin-module ABI: one source of truth for the descriptor,
 # statuses, and version shared with deployer modules.
 appa-builtin = { path = "../appa-builtin" }

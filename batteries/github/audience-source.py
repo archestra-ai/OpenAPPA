@@ -13,7 +13,7 @@ owner's addresses through /user/emails, while a profile's public email
 is whatever its owner typed, so every other member keeps the bare
 `github:<login>` identity and distinct identities never merge by guess.
 
-Credentials come from OPENAPPA_GITHUB_TOKEN (read:org and user:email
+Credentials come from APPA_PROVIDER_GITHUB_TOKEN (read:org and user:email
 scopes). Any GitHub error or missing answer exits nonzero: the runtime
 treats that as no answer and refuses the operation, so an API hiccup
 never becomes a policy decision.
@@ -28,7 +28,7 @@ import urllib.request
 
 
 API_ROOT = "https://api.github.com"
-TOKEN_VAR = "OPENAPPA_GITHUB_TOKEN"
+TOKEN_VAR = "APPA_PROVIDER_GITHUB_TOKEN"
 TIMEOUT_SECONDS = 30
 PAGE_SIZE = 100
 

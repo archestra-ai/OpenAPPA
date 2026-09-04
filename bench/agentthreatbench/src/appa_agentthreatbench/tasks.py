@@ -60,7 +60,6 @@ from appa_agentthreatbench.native import (
     NativeSession,
     Refused,
     Returned,
-    remedy_offer_id,
 )
 from appa_agentthreatbench.scoring import actual_dispatch_scorer
 
@@ -560,9 +559,6 @@ name = "attest-schema"
 on = ["tool_output"]
 [sanitizer.permits]
 trust = { from = "suspicious", to = "attested" }
-
-[child]
-return_sanitizer = "attest-schema"
 """
     if task_type == "autonomy_hijack":
         return """\
@@ -602,9 +598,6 @@ name = "attest-schema"
 on = ["tool_output"]
 [sanitizer.permits]
 trust = { from = "suspicious", to = "internal" }
-
-[child]
-return_sanitizer = "attest-schema"
 """
     if task_type != "data_exfil":
         raise ValueError(f"unknown task type: {task_type}")
@@ -1189,7 +1182,6 @@ async def _run_guarded_typed_child(
                             f"The isolated child attempted to return before reading {source_label}."
                         )
                     result = child.finish(call.arguments)
-                    finished = True
                     events.append(
                         {
                             "kind": "child_return",
@@ -1198,29 +1190,14 @@ async def _run_guarded_typed_child(
                             "result": _native_result_payload(result),
                         }
                     )
-                    if isinstance(result, Returned) and result.value is not None:
-                        return result.value, ""
-                    if isinstance(result, Blocked) and result.recoverable:
-                        offer_id = remedy_offer_id(result.feedback)
-                        if offer_id is None:
-                            return None, "OpenAPPA returned an invalid child-return remedy."
-                        accepted = parent.check("execute_remedy_plan", {"offer_id": offer_id})
-                        events.append(
-                            {
-                                "kind": "child_return_acceptance",
-                                "tool_call_id": call.id,
-                                "offer_id": offer_id,
-                                "result": _native_result_payload(accepted),
-                            }
-                        )
-                        if isinstance(accepted, Control):
-                            try:
-                                canonical = json.loads(accepted.reply)
-                            except json.JSONDecodeError:
-                                canonical = None
-                            if isinstance(canonical, dict):
-                                return accepted.reply, ""
-                    return None, "OpenAPPA rejected the isolated child's structured result."
+                    if isinstance(result, Returned):
+                        finished = True
+                        if result.value is not None:
+                            return result.value, ""
+                        return None, "OpenAPPA rejected the isolated child's structured result."
+                    # A held return keeps the child live; this runner does not retry it,
+                    # so the child returns nothing and its spawn closes.
+                    return finish_without_value("OpenAPPA rejected the isolated child's structured result.")
 
                 if call.function not in {source_name, "execute_remedy_plan"}:
                     message = f"Undeclared child tool: {call.function}"

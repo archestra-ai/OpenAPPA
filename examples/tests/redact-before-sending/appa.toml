@@ -1,0 +1,39 @@
+# HR data may leave the company only through the redactor. Reading HR
+# restricts the trajectory to the HR desk; an outside email needs `public`;
+# the sanitizer is the declared way from one to the other.
+#
+# The HR desk is a literal reader here, not the built-in `internal`: a
+# sanitizer's `from` needs the members of the audience it moves from, and
+# `internal` has members only when an `[audience.internal]` source is bound.
+
+[policy]
+version = 2
+
+[[policy.tool]]
+name = "Read(path:/hr/*)"
+delta = { audience = ["hr@corp.example"] }
+
+[[policy.tool]]
+name = "Read"
+delta = {}
+
+[[policy.tool]]
+name = "Email"
+requires = { audience = { contains = ["public"] } }
+delta = {}
+
+# Rewrites the email's arguments before dispatch and moves the value from
+# the HR desk to `public`.
+[[policy.sanitizer]]
+name = "redactor"
+on = ["tool_input"]
+
+[policy.sanitizer.permits]
+audience = { from = ["hr@corp.example"], to = ["public"] }
+
+[externals]
+timeout_ms = 2000
+max_body_bytes = 65536
+
+[externals.sanitizers.redactor]
+builtin = "redact-email"

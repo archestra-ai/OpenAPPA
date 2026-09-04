@@ -86,7 +86,7 @@ export const GLOSSARY_TERMS = [
   "hint",
   "declaration",
   "artifact",
-  "return_sanitizer",
+  "return_schema",
   "narrowing",
   "remedy_plans",
   "trajectory",

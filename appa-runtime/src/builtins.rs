@@ -469,10 +469,18 @@ fn isolate_claude_environment(command: &mut tokio::process::Command) {
     // tool-less, and non-persistent, so it is safe and necessary to clear the
     // harness marker before launching it.
     command.env_remove("CLAUDECODE");
-    // No APPA secret or wiring variable reaches the model: the child needs its own
-    // credentials and HOME, never this runtime's bearer tokens.
+    // A consult is one answer, not a session: the CLI's background traffic (telemetry,
+    // bootstrap fetches, the session-title call) is one more connection per consult
+    // on a host that may run many consults at once, and none of it reaches the answer.
+    command.env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1");
+    // No APPA variable of any kind reaches the model: the child needs its own credentials
+    // and HOME, never this runtime's bearer tokens — and not the provider credential a
+    // `command` external inherits either, which this consult never reads.
     for (key, _) in std::env::vars_os() {
-        if key.to_string_lossy().starts_with("APPA_") {
+        if key
+            .to_string_lossy()
+            .starts_with(crate::config::RUNTIME_VARIABLE_PREFIX)
+        {
             command.env_remove(key);
         }
     }
@@ -505,6 +513,12 @@ mod tests {
                 .get_envs()
                 .any(|(name, value)| name == "CLAUDECODE" && value.is_none()),
             "the nested-session marker is explicitly removed"
+        );
+        assert!(
+            command.as_std().get_envs().any(|(name, value)| {
+                name == "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" && value.is_some_and(|value| value == "1")
+            }),
+            "the consult runs without the CLI's background traffic"
         );
     }
 

@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "appa-kagent-demo values",
+  "description": "Constrains the agent names the chart renders into the policy and the Agent objects. Each one must be a DNS-1123 label: lowercase alphanumerics and hyphens, 63 characters at most. kagent maps only hyphens and slashes when it spells the agent-tool name, so a dotted subdomain name is refused here on purpose. Every other value passes unchecked.",
+  "type": "object",
+  "properties": {
+    "agents": {
+      "type": "object",
+      "properties": {
+        "childName": {
+          "type": "string",
+          "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$",
+          "description": "The python child cluster-ops delegates to. The policy names it <namespace>__NS__<childName>, hyphens as underscores."
+        },
+        "go": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$",
+              "description": "The go twin of cluster-ops."
+            },
+            "childName": {
+              "type": "string",
+              "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$",
+              "description": "The go child the go twin delegates to. The policy names it <namespace>__NS__<childName>, hyphens as underscores."
+            },
+            "undeclaredName": {
+              "type": "string",
+              "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$",
+              "description": "The go agent the policy never names. Every delegation to it is denied."
+            }
+          }
+        }
+      }
+    }
+  }
+}

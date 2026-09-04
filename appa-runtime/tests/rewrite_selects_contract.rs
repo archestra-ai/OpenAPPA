@@ -3,13 +3,13 @@
 //! path.
 
 mod common;
-use common::{offers, raw, serve};
+use common::{actor, offer_of, propose, ran, raw, root, serve};
 
 use std::sync::{Arc, Mutex};
 
-use appa_runtime::api::{AuditEvent, OfferId, RemedyOutcome, Runtime};
+use appa_runtime::api::{AuditEvent, RemedyOutcome, Runtime};
 use appa_runtime::{config::Config, hooks};
-use appa_runtime_api::{Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, ToolOutcome, TrajectoryId};
+use appa_runtime_api::{HookDecision, HookEvent, ProposedCall};
 use axum::Router;
 use axum::extract::State;
 use axum::routing::post;
@@ -111,17 +111,6 @@ async fn serve_stubs(rewrite: serde_json::Value) -> (String, Stubs) {
     (serve(router).await, stubs)
 }
 
-fn root() -> TrajectoryId {
-    TrajectoryId("rewrite-selects-contract".to_string())
-}
-
-fn actor() -> Actor {
-    Actor {
-        root: root(),
-        child: None,
-    }
-}
-
 fn read_hr() -> ProposedCall {
     ProposedCall {
         tool: "read_hr".to_string(),
@@ -136,45 +125,6 @@ fn read_file(path: &str) -> ProposedCall {
     }
 }
 
-async fn propose(runtime: &Arc<Runtime>, call: ProposedCall) -> HookDecision {
-    hooks::handle(
-        runtime,
-        HookEvent::ToolCall {
-            actor: actor(),
-            call,
-            spawn: false,
-        },
-    )
-    .await
-}
-
-async fn ran(runtime: &Arc<Runtime>, call: ProposedCall) {
-    assert_eq!(
-        hooks::handle(
-            runtime,
-            HookEvent::ToolResult {
-                actor: actor(),
-                call,
-                outcome: ToolOutcome::Success {
-                    body: OutcomeBody::Available("done".to_string()),
-                },
-            },
-        )
-        .await,
-        HookDecision::Ack
-    );
-}
-
-fn last_offer(decision: &HookDecision) -> OfferId {
-    let HookDecision::DenyCall { feedback, .. } = decision else {
-        panic!("expected a deny carrying feedback, got {decision:?}")
-    };
-    offers(feedback)
-        .last()
-        .cloned()
-        .unwrap_or_else(|| panic!("no offer id in feedback: {feedback}"))
-}
-
 /// A runtime whose audience is narrowed to `hr`, with the sanitizer answering `rewrite`.
 async fn narrowed(dir: &tempfile::TempDir, rewrite: serde_json::Value) -> (Arc<Runtime>, Stubs) {
     let (base, stubs) = serve_stubs(rewrite).await;
@@ -186,7 +136,7 @@ async fn narrowed(dir: &tempfile::TempDir, rewrite: serde_json::Value) -> (Arc<R
         hooks::handle(&runtime, HookEvent::SessionStart { root: root() }).await,
         HookDecision::Ack
     );
-    let accept = last_offer(&propose(&runtime, read_hr()).await);
+    let accept = offer_of(&propose(&runtime, read_hr()).await);
     assert!(matches!(
         runtime.execute_remedy(&actor(), accept).await,
         RemedyOutcome::Authorized { .. }
@@ -232,7 +182,7 @@ async fn a_rewrite_into_the_public_contract_consults_its_annotator_about_the_rew
         stubs.consults.lock().unwrap().is_empty(),
         "the private contract is static and owes no annotation"
     );
-    let hop = last_offer(&blocked);
+    let hop = offer_of(&blocked);
 
     assert_eq!(
         rewritten_path(runtime.execute_remedy(&actor(), hop).await),
@@ -268,7 +218,7 @@ async fn a_rewrite_into_the_private_contract_records_the_classified_read_and_con
 
     let blocked = propose(&runtime, read_file("public/q3.md")).await;
     assert_eq!(stubs.consults.lock().unwrap().len(), 1, "the proposal is classified");
-    let hop = last_offer(&blocked);
+    let hop = offer_of(&blocked);
 
     assert_eq!(
         rewritten_path(runtime.execute_remedy(&actor(), hop).await),
@@ -293,7 +243,7 @@ async fn a_rewrite_within_the_public_contract_is_annotated_afresh() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let (runtime, stubs) = narrowed(&dir, serde_json::json!({ "path": "public/q4.md" })).await;
 
-    let hop = last_offer(&propose(&runtime, read_file("public/q3.md")).await);
+    let hop = offer_of(&propose(&runtime, read_file("public/q3.md")).await);
     assert_eq!(
         rewritten_path(runtime.execute_remedy(&actor(), hop).await),
         "public/q4.md"
@@ -333,7 +283,7 @@ async fn a_rewrite_no_contract_selects_leaves_the_offer_standing() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let (runtime, stubs) = narrowed(&dir, serde_json::json!({ "path": "shared/q3.md" })).await;
 
-    let hop = last_offer(&propose(&runtime, read_file("private/q3.md")).await);
+    let hop = offer_of(&propose(&runtime, read_file("private/q3.md")).await);
     for _ in 0..2 {
         assert!(matches!(
             runtime.execute_remedy(&actor(), hop.clone()).await,

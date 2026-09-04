@@ -1,7 +1,7 @@
 //! The hook dispatcher: one typed `HookEvent` in, one `HookDecision`
 //! out.
 
-use appa_runtime_api::{Actor, Codec, HookDecision, HookEvent, ParseRefusal, ProposedCall, TrajectoryId};
+use appa_runtime_api::{Actor, Codec, HookDecision, HookEvent, ParseRefusal, ProposedCall, Ruling, TrajectoryId};
 
 use crate::api::{
     ChildReturnDecision, EventError, LateOpen, OfferId, Runtime, Session, SpawnResultDecision, ToolCallDecision,
@@ -19,6 +19,16 @@ pub async fn answer(runtime: &Runtime, codec: &Codec, body: &[u8]) -> (u16, serd
         Err(ParseRefusal::Unreadable { detail }) => return (400, serde_json::json!({ "error": detail })),
         Err(ParseRefusal::Malformed { detail }) => return (409, serde_json::json!({ "error": detail })),
     };
+    if let HookEvent::ToolCall { actor, call, .. } = &event {
+        match runtime.opened_among(&actor.root, &(codec.names_children)(actor, call)) {
+            Ok(Some(child)) => {
+                tracing::debug!(root = %actor.root.0, child = %child.0, "a call names a family child's transcript");
+                return (200, (codec.render)(&event, &deny(NAMED_TRANSCRIPT.to_string())));
+            }
+            Ok(None) => {}
+            Err(error) => return (409, (codec.render)(&event, &refuse(error.to_string()))),
+        }
+    }
     let decision = handle(runtime, event.clone()).await;
     let status = match decision {
         HookDecision::Refuse { .. } => 409,
@@ -26,6 +36,11 @@ pub async fn answer(runtime: &Runtime, codec: &Codec, body: &[u8]) -> (u16, serd
     };
     (status, (codec.render)(&event, &decision))
 }
+
+/// A subagent's words reach its parent through the checked return only; a call that
+/// names the file the harness keeps them in is refused before it runs.
+const NAMED_TRANSCRIPT: &str = "this call names a subagent's transcript or output file; a subagent's words \
+                                reach this session only through its checked return";
 
 /// Dispatch one typed event to its session and fold the outcome into
 /// one decision. The dispatcher holds nothing between calls; every id
@@ -40,13 +55,14 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             Err(error) => refuse(error.to_string()),
         },
         HookEvent::Prompt { actor, .. } => {
-            // A prompt gates the new turn, so a close that failed blocks
-            // it: the call is still open and the first proposal would
-            // refuse anyway, with less to say about why.
-            match on_actor(runtime, &actor, |session| async move { session.on_prompt().await }).await {
-                Ok(()) => HookDecision::Ack,
-                Err(error) => fold(error, block),
-            }
+            // The prompt text is not an engine event: nothing is reported,
+            // nothing is recorded, and offer freshness stays the engine's
+            // judgment. The prompt is only noted as the sign that the
+            // previous turn is over; a queued message arrives here while
+            // its turn's call still runs, so the call is settled at the
+            // first proposal of the new turn, when that result is in.
+            runtime.note_prompt(&actor);
+            HookDecision::Ack
         }
         HookEvent::TurnEnd { actor } => {
             // A turn end gates nothing, so it answers `Ack` whatever
@@ -54,24 +70,57 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             // turn" on this hook, which would hold the harness in a turn
             // it has finished; a close that failed leaves the call open
             // and the next proposal refuses on its own.
-            if let Err(error) = on_actor(runtime, &actor, |session| async move { session.on_turn_end().await }).await {
+            runtime.take_prompted(&actor);
+            if let Err(error) = on_actor(runtime, &actor, MissingStart::Refuse, |session| async move {
+                session.on_turn_end().await
+            })
+            .await
+            {
                 tracing::warn!(root = %actor.root.0, %error, "the turn end closed no abandoned call");
             }
             runtime.release_vouches(&actor);
             HookDecision::Ack
         }
-        HookEvent::ToolCall { actor, call, spawn } => {
-            if is_control_tool(&call.tool) {
-                return control_call(runtime, &actor, &call);
+        HookEvent::ToolCall {
+            actor,
+            call,
+            spawn,
+            ruling,
+        } => {
+            if runtime.take_prompted(&actor) {
+                // The first proposal after a prompt that no turn end preceded:
+                // the user interrupted the previous turn, and whatever it left
+                // open is settled before this turn's first call, control tools
+                // included, so a vouch this turn records is never released here.
+                if let Err(error) = on_actor(runtime, &actor, MissingStart::OpenLate, |session| async move {
+                    session.on_turn_end().await
+                })
+                .await
+                {
+                    runtime.note_prompt(&actor);
+                    return fold(error, deny);
+                }
+                runtime.release_vouches(&actor);
             }
-            match on_actor(runtime, &actor, |session| {
+            if is_control_tool(&call.tool) {
+                return control_call(runtime, &actor, &call, ruling);
+            }
+            match on_actor(runtime, &actor, MissingStart::OpenLate, |session| {
                 let call = call.clone();
                 async move { session.on_tool_call(call, spawn).await }
             })
             .await
             {
                 Ok(ToolCallDecision::Allow { spawn }) => HookDecision::AllowCall { spawn },
-                Ok(ToolCallDecision::Deny { feedback }) => HookDecision::DenyCall { feedback },
+                Ok(ToolCallDecision::Deny {
+                    feedback,
+                    offers,
+                    review,
+                }) => HookDecision::DenyCall {
+                    feedback,
+                    offers,
+                    review,
+                },
                 Err(error) => fold(error, deny),
             }
         }
@@ -80,7 +129,7 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
                 tracing::debug!(trajectory = %actor.root.0, "control tool outcome absorbed");
                 return HookDecision::Ack;
             }
-            match on_actor(runtime, &actor, |session| {
+            match on_actor(runtime, &actor, MissingStart::Refuse, |session| {
                 let (call, outcome) = (call.clone(), outcome.clone());
                 async move { session.on_tool_result(call, outcome).await }
             })
@@ -98,7 +147,7 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             value,
         } => {
             let said = value.clone();
-            match on_actor(runtime, &actor, |session| {
+            match on_actor(runtime, &actor, MissingStart::Refuse, |session| {
                 let (call, outcome, child, value) = (call.clone(), outcome.clone(), child.clone(), value.clone());
                 async move { session.on_spawn_result(call, outcome, child, value).await }
             })
@@ -110,18 +159,26 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             }
         }
         HookEvent::ChildStart { root, child, spawn } => {
+            // The child is told what its return must look like where the
+            // fork's policy shapes it; a return that crosses as spoken
+            // needs no word.
             let root = match open_or_reopen(runtime, &root) {
                 Ok(session) => session,
                 Err(error) => return refuse(error.to_string()),
             };
-            match root.on_child_start(child, spawn) {
-                Ok(_) => HookDecision::Ack,
+            match root.start_child(child, spawn) {
+                Ok((_, Some(text))) => HookDecision::Context { text },
+                Ok((_, None)) => HookDecision::Ack,
                 Err(error) => refuse(error.to_string()),
             }
         }
         HookEvent::ChildEnd { root, child, value } => {
+            // The subagent's return is checked here and blocked when it
+            // may not cross; a block keeps the subagent running until it
+            // returns what may. A child the family never saw start is
+            // blocked too: its return has no fork to cross on.
             let said = value.clone();
-            match on_child(runtime, &root, &child, |session| {
+            match on_child(runtime, &root, &child, MissingStart::Refuse, |session| {
                 let value = value.clone();
                 async move { session.on_child_end(value).await }
             })
@@ -141,11 +198,15 @@ fn outcome_decision(decision: ToolResultDecision) -> HookDecision {
     }
 }
 
+/// A crossing as spoken answers with no opinion. What crosses otherwise — the canonical
+/// form of a shaped return, a sanitizer's derivation — goes back as the value the child
+/// must return, or the harness deliver, for it to reach the parent.
 fn return_decision(said: Option<String>, decision: ChildReturnDecision) -> HookDecision {
     match decision {
         ChildReturnDecision::Returned { value } if said.as_deref() != Some(value.as_str()) => {
             HookDecision::ChildReturn { value }
         }
+        ChildReturnDecision::Staged { value } => HookDecision::ChildReturn { value },
         ChildReturnDecision::Returned { .. } | ChildReturnDecision::NoValue => HookDecision::Ack,
         ChildReturnDecision::Blocked { feedback } => block(feedback),
     }
@@ -163,7 +224,7 @@ fn open_or_reopen(runtime: &Runtime, root: &appa_runtime_api::TrajectoryId) -> R
     }
 }
 
-fn control_call(runtime: &Runtime, actor: &Actor, call: &ProposedCall) -> HookDecision {
+fn control_call(runtime: &Runtime, actor: &Actor, call: &ProposedCall, ruling: Option<Ruling>) -> HookDecision {
     let Some(quoted) = quoted_offer(call) else {
         tracing::debug!(trajectory = %actor.root.0, "control tool quotes no offer id");
         return HookDecision::PassControl;
@@ -171,13 +232,13 @@ fn control_call(runtime: &Runtime, actor: &Actor, call: &ProposedCall) -> HookDe
     let acting = actor.child.clone().unwrap_or_else(|| actor.root.clone());
     match runtime.resolve_in(&actor.root, &quoted) {
         Some((_, pursuer)) if pursuer == acting => {
-            runtime.vouch(&quoted, actor);
+            runtime.vouch(&quoted, actor, ruling);
             tracing::debug!(trajectory = %acting.0, "control tool names an offer this trajectory pursues");
             HookDecision::PassControl
         }
         _ => {
             tracing::debug!(trajectory = %acting.0, "control tool refused: no such offer here");
-            deny("[appa] this offer no longer stands; re-propose the call".to_string())
+            deny("this offer no longer stands; re-propose the call".to_string())
         }
     }
 }
@@ -187,12 +248,29 @@ fn quoted_offer(call: &ProposedCall) -> Option<OfferId> {
     Some(OfferId(arguments.get("offer_id")?.as_str()?.to_string()))
 }
 
-async fn on_actor<T, Run>(runtime: &Runtime, actor: &Actor, event: impl Fn(Session) -> Run) -> Result<T, EventError>
+/// What a child's event does when the family has not opened that child.
+/// A subagent's first tool call can overtake its start hook, so the
+/// call opens the child against the one spawn in flight. Every other
+/// event of an unopened child is refused: a return or a turn end claims
+/// nothing a missing start could supply, and opening a child on its end
+/// would let a stop the family never saw start cross a value.
+#[derive(Clone, Copy)]
+enum MissingStart {
+    OpenLate,
+    Refuse,
+}
+
+async fn on_actor<T, Run>(
+    runtime: &Runtime,
+    actor: &Actor,
+    missing_start: MissingStart,
+    event: impl Fn(Session) -> Run,
+) -> Result<T, EventError>
 where
     Run: Future<Output = Result<T, EventError>>,
 {
     match &actor.child {
-        Some(child) => on_child(runtime, &actor.root, child, event).await,
+        Some(child) => on_child(runtime, &actor.root, child, missing_start, event).await,
         None => event(open_or_reopen(runtime, &actor.root)?).await,
     }
 }
@@ -201,21 +279,29 @@ async fn on_child<T, Run>(
     runtime: &Runtime,
     root: &TrajectoryId,
     child: &TrajectoryId,
+    missing_start: MissingStart,
     event: impl Fn(Session) -> Run,
 ) -> Result<T, EventError>
 where
     Run: Future<Output = Result<T, EventError>>,
 {
     let root_session = open_or_reopen(runtime, root)?;
-    match event(runtime.session(root, child)?).await {
-        Err(EventError::SpawnNotTaken) => match root_session.open_late(child.clone())? {
-            LateOpen::Opened => {
-                tracing::debug!(root = %root.0, child = %child.0, "a child event arrived before its start: opened the child late");
-                event(runtime.session(root, child)?).await
+    match (event(runtime.session(root, child)?).await, missing_start) {
+        (Err(EventError::SpawnNotTaken), MissingStart::OpenLate) => {
+            // `AlreadyOpen` means the start hook landed between the two
+            // attempts; the event now finds its child, so it is not
+            // refused for a race the harness has already resolved.
+            match root_session.open_late(child.clone())? {
+                LateOpen::Opened => {
+                    tracing::debug!(root = %root.0, child = %child.0, "a child event arrived before its start: opened the child late");
+                }
+                LateOpen::AlreadyOpen => {
+                    tracing::debug!(root = %root.0, child = %child.0, "the child's start landed while its event was in flight");
+                }
             }
-            LateOpen::AlreadyOpen => Err(EventError::SpawnNotTaken),
-        },
-        outcome => outcome,
+            event(runtime.session(root, child)?).await
+        }
+        (outcome, _) => outcome,
     }
 }
 
@@ -227,8 +313,15 @@ fn fold(error: EventError, family: fn(String) -> HookDecision) -> HookDecision {
     }
 }
 
+/// A refusal of this dispatcher's own that the model will read names APPA
+/// once, here, so a session can tell a runtime refusal from its harness's;
+/// a block is marked by the adapter's withheld-result rendering instead.
 fn deny(feedback: String) -> HookDecision {
-    HookDecision::DenyCall { feedback }
+    HookDecision::DenyCall {
+        feedback: format!("[appa] {feedback}"),
+        offers: Vec::new(),
+        review: Vec::new(),
+    }
 }
 
 fn block(reason: String) -> HookDecision {
@@ -295,6 +388,59 @@ mod tests {
         answer(runtime, &codec(), body).await
     }
 
+    fn spawn_call() -> crate::api::ProposedCall {
+        crate::api::ProposedCall {
+            tool: "Task".to_string(),
+            arguments: crate::api::raw(serde_json::json!({"prompt": "look it up"})),
+        }
+    }
+
+    /// Declare the one return route the fixture offers — as spoken, floored at the
+    /// parent's current label — for the offer the blocked spawn surfaced.
+    async fn declare_return(runtime: &Runtime, root: &TrajectoryId, offers: &[appa_runtime_api::OfferedRemedy]) {
+        let offer = offers
+            .iter()
+            .find(|offer| offer.returns == Some(appa_runtime_api::OfferedReturn::AsSpoken))
+            .expect("the menu offers the bare floor");
+        let actor = Actor {
+            root: root.clone(),
+            child: None,
+        };
+        let arguments = crate::engine::RemedyArguments {
+            label: Some(crate::engine::LabelSpelling::default()),
+            return_schema: None,
+        };
+        let outcome = runtime
+            .execute_remedy_with(&actor, OfferId(offer.id.clone()), arguments)
+            .await;
+        assert!(
+            matches!(outcome, crate::api::RemedyOutcome::Authorized { .. }),
+            "the declaration approves the spawn, got {outcome:?}"
+        );
+    }
+
+    /// The marked spawn's round trip: blocked on the return menu, declared, released.
+    async fn declared_spawn(runtime: &Runtime, root: &TrajectoryId) -> appa_runtime_api::SpawnBinding {
+        let spawn = || HookEvent::ToolCall {
+            actor: Actor {
+                root: root.clone(),
+                child: None,
+            },
+            call: spawn_call(),
+            spawn: true,
+            ruling: None,
+        };
+        let HookDecision::DenyCall { offers, .. } = handle(runtime, spawn()).await else {
+            panic!("a marked spawn blocks until its return is declared");
+        };
+        declare_return(runtime, root, &offers).await;
+        let released = handle(runtime, spawn()).await;
+        let HookDecision::AllowCall { spawn: Some(binding) } = released else {
+            panic!("the declared spawn must release with its binding, got {released:?}");
+        };
+        binding
+    }
+
     const CONTROL_TOOL_FIXTURE_NAME: &str = "mcp__plugin_appa-runtime_appa__execute_remedy_plan";
 
     fn fixtures() -> Vec<serde_json::Value> {
@@ -313,8 +459,30 @@ mod tests {
         for event in fixtures() {
             let name = event["hook_event_name"].as_str().expect("each fixture names its hook");
             let control = event["tool_name"] == CONTROL_TOOL_FIXTURE_NAME;
+            let spawn = name == "PreToolUse" && event["tool_name"] == "Agent" && event.get("agent_id").is_none();
 
             let body = serde_json::to_vec(&event).expect("the fixture re-serializes");
+            if spawn {
+                // The parent's spawn blocks on the return menu; the model declares and
+                // proposes the spawn again.
+                let (status, answer) = call_hook(&runtime, &body).await;
+                assert_eq!(status, 200, "hook {name} refused: {answer}");
+                assert_eq!(
+                    answer["hookSpecificOutput"]["permissionDecision"], "deny",
+                    "a marked spawn blocks until its return is declared"
+                );
+                let root = TrajectoryId(format!("cc:{}", event["session_id"].as_str().expect("a session id")));
+                let quoted = runtime
+                    .minted_offers(&root, &root)
+                    .into_iter()
+                    .next()
+                    .expect("the block surfaced the return declaration");
+                let offers = vec![appa_runtime_api::OfferedRemedy {
+                    id: quoted.0,
+                    returns: Some(appa_runtime_api::OfferedReturn::AsSpoken),
+                }];
+                declare_return(&runtime, &root, &offers).await;
+            }
             let (status, answer) = call_hook(&runtime, &body).await;
 
             assert_eq!(status, 200, "hook {name} refused: {answer}");
@@ -410,41 +578,170 @@ mod tests {
         assert_eq!(freed.1["hookSpecificOutput"]["permissionDecision"], "allow");
     }
 
-    /// The user pressed Esc while the command ran: Claude Code sends no
-    /// outcome hook for the call and no `Stop` hook for the turn. The
-    /// next prompt is the first hook to arrive, and it frees the call.
-    #[tokio::test]
-    async fn the_next_prompt_frees_a_call_an_interrupt_left_open() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_runtime(&dir);
-        let propose = |command: &str| {
-            serde_json::json!({
-                "hook_event_name": "PreToolUse",
-                "session_id": "s1",
-                "tool_name": "Bash",
-                "tool_input": {"command": command},
-            })
-        };
-        let released = call_hook(
-            &runtime,
-            &serde_json::to_vec(&propose("ping -c 30 127.0.0.1")).expect("re-serializes"),
-        )
-        .await;
-        assert_eq!(released.1["hookSpecificOutput"]["permissionDecision"], "allow");
+    fn bash_call(command: &str) -> serde_json::Value {
+        serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "s1",
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+        })
+    }
 
-        // Interrupted: neither PostToolUse nor Stop arrives.
-        let prompt = serde_json::json!({
+    fn bash_result(command: &str) -> serde_json::Value {
+        serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "session_id": "s1",
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+            "tool_response": {"stdout": "done"},
+        })
+    }
+
+    fn prompt() -> serde_json::Value {
+        serde_json::json!({
             "hook_event_name": "UserPromptSubmit",
             "session_id": "s1",
             "prompt": "never mind, list the files",
-        });
+        })
+    }
+
+    async fn hook(runtime: &Runtime, body: &serde_json::Value) -> (u16, serde_json::Value) {
+        call_hook(runtime, &serde_json::to_vec(body).expect("re-serializes")).await
+    }
+
+    fn closed_as_unknown(runtime: &Runtime) -> bool {
+        runtime
+            .audit(&appa_runtime_api::TrajectoryId("cc:s1".to_string()))
+            .expect("the audit reads")
+            .iter()
+            .any(|entry| {
+                matches!(
+                    &entry.event,
+                    crate::engine::AuditEvent::Closed {
+                        outcome: crate::engine::DispatchOutcome::Unknown
+                    }
+                )
+            })
+    }
+
+    /// The user pressed Esc while the command ran: Claude Code sends no
+    /// outcome hook for the call and no `Stop` hook for the turn. The
+    /// next prompt is the first hook to arrive; the new turn's first
+    /// proposal closes the call as unreported and releases.
+    #[tokio::test]
+    async fn the_first_call_after_a_prompt_frees_a_call_an_interrupt_left_open() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let released = hook(&runtime, &bash_call("ping -c 30 127.0.0.1")).await;
+        assert_eq!(released.1["hookSpecificOutput"]["permissionDecision"], "allow");
+        let actor = Actor {
+            root: appa_runtime_api::TrajectoryId("cc:s1".to_string()),
+            child: None,
+        };
+        let quoted = OfferId("offer-1".to_string());
+        runtime.vouch(&quoted, &actor, None);
+
+        // Interrupted: neither PostToolUse nor Stop arrives.
+        assert_eq!(hook(&runtime, &prompt()).await, (200, serde_json::json!({})));
+        assert!(!closed_as_unknown(&runtime), "the prompt itself records nothing");
+
+        let freed = hook(&runtime, &bash_call("ls")).await;
+        assert_eq!(freed.1["hookSpecificOutput"]["permissionDecision"], "allow");
+        assert!(closed_as_unknown(&runtime), "the interrupted call closed as unreported");
         assert_eq!(
-            call_hook(&runtime, &serde_json::to_vec(&prompt).expect("re-serializes")).await,
-            (200, serde_json::json!({})),
+            runtime.take_vouched(&quoted),
+            None,
+            "the interrupted turn's vouch is released"
         );
 
-        let freed = call_hook(&runtime, &serde_json::to_vec(&propose("ls")).expect("re-serializes")).await;
+        let late = hook(&runtime, &bash_result("ping -c 30 127.0.0.1")).await;
+        assert_eq!(late.1["decision"], "block", "a result for the closed call is refused");
+    }
+
+    /// The user typed while the command ran: Claude Code queues the message
+    /// and fires the prompt hook at once, then reports the command's
+    /// outcome when it finishes. The result must land on the still-open
+    /// call, and the next turn's first proposal then releases freely.
+    #[tokio::test]
+    async fn a_prompt_queued_behind_a_running_call_keeps_its_result() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let released = hook(&runtime, &bash_call("sleep 30")).await;
+        assert_eq!(released.1["hookSpecificOutput"]["permissionDecision"], "allow");
+
+        assert_eq!(hook(&runtime, &prompt()).await, (200, serde_json::json!({})));
+        assert_eq!(
+            hook(&runtime, &bash_result("sleep 30")).await,
+            (200, serde_json::json!({})),
+            "the running call's result lands on its open dispatch",
+        );
+        assert!(!closed_as_unknown(&runtime), "nothing was closed as unreported");
+
+        let next = hook(&runtime, &bash_call("ls")).await;
+        assert_eq!(next.1["hookSpecificOutput"]["permissionDecision"], "allow");
+        assert!(!closed_as_unknown(&runtime));
+        let repeated = hook(&runtime, &bash_result("sleep 30")).await;
+        assert_eq!(
+            repeated.1["decision"], "block",
+            "a second report of the same result is refused"
+        );
+    }
+
+    /// A prompt writes nothing, so a store that refuses every append still
+    /// acknowledges it; the failure surfaces at the proposal that needs the
+    /// close, and the mark survives for the next proposal.
+    #[tokio::test]
+    async fn a_prompt_acknowledges_over_a_store_that_cannot_append() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let released = hook(&runtime, &bash_call("ping -c 30 127.0.0.1")).await;
+        assert_eq!(released.1["hookSpecificOutput"]["permissionDecision"], "allow");
+        runtime.store().fail_commit_after(0);
+
+        assert_eq!(hook(&runtime, &prompt()).await, (200, serde_json::json!({})));
+
+        let (status, _) = hook(&runtime, &bash_call("ls")).await;
+        assert_eq!(status, 409, "the close the proposal needs is an operational refusal");
+        runtime.store().fail_commit_after(u64::MAX - 1);
+        let freed = hook(&runtime, &bash_call("ls")).await;
         assert_eq!(freed.1["hookSpecificOutput"]["permissionDecision"], "allow");
+        assert!(closed_as_unknown(&runtime));
+    }
+
+    /// A turn end settles the prompt's mark too: a proposal in the turn
+    /// after a normally ended one closes nothing.
+    #[tokio::test]
+    async fn a_turn_end_settles_the_prompt_mark() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        assert_eq!(hook(&runtime, &prompt()).await, (200, serde_json::json!({})));
+        let stop = serde_json::json!({"hook_event_name": "Stop", "session_id": "s1"});
+        assert_eq!(hook(&runtime, &stop).await, (200, serde_json::json!({})));
+
+        let released = hook(&runtime, &bash_call("sleep 30")).await;
+        assert_eq!(released.1["hookSpecificOutput"]["permissionDecision"], "allow");
+        assert_eq!(
+            hook(&runtime, &bash_result("sleep 30")).await,
+            (200, serde_json::json!({}))
+        );
+        assert!(!closed_as_unknown(&runtime));
+    }
+
+    /// Every refusal of the dispatcher's own that reaches the model on the
+    /// deny wire names APPA, whichever event error produced it.
+    #[tokio::test]
+    async fn a_deny_of_the_dispatchers_own_names_appa() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let released = hook(&runtime, &bash_call("sleep 30")).await;
+        assert_eq!(released.1["hookSpecificOutput"]["permissionDecision"], "allow");
+
+        let denied = hook(&runtime, &bash_call("ls")).await;
+        assert_eq!(denied.1["hookSpecificOutput"]["permissionDecision"], "deny");
+        let reason = denied.1["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .expect("a deny carries its reason");
+        assert!(reason.starts_with("[appa] "), "the deny reads: {reason}");
     }
 
     #[tokio::test]
@@ -688,24 +985,7 @@ mod tests {
         let root = appa_runtime_api::TrajectoryId("cc:s1".to_string());
         let child = appa_runtime_api::TrajectoryId("cc:s1:a1".to_string());
 
-        let released = handle(
-            &runtime,
-            HookEvent::ToolCall {
-                actor: Actor {
-                    root: root.clone(),
-                    child: None,
-                },
-                call: crate::api::ProposedCall {
-                    tool: "Task".to_string(),
-                    arguments: crate::api::raw(serde_json::json!({"prompt": "look it up"})),
-                },
-                spawn: true,
-            },
-        )
-        .await;
-        let HookDecision::AllowCall { spawn: Some(binding) } = released else {
-            panic!("the marked spawn must release with its binding, got {released:?}");
-        };
+        let binding = declared_spawn(&runtime, &root).await;
         assert_eq!(
             handle(
                 &runtime,
@@ -789,6 +1069,7 @@ mod tests {
                 },
                 call: call(),
                 spawn: false,
+                ruling: None,
             },
         )
         .await;
@@ -802,25 +1083,7 @@ mod tests {
         let runtime = open_runtime(&dir);
         let root = appa_runtime_api::TrajectoryId("cc:s1".to_string());
         let child = appa_runtime_api::TrajectoryId("cc:s1:a1".to_string());
-        let released = handle(
-            &runtime,
-            HookEvent::ToolCall {
-                actor: Actor {
-                    root: root.clone(),
-                    child: None,
-                },
-                call: crate::api::ProposedCall {
-                    tool: "Task".to_string(),
-                    arguments: crate::api::raw(serde_json::json!({"prompt": "look it up"})),
-                },
-                spawn: true,
-            },
-        )
-        .await;
-        assert!(
-            matches!(released, HookDecision::AllowCall { spawn: Some(_) }),
-            "got {released:?}"
-        );
+        declared_spawn(&runtime, &root).await;
 
         let decision = handle(
             &runtime,
@@ -834,6 +1097,7 @@ mod tests {
                     arguments: crate::api::raw(serde_json::json!({"command": "ls"})),
                 },
                 spawn: false,
+                ruling: None,
             },
         )
         .await;
@@ -871,6 +1135,7 @@ mod tests {
                     arguments: crate::api::raw(serde_json::json!({"command": "ls"})),
                 },
                 spawn: false,
+                ruling: None,
             },
         )
         .await;
@@ -882,12 +1147,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_runtime(&dir);
         runtime.store().fail_commit_after(0);
-        let prompt = serde_json::json!({
-            "hook_event_name": "UserPromptSubmit",
-            "session_id": "s1",
-            "prompt": "read the report",
-        });
-        let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&prompt).expect("serializes")).await;
+        let (status, answer) = hook(&runtime, &bash_call("ls")).await;
         assert_eq!(status, 409, "the harness must fail closed on a storage failure");
         assert!(
             answer.get("error").is_some(),

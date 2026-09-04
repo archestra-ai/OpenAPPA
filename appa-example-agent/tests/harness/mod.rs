@@ -14,7 +14,12 @@ pub struct Provider {
 
 enum Step {
     Says(WireMessage),
-    Remedy { id: String },
+    /// Pursue the `nth` offer the last feedback listed, with `arguments` beside its id.
+    Remedy {
+        id: String,
+        nth: usize,
+        arguments: serde_json::Value,
+    },
 }
 
 impl Provider {
@@ -44,8 +49,24 @@ impl Provider {
     }
 
     pub fn pursues_the_offer(&self) -> &Self {
+        self.pursues_the_nth_offer_with(0, serde_json::json!({}))
+    }
+
+    /// Declare the child's return as spoken, floored at this trajectory's current
+    /// label: the first plan a marked spawn's block lists.
+    pub fn declares_the_return(&self) -> &Self {
+        self.pursues_the_nth_offer_with(0, serde_json::json!({"label": {}}))
+    }
+
+    /// Declare the child's return through the one registered return sanitizer,
+    /// listed behind the bare floor.
+    pub fn declares_the_sanitized_return(&self) -> &Self {
+        self.pursues_the_nth_offer_with(1, serde_json::json!({"label": {}}))
+    }
+
+    fn pursues_the_nth_offer_with(&self, nth: usize, arguments: serde_json::Value) -> &Self {
         let id = self.next_id();
-        self.push(Step::Remedy { id })
+        self.push(Step::Remedy { id, nth, arguments })
     }
 
     fn next_id(&self) -> String {
@@ -98,15 +119,19 @@ impl Provider {
                         .expect("the script covers every round the agent runs");
                     let message = match step {
                         Step::Says(message) => message,
-                        Step::Remedy { id } => {
-                            let offer = surfaced_offer(&body)
-                                .unwrap_or_else(|| panic!("the last feedback surfaces an offer id, in: {body}"));
+                        Step::Remedy { id, nth, arguments } => {
+                            let offer = surfaced_offers(&body)
+                                .into_iter()
+                                .nth(nth)
+                                .unwrap_or_else(|| panic!("the last feedback surfaces offer {nth}, in: {body}"));
+                            let mut call = arguments.as_object().cloned().unwrap_or_default();
+                            call.insert("offer_id".to_string(), serde_json::Value::String(offer));
                             WireMessage::assistant_tool_calls(
                                 None,
                                 vec![call_of(
                                     &id,
                                     "execute_remedy_plan",
-                                    &serde_json::json!({ "offer_id": offer }).to_string(),
+                                    &serde_json::Value::Object(call).to_string(),
                                 )],
                             )
                         }
@@ -123,7 +148,7 @@ impl Provider {
 #[derive(Clone, Default)]
 pub struct ToolHost {
     bodies: Arc<Mutex<Vec<(String, String)>>>,
-    sanitized: Arc<Mutex<Option<String>>>,
+    sanitizer_response: Arc<Mutex<Option<serde_json::Value>>>,
     sanitizer_consults: Arc<Mutex<usize>>,
     ruling: Arc<Mutex<Option<String>>>,
     calls: Arc<Mutex<Vec<serde_json::Value>>>,
@@ -139,7 +164,16 @@ impl ToolHost {
     }
 
     pub fn sanitizes_to(&self, body: &str) -> &Self {
-        *self.sanitized.lock().expect("not poisoned") = Some(body.to_string());
+        *self.sanitizer_response.lock().expect("not poisoned") = Some(serde_json::json!({
+            "version": 1,
+            "answer": { "body": body },
+        }));
+        self
+    }
+
+    /// The sanitizer answers with nothing the runtime can use: no derivation.
+    pub fn sanitizes_nothing(&self) -> &Self {
+        *self.sanitizer_response.lock().expect("not poisoned") = Some(serde_json::json!(42));
         self
     }
 
@@ -187,14 +221,9 @@ impl ToolHost {
             .route(
                 "/sanitizer",
                 axum::routing::post(move |axum::Json(_): axum::Json<serde_json::Value>| {
-                    let body = sanitizer.sanitized.lock().expect("not poisoned").clone();
+                    let response = sanitizer.sanitizer_response.lock().expect("not poisoned").clone();
                     *sanitizer.sanitizer_consults.lock().expect("not poisoned") += 1;
-                    async move {
-                        axum::Json(serde_json::json!({
-                            "version": 1,
-                            "answer": { "body": body.expect("the fixture binds a sanitizer answer") },
-                        }))
-                    }
+                    async move { axum::Json(response.expect("the fixture binds a sanitizer answer")) }
                 }),
             )
             .route(
@@ -224,19 +253,33 @@ fn call_of(id: &str, tool: &str, arguments: &str) -> WireToolCall {
     }
 }
 
-fn surfaced_offer(request: &serde_json::Value) -> Option<String> {
-    let messages = request["messages"].as_array()?;
+/// The offers the last feedback in `request` lists, in its order.
+fn surfaced_offers(request: &serde_json::Value) -> Vec<String> {
+    let Some(messages) = request["messages"].as_array() else {
+        return Vec::new();
+    };
     messages
         .iter()
         .rev()
-        .find_map(|message| offer_id(message["content"].as_str()?))
+        .filter_map(|message| message["content"].as_str())
+        .map(offer_ids)
+        .find(|offers| !offers.is_empty())
+        .unwrap_or_default()
 }
 
 pub fn offer_id(text: &str) -> Option<String> {
-    let after = text.split("offer_id:").nth(1)?;
-    let rest = after.trim_start().strip_prefix('"')?;
-    let end = rest.find('"')?;
-    Some(rest[..end].to_string())
+    offer_ids(text).into_iter().next()
+}
+
+/// Every offer id `text` quotes, in order.
+pub fn offer_ids(text: &str) -> Vec<String> {
+    text.split("offer_id:")
+        .skip(1)
+        .filter_map(|after| {
+            let rest = after.trim_start().strip_prefix('"')?;
+            Some(rest[..rest.find('"')?].to_string())
+        })
+        .collect()
 }
 
 async fn spawn(app: axum::Router) -> SocketAddr {

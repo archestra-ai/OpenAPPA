@@ -1,15 +1,14 @@
 # Slack battery
 
 Rules for the claude.ai Slack connector, all 19 of its tools. No argument
-patterns, no channel ids. Add it to your root config with `include`. The
-root config must define an authority named `hitl`.
+patterns, no channel ids. Add it to your root config with `include`.
 
 ## Files
 
 **`appa.toml`** — three groups.
 
 *Reads* — channels, threads, canvases, files, profiles, members,
-reactions, and every search. The result is private: nothing built from
+reactions, and every search. The result is `internal`: nothing built from
 it can go to a public place. Its trust is unchanged, so it can be
 summarised and posted back to Slack.
 
@@ -17,8 +16,10 @@ summarised and posted back to Slack.
 your own Drafts. Trusted data, no approval.
 
 *Writes other people read* — sending or scheduling a message, creating
-or updating a canvas, creating a channel. Trusted data and a person's
-approval, every time.
+or updating a canvas, creating a channel. Trusted data that reaches
+`internal` (`audience = { contains = ["internal"] }`): agents post
+autonomously without human interruption, while requester secrets
+(`self`) are strictly prevented from entering channels.
 
 **`audience-source.py`** — the `slack` audience source. It answers the
 stock catalog's selectors over the Slack Web API:
@@ -58,16 +59,18 @@ from = ["slack:user-group/finance"]
 
 [externals.audience.slack]
 command = ["python3", "batteries/slack/audience-source.py"]
+token_env = "APPA_PROVIDER_SLACK_TOKEN"
 ```
 
 A command path is resolved against the directory of the config file
 that names it, so write the path as your root config sees the battery.
 
-The script reads its token from `OPENAPPA_SLACK_TOKEN`. The token needs the
-`users:read`, `users:read.email`, and `usergroups:read` scopes. The
-runtime strips every `APPA_*` variable from a command it runs — its own
-credentials never reach an external — so a source's token must be named
-outside that prefix. Any Slack error or missing answer stops the
+The script reads its token from `APPA_PROVIDER_SLACK_TOKEN`, which the
+binding's `token_env` forwards. The token needs the `users:read`,
+`users:read.email`, and `usergroups:read` scopes. A command inherits
+none of the runtime's `APPA_*` namespace — not its wiring, not a bearer
+token it sends, not another command's credential — only the one
+`APPA_PROVIDER_*` variable its own binding names. Any Slack error or missing answer stops the
 operation without recording a decision; nothing is guessed.
 
 Reads are workspace-wide: `full-members` and `user-group/<handle>` page

@@ -43,7 +43,6 @@ delta = {}
 [policy.deployment]
 context_control = true
 dispatch = "enforced"
-confined_child_return = true
 confined_results = ["search_task_tracker", "read_task_tracker", "create_task_tracker", "send_email"]
 
 # --- registered externals ---------------------------------------------------

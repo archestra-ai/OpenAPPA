@@ -46,8 +46,18 @@ impl Trust {
 /// `@` (a group reference). The constructor cannot enforce that, so the rule is
 /// [`is_literal`](ReaderId::is_literal), applied on every ingress that builds a reader set:
 /// registry declarations at load, annotation answers, and membership answers.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct ReaderId(String);
+
+/// Every reader that arrives as data — a persisted event at replay, an external's answer,
+/// an API payload — carries the same one spelling per identity as a constructed one.
+/// Deserializing straight into the field would let `alice@CORP.com` off the wire compare
+/// as a second reader.
+impl<'de> Deserialize<'de> for ReaderId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<ReaderId, D::Error> {
+        Ok(ReaderId::new(String::deserialize(deserializer)?))
+    }
+}
 
 impl ReaderId {
     /// Build a reader, normalized so that one identity has one spelling: an address keeps
@@ -67,10 +77,10 @@ impl ReaderId {
     }
 
     /// A literal reader ID: `public`, `self`, and `internal` are reserved audience states —
-    /// never readers — and the `@` mark is reserved for group references. Every ingress that
-    /// builds a reader set applies this rule.
+    /// never readers — the `@` mark is reserved for group references, and an empty id names
+    /// no one. Every ingress that builds a reader set applies this rule.
     pub fn is_literal(&self) -> bool {
-        !matches!(self.0.as_str(), "public" | "self" | "internal") && !self.0.starts_with('@')
+        !self.0.is_empty() && !matches!(self.0.as_str(), "public" | "self" | "internal") && !self.0.starts_with('@')
     }
 
     /// The provider prefix of a qualified reader (`slack:U012345` → `slack`), when one exists.
@@ -462,22 +472,25 @@ impl DeclaredAudience {
         DeclaredAudience::Union(clause)
     }
 
-    pub(crate) fn symbolic_atoms(&self) -> Box<dyn Iterator<Item = SymbolicAtom> + '_> {
+    fn clause(&self) -> Option<&Clause> {
         match self {
-            DeclaredAudience::Public => Box::new(std::iter::empty()),
-            DeclaredAudience::Union(clause) => Box::new(clause.symbolic_atoms()),
+            DeclaredAudience::Public => None,
+            DeclaredAudience::Union(clause) => Some(clause),
         }
+    }
+
+    pub(crate) fn symbolic_atoms(&self) -> impl Iterator<Item = SymbolicAtom> + '_ {
+        self.clause().into_iter().flat_map(Clause::symbolic_atoms)
     }
 
     /// See [`Clause::needed_atoms`].
     pub(crate) fn needed_atoms<'a>(
         &'a self,
         providers: &'a BTreeSet<String>,
-    ) -> Box<dyn Iterator<Item = SymbolicAtom> + 'a> {
-        match self {
-            DeclaredAudience::Public => Box::new(std::iter::empty()),
-            DeclaredAudience::Union(clause) => Box::new(clause.needed_atoms(providers)),
-        }
+    ) -> impl Iterator<Item = SymbolicAtom> + 'a {
+        self.clause()
+            .into_iter()
+            .flat_map(move |clause| clause.needed_atoms(providers))
     }
 }
 
@@ -486,12 +499,12 @@ impl DeclaredAudience {
 /// the source reports — consulted by derivation and by extensional closure, never by
 /// canonicalization.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct WithinAssertions {
+pub(crate) struct WithinAssertions {
     targets: BTreeMap<GroupName, ChainAudience>,
 }
 
 impl WithinAssertions {
-    pub fn new(targets: impl IntoIterator<Item = (GroupName, ChainAudience)>) -> WithinAssertions {
+    pub(crate) fn new(targets: impl IntoIterator<Item = (GroupName, ChainAudience)>) -> WithinAssertions {
         WithinAssertions {
             targets: targets.into_iter().collect(),
         }
@@ -511,52 +524,65 @@ pub struct MembershipNeeded {
     pub needed: Vec<SymbolicAtom>,
 }
 
-/// The membership answers one operation reads: one exact reader set per symbolic atom,
-/// post-identity and post-closure. Built by the operation's driver from pinned primitive
-/// evidence — source answers, member lookups, identity mappings — and rebuilt identically on
-/// replay, so a live decision and its replay read the same directory answers. An empty set is
-/// a valid answer.
+/// The membership answers one operation reads: one exact reader set per group or chain
+/// atom, post-identity and post-closure, and one principal per canonicalized reader. Built
+/// by the operation's driver from pinned primitive evidence — source answers, member
+/// lookups, identity mappings — and rebuilt identically on replay, so a live decision and
+/// its replay read the same directory answers. An empty set is a valid answer.
 ///
-/// Every ask through [`Expansions::members`] — answered or not — lands in the reads log, so
-/// after a decision runs the log names exactly the atoms the operation deterministically
-/// requested. The log is bookkeeping, never an answer: it takes no part in equality.
+/// Every ask — answered or not — lands in the reads log, so after a decision runs the log
+/// names exactly the atoms the operation deterministically requested. The log is
+/// bookkeeping, never an answer: it takes no part in equality.
 #[derive(Clone, Debug, Default)]
 pub struct Expansions {
-    answers: BTreeMap<SymbolicAtom, BTreeSet<ReaderId>>,
+    members: BTreeMap<SymbolicAtom, BTreeSet<ReaderId>>,
+    principals: BTreeMap<ReaderId, ReaderId>,
     reads: std::cell::RefCell<BTreeSet<SymbolicAtom>>,
 }
 
 impl PartialEq for Expansions {
     fn eq(&self, other: &Expansions) -> bool {
-        self.answers == other.answers
+        self.members == other.members && self.principals == other.principals
     }
 }
 
 impl Eq for Expansions {}
 
 impl Expansions {
-    pub fn new(answers: impl IntoIterator<Item = (SymbolicAtom, BTreeSet<ReaderId>)>) -> Expansions {
+    pub(crate) fn new(
+        members: impl IntoIterator<Item = (SymbolicAtom, BTreeSet<ReaderId>)>,
+        principals: impl IntoIterator<Item = (ReaderId, ReaderId)>,
+    ) -> Expansions {
         Expansions {
-            answers: answers.into_iter().collect(),
+            members: members.into_iter().collect(),
+            principals: principals.into_iter().collect(),
             reads: std::cell::RefCell::default(),
         }
     }
 
+    /// The reader set a group or chain atom denotes, where the operation answered it.
     pub(crate) fn members(&self, atom: &SymbolicAtom) -> Option<&BTreeSet<ReaderId>> {
         self.reads.borrow_mut().insert(atom.clone());
-        self.answers.get(atom)
+        self.members.get(atom)
+    }
+
+    /// The principal a qualified reader canonicalizes to, where the operation answered it.
+    pub(crate) fn principal(&self, reader: &ReaderId) -> Option<&ReaderId> {
+        self.reads.borrow_mut().insert(SymbolicAtom::Reader(reader.clone()));
+        self.principals.get(reader)
+    }
+
+    /// Is the atom answered, whichever kind it is?
+    pub(crate) fn answered(&self, atom: &SymbolicAtom) -> bool {
+        match atom {
+            SymbolicAtom::Reader(reader) => self.principal(reader).is_some(),
+            SymbolicAtom::Chain(_) | SymbolicAtom::Group(_) => self.members(atom).is_some(),
+        }
     }
 
     /// The atoms asked so far, sorted. A snapshot: later asks keep logging.
     pub(crate) fn reads(&self) -> Vec<SymbolicAtom> {
         self.reads.borrow().iter().cloned().collect()
-    }
-
-    /// Fold another context's asks into this log — an overlay context reads on behalf of the
-    /// same act, and the act's justification must count those asks.
-    pub(crate) fn absorb_reads(&self, other: &Expansions) {
-        let absorbed: Vec<SymbolicAtom> = other.reads.borrow().iter().cloned().collect();
-        self.reads.borrow_mut().extend(absorbed);
     }
 }
 
@@ -565,10 +591,10 @@ impl Expansions {
 /// readers canonicalize), and the operation's answers. The first two are policy, fixed for
 /// the trajectory; the answers are the operation's pinned evidence.
 #[derive(Clone, Copy, Debug)]
-pub struct MembershipContext<'a> {
-    pub within: &'a WithinAssertions,
-    pub providers: &'a BTreeSet<String>,
-    pub expansions: &'a Expansions,
+pub(crate) struct MembershipContext<'a> {
+    pub(crate) within: &'a WithinAssertions,
+    pub(crate) providers: &'a BTreeSet<String>,
+    pub(crate) expansions: &'a Expansions,
 }
 
 /// Test fixture: owned context parts, so a unit test borrows one binding instead of three.
@@ -588,7 +614,7 @@ impl TestContext {
 }
 
 impl<'a> MembershipContext<'a> {
-    pub fn new(
+    pub(crate) fn new(
         within: &'a WithinAssertions,
         providers: &'a BTreeSet<String>,
         expansions: &'a Expansions,
@@ -604,16 +630,11 @@ impl<'a> MembershipContext<'a> {
     /// registered source — then the operation's pinned canonicalization, or the atom to ask.
     fn principal(&self, reader: &ReaderId) -> Result<ReaderId, SymbolicAtom> {
         match reader.provider_prefix() {
-            Some(provider) if self.providers.contains(provider) => {
-                let atom = SymbolicAtom::Reader(reader.clone());
-                match self.expansions.members(&atom) {
-                    Some(answer) => {
-                        debug_assert_eq!(answer.len(), 1, "a reader canonicalization answers one principal");
-                        Ok(answer.first().cloned().unwrap_or_else(|| reader.clone()))
-                    }
-                    None => Err(atom),
-                }
-            }
+            Some(provider) if self.providers.contains(provider) => self
+                .expansions
+                .principal(reader)
+                .cloned()
+                .ok_or_else(|| SymbolicAtom::Reader(reader.clone())),
             _ => Ok(reader.clone()),
         }
     }
@@ -1010,23 +1031,22 @@ mod tests {
                             internal.extend(self_closed.iter().cloned());
                         }
                     }
-                    let expansions = Expansions::new([
-                        (SymbolicAtom::Chain(ChainAudience::Self_), self_closed),
-                        (SymbolicAtom::Chain(ChainAudience::Internal), internal),
-                        (SymbolicAtom::Group(named("finance")), finance),
-                        (SymbolicAtom::Group(named("legal")), legal),
-                        (
-                            SymbolicAtom::Group(GroupRef::Source {
-                                provider: "slack".into(),
-                                selector: "user-group/eng".into(),
-                            }),
-                            eng,
-                        ),
-                        (
-                            SymbolicAtom::Reader(ReaderId::new("slack:u1")),
-                            BTreeSet::from([principal]),
-                        ),
-                    ]);
+                    let expansions = Expansions::new(
+                        [
+                            (SymbolicAtom::Chain(ChainAudience::Self_), self_closed),
+                            (SymbolicAtom::Chain(ChainAudience::Internal), internal),
+                            (SymbolicAtom::Group(named("finance")), finance),
+                            (SymbolicAtom::Group(named("legal")), legal),
+                            (
+                                SymbolicAtom::Group(GroupRef::Source {
+                                    provider: "slack".into(),
+                                    selector: "user-group/eng".into(),
+                                }),
+                                eng,
+                            ),
+                        ],
+                        [(ReaderId::new("slack:u1"), principal)],
+                    );
                     (within, expansions)
                 },
             )
@@ -1074,6 +1094,40 @@ mod tests {
             let identity = Label::top();
             prop_assert_eq!(identity.combine(&a), a.clone());
             prop_assert_eq!(a.combine(&identity), a.clone());
+        }
+
+        /// An empty clause anywhere is nobody: the fail-closed floor absorbs every fold, and
+        /// denotes the empty set under every assignment.
+        #[test]
+        fn nobody_absorbs(a in label_strategy(), (within, expansions) in assignment_strategy()) {
+            let nobody = Label::new(a.trust, Audience::nobody());
+            prop_assert_eq!(a.combine(&nobody).audience, Audience::nobody());
+            let providers = providers();
+            let context = MembershipContext::new(&within, &providers, &expansions);
+            prop_assert_eq!(eval(&Audience::nobody(), &context), Some(BTreeSet::new()));
+        }
+
+        /// The four universal edges decide without a single membership answer: public covers
+        /// everything and fits only a public cap; a restricted audience never covers the
+        /// universe and always fits it.
+        #[test]
+        fn universal_edges_decide_without_membership(
+            label in label_strategy(),
+            clause in clause_strategy(),
+        ) {
+            let nothing = Expansions::new([], []);
+            let within = WithinAssertions::default();
+            let providers = providers();
+            let context = MembershipContext::new(&within, &providers, &nothing);
+            let restricted = DeclaredAudience::Union(clause);
+            prop_assert_eq!(label.within_cap(&DeclaredAudience::Public, &context), Evaluation::Holds);
+            if label.audience.is_public() {
+                prop_assert_eq!(label.covers(&DeclaredAudience::Public, &context), Evaluation::Holds);
+                prop_assert_eq!(label.covers(&restricted, &context), Evaluation::Holds);
+                prop_assert_eq!(label.within_cap(&restricted, &context), Evaluation::Fails);
+            } else {
+                prop_assert_eq!(label.covers(&DeclaredAudience::Public, &context), Evaluation::Fails);
+            }
         }
 
         #[test]
@@ -1188,7 +1242,7 @@ mod tests {
 
     #[test]
     fn reserved_spellings_are_never_readers() {
-        for reserved in ["public", "self", "internal", "@finance"] {
+        for reserved in ["public", "self", "internal", "@finance", ""] {
             assert!(!ReaderId::new(reserved).is_literal());
             assert!(Clause::new([], [], [reader(reserved)]).is_err());
         }
@@ -1197,31 +1251,28 @@ mod tests {
         assert!(ReaderId::new("Self").is_literal(), "reserved spellings are exact");
     }
 
-    fn context_free() -> (WithinAssertions, BTreeSet<String>, Expansions) {
-        (WithinAssertions::default(), providers(), Expansions::default())
+    #[test]
+    fn a_reader_off_the_wire_normalizes_like_a_constructed_one() {
+        let wire: ReaderId = serde_json::from_str("\"Alice@CORP.com\"").expect("a reader deserializes from a string");
+        assert_eq!(wire, ReaderId::new("Alice@corp.com"));
+        assert_eq!(
+            wire.as_str(),
+            "Alice@corp.com",
+            "the local part survives the domain fold"
+        );
+        assert_eq!(
+            serde_json::to_string(&wire).expect("a reader serializes"),
+            "\"Alice@corp.com\"",
+            "a replayed record round-trips to the spelling every comparison uses"
+        );
+
+        // A reader that is no address keeps every byte, provider prefixes included.
+        let qualified: ReaderId = serde_json::from_str("\"slack:U012345\"").expect("a reader deserializes");
+        assert_eq!(qualified.as_str(), "slack:U012345");
     }
 
-    #[test]
-    fn the_four_universal_edges_are_decided() {
-        let (nothing, providers, unanswered) = context_free();
-        let context = MembershipContext::new(&nothing, &providers, &unanswered);
-        let restricted = Label::new(Trust::new(1), Audience::restricted([reader("a")]));
-        let public = Label::new(Trust::new(1), Audience::public());
-        let some = DeclaredAudience::restricted([reader("a")]);
-
-        // Public covers everything, restricted never covers public — decided with no answers.
-        assert_eq!(public.covers(&DeclaredAudience::Public, &context), Evaluation::Holds);
-        assert_eq!(public.covers(&some, &context), Evaluation::Holds);
-        assert_eq!(
-            restricted.covers(&DeclaredAudience::Public, &context),
-            Evaluation::Fails
-        );
-        // Everything is within a public cap, public is never within a restricted cap.
-        assert_eq!(
-            restricted.within_cap(&DeclaredAudience::Public, &context),
-            Evaluation::Holds
-        );
-        assert_eq!(public.within_cap(&some, &context), Evaluation::Fails);
+    fn context_free() -> (WithinAssertions, BTreeSet<String>, Expansions) {
+        (WithinAssertions::default(), providers(), Expansions::default())
     }
 
     #[test]
@@ -1272,15 +1323,18 @@ mod tests {
             }
             other => panic!("expected a membership ask, got {other:?}"),
         }
-        let answered = Expansions::new([(
-            SymbolicAtom::Chain(ChainAudience::Internal),
-            BTreeSet::from([reader("alice@corp.com")]),
-        )]);
+        let answered = Expansions::new(
+            [(
+                SymbolicAtom::Chain(ChainAudience::Internal),
+                BTreeSet::from([reader("alice@corp.com")]),
+            )],
+            [],
+        );
         assert_eq!(
             internal_label.covers(&alice, &MembershipContext::new(&nothing, &providers, &answered)),
             Evaluation::Holds
         );
-        let empty = Expansions::new([(SymbolicAtom::Chain(ChainAudience::Internal), BTreeSet::new())]);
+        let empty = Expansions::new([(SymbolicAtom::Chain(ChainAudience::Internal), BTreeSet::new())], []);
         assert_eq!(
             internal_label.covers(&alice, &MembershipContext::new(&nothing, &providers, &empty)),
             Evaluation::Fails,
@@ -1298,26 +1352,26 @@ mod tests {
         // $recipient = slack:U012345, where Slack reports Alice's verified corporate email
         // and the internal closure holds her principal: the cross-provider case end-to-end.
         let recipient = DeclaredAudience::restricted([reader("slack:U012345")]);
-        let unanswered = Expansions::new([(
-            SymbolicAtom::Chain(ChainAudience::Internal),
-            BTreeSet::from([reader("alice@corp.com")]),
-        )]);
+        let unanswered = Expansions::new(
+            [(
+                SymbolicAtom::Chain(ChainAudience::Internal),
+                BTreeSet::from([reader("alice@corp.com")]),
+            )],
+            [],
+        );
         match internal_label.covers(&recipient, &MembershipContext::new(&nothing, &providers, &unanswered)) {
             Evaluation::Needs(MembershipNeeded { needed }) => {
                 assert_eq!(needed, vec![SymbolicAtom::Reader(reader("slack:U012345"))]);
             }
             other => panic!("expected a canonicalization ask, got {other:?}"),
         }
-        let answered = Expansions::new([
-            (
+        let answered = Expansions::new(
+            [(
                 SymbolicAtom::Chain(ChainAudience::Internal),
                 BTreeSet::from([reader("alice@corp.com")]),
-            ),
-            (
-                SymbolicAtom::Reader(reader("slack:U012345")),
-                BTreeSet::from([reader("alice@corp.com")]),
-            ),
-        ]);
+            )],
+            [(reader("slack:U012345"), reader("alice@corp.com"))],
+        );
         assert_eq!(
             internal_label.covers(&recipient, &MembershipContext::new(&nothing, &providers, &answered)),
             Evaluation::Holds
@@ -1332,41 +1386,57 @@ mod tests {
 
     #[test]
     fn canonicalization_rules_are_exactly_three() {
-        // Empty clause collapses to nobody and is never dropped.
-        let disjoint = Audience::restricted([reader("alice")]).combine(&Audience::restricted([reader("bob")]));
-        assert_eq!(disjoint, Audience::nobody());
-        assert!(!disjoint.is_public(), "nobody is not public");
-        let with_symbols = Audience::of_clauses([clause([ChainAudience::Internal], [], [])]).combine(&disjoint);
-        assert_eq!(
-            with_symbols,
-            Audience::nobody(),
-            "an empty clause absorbs the intersection"
-        );
-
-        // Stable-reader clauses merge by exact intersection.
-        let ab = Audience::restricted([reader("a"), reader("b")]);
-        let bc = Audience::restricted([reader("b"), reader("c")]);
-        assert_eq!(ab.combine(&bc), Audience::restricted([reader("b")]));
-        let email = Audience::restricted([reader("a@x.example"), reader("b")]);
-        assert_eq!(
-            email.combine(&Audience::restricted([reader("a@x.example")])),
-            Audience::restricted([reader("a@x.example")]),
-            "the email principal namespace is reserved, hence stable and mergeable"
-        );
+        let chain = |level| Audience::of_clauses([clause([level], [], [])]);
+        let readers = |readers: &[&str]| Audience::restricted(readers.iter().map(|reader| ReaderId::new(*reader)));
+        for (case, left, right, expected) in [
+            // An empty clause collapses to nobody and is never dropped.
+            (
+                "disjoint stable readers",
+                readers(&["alice"]),
+                readers(&["bob"]),
+                Audience::nobody(),
+            ),
+            (
+                "an empty clause absorbs the intersection",
+                chain(ChainAudience::Internal),
+                Audience::nobody(),
+                Audience::nobody(),
+            ),
+            // Stable-reader clauses merge by exact intersection.
+            (
+                "overlapping stable readers",
+                readers(&["a", "b"]),
+                readers(&["b", "c"]),
+                readers(&["b"]),
+            ),
+            // The email principal namespace is reserved, hence stable and mergeable.
+            (
+                "an email principal",
+                readers(&["a@x.example", "b"]),
+                readers(&["a@x.example"]),
+                readers(&["a@x.example"]),
+            ),
+            // Structural subsumption retains the narrower clause and drops the broader one.
+            (
+                "a narrower chain",
+                chain(ChainAudience::Self_),
+                chain(ChainAudience::Internal),
+                chain(ChainAudience::Self_),
+            ),
+            (
+                "a narrower group clause",
+                Audience::of_clauses([clause([], ["finance"], ["a"])]),
+                Audience::of_clauses([clause([], ["finance"], ["a", "b"])]),
+                Audience::of_clauses([clause([], ["finance"], ["a"])]),
+            ),
+        ] {
+            assert_eq!(left.combine(&right), expected, "{case}");
+        }
+        assert!(!Audience::nobody().is_public(), "nobody is not public");
 
         // A reader a deployment could canonicalize keeps its clause: raw-disjoint is not
         // principal-disjoint, so no exact intersection may erase it.
-        let qualified = Audience::restricted([reader("slack:u1")]);
-        let plain = Audience::restricted([reader("a")]);
-        assert_eq!(qualified.combine(&plain).clauses().count(), 2);
-
-        // Structural subsumption retains the narrower clause and drops the broader one.
-        let self_only = Audience::of_clauses([clause([ChainAudience::Self_], [], [])]);
-        let internal = Audience::of_clauses([clause([ChainAudience::Internal], [], [])]);
-        assert_eq!(self_only.combine(&internal), self_only);
-        let narrow = Audience::of_clauses([clause([], ["finance"], ["a"])]);
-        let broad = Audience::of_clauses([clause([], ["finance"], ["a", "b"])]);
-        assert_eq!(narrow.combine(&broad), narrow);
+        assert_eq!(readers(&["slack:u1"]).combine(&readers(&["a"])).clauses().count(), 2);
     }
 
     #[test]

@@ -1,0 +1,79 @@
+name: Check release versions
+description: >-
+  Assert the workspace, the plugin manifest and every release-please annotated line
+  carry the version release-please holds. The tag and the compiled CARGO_PKG_VERSION
+  are concatenated into the plugin artifact URL every shipped binary fetches, so a
+  disagreement between them ships binaries that request a URL which does not exist.
+  The demo chart resolves its image tags to its appVersion, and the operator guides
+  spell an image tag a reader pastes, so a disagreement names images no release
+  published.
+
+inputs:
+  relock:
+    description: Re-lock the workspace first, for the release PR that must commit it
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Check release versions
+      shell: bash
+      env:
+        RELOCK: ${{ inputs.relock }}
+      run: |
+        version=$(tr -d '\r\n' < .github/release-please/version.txt)
+        if [ "$RELOCK" = "true" ]; then
+          cargo update --workspace
+        fi
+        cargo_version=$(cargo metadata --locked --no-deps --format-version 1 \
+          | jq -r '.packages[] | select(.name == "appa") | .version')
+        plugin_version=$(jq -r '.version' \
+          integrations/claude-code/plugin/.claude-plugin/plugin.json)
+        chart_version=$(sed -n 's/^appVersion: *"\([^"]*\)".*/\1/p' \
+          integrations/kagent/demo/chart/Chart.yaml)
+        test "$cargo_version" = "$version"
+        test "$plugin_version" = "$version"
+        test "$chart_version" = "$version"
+
+    # Every file release-please updates generically carries at least one
+    # annotated line, and every version on those lines is the release
+    # version. A hand-edit that drifts leaves a guide naming an image tag
+    # no release published, which fails the reader's first helm install.
+    - name: Check every annotated line
+      shell: bash
+      env:
+        VERSION_FILE: .github/release-please/version.txt
+        CONFIG: .github/release-please/release-please-config.json
+      run: |
+        python3 - <<'CHECK'
+        import json, os, re, sys
+        want = open(os.environ["VERSION_FILE"]).read().strip()
+        config = json.load(open(os.environ["CONFIG"]))
+        bad = []
+        for entry in config["packages"]["."]["extra-files"]:
+            if entry.get("type") != "generic":
+                continue
+            path = entry["path"]
+            lines = [
+                (n, line)
+                for n, line in enumerate(open(path).read().splitlines(), 1)
+                if "x-release-please-version" in line
+            ]
+            if not lines:
+                bad.append(f"{path}: release-please updates nothing here, no annotated line")
+            for n, line in lines:
+                # The release version may be a prerelease (release.yml accepts
+                # 1.0.0-rc.1), so match the release version itself rather than
+                # a bare three-number shape that would truncate it.
+                if want in line:
+                    continue
+                found = re.search(r"\d+\.\d+\.\d+[0-9A-Za-z.-]*", line)
+                if not found:
+                    bad.append(f"{path}:{n}: annotated, but the line carries no version")
+                else:
+                    bad.append(f"{path}:{n}: {found.group(0)}, release-please holds {want}")
+        for problem in bad:
+            print(problem, file=sys.stderr)
+        sys.exit(1 if bad else 0)
+        CHECK

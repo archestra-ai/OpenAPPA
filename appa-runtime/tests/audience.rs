@@ -1,11 +1,11 @@
 mod common;
-use common::{offers, raw, serve};
+use common::{actor, audit_len, last_offer, propose, ran, raw, root, serve};
 
 use std::sync::{Arc, Mutex};
 
 use appa_runtime::api::{RemedyOutcome, Runtime};
 use appa_runtime::{config::Config, hooks};
-use appa_runtime_api::{Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, ToolOutcome, TrajectoryId};
+use appa_runtime_api::{HookDecision, HookEvent, ProposedCall};
 use axum::Router;
 use axum::extract::State;
 use axum::routing::post;
@@ -119,17 +119,6 @@ async fn serve_source() -> (String, Source) {
     (format!("{}/audience", serve(router).await), source)
 }
 
-fn root() -> TrajectoryId {
-    TrajectoryId("audience-test".to_string())
-}
-
-fn actor() -> Actor {
-    Actor {
-        root: root(),
-        child: None,
-    }
-}
-
 fn read_hr() -> ProposedCall {
     ProposedCall {
         tool: "read_hr".to_string(),
@@ -142,42 +131,6 @@ fn send(to: &str) -> ProposedCall {
         tool: "send".to_string(),
         arguments: raw(serde_json::json!({ "to": to })),
     }
-}
-
-async fn propose(runtime: &Arc<Runtime>, call: ProposedCall) -> HookDecision {
-    hooks::handle(
-        runtime,
-        HookEvent::ToolCall {
-            actor: actor(),
-            call,
-            spawn: false,
-        },
-    )
-    .await
-}
-
-async fn ran(runtime: &Arc<Runtime>, call: ProposedCall) {
-    assert_eq!(
-        hooks::handle(
-            runtime,
-            HookEvent::ToolResult {
-                actor: actor(),
-                call,
-                outcome: ToolOutcome::Success {
-                    body: OutcomeBody::Available("done".to_string()),
-                },
-            },
-        )
-        .await,
-        HookDecision::Ack
-    );
-}
-
-fn last_offer(feedback: &str) -> appa_runtime::api::OfferId {
-    offers(feedback)
-        .last()
-        .cloned()
-        .unwrap_or_else(|| panic!("no offer id in feedback: {feedback}"))
 }
 
 async fn narrowed(dir: &tempfile::TempDir, audience_url: &str) -> Arc<Runtime> {
@@ -203,10 +156,6 @@ async fn narrowed(dir: &tempfile::TempDir, audience_url: &str) -> Arc<Runtime> {
     );
     ran(&runtime, read_hr()).await;
     runtime
-}
-
-fn audit_len(runtime: &Runtime) -> usize {
-    runtime.audit(&root()).expect("the audit reads").len()
 }
 
 #[tokio::test]

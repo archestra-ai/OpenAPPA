@@ -15,18 +15,20 @@ use appa_engine::contract::{
     ToolDeclaration,
 };
 use appa_engine::engine::Engine;
-use appa_engine::fact::ReturnPolicy;
 use appa_engine::fact::{EffectKind, EffectSet};
-use appa_engine::label::{Audience, ChainAudience, Clause, DeclaredAudience, GroupRef, Label, ReaderId, Trust};
+use appa_engine::label::{Audience, ChainAudience, Clause, DeclaredAudience, Label, ReaderId, Trust};
 use appa_engine::names::{
-    AnnotatorName, AuthorityName, GroupName, IdentityImplementationName, MarkName, SanitizerName, SurfaceName, TagName,
+    AnnotatorName, AudienceArgument, AuthorityName, GroupName, IdentityImplementationName, MarkName, SanitizerName,
+    SurfaceName, TagName,
 };
 use appa_engine::params::ToolParameters;
 use appa_engine::profile::{
     BindingMode, DeploymentPolicy, ExecutorClass, PolicyDialectVersion, ProfileDeclaration, SurfaceMode,
     neutral_starting_label,
 };
-use appa_engine::registry::{AnnotatorDeclaration, LoadError, PlannerCap, Registry, RegistryConfig, TrustChain};
+use appa_engine::registry::{
+    AnnotatorDeclaration, LoadError, MAX_HINT_CHARS, PlannerCap, Registry, RegistryConfig, TrustChain,
+};
 use appa_engine::value::ToolName;
 
 const SUPPORTED_VERSION: u32 = 2;
@@ -237,11 +239,12 @@ impl ToolCallSource {
     }
 }
 
-/// One registered `[[annotator]]` as the runtime consumes it: the stock builtin it names, if
-/// any, and the input mapping its consult artifacts carry. An empty mapping sends the
-/// complete call.
+/// One registered `[[annotator]]` as the runtime consumes it: the deployer's instruction,
+/// the stock builtin it names, if any, and the input mapping its consult artifacts carry.
+/// An empty mapping sends the complete call.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AnnotatorBinding {
+    pub hint: Option<Hint>,
     pub builtin: Option<AnnotatorBuiltin>,
     pub inputs: BTreeMap<String, ToolCallSource>,
 }
@@ -255,7 +258,7 @@ pub struct Config {
     engine: Engine,
     registry_config: RegistryConfig,
     boundary_label: Label,
-    /// Every registered `[[annotator]]`, with its runtime-owned builtin and input mapping.
+    /// Every registered `[[annotator]]`, with its runtime-owned hint, builtin, and input mapping.
     annotators: BTreeMap<AnnotatorName, AnnotatorBinding>,
 }
 
@@ -306,6 +309,16 @@ impl Config {
                 },
                 None => None,
             };
+            let hint = annotator.hint.map(Hint::new);
+            if let Some(hint) = &hint
+                && hint.as_str().chars().count() > MAX_HINT_CHARS
+            {
+                return Err(ConfigError::Registry(LoadError::HintTooLong {
+                    context: format!("annotator {}", name.as_str()),
+                    len: hint.as_str().chars().count(),
+                    max: MAX_HINT_CHARS,
+                }));
+            }
             let mut inputs = BTreeMap::new();
             for (input, spelling) in annotator.inputs.unwrap_or_default() {
                 let Some(source) = ToolCallSource::parse(&spelling) else {
@@ -340,7 +353,7 @@ impl Config {
                     .effects
                     .map(|effects| effects.into_iter().map(EffectKind::new).collect()),
             });
-            annotators.insert(name, AnnotatorBinding { builtin, inputs });
+            annotators.insert(name, AnnotatorBinding { hint, builtin, inputs });
         }
         let audience = convert_audience(raw.audience, raw.identity)?;
         let mut tools = Vec::new();
@@ -400,39 +413,6 @@ impl Config {
             Some(cap) => PlannerCap::new(cap).ok_or(ConfigError::ZeroPlannerCap)?,
         };
 
-        let child_return = match raw.child {
-            None => ReturnPolicy::Raw,
-            Some(RawChild { return_sanitizer: None }) => {
-                return Err(ConfigError::BadImplementation {
-                    kind: "child",
-                    name: "return binding".to_string(),
-                    reason: "an empty [child] table binds nothing — configure return_sanitizer".to_string(),
-                });
-            }
-            Some(RawChild {
-                return_sanitizer: Some(sanitizer),
-            }) => {
-                let name = SanitizerName::new(sanitizer);
-                match sanitizers.iter().find(|s| s.name == name) {
-                    Some(s) if s.on.output => ReturnPolicy::Sanitized(name),
-                    Some(_) => {
-                        return Err(ConfigError::BadImplementation {
-                            kind: "child return_sanitizer",
-                            name: name.as_str().to_string(),
-                            reason: "not registered for tool output".to_string(),
-                        });
-                    }
-                    None => {
-                        return Err(ConfigError::BadImplementation {
-                            kind: "child return_sanitizer",
-                            name: name.as_str().to_string(),
-                            reason: "no such sanitizer".to_string(),
-                        });
-                    }
-                }
-            }
-        };
-
         let profile = match raw.deployment {
             Some(deployment) => deployment.convert(&trust_chain)?,
             None => ProfileDeclaration::no_coverage(&trust_chain),
@@ -450,7 +430,6 @@ impl Config {
             registry: registry_config.clone(),
             planner_cap,
             dialect: PolicyDialectVersion::new(SUPPORTED_VERSION),
-            child_return,
             profile,
         })?;
 
@@ -496,9 +475,9 @@ impl Config {
         self.annotators.keys()
     }
 
-    /// Every `[[annotator]]` with its runtime-owned binding: the stock builtin it names on its
-    /// declaration, if any, and its consult input mapping. An Annotator naming a builtin takes
-    /// no deployment binding; every other Annotator is bound by name under
+    /// Every `[[annotator]]` with its runtime-owned binding: its hint, the stock builtin it names
+    /// on its declaration, if any, and its consult input mapping. An Annotator naming a builtin
+    /// takes no deployment binding; every other Annotator is bound by name under
     /// `[externals.annotators]`.
     pub fn annotators(&self) -> impl Iterator<Item = (&AnnotatorName, &AnnotatorBinding)> {
         self.annotators.iter()
@@ -521,7 +500,6 @@ struct RawConfig {
     annotator: Vec<RawAnnotator>,
     audience: Option<RawAudience>,
     identity: Option<RawIdentity>,
-    child: Option<RawChild>,
     limits: Option<RawLimits>,
     deployment: Option<RawDeployment>,
 }
@@ -539,7 +517,6 @@ struct RawDeployment {
     provider_run_tools: Vec<String>,
     #[serde(default)]
     confined_results: Vec<String>,
-    confined_child_return: Option<bool>,
     #[serde(default)]
     provider_surfaces: BTreeMap<String, SurfaceMode>,
 }
@@ -606,7 +583,6 @@ impl RawDeployment {
             dispatch: self.dispatch.unwrap_or(ExecutorClass::Assumed),
             executor_exceptions,
             confined_results: self.confined_results.into_iter().map(ToolName::new).collect(),
-            confined_child_return: self.confined_child_return.unwrap_or(false),
             provider_surfaces: self
                 .provider_surfaces
                 .into_iter()
@@ -627,12 +603,14 @@ struct RawLimits {
 #[serde(deny_unknown_fields)]
 struct RawAnnotator {
     name: String,
+    /// The deployer's trusted instruction to this Annotator. It calibrates policy-specific
+    /// vocabulary but grants no value outside the mandate.
+    hint: Option<String>,
     implementation: Option<toml::Value>,
     /// The stock model transport this Annotator carries: `"claude-code"` or `"llm"`. An
     /// Annotator without it is bound by the deployment under `[externals.annotators]`.
     builtin: Option<String>,
-    /// The consult inputs, each a `$tool_call` source. Omitted means the consult artifact is
-    /// the complete tool call.
+    /// The consult inputs, each a `$tool_call` source. Omitted sends the complete call.
     inputs: Option<BTreeMap<String, String>>,
     /// The trust ranks a produced annotation may write. Omitted admits every chain rank.
     ranks: Option<Vec<String>>,
@@ -789,12 +767,6 @@ fn convert_audience(
         .filter(|source| providers.contains(&source.provider))
         .collect();
     Ok(config)
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawChild {
-    return_sanitizer: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1148,6 +1120,22 @@ struct RawTrustTransition {
 
 // --- shared conversion helpers -------------------------------------------------
 
+/// One label delta in the spelling a tool's `delta` takes — a trust rank name and an audience
+/// list — for a label a runtime reads at its own boundary, such as the return floor
+/// `execute_remedy_plan` declares.
+pub fn parse_delta(
+    trust: Option<&str>,
+    audience: Option<&[String]>,
+    chain: &TrustChain,
+    context: &str,
+) -> Result<Delta, ConfigError> {
+    RawDelta {
+        trust: trust.map(str::to_string),
+        audience: audience.map(<[String]>::to_vec),
+    }
+    .convert(chain, context)
+}
+
 fn parse_trust(name: &str, chain: &TrustChain, context: &str) -> Result<Trust, ConfigError> {
     chain.rank_of(name).ok_or_else(|| ConfigError::UnknownTrustRank {
         name: name.to_string(),
@@ -1169,15 +1157,6 @@ fn parse_declared_audience(list: &[String], context: &str) -> Result<DeclaredAud
         context: context.to_string(),
         reason,
     };
-    if list.iter().any(|r| r == "public") {
-        return if list.len() == 1 {
-            Ok(DeclaredAudience::Public)
-        } else {
-            Err(refused(
-                "`public` is the whole universe and cannot be combined with other entries".to_string(),
-            ))
-        };
-    }
     if list.is_empty() {
         return Err(refused("empty reader set".to_string()));
     }
@@ -1190,20 +1169,23 @@ fn parse_declared_audience(list: &[String], context: &str) -> Result<DeclaredAud
     let mut groups = Vec::new();
     let mut readers = Vec::new();
     for entry in list {
-        if let Some(level) = ChainAudience::parse(entry) {
-            if chain.replace(level).is_some() {
+        match AudienceArgument::parse(entry) {
+            Some(AudienceArgument::Public) if list.len() == 1 => return Ok(DeclaredAudience::Public),
+            Some(AudienceArgument::Public) => {
                 return Err(refused(
-                    "two built-in audiences in one union: the outer one already contains the inner".to_string(),
+                    "`public` is the whole universe and cannot be combined with other entries".to_string(),
                 ));
             }
-            continue;
-        }
-        match entry.strip_prefix('@') {
-            Some(mention) => match GroupRef::parse(mention) {
-                Some(group) => groups.push(group),
-                None => return Err(refused(format!("`@{mention}` names no audience"))),
-            },
-            None => readers.push(ReaderId::new(entry)),
+            Some(AudienceArgument::Chain(level)) => {
+                if chain.replace(level).is_some() {
+                    return Err(refused(
+                        "two built-in audiences in one union: the outer one already contains the inner".to_string(),
+                    ));
+                }
+            }
+            Some(AudienceArgument::Group(group)) => groups.push(group),
+            Some(AudienceArgument::Reader(reader)) => readers.push(reader),
+            None => return Err(refused(format!("`{entry}` names no audience"))),
         }
     }
     Clause::new(chain, groups, readers)
@@ -1278,6 +1260,7 @@ fn parse_points(tokens: &[String], name: &str) -> Result<SanitizerPoints, Config
 #[cfg(test)]
 mod tests {
     use super::*;
+    use appa_engine::label::GroupRef;
 
     const DECLARATIONS: &str = r#"
 version = 2
@@ -1713,6 +1696,33 @@ attention = ["operator-signoff", "legal-review"]
         assert!(matches!(
             Config::from_toml_str("version = 2\n[[annotator]]\nname = \"a\"\nranks = [\"nope\"]\n"),
             Err(ConfigError::UnknownTrustRank { .. })
+        ));
+    }
+
+    #[test]
+    fn an_annotator_hint_is_runtime_owned_and_bounded() {
+        let source = "version = 2\n[[annotator]]\nname = \"classifier\"\nhint = \"Suspicious means unvetted data.\"\n";
+        let config = Config::from_toml_str(source).expect("the Annotator hint loads");
+        let (_, binding) = config.annotators().next().expect("the Annotator is registered");
+        assert_eq!(
+            binding.hint.as_ref().map(Hint::as_str),
+            Some("Suspicious means unvetted data.")
+        );
+
+        let without_hint = Config::from_toml_str("version = 2\n[[annotator]]\nname = \"classifier\"\n")
+            .expect("the unhinted Annotator loads");
+        assert_eq!(
+            config.engine().identity(),
+            without_hint.engine().identity(),
+            "advisory hints do not change policy semantics"
+        );
+
+        let overlong = "x".repeat(MAX_HINT_CHARS + 1);
+        let refused = format!("version = 2\n[[annotator]]\nname = \"classifier\"\nhint = \"{overlong}\"\n");
+        assert!(matches!(
+            Config::from_toml_str(&refused),
+            Err(ConfigError::Registry(LoadError::HintTooLong { context, len, max }))
+                if context == "annotator classifier" && len == MAX_HINT_CHARS + 1 && max == MAX_HINT_CHARS
         ));
     }
 

@@ -61,6 +61,14 @@ APPA owes nothing to its own past. Docs describe the current model only
 — no retired rules, no "formerly", no migration notes. Config and wire
 surfaces may break without shims or deprecation paths.
 
+## Policy & Algebra: IFC Monoids First
+
+- **IFC monoids over imperative workarounds**: The core of OpenAPPA is two monoids:
+  the **checked monoid of labels** (`audience × trust`) and the **free monoid of events**.
+  Always prefer Information Flow Control (IFC) monoids (`trust` lattice and `self ⊆ internal ⊆ public` audience chain) to express security invariants.
+- **Effects are a hacky workaround**: History/effect tracking (`emits`, `requires = { history = [...] }`) is an imperative state-machine escape hatch, not the primary algebra. Never reach for effects when information flow / label bounding can express the invariant.
+- **Autonomous execution over attention**: Do not use synthetic `attention` marks (such as `blocked`) to fake policy boundaries, and avoid default `hitl` requirements that stall autonomous agents. Data that is `trusted` and within the target `audience` boundary should flow without human interruption. Attention marks are reserved strictly for real human-in-the-loop decisions (opt-in overlays), or temporary placeholders (`token-exposed`) until a proper sanitizer is available.
+
 ## Collaboration
 
 Applies to discussion and work in this repository.

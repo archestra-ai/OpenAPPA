@@ -28,6 +28,23 @@ enum Command {
         harness: Harness,
     },
 
+    /// Replay trace files against a policy and check every expectation.
+    Replay {
+        #[arg(long, env = "APPA_CONFIG")]
+        config: Option<PathBuf>,
+
+        #[arg(long, env = "APPA_MODULES_DIR")]
+        modules_dir: Option<PathBuf>,
+
+        /// Print every step, not only the ones that failed.
+        #[arg(short, long)]
+        verbose: bool,
+
+        /// Trace files, or directories holding `.appa` files.
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+    },
+
     /// Post one harness hook event to the running runtime.
     #[command(hide = true)]
     Hook {
@@ -43,12 +60,14 @@ enum Command {
 #[derive(Clone, Copy, clap::ValueEnum)]
 enum Adapter {
     ClaudeCode,
+    Kagent,
 }
 
 impl Adapter {
     fn as_str(self) -> &'static str {
         match self {
             Self::ClaudeCode => "claude-code",
+            Self::Kagent => "kagent",
         }
     }
 }
@@ -71,6 +90,15 @@ fn main() -> ExitCode {
 
     match Args::parse().command {
         Command::Hook { url, turn_end } => appa_runtime::hook_client::run(&url, turn_end),
+        Command::Replay {
+            config,
+            modules_dir,
+            verbose,
+            paths,
+        } => {
+            let config = config.unwrap_or_else(appa_runtime::init::installed_config_path);
+            appa_runtime::replay::main(&config, modules_dir, verbose, &paths)
+        }
         Command::Describe { config, adapter } => {
             let config = config.unwrap_or_else(appa_runtime::init::installed_config_path);
             print!("{}", appa_runtime::describe::render(&config, adapter.as_str()));

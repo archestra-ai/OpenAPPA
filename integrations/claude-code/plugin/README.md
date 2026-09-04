@@ -55,7 +55,10 @@ process itself in the crate's
 
 ```sh
 # one session, no installation
-APPA_GATE=1 claude --plugin-dir /path/to/OpenAPPA/integrations/claude-code/plugin
+bundle=$(mktemp -d)
+rmdir "$bundle"
+/path/to/OpenAPPA/scripts/appa-stage-plugin-bundle.sh "$bundle"
+APPA_GATE=1 claude --plugin-dir "$bundle/plugin"
 
 # installed from this checkout
 cargo install --path appa-runtime --force

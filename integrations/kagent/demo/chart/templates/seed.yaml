@@ -1,0 +1,53 @@
+{{- if .Values.seed.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: appa-demo-seed
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "appa-demo.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation
+data:
+  seed.py: |
+{{ .Files.Get "files/seed.py" | indent 4 }}
+  showcase-sessions.json: |
+{{ .Files.Get "files/showcase-sessions.json" | indent 4 }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: appa-demo-seed
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "appa-demo.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "1"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 4
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels: { app: appa-demo-seed }
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: seed
+          image: {{ .Values.seed.image.repository }}:{{ .Values.seed.image.tag }}
+          imagePullPolicy: {{ .Values.seed.image.pullPolicy }}
+          command: ["python3", "/seed/seed.py"]
+          env:
+            - { name: KAGENT_CONTROLLER_URL, value: {{ include "appa-demo.controllerUrl" . | quote }} }
+            - { name: SEED_USER, value: {{ .Values.seed.user | quote }} }
+            - { name: SEED_AGENT_REF, value: {{ printf "%s/cluster-ops" .Release.Namespace | quote }} }
+            - { name: SEED_RELEASE, value: {{ .Release.Name | quote }} }
+          volumeMounts:
+            - { name: seed, mountPath: /seed, readOnly: true }
+      volumes:
+        - name: seed
+          configMap: { name: appa-demo-seed }
+{{- end }}

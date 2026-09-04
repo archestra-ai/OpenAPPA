@@ -7,7 +7,7 @@
 const TERMS = {
   version: "The policy configuration dialect version.",
   include:
-    "Policy fragments composed by the root configuration. Root declarations run first, followed by included declarations in list order. Included files cannot include more files or replace root-wide settings.",
+    "Policy fragments composed by the root configuration. Root declarations run first, followed by included declarations in list order. Included files cannot include more files or replace root-wide settings. A root [[annotator]] replaces one included Annotator with the same name.",
   trust_chain:
     "The ordered list of trust ranks, least-trusted first. Omitted, it defaults to suspicious < trusted.",
 
@@ -31,7 +31,7 @@ const TERMS = {
   annotation:
     "The complete concrete contract one released tool call carries: its delta, its requires, and the effects it emits. Written statically in the [[tool]] entry, or answered per call by an annotator; pinned to the exact call, so a rewrite is annotated afresh and replay never consults again.",
   "[[annotator]]":
-    "A named producer of per-call tool contracts. Its opaque non-empty name can contain dots. It declares the inputs it reads from a proposed call and its mandate — the vocabulary its answers may use — and may name a stock model transport with builtin = \"claude-code\" or \"llm\"; otherwise the deployment binds it under [externals.annotators.<name>].",
+    "A named producer of per-call tool contracts. It declares an optional policy-authored hint, an input mapping, and a mandate that bounds every answer. It may name builtin = \"claude-code\" or \"llm\"; otherwise the deployment binds it under [externals.annotators.<name>].",
   mandate:
     "The closed vocabulary an annotator's answers may use: ranks, audiences, marks, and effects. An omitted bound admits the whole policy vocabulary; public is always an admissible audience. Every transport's answer passes the same mandate validation.",
   remedy:
@@ -86,7 +86,7 @@ const TERMS = {
   "[externals.<kind>.<name>]":
     "One deployment binding: a registered authority or sanitizer bound to exactly one of url, command, or builtin; an annotator without a declared builtin, an audience source, or a custom identity implementation, bound to url or command. A binding without a registration refuses the deployment, and so does an unbound sanitizer, annotator, referenced audience source, or custom identity implementation; an unbound authority returns no answer.",
   declaration:
-    "The registered half of a consult: the component's hint and permits, an annotator's mandate vocabulary, or an audience source's selector templates. The agent never writes it.",
+    "The registered half of a consult: the component's hint and permits, an annotator's hint, input names, and mandate vocabulary, or an audience source's selector templates. The agent never writes it.",
   artifact:
     "The judged half of a consult: the call and its unmet requirements, the body to rewrite, an annotator's args, a selector or member to read, or the member claims to canonicalize. Never the trajectory.",
   internal:
@@ -112,7 +112,7 @@ const TERMS = {
   /* Authorities */
   permits:
     "What a registered component may do, declared in its own table. For an authority: which unmet requirements its rulings can clear, and how far. For a sanitizer: the one transition, on one dimension, its derivation can claim.",
-  hint: "The deployer's own account of what an authority or sanitizer is for. Carried into every remedy plan naming it, so the agent chooses on stated purpose, and into the component's consult, so a model implementation reads its charter. Advisory: it grants nothing.",
+  hint: "The deployer's trusted instruction for an authority, sanitizer, or annotator. It explains what the component covers, removes, or classifies. It enters the component's consult, and authority or sanitizer hints also enter remedy plans. Advisory: it grants nothing.",
   trust_below:
     "In an authority's permits: it can rule for a call whose trust requirement is unmet, for requirements up to this rank.",
   audience_missing:
@@ -144,10 +144,10 @@ const TERMS = {
   to: "In a sanitizer's permits: the exact audience, or the exact trust rank, the derivation carries.",
   resolver:
     "The implementation answering for one registered external: the endpoint, command, builtin, or model behind an authority, sanitizer, annotator, audience source, or identity binding.",
-  "[child]": "Run configuration for child sub-executions.",
-  return_sanitizer: "Configured default sanitizer for all child sub-execution returns.",
+  return_schema:
+    "Argument of the attest-schema plan in a spawn's return declaration: the shape-bounded JSON schema the child's return must match. The child is told the shape when it starts.",
   "attest-schema":
-    "The reserved builtin sanitizer of the quarantine exit: raises trust on a child return whose structure is shape-bounded (values the schema declares and bounds — no free text) and was bound at fork, up to the parent's fork-time rank. Claims instruction-cleanliness only.",
+    "The reserved builtin sanitizer of the quarantine exit: raises trust on a child return whose structure is shape-bounded (values the schema declares and bounds — no free text) and was declared by the parent at the spawn, up to the parent's rank at that spawn. Claims instruction-cleanliness only.",
   'builtin = "redact-email"':
     "The stock in-process sanitizer that replaces every email-like token in a value with a fixed placeholder, deriving the label its permits table declares.",
 

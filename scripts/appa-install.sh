@@ -1,0 +1,156 @@
+#!/bin/sh
+# Install the released `appa` binary for this machine:
+#
+#   curl -fsSL https://openappa.com/install.sh | sh
+#
+# Every release ships one archive per platform beside a SHA256SUMS list. The
+# script resolves the latest release tag (or `APPA_VERSION`), downloads the
+# archive and the list from that one release, verifies the digest, and installs
+# `appa` into `APPA_INSTALL_DIR` (default `~/.local/bin`). It never runs
+# `appa init`: init can prompt, and under a pipe stdin is the script itself.
+#
+# Linux and macOS on x86_64 and aarch64 only. Windows users unpack the zip from
+# the releases page. `APPA_REPOSITORY_URL` exists for appa-install-test.sh,
+# which serves a local release.
+set -eu
+
+repository=${APPA_REPOSITORY_URL:-https://github.com/archestra-ai/OpenAPPA}
+tag_pattern='^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$'
+
+fail() {
+  printf 'appa-install: %s\n' "$1" >&2
+  exit 1
+}
+
+command -v curl >/dev/null 2>&1 || fail "curl is required"
+# A stalled release host fails the install instead of holding the shell.
+fetch() {
+  curl -fsS --connect-timeout 15 --speed-limit 1024 --speed-time 30 "$@"
+}
+
+if command -v sha256sum >/dev/null 2>&1; then
+  digest() { sha256sum "$1" | cut -d' ' -f1; }
+elif command -v shasum >/dev/null 2>&1; then
+  digest() { shasum -a 256 "$1" | cut -d' ' -f1; }
+else
+  fail "sha256sum or shasum is required to verify the download"
+fi
+
+system=$(uname -s)
+machine=$(uname -m)
+case $system in
+  Linux) platform=unknown-linux-gnu ;;
+  Darwin) platform=apple-darwin ;;
+  *) fail "no release binary for $system; see $repository/releases" ;;
+esac
+case $machine in
+  x86_64 | amd64) architecture=x86_64 ;;
+  aarch64 | arm64) architecture=aarch64 ;;
+  *) fail "no release binary for $system $machine; see $repository/releases" ;;
+esac
+archive=appa-$architecture-$platform.tar.gz
+
+if [ -n "${APPA_INSTALL_DIR:-}" ]; then
+  install_dir=$APPA_INSTALL_DIR
+elif [ -n "${HOME:-}" ]; then
+  install_dir=$HOME/.local/bin
+else
+  fail "set APPA_INSTALL_DIR: HOME is not set"
+fi
+# Hooks and `clappa` are rendered with this path, from any working directory.
+case $install_dir in
+  /*) ;;
+  *) fail "APPA_INSTALL_DIR must be an absolute path" ;;
+esac
+
+if [ -n "${APPA_VERSION:-}" ]; then
+  tag=$APPA_VERSION
+else
+  latest=$(fetch -o /dev/null -w '%{redirect_url}' "$repository/releases/latest") ||
+    fail "could not resolve the latest release from $repository"
+  case $latest in
+    "$repository/releases/tag/"*) tag=${latest#"$repository/releases/tag/"} ;;
+    *) fail "unexpected redirect for the latest release: $latest" ;;
+  esac
+fi
+# The character check comes first because `grep -q` succeeds when any single
+# line matches, so a multi-line value would otherwise pass a guard whose whole
+# job is to constrain what reaches a URL.
+case $tag in
+  *[!0-9A-Za-z.-]*) fail "not a release tag: $tag" ;;
+esac
+printf '%s\n' "$tag" | grep -Eq "$tag_pattern" || fail "not a release tag: $tag"
+
+work=$(mktemp -d)
+staged=
+cleanup() {
+  rm -rf "$work"
+  if [ -n "$staged" ]; then
+    rm -f "$staged"
+  fi
+}
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT HUP TERM
+
+# The list and the archive come from the same pinned release, never from
+# `latest`, so a release published mid-run cannot pair one with the other.
+release=$repository/releases/download/$tag
+printf 'Downloading appa %s for %s-%s\n' "$tag" "$architecture" "$platform" >&2
+fetch -L -o "$work/SHA256SUMS" "$release/SHA256SUMS" ||
+  fail "could not download $release/SHA256SUMS"
+fetch -L -o "$work/$archive" "$release/$archive" ||
+  fail "could not download $release/$archive"
+
+listed=$(grep -E "^[0-9a-f]{64}  $archive\$" "$work/SHA256SUMS" || true)
+[ "$(printf '%s\n' "$listed" | grep -c .)" -eq 1 ] ||
+  fail "SHA256SUMS does not list $archive exactly once"
+expected=${listed%% *}
+actual=$(digest "$work/$archive")
+[ "$actual" = "$expected" ] || fail "checksum mismatch for $archive"
+
+# The digest is published by the same host that serves the archive, so it
+# proves the download arrived intact, not that the release is honest. The Rust
+# half of this project validates every archive entry before extracting one;
+# match that here rather than rely on tar, whose treatment of `..` and absolute
+# members differs between GNU and BSD.
+entries=$(tar -tzf "$work/$archive") || fail "$archive is not a readable archive"
+[ "$(printf '%s\n' "$entries" | grep -c .)" -le 16 ] ||
+  fail "$archive holds more entries than a release archive carries"
+if ! printf '%s\n' "$entries" | while IFS= read -r entry; do
+  case $entry in
+    /* | .. | ../* | */.. | */../*) exit 1 ;;
+  esac
+done; then
+  fail "$archive holds an entry that escapes the directory it unpacks into"
+fi
+
+mkdir "$work/extract" || fail "could not create a staging directory"
+tar -xzf "$work/$archive" -C "$work/extract" || fail "could not unpack $archive"
+# A symlink would pass -f by resolving elsewhere, and that elsewhere is what
+# would be installed.
+if [ ! -f "$work/extract/appa" ] || [ -L "$work/extract/appa" ]; then
+  fail "$archive does not contain appa"
+fi
+
+# An installed appa is replaced only by one that runs here.
+version=$("$work/extract/appa" --version) ||
+  fail "the $tag binary does not run on this system; Linux needs glibc 2.34 or newer"
+[ -n "$version" ] || fail "the $tag binary reported no version"
+
+# The previous appa stays in place until the new one is completely written
+# beside it, so a failed copy never leaves the directory without a working
+# binary.
+mkdir -p "$install_dir" || fail "could not create $install_dir"
+staged=$install_dir/appa.$$.new
+install -m 755 "$work/extract/appa" "$staged" ||
+  fail "could not write $staged"
+mv -f "$staged" "$install_dir/appa" || fail "could not replace $install_dir/appa"
+staged=
+printf 'Installed %s to %s\n' "$version" "$install_dir/appa"
+case :${PATH:-}: in
+  *":$install_dir:"*) printf 'Next: appa init claude-code\n' ;;
+  *)
+    printf 'Add %s to PATH to run appa by name.\n' "$install_dir"
+    printf 'Next: "%s/appa" init claude-code\n' "$install_dir"
+    ;;
+esac

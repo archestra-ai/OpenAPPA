@@ -3,169 +3,316 @@ title: kAgent
 nav_title: kAgent
 category: Integrations
 order: 6
-description: Proposal for the OpenAPPA kagent adapter — an ADK plugin delivered in the Harness workload image, with no kagent or Google ADK fork.
+description: Gate declarative kagent agents on Kubernetes through a single runtime image setting.
 ---
 
-:::proposal
-name: kAgent
-date: 2026-09-01
-:::
+[kagent](https://kagent.dev/docs/kagent/introduction/what-is-kagent/) runs AI agents natively on Kubernetes. OpenAPPA adds deterministic security to kagent. It enforces data boundaries, stops data leaks, and requires human approvals before sensitive tools run.
 
-[kagent](https://github.com/kagent-dev/kagent) runs LLM agents on Kubernetes. Its controller compiles each declarative agent (an `AgentTemplate` resource) into configuration, and runs it on a runtime image that the operator names in a `Harness` resource. This proposal gates kagent agents with OpenAPPA through those stock surfaces. It does not fork, patch, or vendor kagent or Google ADK.
+Configure the runtime image in the kagent controller Helm values:
 
-`appa-adapter-kagent` is the adapter. Its workload image extends the published `kagent-adk` image with two files: a small entrypoint and one Google ADK plugin. The plugin maps ADK callbacks to the eight `appa-runtime` `/hook` events and enforces the returned decisions inside the ADK dispatch loop. `appa-runtime` stays a separate process. It owns policy, the Engine, consults, remedy plans, trajectory state, and `appa.db`. Policy semantics stay in [How it works](/how-it-works) and [Policy contracts](/contracts).
+```yaml
+# Helm values for the kagent controller
+controller:
+  # Python declarative runtime image
+  agentImage:
+    registry: ghcr.io
+    repository: archestra-ai/appa-kagent-quickstart
+    tag: 0.8.0 # x-release-please-version
 
-Two upstream surfaces carry the whole integration:
-
-- `Harness.spec.workload.image` is a required, operator-supplied, digest-pinned image reference ([harness_types.go#L34-L40](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/go/api/v1alpha3/harness_types.go#L34-L40)). Every kagent install names a runtime image there. Naming the adapter image is ordinary configuration.
-- `KAgentApp(plugins=[...])` is a public constructor parameter of the published `kagent-adk` package ([_a2a.py#L65](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/python/packages/kagent-adk/src/kagent/adk/_a2a.py#L65)). kagent registers its own plugins through the same parameter ([cli.py#L95-L105](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/python/packages/kagent-adk/src/kagent/adk/cli.py#L95-L105)).
-
-Source baseline: kagent commit [`52cc4de2`](https://github.com/kagent-dev/kagent/commit/52cc4de2a044a5062d10c4f189d863937c1bb0f9) (2026-09-01), google-adk 2.8.0 (kagent's lockfile resolution), Substrate v0.0.20 ([go.mod#L489](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/go/go.mod#L489)).
-
-## Overview
-
-- The platform operator edits one `Harness`: point `spec.workload.image` at the adapter image, and set `APPA_RUNTIME_URL` in `spec.env`.
-- The Harness label selector chooses which `AgentTemplate` resources run gated ([harness_types.go#L114-L117](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/go/api/v1alpha3/harness_types.go#L114-L117), [collections.go#L85-L102](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/go/core/v2/controller/collections.go#L85-L102)). Agent developers change nothing.
-- Inside each agent Actor, the adapter entrypoint rebuilds the compiled agent from `KAGENT_CONFIG_JSON` — the same steps as stock `kagent-adk static` — and registers `AppaHookPlugin`.
-- Each gated ADK callback becomes one `/hook` request to `appa-runtime`. The plugin enforces the returned `HookDecision` where the callback fires: it can deny a tool call with feedback the model reads, replace a tool result, or substitute a child's return.
-- Hooks fail closed. When the runtime is unreachable or answers outside the contract, the gated action does not run.
-
-## Highlights
-
-### Gated agents on Kubernetes
-
-```text
-Kubernetes cluster
-+---------------------------------------------------------------------------+
-| kagent controller-v2 (stock)                                              |
-|   watches AgentTemplate, Harness, ModelConfig, RemoteMCPServer            |
-|   pairs   Harness.spec.allowedAgentTemplates selector -> AgentTemplates   |
-|   renders one immutable Revision per (AgentTemplate, Harness) pair        |
-+------------------------------------+--------------------------------------+
-                                     | runs each Revision as a Substrate Actor
-                                     v
-+--------------------- Substrate Actor (one per agent) ---------------------+
-| image: Harness.spec.workload.image = appa-adapter-kagent (digest-pinned)  |
-| env:   KAGENT_CONFIG_JSON (the compiled agent), APPA_RUNTIME_URL, ...     |
-|                                                                           |
-| adapter entrypoint -> KAgentApp(plugins=[.., AppaHookPlugin]) -> A2A :8080|
-+-----------------------------+---------------------------------------------+
-                              | POST /hook  (fail closed)
-                              v
-+------------------- appa-runtime (one shared service) ---------------------+
-| policy, Engine, consults, remedy plans, trajectory state, appa.db         |
-+---------------------------------------------------------------------------+
+  # Go declarative runtime image
+  goAgentImage:
+    registry: ghcr.io
+    repository: archestra-ai/appa-kagent-adk-go
+    tag: 0.8.0 # x-release-please-version
 ```
 
-The controller injects the compiled agent as environment variables into the Actor ([actor_template.go#L43-L44](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/go/core/v2/substrate/actor_template.go#L43-L44)). The agent exists in the pod only as that data. No developer code and no per-agent image exists there, so one generic adapter image serves every admitted `AgentTemplate`.
+The image replaces the default kagent runtime image. It stays inert until activated with `APPA_ENABLED: "true"`:
 
-All gated Actors of one deployment report to one shared `appa-runtime`. A parent and its delegated children run in separate Actors, and their hooks must reach the same runtime to correlate into one trajectory.
-
-### One image wraps kagent-adk
-
-```text
-appa-adapter-kagent image
-+-------------------------------------------------------------+
-| OpenAPPA layer (two files)                                  |
-|   entrypoint.py       replays the `kagent-adk static` steps |
-|   appa_hook_plugin.py ADK BasePlugin -> POST /hook          |
-+-------------------------------------------------------------+
-| base: published kagent-adk image, unmodified                |
-|   kagent-adk package  (cli.py present, not used as PID 1)   |
-|   google-adk 2.8.0    (BasePlugin is its official API)      |
-+-------------------------------------------------------------+
-
-entrypoint flow — the same public calls as stock `static`, one delta:
-  materialize_from_env("/config")                  # env -> config files
-  cfg = AgentConfig.model_validate(config)         # refuse unsupported fields
-  plugins = [<stock STS / passthrough plugins>]
-  plugins.append(AppaHookPlugin(APPA_RUNTIME_URL)) # <-- the delta
-  KAgentApp(lambda: cfg.to_agent(name), card, url, name,
-            plugins=plugins).build()
+```yaml
+apiVersion: kagent.dev/v1alpha2
+kind: Agent
+spec:
+  declarative:
+    deployment:
+      env:
+        - name: APPA_ENABLED
+          value: "true"
 ```
 
-Stock `kagent-adk static` performs the identical sequence with a closed plugin list ([cli.py#L76-L135](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/python/packages/kagent-adk/src/kagent/adk/cli.py#L76-L135)). The steps are materialize ([_config_materialize.py#L55-L69](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/python/packages/kagent-adk/src/kagent/adk/_config_materialize.py#L55-L69)), then validate and rebuild the agent ([types.py#L387-L403](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/python/packages/kagent-adk/src/kagent/adk/types.py#L387-L403)), then serve ([_a2a.py#L126-L149](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/python/packages/kagent-adk/src/kagent/adk/_a2a.py#L126-L149)). The plugin list handed to ADK's `App(plugins=...)` becomes ADK's `PluginManager`, so one registration covers the root agent, every sub-agent, and every tool. Google ADK stays an unmodified dependency.
+## How it works
 
-### Callback-to-hook mapping
+OpenAPPA runs inside the agent pod through the official Google ADK plugin API. Every [tool call](https://kagent.dev/docs/kagent/concepts/tools/) and [agent-to-agent delegation](https://kagent.dev/docs/kagent/examples/a2a-agents/) passes through the policy engine before execution.
 
-The runtime's hook vocabulary is the eight `HookEvent` variants in `appa-runtime-api/src/lib.rs`. The plugin maps each gated ADK callback onto exactly one event, and callbacks with no event either pass through or hold as liveness gates.
+:::fig-kagent:::
 
-```text
-   ADK CALLBACK (google-adk 2.8.0, unmodified)           APPA RUNTIME /hook — the 8 HookEvents
-   time flows top→bottom within one turn                 and the decisions each one answers
-   ─────────────────────────────────────────             ─────────────────────────────────────
+- **Enforcement occurs before execution**: A tool does not run if a policy requirement fails.
+- **Fail-closed default**: If the policy runtime is unreachable, calls stop.
+- **Runtime support**: Works with both Python (`appa-kagent-adk`) and Go (`appa-kagent-adk-go`) runtimes.
+- **Subagent return gate**: Delegated child agents stop through `appa_return`. OpenAPPA checks returned data at `SpawnResult` before parent context receives it.
 
-session  first invocation of a fresh ADK session ──────▶ [1] SessionStart      ◀ Ack
-  │        detected in on_user_message_callback;             root TrajectoryId derived
-  ▼        no callback exists at session creation            from the ADK session id
-prompt   on_user_message_callback ─────────────────────▶ [2] Prompt            ◀ Ack | Block
-  │        fires BEFORE the session append, so a
-  │        Block keeps the exact bytes out of
-  │        stored session history
-  │      before_run_callback ───────x no event  (Prompt already gates the same bytes)
-  │      before_agent_cb (root) ────x no event  (root entry IS Prompt)
-  ▼
-model    before_model_callback ─────x no event ┐ no model-layer HookEvent exists;
-         after_model_callback ──────x no event │ the plugin holds these callbacks as
-         on_model_error_callback ───x no event ┘ liveness gates: /hook down ⇒ refuse
-  │
-  ▼
-tool     before_tool_callback ═════════════════════════▶ [3] ToolCall{spawn:F} ◀ AllowCall | DenyCall
-loop        deny: the returned dict SKIPS execution                              | Refuse
-  │         and becomes the function response the
-  │         model reads
-  │      after_tool_callback ══════════════════════════▶ [4] ToolResult        ◀ Ack | ReplaceOutput
-  │      on_tool_error_callback ───────────────────────▶ [4] ToolResult{Failure} | Block
-  ▼
-child    before_tool_cb (sub-agent tool) ──────────────▶ [3] ToolCall{spawn:T} ◀ AllowCall{binding}
-deleg.     │ child scope opens:
-           │  before_agent_cb (child) ─────────────────▶ [5] ChildStart        ◀ Ack
-           │      … child runs its own [3]/[4] loop …
-           │  after_agent_cb (child) ──────────────────▶ [6] TurnEnd (child)   ◀ Ack
-           └ after_tool_cb (sub-agent return) ─────────▶ [7] SpawnResult       ◀ Ack | ChildReturn{value}
-               the ONE point where the value the                                 | ReplaceOutput | Block
-               parent receives can be substituted
-  │
-  ▼
-emit     on_event_callback ─────────x no event  (no emission HookEvent;
-  │                                              held as a liveness gate)
-  ▼
-turn     after_run_callback ───────────────────────────▶ [6] TurnEnd (root)    ◀ Ack —
-end      on_run_error_callback ────────────────────────▶ [6] TurnEnd (root,      closes tool dispatches
-         on_agent_error_cb (child) ────────────────────▶ [6] TurnEnd  failure)   the turn abandoned
+## Policy scope
 
-                                                         [8] ChildEnd — unfed BY DESIGN:
-                                                             return substitution is enforceable
-                                                             only parent-side, so returns cross
-                                                             at [7] SpawnResult. The Claude Code
-                                                             adapter makes the same choice.
+Policy scope follows the runtime. A gated [Agent](https://kagent.dev/docs/kagent/concepts/agents/) enforces the policy of the `appa-runtime` named by its `APPA_RUNTIME_URL`.
+
+Agents connecting to the same runtime share one `appa.toml` policy file and decision log. To enforce different policies for different agent groups, run separate `appa-runtime` deployments.
+
+Cross-workload delegation requires a shared runtime deployment so parent and child pods reach the same policy engine.
+
+## Quickstart
+
+Follow this guide to deploy kagent with OpenAPPA and run your first protected agent in a test cluster.
+
+### Prerequisites
+
+Make sure you have installed:
+- [kind](https://kind.sigs.k8s.io/docs/user/quick-start/) or an existing Kubernetes cluster
+- [Helm](https://helm.sh/docs/intro/install/) (v3.8+)
+- [kubectl](https://kubernetes.io/docs/tasks/tools/)
+- [git](https://git-scm.com/downloads)
+- An [OpenAI API key](https://platform.openai.com/account/api-keys)
+
+Clone the repository to run the demo chart:
+
+```sh
+git clone https://github.com/archestra-ai/OpenAPPA
+cd OpenAPPA
 ```
 
-The enforcement mechanics come from ADK's own plugin contract, verified in the 2.8.0 wheel:
+### 1. Install kagent with OpenAPPA
 
-- All 14 callbacks above exist on `BasePlugin` (`google/adk/plugins/base_plugin.py`, lines 114-394 in the 2.8.0 wheel).
-- A dict returned from `before_tool_callback` skips execution and becomes the function response the model reads — `DenyCall` with feedback (`google/adk/flows/llm_flows/functions.py`, lines 611-641).
-- A dict returned from `after_tool_callback` replaces the result the model sees — `ReplaceOutput` (`functions.py`, lines 652-683).
-- `on_user_message_callback` fires before the runner appends the message to session history (`google/adk/runners.py`, lines 675-700), so a `Block` on `Prompt` is a pre-append barrier.
-- kagent dispatches every declared remote sub-agent as an ordinary ADK tool, `KAgentRemoteA2AToolset` ([types.py#L521](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/python/packages/kagent-adk/src/kagent/adk/types.py#L521)), so the tool-call gate is also the spawn gate.
+Install the kagent [CRDs and Helm chart](https://kagent.dev/docs/kagent/resources/helm/) with the OpenAPPA runtime image:
 
-kagent children run in separate Actors. The child Actor's own plugin recognizes the delegated entry from kagent's inbound metadata ([_agent_executor.py#L212-L214](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/python/packages/kagent-adk/src/kagent/adk/_agent_executor.py#L212-L214)). It feeds `ChildStart` and the child `TurnEnd`, while the parent's plugin feeds the spawn `ToolCall` and `SpawnResult`. Both report to the one shared runtime.
+```sh
+# Install kagent CRDs
+helm upgrade --install kagent-crds oci://ghcr.io/kagent-dev/kagent/helm/kagent-crds \
+  --version 0.9.12 -n kagent --create-namespace
 
-### Fail-closed rules
+# Install kagent controller with OpenAPPA runtime
+helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
+  --version 0.9.12 -n kagent \
+  --set controller.agentImage.registry=ghcr.io \
+  --set controller.agentImage.repository=archestra-ai/appa-kagent-quickstart \
+  --set controller.agentImage.tag=0.8.0 --wait # x-release-please-version
+```
 
-1. An unreachable `/hook` endpoint, or a response outside the contract, blocks the gated action. The plugin raises, and ADK aborts the invocation.
-2. A rendered config with a field the entrypoint does not support refuses to start, and the Actor stays unready. In-process `sub_agents` compiled from CRD sub-agent tools are the known case: stock `kagent-adk` drops them silently, and the adapter refuses instead.
-3. The model and emission callbacks feed no event, but they still hold the action when the `/hook` channel is down.
-4. A hard Actor crash emits nothing. `appa-runtime` recovery classifies the open dispatch as `Indeterminate` at the next admitted event.
+To build images from source, see [`integrations/kagent/README.md`](https://github.com/archestra-ai/OpenAPPA/blob/main/integrations/kagent/README.md).
 
-### Scope and limits
+### 2. Deploy the demo stack
 
-- Covered: declarative `AgentTemplate` agents on the kagent (Python ADK) harness variant, run from this workload image on the Substrate path (helm `controller.substrate.enabled`).
-- Not covered: the Claude harness, which omits hooks, permission mode, memory, and inline MCP from its supported contract ([config.go#L48-L50](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/go/harness/claude/config/config.go#L48-L50)).
-- Also not covered: the Codex harness, the non-ADK framework wrappers, and agents on kagent's stock image, whose plugin list is closed ([cli.py#L95-L105](https://github.com/kagent-dev/kagent/blob/52cc4de2a044a5062d10c4f189d863937c1bb0f9/python/packages/kagent-adk/src/kagent/adk/cli.py#L95-L105)).
-- `SessionStart` is a first-invocation proxy. A session that is created but never invoked emits nothing, and also flows nothing.
-- The entrypoint replays the behavior of `kagent-adk static` instead of calling it, because upstream has no plugin configuration knob. Each `kagent-adk` release therefore costs one small equivalence re-check. A one-field upstream contribution would remove the duplication.
+Install the demo chart with your OpenRouter API key. It deploys sample agents (`cluster-ops`, `log-analyst`, `appa-guide`) and 16 demonstration scenarios:
 
-## Implementation plan
+```sh
+helm upgrade --install appa-kagent-demo ./integrations/kagent/demo/chart \
+  -n kagent --set openai.apiKey="$OPENROUTER_API_KEY" --wait
+```
 
-The [kagent implementation plan](../../../integrations/kagent/IMPLEMENTATION.md) defines the artifacts, the entrypoint and plugin specification, the runtime-side codec, deployment profiles, trajectory identity, and the verification matrix.
+The demo chart sets `APPA_ENABLED=true` on all demo agents.
+
+### 3. Open the kagent dashboard
+
+Forward the [kagent dashboard](https://kagent.dev/docs/kagent/observability/launch-ui/) to your machine:
+
+```sh
+kubectl port-forward -n kagent svc/kagent-ui 8901:8080
+```
+
+Open [http://localhost:8901](http://localhost:8901) in your browser.
+
+## Protect an existing cluster
+
+If you already run kagent in your cluster, you do not need to recreate your agents.
+
+### 1. Update the kagent controller image
+
+Update your existing Helm release to use the OpenAPPA runtime image:
+
+```sh
+helm upgrade kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
+  -n kagent --reuse-values \
+  --set controller.agentImage.registry=ghcr.io \
+  --set controller.agentImage.repository=archestra-ai/appa-kagent-quickstart \
+  --set controller.agentImage.tag=0.8.0 # x-release-please-version
+```
+
+If you run Go agents, also set `controller.goAgentImage`:
+
+```sh
+  --set controller.goAgentImage.registry=ghcr.io \
+  --set controller.goAgentImage.repository=archestra-ai/appa-kagent-adk-go \
+  --set controller.goAgentImage.tag=0.8.0 # x-release-please-version
+```
+
+### 2. Write a policy that names your tools
+
+The policy governs only declared tools. Unlisted tool calls stop fail-closed before execution.
+
+Deploy an `appa-runtime` with an `appa.toml` declaring your tools. A wildcard entry (`name = "*"`) covers unlisted tools through an annotator.
+
+Agent delegation requires explicit tool entries under the wire name `<namespace>__NS__<agent>` (hyphens as underscores). Wildcards do not cover delegation spawns. See [Policy contracts](/contracts) for syntax.
+
+### 3. Gate the agents you choose
+
+Add `APPA_ENABLED` and the runtime address to an agent's environment:
+
+```yaml
+spec:
+  declarative:
+    deployment:
+      env:
+        - name: APPA_ENABLED
+          value: "true"
+        - name: APPA_RUNTIME_URL
+          value: http://appa-runtime.kagent.svc.cluster.local:18789
+```
+
+| Mode | `APPA_ENABLED` | `APPA_RUNTIME_URL` | Gating Behavior |
+|---|---|---|---|
+| **Disabled (Default)** | Unset or `"false"` | Any | Ungated. Runs without policy enforcement. |
+| **Bundled appa-runtime** | `"true"` | Unset | Gated. Starts an embedded `appa-runtime` process on `127.0.0.1` inside the pod. |
+| **Shared appa-runtime** | `"true"` | `http://...` | Gated. Connects to the `appa-runtime` Kubernetes Service at `APPA_RUNTIME_URL`. |
+
+Apply this configuration with `kubectl edit agent <name> -n kagent` or update your GitOps manifests. Invalid values for `APPA_ENABLED` fail container startup immediately to prevent accidental ungated execution.
+
+### 4. Confirm the gate
+
+The kagent controller automatically rolls the agent deployment. Check pod startup logs to verify status:
+
+```sh
+kubectl logs -n kagent deployment/cluster-ops | head -n 5
+```
+
+A gated agent logs: `APPA_ENABLED is true. This agent runs gated by the OpenAPPA runtime at ...`.
+
+## Configure policy with appa-guide
+
+The demo chart installs an `appa-guide` agent that automates policy authoring.
+
+1. Open the [kagent dashboard](https://kagent.dev/docs/kagent/observability/launch-ui/) at [http://localhost:8901](http://localhost:8901).
+2. Navigate to **Agents → appa-guide → Chat**.
+3. Send `init` to start policy discovery.
+
+The guide agent reads the cluster's `RemoteMCPServer` toolsets and `Agent` declarations. It drafts policy contracts in plain English and submits them in chat:
+
+```text
+Operator: init
+appa-guide: Discovered 6 tools and 2 subagents in namespace 'kagent'.
+            Drafted policy in appa.toml.
+            Writing policy to ConfigMap 'appa-policy' requires operator sign-off.
+```
+
+When you agree, the agent calls `k8s_apply_manifest` to write the policy ConfigMap. The fleet policy requires `attention = ["human-approval"]` for manifest writes, displaying an **Approve / Reject** confirmation card in the dashboard. Click **Approve** to commit the policy. The runtime reloads the new contracts automatically.
+
+## 1. Confidential read and sanitization
+
+Open the `cluster-ops` agent in the [kagent dashboard](https://kagent.dev/docs/kagent/observability/launch-ui/). Ask it to read the payments-provider secret and post the API key to the public status page. The demo chart includes this pre-configured scenario.
+
+1. The agent proposes the confidential read:
+   ```text
+   read_secret(name: "payments-provider")
+   ```
+   `read_secret` carries `delta = { audience = ["ops"] }`. Admitting that secret would narrow the session's audience to ops readers alone.
+
+2. **OpenAPPA denies the read.** OpenAPPA gates the flow that changes the label, preventing the secret from entering model context. The denial provides structured feedback with runnable continuation offers:
+   ```text
+   [appa] Blocked: this call cannot run yet.
+
+   Why:
+     - allowed readers would narrow: public -> 1 reader
+
+   Continue:
+     - Accept this change for the rest of this session:
+       execute_remedy_plan(offer_id: "…")
+     - Use sanitizer strip-secret-values's result:
+       execute_remedy_plan(offer_id: "…")
+   ```
+
+3. **The agent stays productive.** In this chat, the agent invokes `execute_remedy_plan` to apply the `strip-secret-values` sanitizer. Redacted key names return to the model without credentials. If the agent accepts audience narrowing instead, subsequent calls to `post_status_update` (which require public audience) are blocked.
+
+## 2. Destructive action and human review
+
+OpenAPPA integrates with kagent's native [Human-in-the-Loop](https://kagent.dev/docs/kagent/examples/human-in-the-loop/) confirmation cards:
+
+1. The agent proposes a destructive cluster action:
+   ```text
+   restart_deployment(name: "checkout-api")
+   ```
+   The policy requires explicit approval: `attention = ["human-approval"]`.
+
+2. **OpenAPPA denies the direct call and offers a remedy plan** that consults the `oncall` authority. The agent executes the plan:
+   ```text
+   execute_remedy_plan(offer_id: "...")
+   ```
+   Because the plan requires human review, the agent turn suspends. An **Approve / Reject** card appears on the `execute_remedy_plan` call in the dashboard.
+
+3. **The operator decides**:
+   - **Approve**: `oncall` grants `human-approval`. OpenAPPA authorizes the execution, the agent re-proposes `restart_deployment`, and the deployment restarts.
+   - **Reject**: `oncall` refuses. OpenAPPA records the refusal, and the tool does not execute.
+
+## 3. Subagent delegation and the return gate
+
+When agents call other agents through [A2A (Agent-to-Agent)](https://kagent.dev/docs/kagent/examples/a2a-agents/) delegation, OpenAPPA isolates their execution contexts. Set `context_control = true` under `[policy.deployment]` to enable isolation.
+
+- **Inherited boundaries**: Child agents inherit the parent's data restrictions automatically.
+- **Quarantine**: Untrusted operations (like inspecting raw pod logs) run inside the child agent without affecting the parent context during execution.
+- **Subagent return gate**: The child agent stops by calling the OpenAPPA-owned `appa_return` tool (`ChildEnd`). The parent's gate evaluates `SpawnResult` before outputs enter parent context. If return data would violate parent boundaries, OpenAPPA withholds the data and returns remedy offers.
+- **Explicit authorization**: Agents can only delegate to sub-agents explicitly listed in the policy (`<namespace>__NS__<agent>`). Unlisted agent spawns are blocked fail-closed.
+
+## Policy example
+
+Policies are declarative TOML files checked into version control. This excerpt from [`integrations/kagent/demo/chart/files/demo.appa.toml`](https://github.com/archestra-ai/OpenAPPA/blob/main/integrations/kagent/demo/chart/files/demo.appa.toml) governs the demo agents:
+
+```toml
+# In-cluster secret read: results carry the ops audience
+[[policy.tool]]
+name = "read_secret"
+delta = { audience = ["ops"] }
+
+# Outward update: requires public audience and trusted data
+[[policy.tool]]
+name = "post_status_update"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["public"] }
+
+# Production change: requires human operator sign-off
+[[policy.tool]]
+name = "restart_deployment"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["human-approval"]
+
+# Delegation: the log-analyst agent, called as a tool. kagent dispatches
+# an agent tool as `<namespace>__NS__<agent>`, hyphens as underscores.
+[[policy.tool]]
+name = "kagent__NS__log_analyst"
+delta = {}
+
+# Children run on their own context and declare what returns carry
+[policy.deployment]
+context_control = true
+
+# Human authority definition
+[[policy.authority]]
+name = "oncall"
+hint = "Ask the on-call lead through the kagent approval flow."
+
+[policy.authority.permits]
+attention = ["human-approval"]
+
+# Binds oncall authority to kagent dashboard confirmation cards
+[externals.authorities.oncall]
+builtin = "hitl"
+```
+
+The `builtin = "hitl"` binding connects the `oncall` authority to kagent's dashboard confirmation cards.
+
+## Where next
+
+- [How it works](/how-it-works) — Core concepts, labels, and algebraic flow guarantees.
+- [Policy contracts](/contracts) — Complete policy authoring and syntax guide.
+- [kagent documentation](https://kagent.dev/docs/kagent/) — Official kagent guides and references.
+- [Implementation details](https://github.com/archestra-ai/OpenAPPA/blob/main/integrations/kagent/IMPLEMENTATION.md) — ADK callback lifecycle, Go/Python runtime architecture, and wire specs.

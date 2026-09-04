@@ -3,7 +3,10 @@ use common::{offers, raw};
 
 use std::sync::Arc;
 
-use appa_runtime::api::{AuditEntry, AuditEvent, AuditLabel, DispatchOutcome, OfferId, RemedyOutcome, Runtime};
+use appa_runtime::api::{
+    AuditEntry, AuditEvent, AuditLabel, DispatchOutcome, LabelSpelling, OfferId, RemedyArguments, RemedyOutcome,
+    Runtime,
+};
 use appa_runtime::{config::Config, hooks};
 use appa_runtime_api::{
     Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, SpawnRef, ToolOutcome, TrajectoryId,
@@ -35,7 +38,6 @@ permits = { audience = { from = ["hr"], to = ["public"] } }
 
 [policy.deployment]
 context_control = true
-confined_child_return = true
 
 [externals]
 timeout_ms = 1000
@@ -63,6 +65,14 @@ fn acting() -> Actor {
     Actor {
         root: root(),
         child: None,
+    }
+}
+
+/// The bare declaration: the return crosses as spoken, floored at the parent's current label.
+fn as_spoken() -> RemedyArguments {
+    RemedyArguments {
+        label: Some(LabelSpelling::default()),
+        return_schema: None,
     }
 }
 
@@ -98,6 +108,7 @@ async fn propose(runtime: &Arc<Runtime>, within: Option<&TrajectoryId>, call: Pr
             actor: actor(within),
             call,
             spawn: false,
+            ruling: None,
         },
     )
     .await
@@ -124,16 +135,46 @@ async fn released(runtime: &Arc<Runtime>, within: Option<&TrajectoryId>, tool: &
     .await;
 }
 
-async fn open_child(runtime: &Arc<Runtime>, spawn: ProposedCall) -> HookDecision {
-    let released = hooks::handle(
-        runtime,
-        HookEvent::ToolCall {
-            actor: actor(None),
-            call: spawn,
-            spawn: true,
-        },
-    )
-    .await;
+/// The parent's spawn blocks on the return menu; it declares the return through
+/// `route` (none: as spoken) with `arguments`, proposes the spawn again, and the child
+/// starts on the released fork.
+async fn open_child(
+    runtime: &Arc<Runtime>,
+    spawn: ProposedCall,
+    route: Option<&str>,
+    arguments: RemedyArguments,
+) -> HookDecision {
+    let propose = |call: ProposedCall| {
+        hooks::handle(
+            runtime,
+            HookEvent::ToolCall {
+                actor: actor(None),
+                call,
+                spawn: true,
+                ruling: None,
+            },
+        )
+    };
+    let blocked = propose(spawn).await;
+    let HookDecision::DenyCall { offers, .. } = blocked else {
+        panic!("a marked spawn blocks until its return is declared, got {blocked:?}");
+    };
+    let offer = offers
+        .iter()
+        .find(|offer| {
+            offer.returns.as_ref().map(|offered| match offered {
+                appa_runtime_api::OfferedReturn::AsSpoken => None,
+                appa_runtime_api::OfferedReturn::Sanitized { sanitizer } => Some(sanitizer.as_str()),
+            }) == Some(route)
+        })
+        .expect("the menu offers the requested return route");
+    let declared = runtime
+        .execute_remedy_with(&acting(), OfferId(offer.id.clone()), arguments)
+        .await;
+    let RemedyOutcome::Authorized { call } = declared else {
+        panic!("the declaration approves the spawn, got {declared:?}");
+    };
+    let released = propose(call).await;
     let HookDecision::AllowCall { spawn: Some(binding) } = released else {
         panic!("a context-controlled spawn releases a fork binding, got {released:?}");
     };
@@ -153,10 +194,6 @@ fn first_offer(feedback: &str) -> OfferId {
         .first()
         .cloned()
         .unwrap_or_else(|| panic!("no offer id in feedback: {feedback}"))
-}
-
-fn all_offers(feedback: &str) -> Vec<OfferId> {
-    offers(feedback)
 }
 
 fn feedback_of(decision: &HookDecision) -> String {
@@ -267,7 +304,13 @@ async fn a_branch_records_its_seed_its_own_flows_and_how_its_return_crossed() {
         tool: "delegate".to_string(),
         arguments: raw(serde_json::json!({"task": "look Alice up"})),
     };
-    assert_eq!(open_child(&runtime, spawn).await, HookDecision::Ack);
+    assert!(
+        matches!(
+            open_child(&runtime, spawn, Some("redactor"), as_spoken()).await,
+            HookDecision::Context { .. }
+        ),
+        "a sanitized route tells the starting child what its return goes through"
+    );
 
     let blocked = propose(&runtime, Some(&child()), call("read_hr")).await;
     let offer = first_offer(&feedback_of(&blocked));
@@ -283,14 +326,19 @@ async fn a_branch_records_its_seed_its_own_flows_and_how_its_return_crossed() {
         value: Some("Alice Chen, alice@corp.example".to_string()),
     };
     let stopped = hooks::handle(&runtime, end).await;
-    let derivation = all_offers(&feedback_of(&stopped))
-        .into_iter()
-        .next()
-        .expect("the stop surfaces the derivation plan");
-    assert!(matches!(
-        runtime.execute_remedy(&acting(), derivation).await,
-        RemedyOutcome::Returned { .. }
-    ));
+    let HookDecision::ChildReturn { value } = stopped else {
+        panic!("the redacted derivation is handed back for the child to echo, got {stopped:?}");
+    };
+    assert!(
+        !value.contains("alice@corp.example"),
+        "the derivation carries no raw address: {value}"
+    );
+    let echoed = HookEvent::ChildEnd {
+        root: root(),
+        child: child(),
+        value: Some(value),
+    };
+    assert_eq!(hooks::handle(&runtime, echoed).await, HookDecision::Ack);
 
     let entries = runtime.audit(&root()).expect("the audit reads");
     assert_eq!(
@@ -341,12 +389,8 @@ on = ["tool_output"]
 [policy.sanitizer.permits]
 trust = { from = "suspicious", to = "trusted" }
 
-[policy.child]
-return_sanitizer = "attest-schema"
-
 [policy.deployment]
 context_control = true
-confined_child_return = true
 
 [externals]
 timeout_ms = 1000
@@ -370,15 +414,23 @@ async fn a_child_bound_attest_schema_return_crosses_in_engine() {
 
     let spawn = ProposedCall {
         tool: "spawn".to_string(),
-        arguments: raw(serde_json::json!({
-            "return_schema": {
-                "type": "object",
-                "properties": { "verdict": { "type": "string", "enum": ["allow", "deny"] } },
-                "required": ["verdict"],
-            }
+        arguments: raw(serde_json::json!({"task": "judge the notes"})),
+    };
+    let attested = RemedyArguments {
+        label: Some(LabelSpelling::default()),
+        return_schema: Some(serde_json::json!({
+            "type": "object",
+            "properties": { "verdict": { "type": "string", "enum": ["allow", "deny"] } },
+            "required": ["verdict"],
         })),
     };
-    assert_eq!(open_child(&runtime, spawn).await, HookDecision::Ack);
+    assert!(
+        matches!(
+            open_child(&runtime, spawn, Some("attest-schema"), attested).await,
+            HookDecision::Context { .. }
+        ),
+        "an attesting fork tells the starting child its schema"
+    );
 
     let blocked = propose(&runtime, Some(&child()), call("read_untrusted")).await;
     let accept = first_offer(&feedback_of(&blocked));
@@ -414,7 +466,7 @@ async fn only_a_root_names_the_audit() {
         tool: "delegate".to_string(),
         arguments: raw(serde_json::json!({"task": "look Alice up"})),
     };
-    assert_eq!(open_child(&runtime, spawn).await, HookDecision::Ack);
+    assert_eq!(open_child(&runtime, spawn, None, as_spoken()).await, HookDecision::Ack);
 
     assert!(runtime.audit(&root()).is_some());
     assert!(runtime.audit(&child()).is_none(), "a child shares its family's log");

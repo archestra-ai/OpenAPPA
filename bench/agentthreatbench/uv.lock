@@ -203,7 +203,6 @@ wheels = [
 
 [[package]]
 name = "appa-agent-python"
-version = "0.1.0"
 source = { directory = "../../appa-agent-python" }
 
 [package.metadata]

@@ -1,0 +1,11 @@
+{
+  "without_memory": [
+    {"name": "ask_user", "declared": true}
+  ],
+  "with_memory": [
+    {"name": "ask_user", "declared": true},
+    {"name": "prefetch_memory", "declared": false},
+    {"name": "load_memory", "declared": true},
+    {"name": "save_memory", "declared": true}
+  ]
+}

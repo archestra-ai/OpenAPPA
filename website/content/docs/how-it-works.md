@@ -110,7 +110,7 @@ When the agent calls `get_ticket_from_crm()`, OpenAPPA intercepts the dispatch b
 |---|---|---|
 | **Accept Narrowing** | Trajectory becomes `internal`. | `file_github_issue` is blocked; `send_email` requires authority approval for external recipients. |
 | **Sanitize the Result** | Trajectory stays `{public, trusted}`. | Raw ticket is withheld from the model; `remove_pii`'s sanitized derivation is admitted in its place. |
-| **Child Branch + Sanitizer** | Parent stays `{public, trusted}`; child narrows to `internal`. | Child reads raw ticket, reasons over it, and returns the sanitized derivation across the merge boundary. |
+| **Child Branch + Sanitizer** | Parent stays `{public, trusted}`; child narrows to `internal`. | Parent declares the sanitized route at the spawn; child reads raw ticket, reasons over it, and returns the sanitized derivation across the merge boundary. |
 
 :::fig-two-endings:::
 
@@ -120,7 +120,7 @@ If the agent accepts narrowing to `internal` and later attempts `send_email(body
 
 Reading untrusted external files, third-party APIs, or confidential internal records normally restricts the entire agent session. Child trajectories isolate these label modifications within host-managed sub-executions.
 
-A child process can read and reason over raw, untrusted data in its own sandboxed context without restricting the parent. When the child completes, it returns only a clean, bounded answer across the merge boundary. The main agent stays clean and retains its full reach to interact with public tools. Parent and child branches share a single append-only log so that all sends and approvals remain globally auditable.
+A child process can read and reason over raw, untrusted data in its own sandboxed context without restricting the parent. The parent declares, when it spawns the child, the lowest label it accepts from the child's return and whether a sanitizer rewrites the return first; the child can narrow no further than that declaration allows. When the child completes, it returns only what the declaration covers across the merge boundary, and a return outside it is blocked at the child, never quietly widened. The main agent stays clean and retains its full reach to interact with public tools. Parent and child branches share a single append-only log so that all sends and approvals remain globally auditable.
 
 ## Engine refusals enumerate every valid remedy
 
@@ -147,6 +147,8 @@ Every released tool call carries one complete annotation — its `delta`, its `r
 
 - **Static declaration**: The `[[tool]]` entry writes the whole contract, and every call to the tool carries it.
 - **Annotator**: Where the right contract depends on the call itself (a document path, a recipient, a command line), the `[[tool]]` entry names a registered **annotator** instead. The annotator reads the proposed call and answers the complete contract for that one call, inside the vocabulary its declaration bounds — its **mandate**.
+
+An Annotator declaration can include a trusted policy `hint`. The hint defines policy-specific values and their selection criteria, but cannot expand the mandate. An input mapping can restrict which call values cross the consult boundary.
 
 An annotation is pinned to the exact call it was produced for. A sanitizer rewrite that changes the arguments is annotated afresh, so no call ever runs under another call's annotation, and replay reconstructs every decision without consulting an annotator again.
 

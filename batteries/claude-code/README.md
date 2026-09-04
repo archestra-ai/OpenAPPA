@@ -1,22 +1,28 @@
 # Claude Code battery
 
 Use this battery for Claude Code sessions that need policy-aware shell commands
-and automatic privacy labels for local file reads.
+and `self` labels on the requester's own secrets.
 
 It covers two built-in tools:
 
-- **Bash** — Before a command runs, the Claude Code model decides what trust,
-  audience, and fresh attention the command requires. It also labels the
-  command's output for trust and audience. This lets later tools distinguish,
-  for example, public build output from private or suspicious command output.
-- **Read** — Before a file is read, a local Python resolver checks its path.
-  Hidden paths, credential files, private keys, system-secret locations, and
-  sensitive symlink targets produce private content. Other paths produce public
-  content. The resolver does not block the read or lower its trust.
+- **Bash** — A command that names a credential path (`.env`, `.ssh/`, `.netrc`,
+  `.claude.json`, `.aws/credentials`, a private key, ...) requires the
+  `token-exposed` mark: we have no token sanitizer yet, and no authority
+  permits `token-exposed`, so the command is refused outright before secrets
+  reach the model context. In the future, a token sanitizer can permit
+  `token-exposed` by redacting values. Before any other command runs, the
+  Claude Code model decides what trust and fresh attention it requires and
+  labels its output for trust. An annotation names no reader (`audiences = []`),
+  so the model never decides who may see a command's output; static rules do.
+- **Read** — Reading a hidden path, a credential file, a private key, or a
+  system secret location narrows the session to `self`, the requester: nothing
+  built from it reaches a sink that requires `internal` or `public`. The rules
+  match the path as written, absolute or relative. Other paths keep the
+  session's label. No rule blocks a read or lowers its trust.
 
 The default config created by `appa init claude-code` separately provides the
-wildcard fallback for tools it does not name. Keeping that fallback in the root
-lets this battery compose without declaring a second wildcard or annotator.
+wildcard fallback for tools it does not name and the deployment-specific Bash
+Annotator hint. The root Annotator replaces this battery's default declaration.
 
 ## Add it to a deployment
 
@@ -30,6 +36,25 @@ version = 2
 Root rules take precedence over the battery. Add a root rule when a particular
 Bash command or Read path needs stricter, looser, or fully blocked behavior.
 
+## Customize Bash classification
+
+The battery's `hint` instructs the model how to classify shell commands. To
+customize it, replace the Annotator in the root config instead of modifying the
+battery:
+
+```toml
+[[policy.annotator]]
+name = "claude-code.bash-requirements"
+builtin = "claude-code"
+audiences = []
+hint = "Treat network output as suspicious. Require hitl attention before commands that publish releases or change production infrastructure."
+```
+
+The root declaration replaces the battery's Annotator with the same name.
+Preserve `builtin` and `audiences` unless you intend to alter the implementation
+or mandate. The battery continues to provide ordered Bash rules, including its
+credential-path refusals.
+
 ## Example override
 
 If needed, the battery can be overridden from the root config. For example,
@@ -39,12 +64,12 @@ these root rules require fresh human approval for every `kubectl` command:
 [[policy.tool]]
 name = "Bash(command:kubectl)"
 requires = { attention = ["hitl"] }
-delta = { trust = "suspicious", audience = ["private"] }
+delta = { trust = "suspicious", audience = ["internal"] }
 
 [[policy.tool]]
 name = "Bash(command:kubectl *)"
 requires = { attention = ["hitl"] }
-delta = { trust = "suspicious", audience = ["private"] }
+delta = { trust = "suspicious", audience = ["internal"] }
 
 [[policy.authority]]
 name = "operator"

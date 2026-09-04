@@ -1,0 +1,131 @@
+# The one thing the demo needs from you: the model provider key.
+# Everything else has a preset.
+openai:
+  # Your OpenRouter API key. It lands in a Secret named after the ModelConfig,
+  # read by the agents and by appa-runtime's own sanitizer model. Leave it
+  # empty to paste the key in the kagent dashboard after install instead
+  # (Models → appa-demo-model → Edit → API Key): the dashboard writes the
+  # same Secret, and the agent and runtime pods start once it exists.
+  apiKey: ""
+  # The agents' model. Every gpt-5.6 variant needs reasoning_effort "none"
+  # for function tools on chat completions; the image fills that in
+  # (runtime.reasoningEffort). Pick a gpt-4.1 model to drop the need.
+  model: openai/gpt-5.6-luna
+  # An existing Secret carrying OPENAI_API_KEY, instead of apiKey. Name it
+  # like the ModelConfig for the dashboard's Edit flow to find it.
+  existingSecret: ""
+  # The OpenAI-compatible endpoint for the agents' model. The chart renders
+  # spec.openAI.baseUrl only when this value is non-empty.
+  baseUrl: https://openrouter.ai/api/v1
+
+modelConfig:
+  name: appa-demo-model
+
+# The shared appa-runtime: one pod carrying the runtime (loopback only, by
+# design), the relay that gives it a cluster address, and the mock
+# externals it consults over loopback — the proxy-pair topology in one
+# pod. Every demo agent points at the relay.
+runtime:
+  image:
+    repository: ghcr.io/archestra-ai/appa-kagent-quickstart
+    tag: ""            # defaults to the chart's appVersion
+    pullPolicy: IfNotPresent
+  # Fills the OpenAI model's reasoning_effort when the ModelConfig leaves
+  # it unset (APPA_KAGENT_OPENAI_REASONING_EFFORT on every agent).
+  reasoningEffort: "none"
+  # -v for the decision path at debug, -vv for the algebra at trace.
+  verbosity: ""
+  persistence:
+    # Keep trajectories across runtime pod restarts on a PersistentVolume.
+    enabled: false
+    size: 1Gi
+    storageClass: ""
+
+# The one model profile the policy's `builtin = "llm"` sanitizers
+# consult, the [externals.llm] block of files/demo.appa.toml. The
+# runtime reads the same Secret as the agents, as APPA_LLM_API_KEY.
+llm:
+  # The sanitizers' model. It answers a json_schema request, so pick a
+  # model that supports structured outputs.
+  model: openai/gpt-5.6-luna
+  # The OpenAI-compatible endpoint for that model. HTTPS works anywhere;
+  # cleartext HTTP works on loopback only.
+  url: https://openrouter.ai/api/v1
+
+relay:
+  image:
+    repository: nginx
+    tag: 1.27-alpine
+    pullPolicy: IfNotPresent
+
+mocks:
+  image:
+    repository: ghcr.io/archestra-ai/appa-demo-mocks
+    tag: ""
+    pullPolicy: IfNotPresent
+  # Seconds a change-board consult waits for a member's ruling before it
+  # answers nothing. Inside the policy's externals.timeout_ms (30 s in
+  # the demo policy).
+  approvalWindowSeconds: 25
+
+tools:
+  image:
+    repository: ghcr.io/archestra-ai/appa-demo-tools
+    tag: ""
+    pullPolicy: IfNotPresent
+
+# The delegated children. The policy names each child by the spelling
+# kagent dispatches, `<namespace>__NS__<childName>` with hyphens as
+# underscores. The chart renders those names from the release namespace
+# and these values (templates/_helpers.tpl). Every agent name here must
+# be a DNS-1123 label (values.schema.json). The chart fails to render
+# when two of these names coincide: cluster-ops, release-manager,
+# childName, go.childName, and, with go.enabled, go.name and
+# go.undeclaredName. The policy declares both children even without
+# the go cell, so go.childName stays in the set.
+
+# The APPA guide agent: the canonical composable appa-guide skill (one
+# router, one reference per host) attached
+# through kagent git-ref skills, with the kagent tool server's k8s tools and
+# the shared runtime as its own gate. The agent is packaging; any host with
+# the same tools can run the same skill.
+guide:
+  enabled: true
+  # The cluster must be able to clone this repo (or a fork of it).
+  skill:
+    git:
+      url: https://github.com/archestra-ai/OpenAPPA
+      ref: main
+      path: integrations/appa-guide
+    name: appa-guide
+  # The kagent tool server that serves the k8s_* tools.
+  toolServer: kagent-tool-server
+agents:
+  # The python child cluster-ops delegates to.
+  childName: log-analyst
+  # The go cell: a twin of cluster-ops on kagent's go runtime, gated by
+  # the go plugin. kagent derives its image from the python one — the
+  # last path segment becomes `golang-adk` — so it needs that image
+  # beside appa-kagent-quickstart (the chart README shows the build).
+  go:
+    enabled: true
+    name: cluster-ops-go
+    # Its delegated child on the go runtime too, so the fork's child side
+    # is exercised on the go plugin as well.
+    childName: log-analyst-go
+    # An agent the policy never names, listed by the go parent: the
+    # blocked-delegation case on the go cell.
+    undeclaredName: release-manager-go
+
+# The showcase chats: real transcripts of every demo case, replayed into
+# kagent's session store after install so the dashboard opens with the
+# cases already on screen. Idempotent across upgrades.
+seed:
+  enabled: true
+  # The dashboard's user; kagent's unsecure auth mode names it so.
+  user: admin@kagent.dev
+  controllerUrl: ""    # defaults to kagent-controller in the release namespace
+  image:
+    repository: python
+    tag: 3.13-slim
+    pullPolicy: IfNotPresent

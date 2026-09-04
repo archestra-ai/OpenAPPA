@@ -1,0 +1,125 @@
+# The shared appa-runtime pod: the runtime binds loopback only, by design;
+# the relay gives it the cluster address every agent uses (rewriting Host
+# to a loopback value, which /mcp validates); the mock externals answer
+# the policy's URL bindings over the pod's loopback.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: appa-runtime
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "appa-demo.labels" . | nindent 4 }}
+    app: appa-runtime
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: appa-runtime }
+  template:
+    metadata:
+      labels:
+        app: appa-runtime
+      annotations:
+        checksum/policy: {{ include "appa-demo.policy" . | sha256sum | quote }}
+    spec:
+      containers:
+        - name: runtime
+          image: {{ include "appa-demo.image" (dict "image" .Values.runtime.image "root" .) }}
+          imagePullPolicy: {{ .Values.runtime.image.pullPolicy }}
+          command:
+            - /usr/local/bin/appa
+            - runtime
+            - --adapter
+            - kagent
+            - --config
+            - /etc/appa/demo.appa.toml
+            - --db
+            - /var/lib/appa/appa.db
+            - --listen
+            - 127.0.0.1:18787
+            {{- if .Values.runtime.verbosity }}
+            - {{ .Values.runtime.verbosity }}
+            {{- end }}
+          env:
+            - name: APPA_LLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "appa-demo.secretName" . | quote }}
+                  key: OPENAI_API_KEY
+          volumeMounts:
+            - { name: policy, mountPath: /etc/appa, readOnly: true }
+            - { name: data, mountPath: /var/lib/appa }
+        - name: relay
+          image: {{ .Values.relay.image.repository }}:{{ .Values.relay.image.tag }}
+          imagePullPolicy: {{ .Values.relay.image.pullPolicy }}
+          ports:
+            - { name: relay, containerPort: 18789 }
+          readinessProbe:
+            httpGet: { path: /health, port: relay }
+            periodSeconds: 5
+          volumeMounts:
+            - { name: relay, mountPath: /etc/nginx/conf.d, readOnly: true }
+        - name: mocks
+          image: {{ include "appa-demo.image" (dict "image" .Values.mocks.image "root" .) }}
+          imagePullPolicy: {{ .Values.mocks.image.pullPolicy }}
+          args: ["--approval-window", {{ .Values.mocks.approvalWindowSeconds | quote }}]
+          ports:
+            - { name: mocks, containerPort: 8081 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: mocks }
+            periodSeconds: 5
+      volumes:
+        - name: policy
+          configMap: { name: appa-runtime-policy }
+        - name: relay
+          configMap: { name: appa-runtime-relay }
+        - name: data
+          {{- if .Values.runtime.persistence.enabled }}
+          persistentVolumeClaim: { claimName: appa-runtime-data }
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: appa-runtime
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "appa-demo.labels" . | nindent 4 }}
+spec:
+  selector: { app: appa-runtime }
+  ports:
+    - { name: relay, port: 18789, targetPort: relay }
+---
+# The mocks' side channel (the change board's /pending and /decide), for a
+# board member — or the e2e matrices — outside the pod.
+apiVersion: v1
+kind: Service
+metadata:
+  name: appa-demo-mocks
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "appa-demo.labels" . | nindent 4 }}
+spec:
+  selector: { app: appa-runtime }
+  ports:
+    - { name: mocks, port: 8081, targetPort: mocks }
+{{- if .Values.runtime.persistence.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: appa-runtime-data
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "appa-demo.labels" . | nindent 4 }}
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: {{ .Values.runtime.persistence.size }}
+  {{- if .Values.runtime.persistence.storageClass }}
+  storageClassName: {{ .Values.runtime.persistence.storageClass | quote }}
+  {{- end }}
+{{- end }}

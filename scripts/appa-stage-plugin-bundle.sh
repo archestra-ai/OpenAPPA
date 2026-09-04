@@ -7,9 +7,9 @@
 # appa-plugin-<version>.tar.gz, and `appa init claude-code` accepts exactly the
 # bytes whose SHA-256 its own build baked in.
 #
-# `plugin_bundle::validate_tree` is the single definition of the shape this must
-# produce, and it runs against this script's real output in the init and
-# rendered-hook tests, so a bundle that loses a required file fails CI here
+# `plugin_layout::REPOSITORY_MAPPINGS` is the single definition of what this
+# copies, and a runtime unit test digests this script's real output against the
+# mapping's, so a release bundle that drifts from what init stages fails CI here
 # rather than at someone's install.
 set -eu
 
@@ -37,6 +37,14 @@ CDPATH='' cd -- "$outdir" || exit 1
 
 cp -R -- "$repo/integrations/claude-code/.claude-plugin" ./.claude-plugin
 cp -R -- "$repo/integrations/claude-code/plugin" ./plugin
+# appa-guide is host-neutral source. Materialize it at Claude's required
+# plugin path rather than keeping a second source copy under claude-code/.
+mkdir -p -- ./plugin/skills
+cp -R -- "$repo/integrations/appa-guide" ./plugin/skills/appa-guide
+# Claude loads SKILL.md before any gated tool call. Inline its host reference
+# so the guide can bootstrap even when the current policy refuses `Read`.
+printf '\n\n' >> ./plugin/skills/appa-guide/SKILL.md
+cat ./plugin/skills/appa-guide/references/claude-code.md >> ./plugin/skills/appa-guide/SKILL.md
 cp -R -- "$repo/integrations/claude-code/examples" ./examples
 cp -R -- "$repo/batteries" ./batteries
 cp -- "$repo/integrations/claude-code/README.md" ./README.md

@@ -17,7 +17,7 @@ use rmcp::transport::streamable_http_server::StreamableHttpService;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 
-use crate::api::{OfferId, RemedyOutcome, Runtime};
+use crate::api::{LabelSpelling, OfferId, RemedyArguments, RemedyOutcome, Runtime};
 use crate::elicit::Elicitation;
 
 #[derive(Clone)]
@@ -28,6 +28,34 @@ pub struct RemedyService {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ExecuteRemedyPlanArgs {
     pub offer_id: String,
+    /// For a plan that declares a subagent's return: the lowest label this session accepts
+    /// from the return, in the policy's `delta` spelling. An omitted dimension keeps this
+    /// session's current value.
+    #[serde(default)]
+    pub label: Option<LabelArgs>,
+    /// For a plan that attests a subagent's return: the JSON schema the return must match.
+    #[serde(default)]
+    pub return_schema: Option<serde_json::Value>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct LabelArgs {
+    #[serde(default)]
+    pub trust: Option<String>,
+    #[serde(default)]
+    pub audience: Option<Vec<String>>,
+}
+
+impl From<ExecuteRemedyPlanArgs> for RemedyArguments {
+    fn from(args: ExecuteRemedyPlanArgs) -> RemedyArguments {
+        RemedyArguments {
+            label: args.label.map(|label| LabelSpelling {
+                trust: label.trust,
+                audience: label.audience,
+            }),
+            return_schema: args.return_schema,
+        }
+    }
 }
 
 #[tool_router]
@@ -37,36 +65,43 @@ impl RemedyService {
     }
 
     #[tool(description = "Execute one remedy plan by the offer id that blocking \
-                       feedback surfaced. The id must be quoted exactly.")]
+                       feedback surfaced. The id must be quoted exactly. A plan that \
+                       declares a subagent's return takes `label`, the lowest label this \
+                       session accepts from the return; a plan that attests it also takes \
+                       `return_schema`. After execution succeeds, re-call the original \
+                       tool or receive the admitted output.")]
     pub async fn execute_remedy_plan(
         &self,
         Parameters(args): Parameters<ExecuteRemedyPlanArgs>,
         request: RequestContext<RoleServer>,
     ) -> CallToolResult {
-        let quoted = OfferId(args.offer_id);
-        // The trajectory this act belongs to was named by the hook that
-        // preceded it. Without one there is nothing to serve, and guessing
-        // would be choosing a trajectory for the caller.
-        let Some(acting) = self.runtime.take_vouched(&quoted) else {
+        let quoted = OfferId(args.offer_id.clone());
+        let arguments = RemedyArguments::from(args);
+        // Requires the vouched trajectory from the preceding hook.
+        let Some((acting, ruling)) = self.runtime.take_vouched(&quoted) else {
             return render(RemedyOutcome::Refused {
                 detail: "no live offer with this id exists".to_string(),
             });
         };
         let elicitation = Elicitation::new(request, self.runtime.review_timeout());
-        render(self.runtime.remedy(&acting, quoted, Some(&elicitation)).await)
+        render(
+            self.runtime
+                .remedy(&acting, quoted, arguments, Some(&elicitation), ruling)
+                .await,
+        )
     }
 }
 
 fn render(outcome: RemedyOutcome) -> CallToolResult {
     match outcome {
         RemedyOutcome::Authorized { call } => CallToolResult::success(vec![ContentBlock::text(format!(
-            "[appa] Authorized. Propose the {} call again with exactly these arguments: {}",
+            "[appa] Authorized. Call the {} tool again with exactly these arguments: {}",
             call.tool,
             call.arguments.get(),
         ))]),
         RemedyOutcome::Substituted { call } => CallToolResult::success(vec![ContentBlock::text(format!(
             "[appa] Substituted. The sanitizer replaced the arguments and the call is released. \
-             Propose the {} call with exactly these arguments to run it: {}",
+             Call the {} tool with exactly these arguments to run it: {}",
             call.tool,
             call.arguments.get(),
         ))]),
@@ -94,13 +129,12 @@ impl ServerHandler for RemedyService {
     }
 }
 
-/// The release version the CLI advertises, so an MCP client and `--version` agree.
+/// Advertised runtime version for MCP clients.
 const RUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const SESSION_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// The tower service `main` nests at `/mcp`, serving from process
-/// start.
+/// MCP service served at `/mcp`.
 pub fn service(runtime: Arc<Runtime>) -> StreamableHttpService<RemedyService, LocalSessionManager> {
     let mut sessions = LocalSessionManager::default();
     sessions.session_config.keep_alive = Some(runtime.review_timeout() + SESSION_GRACE);
@@ -289,7 +323,7 @@ mod tests {
         }
         assert_eq!(
             runtime.take_vouched(&quoted),
-            Some(acting(root.0.as_str())),
+            Some((acting(root.0.as_str()), None)),
             "a repeated hook is one caller"
         );
         assert!(runtime.take_vouched(&quoted).is_none());
@@ -311,6 +345,7 @@ mod tests {
                 arguments: raw(serde_json::json!({ "offer_id": quoted.0 })),
             },
             spawn: false,
+            ruling: None,
         }
     }
 }
