@@ -4,7 +4,7 @@ Shared OpenAPPA runtime for a Kubernetes cluster. One replica. Agents
 that set `APPA_RUNTIME_URL` to this Service, with `APPA_ENABLED=true`,
 are gated by the policy in the ConfigMap.
 
-The image of this chart version is `ghcr.io/archestra-ai/appa-runtime:0.8.0`. # x-release-please-version
+The image of this chart version is `ghcr.io/archestra-ai/appa-runtime:0.9.0`. # x-release-please-version
 
 ## Install
 
