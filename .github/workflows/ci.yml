@@ -64,9 +64,11 @@ jobs:
               - '.github/workflows/ci.yml'
             receiver:
               - 'receiver/**'
-              # The receiver's decompression cap has to agree with the
-              # client's; a change to either one re-checks both.
+              # The receiver's checks pin two things about the client: its
+              # decompression cap, and the salt file it compiles in. A change to
+              # either side re-runs them.
               - 'appa-runtime/src/yell/report.rs'
+              - 'appa-runtime/src/yell/client.rs'
               - '.github/workflows/ci.yml'
             go:
               - 'integrations/kagent/appa-kagent-adk-go/**'

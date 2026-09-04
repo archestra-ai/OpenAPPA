@@ -115,8 +115,14 @@ def signed(plain: bytes, header: str | None) -> None:
     """Refuse anything that does not carry the public salt. See the module docstring."""
     if header is None or not header.startswith("v1="):
         raise Refusal(401, "the request carries no v1 signature")
+    # A header arrives as latin-1, so it can hold bytes no hex digest ever does,
+    # and `compare_digest` raises on a str that is not ASCII rather than
+    # answering false. Whatever this is, it is not a signature.
+    offered = header[len("v1=") :]
+    if not offered.isascii():
+        raise Refusal(401, "the signature does not match the document")
     expected = hmac.new(SALT, plain, hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(header[len("v1=") :], expected):
+    if not hmac.compare_digest(offered, expected):
         raise Refusal(401, "the signature does not match the document")
 
 
@@ -201,7 +207,10 @@ def store(plain: bytes, compressed: bytes) -> tuple[str, bool]:
         blob.upload_from_string(compressed, content_type="application/json", if_generation_match=0)
     except gcloud_exceptions.PreconditionFailed:
         return digest, True
-    except (gcloud_exceptions.GoogleAPIError, GoogleAuthError):
+    except (gcloud_exceptions.GoogleAPIError, GoogleAuthError, KeyError):
+        # KeyError included on purpose: an instance with no `APPA_YELL_BUCKET` has
+        # nowhere to write, which is a storage failure the caller cannot read
+        # anything into. The log line says which one it was.
         logger.exception("the report could not be stored")
         raise Refusal(503, "the report could not be stored; try again") from None
     return digest, False

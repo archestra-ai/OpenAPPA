@@ -68,6 +68,10 @@ def test_a_document_without_the_salt_is_refused_before_anything_else(client):
     assert post(client, one_report(), signature="").status_code == 401
     assert post(client, one_report(), signature="deadbeef").status_code == 401
 
+    # A header arrives as latin-1 and can hold bytes no digest ever does. The
+    # comparison raises on those rather than answering false.
+    assert post(client, one_report(), signature="v1=" + "\xff" * 64).status_code == 401
+
 
 def test_a_body_that_is_not_gzip_is_refused(client):
     assert post(client, one_report(), encoding=None).status_code == 415
