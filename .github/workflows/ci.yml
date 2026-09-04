@@ -185,8 +185,15 @@ jobs:
       - name: Installer cases
         run: sh scripts/appa-install-test.sh
 
-  rust-checks:
-    name: Rust Checks
+  # Rust toolchain checks, split so cargo clippy and cargo test run in
+  # parallel instead of serializing ~11 min on one runner. `cargo check`
+  # is omitted: clippy --all-targets is a superset. rust-cache uses the
+  # same shared-key the Linux rust jobs restore; only Rust Tests saves,
+  # so parallel jobs do not race two writes of one cache entry. Fresh PR
+  # branches restore the entry Rust Tests writes on main (Actions caches
+  # only flow down from the default branch).
+  rust-lint:
+    name: Rust Lint
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -199,17 +206,59 @@ jobs:
       - name: Setup Rust
         run: rustup show
 
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: rust-workspace
+          save-if: false
+
       - name: Rust formatting
         run: cargo fmt --all --check
-
-      - name: Rust check
-        run: cargo check --workspace --locked
 
       - name: Rust lint
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+  rust-tests:
+    name: Rust Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Setup Rust
+        run: rustup show
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: rust-workspace
+
       - name: Rust tests
         run: cargo test --workspace --locked
+
+  # Stable-named gate so a required check named "Rust Checks" still
+  # covers the split jobs.
+  rust-checks:
+    name: Rust Checks
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [rust-lint, rust-tests]
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Check rust job results
+        env:
+          LINT_RESULT: ${{ needs.rust-lint.result }}
+          TESTS_RESULT: ${{ needs.rust-tests.result }}
+        run: |
+          if [ "$LINT_RESULT" != "success" ] || [ "$TESTS_RESULT" != "success" ]; then
+            echo "::error::Rust lint or tests failed (lint: $LINT_RESULT, tests: $TESTS_RESULT)."
+            exit 1
+          fi
 
   replay-examples:
     name: Replay Examples
@@ -224,6 +273,12 @@ jobs:
 
       - name: Setup Rust
         run: rustup show
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: rust-workspace
+          save-if: false
 
       # Every directory under examples/tests is one policy and one trace file.
       # The test suite pins them too; this runs the command line end to end,
@@ -250,6 +305,9 @@ jobs:
       - name: Setup Rust
         run: rustup show
 
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
       # Only what is platform-specific here: the config and data directory
       # rules, the process ownership check init stops a runtime with, and the
       # hooks a materialized deployment renders. Not a second full workspace
@@ -275,6 +333,9 @@ jobs:
 
       - name: Setup Rust
         run: rustup show
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Build runtime
         run: cargo build --locked --package appa
@@ -339,6 +400,12 @@ jobs:
 
       - name: Setup Rust
         run: rustup show
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: rust-workspace
+          save-if: false
 
       - name: Setup uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
