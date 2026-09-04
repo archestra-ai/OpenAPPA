@@ -287,7 +287,8 @@ spec:
   declarative:
     systemMessage: |
       Configure OpenAPPA for this kagent cluster. For quickstart, init, or adjust,
-      invoke the appa-guide skill and follow references/kagent.md exactly.
+      invoke the appa-guide skill and follow
+      /skills/appa-guide/references/kagent.md exactly.
     modelConfig: "default-model-config"
     tools:
       - type: McpServer

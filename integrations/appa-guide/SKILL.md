@@ -21,7 +21,7 @@ guess its content.
   reference.
 - **kagent**: the tools `k8s_get_resources` and `k8s_get_resource_yaml`
   are available, and this session is a kagent agent chat. Read
-  `references/kagent.md` and follow it.
+  `/skills/appa-guide/references/kagent.md` and follow it.
 - Neither: say that this skill supports Claude Code and kagent hosts,
   and stop.
 

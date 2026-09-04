@@ -23,7 +23,7 @@ fn the_router_routes_by_host_and_carries_the_shared_rules() {
     assert!(router.starts_with("---\n"), "the router keeps its frontmatter");
     assert!(router.contains("name: appa-guide"));
     assert!(router.contains("references/claude-code.md"));
-    assert!(router.contains("references/kagent.md"));
+    assert!(router.contains("/skills/appa-guide/references/kagent.md"));
     assert!(
         router.contains("k8s_get_resources"),
         "the router detects the kagent host"
@@ -118,6 +118,7 @@ fn the_kagent_chart_consumes_this_skill_package() {
         assert!(guide.contains(tool), "the guide agent carries {tool}");
     }
     assert!(guide.contains("APPA_RUNTIME_URL"));
+    assert!(guide.contains("/skills/appa-guide/references/kagent.md"));
 
     let values = fs::read_to_string(chart.join("values.yaml")).expect("the chart values exist");
     assert!(values.contains("integrations/appa-guide"));
