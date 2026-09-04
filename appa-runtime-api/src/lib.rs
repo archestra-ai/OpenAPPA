@@ -5,8 +5,8 @@
 mod wire;
 
 pub use wire::{
-    Accepted, Adapter, AsSpoken, DecisionName, DeriveFn, Derived, EventName, OutcomeStatus, PROTOCOL, SpellFn,
-    WireDecision, WireEvent, WireOffer, WireOutcome, WireReturn, WireReview, WireRuling,
+    Accepted, Adapter, AsSpoken, DecisionName, DeriveFn, Derived, EventName, NamesChildrenFn, OutcomeStatus, PROTOCOL,
+    SpellFn, WireDecision, WireEvent, WireOffer, WireOutcome, WireReturn, WireReview, WireRuling,
 };
 
 /// The hosts this runtime can serve. The one place harness names appear

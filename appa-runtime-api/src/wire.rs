@@ -5,12 +5,15 @@
 //! on the client side (Claude Code through `appa hook`, kagent inside its
 //! ADK plugin) and reads a [`WireDecision`] back. The wire carries the
 //! host's raw tool spelling and nothing the runtime would have to trust:
-//! whether a call is a spawn, which canonical tool it names, whether its
-//! arguments name a child's transcript, and whether it is the runtime's
-//! own control tool are all derived on the server from the configured
-//! adapter and the raw spelling ([`Adapter::derive`]). Ids cross
-//! unprefixed and the server applies the configured adapter's prefix,
-//! so no caller can speak for another adapter's trajectories. A person's
+//! whether a call is a spawn, which canonical tool it names, and whether
+//! it is the runtime's own control tool are all derived on the server
+//! from the configured adapter and the raw spelling
+//! ([`Adapter::derive`]); whether a proposed call's arguments name a
+//! child's transcript is the same adapter's separate answer
+//! ([`Adapter::names_children`]), asked at the call, where it is used.
+//! Ids cross unprefixed and the server applies the configured adapter's
+//! prefix, so no caller can speak for another adapter's trajectories.
+//! A person's
 //! [`Ruling`] crosses only under a host that reviews through its own
 //! channel ([`AdapterName::review_channel`]); under any other host the
 //! envelope asserting one is refused.
@@ -40,17 +43,23 @@ pub struct Derived {
     /// The call starts a child trajectory (Claude Code's `Agent`, a
     /// kagent agent called as a tool).
     pub spawn: bool,
-    /// The family children the arguments name by the host's own on-disk
-    /// spellings of a child's transcript or output file. A recognizer of
-    /// the default spellings, not a guarantee that no other path reaches
-    /// the file.
-    pub names_children: Vec<TrajectoryId>,
 }
 
 /// The server-side derivation for one call: total over the adapter's raw
 /// domain, a refusal outside it. A plain `fn` pointer — no state, no
 /// runtime access — for the same reason [`Codec`](crate::Codec) is.
 pub type DeriveFn = fn(&Actor, &ProposedCall) -> Result<Derived, ParseRefusal>;
+
+/// The family children one call's arguments name by the host's own
+/// on-disk spellings of a child's transcript or output file. A
+/// recognizer of the default spellings, not a guarantee that no other
+/// path reaches the file.
+///
+/// A separate question from [`DeriveFn`] because only a tool call has an
+/// answer to it: an outcome is observed after the fact and names no
+/// child, so the scan over the arguments is never asked for there. A
+/// plain `fn` pointer for the same reason [`DeriveFn`] is.
+pub type NamesChildrenFn = fn(&Actor, &ProposedCall) -> Vec<TrajectoryId>;
 
 /// The inverse of [`DeriveFn`]: the host's own spelling of one canonical
 /// identity — the name this host's model can dispatch. Both identities
@@ -65,11 +74,13 @@ pub type SpellFn = fn(&CanonicalTool) -> Option<String>;
 
 /// One adapter as the runtime serves it: its name, which fixes the
 /// trajectory prefix, the spawn coverage rule and the review channel,
-/// and the two directions of its tool identity map.
+/// the two directions of its tool identity map, and the children a
+/// proposed call names.
 #[derive(Clone, Copy)]
 pub struct Adapter {
     pub name: AdapterName,
     pub derive: DeriveFn,
+    pub names_children: NamesChildrenFn,
     pub spell: SpellFn,
 }
 
@@ -249,7 +260,8 @@ pub struct WireEvent {
 #[derive(Debug, Clone)]
 pub struct Accepted {
     pub event: HookEvent,
-    /// Set on a tool call only; empty otherwise.
+    /// Set on a tool call only; empty otherwise, because a tool call is
+    /// the one event whose named children are asked for.
     pub names_children: Vec<TrajectoryId>,
 }
 
@@ -450,14 +462,16 @@ impl WireEvent {
                 _ => Err(malformed(format!("{name:?} without its tool call"))),
             }
         };
-        let derived_call = |actor: &Actor| -> Result<(ProposedCall, Derived), ParseRefusal> {
+        // The same call under the identity the adapter derives for it.
+        // An outcome needs nothing else the adapter derives: it names no
+        // child, so it never pays the scan over its arguments.
+        let canonical_call = |actor: &Actor| -> Result<ProposedCall, ParseRefusal> {
             let raw = raw_call()?;
             let derived = (served.derive)(actor, &raw)?;
-            let call = ProposedCall {
-                tool: derived.canonical.as_str().to_string(),
+            Ok(ProposedCall {
+                tool: derived.canonical.into_string(),
                 arguments: raw.arguments,
-            };
-            Ok((call, derived))
+            })
         };
         let outcome = || -> Result<ToolOutcome, ParseRefusal> {
             match self.outcome.clone() {
@@ -483,20 +497,25 @@ impl WireEvent {
             EventName::TurnEnd => accepted(HookEvent::TurnEnd { actor: actor()? }),
             EventName::ToolCall => {
                 let actor = actor()?;
-                let (call, derived) = derived_call(&actor)?;
+                let raw = raw_call()?;
+                let derived = (served.derive)(&actor, &raw)?;
+                let names_children = (served.names_children)(&actor, &raw);
                 Ok(Some(Accepted {
                     event: HookEvent::ToolCall {
                         actor,
-                        call,
+                        call: ProposedCall {
+                            tool: derived.canonical.into_string(),
+                            arguments: raw.arguments,
+                        },
                         spawn: derived.spawn,
                         ruling: ruling.map(Ruling::from),
                     },
-                    names_children: derived.names_children,
+                    names_children,
                 }))
             }
             EventName::ToolResult => {
                 let actor = actor()?;
-                let (call, _) = derived_call(&actor)?;
+                let call = canonical_call(&actor)?;
                 accepted(HookEvent::ToolResult {
                     actor,
                     call,
@@ -505,7 +524,7 @@ impl WireEvent {
             }
             EventName::SpawnResult => {
                 let actor = actor()?;
-                let (call, _) = derived_call(&actor)?;
+                let call = canonical_call(&actor)?;
                 let child = self
                     .spawned_id
                     .as_deref()
@@ -787,18 +806,26 @@ mod tests {
         RawValue::from_string(json.to_string()).expect("the fixture is JSON")
     }
 
-    fn derive(actor: &Actor, call: &ProposedCall) -> Result<Derived, ParseRefusal> {
+    fn derive(_: &Actor, call: &ProposedCall) -> Result<Derived, ParseRefusal> {
         let canonical =
             CanonicalTool::parse(&format!("host/test/{}", call.tool)).map_err(|error| malformed(error.to_string()))?;
         Ok(Derived {
             canonical,
             spawn: call.tool == "spawn",
-            names_children: if call.arguments.get().contains("child-1") {
-                vec![TrajectoryId(format!("{}:child-1", actor.root.0))]
-            } else {
-                Vec::new()
-            },
         })
+    }
+
+    fn names_children(actor: &Actor, call: &ProposedCall) -> Vec<TrajectoryId> {
+        if call.arguments.get().contains("child-1") {
+            vec![TrajectoryId(format!("{}:child-1", actor.root.0))]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// The scan an outcome would discard: asking for it at all is the failure.
+    fn unasked_children(_: &Actor, _: &ProposedCall) -> Vec<TrajectoryId> {
+        panic!("the children of a call are asked for at the call only")
     }
 
     fn spell(canonical: &CanonicalTool) -> Option<String> {
@@ -808,6 +835,16 @@ mod tests {
     const SERVED: Adapter = Adapter {
         name: AdapterName::Kagent,
         derive,
+        names_children,
+        spell,
+    };
+
+    /// The same adapter, refusing to answer the question an outcome has no
+    /// use for.
+    const NEVER_SCANNED: Adapter = Adapter {
+        name: AdapterName::Kagent,
+        derive,
+        names_children: unasked_children,
         spell,
     };
 
@@ -853,6 +890,25 @@ mod tests {
             accepted.names_children,
             vec![TrajectoryId("kagent:r1:child-1".to_string())]
         );
+    }
+
+    /// Only a tool call is asked which children its arguments name; an
+    /// outcome discards the answer, so the wire never asks for it and the
+    /// adapter's scan never runs over a result's payload.
+    #[test]
+    fn an_outcome_is_never_asked_which_children_it_names() {
+        let outcome = r#"{"status":"success","body":{"content":"done"}}"#;
+        for event in ["tool_result", "spawn_result"] {
+            let body = format!(
+                r#"{{"protocol":1,"adapter":"kagent","event":"{event}","root_id":"r1","tool":"read","arguments":{{"path":"tasks/child-1.output"}},"outcome":{outcome}}}"#
+            );
+            let accepted = WireEvent::read(body.as_bytes())
+                .expect("reads")
+                .into_event(&NEVER_SCANNED)
+                .expect("parses")
+                .expect("is an event");
+            assert!(accepted.names_children.is_empty(), "{event}");
+        }
     }
 
     #[test]
@@ -933,6 +989,7 @@ mod tests {
     const CLAUDE_CODE: Adapter = Adapter {
         name: AdapterName::ClaudeCode,
         derive,
+        names_children,
         spell,
     };
 

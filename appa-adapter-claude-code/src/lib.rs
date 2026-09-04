@@ -11,12 +11,12 @@
 //!    renders every `HookDecision` in the hook wire format Claude Code
 //!    expects.
 //! 2. [`adapter`] runs on the server side. From the raw spelling of one
-//!    call the runtime derives the call's canonical identity, whether it
-//!    is the spawn, and which family children its arguments name; the
-//!    wire carries none of these, so nothing a client sends is trusted
-//!    for them. It also carries the derivation's inverse, so the runtime
-//!    can say a tool's Claude Code spelling — the name this model can
-//!    dispatch — where it addresses the model.
+//!    call the runtime derives the call's canonical identity and whether
+//!    it is the spawn, and from a proposed call's arguments which family
+//!    children they name; the wire carries none of these, so nothing a
+//!    client sends is trusted for them. It also carries the derivation's
+//!    inverse, so the runtime can say a tool's Claude Code spelling —
+//!    the name this model can dispatch — where it addresses the model.
 //!
 //! Tool identity, a bijection over the raw spellings it accepts; the
 //! adapter's inverse reads the table right to left:
@@ -33,6 +33,13 @@
 //! contains `__`, because it is what precedes the first one. The spawn
 //! tools `Agent` and `Task` are host tools, `host/claude-code/Agent` and
 //! `host/claude-code/Task`; the `agent` family is not Claude Code's.
+//!
+//! Read right to left the table is partial. The control spelling
+//! occupies a cell the `mcp` row would otherwise own, so
+//! `mcp/plugin_appa-runtime_appa/execute_remedy_plan` — an ordinary tool
+//! a policy may declare — has no Claude Code spelling. Where the runtime
+//! would name that tool it says the canonical id, never a spelling that
+//! dispatches the control tool instead.
 //!
 //! Hook mapping:
 //!
@@ -149,6 +156,7 @@ pub fn adapter() -> Adapter {
     Adapter {
         name: AdapterName::ClaudeCode,
         derive,
+        names_children,
         spell,
     }
 }
@@ -182,26 +190,34 @@ fn canonical(raw: &str) -> Result<CanonicalTool, ParseRefusal> {
 
 /// The inverse of [`canonical`] over its range: what Claude Code calls the tool one
 /// canonical identity names, which is the name the runtime says whenever it tells this
-/// model to run something. `None` for a canonical id no raw spelling maps onto — the
-/// `agent` family, another host's namespace, and a `host/claude-code/<name>` whose name
-/// is itself an `mcp__` spelling, which derives to the `mcp` family instead.
-fn spell(canonical: &CanonicalTool) -> Option<String> {
-    if canonical.is_control() {
+/// model to run something. Every answer is checked against [`canonical`], so a spelling
+/// this returns is one that derives back to the identity it was asked about, and a
+/// canonical id outside the derivation's range answers `None` — the caller says the
+/// canonical id instead.
+///
+/// Three families of id have no Claude Code spelling. The `agent` family and another
+/// host's namespace render nothing. `host/claude-code/<name>` whose name is itself an
+/// `mcp__` spelling, and `mcp/plugin_appa-runtime_appa/execute_remedy_plan` — an ordinary
+/// tool named `execute_remedy_plan` on a server named like the runtime's own plugin —
+/// render a spelling Claude Code dispatches to a different identity, so neither is a
+/// spelling of the id it came from.
+fn spell(tool: &CanonicalTool) -> Option<String> {
+    if tool.is_control() {
         return Some(CONTROL_TOOL_RAW.to_string());
     }
-    let mut segments = canonical.as_str().split('/');
-    match (segments.next()?, segments.next()?, segments.next()?) {
-        ("mcp", server, tool) => Some(format!("{MCP_PREFIX}{server}__{tool}")),
-        ("host", "claude-code", name) if !name.starts_with(MCP_PREFIX) => Some(name.to_string()),
-        _ => None,
-    }
+    let mut segments = tool.as_str().split('/');
+    let raw = match (segments.next()?, segments.next()?, segments.next()?) {
+        ("mcp", server, name) => format!("{MCP_PREFIX}{server}__{name}"),
+        ("host", "claude-code", name) => name.to_string(),
+        _ => return None,
+    };
+    (canonical(&raw).as_ref() == Ok(tool)).then_some(raw)
 }
 
-fn derive(actor: &Actor, call: &ProposedCall) -> Result<Derived, ParseRefusal> {
+fn derive(_: &Actor, call: &ProposedCall) -> Result<Derived, ParseRefusal> {
     Ok(Derived {
         canonical: canonical(&call.tool)?,
         spawn: is_spawn_tool(&call.tool),
-        names_children: names_children(actor, call),
     })
 }
 
@@ -210,6 +226,9 @@ fn derive(actor: &Actor, call: &ProposedCall) -> Result<Derived, ParseRefusal> {
 /// transcript (`subagents/agent-<agent>.jsonl`). Every string leaf of the arguments is scanned,
 /// so a path inside a shell command is caught as a `Read` path is. The default spellings only:
 /// a renamed copy, a symlink, or a relative path the shell resolves is not.
+///
+/// The wire asks this at a proposed call and nowhere else, so the scan runs once per call and
+/// never over a result's payload.
 fn names_children(actor: &Actor, call: &ProposedCall) -> Vec<TrajectoryId> {
     let Ok(arguments) = serde_json::from_str::<serde_json::Value>(call.arguments.get()) else {
         return Vec::new();
@@ -776,18 +795,27 @@ mod tests {
         })
     }
 
-    fn derived(tool: &str, arguments: serde_json::Value) -> Result<Derived, ParseRefusal> {
-        let actor = Actor {
-            root: root(),
-            child: None,
-        };
-        (adapter().derive)(
-            &actor,
-            &ProposedCall {
+    fn proposed(tool: &str, arguments: serde_json::Value) -> (Actor, ProposedCall) {
+        (
+            Actor {
+                root: root(),
+                child: None,
+            },
+            ProposedCall {
                 tool: tool.to_string(),
                 arguments: raw(arguments),
             },
         )
+    }
+
+    fn derived(tool: &str, arguments: serde_json::Value) -> Result<Derived, ParseRefusal> {
+        let (actor, call) = proposed(tool, arguments);
+        (adapter().derive)(&actor, &call)
+    }
+
+    fn named_children(tool: &str, arguments: serde_json::Value) -> Vec<TrajectoryId> {
+        let (actor, call) = proposed(tool, arguments);
+        (adapter().names_children)(&actor, &call)
     }
 
     #[test]
@@ -824,6 +852,9 @@ mod tests {
     }
 
     /// A canonical id no Claude Code spelling derives to has no Claude Code spelling.
+    /// `mcp/plugin_appa-runtime_appa/execute_remedy_plan` is the ordinary tool a policy
+    /// may declare on a server named like the runtime's own plugin: its rendering is the
+    /// reserved control spelling, which names another tool, so it has none.
     #[test]
     fn a_canonical_id_outside_the_range_has_no_host_spelling() {
         for name in [
@@ -831,6 +862,7 @@ mod tests {
             "host/kagent/memory_persist",
             "host/kagent-gate/outer",
             "host/claude-code/mcp__github__x",
+            "mcp/plugin_appa-runtime_appa/execute_remedy_plan",
         ] {
             let canonical = CanonicalTool::parse(name).expect("the fixture is canonical");
             assert_eq!((adapter().spell)(&canonical), None, "{name}");
@@ -867,49 +899,50 @@ mod tests {
     }
 
     #[test]
-    fn the_derivation_carries_spawn_and_the_named_children() {
+    fn the_derivation_carries_the_canonical_identity_and_spawn() {
         for tool in ["Agent", "Task"] {
             let derived = derived(tool, serde_json::json!({"prompt": "list files"})).expect("derives");
             assert!(derived.spawn, "{tool} is the spawn");
             assert_eq!(derived.canonical.as_str(), format!("host/claude-code/{tool}"));
-            assert!(derived.names_children.is_empty());
         }
-        let shell = derived(
-            "Bash",
-            serde_json::json!({"command": "cat tasks/a1.output; grep x subagents/agent-a2.jsonl tasks/a1.output"}),
-        )
-        .expect("derives");
-        assert!(!shell.spawn);
+        assert!(
+            !derived("Bash", serde_json::json!({"command": "ls"}))
+                .expect("derives")
+                .spawn
+        );
+        assert!(matches!(
+            derived("mcp__github", serde_json::json!({})),
+            Err(ParseRefusal::Malformed { .. })
+        ));
+    }
+
+    #[test]
+    fn a_calls_arguments_name_the_family_children_they_spell() {
+        assert!(named_children("Agent", serde_json::json!({"prompt": "list files"})).is_empty());
         assert_eq!(
-            shell.names_children,
+            named_children(
+                "Bash",
+                serde_json::json!({"command": "cat tasks/a1.output; grep x subagents/agent-a2.jsonl tasks/a1.output"}),
+            ),
             vec![
                 TrajectoryId("cc:s1:a1".to_string()),
                 TrajectoryId("cc:s1:a2".to_string())
             ],
         );
-        let nested = derived(
-            "Read",
-            serde_json::json!({"file_path": "/home/u/.claude/subagents/agent-b7.jsonl", "meta": [{"p": "tasks/x-1.output"}]}),
-        )
-        .expect("derives");
         assert_eq!(
-            nested.names_children,
+            named_children(
+                "Read",
+                serde_json::json!({"file_path": "/home/u/.claude/subagents/agent-b7.jsonl", "meta": [{"p": "tasks/x-1.output"}]}),
+            ),
             vec![
                 TrajectoryId("cc:s1:b7".to_string()),
                 TrajectoryId("cc:s1:x-1".to_string())
             ],
         );
         assert!(
-            derived("Read", serde_json::json!({"file_path": "tasks/a1.txt"}))
-                .expect("derives")
-                .names_children
-                .is_empty(),
+            named_children("Read", serde_json::json!({"file_path": "tasks/a1.txt"})).is_empty(),
             "another suffix names no child"
         );
-        assert!(matches!(
-            derived("mcp__github", serde_json::json!({})),
-            Err(ParseRefusal::Malformed { .. })
-        ));
     }
 
     mod laws {
@@ -931,6 +964,30 @@ mod tests {
             ]
         }
 
+        /// Every canonical identity a policy may declare, including the ones no Claude
+        /// Code spelling derives to: the control tool's own server and name, another
+        /// host's namespace, and a host tool named like an `mcp__` spelling.
+        fn canonical_id() -> impl Strategy<Value = CanonicalTool> {
+            let family = prop_oneof![Just("mcp"), Just("host"), Just("agent")];
+            let namespace = prop_oneof![
+                Just("plugin_appa-runtime_appa".to_string()),
+                Just("claude-code".to_string()),
+                Just("kagent".to_string()),
+                segment_chars(),
+            ];
+            let name = prop_oneof![
+                Just("execute_remedy_plan".to_string()),
+                Just("mcp__github__x".to_string()),
+                segment_chars(),
+            ];
+            prop_oneof![
+                (family, namespace, name).prop_filter_map("a canonical identity", |(family, namespace, name)| {
+                    CanonicalTool::of(family, &namespace, &name).ok()
+                }),
+                raw_spelling().prop_filter_map("an accepted spelling", |raw| canonical(&raw).ok()),
+            ]
+        }
+
         proptest! {
             #[test]
             fn an_accepted_spelling_parses_back_and_is_control_only_when_registered(raw in raw_spelling()) {
@@ -948,6 +1005,17 @@ mod tests {
                 if let Ok(canonical) = canonical(&raw) {
                     let spelled = (adapter().spell)(&canonical);
                     prop_assert_eq!(spelled.as_deref(), Some(raw.as_str()));
+                }
+            }
+
+            /// The other direction, over every canonical identity a policy may declare:
+            /// a spelling the inverse yields is one Claude Code dispatches to the very
+            /// identity it was asked about. An identity whose rendering would name
+            /// another tool is spelled `None` instead, never that rendering.
+            #[test]
+            fn a_spelled_identity_is_the_one_its_spelling_derives_to(tool in canonical_id()) {
+                if let Some(spelled) = (adapter().spell)(&tool) {
+                    prop_assert_eq!(canonical(&spelled), Ok(tool));
                 }
             }
 

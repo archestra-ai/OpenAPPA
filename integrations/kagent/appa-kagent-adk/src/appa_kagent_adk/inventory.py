@@ -14,7 +14,9 @@ A call of a name outside it is refused at the gate, never forwarded.
 
 The inverse travels with it. The runtime names a tool back to the model
 by the spelling it received, which is not a name the model can call, so
-``despell`` spells it into the name ADK dispatches.
+``despell`` spells it into the name ADK dispatches. The builder owns
+both directions and refuses a config whose two raw names spell alike,
+so every spelling the wire carries names one tool the model can call.
 
 - An MCP entry (``http_tools``, ``sse_tools``) names its tools in its
   ``tools`` filter, and a gated agent must carry one: without it the
@@ -25,7 +27,9 @@ by the spelling it received, which is not a name the model can call, so
 - kagent renders a remote agent's tool name as
   ``<namespace>__NS__<agent>`` with hyphens as underscores. Both halves
   are DNS-1123 labels, which carry no underscore, so the real names
-  come back exactly.
+  come back exactly. The rendering is not injective over every name a
+  config can carry — ``team_a__NS__x`` and ``team-a__NS__x`` spell
+  alike — and the builder refuses the pair rather than lose one.
 - The builtins come from ``builtins.json``, the manifest pinned to the
   kagent-adk version this image wraps, in groups the rendered config
   and the runtime's environment switch on.
@@ -37,7 +41,7 @@ import json
 import os
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from importlib import resources
 from typing import Any
 from urllib.parse import urlsplit
@@ -94,14 +98,13 @@ class ToolInventory:
     """The raw ADK tool names of one agent, each with its wire spelling."""
 
     spellings: Mapping[str, str]
-    names: Mapping[str, str] = field(init=False)
-    """The inverse: each wire spelling, back to the name ADK dispatches."""
+    names: Mapping[str, str]
+    """The inverse: each wire spelling, back to the name ADK dispatches.
 
-    def __post_init__(self) -> None:
-        # The inverse is built with the inventory and from nothing else.
-        # A raw name is declared once, so no two names share a spelling
-        # and the inverse loses nothing.
-        object.__setattr__(self, "names", {spelling: name for name, spelling in self.spellings.items()})
+    ``from_config`` is the only builder, and it fills both directions as
+    one: a spelling is assigned to at most one raw name, so the inverse
+    loses nothing.
+    """
 
     def spelling(self, name: str) -> str | None:
         """The wire spelling of a raw name, or None for a name outside the inventory."""
@@ -123,7 +126,8 @@ class ToolInventory:
         """Build the inventory of a rendered kagent config.
 
         Raises ``ConfigRefused`` for an MCP entry without a tool filter,
-        a name the wire cannot spell, and a raw name declared twice.
+        a name the wire cannot spell, a raw name declared twice, and two
+        raw names that spell alike.
         """
         builder = _Builder()
         builder.add(wire.RESERVED_TOOL, wire.CONTROL_TOOL, "the reserved tool")
@@ -143,7 +147,7 @@ class ToolInventory:
             if enabled[group]:
                 for name in names:
                     builder.add(name, builtin_spelling(name), f"the builtin group {group}")
-        return cls(dict(builder.spellings))
+        return cls(dict(builder.spellings), dict(builder.names))
 
 
 def _entries(raw: Any) -> list[dict[str, Any]]:
@@ -157,8 +161,11 @@ def _entries(raw: Any) -> list[dict[str, Any]]:
 
 
 class _Builder:
+    """Both directions of one inventory, each name and each spelling taken once."""
+
     def __init__(self) -> None:
         self.spellings: dict[str, str] = {}
+        self.names: dict[str, str] = {}
         self._sources: dict[str, str] = {}
 
     def add(self, name: str, spelling: str, source: str) -> None:
@@ -168,7 +175,15 @@ class _Builder:
                 f"the config declares the tool name {name!r} twice ({declared} and {source}), and the "
                 "gate cannot tell the two apart — rename one of them"
             )
+        spelled = self.names.get(spelling)
+        if spelled is not None:
+            raise ConfigRefused(
+                f"the config declares {spelled!r} ({self._sources[spelled]}) and {name!r} ({source}), and "
+                f"both spell as {spelling!r} on the wire — the runtime could name only one of them back "
+                "to the model, so rename one of them"
+            )
         self.spellings[name] = spelling
+        self.names[spelling] = name
         self._sources[name] = source
 
     def mcp_server(self, path: str, server: dict[str, Any]) -> None:

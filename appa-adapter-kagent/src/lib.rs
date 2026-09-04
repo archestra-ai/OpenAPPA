@@ -34,18 +34,24 @@
 //! A kagent child's words reach its parent through the after-tool
 //! callback only, and the child trajectory binds to its spawn through
 //! `spawn_binding` at `child_start`, not through an argument the
-//! parent spells. So no call names a child by its arguments and the
-//! derivation's `names_children` is always empty.
+//! parent spells. So no call names a child by its arguments and
+//! [`names_children`] is always empty.
 
-use appa_runtime_api::{Actor, Adapter, AdapterName, CanonicalTool, Derived, ParseRefusal, ProposedCall};
+use appa_runtime_api::{Actor, Adapter, AdapterName, CanonicalTool, Derived, ParseRefusal, ProposedCall, TrajectoryId};
 
 /// The server-side derivation the runtime applies to every kagent call.
 pub fn adapter() -> Adapter {
     Adapter {
         name: AdapterName::Kagent,
         derive,
+        names_children,
         spell,
     }
+}
+
+/// No kagent call names a family child by its arguments, so nothing here scans them.
+fn names_children(_: &Actor, _: &ProposedCall) -> Vec<TrajectoryId> {
+    Vec::new()
 }
 
 /// The one tool the `appa:` prefix names.
@@ -90,7 +96,6 @@ fn derive(_: &Actor, call: &ProposedCall) -> Result<Derived, ParseRefusal> {
             return Ok(Derived {
                 canonical: CanonicalTool::control(),
                 spawn: false,
-                names_children: Vec::new(),
             });
         }
         ("appa", _) => return Err(refused(format!("appa: names one tool, {CONTROL_TOOL_NAME}"))),
@@ -107,31 +112,38 @@ fn derive(_: &Actor, call: &ProposedCall) -> Result<Derived, ParseRefusal> {
         }
     };
     let canonical = CanonicalTool::of(family, namespace, tool).map_err(|error| refused(error.to_string()))?;
-    Ok(Derived {
-        canonical,
-        spawn,
-        names_children: Vec::new(),
-    })
+    Ok(Derived { canonical, spawn })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use appa_runtime_api::TrajectoryId;
 
-    fn derived(tool: &str) -> Result<Derived, ParseRefusal> {
-        let actor = Actor {
-            root: TrajectoryId("kagent:s1".to_string()),
-            child: Some(TrajectoryId("kagent:s1:c1".to_string())),
-        };
-        (adapter().derive)(
-            &actor,
-            &ProposedCall {
+    fn proposed(tool: &str) -> (Actor, ProposedCall) {
+        (
+            Actor {
+                root: TrajectoryId("kagent:s1".to_string()),
+                child: Some(TrajectoryId("kagent:s1:c1".to_string())),
+            },
+            ProposedCall {
                 tool: tool.to_string(),
                 arguments: serde_json::value::to_raw_value(&serde_json::json!({"path": "tasks/c1.output"}))
                     .expect("the fixture serializes"),
             },
         )
+    }
+
+    fn derived(tool: &str) -> Result<Derived, ParseRefusal> {
+        let (actor, call) = proposed(tool);
+        (adapter().derive)(&actor, &call)
+    }
+
+    /// A kagent child is bound at `child_start`, never named by a call's arguments, so a
+    /// call spelling what would be a child's output file under another host names none.
+    #[test]
+    fn no_kagent_call_names_a_family_child() {
+        let (actor, call) = proposed("builtin:read_file");
+        assert!((adapter().names_children)(&actor, &call).is_empty());
     }
 
     #[test]
@@ -154,7 +166,6 @@ mod tests {
             assert_eq!(derived.canonical.as_str(), expected, "{raw}");
             assert_eq!(derived.spawn, spawn, "{raw}");
             assert_eq!(derived.canonical.is_control(), raw == CONTROL_TOOL_RAW, "{raw}");
-            assert!(derived.names_children.is_empty(), "{raw}: no kagent call names a child");
             assert_eq!(
                 (adapter().spell)(&derived.canonical).as_deref(),
                 Some(raw),
@@ -245,6 +256,26 @@ mod tests {
             ]
         }
 
+        /// Every canonical identity a policy may declare, including the ones no kagent
+        /// spelling derives to and the control tool's own name under another family.
+        fn canonical_id() -> impl Strategy<Value = CanonicalTool> {
+            let family = prop_oneof![Just("mcp"), Just("host"), Just("agent")];
+            let namespace = prop_oneof![
+                Just("kagent".to_string()),
+                Just("kagent-gate".to_string()),
+                Just("appa".to_string()),
+                Just("claude-code".to_string()),
+                segment_chars(),
+            ];
+            let name = prop_oneof![Just(CONTROL_TOOL_NAME.to_string()), segment_chars()];
+            prop_oneof![
+                (family, namespace, name).prop_filter_map("a canonical identity", |(family, namespace, name)| {
+                    CanonicalTool::of(family, &namespace, &name).ok()
+                }),
+                raw_spelling().prop_filter_map("an accepted spelling", |raw| derived(&raw).ok().map(|d| d.canonical)),
+            ]
+        }
+
         proptest! {
             #[test]
             fn an_accepted_spelling_parses_back_and_is_control_only_when_registered(raw in raw_spelling()) {
@@ -253,7 +284,6 @@ mod tests {
                     prop_assert_eq!(CanonicalTool::parse(canonical.as_str()), Ok(canonical.clone()));
                     prop_assert_eq!(canonical.is_control(), raw == CONTROL_TOOL_RAW);
                     prop_assert_eq!(derived.spawn, canonical.as_str().starts_with("agent/"), "{}", canonical);
-                    prop_assert!(derived.names_children.is_empty());
                     if let Some(namespace) = canonical.as_str().split('/').nth(1) {
                         prop_assert!(!namespace.contains("__"), "{}", canonical);
                     }
@@ -267,6 +297,18 @@ mod tests {
                 if let Ok(derived) = derived(&raw) {
                     let spelled = (adapter().spell)(&derived.canonical);
                     prop_assert_eq!(spelled.as_deref(), Some(raw.as_str()));
+                }
+            }
+
+            /// The other direction, over every canonical identity a policy may declare:
+            /// a spelling the inverse yields is one the plugin dispatches to the very
+            /// identity it was asked about. The `appa:` prefix is reserved and no
+            /// rendering here uses it, so no ordinary tool can be spelled as the control
+            /// tool.
+            #[test]
+            fn a_spelled_identity_is_the_one_its_spelling_derives_to(tool in canonical_id()) {
+                if let Some(spelled) = (adapter().spell)(&tool) {
+                    prop_assert_eq!(derived(&spelled).map(|derived| derived.canonical), Ok(tool));
                 }
             }
 

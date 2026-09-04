@@ -16,7 +16,10 @@
 //
 // The inverse travels with it. The runtime names a tool back to the
 // model by the spelling it received, which is not a name the model can
-// call, so Despell spells it into the name ADK dispatches.
+// call, so Despell spells it into the name ADK dispatches. The builder
+// owns both directions and refuses a config whose two raw names spell
+// alike, so every spelling the wire carries names one tool the model
+// can call.
 //
 //   - An MCP entry names its tools in its tool filter, and a gated agent
 //     must carry one: without it the server decides the tool list at
@@ -26,7 +29,9 @@
 //   - kagent renders a remote agent's tool name as
 //     <namespace>__NS__<agent> with hyphens as underscores. Both halves
 //     are DNS-1123 labels, which carry no underscore, so the real names
-//     come back exactly.
+//     come back exactly. The rendering is not injective over every name
+//     a config can carry — team_a__NS__x and team-a__NS__x spell alike —
+//     and the builder refuses the pair rather than lose one.
 //   - The builtins come from builtins.json, the manifest pinned to the
 //     kagent go module this image wraps, in groups the rendered config
 //     and the runtime's environment switch on.
@@ -83,9 +88,9 @@ func BuiltinManifest() []byte { return builtinsManifest }
 type Inventory struct {
 	spellings map[string]string
 	// names is the inverse: each wire spelling, back to the name ADK
-	// dispatches. It is built with the inventory and from nothing else.
-	// A raw name is declared once, so no two names share a spelling and
-	// the inverse loses nothing.
+	// dispatches. BuildInventory is the only builder, and it fills both
+	// directions as one: a spelling is assigned to at most one raw name,
+	// so the inverse loses nothing.
 	names map[string]string
 }
 
@@ -139,6 +144,8 @@ const (
 	UnspellableName
 	// DuplicateName: one raw name declared twice.
 	DuplicateName
+	// CollidingSpelling: two raw names that spell alike on the wire.
+	CollidingSpelling
 )
 
 // InventoryRefusal is BuildInventory's error: which refusal fired, the
@@ -158,6 +165,9 @@ func (r *InventoryRefusal) Error() string {
 	case DuplicateName:
 		return fmt.Sprintf("the config declares the tool name %q twice (%s), and the gate cannot tell the two apart: rename one of them",
 			r.Name, r.Detail)
+	case CollidingSpelling:
+		// The detail already names both declarations and the spelling.
+		return r.Detail
 	default:
 		return fmt.Sprintf("%s: %s", r.Path, r.Detail)
 	}
@@ -195,7 +205,7 @@ type InventorySpec struct {
 // BuildInventory spells every tool the spec declares. A refusal is an
 // *InventoryRefusal; a manifest this image cannot read is a plain error.
 func BuildInventory(spec InventorySpec) (Inventory, error) {
-	b := builder{spellings: map[string]string{}, sources: map[string]string{}}
+	b := builder{spellings: map[string]string{}, names: map[string]string{}, sources: map[string]string{}}
 	if err := b.add(ReservedTool, ControlTool, "the reserved tool"); err != nil {
 		return Inventory{}, err
 	}
@@ -233,11 +243,7 @@ func BuildInventory(spec InventorySpec) (Inventory, error) {
 			}
 		}
 	}
-	names := make(map[string]string, len(b.spellings))
-	for name, spelling := range b.spellings {
-		names[spelling] = name
-	}
-	return Inventory{spellings: b.spellings, names: names}, nil
+	return Inventory{spellings: b.spellings, names: b.names}, nil
 }
 
 func laneGroups() (map[string][]string, error) {
@@ -254,8 +260,11 @@ func laneGroups() (map[string][]string, error) {
 	return lane.Groups, nil
 }
 
+// builder holds both directions of one inventory, each raw name and
+// each spelling taken once.
 type builder struct {
 	spellings map[string]string
+	names     map[string]string
 	sources   map[string]string
 }
 
@@ -263,7 +272,14 @@ func (b *builder) add(name, spelling, source string) error {
 	if declared, twice := b.sources[name]; twice {
 		return &InventoryRefusal{Kind: DuplicateName, Path: source, Name: name, Detail: declared + " and " + source}
 	}
+	if spelled, taken := b.names[spelling]; taken {
+		return &InventoryRefusal{Kind: CollidingSpelling, Path: source, Name: name,
+			Detail: fmt.Sprintf("the config declares %q (%s) and %q (%s), and both spell as %q on the wire: "+
+				"the runtime could name only one of them back to the model, so rename one of them",
+				spelled, b.sources[spelled], name, source, spelling)}
+	}
 	b.spellings[name] = spelling
+	b.names[spelling] = name
 	b.sources[name] = source
 	return nil
 }

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -116,6 +117,34 @@ func TestARawNameDeclaredTwiceIsRefused(t *testing.T) {
 	_, err = BuildInventory(InventorySpec{MCPServers: []MCPServerSpec{{Path: "http_tools[0]", URL: "http://x:1/mcp", Tools: []string{"ask_user"}}}})
 	if !errors.As(err, &refusal) || refusal.Kind != DuplicateName || refusal.Name != "ask_user" {
 		t.Errorf("a tool that shadows a builtin is refused, got %v", err)
+	}
+}
+
+func TestTwoRawNamesThatSpellAlikeAreRefused(t *testing.T) {
+	// kagent renders a hyphen as an underscore, so these two distinct raw
+	// names carry one spelling, and one of them would be lost.
+	_, err := BuildInventory(InventorySpec{RemoteAgents: []RemoteAgentSpec{
+		{Path: "remote_agents[0].name", Name: "team_a__NS__release_manager"},
+		{Path: "remote_agents[1].name", Name: "team-a__NS__release_manager"},
+	}})
+	var refusal *InventoryRefusal
+	if !errors.As(err, &refusal) || refusal.Kind != CollidingSpelling || refusal.Name != "team-a__NS__release_manager" {
+		t.Fatalf("two names that spell alike are refused, got %v", err)
+	}
+	if !strings.Contains(refusal.Error(), "agent:team-a/release-manager") {
+		t.Errorf("the refusal names the spelling they collide on, got %q", refusal.Error())
+	}
+}
+
+func TestEverySpellingDespellsBackToTheNameADKDispatches(t *testing.T) {
+	inventory := mustBuild(t, InventorySpec{
+		MCPServers:   []MCPServerSpec{demoTools},
+		RemoteAgents: []RemoteAgentSpec{{Path: "remote_agents[0].name", Name: "kagent__NS__log_analyst"}},
+	})
+	for name, spelling := range inventory.spellings {
+		if got := inventory.Despell("call " + spelling + " now"); got != "call "+name+" now" {
+			t.Errorf("%q despells to %q, want the raw name %q", spelling, got, name)
+		}
 	}
 }
 

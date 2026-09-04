@@ -92,6 +92,27 @@ def test_a_raw_name_declared_twice_is_refused():
         inventory(http_tools=[{"params": {"url": "http://other:3000/mcp"}, "tools": ["ask_user"]}])
 
 
+def test_two_raw_names_that_spell_alike_are_refused():
+    # kagent renders a hyphen as an underscore, so these two distinct raw
+    # names carry one spelling, and one of them would be lost.
+    with pytest.raises(ConfigRefused, match=r"agent:team-a/release-manager"):
+        inventory(
+            remote_agents=[
+                {"name": "team_a__NS__release_manager", "url": "http://x"},
+                {"name": "team-a__NS__release_manager", "url": "http://y"},
+            ]
+        )
+
+
+def test_every_spelling_despells_back_to_the_name_adk_dispatches():
+    built = inventory(
+        http_tools=[DEMO_TOOLS],
+        remote_agents=[{"name": "kagent__NS__log_analyst", "url": "http://x"}],
+    )
+    for name, spelling in built.spellings.items():
+        assert built.despell(f"call {spelling} now") == f"call {name} now"
+
+
 def test_the_builtin_groups_follow_the_config_and_the_environment():
     plain = inventory()
     assert plain.spelling("load_memory") is None
