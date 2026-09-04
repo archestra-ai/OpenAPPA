@@ -68,21 +68,15 @@ Make sure you have installed:
 - [kind](https://kind.sigs.k8s.io/docs/user/quick-start/) or an existing Kubernetes cluster
 - [Helm](https://helm.sh/docs/intro/install/) (v3.8+)
 - [kubectl](https://kubernetes.io/docs/tasks/tools/)
-- [git](https://git-scm.com/downloads)
-- An [OpenRouter API key](https://openrouter.ai/settings/keys)
-
-Clone the repository to run the demo chart:
-
-```sh
-git clone https://github.com/archestra-ai/OpenAPPA
-cd OpenAPPA
-```
+- An [OpenAI API key](https://platform.openai.com/api-keys) (or credentials for another [supported kagent provider](https://kagent.dev/docs/kagent/supported-providers/))
 
 ### 1. Install kagent with OpenAPPA
 
-Install the kagent [CRDs and Helm chart](https://kagent.dev/docs/kagent/resources/helm/) with the OpenAPPA runtime image:
+Install the kagent [CRDs and Helm chart](https://kagent.dev/docs/kagent/resources/helm/) configured with your OpenAI API key and the OpenAPPA runtime image:
 
 ```sh
+export OPENAI_API_KEY="<your-api-key>"
+
 # Install kagent CRDs
 helm upgrade --install kagent-crds oci://ghcr.io/kagent-dev/kagent/helm/kagent-crds \
   --version 0.9.12 -n kagent --create-namespace
@@ -102,36 +96,81 @@ helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --set cilium-policy-agent.enabled=false \
   --set cilium-manager-agent.enabled=false \
   --set cilium-debug-agent.enabled=false \
+  --set providers.default=openAI \
+  --set-string providers.openAI.apiKey="$OPENAI_API_KEY" \
   --wait --timeout 10m \
   --set controller.agentImage.tag=0.9.0 # x-release-please-version
 ```
 
-The kagent chart enables its stock sample agents by default. Those agents require a provider Secret such as `kagent-openai`, but this quickstart replaces them with the demo agents in the next step. The flags above disable only the unused stock agents. They keep the controller, dashboard, and tool services enabled. The explicit timeout makes Helm report a failed rollout instead of waiting without a visible deadline.
+The kagent chart enables its stock sample agents by default. Setting `providers.openAI.apiKey` configures the default OpenAI provider for the cluster. The flags above disable the unused stock agents to keep the cluster lean. The explicit timeout makes Helm report a failed rollout instead of waiting without a visible deadline.
 
-To build images from source, see [`integrations/kagent/README.md`](https://github.com/archestra-ai/OpenAPPA/blob/main/integrations/kagent/README.md).
+The parameters `providers.default=openAI` and `providers.openAI.apiKey` configure kagent's default provider and credentials. You can configure any LLM provider and model supported by kagent (such as Anthropic, Azure OpenAI, Google Vertex AI, AWS Bedrock, Ollama, or custom OpenAI-compatible gateways) by setting the corresponding chart parameters or referencing custom `ModelConfig` resources. See the [kagent Supported Providers documentation](https://kagent.dev/docs/kagent/supported-providers/) for details.
 
-### 2. Deploy the demo stack
+### 2. Deploy the shared OpenAPPA runtime
 
-Install the demo chart with your OpenRouter API key. It deploys sample agents (`cluster-ops`, `log-analyst`, `appa-guide`) and 16 demonstration scenarios:
+Deploy the OpenAPPA policy runtime using the official Helm chart from GHCR:
 
 ```sh
-export OPENROUTER_API_KEY="<your-api-key>"
-
-helm upgrade --install appa-kagent-demo ./integrations/kagent/demo/chart \
-  -n kagent --set-string openai.apiKey="$OPENROUTER_API_KEY" \
+helm upgrade --install appa-runtime oci://ghcr.io/archestra-ai/charts/appa-runtime \
+  --version 0.9.0 \
+  --namespace appa --create-namespace \
+  --set persistence.enabled=true \
+  --set persistence.size=8Gi \
   --wait --timeout 10m
 ```
 
-The demo chart sets `APPA_ENABLED=true` on all demo agents.
+The runtime binds loopback at `127.0.0.1:18788` with an unprivileged NGINX relay sidecar exposing port `18789`. Gated agents connect via cluster DNS:
 
-If an install times out, inspect the resource that did not become ready:
+```text
+http://appa-runtime.appa.svc.cluster.local:18789
+```
+
+- **Single replica with SQLite**: OpenAPPA evaluates algebraic monoids deterministically without distributed consensus overhead. SQLite stores the append-only trajectory audit log.
+- **Persistence (`persistence.enabled=true`)**: Mounts a PersistentVolumeClaim at `/var/lib/appa`. It retains the trajectory log and provides writable storage for the `appa-guide` skill to download, verify, and refresh batteries.
+- **Policy ConfigMap**: Mounts the `appa-policy` ConfigMap (key `appa.toml`) at `/etc/appa/appa.toml`. The runtime boots fail-closed until policy rules are configured.
+
+If an install times out, inspect the cluster status:
 
 ```sh
+kubectl get pods -n appa
 kubectl get pods,agents -n kagent
 kubectl get events -n kagent --sort-by='.lastTimestamp'
 ```
 
-### 3. Open the kagent dashboard
+### 3. Deploy a protected agent
+
+Deploy a declarative agent configured with `APPA_ENABLED: "true"` pointing to the shared runtime:
+
+```yaml
+apiVersion: kagent.dev/v1alpha2
+kind: Agent
+metadata:
+  name: sre-agent
+  namespace: kagent
+spec:
+  type: Declarative
+  description: "Site reliability agent protected by OpenAPPA."
+  declarative:
+    modelConfig: "default-model-config"
+    deployment:
+      env:
+        - name: APPA_ENABLED
+          value: "true"
+        - name: APPA_RUNTIME_URL
+          value: "http://appa-runtime.appa.svc.cluster.local:18789"
+```
+
+Save as `sre-agent.yaml` and apply:
+
+```sh
+kubectl apply -f sre-agent.yaml
+```
+
+The `modelConfig` field references the cluster's active `ModelConfig` resource (`default-model-config` by default). You can point this to any provider and model configured in your cluster per the [kagent Supported Providers documentation](https://kagent.dev/docs/kagent/supported-providers/).
+
+Gated agents refuse to start without an active runtime connection (`fail-closed`).
+
+### 4. Open the kagent dashboard
 
 Forward the [kagent dashboard](https://kagent.dev/docs/kagent/observability/launch-ui/) to your machine:
 
@@ -139,11 +178,11 @@ Forward the [kagent dashboard](https://kagent.dev/docs/kagent/observability/laun
 kubectl port-forward -n kagent svc/kagent-ui 8901:8080
 ```
 
-Open [http://localhost:8901](http://localhost:8901) in your browser. Explore the pre-seeded scenario chats under **Agents → cluster-ops → Chat**, or open **Agents → appa-guide → Chat** to manage policies.
+Open [http://localhost:8901](http://localhost:8901) in your browser. Explore your agents under **Agents → sre-agent → Chat**, or deploy **appa-guide** below to manage policies.
 
-## Install cluster-wide runtime and protect existing agents
+## Protect existing agents
 
-If you already run kagent in your cluster, you do not need to rebuild your agents or fork your code. You deploy one shared `appa-runtime` and point your agents to it.
+If you already run kagent in your cluster, you do not need to rebuild your agents or fork your code. You update the controller image and point your agents to `appa-runtime`.
 
 ### 1. Update the kagent controller image
 
@@ -162,31 +201,7 @@ helm upgrade kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
 
 This image replaces the base container image for declarative agent pods. It stays inert until an agent enables `APPA_ENABLED: "true"`. Existing agents remain unaffected.
 
-### 2. Deploy the shared OpenAPPA runtime
-
-Deploy a single `appa-runtime` for the cluster. It serves the policy engine, evaluates tool flows, and logs audit events:
-
-```sh
-helm upgrade --install appa-runtime oci://ghcr.io/archestra-ai/charts/appa-runtime \
-  --version 0.9.0 \
-  --namespace appa --create-namespace \
-  --set persistence.enabled=true \
-  --set persistence.size=8Gi
-```
-
-From a repository clone, use `charts/appa-runtime` as the chart path instead.
-
-Key runtime architecture details:
-
-- **Single replica with SQLite**: OpenAPPA evaluates algebraic monoids deterministically without distributed consensus overhead. SQLite stores the append-only trajectory audit log.
-- **Relay sidecar and Service address**: The runtime process binds loopback at `127.0.0.1:18788`. An unprivileged NGINX sidecar exposes the cluster Service on port `18789`. Agents connect via cluster DNS:
-  ```text
-  http://appa-runtime.appa.svc.cluster.local:18789
-  ```
-- **Persistence (`persistence.enabled=true`)**: Mounts a PersistentVolumeClaim at `/var/lib/appa`. It retains the trajectory log and provides writable storage for the `appa-guide` skill to download, verify, and refresh batteries.
-- **Policy ConfigMap**: Mounts the `appa-policy` ConfigMap (key `appa.toml`) at `/etc/appa/appa.toml`. The runtime boots fail-closed until policy rules are configured.
-
-### 3. Wire existing agents to the runtime
+### 2. Wire existing agents to the runtime
 
 To protect an existing [Agent](https://kagent.dev/docs/kagent/concepts/agents/), add `APPA_ENABLED` and `APPA_RUNTIME_URL` to `spec.declarative.deployment.env`:
 
@@ -231,7 +246,7 @@ kubectl patch agent sre-agent -n default --type=merge -p '{
 
 Invalid values for `APPA_ENABLED` fail container startup immediately. Gated agents refuse to run without a valid runtime connection.
 
-### 4. Confirm the gate
+### 3. Confirm the gate
 
 The kagent controller automatically rolls the agent deployment when the manifest changes. Check the rollout status and startup logs:
 
@@ -447,7 +462,7 @@ When agents call other agents through [A2A (Agent-to-Agent)](https://kagent.dev/
 
 ## Policy example
 
-Policies are declarative TOML files checked into version control. This excerpt from [`integrations/kagent/demo/chart/files/demo.appa.toml`](https://github.com/archestra-ai/OpenAPPA/blob/main/integrations/kagent/demo/chart/files/demo.appa.toml) governs the demo agents:
+Policies are declarative TOML files stored in the `appa-policy` ConfigMap or version control. This example policy excerpt governs cluster tools and human review:
 
 ```toml
 # In-cluster secret read: results carry the ops audience
