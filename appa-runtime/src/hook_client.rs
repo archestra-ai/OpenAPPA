@@ -428,7 +428,10 @@ fn reports_a_result(event: &HookEvent) -> bool {
 fn stands_in_for_a_result(decision: &HookDecision) -> bool {
     matches!(
         decision,
-        HookDecision::Block { .. } | HookDecision::ReplaceOutput { .. } | HookDecision::ChildReturn { .. }
+        HookDecision::Block { .. }
+            | HookDecision::ReplaceOutput { .. }
+            | HookDecision::DeliverValue { .. }
+            | HookDecision::ChildReturn { .. }
     )
 }
 

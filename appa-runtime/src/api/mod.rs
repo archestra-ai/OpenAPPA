@@ -70,11 +70,14 @@ pub(crate) enum ToolCallDecision {
 }
 
 /// What the adapter gives the harness as the tool output. `Keep`: use
-/// the output as it is. `Replace`: use this text instead — a cleaned
-/// version, or a short note saying the real output was not accepted.
+/// the output as it is. `Deliver`: use this admitted value — a confined
+/// result the check let through, or a sanitizer's derivation — as it
+/// crossed. `Replace`: use the runtime's own words instead, a short note
+/// saying the real output was not accepted or the narrowing it causes.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ToolResultDecision {
     Keep,
+    Deliver { value: String },
     Replace { placeholder: String },
 }
 
@@ -1181,9 +1184,14 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
         ));
     }
 
+    // The control tool is the runtime's own: the hooks answer that identity before the
+    // executor classifies a call or confines its result, so a policy naming it declares
+    // something the deployment can never apply. A contract naming it and a `[deployment]`
+    // field naming it are the same claim, and both are refused rather than accepted as a
+    // silent no-op.
     let rc = policy.registry_config();
-    for tool in &rc.tools {
-        let name = tool.name().as_str();
+    let contracts = rc.tools.iter().map(|tool| tool.name().as_str());
+    for name in contracts.chain(policy.deployment_tool_names().map(|(_, name)| name)) {
         if is_control_tool(bare_tool_name(name)) {
             return Err(OpenError::ReservedTool(name.to_string()));
         }
@@ -1451,6 +1459,43 @@ mod deployment_tests {
             test_permits(),
             ToolNaming::AsAuthored,
         )
+    }
+
+    /// The hooks answer the control tool's identity before a call is classified or a result
+    /// confined, so a `[deployment]` field naming it claims a treatment the runtime can never
+    /// apply. A wildcard contract makes the name pass coverage, so only this refusal stops the
+    /// claim from opening as a silent no-op — the same refusal a contract naming it gets.
+    #[test]
+    fn no_deployment_field_may_name_the_control_tool() {
+        let policy = |field: &str| {
+            format!(
+                r#"
+                version = 2
+                [[annotator]]
+                name = "any"
+                builtin = "claude-code"
+                [[tool]]
+                name = "*"
+                annotator = "any"
+                [deployment]
+                {field} = ["{}"]
+            "#,
+                appa_runtime_api::CONTROL_TOOL
+            )
+        };
+        for field in ["assumed_tools", "provider_run_tools", "confined_results"] {
+            assert!(
+                matches!(load(claude_config(&policy(field))), Err(OpenError::ReservedTool(_))),
+                "[deployment] {field} naming the control tool must refuse to open"
+            );
+        }
+        assert!(
+            load(claude_config(
+                &policy("assumed_tools").replace(appa_runtime_api::CONTROL_TOOL, "host/claude-code/Read")
+            ))
+            .is_ok(),
+            "every other name in the same field still opens"
+        );
     }
 
     #[test]

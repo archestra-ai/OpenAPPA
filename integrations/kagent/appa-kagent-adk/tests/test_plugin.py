@@ -587,10 +587,26 @@ async def test_a_spawn_that_returns_nothing_leaves_the_dispatch_unresolved():
     assert hook.events[0]["outcome"] == {"status": "indeterminate"}
 
 
+async def test_an_admitted_value_reaches_the_model_as_the_runtime_admitted_it():
+    """`deliver_value` carries the value the engine admitted. The
+    inventory would rewrite the spellings this one quotes, and the model
+    must still read the bytes that crossed."""
+    admitted = "the ledger names mcp:demo-tools/read_ledger and appa:execute_remedy_plan"
+    hook = Hook({"protocol": 1, "decision": "deliver_value", "value": admitted})
+    plugin = plugin_over(hook)
+    returned = await plugin.after_tool_callback(
+        tool=FakeTool("k8s_get_pods"),
+        tool_args={},
+        tool_context=dispatch(FakeSession("s1")),
+        result={"pods": []},
+    )
+    assert returned == {"result": admitted}
+
+
 async def test_a_replaced_output_reaches_the_model_in_names_it_can_dispatch():
-    """`replace_output` carries the runtime's own staged-narrowing text
-    as well as an admitted value, and that text names tools by the
-    spelling the wire carries. The model dispatches the ADK name."""
+    """`replace_output` carries the runtime's own staged-narrowing text,
+    which names tools by the spelling the wire carries. The model
+    dispatches the ADK name."""
     spelled = 'take mcp:demo-tools/read_ledger through appa:execute_remedy_plan(offer_id: "o1")'
     hook = Hook({"protocol": 1, "decision": "replace_output", "output": spelled})
     plugin = plugin_over(hook)

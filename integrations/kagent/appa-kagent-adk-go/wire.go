@@ -164,14 +164,27 @@ func wireErrorf(format string, args ...any) *WireError {
 // Decision is one parsed decision envelope.
 //
 // Kind is the wire spelling (ack, allow_call, pass_control, deny_call,
-// block, replace_output, child_return, context, refuse); the payload
-// field, where the kind carries one, lands in the matching attribute.
+// block, replace_output, deliver_value, child_return, context, refuse);
+// the payload field, where the kind carries one, lands in the matching
+// attribute.
+//
+// A decision that stands in for a result says which of two contents it
+// carries. deliver_value and child_return carry a Value the engine
+// admitted, and the plugin delivers those bytes as they crossed.
+// replace_output, deny_call, block and refuse carry the runtime's own
+// words, which name tools by the spelling the plugin sent, so the
+// plugin spells them back before the model reads them.
 type Decision struct {
 	Kind     string
 	Feedback string
 	Reason   string
-	Output   string
-	Value    string
+	// Output rides a replace_output: the runtime's own words in place of
+	// the result, which the plugin spells back into names the model
+	// dispatches.
+	Output string
+	// Value rides a deliver_value and a child_return: the value the
+	// engine admitted, which reaches the model as it crossed.
+	Value string
 	// Text rides a context: what the harness hands the actor the event
 	// names, which at a child's start is the return contract it works
 	// under.
@@ -230,6 +243,7 @@ var decisionPayloads = map[string]string{
 	"deny_call":      "feedback",
 	"block":          "reason",
 	"replace_output": "output",
+	"deliver_value":  "value",
 	"child_return":   "value",
 	"context":        "text",
 	"refuse":         "detail",

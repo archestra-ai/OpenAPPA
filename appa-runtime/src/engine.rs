@@ -306,9 +306,12 @@ pub enum Next {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Presentation {
     KeepOutput,
+    /// The runtime's own words in place of the output: nothing here was admitted from a
+    /// value, and the harness may spell the tool names it carries.
     ReplaceOutput {
         placeholder: String,
     },
+    /// A value the engine admitted, delivered as it crossed.
     Value {
         value: String,
     },
@@ -2502,6 +2505,9 @@ fn engine_outcome(outcome: &ToolOutcome) -> CoreToolOutcome {
     }
 }
 
+/// What the model reads in place of the raw result. An admitted value and the runtime's
+/// own words are separate presentations here, because a harness delivers the first as it
+/// crossed and spells its own tool names into the second.
 fn outcome_presentation(outcome: &ToolOutcome, admitted: Option<ValueBody>) -> Presentation {
     match (outcome, admitted) {
         (
@@ -2510,8 +2516,8 @@ fn outcome_presentation(outcome: &ToolOutcome, admitted: Option<ValueBody>) -> P
             },
             Some(value),
         ) if value.as_str() == raw => Presentation::KeepOutput,
-        (_, Some(value)) => Presentation::ReplaceOutput {
-            placeholder: value.as_str().to_string(),
+        (_, Some(value)) => Presentation::Value {
+            value: value.as_str().to_string(),
         },
         (
             ToolOutcome::Success {

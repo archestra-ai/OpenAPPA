@@ -399,13 +399,16 @@ func (b *builder) remoteAgent(remote RemoteAgentSpec) error {
 	return b.add(remote.Name, AgentSpelling(namespace, agent), remote.Path)
 }
 
-// hostOf is the host of a server URL; false where it carries none.
+// hostOf is the lowercased host of a server URL; false where it carries
+// none. DNS is case-insensitive, so the same service written in another
+// case must reach the same policy identity, and lowercasing here is the
+// one place that settles it — as urlsplit does for the python lane.
 func hostOf(raw string) (string, bool) {
 	parsed, err := url.Parse(raw)
 	if err != nil {
 		return "", false
 	}
-	host := parsed.Hostname()
+	host := strings.ToLower(parsed.Hostname())
 	if host == "" {
 		return "", false
 	}
@@ -437,7 +440,6 @@ func toolsetOf(host string) (string, bool) {
 // isInternalK8sURL asks the API server whether that second label is a
 // namespace, which this plugin cannot do.
 func inCluster(host string) bool {
-	host = strings.ToLower(host)
 	if host == "localhost" || host == "127.0.0.1" {
 		return true
 	}

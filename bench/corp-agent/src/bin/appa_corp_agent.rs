@@ -199,10 +199,10 @@ async fn main() -> anyhow::Result<()> {
         max_fork_depth: args.max_fork_depth,
     });
     if forking {
-        agent = agent.with_spawn_tool(SpawnTool {
-            name: ToolName::new(catalogue::FORK),
-            errand: ArgumentKey::new(catalogue::ERRAND),
-        });
+        agent = agent.with_spawn_tool(SpawnTool::new(
+            ToolName::new(catalogue::FORK),
+            ArgumentKey::new(catalogue::ERRAND),
+        )?);
     }
 
     let root = TrajectoryId("appa-corp-agent".to_string());

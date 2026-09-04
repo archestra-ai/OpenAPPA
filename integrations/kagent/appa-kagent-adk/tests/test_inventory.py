@@ -102,6 +102,14 @@ def test_an_in_cluster_endpoint_names_its_toolset(host):
     assert built.spelling("list_pods") == f"mcp:{host.split('.')[0]}/list_pods"
 
 
+def test_a_host_written_in_another_case_is_the_same_toolset():
+    """DNS is case-insensitive, so the same service reaches the same policy
+    identity however the URL spells it."""
+    url = "http://DEMO-TOOLS.kagent.svc.cluster.local:3000/mcp"
+    built = inventory(http_tools=[{"params": {"url": url}, "tools": ["list_pods"]}])
+    assert built.spelling("list_pods") == "mcp:demo-tools/list_pods"
+
+
 @pytest.mark.parametrize(
     "host",
     [

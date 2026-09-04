@@ -116,6 +116,9 @@ class GatedCodeExecutor:
         answer = self._gate.post(wire.tool_result(root_id, CODE_EXECUTION_TOOL, arguments, outcome, child_id))
         if answer.kind == "ack":
             return result
+        if answer.kind == "deliver_value":
+            # The admitted value, as it crossed.
+            return CodeExecutionResult(stdout=answer.value, stderr="")
         if answer.kind == "replace_output":
             return CodeExecutionResult(stdout=self._gate.for_model(answer.output), stderr="")
         if answer.kind == "block":

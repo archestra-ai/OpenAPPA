@@ -38,14 +38,16 @@ fn canonical_tool_name(advertised: &str) -> &str {
     }
 }
 
-/// The advertised control name belongs to the runtime. A host tool spelled the
-/// same way would be indistinguishable from the control tool at check time, so
-/// the session refuses the inventory instead of rerouting the host's tool.
+/// Both of the control tool's names belong to the runtime: the advertised alias, which
+/// `canonical_tool_name` translates, and the canonical id, which passes through unchanged. A
+/// host tool spelled either way would be indistinguishable from the control tool at check
+/// time — every call to it reaches remedy handling — so the session refuses the inventory
+/// instead of rerouting the host's tool.
 fn refuse_reserved_tool_name(name: &str) -> Result<(), String> {
     match name {
-        ADVERTISED_CONTROL_TOOL => Err(format!(
-            "{ADVERTISED_CONTROL_TOOL} is the reserved control tool name; rename the host tool"
-        )),
+        ADVERTISED_CONTROL_TOOL | appa_runtime_api::CONTROL_TOOL => {
+            Err(format!("{name} is a reserved control tool name; rename the host tool"))
+        }
         _ => Ok(()),
     }
 }
@@ -491,7 +493,9 @@ impl SessionInner {
         let (content, disposition) = match decision {
             HookDecision::Ack if as_produced => (produced, DeliveryDisposition::Admitted),
             HookDecision::Ack => (produced, DeliveryDisposition::Sealed),
-            HookDecision::ReplaceOutput { output } => (output, DeliveryDisposition::Sealed),
+            HookDecision::ReplaceOutput { output } | HookDecision::DeliverValue { value: output } => {
+                (output, DeliveryDisposition::Sealed)
+            }
             HookDecision::Block { reason } => (reason, DeliveryDisposition::Sealed),
             other => return Err(format!("the runtime answered a tool outcome with {other:?}")),
         };
@@ -715,10 +719,12 @@ impl SessionInner {
             },
             // A void return closes the spawn with nothing carried; the placeholder
             // is the parent's tool result, not a value.
-            HookDecision::ReplaceOutput { .. } if crossing.is_none() => ReturnResponse::Returned {
-                value: None,
-                disposition,
-            },
+            HookDecision::ReplaceOutput { .. } | HookDecision::DeliverValue { .. } if crossing.is_none() => {
+                ReturnResponse::Returned {
+                    value: None,
+                    disposition,
+                }
+            }
             HookDecision::Block { reason } => ReturnResponse::Blocked { feedback: reason },
             other => return Err(format!("the runtime answered a spawn result with {other:?}")),
         })
@@ -1296,33 +1302,34 @@ delta    = {}
         assert!(session.pending.is_none(), "no outcome is owed");
     }
 
+    /// Both control tool names reach remedy handling — the advertised alias is translated
+    /// into the canonical id, and the canonical id passes through — so a host tool or a
+    /// spawn tool under either one opens no session.
     #[test]
     fn a_host_tool_spelled_like_the_control_tool_opens_no_session() {
-        let opened = SessionInner::open(
-            POLICY,
-            &format!(r#"["publish","{ADVERTISED_CONTROL_TOOL}"]"#),
-            "do the thing",
-            None,
-            None,
-            None,
-        );
-        let error = opened.err().expect("the reserved name is refused");
-        assert!(error.contains(ADVERTISED_CONTROL_TOOL), "got: {error}");
+        for reserved in [ADVERTISED_CONTROL_TOOL, appa_runtime_api::CONTROL_TOOL] {
+            let opened = SessionInner::open(
+                POLICY,
+                &format!(r#"["publish","{reserved}"]"#),
+                "do the thing",
+                None,
+                None,
+                None,
+            );
+            assert!(opened.is_err(), "a host tool cannot claim {reserved}");
 
-        let spawn = SessionInner::open(
-            POLICY,
-            r#"["publish"]"#,
-            "do the thing",
-            None,
-            None,
-            Some(ADVERTISED_CONTROL_TOOL),
-        );
-        assert!(spawn.is_err(), "a spawn tool cannot claim the reserved name either");
+            let spawn = SessionInner::open(POLICY, r#"["publish"]"#, "do the thing", None, None, Some(reserved));
+            assert!(spawn.is_err(), "a spawn tool cannot claim {reserved} either");
+        }
 
         // The refusal is the collision, not the name: the control tool still answers.
         let mut session = session(None);
         assert_eq!(
             kind(&session.root_check(ADVERTISED_CONTROL_TOOL, "{}").unwrap()),
+            "control"
+        );
+        assert_eq!(
+            kind(&session.root_check(appa_runtime_api::CONTROL_TOOL, "{}").unwrap()),
             "control"
         );
     }

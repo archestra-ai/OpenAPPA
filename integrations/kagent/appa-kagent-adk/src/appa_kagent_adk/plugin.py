@@ -49,10 +49,11 @@ a remedy releases — and the model dispatches the raw ADK name, so every
 runtime string the plugin hands the model is spelled back through the
 inventory first (``_for_model``). The bytes a child's return crossed
 with are the exception: they reach the parent as the runtime crossed
-them. A ``replace_output`` carries either kind — the admitted value of
-a confined or sanitized result, or the runtime's staged-narrowing text
-naming the control tool — and the wire tells them apart nowhere, so it
-is spelled back with the rest.
+them, and the wire names which kind it carries: a ``deliver_value``
+holds the admitted value of a confined or sanitized result, which
+reaches the model byte for byte, and a ``replace_output`` holds the
+runtime's own staged-narrowing text, which is spelled back with the
+rest.
 
 The plugin also declares the return of a spawn itself. A ``deny_call``
 that offers a return route never reaches the model: the plugin takes
@@ -549,9 +550,9 @@ class AppaPluginKagent(BasePlugin):
             )
             if decision.kind == "ack":
                 return None
-            if decision.kind == "child_return":
-                # The bytes the return crossed with, never spelled over:
-                # the parent receives what the runtime crossed.
+            if decision.kind in ("child_return", "deliver_value"):
+                # The bytes the value crossed with, never spelled over:
+                # the parent receives what the runtime admitted.
                 return {"result": decision.value}
             if decision.kind == "replace_output":
                 return {"result": self._for_model(decision.output)}
@@ -561,12 +562,14 @@ class AppaPluginKagent(BasePlugin):
         decision = await self._post(wire.tool_result(root_id, spelled, arguments, outcome, child_id))
         if decision.kind == "ack":
             return self._remedy_rendering(tool, result)
+        if decision.kind == "deliver_value":
+            # The admitted value of a confined or sanitized result, as it
+            # crossed. Spelling it back would hand the model other bytes
+            # than the ones the runtime admitted.
+            return {"result": decision.value}
         if decision.kind == "replace_output":
-            # One kind, two contents: the admitted value of a confined or
-            # sanitized result, and the runtime's own staged-narrowing
-            # text, which names the control tool by a spelling ADK cannot
-            # dispatch. Nothing on the wire tells them apart, so both are
-            # spelled back.
+            # The runtime's own words about this result, which name the
+            # control tool by a spelling ADK cannot dispatch.
             return {"result": self._for_model(decision.output)}
         if decision.kind == "block":
             return _withheld(self._for_model(decision.reason))
@@ -597,6 +600,8 @@ class AppaPluginKagent(BasePlugin):
         )
         if decision.kind == "ack":
             return None  # the original error propagates
+        if decision.kind == "deliver_value":
+            return {"result": decision.value}
         if decision.kind == "replace_output":
             return {"result": self._for_model(decision.output)}
         if decision.kind == "block":

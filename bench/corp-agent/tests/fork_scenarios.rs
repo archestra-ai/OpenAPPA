@@ -111,10 +111,10 @@ async fn episode(policy: &str, provider: &Provider) -> Episode {
     .with_head(TranscriptHead::new(vec![WireMessage::system(
         "You are a corporate assistant.",
     )]))
-    .with_spawn_tool(SpawnTool {
-        name: ToolName::new(catalogue::FORK),
-        errand: ArgumentKey::new(catalogue::ERRAND),
-    })
+    .with_spawn_tool(
+        SpawnTool::new(ToolName::new(catalogue::FORK), ArgumentKey::new(catalogue::ERRAND))
+            .expect("the fork tool leaves the control name to the runtime"),
+    )
     .with_limits(Limits {
         max_fork_depth: 1,
         ..Limits::default()

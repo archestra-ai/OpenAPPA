@@ -1095,8 +1095,15 @@ impl Registry {
     /// The one classification every name lookup derives from. An exact declaration always wins;
     /// the wildcard covers only a name the policy does not write. `None` is a name no contract
     /// covers: a proposal naming it is refused.
+    ///
+    /// [`WILDCARD_SPELLING`] is the wildcard contract's own spelling and never a tool a host
+    /// dispatches, so a proposal naming it names no tool: it classifies as `None` even under a
+    /// policy that writes the wildcard, rather than resolving to the contract that covers
+    /// everything else.
     pub fn classify(&self, name: &ToolName) -> Option<ToolKind> {
-        if self.tools.contains_key(name) {
+        if name.as_str() == WILDCARD_SPELLING {
+            None
+        } else if self.tools.contains_key(name) {
             Some(ToolKind::Declared)
         } else if self.provider_run.contains_key(name) {
             Some(ToolKind::ProviderRun)
@@ -2128,6 +2135,30 @@ mod tests {
         assert!(
             !registry.declared(&ToolName::new(WILDCARD_SPELLING)),
             "the wildcard's spelling names no tool"
+        );
+    }
+
+    /// The wildcard's spelling is a contract, not a tool: a caller that proposes the literal
+    /// `*` names a tool no host dispatches, so it resolves to nothing — the wildcard covers
+    /// every *other* name — and the proposal is refused instead of annotated and checked.
+    #[test]
+    fn a_call_proposing_the_wildcards_own_spelling_resolves_to_no_declaration() {
+        let mut cfg = base();
+        cfg.tools = declared(vec![tool("read")]);
+        cfg.tools.push(annotated(WILDCARD_SPELLING, "any"));
+        cfg.annotators = vec![annotator("any")];
+        let registry = Registry::build_covered(cfg).unwrap();
+        let literal = ToolName::new(WILDCARD_SPELLING);
+
+        assert_eq!(registry.classify(&literal), None);
+        assert!(!registry.contains_tool(&literal));
+        assert!(!registry.declared(&literal));
+        assert!(registry.select_tool(&literal, &serde_json::json!({})).is_none());
+        assert!(registry.keyed_tool(&literal, ToolDeclarationId::default()).is_none());
+        assert_eq!(
+            registry.classify(&ToolName::new("ghost")),
+            Some(ToolKind::Wildcard),
+            "every other unwritten name still resolves to the wildcard"
         );
     }
 

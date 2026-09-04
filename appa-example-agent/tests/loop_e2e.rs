@@ -291,10 +291,10 @@ context_control = true
 "#;
 
 fn delegating(agent: Agent) -> Agent {
-    agent.with_spawn_tool(SpawnTool {
-        name: ToolName::new("delegate"),
-        errand: ArgumentKey::new("task"),
-    })
+    agent.with_spawn_tool(
+        SpawnTool::new(ToolName::new("delegate"), ArgumentKey::new("task"))
+            .expect("the spawn tool leaves the control name to the runtime"),
+    )
 }
 
 #[tokio::test]

@@ -132,6 +132,18 @@ func TestAnInClusterEndpointNamesItsToolset(t *testing.T) {
 	}
 }
 
+// DNS is case-insensitive, so the same service reaches the same policy
+// identity however the URL spells it.
+func TestAHostWrittenInAnotherCaseIsTheSameToolset(t *testing.T) {
+	inventory := mustBuild(t, InventorySpec{MCPServers: []MCPServerSpec{
+		{Path: "http_tools[0]", URL: "http://DEMO-TOOLS.kagent.svc.cluster.local:3000/mcp", Tools: []string{"list_pods"}},
+	}})
+	want := MCPSpelling("demo-tools", "list_pods")
+	if got, known := inventory.Spelling("list_pods"); !known || got != want {
+		t.Errorf("an uppercase host spells %q (%v), want %q", got, known, want)
+	}
+}
+
 // The toolset is the host's first label, so a foreign endpoint under
 // that label would take the policy identity of the in-cluster service.
 func TestAnMCPEndpointOutsideTheClusterIsRefused(t *testing.T) {

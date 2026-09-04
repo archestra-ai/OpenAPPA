@@ -123,6 +123,11 @@ def test_absent_optionals_stay_off_the_wire():
             wire.Decision(kind="replace_output", output="the output is confined"),
         ),
         (
+            "deliver_value",
+            {"decision": "deliver_value", "value": "the sanitized ledger"},
+            wire.Decision(kind="deliver_value", value="the sanitized ledger"),
+        ),
+        (
             "child_return",
             {"decision": "child_return", "value": "the redacted summary"},
             wire.Decision(kind="child_return", value="the redacted summary"),
@@ -158,6 +163,7 @@ def test_every_decision_envelope_parses(name, body, expected):
         ("deny_without_feedback", b'{"protocol": 1, "decision": "deny_call"}'),
         ("block_without_reason", b'{"protocol": 1, "decision": "block"}'),
         ("replace_without_output", b'{"protocol": 1, "decision": "replace_output"}'),
+        ("deliver_without_value", b'{"protocol": 1, "decision": "deliver_value"}'),
         ("refuse_without_detail", b'{"protocol": 1, "decision": "refuse"}'),
         ("context_without_text", b'{"protocol": 1, "decision": "context"}'),
         ("offers_not_a_list", b'{"protocol": 1, "decision": "deny_call", "feedback": "f", "offers": {}}'),

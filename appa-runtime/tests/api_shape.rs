@@ -121,6 +121,9 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
         HookDecision::ReplaceOutput { output } => {
             let _: String = output;
         }
+        HookDecision::DeliverValue { value } => {
+            let _: String = value;
+        }
         HookDecision::ChildReturn { value } => {
             let _: String = value;
         }

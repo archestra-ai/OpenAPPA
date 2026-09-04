@@ -197,15 +197,29 @@ class Decision:
 
     ``kind`` is the wire spelling (``ack``, ``allow_call``,
     ``pass_control``, ``deny_call``, ``block``, ``replace_output``,
-    ``child_return``, ``context``, ``refuse``); the payload field, where
-    the kind carries one, lands in the matching attribute.
+    ``deliver_value``, ``child_return``, ``context``, ``refuse``); the
+    payload field, where the kind carries one, lands in the matching
+    attribute.
+
+    A decision that stands in for a result says which of two contents it
+    carries. ``deliver_value`` and ``child_return`` carry a ``value``
+    the engine admitted, and the plugin delivers those bytes as they
+    crossed. ``replace_output``, ``deny_call``, ``block`` and ``refuse``
+    carry the runtime's own words, which name tools by the spelling the
+    plugin sent, so the plugin spells them back before the model reads
+    them.
     """
 
     kind: str
     feedback: str | None = None
     reason: str | None = None
     output: str | None = None
+    """On a ``replace_output``: the runtime's own words in place of the
+    result, which the plugin spells back into names the model
+    dispatches."""
     value: str | None = None
+    """On a ``deliver_value`` and a ``child_return``: the value the
+    engine admitted, which reaches the model as it crossed."""
     text: str | None = None
     """On a ``context``: what the harness hands the actor the event
     names — at a child's start, the return contract it works under."""
@@ -227,6 +241,7 @@ _DECISION_PAYLOADS: dict[str, tuple[str, ...]] = {
     "deny_call": ("feedback",),
     "block": ("reason",),
     "replace_output": ("output",),
+    "deliver_value": ("value",),
     "child_return": ("value",),
     "context": ("text",),
     "refuse": ("detail",),

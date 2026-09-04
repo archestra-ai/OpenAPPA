@@ -584,11 +584,15 @@ fn render(event: &HookEvent, decision: &HookDecision) -> serde_json::Value {
             Some(replacement) => replaced(replacement, Some(reason)),
             None => block(reason),
         },
-        // The admitted text in place of the body the model asked for.
-        HookDecision::ReplaceOutput { output } => match replacement(event, output) {
-            Some(replacement) => replaced(replacement, None),
-            None => block(output),
-        },
+        // What stands in for the body the model asked for: an admitted value, or the
+        // runtime's own words about the result. Claude Code dispatches the spellings this
+        // adapter derives from, so nothing here is spelled back and both render alike.
+        HookDecision::ReplaceOutput { output } | HookDecision::DeliverValue { value: output } => {
+            match replacement(event, output) {
+                Some(replacement) => replaced(replacement, None),
+                None => block(output),
+            }
+        }
         // No hook rewrites what a subagent's stop delivers, so the
         // subagent is held until it returns the crossing value itself.
         HookDecision::ChildReturn { value } => match replacement(event, value) {
@@ -1809,6 +1813,21 @@ mod tests {
         assert_eq!(
             render(
                 &event,
+                &HookDecision::DeliverValue {
+                    value: "the output is confined".to_string(),
+                }
+            ),
+            render(
+                &event,
+                &HookDecision::ReplaceOutput {
+                    output: "the output is confined".to_string(),
+                }
+            ),
+            "this codec spells nothing back, so an admitted value and the runtime's own words render alike",
+        );
+        assert_eq!(
+            render(
+                &event,
                 &HookDecision::Block {
                     reason: "this outcome does not match the open dispatch".to_string(),
                 }
@@ -1935,6 +1954,9 @@ mod tests {
             },
             HookDecision::ReplaceOutput {
                 output: "the output is confined".to_string(),
+            },
+            HookDecision::DeliverValue {
+                value: "the admitted derivation".to_string(),
             },
             HookDecision::Refuse {
                 detail: "storage failure".to_string(),

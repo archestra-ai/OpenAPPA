@@ -205,6 +205,7 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
 fn outcome_decision(decision: ToolResultDecision) -> HookDecision {
     match decision {
         ToolResultDecision::Keep => HookDecision::Ack,
+        ToolResultDecision::Deliver { value } => HookDecision::DeliverValue { value },
         ToolResultDecision::Replace { placeholder } => HookDecision::ReplaceOutput { output: placeholder },
     }
 }

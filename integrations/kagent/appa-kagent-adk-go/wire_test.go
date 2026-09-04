@@ -190,6 +190,11 @@ func TestEveryDecisionEnvelopeParses(t *testing.T) {
 			Decision{Kind: "replace_output", Output: "the output is confined"},
 		},
 		{
+			"deliver_value",
+			`{"protocol": 1, "decision": "deliver_value", "value": "the sanitized ledger"}`,
+			Decision{Kind: "deliver_value", Value: "the sanitized ledger"},
+		},
+		{
 			"child_return",
 			`{"protocol": 1, "decision": "child_return", "value": "the redacted summary"}`,
 			Decision{Kind: "child_return", Value: "the redacted summary"},
@@ -234,6 +239,7 @@ func TestAnAnswerOutsideTheContractIsAWireError(t *testing.T) {
 		{"deny_without_feedback", `{"protocol": 1, "decision": "deny_call"}`},
 		{"block_without_reason", `{"protocol": 1, "decision": "block"}`},
 		{"replace_without_output", `{"protocol": 1, "decision": "replace_output"}`},
+		{"deliver_without_value", `{"protocol": 1, "decision": "deliver_value"}`},
 		{"refuse_without_detail", `{"protocol": 1, "decision": "refuse"}`},
 		{"context_without_text", `{"protocol": 1, "decision": "context"}`},
 		{"offers_not_a_list", `{"protocol": 1, "decision": "deny_call", "feedback": "f", "offers": {}}`},

@@ -132,8 +132,10 @@ fn outcome_decision(decision: EngineDecision) -> Result<ToolResultDecision, Even
         Next::PresentToModel(Presentation::ReplaceOutput { placeholder, .. }) => {
             Ok(ToolResultDecision::Replace { placeholder })
         }
-        // An admitted value delivered in place of the raw output.
-        Next::PresentToModel(Presentation::Value { value }) => Ok(ToolResultDecision::Replace { placeholder: value }),
+        // An admitted value delivered in place of the raw output, as it crossed.
+        Next::PresentToModel(Presentation::Value { value }) => Ok(ToolResultDecision::Deliver { value }),
+        // The runtime's own words: the narrowing this result causes and the control call
+        // that accepts it.
         Next::PresentToModel(Presentation::Blocked { feedback, .. }) => {
             Ok(ToolResultDecision::Replace { placeholder: feedback })
         }
@@ -1598,8 +1600,8 @@ name = "appa/execute_remedy_plan"
             .expect("the re-reported outcome admits");
         assert_eq!(
             replaced,
-            ToolResultDecision::Replace {
-                placeholder: "scrubbed".to_string()
+            ToolResultDecision::Deliver {
+                value: "scrubbed".to_string()
             },
         );
         let log = runtime.log_facts(&root());
@@ -3343,8 +3345,8 @@ confined_results = ["leak"]
         let decision = run_sanitize_offer(&runtime, &mut session).await;
         assert_eq!(
             decision,
-            ToolResultDecision::Replace {
-                placeholder: "scrubbed".to_string()
+            ToolResultDecision::Deliver {
+                value: "scrubbed".to_string()
             },
             "the derivation is admitted and the raw is withheld",
         );

@@ -652,6 +652,7 @@ async fn a_decision_that_cannot_be_written_does_not_exit_zero() {
         r#"{"protocol":1,"decision":"deny_call","feedback":"[appa] Blocked: this call cannot run yet."}"#,
         r#"{"protocol":1,"decision":"block","reason":"denied"}"#,
         r#"{"protocol":1,"decision":"replace_output","output":"[appa] the output is confined"}"#,
+        r#"{"protocol":1,"decision":"deliver_value","value":"{\"ticket\":\"scrubbed\"}"}"#,
     ] {
         let url = serve(Router::new().route("/hook", post(move || async move { answer }))).await;
         let heard = url.clone();

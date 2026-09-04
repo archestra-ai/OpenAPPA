@@ -1038,10 +1038,29 @@ func TestACompletedVoidResultCrossesAsTheNullBodyTheModelReads(t *testing.T) {
 	}
 }
 
+func TestAnAdmittedValueReachesTheModelAsTheRuntimeAdmittedIt(t *testing.T) {
+	// deliver_value carries the value the engine admitted. The inventory
+	// would rewrite the spellings this one quotes, and the model must
+	// still read the bytes that crossed.
+	admitted := `the ledger names mcp:demo-tools/read_ledger and appa:execute_remedy_plan`
+	h := newHook(t, map[string]any{"protocol": 1, "decision": "deliver_value", "value": admitted})
+	p := pluginOver(t, h)
+	returned, err := p.afterTool(
+		newFakeContext(newFakeSession("s1")), &fakeTool{"k8s_get_pods"},
+		map[string]any{}, map[string]any{"pods": []any{}}, nil)
+	if err != nil {
+		t.Fatalf("the admitted value must be delivered, not fail: %v", err)
+	}
+	want := map[string]any{"result": admitted}
+	if !reflect.DeepEqual(returned, want) {
+		t.Errorf("the admitted value must reach the model as it crossed, got %v", returned)
+	}
+}
+
 func TestAReplacedOutputReachesTheModelInNamesItCanDispatch(t *testing.T) {
-	// replace_output carries the runtime's own staged-narrowing text as
-	// well as an admitted value, and that text names tools by the
-	// spelling the wire carries. The model dispatches the ADK name.
+	// replace_output carries the runtime's own staged-narrowing text,
+	// which names tools by the spelling the wire carries. The model
+	// dispatches the ADK name.
 	spelled := `take mcp:demo-tools/read_ledger through appa:execute_remedy_plan(offer_id: "o1")`
 	h := newHook(t, map[string]any{"protocol": 1, "decision": "replace_output", "output": spelled})
 	p := pluginOver(t, h)

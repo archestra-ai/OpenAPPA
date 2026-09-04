@@ -23,6 +23,16 @@
 //! on any other call, or on any other event — no other event reads one —
 //! the envelope asserting one is refused.
 //!
+//! A decision that stands in for a result says on the wire which of the
+//! two it carries, because a client may rewrite one and may not rewrite
+//! the other. `deliver_value` and `child_return` carry a `value` the
+//! engine admitted: the client delivers those bytes as they crossed. A
+//! decision carrying the runtime's own words — `replace_output`,
+//! `deny_call`, `block`, `refuse` — carries text authored here, which
+//! names tools by the spelling that host sent, so a client whose model
+//! dispatches other names spells them back before the model reads it.
+//! No client tells the two apart by reading the payload.
+//!
 //! The event and decision structs are flat with optional fields rather
 //! than tagged enums because `arguments` is a `RawValue`, which serde's
 //! internally tagged representation cannot carry.
@@ -702,6 +712,7 @@ pub enum DecisionName {
     DenyCall,
     Block,
     ReplaceOutput,
+    DeliverValue,
     ChildReturn,
     Context,
     Refuse,
@@ -825,6 +836,10 @@ impl WireDecision {
                 output: Some(output.clone()),
                 ..Self::bare(DecisionName::ReplaceOutput)
             },
+            HookDecision::DeliverValue { value } => Self {
+                value: Some(value.clone()),
+                ..Self::bare(DecisionName::DeliverValue)
+            },
             HookDecision::ChildReturn { value } => Self {
                 value: Some(value.clone()),
                 ..Self::bare(DecisionName::ChildReturn)
@@ -888,6 +903,9 @@ impl WireDecision {
             },
             DecisionName::ReplaceOutput => HookDecision::ReplaceOutput {
                 output: required("output", self.output)?,
+            },
+            DecisionName::DeliverValue => HookDecision::DeliverValue {
+                value: required("value", self.value)?,
             },
             DecisionName::ChildReturn => HookDecision::ChildReturn {
                 value: required("value", self.value)?,
@@ -1513,6 +1531,7 @@ mod tests {
             HookDecision::ReplaceOutput {
                 output: "o".to_string(),
             },
+            HookDecision::DeliverValue { value: "v".to_string() },
             HookDecision::ChildReturn { value: "v".to_string() },
             HookDecision::Context { text: "t".to_string() },
             HookDecision::Refuse {
@@ -1537,6 +1556,9 @@ mod tests {
         assert_eq!(offers["offers"][0]["returns"], "as_spoken");
         let missing: WireDecision = serde_json::from_str(r#"{"protocol":1,"decision":"block"}"#).expect("reads");
         assert!(matches!(missing.into_decision(), Err(ParseRefusal::Malformed { .. })));
+        let valueless: WireDecision =
+            serde_json::from_str(r#"{"protocol":1,"decision":"deliver_value"}"#).expect("reads");
+        assert!(matches!(valueless.into_decision(), Err(ParseRefusal::Malformed { .. })));
         let foreign: WireDecision = serde_json::from_str(r#"{"protocol":9,"decision":"ack"}"#).expect("reads");
         assert!(matches!(foreign.into_decision(), Err(ParseRefusal::Malformed { .. })));
     }

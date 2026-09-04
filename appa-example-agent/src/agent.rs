@@ -16,7 +16,9 @@ use tokio_util::sync::CancellationToken;
 use crate::budget::{Exhausted, ForkUnavailable, Limits, RunBudget};
 use crate::provider::{OpenAiCompatible, ProviderError};
 use crate::record::{CallId, Record, Recorded};
-use crate::tools::{ADVERTISED_CONTROL_TOOL, ToolCatalogue, ToolShim, canonical_tool_name};
+use crate::tools::{
+    ADVERTISED_CONTROL_TOOL, CatalogueError, ToolCatalogue, ToolShim, canonical_tool_name, is_reserved_tool_name,
+};
 use crate::wire::{ChatCompletionRequest, WireMessage, WireToolCall};
 
 /// A void child return is a control result, not an information-bearing value.
@@ -70,10 +72,24 @@ impl ArgumentKey {
 /// It is an ordinary registered contract — the runtime
 /// checks it like any call — and this names which one the agent acts
 /// on, and which argument carries the errand.
+///
+/// The name is validated at construction, exactly as [`ToolCatalogue::new`] validates the
+/// advertised inventory: a spawn tool under either control tool name would be canonicalized
+/// into the control tool at check time, and the agent would then compare the canonical name
+/// against the stored one and no longer recognize its own spawn.
 #[derive(Clone, Debug)]
 pub struct SpawnTool {
-    pub name: ToolName,
-    pub errand: ArgumentKey,
+    name: ToolName,
+    errand: ArgumentKey,
+}
+
+impl SpawnTool {
+    pub fn new(name: ToolName, errand: ArgumentKey) -> Result<Self, CatalogueError> {
+        if is_reserved_tool_name(&name.0) {
+            return Err(CatalogueError::ReservedToolName(name.0));
+        }
+        Ok(SpawnTool { name, errand })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -134,7 +150,8 @@ impl Agent {
     }
 
     /// Without a spawn tool the agent never opens a child, whatever
-    /// the policy allows.
+    /// the policy allows. Every [`SpawnTool`] that exists carries a name the agent can
+    /// still recognize after canonicalization, so this builder takes one as it is.
     pub fn with_spawn_tool(mut self, spawn: SpawnTool) -> Self {
         self.spawn = Some(spawn);
         self
@@ -595,7 +612,7 @@ impl Run<'_> {
                 .await;
                 Ok(raw)
             }
-            HookDecision::ReplaceOutput { output } => {
+            HookDecision::ReplaceOutput { output } | HookDecision::DeliverValue { value: output } => {
                 self.record(
                     frame,
                     Record::Substituted {
@@ -847,4 +864,33 @@ fn unexpected(event: &str, decision: &HookDecision) -> StopReason {
     StopReason::Refused(format!(
         "{event} was answered with {decision:?}, which it cannot deliver"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The agent recognizes its own spawn by comparing the stored name against the name a
+    /// proposal carries, and every proposal carries the canonicalized name. A spawn tool
+    /// under either control tool name would canonicalize into the control tool and stop
+    /// being recognized, so no such [`SpawnTool`] can be built — and every one that can be
+    /// is its own canonical name.
+    #[test]
+    fn a_spawn_tool_is_named_what_the_runtime_will_call_it() {
+        for reserved in [ADVERTISED_CONTROL_TOOL, appa_runtime_api::CONTROL_TOOL] {
+            assert_eq!(
+                SpawnTool::new(ToolName::new(reserved), ArgumentKey::new("errand")).err(),
+                Some(CatalogueError::ReservedToolName(reserved.to_string())),
+            );
+        }
+        for ordinary in ["delegate", "fork", "mcp/evil/execute_remedy_plan"] {
+            let spawn = SpawnTool::new(ToolName::new(ordinary), ArgumentKey::new("errand"))
+                .expect("an ordinary host tool names a spawn");
+            assert_eq!(
+                canonical_tool_name(&spawn.name.0),
+                spawn.name.0,
+                "a proposal of this spawn carries the name the agent stored"
+            );
+        }
+    }
 }

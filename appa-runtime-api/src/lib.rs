@@ -435,8 +435,21 @@ pub enum HookDecision {
     Block {
         reason: String,
     },
+    /// The runtime's own words in place of the result: a notice that
+    /// nothing was admitted, or the narrowing this result would cause
+    /// and the control call that accepts it. Nothing here was admitted
+    /// from a value, so a harness that spells the runtime's tool names
+    /// into names its model dispatches spells this text.
     ReplaceOutput {
         output: String,
+    },
+    /// The value the engine admitted in place of the raw result: a
+    /// confined result the check let through, or a sanitizer's
+    /// derivation. It reaches the model as it crossed — a harness
+    /// delivers these bytes and rewrites nothing in them, exactly as it
+    /// delivers a [`HookDecision::ChildReturn`].
+    DeliverValue {
+        value: String,
     },
     /// What crosses to the parent is `value`, not the child's message as
     /// it spelled it: a shaped return crosses in canonical form, and a

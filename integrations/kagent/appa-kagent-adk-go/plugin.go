@@ -59,10 +59,11 @@
 // so every runtime string the plugin hands the model is spelled back
 // through the inventory first (forModel). The bytes a child's return
 // crossed with are the exception: they reach the parent as the runtime
-// crossed them. A replace_output carries either kind — the admitted
-// value of a confined or sanitized result, or the runtime's
-// staged-narrowing text naming the control tool — and the wire tells
-// them apart nowhere, so it is spelled back with the rest.
+// crossed them, and the wire names which kind it carries: a
+// deliver_value holds the admitted value of a confined or sanitized
+// result, which reaches the model byte for byte, and a replace_output
+// holds the runtime's own staged-narrowing text, which is spelled back
+// with the rest.
 package appakagentadk
 
 import (
@@ -1170,9 +1171,9 @@ func (p *AppaPluginKagent) afterTool(ctx agent.Context, t tool.Tool, args, resul
 		switch decision.Kind {
 		case "ack":
 			return nil, nil
-		case "child_return":
-			// The bytes the return crossed with, never spelled over:
-			// the parent receives what the runtime crossed.
+		case "child_return", "deliver_value":
+			// The bytes the value crossed with, never spelled over:
+			// the parent receives what the runtime admitted.
 			return map[string]any{"result": decision.Value}, nil
 		case "replace_output":
 			return map[string]any{"result": p.forModel(decision.Output)}, nil
@@ -1189,12 +1190,14 @@ func (p *AppaPluginKagent) afterTool(ctx agent.Context, t tool.Tool, args, resul
 	switch decision.Kind {
 	case "ack":
 		return p.remedyRendering(t, result), nil
+	case "deliver_value":
+		// The admitted value of a confined or sanitized result, as it
+		// crossed. Spelling it back would hand the model other bytes
+		// than the ones the runtime admitted.
+		return map[string]any{"result": decision.Value}, nil
 	case "replace_output":
-		// One kind, two contents: the admitted value of a confined or
-		// sanitized result, and the runtime's own staged-narrowing text,
-		// which names the control tool by a spelling the ADK cannot
-		// dispatch. Nothing on the wire tells them apart, so both are
-		// spelled back.
+		// The runtime's own words about this result, which name the
+		// control tool by a spelling the ADK cannot dispatch.
 		return map[string]any{"result": p.forModel(decision.Output)}, nil
 	case "block":
 		return withheldResult(p.forModel(decision.Reason)), nil
@@ -1226,6 +1229,8 @@ func (p *AppaPluginKagent) onToolError(ctx agent.Context, t tool.Tool, args map[
 	switch decision.Kind {
 	case "ack":
 		return nil, nil // the original error propagates
+	case "deliver_value":
+		return map[string]any{"result": decision.Value}, nil
 	case "replace_output":
 		return map[string]any{"result": p.forModel(decision.Output)}, nil
 	case "block":
