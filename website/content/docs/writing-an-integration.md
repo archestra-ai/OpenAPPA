@@ -40,6 +40,16 @@ OpenAPPA reconstructs each trajectory from an append-only event log persisted to
 | **Shared internal service** | Gates multiple internal agents through a centralized runtime and shared policy. |
 | **Application service** | Protects user-facing agents directly inside your application infrastructure. |
 
+## Why Add OpenAPPA?
+
+### Benefits for a SaaS Product
+
+OpenAPPA enforces policy independently of the model. If your product connects external MCP servers, OpenAPPA lets customers configure deterministic boundaries on where data may flow. For automated background agents, it prevents data egress to unauthorized destinations.
+
+### Benefits for an Enterprise Agent
+
+OpenAPPA applies centralized security policies across all internal agents. A policy defines where data may flow, required sanitization before egress, and human-in-the-loop approvals for sensitive actions.
+
 ## Add an Integration
 
 > **Ask your coding agent**
