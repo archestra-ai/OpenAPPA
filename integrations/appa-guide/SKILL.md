@@ -62,6 +62,9 @@ the `appa-guide` skill name; never invent a mode-specific skill name.
 - Read before proposing. Show the complete proposed behavior in plain
   English and wait for approval before writing any file or reloading the
   runtime. Ask for approval again if a correction changes that behavior.
+- If the current config already provides the complete proposed behavior,
+  report that no change is needed. Do not ask for approval, write, or
+  reload an unchanged config.
 - Make the smallest change that achieves the request. Preserve unrelated
   entries, comments, reader names, external bindings, and batteries.
 - Use short sentences. Explain what data stays private, what can leave

@@ -27,6 +27,24 @@ For `init`, finish the read-only inspection and present the complete
 proposal without an intermediate confirmation. Approval is required only
 before a write or reload.
 
+### Required init checklist
+
+Do not present an init result until all these steps succeed or their
+unavailable state is reported:
+
+1. Load the shared `appa-guide` skill rules.
+2. Read this complete reference.
+3. List Agents across all namespaces and identify each target runtime.
+4. Read each shared policy ConfigMap and invoke `appa-guide-inspect` in
+   each runtime pod.
+5. Read only the MCP servers referenced by target Agents. Skip
+   `appa-guide` and servers used only by it.
+6. Compare installed tools and delegations with the current policy and
+   available batteries.
+7. Present the complete proposal format below. Do not say initialization
+   is complete before an approved change is applied. If no change is
+   needed, say so and do not offer a write or reload.
+
 ### Read-only fallback
 
 If the write tools are missing, or the target runtime is unreachable,
@@ -244,8 +262,10 @@ Show:
    correct `APPA_RUNTIME_URL`. Bundled mode leaves that URL unset. Propose
    the change and apply it only after approval.
 
-In read-only fallback, put the complete TOML in chat instead. Otherwise
-end with: **Approve, or tell me what to change.** Wait for the reply.
+In read-only fallback, put the complete TOML in chat instead. If the
+proposal changes behavior, end with: **Approve, or tell me what to change.**
+Wait for the reply. If it changes nothing, report that no
+change is needed and do not ask for approval.
 
 After approval:
 

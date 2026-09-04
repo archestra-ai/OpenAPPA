@@ -40,6 +40,7 @@ fn the_router_routes_by_host_and_carries_the_shared_rules() {
         "OpenAPPA pieces",
         "smallest change",
         "wait for approval",
+        "reload an unchanged config",
     ] {
         assert!(
             router.contains(shared),
@@ -92,6 +93,7 @@ fn the_kagent_reference_carries_the_full_flow() {
         "Protect all Agents",
         "appa-guide-inspect",
         "appa-guide-reload",
+        "Required init checklist",
     ] {
         assert!(reference.contains(marker), "the kagent flow names {marker:?}");
     }
