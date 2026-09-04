@@ -1,14 +1,27 @@
-//! Report-local identifiers for the names a deployment chose.
+//! Report-local identifiers for the strings a report may not carry as spelled.
 //!
-//! Under pseudonymization every policy-defined name — a tool, an authority, a group, a
-//! selector — is replaced by a token like `tool-1`. The substitution is *within one report*:
-//! two reports never agree on what `tool-1` means, so nothing here can be used to correlate
-//! one deployment across reports.
+//! # Two reasons a name is replaced, and only one of them is a mode
 //!
-//! What survives the substitution is what a reader needs to reason about the trajectory:
-//! equality (the same tool is the same token everywhere), cardinality (three tools stay
-//! three), and order of first appearance. What does not survive is the spelling, which is the
-//! only part that names the deployment.
+//! Some strings are the *deployment's* vocabulary: a tool, an authority, a trust rank. Those
+//! are diagnostic in a report a team sends about its own deployment, so [`Mode::Baseline`]
+//! carries them as spelled and [`Mode::Pseudonymized`] replaces them — that is the whole of
+//! what the person is agreeing to at the first prompt.
+//!
+//! Others are not the deployment's vocabulary at all: a harness session id, a person, a key
+//! the *model* chose in a tool call, a field name in a schema the *agent* authored. No mode
+//! carries those, because no mode was ever offered for them. [`Class::always_tokenized`] is
+//! that distinction, and it is a property of the class rather than of the caller, so a table
+//! entry cannot get it wrong by choosing the mode-governed spelling for a person.
+//!
+//! # What a token preserves
+//!
+//! Equality (the same tool is the same token everywhere), cardinality (three tools stay
+//! three), and order of first appearance. What it does not preserve is the spelling.
+//!
+//! Tokens are report-*local*: nothing here is a stable identifier, and `tool-1` in one report
+//! carries no relation to `tool-1` in another. They are not randomized aliases, so two reports
+//! of similar sessions may well number similarly — the guarantee is that the spelling does not
+//! leave, not that an observer holding one report learns nothing about another.
 
 use std::collections::BTreeMap;
 
@@ -16,8 +29,20 @@ use std::collections::BTreeMap;
 /// `tool-1` and `authority-1` are unrelated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Class {
+    /// The harness's own session id. It names the machine and often the person, so no mode
+    /// carries it.
     Trajectory,
+    /// A person: an email address, an account id, a provider-qualified member.
     Reader,
+    /// A key the model chose in a tool call. Tool parameters are not confined to
+    /// policy-declared names — an open-parameter tool takes any object — so an argument *key*
+    /// is the caller's data exactly as its value is.
+    Argument,
+    /// A content digest. It correlates a call with its offer inside one report, and outside
+    /// one it is an unsalted hash of the very arguments and outputs the report promises not
+    /// to carry: a recipient who guesses them can confirm the guess. A token keeps the
+    /// correlation and removes the oracle.
+    Digest,
     Authority,
     Tool,
     Effect,
@@ -32,19 +57,44 @@ pub(crate) enum Class {
     Trust,
     /// A custom identity implementation's name.
     Identity,
-    /// A name the policy author chose for a field: a property in a return contract's schema, or
-    /// the tool argument an `includes($arg)` placeholder reads.
+    /// A property name in a return contract's schema. The schema arrives in a remedy plan's
+    /// arguments, so it is the agent's text, not the policy's.
     Field,
-    /// A `const` or `enum` literal authored in a return contract's schema.
+    /// A `const` or `enum` literal in that same agent-authored schema.
     Literal,
 }
 
 impl Class {
+    /// Whether this class is replaced in *both* modes.
+    ///
+    /// True for everything that is not the deployment's own vocabulary. Baseline offers the
+    /// person one thing — the names their policy spells — and a session id, a colleague's
+    /// email, a key the model invented and a digest of the arguments are none of them.
+    fn always_tokenized(self) -> bool {
+        match self {
+            Class::Trajectory | Class::Reader | Class::Argument | Class::Digest | Class::Field | Class::Literal => true,
+            Class::Authority
+            | Class::Tool
+            | Class::Effect
+            | Class::Sanitizer
+            | Class::Annotator
+            | Class::Mark
+            | Class::Group
+            | Class::Surface
+            | Class::Source
+            | Class::Selector
+            | Class::Trust
+            | Class::Identity => false,
+        }
+    }
+
     /// The stem a token of this class is spelled with.
     fn stem(self) -> &'static str {
         match self {
             Class::Trajectory => "trajectory",
             Class::Reader => "reader",
+            Class::Argument => "argument",
+            Class::Digest => "digest",
             Class::Authority => "authority",
             Class::Tool => "tool",
             Class::Effect => "effect",
@@ -65,9 +115,9 @@ impl Class {
 
 /// One report's substitution table.
 ///
-/// In [`Mode::Baseline`] this hands every name back unchanged; the walk is identical either
-/// way, so a baseline and a pseudonymized report differ in exactly one place rather than
-/// following two code paths that can drift apart.
+/// In [`Mode::Baseline`] this hands the deployment's own names back unchanged; the walk is
+/// identical either way, so a baseline and a pseudonymized report differ in exactly one place
+/// rather than following two code paths that can drift apart.
 #[derive(Debug, Default)]
 pub(crate) struct Tokens {
     assigned: BTreeMap<(Class, String), u32>,
@@ -77,8 +127,10 @@ pub(crate) struct Tokens {
 /// Whether policy-defined names are carried as spelled or replaced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Mode {
-    /// Names as the deployment spells them. Still excludes every value, argument, path and
-    /// identity — the classification is the same; only the naming differs.
+    /// The deployment's own names as it spells them: tools, authorities, sanitizers, effects,
+    /// trust ranks, groups. Everything [`Class::always_tokenized`] covers is replaced here
+    /// too, so this mode still carries no session id, no person, no argument key and no
+    /// content digest. The classification is the same in both modes; only the naming differs.
     Baseline,
     Pseudonymized,
 }
@@ -90,7 +142,7 @@ impl Tokens {
     /// (lexicographic keys, index order) precisely so that this numbering does not depend on
     /// how the JSON library happens to store its maps.
     pub(crate) fn token(&mut self, mode: Mode, class: Class, raw: &str) -> String {
-        if mode == Mode::Baseline {
+        if mode == Mode::Baseline && !class.always_tokenized() {
             return raw.to_string();
         }
         let key = (class, raw.to_string());

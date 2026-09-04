@@ -62,8 +62,10 @@ pub(crate) enum Rule {
     /// A value body: replaced by its length, so a reader sees that something large crossed
     /// without seeing any of it.
     BodyBytes,
-    /// Tool-call arguments: the *keys* survive, every value is dropped. Which arguments a
-    /// call carried is diagnostic; what was in them is the caller's data.
+    /// Tool-call arguments: how many the call carried and which of them recur, as tokens.
+    /// Every value is dropped, and so is every key's spelling — a key is the caller's data
+    /// just as its value is, because an open-parameter tool accepts any object and the model
+    /// chooses the names in it.
     ArgumentKeys,
     /// An array whose items are names. A set of `ToolName` serializes to an array, and no
     /// map-key rule reaches it.
@@ -242,7 +244,14 @@ impl Walk<'_> {
         }
     }
 
-    /// Which arguments a call carried, never what was in them.
+    /// How many arguments a call carried and which of them recur — never what was in them,
+    /// and never how they were spelled.
+    ///
+    /// A key is tokenized like any other caller-chosen string. It is tempting to carry keys as
+    /// spelled, since a declared tool's parameters are named in the policy; but nothing
+    /// confines a call to declared names — an open-parameter tool takes any object — so a call
+    /// carrying `{"/home/alice/.ssh/id_rsa": true}` would export that path *classified*, where
+    /// no drift report would ever mention it.
     fn argument_keys(&mut self, value: &Value, path: &str) -> Value {
         // `CanonicalArguments` serializes as a scalar string holding canonical JSON, not as
         // an object: a rule written against the Rust struct would not match this at all.
@@ -254,7 +263,7 @@ impl Walk<'_> {
             Some(map) => Value::Array(
                 Self::sorted(map)
                     .into_iter()
-                    .map(|(key, _)| Value::from(key.as_str()))
+                    .map(|(key, _)| self.token(Class::Argument, key))
                     .collect(),
             ),
             None => self.unclassify(path),
@@ -466,13 +475,19 @@ mod tests {
 
     static NESTED: Table = Table {
         name: "Nested",
-        entries: &[("tool", Rule::Token(Class::Tool))],
+        entries: &[
+            ("tool", Rule::Token(Class::Tool)),
+            ("digest", Rule::Token(Class::Digest)),
+        ],
     };
 
     static ROOT: Table = Table {
         name: "Root",
         entries: &[
             ("tool", Rule::Token(Class::Tool)),
+            ("reader", Rule::Token(Class::Reader)),
+            ("session", Rule::Token(Class::Trajectory)),
+            ("digest", Rule::Token(Class::Digest)),
             ("count", Rule::Keep),
             ("body", Rule::BodyBytes),
             ("arguments", Rule::ArgumentKeys),
@@ -537,7 +552,7 @@ mod tests {
     }
 
     #[test]
-    fn arguments_keep_their_keys_and_lose_their_values() {
+    fn arguments_keep_their_shape_and_lose_their_keys_and_values() {
         let stripped = run(serde_json::json!({
             "arguments": r#"{"file_path":"/home/someone/.ssh/id_rsa","limit":10}"#
         }));
@@ -547,10 +562,63 @@ mod tests {
         );
         assert_eq!(
             stripped.value["argument_keys"],
-            serde_json::json!(["file_path", "limit"])
+            serde_json::json!(["argument-1", "argument-2"]),
+            "how many arguments and which recur, never how they were spelled"
         );
         let rendered = serde_json::to_string(&stripped.value).expect("serializes");
         assert!(!rendered.contains("id_rsa"));
+    }
+
+    /// Nothing confines a call to the parameter names its tool declares: an open-parameter
+    /// tool takes any object, so the *key* is attacker-chosen text. A key carried as spelled
+    /// would leave classified, where no drift report would ever mention it.
+    #[test]
+    fn a_hostile_argument_key_does_not_escape_in_either_mode() {
+        let hostile = serde_json::json!({
+            "arguments": r#"{"/home/alice/.ssh/id_rsa":true,"alice@corp.example":null}"#
+        });
+        for mode in [Mode::Baseline, Mode::Pseudonymized] {
+            let mut tokens = Tokens::default();
+            let stripped = strip(&hostile, &ROOT, &mut tokens, mode);
+            let rendered = serde_json::to_string(&stripped.value).expect("serializes");
+            for spelled in ["id_rsa", "alice", "corp.example", "/home"] {
+                assert!(!rendered.contains(spelled), "{spelled} escaped in {mode:?}: {rendered}");
+            }
+        }
+    }
+
+    /// Baseline offers the person one thing: the names their own policy spells. A session id,
+    /// a colleague's email and a content digest are none of them, and no mode carries those.
+    #[test]
+    fn baseline_carries_the_deployment_s_names_and_nobody_s_identity() {
+        let value = serde_json::json!({
+            "tool": "Bash",
+            "nested": { "tool": "Read" },
+            "reader": "alice@corp.example",
+            "session": "cc:6906d44d-d32f-44cc-b110-89db24c6d5db",
+            "digest": "38142c4d026dba0e8f82124bf7d95f1edd7f8ab8e348f41fd276ec1af59c1a63"
+        });
+        let mut tokens = Tokens::default();
+        let stripped = strip(&value, &ROOT, &mut tokens, Mode::Baseline);
+        assert_eq!(stripped.value["tool"], "Bash", "the policy's own vocabulary is spelled");
+        assert_eq!(stripped.value["reader"], "reader-1");
+        assert_eq!(stripped.value["session"], "trajectory-1");
+        assert_eq!(stripped.value["digest"], "digest-1");
+        let rendered = serde_json::to_string(&stripped.value).expect("serializes");
+        for spelled in ["alice", "6906d44d", "38142c4d"] {
+            assert!(!rendered.contains(spelled), "{spelled} survived baseline");
+        }
+    }
+
+    /// A digest correlates within one report exactly as its hex did, which is the only
+    /// correlation a reader has — and the only one the hex was carried for.
+    #[test]
+    fn a_digest_token_still_correlates_two_facts() {
+        let stripped = run(serde_json::json!({
+            "digest": "38142c4d026dba0e8f82124bf7d95f1edd7f8ab8e348f41fd276ec1af59c1a63",
+            "nested": { "digest": "38142c4d026dba0e8f82124bf7d95f1edd7f8ab8e348f41fd276ec1af59c1a63" }
+        }));
+        assert_eq!(stripped.value["digest"], stripped.value["nested"]["digest"]);
     }
 
     /// A `BTreeSet<ToolName>` serializes to an array, so no map-key rule reaches it.

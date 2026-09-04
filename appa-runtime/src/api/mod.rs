@@ -467,6 +467,12 @@ impl Runtime {
     /// Note one thing this runtime did. Infallible and best-effort by construction: a
     /// diagnostic must never fail a decision the engine has already made, and the lock is
     /// held only for the insert.
+    ///
+    /// `root` is the family's root, never the acting trajectory. The log is keyed by family
+    /// because that is the unit a report is about and the unit the per-list bound applies to;
+    /// filing a subagent's event under the subagent would put it outside its own family's
+    /// account and leave [`crate::events::EventLog::recent_root`] naming an id no log reads
+    /// for. `None` is for what happens before any family is known.
     pub(crate) fn record(&self, root: Option<&TrajectoryId>, event: crate::events::RuntimeEvent) {
         self.inner.record(root, event);
     }

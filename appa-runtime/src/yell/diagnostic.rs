@@ -5,14 +5,23 @@
 //! trust ranks a reader needs to make sense of them. No prompt, no argument, no tool output,
 //! no path, and — under [`Mode::Pseudonymized`] — no name the deployment chose.
 //!
-//! ## Why the export is bounded by bytes and not by a fact count
+//! ## Why the facts are bounded by bytes and not by a count
 //!
 //! A count is not a bound: fifty thousand facts carrying large arguments are gigabytes before
 //! the first one is stripped. So the builder walks the log twice. The first pass runs
 //! newest-first with a throwaway token map, keeping nothing but a running byte total, to find
-//! the oldest fact that still fits the budget. The second runs from there oldest-first with
-//! the real map, so the export is in log order and token numbers follow first appearance. One
-//! stripped fact is live at a time in the first pass.
+//! the oldest fact that still fits [`MAX_FACT_BYTES`]. The second runs from there oldest-first
+//! with the real map, so the export is in log order and token numbers follow first appearance.
+//! One stripped fact is live at a time in the first pass.
+//!
+//! Be exact about what that bounds, because it is easy to claim more. It bounds the *facts*
+//! this builder materializes, to within the width of a token's ordinal — the two passes number
+//! tokens in opposite orders, so `tool-9` in one may be `tool-12` in the other, and
+//! [`ENTRY_OVERHEAD`] is an estimate of each entry's framing rather than a measurement. It
+//! does not bound the runtime events, which arrive already bounded by the event log's own
+//! byte cap and are cloned out from under its mutex. And it is not a bound on the emitted
+//! document: the envelope a report sends is measured and trimmed against the receiver's real
+//! limits, gzipped, after this builder has run.
 
 use serde::Serialize;
 use serde_json::Value;
@@ -441,10 +450,13 @@ mod tests {
         }
     }
 
-    /// Baseline names what the deployment spells and hides exactly the same values, so the two
-    /// modes differ in naming alone and cannot drift into two classifications.
+    /// Baseline carries the deployment's own names and hides exactly the same everything else,
+    /// so the two modes differ in naming alone and cannot drift into two classifications.
+    ///
+    /// The second half is the one that matters: `/diagnostic` defaults to Baseline, so this is
+    /// what the endpoint hands out when nobody asked for anything.
     #[tokio::test]
-    async fn baseline_differs_from_pseudonymized_only_in_the_names() {
+    async fn baseline_carries_the_deployment_s_names_and_nothing_of_the_session() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let (runtime, root) = recorded_session(&dir).await;
         let baseline = export(&runtime, &root, Mode::Baseline);
@@ -455,9 +467,126 @@ mod tests {
         assert_eq!(baseline.unclassified, pseudonymized.unclassified);
         let rendered = serde_json::to_string(&baseline).expect("the export serializes");
         assert!(rendered.contains("Bash"), "baseline carries the names as spelled");
+        let session = root.0.trim_start_matches("cc:").to_string();
+        assert!(!rendered.contains(&session), "baseline carries no harness session id");
+        for spelled in ["/home/user", "hookrec"] {
+            assert!(!rendered.contains(spelled), "{spelled} survived baseline");
+        }
+    }
+
+    /// The variant name each `Fact` serializes under.
+    ///
+    /// This match is the compile-time half of the gate. The walk is deny-by-default, so an
+    /// unclassified variant is safe — it carries nothing — but safe is not the same as
+    /// reported, and a recorded session only ever produces a handful of the twenty-three. Add
+    /// a variant to the engine and this stops compiling, which is the moment to add its table.
+    fn variant(fact: &Fact) -> &'static str {
+        match fact {
+            Fact::TrajectoryOpened { .. } => "TrajectoryOpened",
+            Fact::ValueAdmitted { .. } => "ValueAdmitted",
+            Fact::DispatchOpened { .. } => "DispatchOpened",
+            Fact::DispatchSucceeded { .. } => "DispatchSucceeded",
+            Fact::DispatchClosed { .. } => "DispatchClosed",
+            Fact::Ruling { .. } => "Ruling",
+            Fact::Denial { .. } => "Denial",
+            Fact::Acceptance { .. } => "Acceptance",
+            Fact::OutputSanitizerBound { .. } => "OutputSanitizerBound",
+            Fact::CandidateDerived { .. } => "CandidateDerived",
+            Fact::CandidateAccepted { .. } => "CandidateAccepted",
+            Fact::ChildReturn { .. } => "ChildReturn",
+            Fact::ProposalBatchDecided { .. } => "ProposalBatchDecided",
+            Fact::OfferOpened { .. } => "OfferOpened",
+            Fact::OfferAccepted { .. } => "OfferAccepted",
+            Fact::OfferDenied { .. } => "OfferDenied",
+            Fact::OfferInvalidated { .. } => "OfferInvalidated",
+            Fact::CallApproved { .. } => "CallApproved",
+            Fact::CallApprovalConsumed { .. } => "CallApprovalConsumed",
+            Fact::BasisAdvanced { .. } => "BasisAdvanced",
+            Fact::ForkPrepared { .. } => "ForkPrepared",
+            Fact::ForkOpened { .. } => "ForkOpened",
+            Fact::Boundary { .. } => "Boundary",
+        }
+    }
+
+    /// Every name [`variant`] can return is a key the inventory names, and the inventory names
+    /// nothing else. The first half catches a variant added to the engine and not classified;
+    /// the second catches a table left behind after one is removed or renamed.
+    #[tokio::test]
+    async fn the_inventory_names_every_fact_variant_and_no_others() {
+        const NAMES: [&str; 23] = [
+            "TrajectoryOpened",
+            "ValueAdmitted",
+            "DispatchOpened",
+            "DispatchSucceeded",
+            "DispatchClosed",
+            "Ruling",
+            "Denial",
+            "Acceptance",
+            "OutputSanitizerBound",
+            "CandidateDerived",
+            "CandidateAccepted",
+            "ChildReturn",
+            "ProposalBatchDecided",
+            "OfferOpened",
+            "OfferAccepted",
+            "OfferDenied",
+            "OfferInvalidated",
+            "CallApproved",
+            "CallApprovalConsumed",
+            "BasisAdvanced",
+            "ForkPrepared",
+            "ForkOpened",
+            "Boundary",
+        ];
+        let classified: Vec<&str> = tables::FACT.entries.iter().map(|(name, _)| *name).collect();
+        let mut expected = NAMES.to_vec();
+        expected.sort_unstable();
+        let mut actual = classified;
+        actual.sort_unstable();
+        assert_eq!(actual, expected);
+
+        // And the names are the ones the engine's own serde emits, not a list that drifted
+        // from it: every fact a real session produced serializes under the name the match
+        // gives it.
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let (runtime, root) = recorded_session(&dir).await;
+        let log = runtime.log_facts(&root);
+        assert!(!log.is_empty(), "the replay produced facts");
+        for fact in &log {
+            let value = serde_json::to_value(fact).expect("a fact serializes");
+            let emitted = value.as_object().expect("a fact is a one-key object");
+            assert_eq!(emitted.keys().collect::<Vec<_>>(), vec![variant(fact)]);
+        }
+    }
+
+    /// The family's account holds what its subagent did, not only what its root did.
+    ///
+    /// Hooks, external consults and control calls are recorded from three different places,
+    /// and each of them has an acting trajectory to hand — which for a subagent is the child.
+    /// `EventLog` reads one root's bucket, so a single one of those filing under the child
+    /// drops that evidence out of the report without anything failing.
+    #[tokio::test]
+    async fn a_subagent_s_events_land_in_its_family_s_account() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let (runtime, root) = recorded_session(&dir).await;
+        let export = export(&runtime, &root, Mode::Pseudonymized);
+
+        // The recorded subagent's own tool calls carry its dispatches, and a dispatch names
+        // the trajectory that made it.
+        let child = export
+            .branches
+            .iter()
+            .find(|branch| branch.parent.is_some())
+            .expect("the recorded session spawned a subagent");
+        let from_child = export
+            .runtime_events
+            .iter()
+            .filter(|entry| entry.event.pointer("/dispatch/trajectory") == Some(&Value::from(child.id.as_str())))
+            .count();
         assert!(
-            !rendered.contains("/home/user"),
-            "baseline still carries no argument value"
+            from_child > 0,
+            "the subagent's hooks are in the family's account, got {:?}",
+            export.runtime_events
         );
     }
 

@@ -16,9 +16,13 @@ use super::tokens::Class;
 
 /// The harness's own session id, which names the machine and often the person.
 const TRAJECTORY: Rule = Rule::Token(Class::Trajectory);
-/// A content digest. Opaque, derived, and the correlation key a reader reconstructs the
-/// decision sequence from, so it is carried as it stands.
-const DIGEST: Rule = Rule::Keep;
+/// A content digest: the correlation key a reader reconstructs the decision sequence from.
+///
+/// Tokenized, not carried as it stands. Within one report a token correlates exactly as the
+/// hex does; outside one, the hex is an unsalted SHA-256 of the very tool name, arguments and
+/// output bytes this export promises not to carry, and a recipient who guesses them can
+/// confirm the guess. The correlation is what a reader needs; the oracle is not.
+const DIGEST: Rule = Rule::Token(Class::Digest);
 /// A counter, a rank, a version, a boolean: engine arithmetic with no name in it.
 const NUMBER: Rule = Rule::Keep;
 
@@ -163,8 +167,9 @@ static RECIPIENT_SPEC: Table = Table {
     name: "RecipientSpec",
     entries: &[
         ("Static", Rule::Table(&DECLARED_AUDIENCE)),
-        // The name of the tool argument the recipients are read from: authored in the policy.
-        ("Placeholder", Rule::Token(Class::Field)),
+        // The tool argument the recipients are read from. The policy names it, but it names
+        // the same key space a call's arguments do, so it is numbered with them.
+        ("Placeholder", Rule::Token(Class::Argument)),
     ],
 };
 

@@ -908,8 +908,10 @@ impl Session {
     ) -> crate::external::ConsultOutcome {
         let started = std::time::Instant::now();
         let outcome = self.deployment.externals.consult(consult, elicitation, ruling).await;
+        // Filed under the family, never the acting trajectory: a subagent's slow authority is
+        // part of its family's account, and `EventLog` reads one root's bucket.
         self.inner.record(
-            Some(&self.trajectory),
+            Some(&self.root),
             crate::events::RuntimeEvent::External {
                 role: consult.kind().into(),
                 name: consult.name.clone(),

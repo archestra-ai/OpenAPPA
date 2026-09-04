@@ -93,7 +93,8 @@ impl RemedyService {
         // reads: a remedy that takes a minute and then declines is the shape of "APPA is in
         // the way", and neither the duration nor the offer it quoted is in the trajectory.
         self.runtime.record(
-            Some(crate::api::acting_trajectory(&acting)),
+            // The family, never the acting trajectory: see `Session::timed_consult`.
+            Some(&acting.root),
             crate::events::RuntimeEvent::Control {
                 call: crate::events::ControlCall::Remedy {
                     offer: quoted.0,
