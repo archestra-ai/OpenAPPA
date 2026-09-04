@@ -6,8 +6,8 @@ use std::sync::Arc;
 use crate::elicit::Elicitation;
 
 use crate::consult::{
-    AnnotationAnswer, AnnotationArtifact, AudienceSourceArtifact, AudienceSourceDeclaration, Consult, ConsultBody,
-    LookupAnswer, MembersAnswer, PrincipalAnswer, SanitizerAnswer,
+    AnnotationAnswer, AudienceSourceArtifact, AudienceSourceDeclaration, Consult, ConsultBody, LookupAnswer,
+    MembersAnswer, PrincipalAnswer, SanitizerAnswer,
 };
 use crate::engine::{
     AuthorityVerdict, EngineDecision, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Feedback, ForkStatus,
@@ -262,6 +262,11 @@ impl Session {
     }
 
     pub async fn on_tool_call(&self, call: ProposedCall, spawn: bool) -> Result<ToolCallDecision, EventError> {
+        // The consult wire is JSON, so a directory it cannot spell is refused here, at the
+        // runtime's entry, and never reaches an annotator.
+        if call.cwd.as_deref().is_some_and(|cwd| cwd.to_str().is_none()) {
+            return Err(EventError::UnrepresentableCwd);
+        }
         if let Some(open) = self.substituted_release(&call)? {
             return self.claim_or_abandon(call, open).await;
         }
@@ -946,17 +951,13 @@ impl Session {
                 annotator,
                 call,
                 declaration,
-                args,
-                cwd,
+                artifact,
             } => {
                 let consult = Consult {
                     name: annotator.clone(),
                     body: ConsultBody::Annotation {
                         declaration: declaration.clone(),
-                        artifact: AnnotationArtifact {
-                            args: args.clone(),
-                            cwd: cwd.clone(),
-                        },
+                        artifact: artifact.clone(),
                     },
                 };
                 let answer = match self.deployment.externals.consult(&consult, None, None).await {
@@ -1478,6 +1479,29 @@ name = "execute_remedy_plan"
             facts.last(),
             Some(appa_engine::fact::Fact::DispatchOpened { .. })
         ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_working_directory_that_is_not_utf8_is_refused_before_the_call_is_judged() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let call = ProposedCall {
+            cwd: Some(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b"/home/me/\xff"))),
+            ..fetch(serde_json::json!({"a": 1}))
+        };
+        assert!(matches!(
+            session.on_tool_call(call, false).await,
+            Err(EventError::UnrepresentableCwd)
+        ));
+        assert!(
+            runtime.open_dispatches(&root(), &root()).is_empty(),
+            "nothing is appended for a call refused at the entry"
+        );
     }
 
     #[tokio::test]

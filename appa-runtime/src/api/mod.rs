@@ -234,6 +234,10 @@ pub(crate) enum EventError {
     UndeclaredSpawn { tool: String },
     #[error("storage failure: {0}")]
     Storage(String),
+    /// The harness reported a working directory the consult wire cannot spell: not
+    /// UTF-8. An adapter fault, refused before the call is judged; nothing is appended.
+    #[error("the reported working directory is not UTF-8; the call is refused before it is judged")]
+    UnrepresentableCwd,
 }
 
 impl EventError {
@@ -266,6 +270,7 @@ impl EventError {
             | EventError::ResolutionDiverged { .. }
             | EventError::AnnotationRefused { .. }
             | EventError::UndeclaredTool { .. }
+            | EventError::UnrepresentableCwd
             | EventError::UnexpectedDecision => true,
             EventError::CallOutstanding
             | EventError::SubstitutionAbandoned { .. }

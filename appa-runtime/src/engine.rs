@@ -36,7 +36,7 @@
 //! the plan from the live views and matches it by value, so an offer whose
 //! basis has moved declines instead of executing.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use appa_engine::audience::{AudienceEvidence, IdentityImplementation, IdentityMapping, MemberClaims, SelectorSpec};
 use appa_engine::contract::{
@@ -79,8 +79,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::api::OutcomeBody;
 pub(crate) use crate::api::{OfferId, ProposedCall, SpawnBinding, ToolOutcome, TrajectoryId};
 use crate::consult::{
-    AnnotationAnswer, AnnotationDeclaration, AuthorityAnswer, AuthorityArtifact, AuthorityDeclaration, HistoryEntry,
-    Requirement, Ruling, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint, WireAudience,
+    AnnotationAnswer, AnnotationArtifact, AnnotationDeclaration, AuthorityAnswer, AuthorityArtifact,
+    AuthorityDeclaration, HistoryEntry, Requirement, Ruling, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint,
+    WireAudience,
 };
 use appa_runtime_api::{OfferedRemedy, OfferedReturn};
 
@@ -142,11 +143,10 @@ pub enum ExternalRequest {
         annotator: String,
         call: appa_engine::value::CanonicalDigest,
         declaration: AnnotationDeclaration,
-        /// The consult artifact: the complete call, or one value per declared input.
-        args: serde_json::Value,
-        /// The working directory the harness reported for the proposed call, as written;
-        /// `None` when it reported none. Consult input only: never part of the digest.
-        cwd: Option<PathBuf>,
+        /// The consult artifact: the complete call or one value per declared input, and
+        /// the working directory the harness reported. Consult input only: no part of the
+        /// digest.
+        artifact: AnnotationArtifact,
     },
     /// One audience source read: the members of one selector's collection at the
     /// registered source of `provider`.
@@ -1743,8 +1743,10 @@ impl RuntimeEngine {
                 annotator: annotator.as_str().to_string(),
                 call: digest,
                 declaration: self.annotation_declaration(annotator, binding),
-                args: annotation_args(&binding.inputs, declaration, resolved),
-                cwd: cwd.map(Path::to_path_buf),
+                artifact: AnnotationArtifact {
+                    args: annotation_args(&binding.inputs, declaration, resolved),
+                    cwd: cwd.map(Path::to_path_buf),
+                },
             }]));
         };
         Ok(PinnedAnnotation::new(
@@ -3375,20 +3377,20 @@ mod tests {
                         annotator,
                         call: digest,
                         declaration,
-                        args,
-                        cwd: None,
+                        artifact,
                     },
                 ] => {
                     assert_eq!(annotator, "classifier");
                     // The annotator maps no inputs, so `args` is the complete call.
                     assert_eq!(
-                        args,
-                        &serde_json::json!({
+                        artifact.args,
+                        serde_json::json!({
                             "name": "lookup",
                             "description": "Looks one record up.",
                             "arguments": {"nested": {"id": 7}, "deep": true},
                         })
                     );
+                    assert_eq!(artifact.cwd, None, "no directory was reported for this call");
                     // The declaration carries the mandate's complete vocabulary and nothing of
                     // the trajectory: no current label and no call-specific requirements.
                     assert!(declaration.inputs.is_empty());
