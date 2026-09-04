@@ -605,15 +605,10 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  # The live A2A matrix runs on demand only, and it carries NO same-named
-  # placeholder job. GitHub treats a skipped check run as satisfying a
-  # required status check, so the real job reports its own name when its
-  # `if` is false and nothing waits on a context that never arrives. A
-  # same-named twin would report skipped beside a real failure and
-  # satisfy the requirement anyway, which is how a twin masks red e2e.
-  #
-  # All 17 A2A cases against a real model on a kind cluster. Each test gets
-  # three total attempts; a test that exhausts them fails the gate.
+  # The live A2A matrix runs on demand only. Two isolated clusters split
+  # the 17 cases by measured duration; each case still gets three total
+  # attempts. The fan-in below alone owns the required check name, so a
+  # failed shard cannot be masked by a same-named skipped check.
   #
   # The steps below own the runner. The scripts under e2e/ci own the stack:
   #   kind-up.sh    loads the three `:ci` images into the cluster. It keeps
@@ -623,8 +618,8 @@ jobs:
   #                 and writes the model and the timings to the step summary.
   # Each script reads the environment this job exports. e2e/ci/README.md
   # documents the same three commands for a laptop or a dev VM.
-  kagent-a2a-e2e:
-    name: kagent A2A E2E
+  kagent-a2a-e2e-shards:
+    name: kagent A2A E2E (${{ matrix.name }})
     needs: changes
     # A pull request runs the matrix when it carries the label and it
     # changes an e2e path. A fork never reads the OpenRouter key.
@@ -637,11 +632,26 @@ jobs:
       needs.changes.outputs.e2e == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # These four cases account for about half the measured test time.
+          - name: long
+            cases: >-
+              the_exfil_ask or configured_default or
+              delegated_child_is_gated or untrusted_ingress
+          # New cases default to this shard instead of silently disappearing.
+          - name: rest
+            cases: >-
+              not (the_exfil_ask or configured_default or
+              delegated_child_is_gated or untrusted_ingress)
     env:
       KIND_CLUSTER: appa-e2e
       KAGENT_VERSION: "0.9.12"
       APPA_E2E_NAMESPACE: kagent
       APPA_E2E_IMAGE_TAG: ci
+      APPA_E2E_CASES: ${{ matrix.cases }}
       # The load leaves each image in the daemon and in the cluster node,
       # so the script drops the daemon copy.
       APPA_E2E_PRUNE_DAEMON_IMAGES: "1"
@@ -720,7 +730,7 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Run all 17 A2A cases
+      - name: Run A2A shard
         id: live-e2e
         run: bash integrations/kagent/e2e/ci/run-a2a.sh
 
@@ -743,10 +753,34 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: kagent-a2a-e2e-diagnostics
+          name: kagent-a2a-e2e-${{ matrix.name }}-diagnostics
           path: ${{ runner.temp }}/kagent-e2e-diagnostics
           if-no-files-found: ignore
           retention-days: 7
+
+  kagent-a2a-e2e:
+    name: kagent A2A E2E
+    needs: [changes, kagent-a2a-e2e-shards]
+    if: >-
+      always() &&
+      (github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (contains(github.event.pull_request.labels.*.name, 'run-e2e') ||
+      github.event.label.name == 'run-e2e') &&
+      needs.changes.outputs.e2e == 'true'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Check A2A shard results
+        env:
+          SHARD_RESULT: ${{ needs.kagent-a2a-e2e-shards.result }}
+        run: |
+          if [ "$SHARD_RESULT" != "success" ]; then
+            echo "::error::One or more A2A shards failed ($SHARD_RESULT)."
+            exit 1
+          fi
 
   # The five published images build here on every change that can break
   # them. Publishing itself happens in release.yml.
