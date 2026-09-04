@@ -780,15 +780,18 @@ fn array_items(vocabulary: &[String]) -> serde_json::Value {
 }
 
 /// The schema of one answered audience: the `public` token, or a non-empty array over the
-/// mandate's spellings. One chain word and no repeat are the decoder's rules — a strict-mode
-/// provider enforces `minItems` on an array and nothing finer.
+/// mandate's spellings — offered only when the mandate names one, so a closed mandate's
+/// schema admits `public` alone and nothing the decoder would refuse. One chain word and no
+/// repeat are the decoder's rules: a strict-mode provider enforces `minItems` on an array
+/// and nothing finer.
 fn dynamic_audience_schema(audiences: &[String]) -> serde_json::Value {
-    serde_json::json!({
-        "oneOf": [
-            {"type": "string", "const": "public"},
-            {"type": "array", "items": array_items(audiences), "minItems": 1}
-        ]
-    })
+    let public = serde_json::json!({"type": "string", "const": "public"});
+    match closed_enum(audiences) {
+        None => public,
+        Some(items) => serde_json::json!({
+            "oneOf": [public, {"type": "array", "items": items, "minItems": 1}]
+        }),
+    }
 }
 
 /// The strict-mode-compatible schema for one annotation answer: every accepted shape is a
@@ -1350,6 +1353,23 @@ mod tests {
             None,
             "a repeated entry passes the schema and is the decoder's refusal"
         );
+
+        // A closed mandate offers `public` and no array at all: nothing the schema admits is
+        // a value the decoder refuses.
+        let closed = annotation_schema(&AnnotationDeclaration {
+            audiences: vec![],
+            ..annotation_declaration()
+        });
+        assert!(jsonschema::is_valid(
+            &closed,
+            &with_audience(serde_json::json!("public"))
+        ));
+        for rejected in [serde_json::json!([]), serde_json::json!(["__appa_no_such_value__"])] {
+            assert!(
+                !jsonschema::is_valid(&closed, &with_audience(rejected.clone())),
+                "{rejected} is outside a closed mandate's schema"
+            );
+        }
     }
 
     #[test]
