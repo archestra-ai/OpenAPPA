@@ -874,6 +874,22 @@ impl Runtime {
         }
     }
 
+    /// [`Runtime::report`], off the async workers.
+    ///
+    /// Stripping, serializing and gzipping a long trajectory is seconds of CPU over as much
+    /// as [`crate::yell::report::MAX_PLAIN_BYTES`], and the same runtime serves the hooks that gate
+    /// an agent's every tool call. A report is never worth stalling the sessions it is about,
+    /// so every async caller goes through here and the synchronous builder stays synchronous.
+    pub(crate) async fn report_off_thread(
+        self: &Arc<Self>,
+        request: yell::ReportRequest,
+    ) -> Result<yell::Finished, yell::Oversize> {
+        let runtime = Arc::clone(self);
+        tokio::task::spawn_blocking(move || runtime.report(request))
+            .await
+            .expect("building a report does not panic")
+    }
+
     /// One finished `openappa.yell.v1` document, ready to write and to send.
     ///
     /// Assembling here rather than in the CLI is what keeps the size loop honest: only a

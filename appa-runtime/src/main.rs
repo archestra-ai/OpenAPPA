@@ -330,7 +330,8 @@ async fn report(
     };
     state
         .runtime
-        .report(request)
+        .report_off_thread(request)
+        .await
         .map(|finished| finished.plain)
         .map_err(|oversize| refuse(axum::http::StatusCode::PAYLOAD_TOO_LARGE, oversize.to_string()))
 }

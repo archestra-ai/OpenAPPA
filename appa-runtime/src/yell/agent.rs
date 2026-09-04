@@ -72,7 +72,7 @@ pub(crate) enum Outcome {
 /// Always in the deployment's own names: nobody is here to be asked the pseudonymization
 /// question, and a deployment that turned agent reporting on has already answered it. What
 /// may leave is the same either way — the mode chooses only how the names are spelled.
-pub(crate) async fn yell(runtime: &Runtime, harness: Adapter, args: &YellArgs) -> Outcome {
+pub(crate) async fn yell(runtime: &std::sync::Arc<Runtime>, harness: Adapter, args: &YellArgs) -> Outcome {
     let Some((acting, _)) = runtime.take_vouched(&args.ticket()) else {
         return Outcome::Unvouched;
     };
@@ -87,7 +87,7 @@ pub(crate) async fn yell(runtime: &Runtime, harness: Adapter, args: &YellArgs) -
         selection: selection(&acting, args.with_trajectory),
         harness,
     };
-    let Ok(finished) = runtime.report(request) else {
+    let Ok(finished) = runtime.report_off_thread(request).await else {
         return Outcome::Oversize;
     };
     let Some(receiver) = client::Receiver::resolve() else {
