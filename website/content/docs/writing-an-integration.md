@@ -78,7 +78,7 @@ The runtime serves one adapter, selected at startup with `--adapter claude-code|
 
 The two initial adapters reach the wire differently:
 
-- **Claude Code** posts through `appa hook --adapter claude-code`, run by the plugin's hooks. The Claude Code adapter crate keeps a client-side codec for it: the command reads Claude Code's hook JSON (`PreToolUse`, `PostToolUse`, `SubagentStart`, `SubagentStop`, …) on standard input, translates it to the envelope, posts it, and translates the decision back into the hook answer Claude Code reads.
+- **Claude Code** posts through `appa hook`, run by the plugin's hooks. The Claude Code adapter crate keeps a client-side codec for it: the command reads Claude Code's hook JSON (`PreToolUse`, `PostToolUse`, `SubagentStart`, `SubagentStop`, …) on standard input, translates it to the envelope, posts it, and translates the decision back into the hook answer Claude Code reads.
 - **kagent** posts the envelope directly: the Python and Go ADK plugins build it inside the agent pod and read the decision back. The kagent adapter crate is `adapter()` alone.
 
 A new host chooses one of the two shapes: build the envelope in-process, as kagent does, or translate a host's hook format in a client, as `appa hook` does. Either way it needs an adapter crate the runtime is built with, because the runtime derives the tool identity of every call from it. For a complete reference, see [`appa-adapter-claude-code`](https://github.com/archestra-ai/OpenAPPA/tree/main/appa-adapter-claude-code) and [`appa-adapter-kagent`](https://github.com/archestra-ai/OpenAPPA/tree/main/appa-adapter-kagent); the envelope and decision types are in [`appa-runtime-api`](https://github.com/archestra-ai/OpenAPPA/tree/main/appa-runtime-api).
@@ -87,7 +87,7 @@ A new host chooses one of the two shapes: build the envelope in-process, as kage
 
 Inspect the Claude Code integration on GitHub for a complete reference:
 
-- **Adapter**: [`appa-adapter-claude-code`](https://github.com/archestra-ai/OpenAPPA/tree/main/appa-adapter-claude-code) — derives the canonical tool id and spawn-ness from Claude Code's raw tool spellings, and carries the client-side codec `appa hook --adapter claude-code` uses to translate Claude Code's hook JSON to the envelope and the decision back.
+- **Adapter**: [`appa-adapter-claude-code`](https://github.com/archestra-ai/OpenAPPA/tree/main/appa-adapter-claude-code) — derives the canonical tool id and spawn-ness from Claude Code's raw tool spellings, and carries the client-side codec `appa hook` uses to translate Claude Code's hook JSON to the envelope and the decision back.
 - **Claude Code Hooks Plugin**: [`integrations/claude-code`](https://github.com/archestra-ai/OpenAPPA/tree/main/integrations/claude-code) — client-side harness configuration (`hooks.json`, the `appa hook` invocation, and MCP registration).
 
 ### Smoke-Test Checklist
@@ -134,5 +134,5 @@ OpenAPPA records an append-only log of every trajectory, tool dispatch, authorit
 
 Explore working integrations in this repository:
 
-- **[Claude Code](/claude-code)**: Anthropic's terminal agent, gated through the plugin's hooks running `appa hook --adapter claude-code`.
+- **[Claude Code](/claude-code)**: Anthropic's terminal agent, gated through the plugin's hooks running `appa hook`.
 - **[kAgent](/kagent)**: Kubernetes agents gated in-pod through the Google Agent Development Kit (ADK) plugin API, in both the Python and Go runtimes; the plugins post the envelope directly.

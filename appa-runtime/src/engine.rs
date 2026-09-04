@@ -1563,7 +1563,13 @@ impl RuntimeEngine {
         staged: &[(EngineOfferId, PlanId)],
     ) -> Presentation {
         let offers: Vec<OfferId> = staged.iter().map(|(offer, _)| offer_id(offer)).collect();
-        let feedback = stage_feedback(headline, residual, &offers, self.engine.registry().trust_chain());
+        let feedback = stage_feedback(
+            headline,
+            residual,
+            &offers,
+            self.engine.registry().trust_chain(),
+            self.naming,
+        );
         Presentation::Blocked { feedback, offers }
     }
 
@@ -2593,11 +2599,28 @@ fn malformed_feedback(error: &EngineError, naming: ToolNaming) -> String {
     }
 }
 
+/// The control tool's own name, without the `appa` family its canonical identity carries.
+const BARE_CONTROL_TOOL: &str = "execute_remedy_plan";
+
+/// How this deployment's model dispatches the runtime's own control tool. Feedback that
+/// tells a model to take a remedy names a call it has to make, so a served deployment
+/// spells the control tool the way that host dispatches it — Claude Code reaches the
+/// runtime's MCP server as `mcp__plugin_appa-runtime_appa__execute_remedy_plan`. A host
+/// that embeds the runtime names its own tools, and there the tool's bare name is what the
+/// model has to go on.
+fn control_spelling(naming: ToolNaming) -> String {
+    match naming {
+        ToolNaming::AsAuthored => BARE_CONTROL_TOOL.to_string(),
+        ToolNaming::Canonical { .. } => naming.model_spelling(appa_runtime_api::CONTROL_TOOL),
+    }
+}
+
 fn stage_feedback(
     headline: &str,
     residual: &appa_engine::check::Narrowing,
     offers: &[OfferId],
     chain: &TrustChain,
+    naming: ToolNaming,
 ) -> String {
     let mut lines = vec![headline.to_string()];
     lines.extend(
@@ -2606,13 +2629,11 @@ fn stage_feedback(
             .map(|change| format!("  - {change}")),
     );
     if !offers.is_empty() {
+        let control = control_spelling(naming);
         lines.push(String::new());
         lines.push("To accept this change and receive the output:".to_string());
         for offer in offers {
-            lines.push(format!(
-                "  - execute_remedy_plan(offer_id: \"{}\")",
-                terminal_safe(&offer.0)
-            ));
+            lines.push(format!("  - {control}(offer_id: \"{}\")", terminal_safe(&offer.0)));
         }
     }
     lines.join("\n")
@@ -2901,6 +2922,7 @@ fn return_instruction(
     sanitizer: Option<&appa_engine::names::SanitizerName>,
     id: &OfferId,
     spelling: &ReturnSpelling,
+    control: &str,
 ) -> String {
     let id = terminal_safe(&id.0);
     let ReturnSpelling { floor, ranks } = spelling;
@@ -2910,7 +2932,7 @@ fn return_instruction(
              tool again with the same arguments. The subagent starts at this session's label, now {floor}, and can \
              accept no change below the floor it is given: a subagent that must read below this session's trust needs \
              the floor at that rank, and its return may then narrow this session that far. An omitted dimension keeps \
-             its current value.\n    execute_remedy_plan(offer_id: \"{id}\", label: {{trust: \"<rank>\"}}), with \
+             its current value.\n    {control}(offer_id: \"{id}\", label: {{trust: \"<rank>\"}}), with \
              <rank> one of {ranks} (lowest first)"
         ),
         Some(name) if name.is_attest_schema() => format!(
@@ -2918,20 +2940,20 @@ fn return_instruction(
              schema is strict: an object lists its `properties`, every one `required`, and is closed as written \
              (no `additionalProperties`); an integer carries `minimum` and `maximum`; a string leaf carries \
              `enum`, `const`, or `format`, never free text. The return is delivered at the attestation's \
-             label.\n    execute_remedy_plan(offer_id: \"{id}\", label: {floor}, return_schema: {{type: \
+             label.\n    {control}(offer_id: \"{id}\", label: {floor}, return_schema: {{type: \
              \"object\", ...}})"
         ),
         Some(name) => format!(
             "  - Have sanitizer {} rewrite the subagent's return before this session receives it, and declare the \
-             floor.\n    execute_remedy_plan(offer_id: \"{id}\", label: {floor})",
+             floor.\n    {control}(offer_id: \"{id}\", label: {floor})",
             terminal_safe(name.as_str())
         ),
     }
 }
 
-fn remedy_instruction(plan: &ExecutableRemedyPlan, id: &OfferId, spelling: &ReturnSpelling) -> String {
+fn remedy_instruction(plan: &ExecutableRemedyPlan, id: &OfferId, spelling: &ReturnSpelling, control: &str) -> String {
     if let Some(sanitizer) = plan.return_step() {
-        return return_instruction(sanitizer, id, spelling);
+        return return_instruction(sanitizer, id, spelling, control);
     }
     let needs_approval = !plan.required.is_empty();
     let action = match (needs_approval, plan.narrowing().is_some(), plan.sanitizer()) {
@@ -2949,10 +2971,7 @@ fn remedy_instruction(plan: &ExecutableRemedyPlan, id: &OfferId, spelling: &Retu
         (true, false, None) => "Submit for approval".to_string(),
         (false, false, None) => "Apply the offered remedy".to_string(),
     };
-    format!(
-        "  - {action}:\n    execute_remedy_plan(offer_id: \"{}\")",
-        terminal_safe(&id.0),
-    )
+    format!("  - {action}:\n    {control}(offer_id: \"{}\")", terminal_safe(&id.0),)
 }
 
 fn remedy_lines(
@@ -2962,6 +2981,10 @@ fn remedy_lines(
     chain: &TrustChain,
     naming: ToolNaming,
 ) -> Vec<String> {
+    // Both lines name a call this model has to make: the remedy through the runtime's own
+    // control tool, the redispatch through the tool itself. Each is spelled the way this
+    // deployment's harness dispatches it, not by the identity the runtime keys facts on.
+    let control = control_spelling(naming);
     planned
         .plans
         .iter()
@@ -2969,9 +2992,7 @@ fn remedy_lines(
             RemedyPlan::Executable(plan) => offers
                 .iter()
                 .find(|(_, offered)| *offered == plan.id)
-                .map(|(id, _)| remedy_instruction(plan, id, spelling)),
-            // The model runs this one itself, so it is named the way its own harness
-            // dispatches it and not by the identity the runtime keys the contract on.
+                .map(|(id, _)| remedy_instruction(plan, id, spelling, &control)),
             RemedyPlan::Redispatch(redispatch) => Some(format!(
                 "  - Run {} first; it clears: {}.",
                 terminal_safe(&naming.model_spelling(redispatch.tool().as_str())),
@@ -3142,9 +3163,9 @@ fn fork_advice_text(advice: ForkAdvice, remedies_required: bool) -> String {
 mod tests {
     use super::TrustChain;
     use super::{
-        EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Next, OfferId, OfferNonce, ProposedCall,
-        Resolution, ReturnBounds, RuntimeEngine, SanitizerSubject, TrajectoryId, audience_wire, block_feedback,
-        engine_id, remedy_instruction, remedy_lines, terminal_safe,
+        BARE_CONTROL_TOOL, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Next, OfferId, OfferNonce,
+        ProposedCall, Resolution, ReturnBounds, RuntimeEngine, SanitizerSubject, TrajectoryId, audience_wire,
+        block_feedback, engine_id, remedy_instruction, remedy_lines, terminal_safe,
     };
     use crate::api::ToolNaming;
     use crate::consult::{AnnotationAnswer, HistoryEntry, RequiredAudienceAnswer, SanitizerPoint, WireAudience};
@@ -3525,8 +3546,8 @@ mod tests {
                 ToolNaming::AsAuthored
             ),
             vec![
-                remedy_instruction(&plan(3), &offers[1].0, &spelling),
-                remedy_instruction(&plan(8), &offers[0].0, &spelling),
+                remedy_instruction(&plan(3), &offers[1].0, &spelling, BARE_CONTROL_TOOL),
+                remedy_instruction(&plan(8), &offers[0].0, &spelling, BARE_CONTROL_TOOL),
             ],
             "the plan with no offer is not shown; the rest carry their own offer"
         );
@@ -3561,6 +3582,70 @@ mod tests {
             }),
             lines(ToolNaming::AsAuthored).replace("host/claude-code/Bash", "Bash"),
             "the served line differs from the recorded one only in the tool's spelling",
+        );
+    }
+
+    /// Both feedback builders tell the model to take a remedy through the runtime's own
+    /// control tool, which is a call that model has to make: a served deployment names it
+    /// the way that harness dispatches it — Claude Code reaches the runtime's MCP server
+    /// under a plugin-qualified spelling — and a host that embeds the runtime keeps the
+    /// bare name it serves the tool under.
+    #[test]
+    fn remedy_feedback_names_the_control_tool_the_host_dispatches() {
+        let claude_code = ToolNaming::Canonical {
+            host: appa_adapter_claude_code::adapter().spell,
+        };
+        let dispatched = "mcp__plugin_appa-runtime_appa__execute_remedy_plan";
+        let served_spelling = |embedded: String| embedded.replace(BARE_CONTROL_TOOL, dispatched);
+
+        let plan = ExecutableRemedyPlan {
+            id: PlanId::new(1),
+            steps: vec![RemedyStep::Authorize(appa_engine::names::AuthorityName::new("officer"))],
+            required: vec![],
+        };
+        let planned = PlannedBlock {
+            raw: RawBlock {
+                requirement_gaps: vec![],
+                narrowing: None,
+            },
+            plans: vec![RemedyPlan::Executable(plan)],
+            fork_advice: None,
+        };
+        let offers = vec![(OfferId("offer-1".to_string()), PlanId::new(1))];
+        let spelling = super::ReturnSpelling {
+            floor: "{}".to_string(),
+            ranks: String::new(),
+        };
+        let blocked =
+            |naming| remedy_lines(&planned, &offers, &spelling, &TrustChain::new(Vec::new()), naming).join("\n");
+        assert_eq!(
+            blocked(claude_code),
+            served_spelling(blocked(ToolNaming::AsAuthored)),
+            "the served remedy line differs from the embedded one only in the control tool's spelling",
+        );
+
+        let residual = appa_engine::check::Narrowing {
+            from: appa_engine::label::Label::top(),
+            to: appa_engine::label::Label::top(),
+        };
+        let staged = |naming| {
+            super::stage_feedback(
+                "[appa] Blocked: this result cannot be delivered yet.",
+                &residual,
+                &[OfferId("offer-1".to_string())],
+                &TrustChain::new(Vec::new()),
+                naming,
+            )
+        };
+        assert_eq!(
+            staged(claude_code),
+            served_spelling(staged(ToolNaming::AsAuthored)),
+            "the served stage line differs from the embedded one only in the control tool's spelling",
+        );
+        assert_ne!(
+            staged(claude_code),
+            staged(ToolNaming::AsAuthored),
+            "the deployments name different spellings",
         );
     }
 

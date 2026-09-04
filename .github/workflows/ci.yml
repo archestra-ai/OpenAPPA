@@ -424,10 +424,13 @@ jobs:
       # resolution (google-adk 1.31.1, a2a-sdk 0.3.x). The entrypoint tests
       # run only here; they skip on the bare lane above.
       - name: appa-kagent-adk tests, kagent v0.9.12 lane
+        env:
+          APPA_KAGENT_LANE: "1"
         run: >
           uv run --project integrations/kagent/appa-kagent-adk
           --with "kagent-adk @ git+https://github.com/kagent-dev/kagent@v0.9.12#subdirectory=python/packages/kagent-adk"
           --with "a2a-sdk>=0.3.23,<0.4" --with "google-adk==1.31.1" --with "mcp>=1.25,<2"
+          --with "pytest>=8" --with "pytest-asyncio"
           pytest integrations/kagent/appa-kagent-adk/tests
 
   kagent-go-checks:
@@ -529,6 +532,7 @@ jobs:
           uv run --project integrations/kagent/appa-kagent-adk
           --with "kagent-adk @ git+https://github.com/kagent-dev/kagent@v0.9.12#subdirectory=python/packages/kagent-adk"
           --with "a2a-sdk>=0.3.23,<0.4" --with "google-adk==1.31.1" --with "mcp>=1.25,<2"
+          --with "pytest>=8" --with "pytest-asyncio"
           pytest integrations/kagent/tests -q --basetemp "$APPA_INTEGRATION_BASETEMP"
 
       - name: Upload the trajectory database and the process logs

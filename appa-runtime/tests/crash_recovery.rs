@@ -78,7 +78,7 @@ fn wait_for_health(server: &mut Server) {
     panic!("the server never became healthy within the deadline");
 }
 
-/// The wire event `appa hook --adapter claude-code` posts for one Claude Code hook.
+/// The wire event `appa hook` posts for one Claude Code hook.
 fn wire(claude_hook_json: &str) -> String {
     let event = (appa_adapter_claude_code::codec().parse)(claude_hook_json.as_bytes())
         .expect("the hook parses")

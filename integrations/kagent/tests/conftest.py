@@ -71,9 +71,6 @@ os.environ.setdefault("KAGENT_URL", "http://kagent-controller:8083")
 os.environ.setdefault("KAGENT_NAME", "cluster-ops")
 os.environ.setdefault("KAGENT_NAMESPACE", "kagent")
 
-pytest.importorskip("kagent.adk", reason="the kagent/ADK lane is not installed")
-pytest.importorskip("mcp", reason="mcp is not installed")
-
 import kagent.core._config as kagent_identity
 import uvicorn
 from appa_kagent_adk import entrypoint

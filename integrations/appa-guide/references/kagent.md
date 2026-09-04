@@ -82,7 +82,11 @@ A rule names a tool by its canonical tool id:
 - A tool of the `RemoteMCPServer` or `ToolServer` served at
   `<toolset>`, the first label of the server host in `params.url`:
   `mcp/<toolset>/<tool>`. The same tool name on two servers is two
-  contracts.
+  contracts. A gated agent reaches that toolset only at the Kubernetes
+  service forms of the same name (`<service>`,
+  `<service>.<namespace>.svc`,
+  `<service>.<namespace>.svc.cluster.local`) or at loopback, so the
+  contract names one endpoint.
 - An agent called as a tool: `agent/<namespace>/<name>`. The wildcard
   covers no spawn: a delegation needs a contract that names the agent,
   or it stays blocked.

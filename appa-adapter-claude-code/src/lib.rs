@@ -134,7 +134,10 @@
 //! non-2xx answer too — so a runtime refusal at `PostToolUse` also
 //! withholds. A tool whose output shape validates another fixed-value
 //! string field would keep the original; the fixed-value list is the
-//! codec's to extend.
+//! codec's to extend. A `PostToolUse` this codec cannot read at all is
+//! withheld too, from the tool and response its bytes still carry: the
+//! result has run either way, and a hook that only exits non-zero leaves
+//! that output in front of the model.
 //!
 //! A `PreToolUse` release carries no slot for the spawn binding, and
 //! needs none: the child start names the spawn in flight instead.
@@ -146,9 +149,13 @@ use appa_runtime_api::{
     ProposedCall, SpawnRef, ToolOutcome, TrajectoryId,
 };
 
-/// The client-side shape translation `appa hook --adapter claude-code` runs.
+/// The client-side shape translation `appa hook` runs.
 pub fn codec() -> Codec {
-    Codec { parse, render }
+    Codec {
+        parse,
+        render,
+        withholding,
+    }
 }
 
 /// The server-side derivation the runtime applies to every Claude Code call.
@@ -603,32 +610,38 @@ struct Replacement {
 
 fn replacement(event: &HookEvent, text: &str) -> Option<Replacement> {
     match event {
-        HookEvent::SpawnResult { outcome, .. } => {
-            let mut response = delivered(outcome)?;
-            let output = match response.as_object_mut() {
-                Some(object) => {
-                    object.insert(
-                        "content".to_string(),
-                        serde_json::json!([{ "type": "text", "text": text }]),
-                    );
-                    response
-                }
-                None => serde_json::Value::String(text.to_string()),
-            };
-            Some(Replacement { output, context: None })
-        }
-        HookEvent::ToolResult { call, outcome, .. } => {
-            let response = delivered(outcome)?;
-            Some(if is_mcp_tool(&call.tool) {
-                Replacement {
-                    output: serde_json::json!([{ "type": "text", "text": text }]),
-                    context: None,
-                }
-            } else {
-                swap_leaves(&call.tool, response, text)
-            })
-        }
+        HookEvent::SpawnResult { outcome, .. } => Some(spawn_replacement(delivered(outcome)?, text)),
+        HookEvent::ToolResult { call, outcome, .. } => Some(tool_replacement(&call.tool, delivered(outcome)?, text)),
         _ => None,
+    }
+}
+
+/// The spawn's result restated: the swap is the `content` text, the one field of the
+/// `Agent` response Claude Code shows the parent model, and the run's own metadata stays
+/// for the transcript.
+fn spawn_replacement(mut response: serde_json::Value, text: &str) -> Replacement {
+    let output = match response.as_object_mut() {
+        Some(object) => {
+            object.insert(
+                "content".to_string(),
+                serde_json::json!([{ "type": "text", "text": text }]),
+            );
+            response
+        }
+        None => serde_json::Value::String(text.to_string()),
+    };
+    Replacement { output, context: None }
+}
+
+/// One tool's result restated: an MCP result as a single text block, whose keys are content
+/// too, and every other tool's own output shape with its leaves redacted.
+fn tool_replacement(tool: &str, response: serde_json::Value, text: &str) -> Replacement {
+    match is_mcp_tool(tool) {
+        true => Replacement {
+            output: serde_json::json!([{ "type": "text", "text": text }]),
+            context: None,
+        },
+        false => swap_leaves(tool, response, text),
     }
 }
 
@@ -756,6 +769,39 @@ fn deny(reason: &str) -> serde_json::Value {
             "permissionDecisionReason": reason,
         }
     })
+}
+
+/// The little of a hook event this codec still reads once [`parse`] has refused the rest:
+/// the hook's name, and the tool and response a post-use hook carries. Nothing here is a
+/// field a hook must be well formed to have.
+#[derive(Debug, Deserialize)]
+struct RefusedEvent {
+    hook_event_name: String,
+    #[serde(default)]
+    tool_name: Option<String>,
+    #[serde(default)]
+    tool_response: Option<serde_json::Value>,
+}
+
+/// The withholding for hook bytes [`parse`] refused. A post-use hook reports a result the
+/// tool has already produced, and Claude Code keeps that output unless the answer replaces
+/// it — so the shape those bytes still carry is read for the replacement, and a post-use
+/// hook too broken to name a tool and its response is answered by the reason alone. Every
+/// other hook answers `None`: nothing has run there, and the client's blocking exit is what
+/// stops the action — a stop hook included, where Claude Code reads that exit as the block.
+fn withholding(body: &[u8], reason: &str) -> Option<serde_json::Value> {
+    let event: RefusedEvent = serde_json::from_slice(body).ok()?;
+    let text = withheld(reason);
+    match event.hook_event_name.as_str() {
+        "PostToolUse" | "PostToolUseFailure" => Some(match (event.tool_name.as_deref(), event.tool_response) {
+            (Some(tool), Some(response)) if is_spawn_tool(tool) => {
+                replaced(spawn_replacement(response, &text), Some(reason))
+            }
+            (Some(tool), Some(response)) => replaced(tool_replacement(tool, response, &text), Some(reason)),
+            _ => block(reason),
+        }),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -1883,6 +1929,86 @@ mod tests {
             }),
         );
         assert_eq!(render(&event, &HookDecision::Ack), serde_json::json!({}));
+    }
+
+    /// A post-use hook this codec cannot read still reports a result the tool produced, so
+    /// it is answered by the same replacement a parsed one gets — built from the tool and
+    /// response its bytes still carry. Here the hook misses `tool_input`, which every parse
+    /// of a post-use hook requires.
+    #[test]
+    fn an_unreadable_post_use_hook_still_withholds_the_result_it_reports() {
+        let refused = serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "session_id": "s1",
+            "tool_name": "Bash",
+            "tool_response": {"stdout": "root:x:0:0"},
+        });
+        assert!(parse_value(&refused).is_err(), "the fixture is one parse refuses");
+        let answer = withholding(
+            &serde_json::to_vec(&refused).expect("the fixture serializes"),
+            "unreadable",
+        )
+        .expect("a post-use hook reports a result");
+        assert_eq!(
+            answer,
+            serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "updatedToolOutput": {"stdout": "[appa] the tool result was withheld: unreadable"},
+                },
+                "decision": "block",
+                "reason": "unreadable",
+            }),
+        );
+
+        let spawn = serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "session_id": "s1",
+            "tool_name": "Agent",
+            "tool_response": agent_response(),
+        });
+        let answer = withholding(
+            &serde_json::to_vec(&spawn).expect("the fixture serializes"),
+            "unreadable",
+        )
+        .expect("a spawn's post-use hook reports a result");
+        assert_eq!(
+            answer["hookSpecificOutput"]["updatedToolOutput"]["content"],
+            serde_json::json!([{"type": "text", "text": "[appa] the tool result was withheld: unreadable"}]),
+            "the subagent's message is what the parent model reads: {answer}",
+        );
+        assert!(
+            !answer.to_string().contains("one file: readme.txt"),
+            "the withheld message never reaches the model: {answer}",
+        );
+    }
+
+    /// Nothing has run at any other hook, and bytes that are no JSON at all report no
+    /// result either: the client's blocking exit is what stops those, with nothing printed.
+    #[test]
+    fn only_a_post_use_hooks_bytes_report_a_result_to_withhold() {
+        for hook in ["PreToolUse", "SubagentStop", "Stop", "SessionStart", "Notification"] {
+            let event = serde_json::json!({"hook_event_name": hook, "session_id": "s1", "tool_name": "Bash"});
+            assert_eq!(
+                withholding(
+                    &serde_json::to_vec(&event).expect("the fixture serializes"),
+                    "unreadable"
+                ),
+                None,
+                "{hook} reports no result the harness has already produced",
+            );
+        }
+        assert_eq!(withholding(b"not json", "unreadable"), None);
+
+        let broken = serde_json::json!({"hook_event_name": "PostToolUseFailure", "session_id": "s1"});
+        assert_eq!(
+            withholding(
+                &serde_json::to_vec(&broken).expect("the fixture serializes"),
+                "unreadable"
+            ),
+            Some(serde_json::json!({"decision": "block", "reason": "unreadable"})),
+            "a post-use hook naming no response carries the reason alone",
+        );
     }
 
     #[test]

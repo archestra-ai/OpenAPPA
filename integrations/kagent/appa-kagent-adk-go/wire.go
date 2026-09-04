@@ -246,9 +246,14 @@ func parseDecision(body []byte) (Decision, error) {
 	if parsed == nil {
 		return Decision{}, wireErrorf("the decision envelope is not an object")
 	}
-	// A JSON number decodes as float64; any other type, a bool included,
-	// is outside the wire.
-	if protocol, ok := parsed["protocol"].(float64); !ok || protocol != Protocol {
+	// The version is an integer on the wire. Into map[string]any every
+	// JSON number decodes as float64, so 1.0 and 1 are one value there;
+	// a typed decode of the field alone is what tells them apart, and it
+	// refuses a bool, a string and a fraction alike.
+	var envelope struct {
+		Protocol *int `json:"protocol"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil || envelope.Protocol == nil || *envelope.Protocol != Protocol {
 		return Decision{}, wireErrorf("a decision under a protocol outside the wire: %v", parsed["protocol"])
 	}
 	kind, ok := parsed["decision"].(string)

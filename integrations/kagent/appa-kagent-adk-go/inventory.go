@@ -25,7 +25,11 @@
 //     must carry one: without it the server decides the tool list at
 //     runtime, and the gate cannot name what it did not see. The toolset
 //     is the first DNS label of the server host in the entry's URL, the
-//     name the RemoteMCPServer resource carries in the cluster.
+//     name the RemoteMCPServer resource carries in the cluster. The
+//     builder refuses an endpoint the cluster does not serve — the
+//     accepted hosts are the Kubernetes service forms of that same name
+//     and loopback — so a foreign authority cannot claim the policy
+//     identity of a trusted toolset.
 //   - kagent renders a remote agent's tool name as
 //     <namespace>__NS__<agent> with hyphens as underscores. Both halves
 //     are DNS-1123 labels, which carry no underscore, so the real names
@@ -58,13 +62,23 @@ const ControlTool = "appa:execute_remedy_plan"
 
 const namespaceMark = "__NS__"
 
-// segment is one segment of a canonical tool id, as the runtime admits it.
-var segment = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+// clusterDomain is the DNS domain a Kubernetes service name ends in.
+// The toolset name is the first label of the MCP host, so a host
+// outside the cluster would claim the policy identity of the
+// in-cluster service of that name.
+const clusterDomain = "cluster.local"
 
 // segmentRun is one segment of a wire spelling as it stands in a
 // runtime string: a run that starts and ends on a core character and
 // is maximal over them.
 const segmentRun = `[A-Za-z0-9_-](?:[A-Za-z0-9_.-]*[A-Za-z0-9_-])?`
+
+// segment is one segment of a canonical tool id, as the runtime admits
+// it. It is the run's own grammar anchored, so every name the
+// inventory accepts is a name Despell can match back: a boundary
+// period would end the run short, and the spelling could never be
+// found whole.
+var segment = regexp.MustCompile(`^` + segmentRun + `$`)
 
 // spelledCandidate matches a wire spelling: two or three segments,
 // class:name or class:namespace/name. The inventory alone decides
@@ -178,6 +192,9 @@ const (
 	DuplicateName
 	// CollidingSpelling: two raw names that spell alike on the wire.
 	CollidingSpelling
+	// ForeignAuthority: an MCP endpoint the cluster does not serve,
+	// whose host would claim the toolset name of an in-cluster service.
+	ForeignAuthority
 )
 
 // InventoryRefusal is BuildInventory's error: which refusal fired, the
@@ -317,12 +334,20 @@ func (b *builder) add(name, spelling, source string) error {
 }
 
 func (b *builder) mcpServer(server MCPServerSpec) error {
-	toolset, ok := toolsetOf(server.URL)
+	host, hosted := hostOf(server.URL)
+	toolset, spellable := toolsetOf(host)
 	// A doubled underscore is the mark kagent reserves, so the runtime
 	// admits no canonical id whose namespace carries one.
-	if !ok || strings.Contains(toolset, "__") {
+	if !hosted || !spellable || strings.Contains(toolset, "__") {
 		return &InventoryRefusal{Kind: UnspellableName, Path: server.Path, Name: server.URL,
 			Detail: fmt.Sprintf("the toolset name is the first label of the server host in the URL, and %q carries none the wire can spell", server.URL)}
+	}
+	if !inCluster(host) {
+		return &InventoryRefusal{Kind: ForeignAuthority, Path: server.Path, Name: server.URL,
+			Detail: fmt.Sprintf("%q is served outside the cluster, and its tools would claim the policy identity "+
+				"mcp/%s/<tool> of the in-cluster %q: an MCP endpoint is named <service>, "+
+				"<service>.<namespace>.svc, <service>.<namespace>.svc.cluster.local, localhost, or 127.0.0.1",
+				server.URL, toolset, toolset)}
 	}
 	if len(server.Tools) == 0 {
 		return &InventoryRefusal{Kind: UnfilteredToolset, Path: server.Path}
@@ -353,7 +378,8 @@ func (b *builder) remoteAgent(remote RemoteAgentSpec) error {
 	return b.add(remote.Name, AgentSpelling(namespace, agent), remote.Path)
 }
 
-func toolsetOf(raw string) (string, bool) {
+// hostOf is the host of a server URL; false where it carries none.
+func hostOf(raw string) (string, bool) {
 	parsed, err := url.Parse(raw)
 	if err != nil {
 		return "", false
@@ -362,9 +388,40 @@ func toolsetOf(raw string) (string, bool) {
 	if host == "" {
 		return "", false
 	}
+	return host, true
+}
+
+// toolsetOf is the toolset name a host claims: its first label, where
+// the wire can spell it.
+func toolsetOf(host string) (string, bool) {
 	label, _, _ := strings.Cut(host, ".")
 	if !segment.MatchString(label) {
 		return "", false
 	}
 	return label, true
+}
+
+// inCluster reports whether host is an in-cluster address of the
+// service its first label names.
+//
+// The Kubernetes service forms all resolve to the Service the first
+// label names, so the toolset name and the endpoint the arguments
+// reach are the same authority. Every other host is a foreign
+// authority claiming that name. <service>.<namespace> is one form short
+// of a public domain name, and no rule tells the two apart, so the
+// qualified form must carry svc.
+func inCluster(host string) bool {
+	host = strings.ToLower(host)
+	if host == "localhost" || host == "127.0.0.1" {
+		return true
+	}
+	labels := strings.Split(host, ".")
+	switch {
+	case len(labels) == 1:
+		return true
+	case len(labels) < 3 || labels[2] != "svc":
+		return false
+	default:
+		return len(labels) == 3 || strings.Join(labels[3:], ".") == clusterDomain
+	}
 }

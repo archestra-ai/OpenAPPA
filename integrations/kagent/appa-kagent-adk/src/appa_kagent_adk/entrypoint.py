@@ -75,6 +75,9 @@ STOCK_STARTUP = (
     f"{ENABLED_ENV} is not true. This agent runs UNGATED as the stock kagent runtime, "
     f"and no OpenAPPA policy applies. Set {ENABLED_ENV}=true to gate this agent."
 )
+# What the gated startup fixed before the model runs: the names the
+# wire can carry.
+GATED_INVENTORY = "the gated inventory spells %d tools"
 # The one combination worth naming: a runtime URL that gates nothing.
 IGNORED_RUNTIME_URL = (
     f"{RUNTIME_URL_ENV} is set, and this agent ignores it. The agent runs UNGATED because {ENABLED_ENV} is not true."
@@ -251,7 +254,7 @@ def build_server(filepath: str, runtime_url: str):
     agent_config = AgentConfig.model_validate(config)
     config_guard.refuse_divergent_summarizer(agent_config)
     inventory = ToolInventory.from_config(config)
-    logger.info("the gated inventory spells %d tools", len(inventory.spellings))
+    logger.info(GATED_INVENTORY, len(inventory.spellings))
     agent_card = AgentCard.model_validate(_read_document(filepath, "agent-card.json"))
 
     app_cfg = KAgentConfig()

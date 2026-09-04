@@ -1,6 +1,7 @@
 """The tool inventory: what a rendered config lets the wire name, and how."""
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -72,10 +73,55 @@ def test_an_mcp_entry_without_a_tool_filter_is_refused(server):
         pytest.param(
             {"params": {"url": "http://demo__tools:3000/mcp"}, "tools": ["a"]}, id="host-with-the-reserved-mark"
         ),
+        # A boundary period ends the spelling run short, so despell
+        # could never match the spelling of such a name back.
+        pytest.param({"params": {"url": "http://demo-tools:3000/mcp"}, "tools": [".status"]}, id="a-leading-period"),
+        pytest.param({"params": {"url": "http://demo-tools:3000/mcp"}, "tools": ["status."]}, id="a-trailing-period"),
+        pytest.param({"params": {"url": "http://demo-tools:3000/mcp"}, "tools": ["."]}, id="a-lone-period"),
     ],
 )
 def test_a_name_the_wire_cannot_spell_is_refused(server):
     with pytest.raises(ConfigRefused, match=r"http_tools\.0"):
+        inventory(http_tools=[server])
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        pytest.param("demo-tools", id="the-service"),
+        pytest.param("demo-tools.kagent.svc", id="the-svc-form"),
+        pytest.param("demo-tools.kagent.svc.cluster.local", id="the-fully-qualified-form"),
+        pytest.param("localhost", id="loopback-by-name"),
+        pytest.param("127.0.0.1", id="loopback-by-address"),
+    ],
+)
+def test_an_in_cluster_endpoint_names_its_toolset(host):
+    built = inventory(http_tools=[{"params": {"url": f"http://{host}:3000/mcp"}, "tools": ["list_pods"]}])
+    assert built.spelling("list_pods") == f"mcp:{host.split('.')[0]}/list_pods"
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        # The attack: a toolset name a trusted policy already names,
+        # served by an authority the cluster does not resolve.
+        # A two-label host is one label short of a public domain name
+        # and cannot be told apart from one.
+        pytest.param("demo-tools.attacker", id="the-service-and-namespace"),
+        pytest.param("demo-tools.io", id="a-two-label-public-domain"),
+        pytest.param("demo-tools.attacker.example.com", id="a-foreign-domain"),
+        pytest.param("demo-tools.kagent.example.com", id="a-foreign-domain-under-the-namespace"),
+        pytest.param("demo-tools.kagent.svc.attacker.com", id="a-foreign-domain-past-svc"),
+        pytest.param("demo-tools.kagent.pod.cluster.local", id="a-form-that-is-not-a-service"),
+        pytest.param("demo-tools.kagent.svc.cluster.local.attacker.com", id="a-suffix-past-the-cluster-domain"),
+        pytest.param("192.0.2.10", id="an-address-outside-loopback"),
+    ],
+)
+def test_an_mcp_endpoint_outside_the_cluster_is_refused(host):
+    """The toolset is the host's first label, so a foreign endpoint under that
+    label would take the policy identity of the in-cluster service."""
+    server = {"params": {"url": f"http://{host}:3000/mcp"}, "tools": ["list_pods"]}
+    with pytest.raises(ConfigRefused, match=re.escape(host)):
         inventory(http_tools=[server])
 
 

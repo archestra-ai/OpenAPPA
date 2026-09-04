@@ -18,8 +18,9 @@
 //! prefix, so no caller can speak for another adapter's trajectories.
 //! A person's
 //! [`Ruling`] crosses only under a host that reviews through its own
-//! channel ([`AdapterName::review_channel`]); under any other host the
-//! envelope asserting one is refused.
+//! channel ([`AdapterName::review_channel`]), and there only on the
+//! control call that quotes the offer it answers; under any other host,
+//! or on any other call, the envelope asserting one is refused.
 //!
 //! The event and decision structs are flat with optional fields rather
 //! than tagged enums because `arguments` is a `RawValue`, which serde's
@@ -558,6 +559,21 @@ impl WireEvent {
                 let actor = actor()?;
                 let raw = raw_call()?;
                 let derived = (served.derive)(&actor, &raw)?;
+                // A ruling answers the review of the offer a control
+                // call quotes, and only the control call spends one.
+                // On any other call the runtime would judge the flow
+                // and drop the ruling unread, so an asserted denial is
+                // refused here rather than silently ignored.
+                let ruling = match (ruling, derived.canonical.is_control()) {
+                    (None, _) => None,
+                    (Some(ruling), true) => Some(Ruling::from(ruling)),
+                    (Some(_), false) => {
+                        return Err(malformed(format!(
+                            "a ruling on {}, which is not the runtime's control call",
+                            derived.canonical
+                        )));
+                    }
+                };
                 let names_children = (served.names_children)(&actor, &raw);
                 Ok(Some(Accepted {
                     event: HookEvent::ToolCall {
@@ -567,7 +583,7 @@ impl WireEvent {
                             arguments: raw.arguments,
                         },
                         spawn: derived.spawn,
-                        ruling: ruling.map(Ruling::from),
+                        ruling,
                     },
                     names_children,
                 }))
@@ -877,7 +893,17 @@ mod tests {
         RawValue::from_string(json.to_string()).expect("the fixture is JSON")
     }
 
+    /// The one raw spelling this fixture host gives the control tool,
+    /// as every real adapter gives it one.
+    const CONTROL_RAW: &str = "execute_remedy_plan";
+
     fn derive(_: &Actor, call: &ProposedCall) -> Result<Derived, ParseRefusal> {
+        if call.tool == CONTROL_RAW {
+            return Ok(Derived {
+                canonical: CanonicalTool::control(),
+                spawn: false,
+            });
+        }
         let canonical =
             CanonicalTool::parse(&format!("host/test/{}", call.tool)).map_err(|error| malformed(error.to_string()))?;
         Ok(Derived {
@@ -1064,45 +1090,54 @@ mod tests {
         spell,
     };
 
-    /// A control call carrying `ruling` is a person's answer the host
-    /// obtained itself. Claude Code obtains none, so the envelope is
-    /// refused there and admitted under kagent.
+    /// A ruling is a person's answer the host obtained itself for the
+    /// offer one control call quotes, so it crosses on exactly that
+    /// call under exactly that kind of host. Claude Code obtains no
+    /// answer of its own, and an ordinary call has no offer a ruling
+    /// could answer: on either the envelope is refused, never read with
+    /// the asserted ruling dropped.
     #[test]
-    fn a_ruling_crosses_only_under_a_host_with_its_own_review_channel() {
-        let posted = |adapter: &str, ruling: &str| {
+    fn a_ruling_crosses_only_on_the_control_call_of_a_host_that_reviews_itself() {
+        #[derive(Debug)]
+        enum Expected {
+            Ruled(Option<Ruling>),
+            Refused,
+        }
+        let posted = |adapter: &str, tool: &str, ruling: &str| {
             format!(
-                r#"{{"protocol":1,"adapter":"{adapter}","event":"tool_call","root_id":"r1","tool":"execute_remedy_plan","arguments":{{"offer_id":"o1"}}{ruling}}}"#
+                r#"{{"protocol":1,"adapter":"{adapter}","event":"tool_call","root_id":"r1","tool":"{tool}","arguments":{{"offer_id":"o1"}}{ruling}}}"#
             )
         };
         let approve = r#","ruling":"approve""#;
-        let accepted = WireEvent::read(posted("kagent", approve).as_bytes())
-            .expect("reads")
-            .into_event(&SERVED)
-            .expect("kagent reviews through its own channel")
-            .expect("is an event");
-        match accepted.event {
-            HookEvent::ToolCall { ruling, .. } => assert_eq!(ruling, Some(Ruling::Approve)),
-            other => panic!("{other:?}"),
-        }
-
-        for ruling in [approve, r#","ruling":"deny""#] {
-            let refused = WireEvent::read(posted("claude-code", ruling).as_bytes())
-                .expect("reads")
-                .into_event(&CLAUDE_CODE);
-            assert!(
-                matches!(refused, Err(ParseRefusal::Malformed { .. })),
-                "a ruling under claude-code must be refused, got {refused:?}"
-            );
-        }
-
-        let plain = WireEvent::read(posted("claude-code", "").as_bytes())
-            .expect("reads")
-            .into_event(&CLAUDE_CODE)
-            .expect("an unruled call is ordinary")
-            .expect("is an event");
-        match plain.event {
-            HookEvent::ToolCall { ruling, .. } => assert_eq!(ruling, None),
-            other => panic!("{other:?}"),
+        let deny = r#","ruling":"deny""#;
+        let table = [
+            // The host reviews through its own channel and the call is
+            // the one that quotes the offer.
+            (&SERVED, CONTROL_RAW, approve, Expected::Ruled(Some(Ruling::Approve))),
+            (&SERVED, CONTROL_RAW, deny, Expected::Ruled(Some(Ruling::Deny))),
+            (&SERVED, CONTROL_RAW, "", Expected::Ruled(None)),
+            // The same host, an ordinary call: nothing would spend the
+            // ruling, so asserting one is refused.
+            (&SERVED, "builtin_read_file", approve, Expected::Refused),
+            (&SERVED, "builtin_read_file", deny, Expected::Refused),
+            (&SERVED, "builtin_read_file", "", Expected::Ruled(None)),
+            // A host with no review channel of its own.
+            (&CLAUDE_CODE, CONTROL_RAW, approve, Expected::Refused),
+            (&CLAUDE_CODE, CONTROL_RAW, deny, Expected::Refused),
+            (&CLAUDE_CODE, CONTROL_RAW, "", Expected::Ruled(None)),
+            (&CLAUDE_CODE, "builtin_read_file", deny, Expected::Refused),
+        ];
+        for (served, tool, asserted, expected) in table {
+            let row = posted(served.name.as_str(), tool, asserted);
+            let read = WireEvent::read(row.as_bytes()).expect("reads").into_event(served);
+            match (&expected, read) {
+                (Expected::Ruled(ruled), Ok(Some(accepted))) => match accepted.event {
+                    HookEvent::ToolCall { ruling, .. } => assert_eq!(ruling, *ruled, "{row}"),
+                    other => panic!("{row} crossed as {other:?}"),
+                },
+                (Expected::Refused, Err(ParseRefusal::Malformed { .. })) => {}
+                (expected, other) => panic!("{row} is {expected:?}, got {other:?}"),
+            }
         }
     }
 

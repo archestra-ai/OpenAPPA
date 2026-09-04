@@ -183,7 +183,7 @@ def test_the_factory_wraps_code_execution_and_appends_the_reserved_toolset(confi
 
 def test_the_appa_plugin_needs_a_runtime_url():
     with pytest.raises(ValueError, match="APPA_RUNTIME_URL"):
-        AppaPluginKagent("")
+        AppaPluginKagent("", inventory=ToolInventory.from_config(CONFIG, environ={}))
 
 
 # -- the knob: APPA_ENABLED selects the mode --------------------------------
@@ -429,7 +429,12 @@ def test_the_gated_mode_serves_the_gated_construction(config_dir, monkeypatch, b
     reserved = app.root_agent_factory().tools[-1]
     assert isinstance(reserved, McpToolset) and reserved.tool_filter == [RESERVED_TOOL]
 
-    assert entrypoint_lines(caplog) == [entrypoint.GATED_STARTUP % RUNTIME_URL], "one line names the mode"
+    # The plain config spells two names: the always builtin and the reserved tool.
+    inventory = ToolInventory.from_config(CONFIG, environ={})
+    assert entrypoint_lines(caplog) == [
+        entrypoint.GATED_STARTUP % RUNTIME_URL,
+        entrypoint.GATED_INVENTORY % len(inventory.spellings),
+    ], "one line names the mode, and one more the inventory it fixed"
     assert entrypoint_levels(caplog) == {logging.INFO}
     assert not any("UNGATED" in record.getMessage() for record in caplog.records)
 

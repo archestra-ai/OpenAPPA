@@ -228,6 +228,8 @@ func TestAnAnswerOutsideTheContractIsAWireError(t *testing.T) {
 		{"other_protocol", `{"protocol": 2, "decision": "ack"}`},
 		{"protocol_as_bool", `{"protocol": true, "decision": "ack"}`},
 		{"protocol_as_string", `{"protocol": "1", "decision": "ack"}`},
+		{"protocol_as_float", `{"protocol": 1.0, "decision": "ack"}`},
+		{"protocol_as_exponent", `{"protocol": 1e0, "decision": "ack"}`},
 		{"unknown_kind", `{"protocol": 1, "decision": "approve"}`},
 		{"deny_without_feedback", `{"protocol": 1, "decision": "deny_call"}`},
 		{"block_without_reason", `{"protocol": 1, "decision": "block"}`},

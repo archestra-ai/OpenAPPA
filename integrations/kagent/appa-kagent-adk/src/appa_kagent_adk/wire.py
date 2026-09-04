@@ -247,7 +247,9 @@ def parse_decision(body: bytes | str) -> Decision:
     if not isinstance(parsed, dict):
         raise WireError("the decision envelope is not an object")
     protocol = parsed.get("protocol")
-    if isinstance(protocol, bool) or protocol != PROTOCOL:
+    # The version is an integer on the wire. A bool and a float are both
+    # equal to one in Python, so neither passes as protocol 1.
+    if not isinstance(protocol, int) or isinstance(protocol, bool) or protocol != PROTOCOL:
         raise WireError(f"a decision under a protocol outside the wire: {protocol!r}")
     kind = parsed.get("decision")
     if not isinstance(kind, str) or kind not in _DECISION_PAYLOADS:

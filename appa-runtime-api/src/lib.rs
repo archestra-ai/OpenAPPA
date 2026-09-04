@@ -500,4 +500,13 @@ pub enum ParseRefusal {
 pub struct Codec {
     pub parse: fn(&[u8]) -> Result<Option<HookEvent>, ParseRefusal>,
     pub render: fn(&HookEvent, &HookDecision) -> serde_json::Value,
+    /// The answer that withholds a result, read from host bytes
+    /// [`Codec::parse`] refused. `Some` where those bytes report a
+    /// result the harness has already produced, carrying the host's own
+    /// answer that takes it out of the model's attention for the given
+    /// reason; `None` for every other hook, where nothing has run and
+    /// the client's exit code stops the action. Recognizing the hook is
+    /// the host's own shape question, so it is answered here rather than
+    /// by the client reading the host's JSON itself.
+    pub withholding: fn(&[u8], &str) -> Option<serde_json::Value>,
 }

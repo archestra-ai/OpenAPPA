@@ -243,7 +243,7 @@ try {
     # onto the runtime's wire, posts it, renders the answer back into Claude Code's
     # shape, and exits 2 on a refusal or no answer (0 on a turn end, which decides
     # nothing). Its stdout and exit code are this hook's.
-    $hookArgs = @("hook", "--adapter", "claude-code", "--url", $runtimeUrl)
+    $hookArgs = @("hook", "--url", $runtimeUrl)
     if ($TurnEnd) {
         $hookArgs += "--turn-end"
     }

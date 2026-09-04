@@ -34,7 +34,7 @@ pub fn claude_event(hook_json: &serde_json::Value) -> Option<HookEvent> {
 
 /// One Claude Code hook through the served `/hook` dispatcher, wire to wire,
 /// with the wire decision rendered back into Claude Code's hook answer, as
-/// `appa hook --adapter claude-code` prints it. A refusal before any event
+/// `appa hook` prints it. A refusal before any event
 /// exists comes back as the runtime's `{"error": …}` body.
 pub async fn claude_hook(runtime: &Runtime, hook_json: &serde_json::Value) -> (u16, serde_json::Value) {
     let codec = appa_adapter_claude_code::codec();

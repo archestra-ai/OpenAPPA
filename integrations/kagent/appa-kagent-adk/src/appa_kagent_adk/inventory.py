@@ -23,7 +23,10 @@ so every spelling the wire carries names one tool the model can call.
   server decides the tool list at runtime, and the gate cannot name
   what it did not see. The toolset is the first DNS label of the server
   host in ``params.url``, the name the RemoteMCPServer resource carries
-  in the cluster.
+  in the cluster. The builder refuses an endpoint the cluster does not
+  serve — the accepted hosts are the Kubernetes service forms of that
+  same name and loopback — so a foreign authority cannot claim the
+  policy identity of a trusted toolset.
 - kagent renders a remote agent's tool name as
   ``<namespace>__NS__<agent>`` with hyphens as underscores. Both halves
   are DNS-1123 labels, which carry no underscore, so the real names
@@ -58,22 +61,32 @@ SKILLS_FOLDER_ENV = "KAGENT_SKILLS_FOLDER"
 
 _MCP_KEYS = ("http_tools", "sse_tools")
 _NAMESPACE_MARK = "__NS__"
-# One segment of a canonical tool id, as the runtime admits it.
-_SEGMENT = re.compile(r"^[A-Za-z0-9_.-]+$")
 # The characters an identifier is built of. A core character always
 # continues one; a separator continues one only where a core character
 # follows it, so the period that ends a sentence closes the identifier
 # and the period inside ``list.json`` does not.
 _CORE = frozenset(string.ascii_letters + string.digits + "_-")
 _SEPARATOR = frozenset(".:/")
-# A wire spelling as it stands in a runtime string: two or three
-# segments, ``class:name`` or ``class:namespace/name``, each segment a
-# run that starts and ends on a core character and is maximal over
-# them. The inventory alone decides which candidate is a spelling it
-# gave out, and ``despell`` replaces one only where the identifier
-# continues on neither side.
+# One segment of a wire spelling: a run that starts and ends on a core
+# character and is maximal over them.
 _SEGMENT_RUN = r"[A-Za-z0-9_-](?:[A-Za-z0-9_.-]*[A-Za-z0-9_-])?"
+# One segment of a canonical tool id, as the runtime admits it. It is
+# the run's own grammar anchored, so every name the inventory accepts
+# is a name ``despell`` can match back: a boundary period would end the
+# run short, and the spelling could never be found whole.
+_SEGMENT = re.compile(rf"^{_SEGMENT_RUN}$")
+# A wire spelling as it stands in a runtime string: two or three
+# segments, ``class:name`` or ``class:namespace/name``. The inventory
+# alone decides which candidate is a spelling it gave out, and
+# ``despell`` replaces one only where the identifier continues on
+# neither side.
 _SPELLED = re.compile(rf"{_SEGMENT_RUN}:{_SEGMENT_RUN}(?:/{_SEGMENT_RUN})?")
+# The cluster-internal authorities an MCP endpoint may carry. The
+# toolset name is the first label of the host, so a host outside the
+# cluster would claim the policy identity of the in-cluster service of
+# that name.
+_CLUSTER_DOMAIN = ("cluster", "local")
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1"})
 
 
 def _char(text: str, index: int) -> str:
@@ -227,13 +240,21 @@ class _Builder:
     def mcp_server(self, path: str, server: dict[str, Any]) -> None:
         params = server.get("params")
         url = params.get("url") if isinstance(params, dict) else None
-        toolset = _toolset_of(url if isinstance(url, str) else "")
+        host = _host_of(url if isinstance(url, str) else "")
+        toolset = _toolset_of(host) if host is not None else None
         # A doubled underscore is the mark kagent reserves, so the runtime
         # admits no canonical id whose namespace carries one.
-        if toolset is None or "__" in toolset:
+        if host is None or toolset is None or "__" in toolset:
             raise ConfigRefused(
                 f"{path}: the toolset name is the first label of the server host in params.url, and "
                 f"{url!r} carries none the wire can spell"
+            )
+        if not _in_cluster(host):
+            raise ConfigRefused(
+                f"{path}: {url!r} is served outside the cluster, and its tools would claim the policy "
+                f"identity mcp/{toolset}/<tool> of the in-cluster {toolset!r} — an MCP endpoint is named "
+                "<service>, <service>.<namespace>.svc, "
+                "<service>.<namespace>.svc.cluster.local, localhost, or 127.0.0.1"
             )
         names = server.get("tools")
         if not isinstance(names, list) or not names or not all(isinstance(name, str) for name in names):
@@ -264,12 +285,37 @@ class _Builder:
         self.add(name, agent_spelling(namespace, agent), path)
 
 
-def _toolset_of(url: str) -> str | None:
+def _host_of(url: str) -> str | None:
+    """The lowercased host of a server URL, or None where it carries none."""
     try:
         host = urlsplit(url).hostname
     except ValueError:
         return None
-    if not host:
-        return None
+    return host or None
+
+
+def _toolset_of(host: str) -> str | None:
+    """The toolset name a host claims: its first label, where the wire can spell it."""
     label = host.split(".", 1)[0]
     return label if _SEGMENT.match(label) else None
+
+
+def _in_cluster(host: str) -> bool:
+    """Whether ``host`` is an in-cluster address of the service its first label names.
+
+    The Kubernetes service forms all resolve to the Service the first
+    label names, so the toolset name and the endpoint the arguments
+    reach are the same authority. Every other host is a foreign
+    authority claiming that name. ``<service>.<namespace>`` is one form
+    short of a public domain name, and no rule tells the two apart, so
+    the qualified form must carry ``svc``.
+    """
+    if host in _LOOPBACK_HOSTS:
+        return True
+    match tuple(host.split(".")):
+        case (_,) | (_, _, "svc"):
+            return True
+        case (_, _, "svc", *domain):
+            return tuple(domain) == _CLUSTER_DOMAIN
+        case _:
+            return False

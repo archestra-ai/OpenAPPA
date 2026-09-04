@@ -160,6 +160,8 @@ The policy names each tool by its canonical tool id. The kagent adapter maps wha
 
 The toolset is the first label of the server host in the rendered `params.url`, which is the resource name when the Service carries it. A gated agent must give each MCP entry an explicit `tools` list: without one the server decides the tool list at run time, and the plugin refuses to start.
 
+The toolset name therefore binds to the endpoint that serves it. A gated agent may point an MCP entry only at the Kubernetes service forms of that same name — `<service>`, `<service>.<namespace>.svc`, `<service>.<namespace>.svc.cluster.local` — or at `localhost` or `127.0.0.1`. The bare `<service>.<namespace>` form is refused with them: it is one label short of a public domain name, and nothing tells the two apart. Any other host refuses the start, so no endpoint outside the cluster takes the policy identity `mcp/<toolset>/<tool>` that your contracts trust. A cluster with a DNS domain other than `cluster.local` uses the shorter `<service>.<namespace>.svc` form.
+
 Agent delegation requires an explicit tool entry under `agent/<namespace>/<agent>`. Wildcards do not cover delegation spawns. See [Policy contracts](/contracts#tool-names) for the grammar.
 
 ### 3. Gate the agents you choose

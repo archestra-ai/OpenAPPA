@@ -79,7 +79,7 @@ Argument selectors keep their shape: `host/claude-code/Read(file_path:*)`. `Agen
 
 ### How a session reaches the runtime
 
-The plugin's hooks run `appa hook --adapter claude-code` on every event. The command translates Claude Code's hook JSON into the hook protocol's wire envelope (`protocol: 1`), posts it to the runtime's `/hook` endpoint, and translates the decision back into the hook answer Claude Code reads. The envelope carries the raw tool spelling and the session's own ids; the runtime derives the canonical tool id and prefixes the trajectory id with `cc:`. A hook that gets no answer blocks the action.
+The plugin's hooks run `appa hook` on every event. The command translates Claude Code's hook JSON into the hook protocol's wire envelope (`protocol: 1`), posts it to the runtime's `/hook` endpoint, and translates the decision back into the hook answer Claude Code reads. The envelope carries the raw tool spelling and the session's own ids; the runtime derives the canonical tool id and prefixes the trajectory id with `cc:`. A hook that gets no answer blocks the action.
 
 ## 2. Try a flow that should be blocked
 

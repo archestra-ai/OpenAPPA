@@ -319,10 +319,9 @@ async fn a_2xx_answer_that_is_no_wire_decision_exits_2() {
     assert_eq!(stdout, "");
 }
 
-fn run_client(args: &[&str], url: &str, stdin: &str) -> (i32, String) {
+fn run_client(url: &str, stdin: &str) -> (i32, String) {
     let child = Command::new(built_binary())
         .arg("hook")
-        .args(args)
         .arg("--url")
         .arg(url)
         .stdin(Stdio::piped())
@@ -333,7 +332,7 @@ fn run_client(args: &[&str], url: &str, stdin: &str) -> (i32, String) {
     finish(child, stdin)
 }
 
-/// `appa hook --adapter claude-code` end to end against a served runtime: the
+/// `appa hook` end to end against a served runtime: the
 /// Claude Code hook is translated onto the wire, the runtime decides under a
 /// policy naming the canonical tool, and the decision comes back in Claude Code's
 /// shape with the exit code its outcome takes.
@@ -348,41 +347,29 @@ fn the_hook_client_translates_both_ways_against_a_served_runtime() {
     )
     .expect("the config writes");
     let runtime = serve_runtime(&config, &dir.path().join("appa.db"));
-    let claude = ["--adapter", "claude-code"];
 
-    let (code, stdout) = run_client(&claude, &runtime.url, PRE_TOOL_USE);
+    let (code, stdout) = run_client(&runtime.url, PRE_TOOL_USE);
     assert_eq!(code, 0, "{stdout}");
     let answer: serde_json::Value = serde_json::from_str(&stdout).expect("the answer is JSON");
     assert_eq!(answer["hookSpecificOutput"]["hookEventName"], "PreToolUse");
     assert_eq!(answer["hookSpecificOutput"]["permissionDecision"], "allow", "{answer}");
 
     let ran = r#"{"hook_event_name":"PostToolUse","session_id":"plugin-test","tool_name":"Bash","tool_input":{"command":"ls"},"tool_response":{"stdout":"readme.txt"}}"#;
-    let (code, stdout) = run_client(&claude, &runtime.url, ran);
+    let (code, stdout) = run_client(&runtime.url, ran);
     assert_eq!(code, 0, "{stdout}");
     assert_eq!(stdout, "{}", "a kept result answers with no opinion");
 
     // Nothing covers Write: the runtime refuses the call typed, and the client blocks.
     let uncovered = r#"{"hook_event_name":"PreToolUse","session_id":"plugin-test","tool_name":"Write","tool_input":{"file_path":"x","content":"y"}}"#;
-    let (code, stdout) = run_client(&claude, &runtime.url, uncovered);
+    let (code, stdout) = run_client(&runtime.url, uncovered);
     assert_eq!(code, 2, "a runtime refusal must block the action: {stdout}");
     let answer: serde_json::Value = serde_json::from_str(&stdout).expect("the refusal renders");
     assert!(answer["error"].is_string(), "{answer}");
 
     let ungated = r#"{"hook_event_name":"Notification","session_id":"plugin-test"}"#;
-    let (code, stdout) = run_client(&claude, &runtime.url, ungated);
+    let (code, stdout) = run_client(&runtime.url, ungated);
     assert_eq!(code, 0);
     assert_eq!(stdout, "{}", "an ungated hook answers without a round trip");
-
-    let (code, stdout) = run_client(&["--adapter", "kagent"], &runtime.url, PRE_TOOL_USE);
-    assert_eq!(
-        code, 2,
-        "kagent posts the wire itself; the client refuses to translate for it"
-    );
-    assert_eq!(stdout, "");
-
-    let (code, stdout) = run_client(&["--adapter", "sky-net"], &runtime.url, PRE_TOOL_USE);
-    assert_ne!(code, 0, "an unknown adapter is refused");
-    assert_eq!(stdout, "");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -476,7 +463,7 @@ async fn the_posix_hook_exits_zero_when_it_withholds_a_result() {
 async fn an_unanswered_post_use_hook_withholds_the_result_it_reports() {
     let url = refused_url().await;
     let ran = r#"{"hook_event_name":"PostToolUse","session_id":"plugin-test","tool_name":"Bash","tool_input":{"command":"ls"},"tool_response":{"stdout":"readme.txt"}}"#;
-    let (code, stdout) = tokio::task::spawn_blocking(move || run_client(&["--adapter", "claude-code"], &url, ran))
+    let (code, stdout) = tokio::task::spawn_blocking(move || run_client(&url, ran))
         .await
         .expect("the blocking task joins");
     assert_eq!(
@@ -511,7 +498,7 @@ async fn a_refused_post_use_hook_withholds_the_result_it_reports() {
         (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom"),
     ] {
         let url = serve(Router::new().route("/hook", post(move || async move { answer }))).await;
-        let (code, stdout) = tokio::task::spawn_blocking(move || run_client(&["--adapter", "claude-code"], &url, ran))
+        let (code, stdout) = tokio::task::spawn_blocking(move || run_client(&url, ran))
             .await
             .expect("the blocking task joins");
         assert_eq!(
@@ -536,7 +523,7 @@ async fn a_refused_post_use_hook_withholds_the_result_it_reports() {
 async fn an_unanswered_pre_use_hook_prints_no_replacement() {
     let url = refused_url().await;
     let proposed = r#"{"hook_event_name":"PreToolUse","session_id":"plugin-test","tool_name":"Bash","tool_input":{"command":"ls"}}"#;
-    let (code, stdout) = tokio::task::spawn_blocking(move || run_client(&["--adapter", "claude-code"], &url, proposed))
+    let (code, stdout) = tokio::task::spawn_blocking(move || run_client(&url, proposed))
         .await
         .expect("the blocking task joins");
     assert_eq!(code, 2, "no answer from the runtime must block the call");
@@ -556,11 +543,9 @@ async fn an_event_that_cannot_cross_the_wire_still_withholds_the_result_it_repor
     let ran = r#"{"hook_event_name":"PostToolUse","session_id":"","tool_name":"Bash","tool_input":{"command":"ls"},"tool_response":{"stdout":"readme.txt"}}"#;
     let proposed =
         r#"{"hook_event_name":"PreToolUse","session_id":"","tool_name":"Bash","tool_input":{"command":"ls"}}"#;
-    let claude = ["--adapter", "claude-code"];
-    let (ran, proposed) =
-        tokio::task::spawn_blocking(move || (run_client(&claude, &url, ran), run_client(&claude, &url, proposed)))
-            .await
-            .expect("the blocking task joins");
+    let (ran, proposed) = tokio::task::spawn_blocking(move || (run_client(&url, ran), run_client(&url, proposed)))
+        .await
+        .expect("the blocking task joins");
 
     let (code, stdout) = ran;
     assert_eq!(
@@ -583,6 +568,67 @@ async fn an_event_that_cannot_cross_the_wire_still_withholds_the_result_it_repor
     assert_eq!(stdout, "", "a call that never ran has no output to replace");
 }
 
+/// A host event the codec cannot read at all: this `PostToolUse` misses `tool_input`, which
+/// every parse of one requires. The tool has run all the same, so the hook is answered by
+/// the withholding the codec reads out of the bytes — a hook that only exited non-zero here
+/// would leave the output it reports in front of the model. A call that has not run is
+/// stopped by the exit code alone, with nothing printed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_event_the_codec_cannot_read_still_withholds_the_result_it_reports() {
+    let url = refused_url().await;
+    let ran = r#"{"hook_event_name":"PostToolUse","session_id":"plugin-test","tool_name":"Bash","tool_response":{"stdout":"readme.txt"}}"#;
+    let proposed = r#"{"hook_event_name":"PreToolUse","session_id":"plugin-test","tool_name":"Bash"}"#;
+    let (ran, proposed) = tokio::task::spawn_blocking(move || (run_client(&url, ran), run_client(&url, proposed)))
+        .await
+        .expect("the blocking task joins");
+
+    let (code, stdout) = ran;
+    assert_eq!(
+        code, 0,
+        "the harness applies the replacement only from a hook that exits zero: {stdout}"
+    );
+    let answer: serde_json::Value = serde_json::from_str(&stdout).expect("the withholding renders as JSON");
+    assert_eq!(answer["hookSpecificOutput"]["hookEventName"], "PostToolUse", "{answer}");
+    assert!(
+        !answer["hookSpecificOutput"]["updatedToolOutput"].is_null(),
+        "the produced output is replaced, not left in front of the model: {answer}"
+    );
+    assert!(
+        !answer.to_string().contains("readme.txt"),
+        "the withheld body never reaches the model: {answer}"
+    );
+
+    let (code, stdout) = proposed;
+    assert_eq!(code, 2, "a call that never ran is stopped by the exit code");
+    assert_eq!(stdout, "", "a call that never ran has no output to replace");
+}
+
+/// The client with the read end of its stdout closed before it answers: whatever it renders
+/// cannot reach the harness, and only its exit code is left to report that.
+fn run_unheard_client(url: &str, stdin: &str) -> i32 {
+    let mut child = Command::new(built_binary())
+        .arg("hook")
+        .arg("--url")
+        .arg(url)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the hook client spawns");
+    drop(child.stdout.take().expect("the child has a stdout pipe"));
+    child
+        .stdin
+        .as_mut()
+        .expect("the child has a stdin pipe")
+        .write_all(stdin.as_bytes())
+        .expect("the event writes to the hook's stdin");
+    child
+        .wait()
+        .expect("the hook client finishes")
+        .code()
+        .expect("the hook client exits with a code")
+}
+
 /// A withholding carries its whole effect through what the client prints, so one the
 /// harness never received withheld nothing. Here the read end of the client's stdout is
 /// closed before it answers, so the write fails: the client must not exit zero and report a
@@ -591,33 +637,38 @@ async fn an_event_that_cannot_cross_the_wire_still_withholds_the_result_it_repor
 async fn a_withholding_that_cannot_be_written_does_not_exit_zero() {
     let url = refused_url().await;
     let ran = r#"{"hook_event_name":"PostToolUse","session_id":"plugin-test","tool_name":"Bash","tool_input":{"command":"ls"},"tool_response":{"stdout":"readme.txt"}}"#;
-    let code = tokio::task::spawn_blocking(move || {
-        let mut child = Command::new(built_binary())
-            .arg("hook")
-            .args(["--adapter", "claude-code"])
-            .arg("--url")
-            .arg(&url)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("the hook client spawns");
-        drop(child.stdout.take().expect("the child has a stdout pipe"));
-        child
-            .stdin
-            .as_mut()
-            .expect("the child has a stdin pipe")
-            .write_all(ran.as_bytes())
-            .expect("the event writes to the hook's stdin");
-        child
-            .wait()
-            .expect("the hook client finishes")
-            .code()
-            .expect("the hook client exits with a code")
-    })
-    .await
-    .expect("the blocking task joins");
+    let code = tokio::task::spawn_blocking(move || run_unheard_client(&url, ran))
+        .await
+        .expect("the blocking task joins");
     assert_eq!(code, 2, "a replacement the harness never received must not exit zero");
+}
+
+/// The same holds for an answer the runtime did give: a decision the harness never received
+/// decided nothing, and exiting zero on it would release the call the runtime denied. The
+/// pair pins the write as the only difference — heard, the same answer renders and exits 0.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_decision_that_cannot_be_written_does_not_exit_zero() {
+    for answer in [
+        r#"{"protocol":1,"decision":"deny_call","feedback":"[appa] Blocked: this call cannot run yet."}"#,
+        r#"{"protocol":1,"decision":"block","reason":"denied"}"#,
+        r#"{"protocol":1,"decision":"replace_output","output":"[appa] the output is confined"}"#,
+    ] {
+        let url = serve(Router::new().route("/hook", post(move || async move { answer }))).await;
+        let heard = url.clone();
+        let (heard, unheard) = tokio::task::spawn_blocking(move || {
+            (run_client(&heard, PRE_TOOL_USE), run_unheard_client(&url, PRE_TOOL_USE))
+        })
+        .await
+        .expect("the blocking task joins");
+
+        let (code, stdout) = heard;
+        assert_eq!(code, 0, "the answer is one the client renders and exits 0 on: {stdout}");
+        assert!(!stdout.is_empty(), "{answer} renders an answer for the harness");
+        assert_eq!(
+            unheard, 2,
+            "a decision the harness never received must not exit zero: {answer}"
+        );
+    }
 }
 
 /// Run the shipped Windows hook under whatever PowerShell this machine has, and

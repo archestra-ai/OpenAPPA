@@ -55,6 +55,7 @@ from kagent.core import KAgentConfig  # noqa: E402
 
 from appa_kagent_adk import entrypoint  # noqa: E402
 from appa_kagent_adk.gates import MEMORY_PERSIST_TOOL, gate_memory_persist  # noqa: E402
+from appa_kagent_adk.inventory import ToolInventory  # noqa: E402
 from appa_kagent_adk.plugin import AppaPluginKagent  # noqa: E402
 from appa_kagent_adk.wire import RESERVED_TOOL  # noqa: E402
 
@@ -335,9 +336,12 @@ async def test_a_proposal_of_each_recorded_name_crosses_the_gate_as_spelled(reco
     agent = stock_agent(MEMORY_CONFIG)
     agent.model = ScriptedModel(turns=[{"tool": name, "args": PROPOSALS[name]}])
     hook = RunnerHook()
+    # The memory builtins are in the inventory only for a memory agent,
+    # so the gate is the one this rendered config builds.
+    gated = plugin_over(hook, inventory=ToolInventory.from_config(MEMORY_CONFIG, environ={}))
 
     if recorded["declared"]:
-        await run_turn(agent, [plugin_over(hook)])
+        await run_turn(agent, [gated])
         call, result = hook.tool_events()
         assert (call["event"], call["tool"], call["arguments"]) == ("tool_call", f"builtin:{name}", PROPOSALS[name])
         assert "spawn" not in call
@@ -352,7 +356,7 @@ async def test_a_proposal_of_each_recorded_name_crosses_the_gate_as_spelled(reco
     # dispatcher rejects the name before any tool gate, and the
     # rejection crosses as the failure result under that spelling.
     with pytest.raises(ValueError, match=f"Tool '{name}' not found"):
-        await run_turn(agent, [plugin_over(hook)])
+        await run_turn(agent, [gated])
     (failure,) = hook.tool_events()
     assert (failure["event"], failure["tool"], failure["outcome"]["status"]) == (
         "tool_result",
@@ -389,7 +393,7 @@ async def test_the_gate_fires_behind_the_stock_plugins_in_a_real_runner(config_d
 
     kinds = [event["event"] for event in hook.events]
     assert kinds[:2] == ["session_start", "prompt"]
-    assert [event["tool"] for event in hook.tool_events()] == ["ask_user", "ask_user"]
+    assert [event["tool"] for event in hook.tool_events()] == ["builtin:ask_user", "builtin:ask_user"]
     assert kinds[-1] == "turn_end"
 
 

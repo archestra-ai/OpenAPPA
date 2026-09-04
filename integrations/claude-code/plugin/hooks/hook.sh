@@ -15,4 +15,4 @@ esac
 # shellcheck source=integrations/claude-code/plugin/hooks/appa-paths.sh
 . "$appa_hooks_dir/appa-paths.sh"
 
-exec "$APPA_BIN" hook --adapter claude-code --url "${APPA_RUNTIME_URL:-$APPA_ENDPOINT}" "$@"
+exec "$APPA_BIN" hook --url "${APPA_RUNTIME_URL:-$APPA_ENDPOINT}" "$@"

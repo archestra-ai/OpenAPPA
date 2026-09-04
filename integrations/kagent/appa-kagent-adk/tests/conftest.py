@@ -8,13 +8,36 @@ no network, no runtime.
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import os
 from typing import Any, Protocol
 
 import httpx
+import pytest
 
 from appa_kagent_adk.inventory import ToolInventory
 from appa_kagent_adk.plugin import AppaPluginKagent
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Refuse to run the pinned lane without the kagent it pins.
+
+    The lane's own tests reach for `kagent.adk` and skip without it, so a lane
+    whose overlay never arrives reports success while testing none of what it
+    exists to test. The runner that means to be the lane says so.
+    """
+    if os.environ.get("APPA_KAGENT_LANE") != "1":
+        return
+    try:
+        found = importlib.util.find_spec("kagent.adk") is not None
+    except ImportError:
+        found = False
+    if not found:
+        raise pytest.UsageError(
+            "APPA_KAGENT_LANE=1 names this run the pinned kagent lane, but kagent.adk is not importable here"
+        )
+
 
 RUNTIME_URL = "http://127.0.0.1:8787"
 

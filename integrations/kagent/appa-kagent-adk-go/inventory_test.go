@@ -101,9 +101,58 @@ func TestANameTheWireCannotSpellIsRefused(t *testing.T) {
 		UnspellableName, "http_tools[0].tools[0]")
 	mustRefuse(t, InventorySpec{MCPServers: []MCPServerSpec{{Path: "http_tools[0]", URL: "http://demo__tools:3000/mcp", Tools: []string{"a"}}}},
 		UnspellableName, "http_tools[0]")
+	// A boundary period ends the spelling run short, so Despell could
+	// never match the spelling of such a name back.
+	for _, name := range []string{".status", "status.", "."} {
+		mustRefuse(t, InventorySpec{MCPServers: []MCPServerSpec{{Path: "http_tools[0]", URL: "http://demo-tools:3000/mcp", Tools: []string{name}}}},
+			UnspellableName, "http_tools[0].tools[0]")
+	}
 	for _, name := range []string{"log-analyst", "__NS__log_analyst", "kagent__NS__", "a__NS__b__NS__c"} {
 		mustRefuse(t, InventorySpec{RemoteAgents: []RemoteAgentSpec{{Path: "remote_agents[0].name", Name: name}}},
 			UnspellableName, "remote_agents[0].name")
+	}
+}
+
+func TestAnInClusterEndpointNamesItsToolset(t *testing.T) {
+	for _, host := range []string{
+		"demo-tools",
+		"demo-tools.kagent.svc",
+		"demo-tools.kagent.svc.cluster.local",
+		"localhost",
+		"127.0.0.1",
+	} {
+		inventory := mustBuild(t, InventorySpec{MCPServers: []MCPServerSpec{
+			{Path: "http_tools[0]", URL: "http://" + host + ":3000/mcp", Tools: []string{"list_pods"}},
+		}})
+		label, _, _ := strings.Cut(host, ".")
+		if got, known := inventory.Spelling("list_pods"); !known || got != MCPSpelling(label, "list_pods") {
+			t.Errorf("%s spells its toolset %q (%v), want %q", host, got, known, MCPSpelling(label, "list_pods"))
+		}
+	}
+}
+
+// The toolset is the host's first label, so a foreign endpoint under
+// that label would take the policy identity of the in-cluster service.
+func TestAnMCPEndpointOutsideTheClusterIsRefused(t *testing.T) {
+	for _, host := range []string{
+		// A two-label host is one label short of a public domain
+		// name and cannot be told apart from one.
+		"demo-tools.attacker",
+		"demo-tools.io",
+		"demo-tools.attacker.example.com",
+		"demo-tools.kagent.example.com",
+		"demo-tools.kagent.svc.attacker.com",
+		"demo-tools.kagent.pod.cluster.local",
+		"demo-tools.kagent.svc.cluster.local.attacker.com",
+		"192.0.2.10",
+	} {
+		spec := InventorySpec{MCPServers: []MCPServerSpec{
+			{Path: "http_tools[0]", URL: "http://" + host + ":3000/mcp", Tools: []string{"list_pods"}},
+		}}
+		mustRefuse(t, spec, ForeignAuthority, "http_tools[0]")
+		if _, err := BuildInventory(spec); err == nil || !strings.Contains(err.Error(), host) {
+			t.Errorf("the refusal names the endpoint it read, got %v", err)
+		}
 	}
 }
 

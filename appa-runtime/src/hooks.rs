@@ -351,7 +351,7 @@ mod tests {
     use crate::api::Runtime;
     use crate::config::Config;
 
-    /// The client side of the wire, as `appa hook --adapter claude-code` runs it: the
+    /// The client side of the wire, as `appa hook` runs it: the
     /// Claude Code hook JSON these tests are written in is translated onto the wire,
     /// and the wire decision is rendered back into Claude Code's hook answer.
     async fn through_the_wire(runtime: &Runtime, claude_hook_json: &[u8]) -> (u16, serde_json::Value) {

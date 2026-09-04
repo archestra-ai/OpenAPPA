@@ -46,15 +46,12 @@ enum Command {
         paths: Vec<PathBuf>,
     },
 
-    /// Post one harness hook event to the running runtime.
+    /// Post one Claude Code hook event to the running runtime. The host is not a choice:
+    /// the kagent plugin posts the canonical wire itself, so this bridge is Claude Code's.
     #[command(hide = true)]
     Hook {
         #[arg(long, env = "APPA_RUNTIME_URL", default_value = "http://127.0.0.1:8787")]
         url: String,
-
-        /// The host whose hook event arrives on stdin.
-        #[arg(long, default_value_t = AdapterName::ClaudeCode)]
-        adapter: AdapterName,
 
         /// Report a finished turn, whose answer never blocks the harness.
         #[arg(long)]
@@ -79,7 +76,7 @@ fn main() -> ExitCode {
     }
 
     match Args::parse().command {
-        Command::Hook { url, adapter, turn_end } => appa_runtime::hook_client::run(&url, adapter, turn_end),
+        Command::Hook { url, turn_end } => appa_runtime::hook_client::run(&url, turn_end),
         Command::Replay {
             config,
             modules_dir,

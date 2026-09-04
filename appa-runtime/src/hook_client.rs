@@ -204,16 +204,9 @@ fn refusal(answer: &Answer) -> String {
     }
 }
 
-/// The host whose hook bytes this client translates. Only Claude Code posts through
-/// `appa hook`: the kagent plugin speaks the canonical wire itself.
-fn codec_for(adapter: AdapterName) -> Result<Codec, String> {
-    match adapter {
-        AdapterName::ClaudeCode => Ok(appa_adapter_claude_code::codec()),
-        AdapterName::Kagent => Err(format!(
-            "`appa hook` translates no {adapter} events: the kagent plugin posts the canonical wire itself"
-        )),
-    }
-}
+/// The host whose hook bytes this client translates. It is not a choice: the kagent plugin
+/// posts the canonical wire itself, so this bridge is Claude Code's alone.
+const HOST: AdapterName = AdapterName::ClaudeCode;
 
 /// The runtime's answer, read off the wire. A body that is not a wire decision is
 /// not guessed at: the hook fails closed on it.
@@ -234,6 +227,16 @@ fn print(answer: &serde_json::Value) -> std::io::Result<()> {
     stdout.flush()
 }
 
+/// Hand the harness one answer and exit on it. An answer that could not be written is an
+/// answer the harness never received, so it decided nothing: exiting zero would release the
+/// action on a decision that never arrived, and the blocking exit is what says so instead.
+fn deliver(answer: &serde_json::Value) -> ExitCode {
+    match print(answer) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => block(&format!("the answer could not be written: {error}")),
+    }
+}
+
 /// The host event read as the typed event it reports: `None` for a hook the adapter does
 /// not gate, whose answer is the empty opinion without a round trip.
 fn parse_host_event(codec: &Codec, host_event: &[u8]) -> Result<Option<HookEvent>, String> {
@@ -246,19 +249,16 @@ fn parse_host_event(codec: &Codec, host_event: &[u8]) -> Result<Option<HookEvent
 /// One parsed event on the canonical wire. Crossing is a step of its own because the event
 /// outlives its failure: an event that cannot cross still reports what the host did, so a
 /// result the tool already produced is withheld rather than left in front of the model.
-fn wire_body(adapter: AdapterName, event: &HookEvent) -> Result<Vec<u8>, String> {
-    let wire = WireEvent::from_event(adapter, event).map_err(|refusal| match refusal {
+fn wire_body(event: &HookEvent) -> Result<Vec<u8>, String> {
+    let wire = WireEvent::from_event(HOST, event).map_err(|refusal| match refusal {
         ParseRefusal::Unreadable { detail } | ParseRefusal::Malformed { detail } => detail,
     })?;
     serde_json::to_vec(&wire).map_err(|error| format!("the wire event does not serialize: {error}"))
 }
 
-pub fn run(url: &str, adapter: AdapterName, turn_end: bool) -> ExitCode {
+pub fn run(url: &str, turn_end: bool) -> ExitCode {
     let decides = Decides::of_a_turn_end(turn_end);
-    let codec = match codec_for(adapter) {
-        Ok(codec) => codec,
-        Err(failure) => return block(&failure),
-    };
+    let codec = appa_adapter_claude_code::codec();
     let mut host_event = Vec::new();
     if let Err(error) = std::io::stdin().read_to_end(&mut host_event) {
         return block(&format!("the hook event could not be read: {error}"));
@@ -267,34 +267,34 @@ pub fn run(url: &str, adapter: AdapterName, turn_end: bool) -> ExitCode {
         // A hook the adapter does not gate is the empty opinion, with no round trip.
         Ok(None) => {
             if decides == Decides::Authorization {
-                let _ = print(&serde_json::json!({}));
+                return deliver(&serde_json::json!({}));
             }
             return ExitCode::SUCCESS;
         }
         Ok(Some(event)) => event,
-        Err(failure) => return unanswered(&codec, None, &failure, decides),
+        // Bytes this codec cannot read at all are still a hook: where they report a result
+        // the harness has already produced, the codec renders the withholding for it, so
+        // the output the tool produced does not stay in front of the model.
+        Err(failure) => return unanswered(&codec, Unanswered::Unparsed(&host_event), &failure, decides),
     };
     // A parsed event that cannot cross the wire is still an event to answer: it is handed
     // to the withholding path rather than dropped, so a result that already ran is taken
     // out of the model's attention instead of staying in front of it.
-    let body = match wire_body(adapter, &event) {
+    let body = match wire_body(&event) {
         Ok(body) => body,
-        Err(failure) => return unanswered(&codec, Some(&event), &failure, decides),
+        Err(failure) => return unanswered(&codec, Unanswered::Event(&event), &failure, decides),
     };
     let answered =
         Endpoint::parse(url).and_then(|endpoint| post(&endpoint, &body, &Deadline::spanning(decides.budget())));
     let answer = match answered {
         Ok(answer) => answer,
-        Err(failure) => return unanswered(&codec, Some(&event), &failure, decides),
+        Err(failure) => return unanswered(&codec, Unanswered::Event(&event), &failure, decides),
     };
     if decides == Decides::Nothing {
         return ExitCode::SUCCESS;
     }
     match (decision_of(&answer.body), answer.is_success()) {
-        (Ok(decision), true) => {
-            let _ = print(&(codec.render)(&event, &decision));
-            ExitCode::SUCCESS
-        }
+        (Ok(decision), true) => deliver(&(codec.render)(&event, &decision)),
         // A refusal is rendered too, and for a result that already ran the rendering
         // is the whole answer: the harness reads it only from a hook that exits zero,
         // so a replacement carried out on a blocking exit would be discarded and the
@@ -306,7 +306,7 @@ pub fn run(url: &str, adapter: AdapterName, turn_end: bool) -> ExitCode {
             let failure = refusal(&answer);
             carry_out(&codec, &event, refused(&event, answered.ok(), &failure), &failure)
         }
-        (Err(failure), true) => unanswered(&codec, Some(&event), &failure, decides),
+        (Err(failure), true) => unanswered(&codec, Unanswered::Event(&event), &failure, decides),
     }
 }
 
@@ -341,13 +341,14 @@ fn refused(event: &HookEvent, answered: Option<HookDecision>, failure: &str) -> 
 
 fn carry_out(codec: &Codec, event: &HookEvent, refused: Refused, failure: &str) -> ExitCode {
     match refused {
-        Refused::Withheld(withholding) => withhold(codec, event, &withholding, failure),
-        Refused::Stopped(answered) => {
-            if let Some(decision) = answered {
-                let _ = print(&(codec.render)(event, &decision));
-            }
-            block(failure)
-        }
+        Refused::Withheld(withholding) => withhold(&(codec.render)(event, &withholding), failure),
+        // The exit code stops the call either way; where the answer's own rendering could
+        // not be delivered, the failure to write it is surfaced beside the refusal rather
+        // than swallowed.
+        Refused::Stopped(answered) => match answered.map(|decision| print(&(codec.render)(event, &decision))) {
+            Some(Err(error)) => block(&format!("{failure}; the answer could not be written: {error}")),
+            _ => block(failure),
+        },
     }
 }
 
@@ -359,35 +360,56 @@ fn carry_out(codec: &Codec, event: &HookEvent, refused: Refused, failure: &str) 
 /// is still in front of the model, and exiting zero would claim a replacement the harness
 /// never received. The blocking exit is what is left to say so — it surfaces the failure on
 /// stderr and stops the turn rather than reporting a withholding that did not happen.
-fn withhold(codec: &Codec, event: &HookEvent, withholding: &HookDecision, failure: &str) -> ExitCode {
+fn withhold(withholding: &serde_json::Value, failure: &str) -> ExitCode {
     eprintln!("OpenAPPA hook withheld the result: {failure}");
-    match print(&(codec.render)(event, withholding)) {
+    match print(withholding) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => block(&format!("{failure}; the withholding could not be written: {error}")),
     }
+}
+
+/// What one hook the runtime did not answer leaves this client holding: the event the host
+/// bytes reported, or the bytes themselves where this codec could not read them. Only the
+/// codec can tell what a host's own bytes report, so the unread ones are handed back to it
+/// rather than sniffed here.
+enum Unanswered<'a> {
+    Event(&'a HookEvent),
+    Unparsed(&'a [u8]),
 }
 
 /// Fail closed on a hook the runtime did not answer. A turn end decides nothing and
 /// never blocks. Otherwise the exit code stops a call the harness has not run yet,
 /// but a result the tool already produced stays in front of the model unless the
 /// withholding is rendered for it — and the harness reads a rendered answer only
-/// from a hook that exits zero, so an event reporting a result is withheld by the
+/// from a hook that exits zero, so a hook reporting a result is withheld by the
 /// rendering and exits zero, while everything else blocks by the exit code alone.
-fn unanswered(codec: &Codec, event: Option<&HookEvent>, failure: &str, decides: Decides) -> ExitCode {
+fn unanswered(codec: &Codec, hook: Unanswered<'_>, failure: &str, decides: Decides) -> ExitCode {
     if decides == Decides::Nothing {
         eprintln!("OpenAPPA runtime did not answer the turn end: {failure}");
         return ExitCode::SUCCESS;
     }
-    match event.filter(|event| reports_a_result(event)) {
-        Some(event) => withhold(
-            codec,
-            event,
-            &HookDecision::Block {
-                reason: format!("the runtime did not answer this hook: {failure}"),
-            },
-            failure,
-        ),
+    match withholding(codec, hook, failure) {
+        Some(withholding) => withhold(&withholding, failure),
         None => block(failure),
+    }
+}
+
+/// The withholding one unanswered hook needs, where it reports a result the tool already
+/// produced: rendered from the event the host bytes reported, or — where they never parsed
+/// — by the codec, which reads the host's own shape for a result the harness has produced.
+fn withholding(codec: &Codec, hook: Unanswered<'_>, failure: &str) -> Option<serde_json::Value> {
+    match hook {
+        Unanswered::Event(event) => reports_a_result(event).then(|| {
+            (codec.render)(
+                event,
+                &HookDecision::Block {
+                    reason: format!("the runtime did not answer this hook: {failure}"),
+                },
+            )
+        }),
+        Unanswered::Unparsed(host_event) => {
+            (codec.withholding)(host_event, &format!("this hook could not be read: {failure}"))
+        }
     }
 }
 
@@ -500,22 +522,50 @@ mod tests {
         assert!(Deadline::spanning(Duration::ZERO).left().is_err());
     }
 
+    /// A hook this codec cannot read at all is still answered where its bytes report a
+    /// result the tool produced: the codec renders the withholding for it, and every other
+    /// unreadable hook has nothing to print and is stopped by the exit code alone.
     #[test]
-    fn only_claude_code_translates_through_this_client() {
-        assert!(codec_for(AdapterName::ClaudeCode).is_ok());
-        assert!(codec_for(AdapterName::Kagent).is_err());
+    fn an_unreadable_hook_is_withheld_only_where_its_bytes_report_a_result() {
+        let codec = appa_adapter_claude_code::codec();
+        // A post-use hook with no `tool_input`: the tool has run, and the parse refuses.
+        let ran = br#"{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"Bash",
+            "tool_response":{"stdout":"root:x:0:0"}}"#;
+        assert!(parse_host_event(&codec, ran).is_err());
+        let withheld =
+            withholding(&codec, Unanswered::Unparsed(ran), "malformed").expect("a hook reporting a result is withheld");
+        assert!(
+            !withheld["hookSpecificOutput"]["updatedToolOutput"].is_null(),
+            "the result is replaced, not left in front of the model: {withheld}"
+        );
+        assert!(
+            !withheld.to_string().contains("root:x:0:0"),
+            "the withheld output does not reach the model: {withheld}"
+        );
+
+        let proposed = br#"{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"Bash"}"#;
+        assert!(parse_host_event(&codec, proposed).is_err());
+        assert_eq!(
+            withholding(&codec, Unanswered::Unparsed(proposed), "malformed"),
+            None,
+            "a call that has not run has no result to withhold"
+        );
+        assert_eq!(
+            withholding(&codec, Unanswered::Unparsed(b"not json"), "unreadable"),
+            None
+        );
     }
 
     #[test]
     fn a_host_event_crosses_as_a_wire_event_with_its_raw_spelling() {
-        let codec = codec_for(AdapterName::ClaudeCode).expect("claude code translates");
+        let codec = appa_adapter_claude_code::codec();
         let host =
             br#"{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"Agent","tool_input":{"prompt":"go"}}"#;
         let event = parse_host_event(&codec, host)
             .expect("the event parses")
             .expect("PreToolUse is gated");
         assert!(matches!(event, HookEvent::ToolCall { .. }));
-        let body = wire_body(AdapterName::ClaudeCode, &event).expect("the event crosses");
+        let body = wire_body(&event).expect("the event crosses");
         let wire: serde_json::Value = serde_json::from_slice(&body).expect("the wire is JSON");
         assert_eq!(wire["protocol"], appa_runtime_api::PROTOCOL);
         assert_eq!(wire["adapter"], "claude-code");
@@ -546,7 +596,7 @@ mod tests {
     /// the event in hand rather than with nothing.
     #[test]
     fn an_event_that_cannot_cross_the_wire_survives_its_failure() {
-        let codec = codec_for(AdapterName::ClaudeCode).expect("claude code translates");
+        let codec = appa_adapter_claude_code::codec();
         let host = br#"{"hook_event_name":"PostToolUse","session_id":"","tool_name":"Bash",
             "tool_input":{"command":"ls"},"tool_response":{"stdout":"root:x:0:0"}}"#;
         let event = parse_host_event(&codec, host)
@@ -554,7 +604,7 @@ mod tests {
             .expect("PostToolUse is gated");
         assert!(matches!(event, HookEvent::ToolResult { .. }));
         assert!(
-            wire_body(AdapterName::ClaudeCode, &event).is_err(),
+            wire_body(&event).is_err(),
             "an empty root id names no trajectory the wire can carry"
         );
         assert!(reports_a_result(&event));
@@ -568,7 +618,7 @@ mod tests {
     /// synthesized — and neither rendering carries the output that was withheld.
     #[test]
     fn a_refusal_to_a_result_that_already_ran_withholds_it_rather_than_blocking() {
-        let codec = codec_for(AdapterName::ClaudeCode).expect("claude code translates");
+        let codec = appa_adapter_claude_code::codec();
         let host = br#"{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"Bash",
             "tool_input":{"command":"cat /etc/passwd"},"tool_response":{"stdout":"root:x:0:0"},"tool_use_id":"t1"}"#;
         let event = parse_host_event(&codec, host)
@@ -599,7 +649,7 @@ mod tests {
     /// rendering only reports it.
     #[test]
     fn a_refusal_before_a_call_runs_stays_a_block() {
-        let codec = codec_for(AdapterName::ClaudeCode).expect("claude code translates");
+        let codec = appa_adapter_claude_code::codec();
         let host =
             br#"{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"Bash","tool_input":{"command":"ls"}}"#;
         let event = parse_host_event(&codec, host)
