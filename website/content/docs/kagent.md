@@ -17,13 +17,13 @@ controller:
   agentImage:
     registry: ghcr.io
     repository: archestra-ai/appa-kagent-quickstart
-    tag: 0.9.0 # x-release-please-version
+    tag: 0.10.0 # x-release-please-version
 
   # Go declarative runtime image
   goAgentImage:
     registry: ghcr.io
     repository: archestra-ai/appa-kagent-adk-go
-    tag: 0.9.0 # x-release-please-version
+    tag: 0.10.0 # x-release-please-version
 ```
 
 The image replaces the default kagent runtime image. It stays inert until activated with `APPA_ENABLED: "true"`:
@@ -104,7 +104,7 @@ helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --set-string providers.openAI.apiKey="$OPENAI_API_KEY" \
   --force-conflicts \
   --wait --timeout 10m \
-  --set controller.agentImage.tag=0.9.0 # x-release-please-version
+  --set controller.agentImage.tag=0.10.0 # x-release-please-version
 ```
 
 The kagent chart enables its stock sample agents by default. Setting `providers.openAI.apiKey` configures the default OpenAI provider for the cluster. The flags above disable the unused stock agents to keep the cluster lean. The explicit timeout makes Helm report a failed rollout instead of waiting without a visible deadline.
@@ -116,7 +116,7 @@ The parameters `providers.default=openAI` and `providers.openAI.apiKey` configur
 Install the public demo chart with the API key you exported above:
 
 ```sh
-APPA_VERSION=0.9.0 # x-release-please-version
+APPA_VERSION=0.10.0 # x-release-please-version
 helm upgrade --install appa-kagent-demo \
   "https://github.com/archestra-ai/OpenAPPA/releases/download/v${APPA_VERSION}/appa-kagent-demo-${APPA_VERSION}.tgz" \
   -n kagent \
@@ -191,7 +191,7 @@ helm upgrade kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --set controller.agentImage.tag=0.9.0 \
   --set controller.goAgentImage.registry=ghcr.io \
   --set controller.goAgentImage.repository=archestra-ai/appa-kagent-adk-go \
-  --set controller.goAgentImage.tag=0.9.0 # x-release-please-version
+  --set controller.goAgentImage.tag=0.10.0 # x-release-please-version
 ```
 
 This image replaces the base container image for declarative agent pods. It stays inert until an agent enables `APPA_ENABLED: "true"`. Existing agents remain unaffected.

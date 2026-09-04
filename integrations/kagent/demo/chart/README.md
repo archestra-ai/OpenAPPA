@@ -42,7 +42,7 @@ helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --set cilium-debug-agent.enabled=false \
   --force-conflicts \
   --wait --timeout 10m \
-  --set controller.agentImage.tag=0.9.0 # x-release-please-version
+  --set controller.agentImage.tag=0.10.0 # x-release-please-version
 ```
 
 The disabled stock agents are not part of the demo and require their own provider Secret. The controller, dashboard, and tool services remain enabled.
@@ -50,7 +50,7 @@ The disabled stock agents are not part of the demo and require their own provide
 ## Install
 
 ```sh
-APPA_VERSION=0.9.0 # x-release-please-version
+APPA_VERSION=0.10.0 # x-release-please-version
 helm upgrade --install appa-kagent-demo \
   "https://github.com/archestra-ai/OpenAPPA/releases/download/v${APPA_VERSION}/appa-kagent-demo-${APPA_VERSION}.tgz" \
   -n kagent \
@@ -171,7 +171,7 @@ docker build -t appa-demo-tools:dev integrations/kagent/demo
 docker build -t appa-demo-mocks:dev integrations/kagent/demo/mocks
 docker build -t golang-adk:dev integrations/kagent/appa-kagent-adk-go   # the go cell: kagent derives this name
 kind load docker-image appa-kagent-quickstart:dev appa-demo-tools:dev appa-demo-mocks:dev golang-adk:dev --name <cluster>
-APPA_VERSION=0.9.0 # x-release-please-version
+APPA_VERSION=0.10.0 # x-release-please-version
 helm upgrade --install appa-kagent-demo \
   "https://github.com/archestra-ai/OpenAPPA/releases/download/v${APPA_VERSION}/appa-kagent-demo-${APPA_VERSION}.tgz" \
   -n kagent \
