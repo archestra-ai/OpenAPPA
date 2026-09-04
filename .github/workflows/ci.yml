@@ -18,8 +18,9 @@ concurrency:
   cancel-in-progress: ${{ github.event.action != 'labeled' }}
 
 jobs:
-  # Each kagent job below runs only when its own inputs change. The other
-  # jobs stay unconditional because they cover the whole workspace.
+  # Each job runs only when its own inputs change. Skipped required
+  # checks still pass, so a docs-only pull request does not wait on
+  # Rust, macOS, Windows, or image builds.
   changes:
     name: Changed Paths
     runs-on: ubuntu-latest
@@ -33,6 +34,11 @@ jobs:
       chart: ${{ steps.filter.outputs.chart }}
       integration: ${{ steps.filter.outputs.integration }}
       e2e: ${{ steps.filter.outputs.e2e }}
+      rust: ${{ steps.filter.outputs.rust }}
+      plugin: ${{ steps.filter.outputs.plugin }}
+      installer: ${{ steps.filter.outputs.installer }}
+      corp: ${{ steps.filter.outputs.corp }}
+      agentthreatbench: ${{ steps.filter.outputs.agentthreatbench }}
     steps:
       # A pull request reads its file list from the API and needs no
       # checkout. Every other event diffs with git and needs the history.
@@ -63,6 +69,63 @@ jobs:
               - 'integrations/kagent/demo/chart/**'
               - 'charts/appa-runtime/**'
               - '.github/workflows/ci.yml'
+            rust: &rust
+              - '**/*.rs'
+              - '**/Cargo.toml'
+              - '**/Cargo.lock'
+              - 'rustfmt.toml'
+              - '.github/workflows/ci.yml'
+              - 'appa-runtime/**'
+              - 'appa-runtime-api/**'
+              - 'appa-engine/**'
+              - 'appa-eventlog/**'
+              - 'appa-policy/**'
+              - 'appa-builtin/**'
+              - 'appa-adapter-kagent/**'
+              - 'appa-adapter-claude-code/**'
+              - 'appa-example-agent/**'
+              - 'appa-agent-python/**'
+              - 'website-chat-playground/**'
+              - 'bench/corp-agent/**'
+              - 'bench/corp-systems/**'
+              - 'bench/corp/policies/**'
+              - 'examples/**'
+              - 'batteries/**'
+              - 'integrations/claude-code/**'
+              - 'integrations/appa-guide/**'
+              - 'integrations/kagent/fixtures/**'
+              - 'website/content/docs/contracts.md'
+            plugin:
+              - 'integrations/claude-code/plugin/**'
+              - 'integrations/claude-code/.claude-plugin/**'
+              - '.claude-plugin/**'
+              - 'batteries/**'
+              - 'scripts/appa-stage-plugin-bundle.sh'
+              - 'scripts/appa-install.sh'
+              - 'scripts/appa-install-test.sh'
+              - 'scripts/appa-refresh-batteries.py'
+              - 'scripts/test_appa_refresh_batteries.py'
+              - '.github/actions/check-release-versions/**'
+              - '.github/release-please/**'
+              - '.github/workflows/ci.yml'
+              - 'Cargo.toml'
+              - 'charts/appa-runtime/Chart.yaml'
+              - 'charts/appa-runtime/README.md'
+              - 'integrations/kagent/demo/chart/Chart.yaml'
+              - 'integrations/kagent/demo/chart/README.md'
+              - 'integrations/kagent/demo/README.md'
+              - 'website/content/docs/kagent.md'
+              - 'integrations/kagent/README.md'
+            installer:
+              - 'scripts/appa-install.sh'
+              - 'scripts/appa-install-test.sh'
+              - '.github/workflows/ci.yml'
+            corp:
+              - 'bench/corp/**'
+              - '.github/workflows/ci.yml'
+            agentthreatbench:
+              - *rust
+              - 'bench/agentthreatbench/**'
             integration: &integration
               - *python
               - 'integrations/kagent/examples/**'
@@ -85,6 +148,10 @@ jobs:
             e2e:
               - *integration
               - 'integrations/kagent/**'
+              # Markdown in this tree does not change an image or the
+              # A2A suite. Plugin Checks still reads the annotated
+              # operator guides.
+              - '!integrations/kagent/**/*.md'
               - 'appa-example-agent/**'
               - 'appa-agent-python/**'
               - 'bench/**'
@@ -102,6 +169,8 @@ jobs:
 
   plugin-checks:
     name: Plugin Checks
+    needs: changes
+    if: needs.changes.outputs.plugin == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -172,6 +241,8 @@ jobs:
 
   installer-checks:
     name: Installer Checks (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.installer == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -198,6 +269,8 @@ jobs:
   # restore.
   rust-lint:
     name: Rust Lint
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -224,6 +297,8 @@ jobs:
 
   rust-tests:
     name: Rust Tests
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     # init_cli copies and hashes the test binary many times. Debug metadata
@@ -251,27 +326,43 @@ jobs:
         run: cargo test --workspace --locked
 
   # Stable-named gate so a required check named "Rust Checks" still
-  # covers the split jobs.
+  # covers the split jobs. Both jobs skipped is success: their paths
+  # did not change.
   rust-checks:
     name: Rust Checks
     runs-on: ubuntu-latest
-    if: always()
-    needs: [rust-lint, rust-tests]
+    if: always() && !cancelled()
+    needs: [changes, rust-lint, rust-tests]
     timeout-minutes: 5
     permissions: {}
     steps:
       - name: Check rust job results
         env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
           LINT_RESULT: ${{ needs.rust-lint.result }}
           TESTS_RESULT: ${{ needs.rust-tests.result }}
         run: |
-          if [ "$LINT_RESULT" != "success" ] || [ "$TESTS_RESULT" != "success" ]; then
-            echo "::error::Rust lint or tests failed (lint: $LINT_RESULT, tests: $TESTS_RESULT)."
+          if [ "$CHANGES_RESULT" != "success" ]; then
+            echo "::error::Changed Paths failed ($CHANGES_RESULT)."
+            exit 1
+          fi
+          if [ "$LINT_RESULT" != "success" ] && [ "$LINT_RESULT" != "skipped" ]; then
+            echo "::error::Rust lint failed ($LINT_RESULT)."
+            exit 1
+          fi
+          if [ "$TESTS_RESULT" != "success" ] && [ "$TESTS_RESULT" != "skipped" ]; then
+            echo "::error::Rust tests failed ($TESTS_RESULT)."
+            exit 1
+          fi
+          if [ "$LINT_RESULT" != "$TESTS_RESULT" ]; then
+            echo "::error::Rust lint and tests disagreed (lint: $LINT_RESULT, tests: $TESTS_RESULT)."
             exit 1
           fi
 
   replay-examples:
     name: Replay Examples
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -302,6 +393,8 @@ jobs:
 
   macos-deployment-checks:
     name: macOS Deployment Checks
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: macos-15
     timeout-minutes: 20
     steps:
@@ -333,6 +426,8 @@ jobs:
 
   windows-deployment-checks:
     name: Windows Deployment Checks
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
@@ -402,6 +497,8 @@ jobs:
 
   python-binding-checks:
     name: Python Binding Checks
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -429,6 +526,8 @@ jobs:
 
   corp-benchmark-checks:
     name: Corporate Benchmark Checks
+    needs: changes
+    if: needs.changes.outputs.corp == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -448,6 +547,8 @@ jobs:
 
   agentthreatbench-checks:
     name: AgentThreatBench Checks
+    needs: changes
+    if: needs.changes.outputs.agentthreatbench == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
