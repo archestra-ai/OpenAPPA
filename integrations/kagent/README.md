@@ -85,11 +85,11 @@ An agent with `APPA_ENABLED=true` refuses to start without its runtime. The wrap
 
 ### Deploy the Interactive Demo
 
-Deploy the demo chart with your OpenAI API key:
+Deploy the demo chart with your OpenRouter API key:
 
 ```sh
 helm upgrade --install appa-kagent-demo ./demo/chart \
-  -n kagent --set openai.apiKey="$OPENAI_API_KEY" --wait
+  -n kagent --set openai.apiKey="$OPENROUTER_API_KEY" --wait
 ```
 
 The chart sets `APPA_ENABLED=true` on every agent it renders, so the demo fleet is gated on install.

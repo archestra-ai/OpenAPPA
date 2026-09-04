@@ -29,7 +29,7 @@ helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
 
 # the demo
 helm upgrade --install appa-kagent-demo ./integrations/kagent/demo/chart \
-  -n kagent --set openai.apiKey="$OPENAI_API_KEY" --wait
+  -n kagent --set openai.apiKey="$OPENROUTER_API_KEY" --wait
 kubectl -n kagent port-forward svc/kagent-ui 8901:8080
 ```
 

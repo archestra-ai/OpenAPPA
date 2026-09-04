@@ -1,7 +1,7 @@
 # The one thing the demo needs from you: the model provider key.
 # Everything else has a preset.
 openai:
-  # Your OpenAI API key. It lands in a Secret named after the ModelConfig,
+  # Your OpenRouter API key. It lands in a Secret named after the ModelConfig,
   # read by the agents and by appa-runtime's own sanitizer model. Leave it
   # empty to paste the key in the kagent dashboard after install instead
   # (Models → appa-demo-model → Edit → API Key): the dashboard writes the
@@ -10,14 +10,13 @@ openai:
   # The agents' model. Every gpt-5.6 variant needs reasoning_effort "none"
   # for function tools on chat completions; the image fills that in
   # (runtime.reasoningEffort). Pick a gpt-4.1 model to drop the need.
-  model: gpt-5.6-luna
+  model: openai/gpt-5.6-luna
   # An existing Secret carrying OPENAI_API_KEY, instead of apiKey. Name it
   # like the ModelConfig for the dashboard's Edit flow to find it.
   existingSecret: ""
-  # An OpenAI-compatible endpoint for the agents' model, such as
-  # https://openrouter.ai/api/v1. Empty means api.openai.com. The chart
-  # renders spec.openAI.baseUrl only when you set it.
-  baseUrl: ""
+  # The OpenAI-compatible endpoint for the agents' model. The chart renders
+  # spec.openAI.baseUrl only when this value is non-empty.
+  baseUrl: https://openrouter.ai/api/v1
 
 modelConfig:
   name: appa-demo-model
@@ -48,10 +47,10 @@ runtime:
 llm:
   # The sanitizers' model. It answers a json_schema request, so pick a
   # model that supports structured outputs.
-  model: gpt-4.1-mini
-  # An OpenAI-compatible endpoint for that model. Empty means
-  # api.openai.com. https anywhere, cleartext http on loopback only.
-  url: ""
+  model: openai/gpt-5.6-luna
+  # The OpenAI-compatible endpoint for that model. HTTPS works anywhere;
+  # cleartext HTTP works on loopback only.
+  url: https://openrouter.ai/api/v1
 
 relay:
   image:
