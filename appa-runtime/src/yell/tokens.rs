@@ -99,6 +99,44 @@ impl Class {
         }
     }
 
+    /// Every class, so that one can be checked against all of them.
+    const ALL: [Class; 18] = [
+        Class::Trajectory,
+        Class::Reader,
+        Class::Argument,
+        Class::Digest,
+        Class::Authority,
+        Class::Tool,
+        Class::Effect,
+        Class::Sanitizer,
+        Class::Annotator,
+        Class::Mark,
+        Class::Group,
+        Class::Surface,
+        Class::Source,
+        Class::Selector,
+        Class::Trust,
+        Class::Identity,
+        Class::Field,
+        Class::Literal,
+    ];
+
+    /// Whether a name is spelled the way this report spells its own tokens.
+    ///
+    /// Tokens and Baseline's spelled names share one namespace, so a deployment that writes a
+    /// tool called `tool-1` would be indistinguishable in a Baseline report from the first
+    /// tool the same report had to tokenize — one name reading as two, or two as one. Such a
+    /// name is tokenized instead, which costs the reader that one spelling and keeps every
+    /// token in the report meaning exactly one thing.
+    fn spelled_like_a_token(raw: &str) -> bool {
+        let Some((stem, ordinal)) = raw.rsplit_once('-') else {
+            return false;
+        };
+        !ordinal.is_empty()
+            && ordinal.chars().all(|digit| digit.is_ascii_digit())
+            && Class::ALL.iter().any(|class| class.stem() == stem)
+    }
+
     /// The stem a token of this class is spelled with.
     fn stem(self) -> &'static str {
         match self {
@@ -153,7 +191,7 @@ impl Tokens {
     /// (lexicographic keys, index order) precisely so that this numbering does not depend on
     /// how the JSON library happens to store its maps.
     pub(crate) fn token(&mut self, mode: Mode, class: Class, raw: &str) -> String {
-        if mode == Mode::Baseline && !class.always_tokenized() {
+        if mode == Mode::Baseline && !class.always_tokenized() && !Class::spelled_like_a_token(raw) {
             return raw.to_string();
         }
         let key = (class, raw.to_string());
@@ -174,6 +212,21 @@ impl Tokens {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Tokens and spelled names share one namespace, so a name shaped like a token cannot be
+    /// carried as spelled: one name would read as two, or two as one.
+    #[test]
+    fn a_name_shaped_like_a_token_is_tokenized_even_in_baseline() {
+        let mut tokens = Tokens::default();
+        let collides = tokens.token(Mode::Baseline, Class::Tool, "tool-1");
+        let invented = tokens.token(Mode::Baseline, Class::Tool, "Bash");
+        assert_ne!(collides, invented);
+        assert_eq!(invented, "Bash", "an ordinary name is still spelled");
+        // Across classes too: the stem is what collides, not the class it was minted in.
+        assert_ne!(tokens.token(Mode::Baseline, Class::Authority, "tool-1"), "tool-1");
+        // A name that merely ends in a number is not a token.
+        assert_eq!(tokens.token(Mode::Baseline, Class::Tool, "web-2"), "web-2");
+    }
 
     #[test]
     fn baseline_carries_names_as_spelled() {

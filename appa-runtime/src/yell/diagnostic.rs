@@ -260,8 +260,13 @@ pub(crate) fn build(source: Source<'_>, mode: Mode) -> Export {
 
 /// The oldest fact index that still fits [`MAX_FACT_BYTES`], found newest-first.
 ///
-/// The token map here is thrown away: it exists only so the measured bytes are the bytes the
-/// second pass will produce, and reusing it would number tokens newest-first.
+/// The token map here is thrown away: it exists so that a token is measured at a token's
+/// width rather than a name's, and reusing it would number the export newest-first. It is not
+/// the same map the second pass builds — that one starts with the trust ranks and the branch
+/// ids already in it, and numbers facts in the other direction — so an entry's measured width
+/// can differ from its emitted width by the width of an ordinal, and those differences add up
+/// across a long log. See the module documentation for what the budget therefore does and
+/// does not bound.
 fn budget_start(facts: &[Fact], mode: Mode, vouched: &BTreeSet<String>) -> usize {
     let mut measure = Tokens::default();
     let mut total = 0usize;

@@ -754,10 +754,15 @@ impl RuntimeEngine {
     /// wildcard the policy writes no name at all, so a wildcard deployment vouches for none
     /// and every tool in its reports is a token.
     pub(crate) fn vouched_tools(&self) -> std::collections::BTreeSet<String> {
-        self.engine
-            .registry()
-            .tools()
-            .map(|declaration| declaration.name().as_str().to_string())
+        let registry = self.engine.registry();
+        // Two lists, because policy compilation splits an exactly written name by what kind of
+        // tool it is. A provider-run tool is written out just as a checkable one is, so
+        // leaving it out here would tokenize a name the deployment chose.
+        let declared = registry.tools().map(|declaration| declaration.name());
+        let provider_run = registry.provider_run_annotations().map(|annotation| &annotation.name);
+        declared
+            .chain(provider_run)
+            .map(|name| name.as_str().to_string())
             .collect()
     }
 
