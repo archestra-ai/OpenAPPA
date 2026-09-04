@@ -14,7 +14,31 @@ name = "k8s_get_resource_yaml"
 delta = {}
 
 [[policy.tool]]
+name = "k8s_get_events"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_get_pod_logs"
+delta = {}
+
+[[policy.tool]]
 name = "k8s_apply_manifest"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["human-approval"]
+
+[[policy.tool]]
+name = "k8s_patch_resource"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["human-approval"]
+
+[[policy.tool]]
+name = "k8s_delete_resource"
 delta = {}
 
 [policy.tool.requires]
@@ -27,6 +51,30 @@ delta = {}
 
 [policy.tool.requires]
 trust = "trusted"
+
+[[policy.tool]]
+name = "helm_list_releases"
+delta = {}
+
+[[policy.tool]]
+name = "helm_get_release"
+delta = {}
+
+[[policy.tool]]
+name = "helm_upgrade"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["human-approval"]
+
+[[policy.tool]]
+name = "helm_uninstall"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["human-approval"]
 
 [[policy.tool]]
 name = "appa-guide"

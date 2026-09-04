@@ -9,7 +9,11 @@ error. Do not retry the call or route around it.
 ## Tools
 
 - Read: `k8s_get_resources`, `k8s_get_resource_yaml`.
-- Write and exec: `k8s_apply_manifest`, `k8s_execute_command`.
+- Diagnose: `k8s_get_events`, `k8s_get_pod_logs`.
+- Write and exec: `k8s_apply_manifest`, `k8s_patch_resource`,
+  `k8s_delete_resource`, `k8s_execute_command`.
+- Helm: `helm_list_releases`, `helm_get_release`, `helm_upgrade`,
+  `helm_uninstall`.
 - Files: the skill tool `appa-guide` and `read_file`.
 
 Use only these. Never kubectl, never bash, never a file write to change
@@ -226,10 +230,10 @@ Show:
 - one short **OpenAPPA pieces** line;
 - **Needed for this to work** at the end, when support is missing —
   group every missing requirement there with the concrete fix. An
-  ungated agent belongs there: the fix adds `APPA_ENABLED=true` in that
-  agent's `spec.declarative.deployment.env`. Shared mode also needs the
-  correct `APPA_RUNTIME_URL`. Bundled mode leaves that URL unset. Give
-  the operator that change. Do not apply it yourself.
+   ungated agent belongs there: the fix adds `APPA_ENABLED=true` in that
+   agent's `spec.declarative.deployment.env`. Shared mode also needs the
+   correct `APPA_RUNTIME_URL`. Bundled mode leaves that URL unset. Propose
+   the change and apply it only after approval.
 
 In read-only fallback, put the complete TOML in chat instead. Otherwise
 end with: **Approve, or tell me what to change.** Wait for the reply.
@@ -285,6 +289,35 @@ must invoke separately.
    its installed tools whose behavior the active policy demonstrates.
    Tell the operator where to observe the result in the agent chat and
    runtime log.
+
+## Cluster operations
+
+Handle OpenAPPA lifecycle requests through the declared Kubernetes and
+Helm tools. Always inspect current state, present the exact intended
+change and its affected Agents, and wait for approval before invoking a
+state-changing tool. The runtime policy independently enforces the same
+approval on apply, patch, delete, Helm upgrade, and Helm uninstall.
+
+- **Protect one Agent**: read its complete environment list. Preserve every
+  existing entry. Add or replace `APPA_ENABLED=true` and, for shared mode,
+  the selected `APPA_RUNTIME_URL`. Apply with `k8s_patch_resource`. Wait for
+  the new pod and verify its startup log and Agent conditions.
+- **Protect all Agents**: inventory every declarative Agent first. Skip
+  `appa-guide`. Group Agents by intended runtime and list them in the
+  proposal. Preserve every Agent's complete environment list. Patch one at
+  a time after approval, then verify every rollout. Stop on the first
+  failure; do not leave the remaining result unreported.
+- **Install the demo fleet**: discover the active OpenAPPA release version
+  with `helm_get_release`. Install the matching public
+  `appa-kagent-demo-<version>.tgz` release asset with `helm_upgrade`. Reuse
+  the existing kagent provider Secret, enable runtime persistence, and set
+  `guide.enabled=false` when `appa-guide` already exists. Wait for all demo
+  Agents and the seed Job. Report the seeded session count.
+- **Upgrade or remove OpenAPPA resources**: inspect the Helm release first.
+  State what changes or data retention applies. Never uninstall unless the
+  operator explicitly asks. Use only published release charts and images.
+- **Diagnose**: inspect Agent conditions, pods, events, and relevant logs.
+  Make the smallest repair and ask before any state change.
 
 ## Adjust
 

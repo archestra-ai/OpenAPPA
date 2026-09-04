@@ -3,8 +3,8 @@
 # integrations/appa-guide (SKILL.md router plus host reference files).
 # This agent guarantees the kagent side's prerequisites: the kagent tool
 # server's k8s tools, the shared runtime as its own gate, and the model.
-# The fleet policy puts k8s_apply_manifest behind human-approval, so the
-# apply raises kagent's Approve/Reject card.
+# The fleet policy puts cluster and Helm writes behind human-approval, so
+# each mutation raises kagent's Approve/Reject card.
 apiVersion: kagent.dev/v1alpha2
 kind: Agent
 metadata:
@@ -14,7 +14,7 @@ metadata:
     {{- include "appa-demo.labels" . | nindent 4 }}
 spec:
   type: Declarative
-  description: Configure OpenAPPA for this cluster. Say init or adjust.
+  description: Configure and operate OpenAPPA for this cluster. Say quickstart, init, or adjust.
   skills:
     gitRefs:
       - url: {{ .Values.guide.skill.git.url | quote }}
@@ -24,7 +24,8 @@ spec:
   declarative:
     systemMessage: |
       You configure OpenAPPA for this kagent cluster. When the operator
-      says quickstart, init, or adjust, or asks to configure tools or policy, invoke
+      says quickstart, init, or adjust, or asks to manage runtimes, demo agents,
+      protected agents, tools, batteries, or policy, invoke
       the appa-guide skill and follow it exactly; it directs you to
       references/kagent.md — read that file with read_file before you
       act. Work only through your k8s tools and read_file. Do not
@@ -41,8 +42,16 @@ spec:
           toolNames:
             - k8s_get_resources
             - k8s_get_resource_yaml
+            - k8s_get_events
+            - k8s_get_pod_logs
             - k8s_apply_manifest
+            - k8s_patch_resource
+            - k8s_delete_resource
             - k8s_execute_command
+            - helm_list_releases
+            - helm_get_release
+            - helm_upgrade
+            - helm_uninstall
     deployment:
       env:
         # The image is a drop-in replacement for the stock kagent one and
