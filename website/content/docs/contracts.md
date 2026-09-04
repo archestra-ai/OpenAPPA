@@ -182,11 +182,14 @@ The annotator receives this consult artifact:
       "command": "git push origin main",
       "timeout": 60000
     }
-  }
+  },
+  "cwd": "/home/me/project"
 }
 ```
 
 This form does not need a tool parameter schema. It does not need a `description`: a tool without one sends `name` and `arguments` only.
+
+`cwd` is the working directory the harness reported for the call, as written, or `null` when it reported none. It sits beside `args` on every annotation consult, whichever inputs the annotator maps.
 
 #### Example: pass one argument
 
@@ -242,7 +245,7 @@ A root `[[annotator]]` declaration replaces one included Annotator with the same
 
 - An annotator declares its optional hint, inputs, and mandate. A tool routes through at most one with `annotator`. That replaces static `delta`, `requires`, and `effects`; writing both forms is a load error.
 - The answer is one complete annotation. An omitted leaf is the identity: no restriction on that dimension, no requirement in that slot.
-- The answer is pinned to the exact call it annotated. A pinned recheck and a replay never consult the annotator again, and a `tool_input` rewrite is annotated afresh for its own bytes.
+- The answer is pinned to the exact call it annotated. A pinned recheck and a replay never consult the annotator again, and a `tool_input` rewrite is annotated afresh for its own bytes. The exact call is the tool and its canonical arguments. `cwd` is no part of it, so a pinned call re-proposed from another directory is not annotated again.
 - If the annotator fails or answers outside its mandate, the call does not run. The refusal is operational — the call was never judged — and nothing is appended: the call can be proposed again.
 
 An annotator maps each declared input from the proposed call. `$tool_call` is the only source.
@@ -276,7 +279,7 @@ hint    = "Use suspicious for data from unvetted sources. Use trusted only when 
 
 The mandate is the ceiling policy review relies on, whichever transport serves the annotator: every transport passes the same exact-shape and mandate validation before an annotation is admitted.
 
-The consult declaration carries the hint, input names, and resolved mandate. Its artifact is `args`. For the one-argument example above:
+The consult declaration carries the hint, input names, and resolved mandate. Its artifact is `args` and `cwd`. For the one-argument example above:
 
 ```json
 {
@@ -291,7 +294,7 @@ The consult declaration carries the hint, input names, and resolved mandate. Its
     "attention_marks": [],
     "effects": []
   },
-  "artifact": { "args": { "subject": "cust-7" } }
+  "artifact": { "args": { "subject": "cust-7" }, "cwd": "/home/me/project" }
 }
 ```
 
@@ -304,8 +307,9 @@ The consult declaration carries the hint, input names, and resolved mandate. Its
 | `declaration.attention_marks` | The mandate's attention marks. An attention value must name these only. |
 | `declaration.effects` | The mandate's effect kinds. An `emits` or history value must name these only. |
 | `artifact.args` | The data the input mapping selected, under the declared input names. Without a mapping, the complete call: `name`, `description` when declared, and `arguments`. |
+| `artifact.cwd` | The working directory the harness reported for the call: an absolute path as written, not canonicalized and not checked, or `null` when the harness reported none. The key is always present. |
 
-The consult carries nothing about the trajectory: no current label, no rank, no reader ids, and no history.
+The consult carries nothing about the trajectory: no current label, no rank, no reader ids, and no history. `cwd` is the harness's report for this one call, not trajectory state.
 
 Response, from an endpoint or a command:
 
@@ -612,13 +616,13 @@ Every transport receives one JSON object per consult:
 | `kind` | `authority`, `sanitizer`, `annotation`, `audience`, or `identity`. |
 | `name` | The registered name, for one service that answers for several. |
 | `declaration` | The registered half: the component's `hint` and `permits`, an annotator's hint, input names, and mandate vocabulary, or an audience source's selector templates. The agent never writes it. |
-| `artifact` | The value under judgment: the call and its unmet requirements, the body to rewrite, an annotator's `args`, a selector or member to read, or the member claims to canonicalize. |
+| `artifact` | The value under judgment: the call and its unmet requirements, the body to rewrite, an annotator's `args` and `cwd`, a selector or member to read, or the member claims to canonicalize. |
 
 | Kind | `declaration` | `artifact` | `answer` |
 |---|---|---|---|
 | `authority` | `hint`, `permits` | `tool`, `arguments`, `requirements` | `ruling` (`approve` or `deny`), optional `reason` |
 | `sanitizer` | `hint`, `on`, `permits`, `parameters` (for `tool_input`) | `tool` (when known), `body` | `body` |
-| `annotation` | `hint`, `inputs`, `trust_ranks`, `audiences`, `attention_marks`, `effects` | `args` | `delta`, `requires`, `emits` |
+| `annotation` | `hint`, `inputs`, `trust_ranks`, `audiences`, `attention_marks`, `effects` | `args`, `cwd` | `delta`, `requires`, `emits` |
 | `audience` | `templates` | `selector`, or `member` for a lookup | `members`, or `claims` for a lookup |
 | `identity` | empty | the member's claims: `id`, `verified_email` when present | `principal` |
 

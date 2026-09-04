@@ -60,9 +60,10 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
         HookEvent::ToolCall {
             actor: _, call, spawn, ..
         } => {
-            let ProposedCall { tool, arguments } = call;
+            let ProposedCall { tool, arguments, cwd } = call;
             let _: String = tool;
             let _: Box<serde_json::value::RawValue> = arguments;
+            let _: Option<std::path::PathBuf> = cwd;
             let _: bool = spawn;
         }
         HookEvent::ToolResult {

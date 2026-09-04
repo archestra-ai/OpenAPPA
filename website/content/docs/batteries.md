@@ -190,3 +190,44 @@ Every other Bash call reaches the battery's model annotator. The root also
 replaces the battery's `Read` rules with a local script.
 
 The battery files stay unchanged.
+
+### Check where a push goes
+
+A root rule runs before every battery rule, so this rule takes `git push` before the battery's model annotator sees it. The annotator's answer is the complete contract for the call. Nothing in the policy names `cwd`.
+
+```toml
+[[policy.annotator]]
+name      = "local.push-target"
+audiences = []
+marks     = ["hitl"]
+
+[[policy.tool]]
+name      = "Bash(command:*git push*)"
+annotator = "local.push-target"
+
+[externals.annotators."local.push-target"]
+command = ["python3", "./push-target.py"]
+```
+
+The script receives this consult on stdin:
+
+```json
+{
+  "version": 1,
+  "kind": "annotation",
+  "name": "local.push-target",
+  "declaration": {
+    "inputs": [],
+    "trust_ranks": ["suspicious", "trusted"],
+    "audiences": [],
+    "attention_marks": ["hitl"],
+    "effects": []
+  },
+  "artifact": {
+    "args": { "name": "Bash", "arguments": { "command": "git push origin main" } },
+    "cwd": "/Users/me/code/OpenAPPA"
+  }
+}
+```
+
+The script decides by shape. A command that contains `cd`, `pushd`, `-C`, or a URL requires `hitl`. A plain push runs `git -C "$cwd" remote get-url --push <remote>`. When the URL names the private repository, the answer has no requirement. Otherwise the answer requires `hitl`. `--push` matters: a `pushurl` in the repository config overrides the fetch URL. When `cwd` is `null`, the script exits with an error, and the call is not judged: nothing is appended, and the agent can propose it again.

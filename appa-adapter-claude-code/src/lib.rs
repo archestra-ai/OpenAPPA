@@ -108,6 +108,8 @@
 //! A `PreToolUse` release carries no slot for the spawn binding, and
 //! needs none: the child start names the spawn in flight instead.
 
+use std::path::{Path, PathBuf};
+
 use serde::Deserialize;
 
 use appa_runtime_api::{
@@ -246,6 +248,10 @@ struct WireEvent {
     tool_input: Option<Box<serde_json::value::RawValue>>,
     #[serde(default)]
     tool_response: Option<serde_json::Value>,
+    /// The working directory Claude Code reports for the call. Carried on
+    /// a `PreToolUse` only, as written.
+    #[serde(default)]
+    cwd: Option<String>,
     #[serde(default)]
     agent_type: Option<String>,
     #[serde(default)]
@@ -285,9 +291,24 @@ impl WireEvent {
                     "AskUserQuestion" => strip_collected_answers(arguments),
                     _ => arguments,
                 };
-                Some(ProposedCall { tool, arguments })
+                Some(ProposedCall {
+                    tool,
+                    arguments,
+                    cwd: None,
+                })
             }
             _ => None,
+        }
+    }
+
+    /// The reported working directory, validated as one absolute path and
+    /// otherwise passed as written: not canonicalized, not checked against
+    /// the filesystem. A present `cwd` that is not absolute is malformed.
+    fn cwd(&self) -> Result<Option<PathBuf>, ParseRefusal> {
+        match self.cwd.as_deref() {
+            None => Ok(None),
+            Some(cwd) if Path::new(cwd).is_absolute() => Ok(Some(PathBuf::from(cwd))),
+            Some(cwd) => Err(malformed(&format!("a cwd that is not an absolute path: {cwd:?}"))),
         }
     }
 
@@ -365,6 +386,10 @@ fn parse(body: &[u8]) -> Result<Option<HookEvent>, ParseRefusal> {
         },
         "PreToolUse" => match event.call() {
             Some(call) => {
+                let call = ProposedCall {
+                    cwd: event.cwd()?,
+                    ..call
+                };
                 let spawn = is_spawn_tool(&call.tool);
                 Ok(Some(HookEvent::ToolCall {
                     actor: event.actor(),
@@ -847,11 +872,66 @@ mod tests {
                 call: ProposedCall {
                     tool: "Bash".to_string(),
                     arguments: raw(serde_json::json!({"command": "ls"})),
+                    cwd: None,
                 },
                 spawn: false,
                 ruling: None,
             })),
         );
+    }
+
+    #[test]
+    fn a_pre_tool_use_carries_the_reported_working_directory_as_written() {
+        let event = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "s1",
+            "tool_name": "Bash",
+            "tool_input": {"command": "git push"},
+            "cwd": "/home/me/project/../project",
+        });
+        match parse_value(&event) {
+            Ok(Some(HookEvent::ToolCall { call, .. })) => assert_eq!(
+                call.cwd.as_deref(),
+                Some(Path::new("/home/me/project/../project")),
+                "the path is carried as written, not canonicalized"
+            ),
+            other => panic!("expected a ToolCall event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_pre_tool_use_with_a_working_directory_that_is_not_absolute_is_malformed() {
+        for cwd in ["project", "./project", ""] {
+            let event = serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "session_id": "s1",
+                "tool_name": "Bash",
+                "tool_input": {"command": "ls"},
+                "cwd": cwd,
+            });
+            assert_eq!(
+                parse_value(&event),
+                Err(ParseRefusal::Malformed {
+                    detail: format!("a cwd that is not an absolute path: {cwd:?}"),
+                }),
+            );
+        }
+    }
+
+    #[test]
+    fn a_tool_outcome_carries_no_working_directory() {
+        let event = serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "session_id": "s1",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+            "tool_response": {"stdout": "x"},
+            "cwd": "not-even-absolute",
+        });
+        match parse_value(&event) {
+            Ok(Some(HookEvent::ToolResult { call, .. })) => assert_eq!(call.cwd, None),
+            other => panic!("expected a ToolResult event, got {other:?}"),
+        }
     }
 
     #[test]
@@ -934,6 +1014,7 @@ mod tests {
                 call: ProposedCall {
                     tool: "Agent".to_string(),
                     arguments: raw(serde_json::json!({"prompt": "List the files.", "subagent_type": "Explore"})),
+                    cwd: None,
                 },
                 outcome: ToolOutcome::Success {
                     body: OutcomeBody::Available(response.to_string()),
@@ -994,6 +1075,7 @@ mod tests {
                     call: ProposedCall {
                         tool: tool.to_string(),
                         arguments: raw(serde_json::json!({"prompt": "List the files.", "subagent_type": "Explore"})),
+                        cwd: None,
                     },
                     outcome: ToolOutcome::Success {
                         body: OutcomeBody::Available(response.to_string()),
@@ -1176,6 +1258,7 @@ mod tests {
             call: ProposedCall {
                 tool: "Bash".to_string(),
                 arguments: raw(serde_json::json!({"command": "cat notes.txt"})),
+                cwd: None,
             },
             outcome: ToolOutcome::Success {
                 body: OutcomeBody::Available(response.to_string()),
@@ -1192,6 +1275,7 @@ mod tests {
             call: ProposedCall {
                 tool: "Agent".to_string(),
                 arguments: raw(serde_json::json!({"prompt": "List the files."})),
+                cwd: None,
             },
             outcome: ToolOutcome::Success {
                 body: OutcomeBody::Available(response.to_string()),
@@ -1210,6 +1294,7 @@ mod tests {
             call: ProposedCall {
                 tool: "Bash".to_string(),
                 arguments: raw(serde_json::json!({"command": "ls"})),
+                cwd: None,
             },
             spawn: false,
             ruling: None,
@@ -1418,6 +1503,7 @@ mod tests {
             call: ProposedCall {
                 tool: "mcp__vault__lookup".to_string(),
                 arguments: raw(serde_json::json!({"key": "prod"})),
+                cwd: None,
             },
             outcome: ToolOutcome::Success {
                 body: OutcomeBody::Available(
@@ -1492,6 +1578,7 @@ mod tests {
             call: ProposedCall {
                 tool: "Bash".to_string(),
                 arguments: raw(serde_json::json!({"command": "ls"})),
+                cwd: None,
             },
             outcome: ToolOutcome::Indeterminate,
         };

@@ -1020,7 +1020,7 @@ mod tests {
                     attention_marks: vec!["privacy-review".to_string(), "review".to_string()],
                     effects: vec!["email".to_string()],
                 },
-                artifact: AnnotationArtifact { args },
+                artifact: AnnotationArtifact { args, cwd: None },
             },
         }
     }

@@ -123,6 +123,7 @@ fn read_hr() -> ProposedCall {
     ProposedCall {
         tool: "read_hr".to_string(),
         arguments: raw(serde_json::json!({})),
+        cwd: None,
     }
 }
 
@@ -130,6 +131,7 @@ fn send(to: &str) -> ProposedCall {
     ProposedCall {
         tool: "send".to_string(),
         arguments: raw(serde_json::json!({ "to": to })),
+        cwd: None,
     }
 }
 
@@ -341,6 +343,7 @@ fn send_capped() -> ProposedCall {
     ProposedCall {
         tool: "send_capped".to_string(),
         arguments: raw(serde_json::json!({})),
+        cwd: None,
     }
 }
 

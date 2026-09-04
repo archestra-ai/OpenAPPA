@@ -72,6 +72,7 @@ fn notes() -> ProposedCall {
     ProposedCall {
         tool: "notes".to_string(),
         arguments: raw(serde_json::json!({"file": "alice.md"})),
+        cwd: None,
     }
 }
 

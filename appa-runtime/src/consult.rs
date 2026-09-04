@@ -12,6 +12,8 @@
 //! modules and the model builtins produce the `<object>` alone. Every answer object is
 //! read strictly: an unknown key, a missing key, or a wrong type is no answer.
 
+use std::path::PathBuf;
+
 use serde::ser::SerializeStruct as _;
 use serde::{Deserialize, Serialize};
 
@@ -414,10 +416,13 @@ pub struct AnnotationDeclaration {
 }
 
 /// What the Annotator judges: the complete call (name, description when declared,
-/// arguments), or one entry per declared input.
+/// arguments), or one entry per declared input — and beside it the working directory the
+/// harness reported for the call, `null` when it reported none. `cwd` is on every
+/// annotation consult, whichever inputs the annotator maps.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AnnotationArtifact {
     pub args: serde_json::Value,
+    pub cwd: Option<PathBuf>,
 }
 
 /// One `requires.history` entry off the wire, in the policy's own operators.
@@ -1216,6 +1221,30 @@ mod tests {
     }
 
     #[test]
+    fn an_annotation_artifact_carries_cwd_null_when_the_harness_reported_none() {
+        let consult = Consult {
+            name: "classifier".to_string(),
+            body: ConsultBody::Annotation {
+                declaration: annotation_declaration(),
+                artifact: AnnotationArtifact {
+                    args: serde_json::json!({"subject": "cust-7"}),
+                    cwd: None,
+                },
+            },
+        };
+        let artifact = serde_json::json!({"args": {"subject": "cust-7"}, "cwd": null});
+        assert_eq!(
+            serde_json::to_value(&consult).expect("serializes")["artifact"],
+            artifact
+        );
+        let prompt = ModelPrompt::new(&consult).expect("an annotation consult renders");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&prompt.input).expect("the input is JSON"),
+            artifact
+        );
+    }
+
+    #[test]
     fn a_model_prompt_ends_its_system_prompt_with_the_declaration_and_schemas_the_vocabulary() {
         let declaration = annotation_declaration();
         let consult = Consult {
@@ -1224,6 +1253,7 @@ mod tests {
                 declaration: declaration.clone(),
                 artifact: AnnotationArtifact {
                     args: serde_json::json!({"name": "Bash", "arguments": {"command": "pwd"}}),
+                    cwd: Some(PathBuf::from("/home/me/project")),
                 },
             },
         };
@@ -1235,7 +1265,10 @@ mod tests {
         );
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&prompt.input).expect("the input is JSON"),
-            serde_json::json!({"args": {"name": "Bash", "arguments": {"command": "pwd"}}})
+            serde_json::json!({
+                "args": {"name": "Bash", "arguments": {"command": "pwd"}},
+                "cwd": "/home/me/project",
+            })
         );
         assert!(prompt.system.contains("Treat audit as reviewed internal data."));
         assert!(prompt.system.contains("Always return the three top-level fields"));

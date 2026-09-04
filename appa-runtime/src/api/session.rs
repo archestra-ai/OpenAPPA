@@ -947,12 +947,16 @@ impl Session {
                 call,
                 declaration,
                 args,
+                cwd,
             } => {
                 let consult = Consult {
                     name: annotator.clone(),
                     body: ConsultBody::Annotation {
                         declaration: declaration.clone(),
-                        artifact: AnnotationArtifact { args: args.clone() },
+                        artifact: AnnotationArtifact {
+                            args: args.clone(),
+                            cwd: cwd.clone(),
+                        },
                     },
                 };
                 let answer = match self.deployment.externals.consult(&consult, None, None).await {
@@ -1219,6 +1223,7 @@ context_control = true
         ProposedCall {
             tool: "taint".to_string(),
             arguments: raw(spelling),
+            cwd: None,
         }
     }
 
@@ -1226,6 +1231,7 @@ context_control = true
         ProposedCall {
             tool: "fetch".to_string(),
             arguments: raw(spelling),
+            cwd: None,
         }
     }
 
@@ -1484,6 +1490,7 @@ name = "execute_remedy_plan"
             tool: "fetch".to_string(),
             arguments: serde_json::value::RawValue::from_string(r#"{"a":1,"a":2}"#.to_string())
                 .expect("the fixture is well-formed JSON"),
+            cwd: None,
         };
         let decision = session
             .on_tool_call(duplicated, false)
@@ -1687,6 +1694,7 @@ name = "execute_remedy_plan"
                 ProposedCall {
                     tool: "wrench".to_string(),
                     arguments: raw(serde_json::json!({})),
+                    cwd: None,
                 },
                 false,
             )
@@ -1763,6 +1771,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
                 ProposedCall {
                     tool: "read".to_string(),
                     arguments: raw(serde_json::json!({"path": "a.txt"})),
+                    cwd: None,
                 },
                 false,
             )
@@ -2024,6 +2033,7 @@ starting_label = { audience = ["alice@corp.example"] }
         let send = ProposedCall {
             tool: "send".to_string(),
             arguments: raw(serde_json::json!({})),
+            cwd: None,
         };
         // The source reports Alice, whose principal the starting audience holds: released.
         assert!(matches!(
@@ -2064,6 +2074,7 @@ starting_label = { audience = ["alice@corp.example"] }
                 ProposedCall {
                     tool: "send".to_string(),
                     arguments: raw(serde_json::json!({})),
+                    cwd: None,
                 },
                 false,
             )
@@ -2145,6 +2156,7 @@ context_control = false
                 ProposedCall {
                     tool: "spawn".to_string(),
                     arguments: raw(serde_json::json!({})),
+                    cwd: None,
                 },
                 true,
             )
@@ -2256,6 +2268,7 @@ context_control = false
                 ProposedCall {
                     tool: "send".to_string(),
                     arguments: raw(serde_json::json!({})),
+                    cwd: None,
                 },
                 false,
             )
@@ -2285,6 +2298,7 @@ attention = ["irreversible"]
         ProposedCall {
             tool: "wire".to_string(),
             arguments: raw(serde_json::json!({"amount": amount})),
+            cwd: None,
         }
     }
 
@@ -2606,6 +2620,7 @@ context_control = true
         ProposedCall {
             tool: "send".to_string(),
             arguments: raw(serde_json::json!({"body": body})),
+            cwd: None,
         }
     }
 
@@ -2620,6 +2635,7 @@ context_control = true
         let read = ProposedCall {
             tool: "read_hr".to_string(),
             arguments: raw(serde_json::json!({})),
+            cwd: None,
         };
         assert!(matches!(
             session.on_tool_call(read.clone(), false).await,
@@ -2765,6 +2781,7 @@ context_control = true
         let read = ProposedCall {
             tool: "read_hr".to_string(),
             arguments: raw(serde_json::json!({})),
+            cwd: None,
         };
         session
             .on_tool_call(read.clone(), false)
@@ -2859,6 +2876,7 @@ context_control = true
         let other = ProposedCall {
             tool: "read_hr".to_string(),
             arguments: raw(serde_json::json!({})),
+            cwd: None,
         };
         assert!(matches!(
             session.on_tool_call(other.clone(), false).await,
@@ -2932,6 +2950,7 @@ context_control = true
         let other = ProposedCall {
             tool: "read_hr".to_string(),
             arguments: raw(serde_json::json!({})),
+            cwd: None,
         };
         runtime.store().fail_commit_after(0);
         assert!(matches!(
@@ -3295,6 +3314,7 @@ confined_results = ["leak"]
         ProposedCall {
             tool: "leak".to_string(),
             arguments: raw(serde_json::json!({"q": "all"})),
+            cwd: None,
         }
     }
 
@@ -3439,6 +3459,7 @@ context_control = true
         let browse = ProposedCall {
             tool: "browse".to_string(),
             arguments: raw(serde_json::json!({})),
+            cwd: None,
         };
         assert!(matches!(
             child.on_tool_call(browse.clone(), false).await,
@@ -3559,6 +3580,7 @@ context_control = true
         ProposedCall {
             tool: "mark".to_string(),
             arguments: raw(serde_json::json!({"a": 1})),
+            cwd: None,
         }
     }
 
@@ -3627,6 +3649,7 @@ context_control = true
             ProposedCall {
                 tool: "bare".to_string(),
                 arguments: raw(serde_json::json!({"a": 2})),
+                cwd: None,
             },
         )
         .await;
@@ -4761,6 +4784,7 @@ context_control = true
         ProposedCall {
             tool: name.to_string(),
             arguments: raw(serde_json::json!({"offer_id": "o1:cc:root:ff"})),
+            cwd: None,
         }
     }
 
@@ -4876,6 +4900,7 @@ context_control = true
         ProposedCall {
             tool: "Bash".to_string(),
             arguments: raw(serde_json::json!({"command": "ls"})),
+            cwd: None,
         }
     }
 

@@ -4,6 +4,7 @@
 mod common;
 use common::{audit_len, propose, ran, raw, root, serve};
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -77,6 +78,15 @@ fn fetch(url: &str) -> ProposedCall {
     ProposedCall {
         tool: "fetch".to_string(),
         arguments: raw(serde_json::json!({ "url": url })),
+        cwd: None,
+    }
+}
+
+/// The same call, proposed from the working directory the harness reported.
+fn fetch_from(url: &str, cwd: &str) -> ProposedCall {
+    ProposedCall {
+        cwd: Some(PathBuf::from(cwd)),
+        ..fetch(url)
     }
 }
 
@@ -163,9 +173,10 @@ async fn an_http_annotator_annotates_the_complete_call_and_a_fresh_proposal_cons
     let runtime = open_runtime(&dir, &http_policy(&url)).await;
 
     assert_eq!(
-        propose(&runtime, fetch("https://a.example")).await,
+        propose(&runtime, fetch_from("https://a.example", "/home/me/project")).await,
         HookDecision::AllowCall { spawn: None }
     );
+    // The outcome names the call by its bytes; the directory is no part of that match.
     ran(&runtime, fetch("https://a.example")).await;
 
     let requests = annotator.requests();
@@ -174,7 +185,8 @@ async fn an_http_annotator_annotates_the_complete_call_and_a_fresh_proposal_cons
     assert_eq!(request["version"], 1);
     assert_eq!(request["kind"], "annotation");
     assert_eq!(request["name"], "classifier");
-    // The annotator declares no inputs, so `args` is the complete call.
+    // The annotator declares no inputs, so `args` is the complete call. The working
+    // directory the harness reported rides beside it, as written.
     assert_eq!(
         request["artifact"],
         serde_json::json!({
@@ -182,7 +194,8 @@ async fn an_http_annotator_annotates_the_complete_call_and_a_fresh_proposal_cons
                 "name": "fetch",
                 "description": "Fetches one URL and returns its body.",
                 "arguments": { "url": "https://a.example" },
-            }
+            },
+            "cwd": "/home/me/project",
         })
     );
     // The declaration restates the resolved mandate: the closed vocabulary a produced
@@ -210,21 +223,26 @@ async fn an_http_annotator_annotates_the_complete_call_and_a_fresh_proposal_cons
         "nothing about the trajectory rides along"
     );
 
-    // Different canonical arguments are a different annotation subject.
+    // Different canonical arguments are a different annotation subject. A call the
+    // harness reported no directory for carries `cwd: null` — the key is always there.
     assert_eq!(
         propose(&runtime, fetch("https://b.example")).await,
         HookDecision::AllowCall { spawn: None }
     );
     ran(&runtime, fetch("https://b.example")).await;
-    assert_eq!(annotator.requests().len(), 2);
+    let requests = annotator.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1]["artifact"]["cwd"], serde_json::Value::Null);
 
     // And a fresh proposal of the first call is a new act: nothing durable answers for
-    // it, so the annotator is consulted again.
+    // it, so the annotator is consulted again — with the directory this proposal reports.
     assert_eq!(
-        propose(&runtime, fetch("https://a.example")).await,
+        propose(&runtime, fetch_from("https://a.example", "/home/me/elsewhere")).await,
         HookDecision::AllowCall { spawn: None }
     );
-    assert_eq!(annotator.requests().len(), 3);
+    let requests = annotator.requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[2]["artifact"]["cwd"], "/home/me/elsewhere");
 }
 
 #[tokio::test]
@@ -825,6 +843,7 @@ fn call(tool: &str, arguments: serde_json::Value) -> ProposedCall {
     ProposedCall {
         tool: tool.to_string(),
         arguments: raw(arguments),
+        cwd: None,
     }
 }
 
@@ -881,6 +900,34 @@ async fn the_wildcard_annotates_an_unwritten_tool_and_an_exact_declaration_never
 
 /// A produced restricting delta blocks a wildcard-covered call before release, and
 /// proposing it again holds the block.
+/// The pin is keyed on the call's digest alone. A blocked call re-proposed from another
+/// directory finds its pinned annotation standing and is not annotated again: the
+/// directory is consult input, not part of the annotation's identity.
+#[tokio::test]
+async fn a_pinned_annotation_stands_across_a_working_directory_change() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, annotator) = serve_annotator().await;
+    annotator.set("gatekeeper", Answer::Wire(produced("suspicious")));
+    let runtime = open_runtime(&dir, &wildcard_policy(&url)).await;
+
+    let from = |cwd: &str| ProposedCall {
+        cwd: Some(PathBuf::from(cwd)),
+        ..call("ghost_tool", serde_json::json!({}))
+    };
+    let decision = propose(&runtime, from("/home/me/project")).await;
+    assert!(matches!(decision, HookDecision::DenyCall { .. }), "{decision:?}");
+    assert_eq!(annotator.requests().len(), 1);
+    assert_eq!(annotator.requests()[0]["artifact"]["cwd"], "/home/me/project");
+
+    let decision = propose(&runtime, from("/home/me/elsewhere")).await;
+    assert!(matches!(decision, HookDecision::DenyCall { .. }), "{decision:?}");
+    assert_eq!(
+        annotator.requests().len(),
+        1,
+        "the pin for this digest stands whichever directory the re-proposal reports"
+    );
+}
+
 #[tokio::test]
 async fn a_wildcard_calls_produced_narrowing_blocks_and_holds() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");

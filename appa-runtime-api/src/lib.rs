@@ -10,10 +10,17 @@ pub struct TrajectoryId(pub String);
 /// A model-directed tool call at the harness's execution boundary. The
 /// arguments are the JSON spelling the harness would execute. The engine
 /// canonicalizes them; the runtime and adapter do not parse or rewrite them.
+///
+/// `cwd` is the working directory the harness reported for the call, as
+/// written: absolute, never canonicalized, never checked against the
+/// filesystem. `None` when the harness reported none. It is consult input
+/// for an annotator and nothing else: it never enters a label, a digest,
+/// a fact, or the canonical arguments.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ProposedCall {
     pub tool: String,
     pub arguments: Box<serde_json::value::RawValue>,
+    pub cwd: Option<std::path::PathBuf>,
 }
 
 /// Equality is over the bytes as spelled, because that is the only
@@ -23,12 +30,13 @@ pub struct ProposedCall {
 /// compare would reintroduce exactly what `arguments` exists to
 /// prevent — `serde_json` would make `{"a":1,"a":2}` equal to the
 /// admissible `{"a":2}`, though the engine refuses the first.
-/// Callers that need same-call identity compare the
+/// The same bytes proposed from a different directory are a different
+/// call. Callers that need same-call identity compare the
 /// engine's canonical bytes; the runtime does
 /// (`api::session::classify_report`).
 impl PartialEq for ProposedCall {
     fn eq(&self, other: &Self) -> bool {
-        self.tool == other.tool && self.arguments.get() == other.arguments.get()
+        self.tool == other.tool && self.arguments.get() == other.arguments.get() && self.cwd == other.cwd
     }
 }
 

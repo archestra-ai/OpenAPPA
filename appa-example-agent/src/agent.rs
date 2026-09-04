@@ -399,6 +399,7 @@ impl Run<'_> {
         let proposed = ProposedCall {
             tool: call.function.name.clone(),
             arguments,
+            cwd: None,
         };
         let id = CallId(call.id.clone());
 

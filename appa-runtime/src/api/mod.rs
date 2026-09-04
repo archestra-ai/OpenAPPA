@@ -44,6 +44,7 @@ impl ExactCall {
             tool: self.tool,
             arguments: serde_json::value::RawValue::from_string(text)
                 .expect("canonical argument bytes are one JSON value"),
+            cwd: None,
         }
     }
 }
