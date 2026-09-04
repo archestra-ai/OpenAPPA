@@ -227,7 +227,7 @@ trust = "trusted"
 attention = ["human-approval"]
 
 [[policy.tool]]
-name = "appa-guide"
+name = "skills"
 delta = {}
 
 [[policy.tool]]

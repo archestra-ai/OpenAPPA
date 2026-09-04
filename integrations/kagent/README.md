@@ -46,6 +46,8 @@ The host-neutral `appa-guide` skill routes to a Claude Code or kagent reference.
 
 ## Quickstart
 
+These commands require Helm 4 because upgrades reclaim chart-owned fields with server-side apply.
+
 ### Deploy kagent with OpenAPPA
 
 Install kagent CRDs and the kagent controller, setting `controller.agentImage` to the OpenAPPA quickstart image:
@@ -53,7 +55,7 @@ Install kagent CRDs and the kagent controller, setting `controller.agentImage` t
 ```sh
 # 1. Install kagent CRDs
 helm upgrade --install kagent-crds oci://ghcr.io/kagent-dev/kagent/helm/kagent-crds \
-  --version 0.9.12 -n kagent --create-namespace
+  --version 0.9.12 -n kagent --create-namespace --force-conflicts
 
 # 2. Install kagent controller with OpenAPPA image
 helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
@@ -70,6 +72,7 @@ helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --set cilium-policy-agent.enabled=false \
   --set cilium-manager-agent.enabled=false \
   --set cilium-debug-agent.enabled=false \
+  --force-conflicts \
   --wait --timeout 10m \
   --set controller.agentImage.tag=0.9.0 # x-release-please-version
 ```
@@ -120,6 +123,8 @@ helm upgrade --install appa-kagent-demo \
   "https://github.com/archestra-ai/OpenAPPA/releases/download/v${APPA_VERSION}/appa-kagent-demo-${APPA_VERSION}.tgz" \
   -n kagent \
   --set-string openai.apiKey="$OPENAI_API_KEY" \
+  --set agents.go.enabled=false \
+  --force-conflicts \
   --wait --timeout 10m
 ```
 

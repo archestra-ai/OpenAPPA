@@ -1,9 +1,9 @@
 # appa-kagent-demo
 
 OpenAPPA on kagent, as a demo you can install in any cluster.
-The chart deploys a gated `cluster-ops` fleet of six agents:
-`cluster-ops`, its delegated `log-analyst`, a `release-manager` the
-policy never names, and their go twins. It deploys the shared
+The chart deploys a gated `cluster-ops` fleet of three agents:
+`cluster-ops`, its delegated `log-analyst`, and a `release-manager` the
+policy never names. Optional Go twins are disabled by default. It deploys the shared
 `appa-runtime` in one pod with its relay and mock externals, and the
 demo tools. It pre-seeds every demo case as a real chat in the
 dashboard (sixteen captured transcripts).
@@ -13,12 +13,12 @@ after install.
 
 ## Prerequisites
 
-kagent 0.9.12 with its agent image set to the OpenAPPA runtime image.
+Helm 4 and kagent 0.9.12 with its agent image set to the OpenAPPA runtime image.
 That one value puts every declarative python agent in the cluster on
 the OpenAPPA image. Go agents run the Go image under the name kagent
 derives. Both images ship with the gate off, so every gated agent sets
 `APPA_ENABLED=true` beside `APPA_RUNTIME_URL` — the chart sets both on
-every agent it renders, the fleet's six and `appa-guide`. Agents kagent
+every agent it renders, the default fleet's three and `appa-guide`. Agents kagent
 routes to `<tag>-full` stay uncovered. The release workflow publishes
 both runtime images at the release version ([Images](#images)). Set this
 tag to the same version as the chart's `appVersion`:
@@ -40,6 +40,7 @@ helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --set cilium-policy-agent.enabled=false \
   --set cilium-manager-agent.enabled=false \
   --set cilium-debug-agent.enabled=false \
+  --force-conflicts \
   --wait --timeout 10m \
   --set controller.agentImage.tag=0.9.0 # x-release-please-version
 ```
@@ -54,6 +55,8 @@ helm upgrade --install appa-kagent-demo \
   "https://github.com/archestra-ai/OpenAPPA/releases/download/v${APPA_VERSION}/appa-kagent-demo-${APPA_VERSION}.tgz" \
   -n kagent \
   --set-string openai.apiKey="$OPENAI_API_KEY" \
+  --set agents.go.enabled=false \
+  --force-conflicts \
   --wait --timeout 10m
 ```
 
@@ -124,7 +127,7 @@ the controller compile it again.
 ## What is inside
 
 ```
-six agents (cluster-ops, log-analyst, release-manager, and their go twins)
+three agents (cluster-ops, log-analyst, and release-manager; optional Go twins)
                                   ──APPA_RUNTIME_URL──▶ Service appa-runtime:18789
                                                         │ pod appa-runtime
                                                         ├─ relay (nginx)     :18789 → 127.0.0.1:18787, Host rewritten

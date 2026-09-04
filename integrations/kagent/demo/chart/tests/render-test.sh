@@ -70,14 +70,15 @@ expect_env() {
   fi
 }
 
-# The defaults render both cells and the guide agent, and the policy
+# The defaults render the Python cell and the guide agent, and the policy
 # declares both children by their wire spelling.
 must_render kagent
 expect 2 '/opt/appa/batteries'
 expect 0 '/var/lib/appa/batteries'
-expect 7 '^kind: Agent$'
+expect 4 '^kind: Agent$'
 expect_env 1 APPA_CONFIG /etc/appa/demo.appa.toml
 expect 1 '^  name: appa-guide$'
+expect 1 '^    name = "skills"$'
 expect 1 '^    name = "kagent__NS__log_analyst"$'
 expect 1 '^    name = "kagent__NS__log_analyst_go"$'
 
@@ -94,27 +95,25 @@ expect 0 '^kind: PersistentVolumeClaim$'
 # The runtime image is a drop-in replacement for the stock kagent image
 # and runs ungated until APPA_ENABLED reads true, and this is a gated
 # demo, so every agent sets it.
-expect_env 7 APPA_ENABLED true
-expect 7 '^        - name: APPA_RUNTIME_URL$'
+expect_env 4 APPA_ENABLED true
+expect 4 '^        - name: APPA_RUNTIME_URL$'
 
 # A name that repeats another agent name fails the render, the fixed
 # cluster-ops and release-manager included.
 must_refuse 'agent names collide' kagent --set agents.childName=release-manager
-must_refuse 'agent names collide' kagent --set agents.childName=cluster-ops-go
+must_refuse 'agent names collide' kagent --set agents.go.enabled=true --set agents.childName=cluster-ops-go
 must_refuse 'agent names collide' kagent --set agents.go.childName=log-analyst
-must_refuse 'agent names collide' kagent --set agents.go.name=cluster-ops
-must_refuse 'agent names collide' kagent --set agents.go.undeclaredName=release-manager
+must_refuse 'agent names collide' kagent --set agents.go.enabled=true --set agents.go.name=cluster-ops
+must_refuse 'agent names collide' kagent --set agents.go.enabled=true --set agents.go.undeclaredName=release-manager
 
-# Without the go cell, agents.go.name and agents.go.undeclaredName leave
-# the set. agents.go.childName stays: the policy declares both children
-# in any case, and the runtime refuses a duplicate tool contract.
-must_render kagent --set agents.go.enabled=false --set agents.childName=cluster-ops-go
-expect 4 '^kind: Agent$'
+# Enabling the Go cell adds its three optional agents.
+must_render kagent --set agents.go.enabled=true
+expect 7 '^kind: Agent$'
 
 # The guide agent is its own switch, and it leaves the collision set: it
 # takes no value-derived name.
 must_render kagent --set guide.enabled=false
-expect 6 '^kind: Agent$'
+expect 3 '^kind: Agent$'
 expect 0 '^  name: appa-guide$'
 must_render kagent --set agents.go.enabled=false --set agents.childName=release-manager-go
 must_refuse 'agent names collide' kagent --set agents.go.enabled=false --set agents.childName=log-analyst-go
@@ -132,7 +131,7 @@ must_refuse 'schema' kagent --set agents.childName=123
 # a numeric release namespace, a numeric ModelConfig name (an integer
 # after --set), and children named 123 and null.
 must_render 123 --set-string agents.childName=123 --set-string agents.go.childName=null \
-  --set modelConfig.name=123 --set openai.apiKey=k
+  --set agents.go.enabled=true --set modelConfig.name=123 --set openai.apiKey=k
 expect 0 ': 123$'
 expect 0 ': null$'
 expect "$(count '^kind: ')" '^  namespace: "123"$'
