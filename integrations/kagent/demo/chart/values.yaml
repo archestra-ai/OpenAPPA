@@ -36,10 +36,12 @@ runtime:
   # -v for the decision path at debug, -vv for the algebra at trace.
   verbosity: ""
   persistence:
-    # Keep trajectories across runtime pod restarts on a PersistentVolume.
+    # Keep trajectories and a writable batteries overlay across restarts.
+    # The appa-guide skill refreshes bundled batteries only when this is on.
     enabled: false
     size: 1Gi
     storageClass: ""
+    existingClaim: ""
 
 # The one model profile the policy's `builtin = "llm"` sanitizers
 # consult, the [externals.llm] block of files/demo.appa.toml. The

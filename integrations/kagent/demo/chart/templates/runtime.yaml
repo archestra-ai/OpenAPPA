@@ -37,10 +37,26 @@ spec:
             - /var/lib/appa/appa.db
             - --listen
             - 127.0.0.1:18787
+            {{- if .Values.runtime.persistence.enabled }}
+            - --batteries-dir
+            - /var/lib/appa/batteries
+            - --batteries-dir
+            - /var/lib/appa/release-batteries
+            {{- end }}
+            - --batteries-dir
+            - /opt/appa/batteries
             {{- if .Values.runtime.verbosity }}
             - {{ .Values.runtime.verbosity }}
             {{- end }}
           env:
+            - name: APPA_CONFIG
+              value: "/etc/appa/demo.appa.toml"
+            - name: APPA_BATTERIES_DIR
+              {{- if .Values.runtime.persistence.enabled }}
+              value: /var/lib/appa/batteries:/var/lib/appa/release-batteries:/opt/appa/batteries
+              {{- else }}
+              value: /opt/appa/batteries
+              {{- end }}
             - name: APPA_LLM_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -75,7 +91,7 @@ spec:
           configMap: { name: appa-runtime-relay }
         - name: data
           {{- if .Values.runtime.persistence.enabled }}
-          persistentVolumeClaim: { claimName: appa-runtime-data }
+          persistentVolumeClaim: { claimName: {{ .Values.runtime.persistence.existingClaim | default "appa-runtime-data" | quote }} }
           {{- else }}
           emptyDir: {}
           {{- end }}
@@ -105,7 +121,7 @@ spec:
   selector: { app: appa-runtime }
   ports:
     - { name: mocks, port: 8081, targetPort: mocks }
-{{- if .Values.runtime.persistence.enabled }}
+{{- if and .Values.runtime.persistence.enabled (not .Values.runtime.persistence.existingClaim) }}
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -114,6 +130,8 @@ metadata:
   namespace: {{ .Release.Namespace | quote }}
   labels:
     {{- include "appa-demo.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
 spec:
   accessModes: [ReadWriteOnce]
   resources:
