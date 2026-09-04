@@ -9,7 +9,6 @@ the URL and a process that posts here by accident, and it proves nothing about
 which deployment sent a report. Treat every field below as caller-controlled.
 """
 
-import gzip
 import hashlib
 import hmac
 import json
@@ -72,22 +71,25 @@ class Refusal(Exception):
     detail: str
 
 
-def plain_body(request: Any) -> bytes:
-    """The document behind the request, decompressed under a hard cap.
+def plain_body(request: Any) -> tuple[bytes, bytes]:
+    """The document behind the request and the bytes it arrived as, under a hard cap.
 
     Decompression happens before the signature can be checked, because the
     signature covers the document rather than its compression. So the cap is not
     an optimization: it is the only thing standing between an unauthenticated
     caller and this instance's memory.
     """
+    if request.headers.get("Content-Encoding", "").lower() != "gzip":
+        raise Refusal(415, "the body must be gzipped")
     declared = request.content_length
     if declared is not None and declared > MAX_COMPRESSED_BYTES:
         raise Refusal(413, "the compressed body is larger than this endpoint accepts")
-    compressed = request.get_data()
+
+    # Read the cap plus one rather than the whole body: a declared length is a
+    # claim, and a chunked request declares none at all.
+    compressed = request.stream.read(MAX_COMPRESSED_BYTES + 1)
     if len(compressed) > MAX_COMPRESSED_BYTES:
         raise Refusal(413, "the compressed body is larger than this endpoint accepts")
-    if request.headers.get("Content-Encoding", "").lower() != "gzip":
-        raise Refusal(415, "the body must be gzipped")
 
     decompressor = zlib.decompressobj(wbits=zlib.MAX_WBITS | 16)
     try:
@@ -98,7 +100,7 @@ def plain_body(request: Any) -> bytes:
         raise Refusal(413, "the document is larger than this endpoint accepts")
     if not decompressor.eof:
         raise Refusal(400, "the gzip stream is truncated")
-    return plain
+    return plain, compressed
 
 
 def signed(plain: bytes, header: str | None) -> None:
@@ -141,6 +143,8 @@ def validated(plain: bytes) -> dict[str, Any]:
         raise Refusal(400, "the message is empty")
     if len(message.encode()) > MAX_MESSAGE_BYTES:
         raise Refusal(413, "the message is longer than this endpoint accepts")
+    if not isinstance(document["origin"], dict):
+        raise Refusal(400, "the origin is not an object")
     if entries(document) > MAX_ENTRIES:
         raise Refusal(413, "the trajectory carries more entries than this endpoint accepts")
     return document
@@ -154,7 +158,7 @@ def entries(document: dict[str, Any]) -> int:
     return sum(len(trajectory[key]) for key in ("facts", "runtime_events") if isinstance(trajectory.get(key), list))
 
 
-def store(plain: bytes) -> tuple[str, bool]:
+def store(plain: bytes, compressed: bytes) -> tuple[str, bool]:
     """Write one report exactly once, and say whether it was already here.
 
     The name is the digest of the document, so a retry of the same bytes is the
@@ -163,13 +167,15 @@ def store(plain: bytes) -> tuple[str, bool]:
     by whoever sent it, and naming objects by it would let one caller overwrite
     another's report.
     """
+    # The stored object is the body as it arrived: it decompresses to exactly the
+    # document that was validated, so recompressing it would spend a second pass
+    # over 32 MiB to arrive at the same content.
     digest = hashlib.sha256(plain).hexdigest()
     blob = bucket().blob(f"reports/{digest}.json.gz")
-    body = gzip.compress(plain)
     try:
         # Create-only. A report is immutable once stored, and a second write of
         # the same name is the duplicate this returns rather than an overwrite.
-        blob.upload_from_string(body, content_type="application/json", if_generation_match=0)
+        blob.upload_from_string(compressed, content_type="application/json", if_generation_match=0)
     except gcloud_exceptions.PreconditionFailed:
         return digest, True
     except gcloud_exceptions.GoogleAPIError:
@@ -185,10 +191,10 @@ def receive(request: Any) -> tuple[Any, int, dict[str, str]]:
     if request.method != "POST":
         return {"error": "post one report"}, 405, json_headers | {"Allow": "POST"}
     try:
-        plain = plain_body(request)
+        plain, compressed = plain_body(request)
         signed(plain, request.headers.get("X-Appa-Signature"))
         document = validated(plain)
-        digest, duplicate = store(plain)
+        digest, duplicate = store(plain, compressed)
     except Refusal as refusal:
         return {"error": refusal.detail}, refusal.status, json_headers
 
@@ -196,7 +202,7 @@ def receive(request: Any) -> tuple[Any, int, dict[str, str]]:
         "stored a report",
         extra={
             "duplicate": duplicate,
-            "author": (document.get("origin") or {}).get("kind"),
+            "author": document["origin"].get("kind"),
             "bytes": len(plain),
             "entries": entries(document),
         },

@@ -12,8 +12,8 @@ In this order, before anything is stored:
 | Refusal | Why |
 | --- | --- |
 | `405` | the request is not a POST |
+| `415` | the body is not gzipped — refused before the body is read at all |
 | `413` | the compressed body, the document it expands to, the message, or the trajectory's entry count is over a cap |
-| `415` | the body is not gzipped |
 | `400` | the body is not a gzip stream, not JSON, or not an envelope this version knows |
 | `401` | the request carries no matching `X-Appa-Signature` |
 | `503` | storage refused the write; the same report may be sent again |
@@ -37,8 +37,8 @@ two agree.
 
 ## Storage
 
-One object per report at `reports/<sha256 of the document>.json.gz`, written
-create-only. A retry of the same bytes is the same object and comes back as
+One object per report at `reports/<sha256 of the document>.json.gz`, holding
+the gzip exactly as it arrived and written create-only. A retry of the same bytes is the same object and comes back as
 `"duplicate": true`; two different reports can never collide. The name is a
 digest rather than the document's `report_id` because that field is written by
 whoever sent it, and naming objects by it would let one caller overwrite

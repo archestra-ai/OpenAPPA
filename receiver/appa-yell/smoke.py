@@ -21,7 +21,12 @@ SALT = (Path(__file__).parent / "salt.txt").read_text().strip().encode()
 
 
 def report(run: str) -> dict[str, Any]:
-    """One report that is honest about being a smoke test, so a reader can skip it."""
+    """One report that is honest about being a smoke test, so a reader can skip it.
+
+    `run` identifies the attempt, not the workflow run: a re-run of the same run has
+    to post something that was never stored, or the duplicate check below would fail
+    against a perfectly healthy endpoint.
+    """
     return {
         "schema": "openappa.yell.v1",
         "report_id": f"ci-{run}",
@@ -55,7 +60,8 @@ def post(endpoint: str, plain: bytes) -> dict[str, Any]:
 
 def main() -> None:
     endpoint = os.environ["APPA_YELL_ENDPOINT"]
-    plain = json.dumps(report(os.environ["GITHUB_RUN_ID"])).encode()
+    attempt = f"{os.environ['GITHUB_RUN_ID']}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}"
+    plain = json.dumps(report(attempt)).encode()
 
     first = post(endpoint, plain)
     assert not first["duplicate"], f"the smoke report was already stored: {first}"

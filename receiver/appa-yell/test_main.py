@@ -12,7 +12,6 @@ import hashlib
 import hmac
 import json
 import re
-import zlib
 from pathlib import Path
 
 import functions_framework
@@ -111,16 +110,19 @@ def test_the_decompression_cap_is_the_clients_own_limit():
 
 
 @pytest.mark.parametrize(
-    "document",
+    ("document", "refusal"),
     [
-        one_report(schema="openappa.yell.v2"),
-        one_report(message=""),
-        one_report(message="   "),
-        one_report(message="x" * (main.MAX_MESSAGE_BYTES + 1)),
+        (one_report(schema="openappa.yell.v2"), 400),
+        (one_report(message=""), 400),
+        (one_report(message="   "), 400),
+        (one_report(message=42), 400),
+        (one_report(origin="cli"), 400),
+        (one_report(origin=["cli"]), 400),
+        (one_report(message="x" * (main.MAX_MESSAGE_BYTES + 1)), 413),
     ],
 )
-def test_a_document_this_endpoint_cannot_store_is_refused(client, document):
-    assert post(client, document).status_code in (400, 413)
+def test_a_document_this_endpoint_cannot_store_is_refused(client, document, refusal):
+    assert post(client, document).status_code == refusal
 
 
 def test_the_envelope_is_strict_and_says_what_is_wrong(client):
@@ -167,14 +169,14 @@ def test_entries_counts_both_lists_and_survives_a_report_with_none():
 
 
 def test_the_signature_is_over_the_document_and_not_the_gzip():
-    """gzip embeds a timestamp, so signing the compressed bytes would make the same
-    report sign differently every time and no retry would ever be a duplicate."""
+    """gzip is not canonical: a timestamp, a compression level and an implementation
+    all change the bytes without changing the document. Signing those would make the
+    same report sign differently from client to client."""
     plain = json.dumps(one_report()).encode()
-    once, again = gzip.compress(plain), gzip.compress(plain)
-    main.signed(plain, "v1=" + hmac.new(main.SALT, plain, hashlib.sha256).hexdigest())
-    assert zlib.crc32(once) == zlib.crc32(again)
+    signature = "v1=" + hmac.new(main.SALT, plain, hashlib.sha256).hexdigest()
+    main.signed(plain, signature)
     with pytest.raises(main.Refusal):
-        main.signed(once, "v1=" + hmac.new(main.SALT, plain, hashlib.sha256).hexdigest())
+        main.signed(gzip.compress(plain), signature)
 
 
 def test_the_salt_is_the_one_the_client_compiles_in():
