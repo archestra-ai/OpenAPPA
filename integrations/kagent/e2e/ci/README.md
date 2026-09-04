@@ -32,12 +32,11 @@ OPENROUTER_API_KEY=… ./install.sh         # kagent 0.9.12, then the demo chart
 `kind-up.sh` keeps a cluster that already carries the name and leaves it
 as the current kubectl context. `install.sh` installs kagent with the
 agent image pointed at the loaded `appa-kagent-quickstart:ci`, turns off
-the ten sample agents and the two bundled tool charts, and installs the
-demo chart without the go cell and without the seed Job. It waits for
+the UI, ten sample agents and three bundled tool charts, and installs the
+demo chart without the guide, go cell or seed Job. It waits for
 `appa-runtime`, `demo-tools` and the three agent Deployments the kagent
-controller compiles. `run-a2a.sh` port-forwards the parent agent and
-the mocks, runs every case with two reruns, and exits with pytest's
-status.
+controller compiles. `run-a2a.sh` port-forwards the parent agent and the
+mocks, runs every case with two reruns, and exits with pytest's status.
 
 Each script reads its settings from the environment
 (`APPA_E2E_NAMESPACE`, `APPA_E2E_IMAGE_TAG`, `APPA_E2E_MODEL`,
