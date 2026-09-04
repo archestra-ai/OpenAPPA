@@ -35,23 +35,23 @@ unavailable state is reported:
 1. Load the shared `appa-guide` skill rules.
 2. Read this complete reference.
 3. List Agents across all namespaces and identify each target runtime.
-4. For each shared runtime URL, read its Service, list pods in that
-   namespace, and select a pod matching the Service selector. The
-   `k8s_get_resources` tool has no label-selector argument. Call it once
-   with `resource_type: pod`, the exact namespace, and `output: json`,
-   then inspect each returned pod's labels. Never construct a pod name
-   from a Helm release or Service name. Read the policy ConfigMap and
-   invoke `appa-guide-inspect` in that runtime pod.
-5. List every `RemoteMCPServer` across all namespaces. Fetch each by
-   exact name and namespace with `k8s_get_resource_yaml`, then record its
-   discovered tools or unavailable state.
+4. For each shared runtime URL, read its Service. List pods once with
+   `resource_type: pod`, the exact namespace, and `output: wide`. Choose
+   the runtime candidate, fetch that exact pod with
+   `k8s_get_resource_yaml`, and verify its labels match the Service
+   selector. Never construct a pod name from a Helm release. Read the
+   policy ConfigMap and invoke `appa-guide-inspect` in that runtime pod.
+5. List every `RemoteMCPServer` across all namespaces with `output: wide`.
+   Fetch each by exact name and namespace with `k8s_get_resource_yaml`,
+   one at a time, then record its discovered tools or unavailable state.
 6. Compare installed tools and delegations with the current policy and
    available batteries.
 7. Present the complete proposal format below. Do not say initialization
    is complete before an approved change is applied. If no change is
    needed, say so and do not offer a write or reload.
 
-Continue tool calls until this checklist is complete. Do not emit an
+Run inspection tool calls one at a time; do not issue parallel calls.
+Continue until this checklist is complete. Do not emit an
 intermediate response that promises the next inspection step. Never call
 an Agent ungated when its observed `APPA_ENABLED` is `true`. Distinguish
 batteries available from `/batteries` from batteries included by the
@@ -87,10 +87,11 @@ error.
    agents by runtime. `APPA_ENABLED=true` with `APPA_RUNTIME_URL` is
    shared mode. `APPA_ENABLED=true` without that URL is bundled mode.
 2. In shared mode, parse the URL's Service and namespace. Read that
-   Service, list pods in its namespace, and select a pod matching its
-   selector. Do not pass a label selector to `k8s_get_resources`; list
-   namespace pods once as JSON and inspect their labels. Never infer a
-   pod name from a Helm release or Service name.
+   Service, then list pods in its namespace once with `output: wide`.
+   Select a candidate, fetch that pod's YAML by exact name, and verify
+   its labels match the Service selector. Do not pass a label selector
+   to `k8s_get_resources`, request the full pod list as JSON, or infer a
+   pod name from a Helm release.
    The production chart selects `app=appa-runtime`. Record the `--config`,
    `--listen`, and ordered `--batteries-dir` or `APPA_BATTERIES_DIR`
    values. Record the policy ConfigMap and data volume.
@@ -124,8 +125,9 @@ error.
    refuses the start. A gated agent reaches this policy only when its
    `APPA_RUNTIME_URL` names the runtime you found. One that names
    another runtime runs on that runtime's policy.
-3. List every `RemoteMCPServer` across all namespaces, then fetch each
-   resource by exact name and namespace. Each `status.discoveredTools`
+3. List every `RemoteMCPServer` across all namespaces with `output: wide`,
+   then fetch each resource by exact name and namespace, one at a time.
+   Each `status.discoveredTools`
    entry is one tool: its exact wire name and description. A server with
    no discovered tools is uninspected — never invent its tool list.
 4. Cross-check. A `toolNames` entry no server discovered has a name but

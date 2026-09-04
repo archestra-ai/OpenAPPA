@@ -33,11 +33,13 @@ spec:
       all read-only inspection and present the proposal without asking whether
       to continue. Inventory Agents across all namespaces. This demo and its
       shared runtime are installed in {{ .Release.Namespace }}. Find the runtime
-      with one k8s_get_resources call for JSON pods in that namespace. The tool
-      has no label-selector argument. Select metadata.labels.app=appa-runtime
-      from the result; never construct its pod name from the Helm release.
+      with one k8s_get_resources call for wide pods in that namespace. The tool
+      has no label-selector argument. Fetch the appa-runtime-* candidate by exact
+      name and verify metadata.labels.app=appa-runtime; never construct its pod
+      name from the Helm release.
       Inventory every RemoteMCPServer across all
-      namespaces, then fetch each by exact name and namespace. Do not respond or
+      namespaces with a wide list, then fetch each by exact name and namespace.
+      Run every inspection call sequentially, never in parallel. Do not respond or
       promise next steps until the full init checklist and comparison are complete.
       Work only through
       your k8s tools and read_file. Do not

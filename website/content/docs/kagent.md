@@ -216,57 +216,9 @@ Agents reach this runtime at `http://appa-runtime.appa.svc.cluster.local:18789`.
 
 With `appa-guide` already available, send: `install or upgrade the shared OpenAPPA runtime with persistent battery storage`.
 
-### 3. Wire existing agents to the runtime
+### 3. Install appa-guide
 
-Patch any active agent with `kubectl` to enable the gate and connect it to `appa-runtime`:
-
-```sh
-kubectl patch agent sre-agent -n kagent --type=merge -p '{
-  "spec": {
-    "declarative": {
-      "deployment": {
-        "env": [
-          {"name": "APPA_ENABLED", "value": "true"},
-          {"name": "APPA_RUNTIME_URL", "value": "http://appa-runtime.appa.svc.cluster.local:18789"}
-        ]
-      }
-    }
-  }
-}'
-```
-
-Alternatively, send `appa-guide`: `protect sre-agent with the shared OpenAPPA runtime and verify its rollout`.
-
-To protect every eligible declarative Agent, send: `enable OpenAPPA for all agents using the shared runtime; show me the affected agents before applying`.
-
-| Mode | `APPA_ENABLED` | `APPA_RUNTIME_URL` | Gating Behavior |
-|---|---|---|---|
-| **Disabled (Default)** | Unset or `"false"` | Any | Ungated. Runs stock kagent behavior without policy checks. |
-| **Shared appa-runtime** | `"true"` | `http://...` | Gated. Connects to the cluster `appa-runtime` Service at `APPA_RUNTIME_URL`. |
-| **Bundled appa-runtime** | `"true"` | Unset | Gated. Starts an embedded `appa-runtime` inside the pod reading `APPA_CONFIG_CONTENTS`. |
-
-Invalid values for `APPA_ENABLED` fail container startup immediately. Gated agents refuse to run without a valid runtime connection.
-
-### 4. Confirm the gate
-
-The kagent controller automatically rolls the agent deployment when the manifest changes. Check the rollout status and startup logs:
-
-```sh
-kubectl rollout status deployment/sre-agent -n kagent
-kubectl logs -n kagent deployment/sre-agent --tail=5
-```
-
-A gated agent logs confirmation during initialization:
-
-```text
-APPA_ENABLED is true. This agent runs gated by the OpenAPPA runtime at http://appa-runtime.appa.svc.cluster.local:18789
-```
-
-If the runtime is unreachable, tool calls stop fail-closed before execution.
-
-### 5. Install appa-guide
-
-Install the configuring agent against the shared runtime:
+Install the configuring Agent against the shared runtime. This bootstraps the one Agent that can wire and configure the others:
 
 ```sh
 kubectl apply -f - <<'EOF'
@@ -294,8 +246,9 @@ spec:
       all read-only inspection and present the proposal without asking whether to
       continue. Inventory Agents across all namespaces. This Agent runs in kagent;
       derive each runtime namespace from APPA_RUNTIME_URL. Resolve runtime pods
-      through the Service selector. List namespace pods as JSON because
-      k8s_get_resources has no label-selector argument. Never infer pod names.
+      through the Service selector. List namespace pods with output wide because
+      k8s_get_resources has no label-selector argument, then verify exact pod YAML.
+      Run inspection calls sequentially.
       Do not respond until the full init checklist and comparison are complete.
     modelConfig: "default-model-config"
     tools:
@@ -324,6 +277,54 @@ spec:
           value: "http://appa-runtime.appa.svc.cluster.local:18789"
 EOF
 ```
+
+### 4. Wire existing agents to the runtime
+
+Send `appa-guide`: `protect sre-agent with the shared OpenAPPA runtime and verify its rollout`.
+
+To protect every eligible declarative Agent, send: `enable OpenAPPA for all agents using the shared runtime; show me the affected agents before applying`.
+
+The guide inventories the Agents, proposes the exact patch, waits for approval, applies it through `k8s_patch_resource`, and verifies the rollout. If the guide is unavailable, use this bootstrap or recovery fallback:
+
+```sh
+kubectl patch agent sre-agent -n kagent --type=merge -p '{
+  "spec": {
+    "declarative": {
+      "deployment": {
+        "env": [
+          {"name": "APPA_ENABLED", "value": "true"},
+          {"name": "APPA_RUNTIME_URL", "value": "http://appa-runtime.appa.svc.cluster.local:18789"}
+        ]
+      }
+    }
+  }
+}'
+```
+
+| Mode | `APPA_ENABLED` | `APPA_RUNTIME_URL` | Gating Behavior |
+|---|---|---|---|
+| **Disabled (Default)** | Unset or `"false"` | Any | Ungated. Runs stock kagent behavior without policy checks. |
+| **Shared appa-runtime** | `"true"` | `http://...` | Gated. Connects to the cluster `appa-runtime` Service at `APPA_RUNTIME_URL`. |
+| **Bundled appa-runtime** | `"true"` | Unset | Gated. Starts an embedded `appa-runtime` inside the pod reading `APPA_CONFIG_CONTENTS`. |
+
+Invalid values for `APPA_ENABLED` fail container startup immediately. Gated agents refuse to run without a valid runtime connection.
+
+### 5. Confirm the gate
+
+The kagent controller automatically rolls the agent deployment when the manifest changes. Check the rollout status and startup logs:
+
+```sh
+kubectl rollout status deployment/sre-agent -n kagent
+kubectl logs -n kagent deployment/sre-agent --tail=5
+```
+
+A gated agent logs confirmation during initialization:
+
+```text
+APPA_ENABLED is true. This agent runs gated by the OpenAPPA runtime at http://appa-runtime.appa.svc.cluster.local:18789
+```
+
+If the runtime is unreachable, tool calls stop fail-closed before execution.
 
 ### 6. Finish setup and exercise the policy
 
