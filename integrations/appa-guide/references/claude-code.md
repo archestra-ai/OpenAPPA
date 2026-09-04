@@ -133,8 +133,9 @@ matched battery covers.
 - Static contracts can reference `self` and `internal` without an audience
   source. Checking a literal recipient against either audience requires an
   explicit audience source.
-- Annotator outputs can specify only literal readers, not `self` or `internal`.
-  Use a static contract when output belongs to a built-in audience.
+- An annotator's answer writes an audience as a static contract does: `self`,
+  `internal`, an `@` mention, or a literal reader, inside its mandate's
+  `audiences`. Omitted, the mandate admits every audience the policy writes.
 - A tool that publishes, posts, sends, shares, or uploads beyond the machine
   requires data that may be public: `requires = { audience = { contains = ["public"] } }`.
 - A tool that communicates within the organization (e.g. posting internal Slack

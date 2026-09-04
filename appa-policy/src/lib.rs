@@ -1,7 +1,7 @@
 //! The spec's policy-dialect compiler: the configuration dialect (TOML) → the engine's
 //! [`RegistryConfig`] for the runtime.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use serde::Deserialize;
 use thiserror::Error;
@@ -16,10 +16,9 @@ use appa_engine::contract::{
 };
 use appa_engine::engine::Engine;
 use appa_engine::fact::{EffectKind, EffectSet};
-use appa_engine::label::{Audience, ChainAudience, Clause, DeclaredAudience, Label, ReaderId, Trust};
+use appa_engine::label::{Audience, ChainAudience, DeclaredAudience, Label, ReaderId, Trust};
 use appa_engine::names::{
-    AnnotatorName, AudienceArgument, AuthorityName, GroupName, IdentityImplementationName, MarkName, SanitizerName,
-    SurfaceName, TagName,
+    AnnotatorName, AuthorityName, GroupName, IdentityImplementationName, MarkName, SanitizerName, SurfaceName, TagName,
 };
 use appa_engine::params::ToolParameters;
 use appa_engine::profile::{
@@ -27,7 +26,8 @@ use appa_engine::profile::{
     neutral_starting_label,
 };
 use appa_engine::registry::{
-    AnnotatorDeclaration, LoadError, MAX_HINT_CHARS, PlannerCap, Registry, RegistryConfig, TrustChain,
+    AnnotatorDeclaration, AudienceVocabulary, LoadError, MAX_HINT_CHARS, PlannerCap, Registry, RegistryConfig,
+    TrustChain,
 };
 use appa_engine::value::ToolName;
 
@@ -344,7 +344,7 @@ impl Config {
                     .transpose()?,
                 audiences: annotator
                     .audiences
-                    .map(|readers| parse_annotator_readers(&readers, &ctx()))
+                    .map(|entries| parse_annotator_audiences(&entries, &ctx()))
                     .transpose()?,
                 marks: annotator
                     .marks
@@ -614,8 +614,9 @@ struct RawAnnotator {
     inputs: Option<BTreeMap<String, String>>,
     /// The trust ranks a produced annotation may write. Omitted admits every chain rank.
     ranks: Option<Vec<String>>,
-    /// The literal readers a produced annotation may name. Omitted admits every reader the
-    /// policy writes; `public` is always admissible.
+    /// The audiences a produced annotation may name: chain words, group references, and
+    /// literal readers. Omitted admits the whole policy vocabulary; `public` is always
+    /// admissible and never listed.
     audiences: Option<Vec<String>>,
     /// The attention marks a produced annotation may require. Omitted admits every declared
     /// mark.
@@ -1147,78 +1148,25 @@ fn parse_audience(list: &[String], context: &str) -> Result<Audience, ConfigErro
     Ok(Audience::of_declared(&parse_declared_audience(list, context)?))
 }
 
-/// One written audience list: the union of its entries. `public` stands alone; `self` and
-/// `internal` are the built-in symbolic audiences (at most one — the union of two chain
-/// levels is the outer one, so writing both is a mistake); `@name` mentions a configured
-/// named audience and `@provider:selector` a source collection directly; everything else is
-/// a literal reader.
+/// One written audience list, in the engine's one grammar for a written list and an
+/// annotation answer alike: the union of its entries, `public` alone, at most one chain word.
 fn parse_declared_audience(list: &[String], context: &str) -> Result<DeclaredAudience, ConfigError> {
-    let refused = |reason: String| ConfigError::BadAudience {
+    DeclaredAudience::parse_entries(list).map_err(|error| ConfigError::BadAudience {
         context: context.to_string(),
-        reason,
-    };
-    if list.is_empty() {
-        return Err(refused("empty reader set".to_string()));
-    }
-    if let Some(ph) = list.iter().find(|r| r.starts_with('$')) {
-        return Err(refused(format!(
-            "argument placeholder {ph:?} is only valid in a `contains`"
-        )));
-    }
-    let mut chain = None;
-    let mut groups = Vec::new();
-    let mut readers = Vec::new();
-    for entry in list {
-        match AudienceArgument::parse(entry) {
-            Some(AudienceArgument::Public) if list.len() == 1 => return Ok(DeclaredAudience::Public),
-            Some(AudienceArgument::Public) => {
-                return Err(refused(
-                    "`public` is the whole universe and cannot be combined with other entries".to_string(),
-                ));
-            }
-            Some(AudienceArgument::Chain(level)) => {
-                if chain.replace(level).is_some() {
-                    return Err(refused(
-                        "two built-in audiences in one union: the outer one already contains the inner".to_string(),
-                    ));
-                }
-            }
-            Some(AudienceArgument::Group(group)) => groups.push(group),
-            Some(AudienceArgument::Reader(reader)) => readers.push(reader),
-            None => return Err(refused(format!("`{entry}` names no audience"))),
-        }
-    }
-    Clause::new(chain, groups, readers)
-        .map(DeclaredAudience::Union)
-        .map_err(|error| refused(error.to_string()))
+        reason: error.to_string(),
+    })
 }
 
-/// The literal readers an `[[annotator]]` mandate's `audiences` may name. An annotation is
-/// literal, so a group mention has no place here, and `public` — always admissible — is never
-/// listed.
-fn parse_annotator_readers(list: &[String], context: &str) -> Result<BTreeSet<ReaderId>, ConfigError> {
-    // `audiences = []` closes the mandate to `public` answers only — the one spelling of
-    // that bound, distinct from an omitted mandate, which admits every reader the policy
-    // names. (An ordinary declared audience still refuses the empty list: a value some
-    // sink reads must name somebody.)
-    if list.is_empty() {
-        return Ok(BTreeSet::new());
-    }
-    match parse_declared_audience(list, context)? {
-        DeclaredAudience::Public => Err(ConfigError::BadAudience {
-            context: context.to_string(),
-            reason: "`public` is always an admissible annotation audience and is never listed as a reader".to_string(),
-        }),
-        DeclaredAudience::Union(clause) => {
-            if clause.chain().is_some() || clause.groups().next().is_some() {
-                return Err(ConfigError::BadAudience {
-                    context: context.to_string(),
-                    reason: "an annotation names literal readers only — no symbolic audience".to_string(),
-                });
-            }
-            Ok(clause.readers().clone())
-        }
-    }
+/// The audience vocabulary an `[[annotator]]` mandate's `audiences` admits: chain words, group
+/// references, and literal readers, each on its own. `audiences = []` closes the mandate to
+/// `public` answers only — the one spelling of that bound, distinct from an omitted mandate,
+/// which admits the whole policy vocabulary. (An ordinary declared audience still refuses the
+/// empty list: a value some sink reads must name somebody.)
+fn parse_annotator_audiences(list: &[String], context: &str) -> Result<AudienceVocabulary, ConfigError> {
+    AudienceVocabulary::parse_entries(list).map_err(|error| ConfigError::BadAudience {
+        context: context.to_string(),
+        reason: error.to_string(),
+    })
 }
 
 fn parse_recipient_spec(list: &[String], context: &str) -> Result<RecipientSpec, ConfigError> {
@@ -1260,7 +1208,7 @@ fn parse_points(tokens: &[String], name: &str) -> Result<SanitizerPoints, Config
 #[cfg(test)]
 mod tests {
     use super::*;
-    use appa_engine::label::GroupRef;
+    use appa_engine::label::{Clause, GroupRef};
 
     const DECLARATIONS: &str = r#"
 version = 2
@@ -1667,8 +1615,8 @@ attention = ["operator-signoff", "legal-review"]
             vec![Trust::new(0), Trust::new(1)]
         );
         assert_eq!(
-            open.audiences().map(|reader| reader.as_str()).collect::<Vec<_>>(),
-            ["alice", "bob"]
+            open.audiences().entries().collect::<Vec<_>>(),
+            ["self", "internal", "alice", "bob"]
         );
         assert_eq!(
             open.marks().map(|mark| mark.as_str()).collect::<Vec<_>>(),
@@ -1683,7 +1631,7 @@ attention = ["operator-signoff", "legal-review"]
             .annotator_mandate(&AnnotatorName::new("bounded"))
             .expect("bounded registers");
         assert_eq!(bounded.trust_ranks().collect::<Vec<_>>(), vec![Trust::new(0)]);
-        assert_eq!(bounded.audiences().map(|r| r.as_str()).collect::<Vec<_>>(), ["alice"]);
+        assert_eq!(bounded.audiences().entries().collect::<Vec<_>>(), ["alice"]);
         assert_eq!(
             bounded.marks().map(|m| m.as_str()).collect::<Vec<_>>(),
             ["operator-signoff"]
@@ -1748,7 +1696,7 @@ annotator = "acl"
             .registry()
             .annotator_mandate(&AnnotatorName::new("acl"))
             .expect("acl registers");
-        assert_eq!(mandate.audiences().count(), 0, "no named reader is admissible");
+        assert!(mandate.audiences().is_empty(), "no named audience is admissible");
     }
 
     #[test]
@@ -1771,16 +1719,58 @@ annotator = "acl"
     }
 
     #[test]
-    fn an_annotator_audience_bound_names_literal_readers_only() {
-        let with = |audiences: &str| format!("version = 2\n[[annotator]]\nname = \"acl\"\naudiences = {audiences}\n");
-        assert!(Config::from_toml_str(&with("[\"alice\", \"bob\"]")).is_ok());
-        for (case, audiences) in [("`public`", "[\"public\"]"), ("a group mention", "[\"@team\"]")] {
+    fn an_annotator_audience_bound_lists_symbolic_audiences_and_readers() {
+        let with = |audiences: &str| {
+            format!(
+                "version = 2\n[[audience.group]]\nname = \"team\"\nfrom = [\"slack:user-group/team\"]\n[[annotator]]\nname = \"acl\"\naudiences = {audiences}\n"
+            )
+        };
+        let config = Config::from_toml_str(&with(
+            "[\"alice\", \"@team\", \"internal\", \"self\", \"@slack:user-group/eng\", \"bob\"]",
+        ))
+        .expect("a symbolic bound loads");
+        assert_eq!(
+            config
+                .registry()
+                .annotator_mandate(&AnnotatorName::new("acl"))
+                .expect("acl registers")
+                .audiences()
+                .entries()
+                .collect::<Vec<_>>(),
+            ["self", "internal", "@team", "@slack:user-group/eng", "alice", "bob"]
+        );
+        for (case, audiences) in [
+            ("`public`", "[\"public\"]"),
+            ("a placeholder", "[\"$to\"]"),
+            ("an empty spelling", "[\"\"]"),
+            ("a repeated entry", "[\"@team\", \"@team\"]"),
+        ] {
             assert!(
                 matches!(
                     Config::from_toml_str(&with(audiences)),
                     Err(ConfigError::BadAudience { .. })
                 ),
                 "{case} must be refused in an annotator's `audiences`"
+            );
+        }
+        assert!(
+            Config::from_toml_str(&with("[\"@nobody\"]")).is_err(),
+            "a group no configuration serves does not route"
+        );
+    }
+
+    #[test]
+    fn a_written_audience_list_refuses_a_repeated_entry() {
+        let with =
+            |audience: &str| format!("version = 2\n[[tool]]\nname = \"post\"\ndelta = {{ audience = {audience} }}\n");
+        assert!(Config::from_toml_str(&with("[\"alice\", \"bob\"]")).is_ok());
+        for repeated in ["[\"alice\", \"alice\"]", "[\"a@CORP.example\", \"a@corp.example\"]"] {
+            assert!(
+                matches!(
+                    Config::from_toml_str(&with(repeated)),
+                    Err(ConfigError::BadAudience { .. })
+                ),
+                "{repeated} names one reader twice"
             );
         }
     }

@@ -146,6 +146,45 @@ fn the_initialized_default_composes_with_the_claude_code_battery() {
     Runtime::open(config, database, None).expect("the composed deployment opens");
 }
 
+/// The shipped default and battery leave `audiences` omitted, so each Annotator's mandate
+/// is the policy's whole audience vocabulary: the chain words and every reader a
+/// declaration names — a reader the deployer adds included.
+#[cfg(unix)]
+#[test]
+fn the_shipped_annotators_admit_every_audience_the_policy_writes() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    composed_with_the_battery(&dir);
+    let root = dir.path().join("appa.toml");
+    let mut composed = std::fs::read_to_string(&root).expect("the composed root is readable");
+    composed.push_str("\n[[policy.tool]]\nname = \"ReadPayroll\"\ndelta = { audience = [\"payroll@corp.example\"] }\n");
+    std::fs::write(&root, composed).expect("the root gains a reader-bearing declaration");
+    let config = Config::load(&root).expect("the extended config composes");
+    let policy = appa_policy::Config::from_toml_str(
+        &toml::to_string(config.policy_file().value()).expect("the composed policy renders"),
+    )
+    .expect("the composed policy loads");
+
+    for annotator in ["claude-code.bash-requirements", "claude-code.undeclared-tool"] {
+        let entries: Vec<String> = policy
+            .registry()
+            .annotator_mandate(&appa_engine::names::AnnotatorName::new(annotator))
+            .unwrap_or_else(|| panic!("{annotator} registers"))
+            .audiences()
+            .entries()
+            .collect();
+        for expected in ["self", "internal", "payroll@corp.example"] {
+            assert!(
+                entries.iter().any(|entry| entry == expected),
+                "{annotator} admits {expected}: {entries:?}"
+            );
+        }
+        assert!(
+            !entries.iter().any(|entry| entry == "public"),
+            "{annotator}: `public` is always admissible and never listed: {entries:?}"
+        );
+    }
+}
+
 #[cfg(unix)]
 fn call(tool: &str, argument: &str, value: &str) -> ProposedCall {
     ProposedCall {
