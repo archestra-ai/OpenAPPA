@@ -611,12 +611,23 @@ mod tests {
         // never ran.
         let ready = at.with_extension("ready");
         let script = "open(my $f, '>', $ARGV[0]) or die; close $f; sleep 30";
-        let mut child = Command::new(at)
-            .args(["-e", script])
-            .arg(&ready)
-            .args(arguments)
-            .spawn()
-            .expect("the stand-in process starts");
+        let spawn_deadline = std::time::Instant::now() + STOP_DEADLINE;
+        let mut child = loop {
+            match Command::new(at)
+                .args(["-e", script])
+                .arg(&ready)
+                .args(arguments)
+                .spawn()
+            {
+                Ok(child) => break child,
+                Err(source)
+                    if source.raw_os_error() == Some(libc::ETXTBSY) && std::time::Instant::now() < spawn_deadline =>
+                {
+                    std::thread::sleep(STOP_POLL);
+                }
+                Err(source) => panic!("the stand-in process starts: {source}"),
+            }
+        };
         let pid = child.id() as i32;
         std::thread::spawn(move || child.wait());
 

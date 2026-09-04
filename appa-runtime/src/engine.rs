@@ -54,7 +54,7 @@ use appa_engine::plan::{
 };
 use appa_engine::profile::PolicyFileKey as EnginePolicyFileKey;
 use appa_engine::projection::Views;
-use appa_engine::registry::TrustChain;
+use appa_engine::registry::{Registry, TrustChain};
 use appa_engine::shape::{ReturnMismatch, ReturnShape};
 use appa_engine::transition::Blocked as CoreBlocked;
 /// The engine's own validated view is the runtime's too: the runtime adds no
@@ -538,9 +538,9 @@ pub(crate) fn opened_under(log: &Log) -> Option<Opened> {
 /// [`PolicyEngine`], which a configuration reload does not change.
 pub struct RuntimeEngine {
     engine: Engine,
-    /// The consult input mapping per registered `[[annotator]]`, policy-compiled and
-    /// runtime-owned: the engine never sees it, the runtime builds every artifact from it.
-    annotator_inputs: BTreeMap<String, BTreeMap<String, appa_policy::ToolCallSource>>,
+    /// The trusted hint, builtin, and consult input mapping per registered `[[annotator]]`,
+    /// policy-compiled and runtime-owned. The engine sees only the enforced mandate.
+    annotators: BTreeMap<String, appa_policy::AnnotatorBinding>,
 }
 
 impl RuntimeEngine {
@@ -558,9 +558,9 @@ impl RuntimeEngine {
     pub fn from_policy(policy: &appa_policy::Config) -> RuntimeEngine {
         RuntimeEngine {
             engine: policy.engine().clone(),
-            annotator_inputs: policy
+            annotators: policy
                 .annotators()
-                .map(|(name, binding)| (name.as_str().to_string(), binding.inputs.clone()))
+                .map(|(name, binding)| (name.as_str().to_string(), binding.clone()))
                 .collect(),
         }
     }
@@ -1099,8 +1099,8 @@ impl RuntimeEngine {
             .iter()
             .map(|(offer, plan)| (offer_id(offer), *plan))
             .collect();
-        let chain = self.engine.registry().trust_chain();
-        let text = block_feedback(&block.block, &offers, chain, bounds);
+        let registry = self.engine.registry();
+        let text = block_feedback(&block.block, &offers, registry, bounds);
         let review = self.pending_reviews(block, &offers);
         (text, offers.into_iter().map(|(offer, _)| offer).collect(), review)
     }
@@ -1507,9 +1507,7 @@ impl RuntimeEngine {
         Ok(Some(ReturnPolicy { floor, sanitizer }))
     }
 
-    /// What a starting child is told about its return: the schema an attesting fork holds it
-    /// to, or the sanitizer that rewrites it and the echo that follows. A bare floor tells the
-    /// child nothing it could act on.
+    /// Return contract context provided to a starting subagent.
     pub(crate) fn fork_return_contract(
         &self,
         view: &EngineView,
@@ -1589,9 +1587,7 @@ impl RuntimeEngine {
         }
     }
 
-    /// One child's stop. The engine decides what crosses: the value merged, the derivation
-    /// staged for the child to echo, or nothing. A stop held below the floor or outside the
-    /// fork's shape is blocked with the reason.
+    /// Handles one child's stop and decides what crosses or blocks.
     fn child_return(
         &self,
         view: &EngineView,
@@ -1635,7 +1631,7 @@ impl RuntimeEngine {
                 return blocked(format!(
                     "[appa] your final message cannot cross: this session's label fell below the floor the parent \
                      set for your return ({}). Nothing this session holds now can cross; stop with an empty final \
-                     message to end without a return.",
+                     message (send no text or explanation) to end without a return.",
                     self.label_text(&floor)
                 ));
             }
@@ -1726,15 +1722,15 @@ impl RuntimeEngine {
             _ => None,
         });
         let Some(answer) = answer else {
-            let inputs = self
-                .annotator_inputs
+            let binding = self
+                .annotators
                 .get(annotator.as_str())
                 .expect("the deployment registers every annotator the policy declares");
             return Err(Resolution(vec![ExternalRequest::Annotation {
                 annotator: annotator.as_str().to_string(),
                 call: digest,
-                declaration: self.annotation_declaration(annotator, inputs),
-                args: annotation_args(inputs, declaration, resolved),
+                declaration: self.annotation_declaration(annotator, binding),
+                args: annotation_args(&binding.inputs, declaration, resolved),
             }]));
         };
         Ok(PinnedAnnotation::new(
@@ -1744,12 +1740,12 @@ impl RuntimeEngine {
         ))
     }
 
-    /// What one annotation consult declares: the Annotator's resolved mandate vocabulary and
-    /// the input names its artifact carries.
+    /// What one annotation consult declares: the Annotator's trusted hint, resolved mandate
+    /// vocabulary, and the input names its artifact carries.
     fn annotation_declaration(
         &self,
         annotator: &appa_engine::names::AnnotatorName,
-        inputs: &BTreeMap<String, appa_policy::ToolCallSource>,
+        binding: &appa_policy::AnnotatorBinding,
     ) -> AnnotationDeclaration {
         let registry = self.engine.registry();
         let chain = registry.trust_chain();
@@ -1757,7 +1753,8 @@ impl RuntimeEngine {
             .annotator_mandate(annotator)
             .expect("declarations name only registered annotators");
         AnnotationDeclaration {
-            inputs: inputs.keys().cloned().collect(),
+            hint: binding.hint.as_ref().map(|hint| hint.as_str().to_string()),
+            inputs: binding.inputs.keys().cloned().collect(),
             trust_ranks: mandate
                 .trust_ranks()
                 .filter_map(|trust| chain.name_of(trust).map(str::to_string))
@@ -2592,11 +2589,15 @@ fn stage_feedback(
             .into_iter()
             .map(|change| format!("  - {change}")),
     );
-    for offer in offers {
-        lines.push(format!(
-            "  - execute_remedy_plan(offer_id: \"{}\")",
-            terminal_safe(&offer.0)
-        ));
+    if !offers.is_empty() {
+        lines.push(String::new());
+        lines.push("To accept this change and receive the output:".to_string());
+        for offer in offers {
+            lines.push(format!(
+                "  - execute_remedy_plan(offer_id: \"{}\")",
+                terminal_safe(&offer.0)
+            ));
+        }
     }
     lines.join("\n")
 }
@@ -2663,8 +2664,7 @@ fn audience_wire(audience: &Audience) -> String {
     audience.clauses().map(clause_wire).collect::<Vec<_>>().join(" ∩ ")
 }
 
-/// One union clause's summary: the chain audience, group marks, and readers in canonical
-/// order — three entries shown, the rest counted; the empty clause is nobody.
+/// One union clause summary: up to three entries shown, remaining counted.
 fn clause_wire(clause: &Clause) -> String {
     let mut entries = crate::consult::clause_entries(clause);
     if entries.is_empty() {
@@ -2711,11 +2711,15 @@ const fn is_format(c: char) -> bool {
     )
 }
 
-fn gap_text(gap: &appa_engine::check::Gap) -> String {
+fn gap_text(gap: &appa_engine::check::Gap, chain: &TrustChain) -> String {
     use appa_engine::check::Gap;
     match gap {
         Gap::TrustFloor { required, actual } => {
-            format!("trust is {actual:?}, below the required floor {required:?}")
+            format!(
+                "trust is {}, below the required floor {}",
+                trust_feedback(*actual, chain),
+                trust_feedback(*required, chain),
+            )
         }
         Gap::Includes { recipients } => match recipients {
             DeclaredAudience::Public => "the readers are not the public audience".to_string(),
@@ -2726,7 +2730,7 @@ fn gap_text(gap: &appa_engine::check::Gap) -> String {
                 )
             }
         },
-        // The count only, as for `includes`: a cap may read a directory group's members.
+        // Count only: a cap may read a directory group's members.
         Gap::Cap { cap } => format!("the committed readers exceed the cap of {}", declared_count(cap)),
         Gap::Prior(effect) => format!("requires a prior {} effect", effect.as_str()),
         Gap::NoPrior(effect) => format!("forbidden after a {} effect", effect.as_str()),
@@ -2778,7 +2782,7 @@ fn audience_count(audience: &Audience) -> String {
     clause_count(clause)
 }
 
-/// One clause's atom count as feedback shows it — counts only, never who.
+/// Summarizes a clause as atom counts only.
 fn clause_count(clause: &Clause) -> String {
     let symbolic = clause.groups().count() + usize::from(clause.chain().is_some());
     match (clause.readers().len(), symbolic) {
@@ -2813,9 +2817,7 @@ fn shape_feedback(mismatch: &ReturnMismatch, policy: Option<&ReturnPolicy>) -> S
     )
 }
 
-/// A label in the spelling `execute_remedy_plan` takes for a return floor. An audience that is
-/// an intersection of clauses has no one-list spelling; the trust rank alone is shown then, and
-/// the omitted dimension keeps the trajectory's current value.
+/// Formats a return floor label for `execute_remedy_plan`.
 fn label_spelling(chain: &TrustChain, label: &Label) -> String {
     let quoted = |text: &str| format!("\"{}\"", terminal_safe(text));
     let top = Trust::new((chain.len() - 1) as u8);
@@ -2844,24 +2846,20 @@ fn label_spelling(chain: &TrustChain, label: &Label) -> String {
     }
 }
 
-/// What bounds a return declaration made on a trajectory: its current label, which no floor
-/// stands above, and the lowest trust its own floor lets it declare.
+/// Trajectory bounds for a return declaration: current label and lowest allowed trust.
 struct ReturnBounds {
     label: Label,
     lowest: Trust,
 }
 
-/// The spelling a return declaration's example needs: this trajectory's label as the
-/// `label` argument takes it, and the trust ranks a placeholder stands for.
+/// Formats the example return floor label and permitted trust ranks.
 struct ReturnSpelling {
     floor: String,
     ranks: String,
 }
 
 impl ReturnSpelling {
-    /// Only the ranks the declaration may take are named: at or below the trajectory's trust,
-    /// and at or above the lowest its own floor permits. The unnamed top sentinel stands for
-    /// the whole chain.
+    /// Permitted trust ranks between lowest and current trust.
     fn of(chain: &TrustChain, bounds: &ReturnBounds) -> ReturnSpelling {
         let ReturnBounds { label, lowest } = bounds;
         let held = if label.trust == Trust::new(u8::MAX) {
@@ -2892,18 +2890,18 @@ fn return_instruction(
     let ReturnSpelling { floor, ranks } = spelling;
     match sanitizer {
         None => format!(
-            "  - Declare the lowest label this session accepts from the subagent's return, then propose the spawn \
-             again. The subagent starts at this session's label, now {floor}, and can accept no change below the \
-             floor it is given: a subagent that must read below this session's trust needs the floor at that rank, \
-             and its return may then narrow this session that far. An omitted dimension keeps its current \
-             value.\n    execute_remedy_plan(offer_id: \"{id}\", label: {{trust: \"<rank>\"}}), with <rank> one \
-             of {ranks} (lowest first)"
+            "  - Declare the lowest label this session accepts from the subagent's return, then call the subagent \
+             tool again with the same arguments. The subagent starts at this session's label, now {floor}, and can \
+             accept no change below the floor it is given: a subagent that must read below this session's trust needs \
+             the floor at that rank, and its return may then narrow this session that far. An omitted dimension keeps \
+             its current value.\n    execute_remedy_plan(offer_id: \"{id}\", label: {{trust: \"<rank>\"}}), with \
+             <rank> one of {ranks} (lowest first)"
         ),
         Some(name) if name.is_attest_schema() => format!(
             "  - Attest the subagent's return: declare the floor and the JSON schema its return must match. The \
              schema is strict: an object lists its `properties`, every one `required`, and is closed as written \
              (no `additionalProperties`); an integer carries `minimum` and `maximum`; a string leaf carries \
-             `enum`, `const`, or `format`, never free text. The return crosses at the attestation's \
+             `enum`, `const`, or `format`, never free text. The return is delivered at the attestation's \
              label.\n    execute_remedy_plan(offer_id: \"{id}\", label: {floor}, return_schema: {{type: \
              \"object\", ...}})"
         ),
@@ -2923,16 +2921,16 @@ fn remedy_instruction(plan: &ExecutableRemedyPlan, id: &OfferId, spelling: &Retu
     let action = match (needs_approval, plan.narrowing().is_some(), plan.sanitizer()) {
         (true, _, Some(sanitizer)) => {
             format!(
-                "Request approval and use sanitizer {}'s result",
+                "Submit for approval and use sanitizer {}'s result",
                 terminal_safe(sanitizer.as_str())
             )
         }
         (false, _, Some(sanitizer)) => {
             format!("Use sanitizer {}'s result", terminal_safe(sanitizer.as_str()))
         }
-        (true, true, None) => "Request approval and accept this change for the rest of this session".to_string(),
+        (true, true, None) => "Submit for approval and accept this change for the rest of this session".to_string(),
         (false, true, None) => "Accept this change for the rest of this session".to_string(),
-        (true, false, None) => "Request approval".to_string(),
+        (true, false, None) => "Submit for approval".to_string(),
         (false, false, None) => "Apply the offered remedy".to_string(),
     };
     format!(
@@ -2941,7 +2939,12 @@ fn remedy_instruction(plan: &ExecutableRemedyPlan, id: &OfferId, spelling: &Retu
     )
 }
 
-fn remedy_lines(planned: &PlannedBlock, offers: &[(OfferId, PlanId)], spelling: &ReturnSpelling) -> Vec<String> {
+fn remedy_lines(
+    planned: &PlannedBlock,
+    offers: &[(OfferId, PlanId)],
+    spelling: &ReturnSpelling,
+    chain: &TrustChain,
+) -> Vec<String> {
     planned
         .plans
         .iter()
@@ -2953,7 +2956,14 @@ fn remedy_lines(planned: &PlannedBlock, offers: &[(OfferId, PlanId)], spelling: 
             RemedyPlan::Redispatch(redispatch) => Some(format!(
                 "  - Run {} first; it clears: {}.",
                 terminal_safe(redispatch.tool().as_str()),
-                terminal_safe(&redispatch.clears().iter().map(gap_text).collect::<Vec<_>>().join("; ")),
+                terminal_safe(
+                    &redispatch
+                        .clears()
+                        .iter()
+                        .map(|gap| gap_text(gap, chain))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ),
             )),
         })
         .collect()
@@ -2962,12 +2972,40 @@ fn remedy_lines(planned: &PlannedBlock, offers: &[(OfferId, PlanId)], spelling: 
 fn block_feedback(
     planned: &PlannedBlock,
     offers: &[(OfferId, PlanId)],
-    chain: &TrustChain,
+    registry: &Registry,
     bounds: &ReturnBounds,
 ) -> String {
+    let chain = registry.trust_chain();
     let mut reasons = Vec::new();
     for gap in &planned.raw.requirement_gaps {
-        reasons.push(terminal_safe(&gap_text(gap)));
+        reasons.push(terminal_safe(&gap_text(gap, chain)));
+    }
+    let public_expansion_required = planned.raw.requirement_gaps.iter().any(|gap| {
+        matches!(
+            gap,
+            appa_engine::check::Gap::Includes {
+                recipients: DeclaredAudience::Public
+            }
+        )
+    });
+    let fresh_review_available = planned.raw.requirement_gaps.iter().any(|gap| match gap {
+        appa_engine::check::Gap::Attention(mark) => registry
+            .authorities()
+            .iter()
+            .any(|authority| authority.mandate.attends.contains(mark)),
+        _ => false,
+    });
+    let public_expansion_reviewable = registry.authorities().iter().any(|authority| {
+        matches!(
+            authority.mandate.reader_ceiling.as_ref(),
+            Some(DeclaredAudience::Public)
+        )
+    });
+    if public_expansion_required && fresh_review_available && !public_expansion_reviewable {
+        reasons.push(
+            "Fresh review is configured for this call, but no authority can review the required expansion to the public audience."
+                .to_string(),
+        );
     }
     if let Some(narrowing) = &planned.raw.narrowing {
         reasons.extend(narrowing_feedback(narrowing, chain));
@@ -2990,7 +3028,7 @@ fn block_feedback(
     ];
     lines.extend(reasons.into_iter().map(|reason| format!("  - {reason}")));
 
-    let remedies = remedy_lines(planned, offers, &ReturnSpelling::of(chain, bounds));
+    let remedies = remedy_lines(planned, offers, &ReturnSpelling::of(chain, bounds), chain);
     if !remedies.is_empty() {
         lines.push(String::new());
         lines.push("Continue:".to_string());
@@ -3026,14 +3064,14 @@ fn fork_heading(advice: ForkAdvice) -> &'static str {
     }
 }
 
-/// `remedies_required` when the block also carries requirement gaps a child would clear.
+/// Guidance text for delegating blocked work to a subagent.
 fn fork_advice_text(advice: ForkAdvice, remedies_required: bool) -> String {
     let ForkAdvice::Narrowing {
         standing,
         sanitized_return,
     } = advice
     else {
-        return "If this trajectory's harness advertises a child-session tool, handle the work there if isolation is \
+        return "If a child-session or subagent tool is available, handle the work there if isolation is \
                 useful.\nA child inherits the same session label, so delegation does not clear these requirements."
             .to_string();
     };
@@ -3044,12 +3082,12 @@ fn fork_advice_text(advice: ForkAdvice, remedies_required: bool) -> String {
     };
     match (standing, sanitized_return) {
         (FloorStanding::Unbound, true) => format!(
-            "If this trajectory's harness advertises a child-session tool, delegate {delegated} there.\nFinish there \
+            "If a child-session or subagent tool is available, delegate {delegated} there.\nFinish there \
              by returning nothing, or return only a sanitized derivation. Returning the raw value applies the same \
              change to this session."
         ),
         (FloorStanding::Unbound, false) => format!(
-            "If this trajectory's harness advertises a child-session tool, delegate {delegated} there.\nNo \
+            "If a child-session or subagent tool is available, delegate {delegated} there.\nNo \
              registered return sanitizer carries this change back without applying it here, so finish there by \
              returning nothing: a returned value applies the same change to this session."
         ),
@@ -3082,12 +3120,14 @@ fn fork_advice_text(advice: ForkAdvice, remedies_required: bool) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::TrustChain;
     use super::{
         EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Next, OfferId, OfferNonce, ProposedCall,
-        Resolution, RuntimeEngine, SanitizerSubject, TrajectoryId, audience_wire, engine_id, remedy_instruction,
-        remedy_lines, terminal_safe,
+        Resolution, ReturnBounds, RuntimeEngine, SanitizerSubject, TrajectoryId, audience_wire, block_feedback,
+        engine_id, remedy_instruction, remedy_lines, terminal_safe,
     };
     use crate::consult::{AnnotationAnswer, HistoryEntry, RequiredAudienceAnswer, SanitizerPoint, WireAudience};
+    use appa_engine::check::{Gap, RawBlock};
     use appa_engine::contract::{AudienceRequirement, HistoryRequirement, RecipientSpec};
     use appa_engine::fact::{EffectKind, EffectSet};
     use appa_engine::label::{Audience, DeclaredAudience, ReaderId, Trust};
@@ -3456,13 +3496,61 @@ mod tests {
             ranks: String::new(),
         };
         assert_eq!(
-            remedy_lines(&planned, &offers, &spelling),
+            remedy_lines(&planned, &offers, &spelling, &TrustChain::new(Vec::new())),
             vec![
                 remedy_instruction(&plan(3), &offers[1].0, &spelling),
                 remedy_instruction(&plan(8), &offers[0].0, &spelling),
             ],
             "the plan with no offer is not shown; the rest carry their own offer"
         );
+    }
+
+    #[test]
+    fn block_explains_when_fresh_review_cannot_cover_public_audience_expansion() {
+        let feedback = |audience_reviewable: bool| {
+            let audience_permit = if audience_reviewable {
+                "audience_missing = [\"public\"]"
+            } else {
+                ""
+            };
+            let policy = appa_policy::Config::from_toml_str(&format!(
+                r#"
+                    version = 2
+                    [[authority]]
+                    name = "reviewer"
+                    [authority.permits]
+                    {audience_permit}
+                    attention = ["hitl"]
+                "#
+            ))
+            .expect("the authority policy compiles");
+            let planned = PlannedBlock {
+                raw: RawBlock {
+                    requirement_gaps: vec![
+                        Gap::Includes {
+                            recipients: DeclaredAudience::Public,
+                        },
+                        Gap::Attention(MarkName::new("hitl")),
+                    ],
+                    narrowing: None,
+                },
+                plans: vec![],
+                fork_advice: None,
+            };
+            block_feedback(
+                &planned,
+                &[],
+                policy.registry(),
+                &ReturnBounds {
+                    label: appa_engine::label::Label::top(),
+                    lowest: Trust::new(0),
+                },
+            )
+        };
+        let diagnostic = "Fresh review is configured for this call, but no authority can review the required expansion to the public audience.";
+
+        assert!(feedback(false).contains(diagnostic));
+        assert!(!feedback(true).contains(diagnostic));
     }
 
     fn restricted(ids: &[&str]) -> Audience {

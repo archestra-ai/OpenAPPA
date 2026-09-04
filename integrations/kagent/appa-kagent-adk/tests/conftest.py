@@ -9,7 +9,7 @@ no network, no runtime.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Protocol
 
 import httpx
 
@@ -112,9 +112,31 @@ class Hook:
         return httpx.MockTransport(handle)
 
 
-def plugin_over(hook: Hook) -> AppaPluginKagent:
+class ScriptedRuntime(Protocol):
+    """A scripted runtime: anything that hands out a /hook transport."""
+
+    def transport(self) -> httpx.MockTransport: ...
+
+
+class Remedy:
+    """The scripted /mcp endpoint: records each plan the plugin ran."""
+
+    def __init__(self, answer: str = "[appa] Authorized. Propose the call again"):
+        self.answer = answer
+        self.calls: list[dict] = []
+
+    async def __call__(self, arguments: dict) -> str:
+        self.calls.append(arguments)
+        return self.answer
+
+
+def plugin_over(hook: ScriptedRuntime, remedy: Remedy | None = None) -> AppaPluginKagent:
     transport = hook.transport()
-    return AppaPluginKagent(RUNTIME_URL, client_factory=lambda: httpx.AsyncClient(transport=transport))
+    return AppaPluginKagent(
+        RUNTIME_URL,
+        client_factory=lambda: httpx.AsyncClient(transport=transport),
+        remedy_call=remedy,
+    )
 
 
 DOWN = httpx.ConnectError("connection refused")

@@ -254,7 +254,8 @@ pub struct PolicyFileKey(String);
 impl PolicyFileKey {
     pub fn of(bytes: &[u8]) -> PolicyFileKey {
         use sha2::Digest as _;
-        PolicyFileKey(format!("{:x}", sha2::Sha256::digest(bytes)))
+        let digest = sha2::Sha256::digest(bytes).into();
+        PolicyFileKey(crate::hex32::encode(&digest))
     }
 
     pub fn as_str(&self) -> &str {

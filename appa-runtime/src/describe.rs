@@ -9,7 +9,7 @@ use std::fmt::Write as _;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
-use crate::config::{Config, Externals, Section};
+use crate::config::{Config, Externals, Implementation, Section};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ConfigDescription {
@@ -43,7 +43,39 @@ impl ConfigState {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct PolicyDescription {
     tools: Vec<String>,
+    authorities: Vec<AuthorityDescription>,
     audience: AudienceSide,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AuthorityDescription {
+    name: String,
+    implementation: AuthorityImplementation,
+    trust_below: Option<String>,
+    audience_missing: Option<String>,
+    effects_containing: Vec<String>,
+    attention: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AuthorityImplementation {
+    Builtin(String),
+    Url,
+    Command,
+    Unbound,
+    Invalid,
+}
+
+impl AuthorityImplementation {
+    fn as_text(&self) -> String {
+        match self {
+            AuthorityImplementation::Builtin(name) => format!("builtin {name}"),
+            AuthorityImplementation::Url => "url".to_string(),
+            AuthorityImplementation::Command => "command".to_string(),
+            AuthorityImplementation::Unbound => "unbound".to_string(),
+            AuthorityImplementation::Invalid => "invalid binding".to_string(),
+        }
+    }
 }
 
 /// The audience side of the policy, as far as this command can describe it offline.
@@ -116,6 +148,82 @@ impl Bindings<'_> {
                 .is_some(),
         }
     }
+
+    fn authority_implementation(self, name: &str) -> AuthorityImplementation {
+        match self {
+            Bindings::Loaded(externals) => match externals.authorities.get(name) {
+                Some(Implementation::Resolver(_)) => AuthorityImplementation::Url,
+                Some(Implementation::Command(_)) => AuthorityImplementation::Command,
+                Some(Implementation::Builtin(builtin)) => AuthorityImplementation::Builtin(builtin.clone()),
+                None => AuthorityImplementation::Unbound,
+            },
+            Bindings::Raw(root) => {
+                let Some(binding) = root
+                    .get("externals")
+                    .and_then(|externals| externals.get(Section::Authorities.name()))
+                    .and_then(|table| table.get(name))
+                else {
+                    return AuthorityImplementation::Unbound;
+                };
+                let Some(binding) = binding.as_table() else {
+                    return AuthorityImplementation::Invalid;
+                };
+                match (
+                    binding.get("url"),
+                    binding.get("command"),
+                    binding.get("builtin").and_then(toml::Value::as_str),
+                ) {
+                    (Some(_), None, None) => AuthorityImplementation::Url,
+                    (None, Some(_), None) => AuthorityImplementation::Command,
+                    (None, None, Some(builtin)) => AuthorityImplementation::Builtin(builtin.to_string()),
+                    _ => AuthorityImplementation::Invalid,
+                }
+            }
+        }
+    }
+}
+
+fn authority_descriptions(compiled: &appa_policy::Config, bindings: Bindings<'_>) -> Vec<AuthorityDescription> {
+    let chain = compiled.registry().trust_chain();
+    let mut authorities = compiled
+        .registry()
+        .authorities()
+        .iter()
+        .map(|authority| AuthorityDescription {
+            name: authority.name.as_str().to_string(),
+            implementation: bindings.authority_implementation(authority.name.as_str()),
+            trust_below: authority.mandate.trust_ceiling.map(|ceiling| {
+                chain
+                    .name_of(ceiling)
+                    .expect("a compiled authority names a rank in its trust chain")
+                    .to_string()
+            }),
+            audience_missing: authority
+                .mandate
+                .reader_ceiling
+                .as_ref()
+                .map(|audience| match audience {
+                    appa_engine::label::DeclaredAudience::Public => "public".to_string(),
+                    appa_engine::label::DeclaredAudience::Union(clause) => {
+                        format!("[{}]", crate::consult::clause_entries(clause).join(", "))
+                    }
+                }),
+            effects_containing: authority
+                .mandate
+                .waivers
+                .iter()
+                .map(|effect| effect.as_str().to_string())
+                .collect(),
+            attention: authority
+                .mandate
+                .attends
+                .iter()
+                .map(|mark| mark.as_str().to_string())
+                .collect(),
+        })
+        .collect::<Vec<_>>();
+    authorities.sort_by(|left, right| left.name.cmp(&right.name));
+    authorities
 }
 
 /// The declared audience configuration, with each source's and the identity's binding status.
@@ -242,7 +350,10 @@ fn describe_policy_value(policy_value: &toml::Value, bindings: Bindings<'_>, out
         .map_err(|error| error.to_string())
         .and_then(|source| appa_policy::Config::from_toml_str(&source).map_err(|error| error.to_string()));
     out.audience = match compiled {
-        Ok(compiled) => AudienceSide::Declared(audience_description(&compiled, bindings)),
+        Ok(compiled) => {
+            out.authorities = authority_descriptions(&compiled, bindings);
+            AudienceSide::Declared(audience_description(&compiled, bindings))
+        }
         Err(error) => AudienceSide::Uncompiled(error),
     };
 }
@@ -271,6 +382,36 @@ pub fn render(path: &Path, adapter: &'static str) -> String {
     }
     let _ = writeln!(output, "Batteries: {}", list_or_none(&config.batteries));
     let _ = writeln!(output, "Policy tools: {}", list_or_none(&policy.tools));
+    if policy.authorities.is_empty() {
+        let _ = writeln!(output, "Authorities: none");
+    } else {
+        let _ = writeln!(output, "Authorities:");
+        for authority in &policy.authorities {
+            let mut permits = Vec::new();
+            if let Some(trust_below) = &authority.trust_below {
+                permits.push(format!("trust_below={trust_below}"));
+            }
+            if let Some(audience_missing) = &authority.audience_missing {
+                permits.push(format!("audience_missing={audience_missing}"));
+            }
+            if !authority.effects_containing.is_empty() {
+                permits.push(format!(
+                    "effects_containing=[{}]",
+                    authority.effects_containing.join(", ")
+                ));
+            }
+            if !authority.attention.is_empty() {
+                permits.push(format!("attention=[{}]", authority.attention.join(", ")));
+            }
+            let _ = writeln!(
+                output,
+                "  {}: {}; permits {}",
+                authority.name,
+                authority.implementation.as_text(),
+                permits.join(", ")
+            );
+        }
+    }
     let _ = writeln!(output, "Audience chain: self ⊆ internal ⊆ public (built-in)");
     match &policy.audience {
         AudienceSide::Declared(audience) => {
@@ -362,7 +503,7 @@ mod tests {
     }
 
     #[test]
-    fn loadable_config_reports_batteries_tools_sources_and_identity() {
+    fn loadable_config_reports_batteries_tools_authorities_sources_and_identity() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let battery = directory.path().join("batteries/mail");
         std::fs::create_dir_all(&battery).expect("battery directory");
@@ -374,7 +515,7 @@ mod tests {
         let root = directory.path().join("appa.toml");
         std::fs::write(
             &root,
-            "include = [\"batteries/mail/appa.toml\"]\n[policy]\nversion = 2\n[policy.audience.self]\nfrom = [\"slack:viewer\"]\n[[policy.audience.group]]\nname = \"finance\"\nwithin = \"internal\"\nfrom = [\"slack:user-group/finance\"]\n[policy.identity]\nimplementation = \"corp-identity\"\n[externals]\ntimeout_ms = 1000\nmax_body_bytes = 65536\n[externals.audience.slack]\ncommand = [\"true\"]\n[externals.identity.corp-identity]\ncommand = [\"true\"]\n",
+            "include = [\"batteries/mail/appa.toml\"]\n[policy]\nversion = 2\n[policy.audience.self]\nfrom = [\"slack:viewer\"]\n[[policy.audience.group]]\nname = \"finance\"\nwithin = \"internal\"\nfrom = [\"slack:user-group/finance\"]\n[policy.identity]\nimplementation = \"corp-identity\"\n[[policy.authority]]\nname = \"operator\"\n[policy.authority.permits]\ntrust_below = \"trusted\"\naudience_missing = [\"public\"]\neffects_containing = [\"mail.sent\"]\nattention = [\"hitl\"]\n[externals]\ntimeout_ms = 1000\nmax_body_bytes = 65536\n[externals.authorities.operator]\nbuiltin = \"hitl\"\n[externals.audience.slack]\ncommand = [\"true\"]\n[externals.identity.corp-identity]\ncommand = [\"true\"]\n",
         )
         .expect("root config");
 
@@ -385,6 +526,17 @@ mod tests {
         assert_eq!(config.state, ConfigState::Loadable);
         assert_eq!(config.batteries, ["mail"]);
         assert_eq!(policy.tools, ["mail_read"]);
+        assert_eq!(
+            policy.authorities,
+            [AuthorityDescription {
+                name: "operator".to_string(),
+                implementation: AuthorityImplementation::Builtin("hitl".to_string()),
+                trust_below: Some("trusted".to_string()),
+                audience_missing: Some("public".to_string()),
+                effects_containing: vec!["mail.sent".to_string()],
+                attention: vec!["hitl".to_string()],
+            }]
+        );
         let AudienceSide::Declared(audience) = policy.audience else {
             panic!("a loadable policy describes its audience side: {:?}", policy.audience);
         };
@@ -417,6 +569,9 @@ mod tests {
                 binding_configured: true,
             }
         );
+        assert!(render(&root, "claude-code").contains(
+            "operator: builtin hitl; permits trust_below=trusted, audience_missing=public, effects_containing=[mail.sent], attention=[hitl]"
+        ));
     }
 
     #[test]

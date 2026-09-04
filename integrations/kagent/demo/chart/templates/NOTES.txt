@@ -4,14 +4,25 @@ Open the dashboard:
 
   kubectl -n {{ .Release.Namespace }} port-forward svc/kagent-ui 8080:8080
   http://localhost:8080/agents/{{ .Release.Namespace }}/cluster-ops/chat
+{{- if .Values.guide.enabled }}
+  http://localhost:8080/agents/{{ .Release.Namespace }}/appa-guide/chat
+{{- end }}
 
-The cluster-ops agent opens with the showcase chats already there — every
-demo case, as it ran: the exfiltration ask that leaks nothing, the agent
-taking a sanitized remedy on its own, the chat steering it to accept the
-change or to decline, a forged offer, the on-call approval, the annotator,
-the release window, the remote change board approving, denying and
-staying silent, delegation, and gated ingress. Run your own from the
-same page.
+The cluster-ops agent opens with all sixteen showcase chats already there,
+one per demo case as it ran:
+
+  - the ordinary pod read, and the exfiltration ask that leaks nothing
+  - the agent taking a sanitized remedy on its own, the chat steering it to
+    accept the change, and the chat steering it to decline
+  - a forged offer, and the on-call approval
+  - the annotator, and the release window approving in window and denying
+    out of window
+  - cross-pod delegation, a delegation the policy never names, and gated
+    ingress
+  - the remote change board approving, denying, and staying silent
+
+Run your own from the same page. When the go cell is enabled, the go twin
+opens with no seeded chats.
 
 {{- if and (not .Values.openai.apiKey) (not .Values.openai.existingSecret) }}
 

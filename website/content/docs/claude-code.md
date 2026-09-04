@@ -99,6 +99,7 @@ OpenAPPA can also call the installed Claude Code CLI as a model builtin: an auth
 [[annotator]]
 name    = "classify-customer"
 builtin = "claude-code"
+hint    = "Use suspicious for customer data from unvetted sources."
 
 [[tool]]
 name        = "get_customer"
@@ -125,7 +126,7 @@ timeout_ms = 60000                  # the consult's own budget — a model call 
 builtin = "hitl"
 ```
 
-The runtime uses the current user's Claude Code authentication. It starts one fresh safe-mode process per consult with no tools, hooks, project settings, or persisted session, in a temporary working directory, with every `APPA_*` environment variable removed. The system prompt carries the annotator's declaration — its mandate vocabulary: the trust ranks, literal readers, attention marks, and effect kinds an answer may use; the only user turn is the artifact: what the annotator's `inputs` mapping selected — the complete call (name, description when declared, arguments) when it maps no inputs, or one value per mapped input. Nothing about the trajectory is sent: no current label, no history. The annotator answers one complete annotation, so it establishes the output label, the call's requirements, and its emitted effects in one consult. Requirements support a trust floor, an audience `contains` list and `within` cap, history entries over the mandate's effect kinds, and attention marks from the mandate. At most four Claude consults run at once.
+The runtime uses the current user's Claude Code authentication. It starts one fresh safe-mode process per consult with no tools, hooks, project settings, or persisted session, in a temporary working directory, with every `APPA_*` environment variable removed. The system prompt carries the annotator's trusted `hint` and mandate vocabulary: the trust ranks, literal readers, attention marks, and effect kinds an answer may use. The only user turn is the artifact selected by the annotator's `inputs` mapping: the complete call (`name`, declared `description`, and `arguments`) when it maps no inputs, or one value per mapped input. Nothing about the trajectory is sent: no current label, no history. The annotator answers one complete annotation, so it establishes the output label, the call's requirements, and its emitted effects in one consult. At most four Claude consults run at once.
 
 A model annotator is a trusted classifier rather than a sandboxed policy authority: it rules the whole contract of every call it covers, bounded only by its declared mandate, and argument-level prompt-injection resistance is best-effort. Bound as an authority or sanitizer, the same model rules only within that component's `permits`, like any other implementation. Process errors, timeouts, invalid fields, and values outside the mandate produce no answer: the call is not judged, nothing is recorded, and the failure surfaces operationally — never as a policy denial.
 
@@ -135,6 +136,7 @@ To serve the same annotator from an API key instead of the subscription, declare
 [[annotator]]
 name    = "classify-customer"
 builtin = "llm"
+hint    = "Use suspicious for customer data from unvetted sources."
 
 [externals.llm]
 provider       = "anthropic"        # anthropic | openai | gemini | ollama

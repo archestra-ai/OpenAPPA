@@ -6,7 +6,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: appa-runtime
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ .Release.Namespace | quote }}
   labels:
     {{- include "appa-demo.labels" . | nindent 4 }}
     app: appa-runtime
@@ -20,7 +20,7 @@ spec:
       labels:
         app: appa-runtime
       annotations:
-        checksum/policy: {{ .Files.Get "files/demo.appa.toml" | sha256sum }}
+        checksum/policy: {{ include "appa-demo.policy" . | sha256sum | quote }}
     spec:
       containers:
         - name: runtime
@@ -44,7 +44,7 @@ spec:
             - name: APPA_LLM_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "appa-demo.secretName" . }}
+                  name: {{ include "appa-demo.secretName" . | quote }}
                   key: OPENAI_API_KEY
           volumeMounts:
             - { name: policy, mountPath: /etc/appa, readOnly: true }
@@ -84,7 +84,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: appa-runtime
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ .Release.Namespace | quote }}
   labels:
     {{- include "appa-demo.labels" . | nindent 4 }}
 spec:
@@ -98,7 +98,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: appa-demo-mocks
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ .Release.Namespace | quote }}
   labels:
     {{- include "appa-demo.labels" . | nindent 4 }}
 spec:
@@ -111,7 +111,7 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: appa-runtime-data
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ .Release.Namespace | quote }}
   labels:
     {{- include "appa-demo.labels" . | nindent 4 }}
 spec:
@@ -120,6 +120,6 @@ spec:
     requests:
       storage: {{ .Values.runtime.persistence.size }}
   {{- if .Values.runtime.persistence.storageClass }}
-  storageClassName: {{ .Values.runtime.persistence.storageClass }}
+  storageClassName: {{ .Values.runtime.persistence.storageClass | quote }}
   {{- end }}
 {{- end }}

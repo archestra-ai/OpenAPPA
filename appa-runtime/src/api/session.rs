@@ -120,15 +120,13 @@ enum SpawnPlan {
     Close(EventError),
 }
 
-/// The spawn result carried a message the child never returned at a stop: the harness
-/// ended the child itself (a turn cap, a kill) and delivered what it had. Nothing crossed.
+/// Delivered when a child terminated without completing its return check.
 const UNCHECKED_RETURN: &str = "[appa] the subagent ended outside the return check and its message is withheld; \
                                 nothing from it crossed into this session";
 
-/// A child that ended by returning nothing is held on any later message: nothing it says
-/// now can cross, and an empty stop lets it go.
+/// Blocks subsequent output from a child that already ended without a return.
 const ENDED_CHILD: &str = "[appa] this subagent ended without a return; nothing it says now can cross. Stop with an \
-                           empty final message.";
+                           empty final message (send no text or explanation).";
 
 fn outcome_decision(decision: EngineDecision) -> Result<ToolResultDecision, EventError> {
     match decision.then {

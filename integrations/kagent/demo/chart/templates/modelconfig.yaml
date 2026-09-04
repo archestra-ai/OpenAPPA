@@ -4,12 +4,17 @@
 apiVersion: kagent.dev/v1alpha2
 kind: ModelConfig
 metadata:
-  name: {{ .Values.modelConfig.name }}
-  namespace: {{ .Release.Namespace }}
+  name: {{ .Values.modelConfig.name | quote }}
+  namespace: {{ .Release.Namespace | quote }}
   labels:
     {{- include "appa-demo.labels" . | nindent 4 }}
 spec:
   provider: OpenAI
   model: {{ .Values.openai.model | quote }}
-  apiKeySecret: {{ include "appa-demo.secretName" . }}
+  apiKeySecret: {{ include "appa-demo.secretName" . | quote }}
   apiKeySecretKey: OPENAI_API_KEY
+  {{- if .Values.openai.baseUrl }}
+  # kagent hands this to the OpenAI client as base_url.
+  openAI:
+    baseUrl: {{ .Values.openai.baseUrl | quote }}
+  {{- end }}

@@ -59,6 +59,8 @@ def test_every_builder_spells_its_fixture_exactly():
         ),
         "child_start_in_flight": wire.child_start("adk-4f6c2f1e", "adk-9b0d11aa"),
         "child_start_bound": wire.child_start("adk-4f6c2f1e", "adk-9b0d11aa", spawn_binding="spawn-1"),
+        "child_end_returned": wire.child_end("adk-4f6c2f1e", "adk-9b0d11aa", value="the total is 42"),
+        "child_end_void": wire.child_end("adk-4f6c2f1e", "adk-9b0d11aa"),
         "ping": wire.ping(),
     }
     assert set(built) == set(fixtures), "the fixture file and this test cover the same wire kinds"
@@ -105,6 +107,11 @@ def test_absent_optionals_stay_off_the_wire():
             wire.Decision(kind="child_return", value="the redacted summary"),
         ),
         (
+            "context",
+            {"decision": "context", "text": "your return crosses as you speak it"},
+            wire.Decision(kind="context", text="your return crosses as you speak it"),
+        ),
+        (
             "refuse",
             {"decision": "refuse", "detail": "storage failure: disk full"},
             wire.Decision(kind="refuse", detail="storage failure: disk full"),
@@ -125,6 +132,17 @@ def test_every_decision_envelope_parses(name, body, expected):
         ("block_without_reason", b'{"decision": "block"}'),
         ("replace_without_output", b'{"decision": "replace_output"}'),
         ("refuse_without_detail", b'{"decision": "refuse"}'),
+        ("context_without_text", b'{"decision": "context"}'),
+        ("offers_not_a_list", b'{"decision": "deny_call", "feedback": "f", "offers": {}}'),
+        ("offer_without_an_id", b'{"decision": "deny_call", "feedback": "f", "offers": [{"returns": "as_spoken"}]}'),
+        (
+            "offer_route_outside_the_wire",
+            b'{"decision": "deny_call", "feedback": "f", "offers": [{"offer_id": "o1", "returns": "shaped"}]}',
+        ),
+        (
+            "sanitized_route_without_a_sanitizer",
+            b'{"decision": "deny_call", "feedback": "f", "offers": [{"offer_id": "o1", "returns": {}}]}',
+        ),
         ("binding_not_a_string", b'{"decision": "allow_call", "spawn_binding": 7}'),
     ],
 )
@@ -153,3 +171,30 @@ def test_a_control_call_carries_its_ruling_only_when_given():
     ruled = tool_call("s1", "execute_remedy_plan", {"offer_id": "o1"}, False, ruling="approve")
     assert ruled["ruling"] == "approve"
     assert "ruling" not in tool_call("s1", "execute_remedy_plan", {"offer_id": "o1"}, False)
+
+
+def test_a_deny_carries_every_offer_with_its_return_route():
+    decision = wire.parse_decision(
+        json.dumps(
+            {
+                "decision": "deny_call",
+                "feedback": "blocked",
+                "offers": [
+                    {"offer_id": "o1"},
+                    {"offer_id": "o2", "returns": "as_spoken"},
+                    {"offer_id": "o3", "returns": {"sanitizer": "redact-invoices"}},
+                ],
+            }
+        )
+    )
+    assert decision.offers == (
+        wire.Offer(offer_id="o1"),
+        wire.Offer(offer_id="o2", returns=wire.RETURN_AS_SPOKEN),
+        wire.Offer(offer_id="o3", returns=wire.RETURN_SANITIZED, sanitizer="redact-invoices"),
+    )
+    assert wire.parse_decision(b'{"decision":"deny_call","feedback":"f"}').offers == ()
+
+
+def test_a_child_end_without_a_value_keeps_it_off_the_wire():
+    assert "value" not in wire.child_end("s1", "c1")
+    assert wire.child_end("s1", "c1", value="the total is 42")["value"] == "the total is 42"

@@ -87,6 +87,8 @@ func TestEveryBuilderSpellsItsFixtureExactly(t *testing.T) {
 			"adk-9b0d11aa", "the total is 42", ""),
 		"child_start_in_flight": childStartEvent("adk-4f6c2f1e", "adk-9b0d11aa", ""),
 		"child_start_bound":     childStartEvent("adk-4f6c2f1e", "adk-9b0d11aa", "spawn-1"),
+		"child_end_returned":    childEndEvent("adk-4f6c2f1e", "adk-9b0d11aa", "the total is 42"),
+		"child_end_void":        childEndEvent("adk-4f6c2f1e", "adk-9b0d11aa", ""),
 		"ping":                  pingEvent(),
 	}
 	if len(built) != len(fixtures) {
@@ -147,6 +149,11 @@ func TestEveryDecisionEnvelopeParses(t *testing.T) {
 			Decision{Kind: "child_return", Value: "the redacted summary"},
 		},
 		{
+			"context",
+			`{"decision": "context", "text": "your return crosses as you speak it"}`,
+			Decision{Kind: "context", Text: "your return crosses as you speak it"},
+		},
+		{
 			"refuse",
 			`{"decision": "refuse", "detail": "storage failure: disk full"}`,
 			Decision{Kind: "refuse", Detail: "storage failure: disk full"},
@@ -176,6 +183,17 @@ func TestAnAnswerOutsideTheContractIsAWireError(t *testing.T) {
 		{"block_without_reason", `{"decision": "block"}`},
 		{"replace_without_output", `{"decision": "replace_output"}`},
 		{"refuse_without_detail", `{"decision": "refuse"}`},
+		{"context_without_text", `{"decision": "context"}`},
+		{"offers_not_a_list", `{"decision": "deny_call", "feedback": "f", "offers": {}}`},
+		{"offer_without_an_id", `{"decision": "deny_call", "feedback": "f", "offers": [{"returns": "as_spoken"}]}`},
+		{
+			"offer_route_outside_the_wire",
+			`{"decision": "deny_call", "feedback": "f", "offers": [{"offer_id": "o1", "returns": "shaped"}]}`,
+		},
+		{
+			"sanitized_route_without_a_sanitizer",
+			`{"decision": "deny_call", "feedback": "f", "offers": [{"offer_id": "o1", "returns": {}}]}`,
+		},
 		{"binding_not_a_string", `{"decision": "allow_call", "spawn_binding": 7}`},
 	} {
 		if _, err := parseDecision([]byte(tc.body)); err == nil {
@@ -199,5 +217,36 @@ func TestADenyCarriesItsReviewsAndRefusesAnUnreadableOne(t *testing.T) {
 	}
 	if _, err := parseDecision([]byte(`{"decision":"deny_call","feedback":"f","review":[{"offer_id":"o1"}]}`)); err == nil {
 		t.Fatal("a review entry without its text is malformed")
+	}
+}
+
+func TestADenyCarriesEveryOfferWithItsReturnRoute(t *testing.T) {
+	decision, err := parseDecision([]byte(`{"decision":"deny_call","feedback":"blocked","offers":[` +
+		`{"offer_id":"o1"},` +
+		`{"offer_id":"o2","returns":"as_spoken"},` +
+		`{"offer_id":"o3","returns":{"sanitizer":"redact-invoices"}}]}`))
+	if err != nil {
+		t.Fatalf("the offers must parse: %v", err)
+	}
+	want := []Offer{
+		{OfferID: "o1"},
+		{OfferID: "o2", Returns: ReturnAsSpoken},
+		{OfferID: "o3", Returns: ReturnSanitized, Sanitizer: "redact-invoices"},
+	}
+	if !reflect.DeepEqual(decision.Offers, want) {
+		t.Errorf("the offers drifted: got %+v, want %+v", decision.Offers, want)
+	}
+	plain, err := parseDecision([]byte(`{"decision":"deny_call","feedback":"f"}`))
+	if err != nil || plain.Offers != nil {
+		t.Fatalf("no offers is none: %+v %v", plain, err)
+	}
+}
+
+func TestAChildEndWithoutAValueKeepsItOffTheWire(t *testing.T) {
+	if _, present := childEndEvent("s1", "c1", "")["value"]; present {
+		t.Error("an absent value must stay off the wire")
+	}
+	if value := childEndEvent("s1", "c1", "the total is 42")["value"]; value != "the total is 42" {
+		t.Errorf("the child's value rides the event, got %v", value)
 	}
 }

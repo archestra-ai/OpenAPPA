@@ -47,6 +47,17 @@ fn every_shipped_example_opens() {
     }
 }
 
+#[test]
+fn the_kagent_policies_open() {
+    // The demo policy binds the llm endpoint to APPA_LLM_API_KEY; the
+    // runtime refuses to load a config whose token is absent, so the
+    // test supplies a placeholder. Nothing consults it at open time,
+    // and no other test in this binary reads the variable.
+    unsafe { std::env::set_var("APPA_LLM_API_KEY", "examples-load") };
+    opens(&repo_root().join("integrations/kagent/examples/kagent.appa.toml"));
+    opens(&repo_root().join("integrations/kagent/demo/chart/files/demo.appa.toml"));
+}
+
 #[cfg(unix)]
 #[test]
 fn the_complete_battery_example_opens() {
@@ -84,6 +95,24 @@ fn composed_with_the_battery(dir: &tempfile::TempDir) -> Config {
 fn the_initialized_default_composes_with_the_claude_code_battery() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let config = composed_with_the_battery(&dir);
+    let annotators = config.policy_file().value()["annotator"]
+        .as_array()
+        .expect("the composed Annotators are an array");
+    let bash_annotators = annotators
+        .iter()
+        .filter(|annotator| annotator["name"].as_str() == Some("claude-code.bash-requirements"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        bash_annotators.len(),
+        1,
+        "the root Bash Annotator replaces the battery default"
+    );
+    assert_eq!(
+        bash_annotators[0]["hint"].as_str(),
+        Some(
+            "Treat network or otherwise unvetted output as suspicious. Classify trust and audience requirements from the command's visible behavior and destination."
+        )
+    );
     let tools = config.policy_file().value()["tool"]
         .as_array()
         .expect("the composed tools are an array");
@@ -125,11 +154,11 @@ fn call(tool: &str, argument: &str, value: &str) -> ProposedCall {
 }
 
 /// A credential named relatively — `.env`, `cat .netrc` — is judged like its absolute
-/// spelling: the read narrows the session to `self`, after which a public sink is out of
-/// reach, and the command is refused with no remedy.
+/// spelling. A Bash call naming one is refused without a remedy. A Read narrows the
+/// trajectory to `self`, after which a public sink requires an exact-call human review.
 #[cfg(unix)]
 #[tokio::test]
-async fn the_battery_judges_relative_credential_paths_like_absolute_ones() {
+async fn the_battery_judges_relative_credentials_and_offers_review_for_public_release() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let config = composed_with_the_battery(&dir);
     let runtime =
@@ -139,7 +168,12 @@ async fn the_battery_judges_relative_credential_paths_like_absolute_ones() {
         HookDecision::Ack
     );
 
-    for command in ["cat .netrc", "cat ~/.ssh/id_ed25519", "cat /home/me/.aws/credentials"] {
+    for command in [
+        "cat .env",
+        "cat .netrc",
+        "cat ~/.ssh/id_ed25519",
+        "cat /home/me/.aws/credentials",
+    ] {
         let refused = propose(&runtime, call("Bash", "command", command)).await;
         let HookDecision::DenyCall { offers, .. } = refused else {
             panic!("`{command}` is refused, got {refused:?}");
@@ -172,11 +206,105 @@ async fn the_battery_judges_relative_credential_paths_like_absolute_ones() {
     );
     ran(&runtime, read).await;
 
+    let publication = propose(&runtime, call("Artifact", "file_path", "page.html")).await;
+    let HookDecision::DenyCall {
+        feedback,
+        offers,
+        review,
+    } = publication
+    else {
+        panic!("a trajectory narrowed to `self` requires review before publishing: {publication:?}");
+    };
+    assert_eq!(
+        offers.len(),
+        1,
+        "the default authority can review the audience expansion"
+    );
+    assert_eq!(review.len(), 1, "the offer is backed by the default human authority");
+    assert!(feedback.contains("Submit for approval"));
+    assert!(review[0].text.contains("page.html"), "the review shows the exact call");
     assert!(
-        matches!(
-            propose(&runtime, call("Artifact", "file_path", "page.html")).await,
-            HookDecision::DenyCall { .. }
-        ),
-        "a session narrowed to `self` cannot publish"
+        review[0].text.contains("public"),
+        "the review shows the audience expansion it covers"
+    );
+}
+
+/// The Slack battery requires `contains = ["internal"]` on writes: a public session can
+/// post autonomously without human approval, while a session holding `self` secrets cannot
+/// leak them into Slack channels.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_slack_battery_allows_public_writes_and_blocks_leaking_self_secrets() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let slack_battery_dir = dir.path().join("batteries/slack");
+    let claude_battery_dir = dir.path().join("batteries/claude-code");
+    std::fs::create_dir_all(&slack_battery_dir).expect("slack battery directory is created");
+    std::fs::create_dir_all(&claude_battery_dir).expect("claude battery directory is created");
+
+    let repository = repo_root();
+    let default = std::fs::read_to_string(repository.join("integrations/claude-code/examples/claude-code.appa.toml"))
+        .expect("the initialized default is readable");
+    std::fs::copy(
+        repository.join("batteries/slack/appa.toml"),
+        slack_battery_dir.join("appa.toml"),
+    )
+    .expect("slack battery file is copied");
+    std::fs::copy(
+        repository.join("batteries/claude-code/appa.toml"),
+        claude_battery_dir.join("appa.toml"),
+    )
+    .expect("claude battery file is copied");
+
+    let root_path = dir.path().join("appa.toml");
+    std::fs::write(
+        &root_path,
+        format!("include = [\"batteries/claude-code/appa.toml\", \"batteries/slack/appa.toml\"]\n\n{default}"),
+    )
+    .expect("the config includes both batteries");
+
+    let config = Config::load(&root_path).expect("the config loads");
+    let runtime = Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("opens"));
+    assert_eq!(
+        hooks::handle(&runtime, HookEvent::SessionStart { root: root() }).await,
+        HookDecision::Ack
+    );
+
+    let slack_send = ProposedCall {
+        tool: "mcp__claude_ai_Slack__slack_send_message".to_string(),
+        arguments: raw(serde_json::json!({ "channel_id": "C123", "text": "hello" })),
+    };
+
+    // 1. Fresh public session: slack write is allowed autonomously
+    assert_eq!(
+        propose(&runtime, slack_send.clone()).await,
+        HookDecision::AllowCall { spawn: None },
+        "a public session can post to slack without hitl"
+    );
+    ran(&runtime, slack_send.clone()).await;
+
+    // 2. Read .env and accept narrowing to self
+    let read_env = call("Read", "file_path", ".env");
+    let narrowing = propose(&runtime, read_env.clone()).await;
+    let HookDecision::DenyCall { feedback, .. } = narrowing else {
+        panic!("reading .env narrows to self");
+    };
+    assert!(matches!(
+        runtime.execute_remedy(&actor(), last_offer(&feedback)).await,
+        RemedyOutcome::Authorized { .. }
+    ));
+    assert_eq!(
+        propose(&runtime, read_env.clone()).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    ran(&runtime, read_env).await;
+
+    // 3. Narrowed to self: slack write is BLOCKED from leaking secrets
+    let blocked_slack = propose(&runtime, slack_send).await;
+    let HookDecision::DenyCall { offers, .. } = blocked_slack else {
+        panic!("slack write must be blocked when session holds self secrets, got {blocked_slack:?}");
+    };
+    assert!(
+        offers.is_empty(),
+        "slack write cannot leak self secrets: no remedy plan"
     );
 }

@@ -1,0 +1,8 @@
+# The integration suite sits outside the plugin package, so ruff finds no
+# configuration by walking up from these files and would lint them under
+# its defaults. These are the plugin package's rules, so one `ruff check`
+# over both trees judges them the same way.
+line-length = 120
+
+[lint]
+select = ["E", "F", "I", "UP"]

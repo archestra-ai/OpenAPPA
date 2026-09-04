@@ -6,10 +6,21 @@ gated agent operates a Kubernetes cluster through the demo toolset
 (`demo_tools.py`), and every proposed flow crosses `appa-runtime`
 under the example policy (`../examples/kagent.appa.toml`).
 
-Each scenario is a test in `../e2e/test_scenarios.py`. The test drives
-a real ADK agent loop through the real `AppaPluginKagent`, a real
-`appa-runtime`, and the real demo tools; only the model is scripted,
-so the tool calls are fixed and every APPA decision is real.
+The integration suite in [../tests/](../tests/) runs these scenarios,
+and eighteen more, as twenty-two tests.
+
+- two exfiltration reads, both denied with the offer to accept the narrowing
+- the ordinary read
+- both injection reads
+- the restart, ruled both ways by the `oncall` human-review authority
+- the remedy that accepts the narrowing
+
+Each test drives two real agents built by the real entrypoint, each
+with its own `AppaPluginKagent`, against one real `appa-runtime`, the
+real demo tools and the real mock externals. Only the model is
+scripted, so the tool calls are fixed and every APPA decision is real.
+The approve path of the human-approval scenario and the change board
+run only in the live matrices (`../e2e/ui`, `../e2e/a2a`).
 
 The demo data carries real hazards: `read_secret` returns real secret
 material, `get_pod_logs` returns text written to steer the reader, and
@@ -33,9 +44,17 @@ Keep this session unchanged:
   … delegate to a child session and return only a sanitized derivation …
 ```
 
-So the agent stays productive: it can accept the label change, or
-delegate the work to a child trajectory and bring back only a
-sanitized result.
+So the agent stays productive. It can accept the label change, or
+delegate the work to a child trajectory and bring back a result that
+narrows nothing.
+
+A delegation is held until the session declares what the return of the
+child may carry. On kagent the plugin declares that itself, at the
+label the session holds now, and the model reads one ordinary tool
+call. The child then returns at its own stop. A return the declaration
+does not cover comes back to the child with the reason, so the child
+writes another final message
+([IMPLEMENTATION.md](../IMPLEMENTATION.md#delegation-and-the-fork)).
 
 ## Data exfiltration — a confidential read into a public session
 
@@ -51,8 +70,9 @@ public post has nothing to leak.
 There is no allow-then-narrow. An ops-audience read into a public
 trajectory is denied until the agent accepts the narrowing through
 `execute_remedy_plan`; only then does the re-proposed read proceed.
-The scenarios expect that two-step — the remedy scenario in
-`../e2e/test_scenarios.py` takes the second step — and the wire
+The scenarios expect that two-step — the remedy cases in
+[../tests/test_remedies.py](../tests/test_remedies.py) take the second
+step — and the wire
 obligations a driver must keep are in
 [IMPLEMENTATION.md](../IMPLEMENTATION.md#wire-obligations).
 
@@ -69,9 +89,10 @@ publicly`.
 `get_pod_logs` carries `delta = { trust = "suspicious" }`. Admitting
 the log would drop the session trust from trusted to suspicious.
 **APPA gates the read**, so the injected instruction never reaches the
-model. The two productive paths are the remedy's: accept the trust
-drop for this session, or delegate the log-reading work to a child and
-return only a sanitized summary.
+model. Two productive paths stay open. Accept the trust drop for this
+session, or delegate the log-reading work to a child. The child reads
+the log in its own trajectory and returns a summary that carries no
+untrusted text.
 
 `check_status_page` behaves the same way — the injection embedded in
 the third-party page is gated at the read.
@@ -96,6 +117,10 @@ answers, in the dashboard and over A2A
 ([IMPLEMENTATION.md](../IMPLEMENTATION.md#human-review)).
 
 ## A remote change board — a URL authority backed by people
+
+This scenario runs on the demo chart's policy
+([chart/files/demo.appa.toml](chart/files/demo.appa.toml)). The
+example policy names no change board.
 
 `rollback_deployment` requires `attention = ["change-approval"]`, which
 the `change-board` authority grants — a URL external
@@ -122,11 +147,8 @@ Deterministic, no model key, on a machine with the compiled `appa`
 binary and the kagent lane installed:
 
 ```sh
-cd integrations/kagent/e2e
-APPA_E2E=1 uv run \
+APPA_INTEGRATION=1 uv run --project integrations/kagent/appa-kagent-adk \
   --with "kagent-adk @ git+https://github.com/kagent-dev/kagent@v0.9.12#subdirectory=python/packages/kagent-adk" \
-  --with "a2a-sdk>=0.3.23,<0.4" --with "google-adk==1.31.1" --with "mcp>=1.25,<2" \
-  --with "pytest>=8" --with "pytest-asyncio>=1" --with "httpx" \
-  --with "../appa-kagent-adk" \
-  pytest .
+  --with "a2a-sdk>=0.3.23,<0.4" --with "google-adk==1.31.1" --with "mcp>=1.25,<2" --with "pytest>=8" \
+  pytest integrations/kagent/tests
 ```

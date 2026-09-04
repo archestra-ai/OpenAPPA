@@ -1,4 +1,4 @@
-"""Mock external services for the kagent demo: one Annotator, two authorities.
+"""Mock external services for the kagent demo: one Annotator, two authorities, one sanitizer.
 
 A small HTTP service answering appa-runtime's consult wire
 (appa-runtime/src/external.rs, appa-runtime/src/consult.rs). The
@@ -13,7 +13,7 @@ two keys, an exact Content-Length, and a body under the deployment's
 denial), so a refusal here is an HTTP 404 with a diagnostic body the
 runtime never parses.
 
-Two components, both deterministic and logged to stdout:
+Four components, all deterministic and logged to stdout:
 
 - POST /annotate — Annotator "runbook-readers" for `lookup_runbook`.
   Reads the runbook id from the artifact and answers a per-call
@@ -29,8 +29,14 @@ Two components, both deterministic and logged to stdout:
     GET  /pending          — the parked consults (id, tool, arguments, hint)
     POST /decide           — {"id": ..., "ruling": "approve"|"deny", "reason"?}
   The window (--approval-window, default 25s) must sit inside the
-  runtime's consult timeout, so an unanswered consult is a clean
+  policy's externals.timeout_ms, so an unanswered consult is a clean
   no-answer and never a transport error.
+- POST /sanitize — the derivation both demo sanitizers can bind to.
+  Answers the consulted body with the demo's secret values redacted and
+  the lines that address the reader removed. The demo chart binds its
+  sanitizers to `builtin = "llm"` and never reaches this endpoint; the
+  integration suite (`../../tests/`) binds them here instead,
+  so its sanitized-remedy cases run without a model.
 
 Run: python3 mock_externals.py [--host H] [--port P] [--verbose]
 """
@@ -39,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import threading
 import time
 import uuid
@@ -47,10 +54,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 WIRE_VERSION = 1
 
 # How long a change-board consult waits for a ruling before it answers
-# nothing. Inside the runtime's consult timeout by design.
+# nothing. Inside the policy's externals.timeout_ms (30 s in the demo
+# policy) by design.
 APPROVAL_WINDOW_S = 25.0
 
-# The one deployment whose restarts sit inside the release window.
+# The one deployment whose changes sit inside the release window.
 RELEASE_WINDOW_DEPLOYMENT = "catalog-cache"
 
 # The audience an ops-* runbook narrows its reader set to. The produced
@@ -105,7 +113,7 @@ def annotate(declaration: object, artifact: object) -> tuple[dict | None, str]:
 
 
 def authorize(artifact: object) -> tuple[dict, str]:
-    """The release-window ruling: approve only the catalog-cache restart."""
+    """The release-window ruling: approve only the catalog-cache change."""
     tool = artifact.get("tool") if isinstance(artifact, dict) else None
     arguments = artifact.get("arguments") if isinstance(artifact, dict) else None
     named = [value for value in arguments.values() if isinstance(value, str)] if isinstance(arguments, dict) else []
@@ -118,6 +126,51 @@ def authorize(artifact: object) -> tuple[dict, str]:
         {"ruling": "deny", "reason": "only catalog-cache restarts are inside the release window"},
         f"tool={tool} arguments={json.dumps(arguments, sort_keys=True)} -> deny",
     )
+
+
+# The demo's secret material, by prefix: the payments API key and the
+# webhook secret `read_secret` returns.
+SECRET_VALUE = re.compile(r"(?:pk_live|whsec)_[A-Za-z0-9]+")
+REDACTION = "[redacted]"
+
+# What marks a line as addressed to the reader rather than stating a
+# fact. The demo's crash logs and status page carry one each.
+INSTRUCTION_MARKERS = ("ignore your previous instructions", "SYSTEM:")
+
+
+def drop_instructions(body: str) -> str:
+    """The body without the lines that address the reader.
+
+    A line carrying a marker goes, and so do the indented lines that
+    continue it — the demo's crash log wraps its injection over two
+    lines, and half an instruction is still an instruction.
+    """
+    kept: list[str] = []
+    dropping = False
+    for line in body.splitlines():
+        if any(marker in line for marker in INSTRUCTION_MARKERS):
+            dropping = True
+            continue
+        if dropping and line[:1].isspace():
+            continue
+        dropping = False
+        kept.append(line)
+    return "\n".join(kept)
+
+
+def sanitize(artifact: object) -> tuple[dict | None, str]:
+    """The sanitizer derivation: (answer, log detail). None is no answer.
+
+    The artifact carries the value under `body`, and the tool that
+    produced it under `tool` where one did — a child return names none,
+    so the derivation reads the body alone.
+    """
+    body = artifact.get("body") if isinstance(artifact, dict) else None
+    if not isinstance(body, str):
+        return None, "no body in the artifact"
+    derived = SECRET_VALUE.sub(REDACTION, drop_instructions(body))
+    tool = artifact.get("tool")
+    return {"body": derived}, f"tool={tool} body={len(body)}b -> {len(derived)}b"
 
 
 class ChangeBoard:
@@ -221,6 +274,16 @@ class ConsultHandler(BaseHTTPRequestHandler):
                 return
             answer, detail = authorize(artifact)
             self.decide(kind, name, 200, {"version": WIRE_VERSION, "answer": answer}, detail)
+        elif self.path == "/sanitize":
+            if kind != "sanitizer":
+                wrong = {"error": "the /sanitize endpoint answers sanitizer consults"}
+                self.decide(kind, name, 400, wrong, "wrong kind")
+                return
+            answer, detail = sanitize(artifact)
+            if answer is None:
+                self.decide(kind, name, 404, {"error": detail}, detail)
+            else:
+                self.decide(kind, name, 200, {"version": WIRE_VERSION, "answer": answer}, detail)
         elif self.path == "/approve":
             if kind != "authority":
                 self.decide(kind, name, 400, {"error": "the /approve endpoint answers authority consults"}, "wrong kind")
@@ -286,7 +349,10 @@ def main() -> None:
     ConsultHandler.verbose = args.verbose
     ConsultHandler.board = ChangeBoard(args.approval_window)
     server = ThreadingHTTPServer((args.host, args.port), ConsultHandler)
-    print(f"[mock] serving /annotate, /authorize, /approve (+ /pending, /decide) on {args.host}:{args.port}", flush=True)
+    print(
+        f"[mock] serving /annotate, /authorize, /approve, /sanitize (+ /pending, /decide) on {args.host}:{args.port}",
+        flush=True,
+    )
     server.serve_forever()
 
 
