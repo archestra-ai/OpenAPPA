@@ -310,10 +310,18 @@ class _Builder:
         A hand-written ``config.json`` mounted past the controller can
         still name one agent and reach another — the Known gaps table of
         integrations/kagent/IMPLEMENTATION.md.
+
+        The ``url`` is not read at all here, where the go lane skips a
+        url-less entry: this runtime wires every declared remote agent
+        whatever its url (``kagent.adk.types.AgentConfig.to_agent``),
+        and the go one skips the url-less ones, so each lane's
+        inventory follows the tools its own runtime builds.
         """
         name = remote.get("name")
         if not isinstance(name, str):
-            return
+            raise ConfigRefused(
+                f"{path}.name: a remote agent is wired as a tool of its name, and this entry declares none"
+            )
         namespace, mark, agent = name.partition(_NAMESPACE_MARK)
         if not mark or not namespace or not agent or _NAMESPACE_MARK in agent:
             raise ConfigRefused(

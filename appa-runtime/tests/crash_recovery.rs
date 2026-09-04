@@ -4,10 +4,10 @@
 //! the wire decision the server sends.
 
 mod common;
-use common::{free_port, http};
+use common::{ServedRuntime, free_port, http, serve_runtime};
 
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -25,57 +25,12 @@ timeout_ms = 5000
 max_body_bytes = 65536
 "#;
 
-struct Server {
-    child: Child,
-    url: String,
-}
-
 static SERVER_SCENARIO: Mutex<()> = Mutex::new(());
 
 fn serialize_server_scenarios() -> MutexGuard<'static, ()> {
     SERVER_SCENARIO
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-impl Drop for Server {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-fn start(config: &Path, db: &Path, port: u16) -> Server {
-    let child = Command::new(env!("CARGO_BIN_EXE_appa"))
-        .arg("runtime")
-        .arg("--config")
-        .arg(config)
-        .arg("--db")
-        .arg(db)
-        .arg("--listen")
-        .arg(format!("127.0.0.1:{port}"))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("the binary spawns");
-    Server {
-        child,
-        url: format!("http://127.0.0.1:{port}"),
-    }
-}
-
-fn wait_for_health(server: &mut Server) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    while std::time::Instant::now() < deadline {
-        if let Some(status) = server.child.try_wait().expect("the child polls") {
-            panic!("the server exited before becoming healthy: {status}");
-        }
-        if http(&format!("{}/health", server.url), "GET", None).is_some() {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    panic!("the server never became healthy within the deadline");
 }
 
 /// The wire event `appa hook` posts for one Claude Code hook.
@@ -88,7 +43,7 @@ fn wire(claude_hook_json: &str) -> String {
 }
 
 /// The wire decision a 2xx answer carries, `None` on a non-2xx answer.
-fn post_hook(server: &Server, claude_hook_json: &str) -> Option<serde_json::Value> {
+fn post_hook(server: &ServedRuntime, claude_hook_json: &str) -> Option<serde_json::Value> {
     let body = http(&format!("{}/hook", server.url), "POST", Some(&wire(claude_hook_json)))?;
     Some(serde_json::from_str(&body).expect("a 2xx answer is a wire decision"))
 }
@@ -153,10 +108,8 @@ fn committed_state_survives_a_hard_kill_and_the_dispatch_stays_open() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let config = write_config(dir.path(), CONFIG);
     let db = dir.path().join("appa.db");
-    let port = free_port();
 
-    let mut server = start(&config, &db, port);
-    wait_for_health(&mut server);
+    let server = serve_runtime(&config, &db);
     post_hook(
         &server,
         r#"{"hook_event_name":"SessionStart","session_id":"crash-1","source":"startup"}"#,
@@ -174,13 +127,11 @@ fn committed_state_survives_a_hard_kill_and_the_dispatch_stays_open() {
     .expect("PreToolUse answers");
     assert!(allowed(&allow), "{allow}");
 
-    let pid = server.child.id();
-    drop(server); // SIGKILL via Drop
-    let _ = pid;
+    // `ServedRuntime` kills the process on drop, which is the hard kill this
+    // scenario needs: the server never runs a shutdown path.
+    drop(server);
 
-    let port = free_port();
-    let mut server = start(&config, &db, port);
-    wait_for_health(&mut server);
+    let server = serve_runtime(&config, &db);
     let kept = post_hook(
         &server,
         r#"{"hook_event_name":"PostToolUse","session_id":"crash-1","tool_name":"Bash","tool_input":{"command":"ls"},"tool_use_id":"t1","tool_response":{"stdout":"readme.txt"}}"#,
@@ -202,9 +153,7 @@ fn a_changed_policy_keeps_old_roots_on_their_opening_policy() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let config = write_config(dir.path(), CONFIG);
     let db = dir.path().join("appa.db");
-    let port = free_port();
-    let mut server = start(&config, &db, port);
-    wait_for_health(&mut server);
+    let server = serve_runtime(&config, &db);
     post_hook(
         &server,
         r#"{"hook_event_name":"SessionStart","session_id":"old-1","source":"startup"}"#,
@@ -227,9 +176,7 @@ fn a_changed_policy_keeps_old_roots_on_their_opening_policy() {
         dir.path(),
         &CONFIG.replace("host/claude-code/Bash", "host/claude-code/Read"),
     );
-    let port = free_port();
-    let mut server = start(&changed, &db, port);
-    wait_for_health(&mut server);
+    let server = serve_runtime(&changed, &db);
 
     let old_allows = post_hook(
         &server,
@@ -273,9 +220,7 @@ fn the_reload_route_installs_an_edited_policy_without_a_restart() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let config = write_config(dir.path(), CONFIG);
     let db = dir.path().join("appa.db");
-    let port = free_port();
-    let mut server = start(&config, &db, port);
-    wait_for_health(&mut server);
+    let server = serve_runtime(&config, &db);
     let reload = format!("{}/reload", server.url);
 
     post_hook(
@@ -373,9 +318,7 @@ fn a_policy_naming_a_non_canonical_tool_refuses_to_serve_and_to_install() {
     expect_startup_refusal(&config, &db, "Bash");
 
     let config = write_config(dir.path(), CONFIG);
-    let port = free_port();
-    let mut server = start(&config, &db, port);
-    wait_for_health(&mut server);
+    let server = serve_runtime(&config, &db);
     let reload = format!("{}/reload", server.url);
     post_hook(
         &server,
@@ -442,9 +385,7 @@ fn a_deployment_field_naming_a_non_canonical_tool_refuses_to_serve_and_to_instal
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let db = dir.path().join("appa.db");
     let config = write_config(dir.path(), DEPLOYMENT_CONFIG);
-    let port = free_port();
-    let mut server = start(&config, &db, port);
-    wait_for_health(&mut server);
+    let server = serve_runtime(&config, &db);
     let reload = format!("{}/reload", server.url);
 
     for (field, canonical, raw_name) in [

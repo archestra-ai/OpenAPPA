@@ -332,8 +332,11 @@ impl WireOutcome {
         let carrying = |field: &str| malformed(format!("a {status} outcome carrying a {field}"));
         let spelled_null = |field: &str| malformed(format!("a {status} outcome whose {field} is null"));
         match (self.status, self.body, self.message) {
+            // The body is the largest thing on this path: it moves out of
+            // its box as the string it already is, rather than being copied
+            // back out of it.
             (OutcomeStatus::Success, Some(body), None) => Ok(ToolOutcome::Success {
-                body: OutcomeBody::Available(body.get().to_string()),
+                body: OutcomeBody::Available(String::from(Box::<str>::from(body))),
             }),
             (OutcomeStatus::Success, Some(_), Some(_)) => Err(carrying("message")),
             (OutcomeStatus::Success, None, _) => Err(without("body")),
@@ -591,16 +594,31 @@ impl WireEvent {
         // Whether this host can assert a person's ruling at all is
         // settled here, on the envelope, before any event exists.
         let ruling = checked_ruling(served.name, self.ruling)?;
+        // The envelope's fields, moved out of it now that the rule above
+        // has read which of them are there. Arguments and a result's body
+        // are the large payloads on this path, and one reader below takes
+        // each: nothing here is copied to be read twice.
+        let Self {
+            root_id,
+            child_id,
+            text,
+            tool,
+            arguments,
+            outcome,
+            spawned_id,
+            value,
+            spawn_binding,
+            ..
+        } = self;
         let root = || -> Result<TrajectoryId, ParseRefusal> {
-            match self.root_id.as_deref() {
+            match root_id.as_deref() {
                 Some(root_id) if !root_id.is_empty() => Ok(served.name.root(root_id)),
                 _ => Err(malformed(format!("{name:?} without a root_id"))),
             }
         };
         let actor = || -> Result<Actor, ParseRefusal> {
             let root = root()?;
-            let child = self
-                .child_id
+            let child = child_id
                 .as_deref()
                 .filter(|id| !id.is_empty())
                 .map(|id| child_of(&root, id));
@@ -608,33 +626,27 @@ impl WireEvent {
         };
         let named_child = || -> Result<(TrajectoryId, TrajectoryId), ParseRefusal> {
             let root = root()?;
-            match self.child_id.as_deref().filter(|id| !id.is_empty()) {
+            match child_id.as_deref().filter(|id| !id.is_empty()) {
                 Some(id) => Ok((root.clone(), child_of(&root, id))),
                 None => Err(malformed(format!("{name:?} without a child_id"))),
-            }
-        };
-        let raw_call = || -> Result<ProposedCall, ParseRefusal> {
-            match (self.tool.clone(), self.arguments.clone()) {
-                (Some(tool), Some(arguments)) => Ok(ProposedCall { tool, arguments }),
-                _ => Err(malformed(format!("{name:?} without its tool call"))),
             }
         };
         // The call as the host spelled it, beside the identity the
         // adapter derives for it. Every event that carries a call reads
         // both: the raw spelling is what a child scan and a diagnostic
-        // need, and the canonical id is what the runtime keys on.
-        let derived_call = || -> Result<(ProposedCall, Derived), ParseRefusal> {
-            let raw = raw_call()?;
-            let derived = (served.derive)(&raw.tool)?;
-            Ok((raw, derived))
-        };
-        let outcome = || -> Result<ToolOutcome, ParseRefusal> {
-            match self.outcome.clone() {
-                Some(outcome) => outcome.into_outcome(),
-                None => Err(malformed(format!("{name:?} without an outcome"))),
-            }
-        };
-        let value = || self.value.clone().filter(|value| !value.is_empty());
+        // need, and the canonical id is what the runtime keys on. The two
+        // fields are handed in rather than read from the envelope, so the
+        // arguments reach the call by moving.
+        let derived_call =
+            |tool: Option<String>, arguments: Option<Box<RawValue>>| -> Result<(ProposedCall, Derived), ParseRefusal> {
+                let raw = match (tool, arguments) {
+                    (Some(tool), Some(arguments)) => ProposedCall { tool, arguments },
+                    _ => return Err(malformed(format!("{name:?} without its tool call"))),
+                };
+                let derived = (served.derive)(&raw.tool)?;
+                Ok((raw, derived))
+            };
+        let value = value.filter(|value| !value.is_empty());
 
         let accepted = |event: HookEvent| {
             Ok(Some(Accepted {
@@ -645,14 +657,14 @@ impl WireEvent {
         match name {
             EventName::Ping => Ok(None),
             EventName::SessionStart => accepted(HookEvent::SessionStart { root: root()? }),
-            EventName::Prompt => match self.text.clone() {
+            EventName::Prompt => match text {
                 Some(text) => accepted(HookEvent::Prompt { actor: actor()?, text }),
                 None => Err(malformed("prompt without its text")),
             },
             EventName::TurnEnd => accepted(HookEvent::TurnEnd { actor: actor()? }),
             EventName::ToolCall => {
                 let actor = actor()?;
-                let (raw, derived) = derived_call()?;
+                let (raw, derived) = derived_call(tool, arguments)?;
                 // A ruling answers the review of the offer a control
                 // call quotes, and only the control call spends one.
                 // On any other call the runtime would judge the flow
@@ -692,15 +704,17 @@ impl WireEvent {
             // where the derivation gives no spawn to spend them on.
             EventName::ToolResult | EventName::SpawnResult => {
                 let actor = actor()?;
-                let (raw, derived) = derived_call()?;
+                let (raw, derived) = derived_call(tool, arguments)?;
                 let spawn = derived.spawn;
                 let call = ProposedCall {
                     tool: derived.canonical.into_string(),
                     arguments: raw.arguments,
                 };
-                let outcome = outcome()?;
-                let child = self
-                    .spawned_id
+                let outcome = match outcome {
+                    Some(outcome) => outcome.into_outcome()?,
+                    None => return Err(malformed(format!("{name:?} without an outcome"))),
+                };
+                let child = spawned_id
                     .as_deref()
                     .filter(|id| !id.is_empty())
                     .map(|id| child_of(&actor.root, id));
@@ -710,9 +724,9 @@ impl WireEvent {
                         call,
                         outcome,
                         child,
-                        value: value(),
+                        value,
                     }),
-                    false => match (child, value()) {
+                    false => match (child, value) {
                         (Some(_), _) => Err(malformed(format!(
                             "a result carrying spawned_id for {}, which this adapter derives as an ordinary call",
                             call.tool
@@ -727,7 +741,16 @@ impl WireEvent {
             }
             EventName::ChildStart => {
                 let (root, child) = named_child()?;
-                let spawn = match self.spawn_binding.clone() {
+                // A binding is a token this runtime minted, and the empty
+                // string is none of them. Read as the absent field it is
+                // not, it would bind the child to whatever spawn the
+                // family has in flight — a different spawn than the one
+                // the envelope claims. A claim the wire cannot honour is
+                // refused rather than answered with another.
+                let spawn = match spawn_binding {
+                    Some(binding) if binding.is_empty() => {
+                        return Err(malformed(format!("{name:?} carrying an empty spawn_binding")));
+                    }
                     Some(binding) => SpawnRef::Binding(SpawnBinding(binding)),
                     None => SpawnRef::InFlight,
                 };
@@ -735,11 +758,7 @@ impl WireEvent {
             }
             EventName::ChildEnd => {
                 let (root, child) = named_child()?;
-                accepted(HookEvent::ChildEnd {
-                    root,
-                    child,
-                    value: value(),
-                })
+                accepted(HookEvent::ChildEnd { root, child, value })
             }
         }
     }
@@ -1243,6 +1262,38 @@ mod tests {
                 .expect("a result event reads a result")
                 .is_some(),
             "{result} is the event those fields belong to"
+        );
+    }
+
+    /// A spawn binding is a token this runtime minted, so an envelope
+    /// carrying the empty string names no spawn at all. Reading it as the
+    /// absent field would bind the child to whatever spawn the family has
+    /// in flight, which is a different spawn than the one claimed, so it is
+    /// refused — while the field left out still means exactly that.
+    #[test]
+    fn an_empty_spawn_binding_is_refused_rather_than_read_as_no_binding() {
+        let posted = |binding: &str| {
+            format!(
+                r#"{{"protocol":1,"adapter":"kagent","event":"child_start","root_id":"r1","child_id":"c1"{binding}}}"#
+            )
+        };
+        let crossed = |row: &str| WireEvent::read(row.as_bytes()).expect("reads").into_event(&SERVED);
+        let spawn_of = |row: String| match crossed(&row) {
+            Ok(Some(accepted)) => match accepted.event {
+                HookEvent::ChildStart { spawn, .. } => spawn,
+                other => panic!("{row} crossed as {other:?}"),
+            },
+            other => panic!("{row} is a child start, got {other:?}"),
+        };
+        assert_eq!(
+            spawn_of(posted(r#","spawn_binding":"{\"fork\":\"f1\"}""#)),
+            SpawnRef::Binding(SpawnBinding(r#"{"fork":"f1"}"#.to_string()))
+        );
+        assert_eq!(spawn_of(posted("")), SpawnRef::InFlight);
+        let empty = posted(r#","spawn_binding":"""#);
+        assert!(
+            matches!(crossed(&empty), Err(ParseRefusal::Malformed { .. })),
+            "{empty} names a spawn no fork holds"
         );
     }
 

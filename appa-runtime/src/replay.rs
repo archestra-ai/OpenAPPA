@@ -438,15 +438,15 @@ async fn run_step(runtime: &Runtime, actor: &Actor, step: &Step) -> StepOutcome 
         tool: step.tool.to_string(),
         arguments: step.arguments.clone(),
     };
-    let (got, feedback) = match propose(runtime, actor, call).await {
+    let (got, feedback, offers) = match propose(runtime, actor, call).await {
         Proposed::Allowed(call) => match report_empty_output(runtime, actor, call).await {
-            Ok(()) => (Got::Allowed, None),
+            Ok(()) => (Got::Allowed, None, Vec::new()),
             Err(detail) => return StepOutcome::CannotRun(detail),
         },
         Proposed::Denied { feedback } => {
             let offers = offers_in(runtime, actor, &feedback);
-            let kinds: BTreeSet<OfferKind> = offers.into_iter().map(|(kind, _)| kind).collect();
-            (Got::Blocked(kinds), Some(feedback))
+            let kinds: BTreeSet<OfferKind> = offers.iter().map(|(kind, _)| kind.clone()).collect();
+            (Got::Blocked(kinds), Some(feedback), offers)
         }
         Proposed::CannotRun(detail) => return StepOutcome::CannotRun(detail),
     };
@@ -454,8 +454,7 @@ async fn run_step(runtime: &Runtime, actor: &Actor, step: &Step) -> StepOutcome 
         (Got::Allowed, Expect::Allow) => StepOutcome::Passed { taken: None },
         (Got::Blocked(kinds), Expect::Deny) if kinds.is_empty() => StepOutcome::Passed { taken: None },
         (Got::Blocked(kinds), expect) if kinds.iter().any(|kind| expect.takes(kind)) => {
-            let feedback = feedback.as_deref().expect("a block carries its feedback");
-            let (kind, offer) = offers_in(runtime, actor, feedback)
+            let (kind, offer) = offers
                 .into_iter()
                 .find(|(offered, _)| expect.takes(offered))
                 .expect("the kind was read from these offers");

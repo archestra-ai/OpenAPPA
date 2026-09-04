@@ -8,8 +8,8 @@ use appa_runtime::api::{LabelSpelling, OfferId, OfferedRemedy, RemedyArguments, 
 use appa_runtime::config::{Binding, Config, ExternalBindings};
 use appa_runtime::hooks;
 use appa_runtime_api::{
-    Actor, HookDecision, HookEvent, OfferedReturn, OutcomeBody, ProposedCall, SpawnBinding, SpawnRef, ToolOutcome,
-    TrajectoryId,
+    ADVERTISED_CONTROL_TOOL, Actor, HookDecision, HookEvent, OfferedReturn, OutcomeBody, ProposedCall, SpawnBinding,
+    SpawnRef, ToolOutcome, TrajectoryId, canonical_tool_name, is_reserved_tool_name,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::PyRuntimeError;
@@ -24,33 +24,7 @@ const MAX_BODY_BYTES: usize = 256 * 1024;
 const BRIDGE_TIMEOUT: Duration = Duration::from_secs(30);
 const CONSULT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The control tool as the model sees it. Function-calling APIs reject `/` in a
-/// tool name, so the canonical id (`appa_runtime_api::CONTROL_TOOL`) is only
-/// used on the runtime side of `canonical_tool_name`.
-const ADVERTISED_CONTROL_TOOL: &str = "execute_remedy_plan";
 const OFFER_ARGUMENT: &str = "offer_id";
-
-/// Translates a name the model called into the name the runtime knows.
-fn canonical_tool_name(advertised: &str) -> &str {
-    match advertised {
-        ADVERTISED_CONTROL_TOOL => appa_runtime_api::CONTROL_TOOL,
-        host_tool => host_tool,
-    }
-}
-
-/// Both of the control tool's names belong to the runtime: the advertised alias, which
-/// `canonical_tool_name` translates, and the canonical id, which passes through unchanged. A
-/// host tool spelled either way would be indistinguishable from the control tool at check
-/// time — every call to it reaches remedy handling — so the session refuses the inventory
-/// instead of rerouting the host's tool.
-fn refuse_reserved_tool_name(name: &str) -> Result<(), String> {
-    match name {
-        ADVERTISED_CONTROL_TOOL | appa_runtime_api::CONTROL_TOOL => {
-            Err(format!("{name} is a reserved control tool name; rename the host tool"))
-        }
-        _ => Ok(()),
-    }
-}
 
 create_exception!(appa_agent_python, AppaError, PyRuntimeError);
 
@@ -206,8 +180,14 @@ impl SessionInner {
         let bridge_url = bridge_url.map(validate_bridge_url).transpose()?;
         let tools: Vec<ToolInput> =
             serde_json::from_str(tools_json).map_err(|error| format!("invalid tools JSON: {error}"))?;
+        // Both of the control tool's names belong to the runtime, so a host tool spelled
+        // either way would be indistinguishable from it at check time: every call to that
+        // name reaches remedy handling. The session refuses the inventory rather than
+        // rerouting the host's tool.
         for name in tools.iter().map(ToolInput::name).chain(spawn_tool) {
-            refuse_reserved_tool_name(name)?;
+            if is_reserved_tool_name(name) {
+                return Err(format!("{name} is a reserved control tool name; rename the host tool"));
+            }
         }
         let policy = toml::to_string(&compose_policy(policy_toml, &tools, bridge_url.is_some(), spawn_tool)?)
             .map_err(|error| format!("the composed policy does not render: {error}"))?;

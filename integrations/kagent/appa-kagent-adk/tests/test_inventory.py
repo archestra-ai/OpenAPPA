@@ -138,6 +138,14 @@ def test_a_remote_agent_outside_the_rendered_shape_is_refused(name):
         inventory(remote_agents=[{"name": name, "url": "http://x"}])
 
 
+@pytest.mark.parametrize("remote", [{"url": "http://x"}, {"name": None, "url": "http://x"}])
+def test_a_nameless_remote_agent_is_refused(remote):
+    """The runtime wires a remote agent as a tool of its name. An entry that
+    declares none leaves a wired tool the inventory cannot spell."""
+    with pytest.raises(ConfigRefused, match=r"remote_agents\.0\.name"):
+        inventory(remote_agents=[remote])
+
+
 def test_a_raw_name_declared_twice_is_refused():
     with pytest.raises(ConfigRefused, match="list_pods"):
         inventory(http_tools=[DEMO_TOOLS, {"params": {"url": "http://other:3000/mcp"}, "tools": ["list_pods"]}])

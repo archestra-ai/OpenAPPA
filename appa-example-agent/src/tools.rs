@@ -2,33 +2,11 @@
 
 use std::time::Duration;
 
-use appa_runtime_api::{OutcomeBody, ProposedCall, ToolOutcome};
+use appa_runtime_api::{ADVERTISED_CONTROL_TOOL, OutcomeBody, ProposedCall, ToolOutcome, is_reserved_tool_name};
 use thiserror::Error;
 
 use crate::http::{HttpClient, read_body_capped};
 use crate::wire::WireTool;
-
-/// The control tool as the model sees it. Function-calling APIs reject `/` in a
-/// tool name, so the canonical id (`appa_runtime_api::CONTROL_TOOL`) is only
-/// used on the runtime side of `canonical_tool_name`.
-pub(crate) const ADVERTISED_CONTROL_TOOL: &str = "execute_remedy_plan";
-
-/// Translates a name the model called into the name the runtime knows.
-pub(crate) fn canonical_tool_name(advertised: &str) -> &str {
-    match advertised {
-        ADVERTISED_CONTROL_TOOL => appa_runtime_api::CONTROL_TOOL,
-        host_tool => host_tool,
-    }
-}
-
-/// Whether a name the host would register is the runtime's control tool under either
-/// spelling: the advertised alias the model calls, or the canonical id the runtime routes.
-/// A host tool under either one is indistinguishable from the control tool at check time —
-/// the alias is translated into the canonical id, and the canonical id passes through — so
-/// every call to it reaches remedy handling instead of the host's tool.
-pub(crate) fn is_reserved_tool_name(name: &str) -> bool {
-    matches!(name, ADVERTISED_CONTROL_TOOL | appa_runtime_api::CONTROL_TOOL)
-}
 
 /// Why a host's tools cannot become a catalogue, and why a spawn tool cannot be named.
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -178,6 +156,7 @@ fn body_of(call: &ProposedCall) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use appa_runtime_api::canonical_tool_name;
 
     fn call(tool: &str, arguments: &str) -> ProposedCall {
         ProposedCall {

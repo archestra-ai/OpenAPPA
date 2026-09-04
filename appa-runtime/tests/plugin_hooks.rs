@@ -218,19 +218,16 @@ fn shipped_command() -> String {
     command
 }
 
-fn run_hook(command: &str, url: &str) -> (i32, String) {
-    run_gated(command, url, true)
-}
-
-/// The shipped POSIX command run over one host event of the caller's choosing.
-fn run_hook_on(command: &str, url: &str, host_event: &str) -> (i32, String) {
+/// The shipped POSIX command over one host event, with `APPA_GATE` set to
+/// whatever the caller's session carries.
+fn spawn_hook(command: &str, url: &str, gate: &str, host_event: &str) -> (i32, String) {
     let child = Command::new("sh")
         .arg("-c")
         .arg(command)
         .env("APPA_RUNTIME_URL", url)
         .env("CLAUDE_PLUGIN_ROOT", plugin_root())
         .env("APPA_BIN", built_binary())
-        .env("APPA_GATE", "1")
+        .env("APPA_GATE", gate)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -239,20 +236,18 @@ fn run_hook_on(command: &str, url: &str, host_event: &str) -> (i32, String) {
     finish(child, host_event)
 }
 
-fn run_gated(command: &str, url: &str, gated: bool) -> (i32, String) {
-    let child = Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .env("APPA_RUNTIME_URL", url)
-        .env("CLAUDE_PLUGIN_ROOT", plugin_root())
-        .env("APPA_BIN", built_binary())
-        .env("APPA_GATE", if gated { "1" } else { "0" })
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("the hook command spawns");
-    finish(child, PRE_TOOL_USE)
+/// The command in a gated session, over one host event of the caller's choosing.
+fn run_hook_on(command: &str, url: &str, host_event: &str) -> (i32, String) {
+    spawn_hook(command, url, "1", host_event)
+}
+
+fn run_hook(command: &str, url: &str) -> (i32, String) {
+    run_hook_on(command, url, PRE_TOOL_USE)
+}
+
+/// The same command in a session APPA does not gate.
+fn run_ungated(command: &str, url: &str) -> (i32, String) {
+    spawn_hook(command, url, "0", PRE_TOOL_USE)
 }
 
 /// Feed `stdin` to a spawned hook and collect its exit code and stdout.
@@ -390,7 +385,7 @@ async fn a_server_error_exits_2_instead_of_failing_open() {
 async fn an_ungated_session_posts_nothing_and_never_blocks() {
     let url = refused_url().await;
     let command = shipped_command();
-    let (code, stdout) = tokio::task::spawn_blocking(move || run_gated(&command, &url, false))
+    let (code, stdout) = tokio::task::spawn_blocking(move || run_ungated(&command, &url))
         .await
         .expect("the blocking task joins");
     assert_eq!(code, 0, "an ungated session must not be blocked");

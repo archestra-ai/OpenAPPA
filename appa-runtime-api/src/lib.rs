@@ -95,6 +95,30 @@ pub struct CanonicalTool(String);
 /// The runtime's own control tool, the one member of the `appa` family.
 pub const CONTROL_TOOL: &str = "appa/execute_remedy_plan";
 
+/// The control tool as a model sees it. Function-calling APIs reject `/` in a tool
+/// name, so a harness advertises this alias and translates it back with
+/// [`canonical_tool_name`]; `CONTROL_TOOL` is the runtime side of that translation.
+pub const ADVERTISED_CONTROL_TOOL: &str = "execute_remedy_plan";
+
+/// Translates a name the model called into the name the runtime knows: the advertised
+/// alias becomes [`CONTROL_TOOL`], and a host tool passes through unchanged.
+pub fn canonical_tool_name(advertised: &str) -> &str {
+    match advertised {
+        ADVERTISED_CONTROL_TOOL => CONTROL_TOOL,
+        host_tool => host_tool,
+    }
+}
+
+/// Whether a name a host would register belongs to the control tool under either
+/// spelling: the advertised alias the model calls, or the canonical id the runtime
+/// routes. A host tool under either one is indistinguishable from the control tool at
+/// check time — the alias is translated into the canonical id, and the canonical id
+/// passes through — so every call to it reaches remedy handling instead of the host's
+/// tool, and a harness refuses the name rather than rerouting it.
+pub fn is_reserved_tool_name(name: &str) -> bool {
+    canonical_tool_name(name) == CONTROL_TOOL
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CanonicalToolError {
     Family { name: String },

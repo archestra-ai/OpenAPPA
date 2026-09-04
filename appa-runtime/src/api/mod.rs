@@ -497,7 +497,7 @@ struct Inner {
     store: LogStore,
     modules: crate::builtins::ModuleRegistry,
     executing: std::sync::Mutex<std::collections::BTreeSet<String>>,
-    permits: std::sync::Mutex<std::collections::BTreeMap<String, Vec<Vouch>>>,
+    permits: std::sync::Mutex<std::collections::BTreeMap<String, Vouch>>,
     /// Trajectories a prompt reached since their turn last settled. Claude Code sends no
     /// `Stop` hook for a turn the user interrupted, so the prompt is the only sign the
     /// previous turn is over; the next tool call or turn end settles what it left behind.
@@ -946,27 +946,31 @@ impl Runtime {
     /// that runs it. `ruling` is a person's answer the harness obtained
     /// through its own review channel; it rides the vouch and is spent
     /// with it, so it can answer exactly the execution it was given for.
+    ///
+    /// One quoted id stands for one vouch. Only the trajectory the offer
+    /// names as its pursuer records one at all, and an offer has one pursuer
+    /// at a time: a child's, until that child ends and the offer falls to
+    /// its parent. A later quote is that next pursuer's, so it supersedes
+    /// the vouch it succeeds rather than standing beside it — where two
+    /// stood, neither could be told from the other and the live one was
+    /// refused together with the stale one.
     pub(crate) fn vouch(&self, quoted: &OfferId, acting: &Actor, ruling: Option<appa_runtime_api::Ruling>) {
         let mut permits = self.inner.permits.lock().expect("the permit mutex is never poisoned");
-        let holders = permits.entry(quoted.0.clone()).or_default();
-        match holders.iter_mut().find(|holder| holder.actor == *acting) {
-            Some(holder) => holder.ruling = ruling,
-            None => holders.push(Vouch {
+        permits.insert(
+            quoted.0.clone(),
+            Vouch {
                 actor: acting.clone(),
                 ruling,
-            }),
-        }
+            },
+        );
     }
 
     /// The trajectory vouched for this quoted id, taken once, with the
     /// ruling its harness attached.
     pub(crate) fn take_vouched(&self, quoted: &OfferId) -> Option<(Actor, Option<appa_runtime_api::Ruling>)> {
         let mut permits = self.inner.permits.lock().expect("the permit mutex is never poisoned");
-        let mut holders = permits.remove(&quoted.0)?;
-        (holders.len() == 1).then(|| {
-            let vouch = holders.remove(0);
-            (vouch.actor, vouch.ruling)
-        })
+        let vouch = permits.remove(&quoted.0)?;
+        Some((vouch.actor, vouch.ruling))
     }
 
     /// Drop every vouch this actor still holds. A vouch is recorded when the actor
@@ -976,10 +980,7 @@ impl Runtime {
     /// later can spend it.
     pub(crate) fn release_vouches(&self, acting: &Actor) {
         let mut permits = self.inner.permits.lock().expect("the permit mutex is never poisoned");
-        permits.retain(|_, holders| {
-            holders.retain(|holder| holder.actor != *acting);
-            !holders.is_empty()
-        });
+        permits.retain(|_, holder| holder.actor != *acting);
     }
 
     /// A prompt reached this actor. Nothing is recorded: the mark lives in memory and is
@@ -1005,13 +1006,12 @@ impl Runtime {
         prompted.remove(acting_trajectory(acting).0.as_str())
     }
 
+    /// Spend the vouch this actor holds, where it is the one standing. A
+    /// vouch the offer's next pursuer has since superseded is not this
+    /// actor's to take away.
     fn spend_vouch(&self, quoted: &OfferId, acting: &Actor) {
         let mut permits = self.inner.permits.lock().expect("the permit mutex is never poisoned");
-        let Some(holders) = permits.get_mut(&quoted.0) else {
-            return;
-        };
-        holders.retain(|holder| holder.actor != *acting);
-        if holders.is_empty() {
+        if permits.get(&quoted.0).is_some_and(|holder| holder.actor == *acting) {
             permits.remove(&quoted.0);
         }
     }
@@ -1981,6 +1981,63 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             .lock()
             .expect("the retired-engine mutex is never poisoned")
             .len()
+    }
+
+    /// The offer a subagent pursued falls to its parent when the subagent
+    /// ends, and the parent quotes the same id. Nothing releases what the
+    /// subagent left standing — a turn end releases the actor's own vouches,
+    /// and a subagent's end is not the parent's turn end — so the two quotes
+    /// meet on one id. The parent is the offer's pursuer now, so its quote
+    /// supersedes the stale one: the take is the parent's, carrying the
+    /// ruling the parent's harness attached and not the child's.
+    #[tokio::test]
+    async fn a_parents_quote_supersedes_the_vouch_its_ended_child_left_standing() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = std::sync::Arc::new(
+            Runtime::open(versioned_policy("first"), dir.path().join("appa.db"), None).expect("the deployment opens"),
+        );
+        let root = TrajectoryId("vouch-supersede".to_string());
+        assert_eq!(
+            crate::hooks::handle(
+                &runtime,
+                appa_runtime_api::HookEvent::SessionStart { root: root.clone() }
+            )
+            .await,
+            appa_runtime_api::HookDecision::Ack
+        );
+        let parent = Actor {
+            root: root.clone(),
+            child: None,
+        };
+        let child = Actor {
+            root: root.clone(),
+            child: Some(TrajectoryId(format!("{}:c1", root.0))),
+        };
+        let quoted = OfferId("offer-1".to_string());
+
+        runtime.vouch(&quoted, &child, Some(appa_runtime_api::Ruling::Approve));
+        crate::hooks::handle(&runtime, appa_runtime_api::HookEvent::TurnEnd { actor: parent.clone() }).await;
+        assert_eq!(
+            runtime.take_vouched(&quoted),
+            Some((child.clone(), Some(appa_runtime_api::Ruling::Approve))),
+            "a turn end releases the actor's own vouches, and a child's is not one of them"
+        );
+
+        runtime.vouch(&quoted, &child, Some(appa_runtime_api::Ruling::Approve));
+        runtime.vouch(&quoted, &parent, None);
+        assert_eq!(
+            runtime.take_vouched(&quoted),
+            Some((parent.clone(), None)),
+            "the offer's pursuer takes its own vouch, and no one else's ruling rides it"
+        );
+
+        runtime.vouch(&quoted, &parent, None);
+        runtime.release_vouches(&child);
+        assert_eq!(
+            runtime.take_vouched(&quoted),
+            Some((parent, None)),
+            "releasing the child's vouches takes away no vouch of the parent's"
+        );
     }
 
     #[tokio::test]

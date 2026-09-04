@@ -43,12 +43,20 @@ impl Endpoint {
         })
     }
 
-    fn address(&self) -> Result<SocketAddr, String> {
-        self.authority
+    /// Every address this authority resolves to, in the order the resolver
+    /// gives them. `localhost` resolves to both loopback families and the
+    /// runtime listens on one of them, so the first address is a candidate
+    /// and not the answer.
+    fn addresses(&self) -> Result<Vec<SocketAddr>, String> {
+        let addresses: Vec<SocketAddr> = self
+            .authority
             .to_socket_addrs()
             .map_err(|error| format!("{} does not resolve: {error}", self.authority))?
-            .next()
-            .ok_or_else(|| format!("{} resolves to no address", self.authority))
+            .collect();
+        match addresses.is_empty() {
+            true => Err(format!("{} resolves to no address", self.authority)),
+            false => Ok(addresses),
+        }
     }
 
     fn request_head(&self, length: usize) -> String {
@@ -127,10 +135,23 @@ impl Answer {
     }
 }
 
+/// The first of these addresses that accepts, with the address it reached. Each
+/// attempt takes what is left of the deadline rather than a share of it: a
+/// refused address answers at once, and the budget the whole round trip runs
+/// against — never the number of addresses — is what bounds the walk.
+fn connect(addresses: &[SocketAddr], deadline: &Deadline) -> Result<(TcpStream, SocketAddr), String> {
+    let mut refusals = Vec::new();
+    for address in addresses {
+        match TcpStream::connect_timeout(address, deadline.left()?) {
+            Ok(socket) => return Ok((socket, *address)),
+            Err(error) => refusals.push(format!("cannot reach {address}: {error}")),
+        }
+    }
+    Err(refusals.join("; "))
+}
+
 fn post(endpoint: &Endpoint, event: &[u8], deadline: &Deadline) -> Result<Answer, String> {
-    let address = endpoint.address()?;
-    let mut socket = TcpStream::connect_timeout(&address, deadline.left()?)
-        .map_err(|error| format!("cannot reach {address}: {error}"))?;
+    let (mut socket, address) = connect(&endpoint.addresses()?, deadline)?;
     socket.set_nodelay(true).ok();
 
     for part in [endpoint.request_head(event.len()).as_bytes(), event] {
@@ -516,6 +537,41 @@ mod tests {
                 body: Vec::new(),
             }),
             "status=500"
+        );
+    }
+
+    /// A hook URL naming a host that resolves to more than one address — the
+    /// `localhost` of every default install, which resolves to both loopback
+    /// families — reaches the runtime on whichever of them it listens on. The
+    /// first address is tried first and a refusal there is not the answer.
+    #[test]
+    fn a_refused_address_falls_through_to_the_next_the_authority_resolves_to() {
+        let listening = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port binds");
+        let live = listening.local_addr().expect("the listener has an address");
+        let vacated = std::net::TcpListener::bind("127.0.0.1:0").expect("a second loopback port binds");
+        let closed = vacated.local_addr().expect("the listener has an address");
+        drop(vacated);
+
+        let deadline = Deadline::spanning(Duration::from_secs(5));
+        let (socket, reached) = connect(&[closed, live], &deadline).expect("the second address answers");
+        assert_eq!(reached, live, "the refused address is not the one it posts to");
+        assert_eq!(socket.peer_addr().expect("the socket is connected"), live);
+
+        assert!(
+            connect(&[closed], &deadline).is_err(),
+            "an authority whose every address refuses is unreachable"
+        );
+        assert!(
+            connect(&[closed, live], &Deadline::spanning(Duration::ZERO)).is_err(),
+            "the walk stays inside the deadline the round trip runs against"
+        );
+
+        assert_eq!(
+            Endpoint::parse("http://127.0.0.1:8787")
+                .expect("the authority parses")
+                .addresses()
+                .expect("a literal address resolves"),
+            vec![SocketAddr::from(([127, 0, 0, 1], 8787))]
         );
     }
 

@@ -7,7 +7,8 @@ use std::sync::Arc;
 use appa_runtime::api::{RemedyOutcome, Runtime};
 use appa_runtime::hooks;
 use appa_runtime_api::{
-    Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, SpawnBinding, SpawnRef, ToolOutcome, TrajectoryId,
+    ADVERTISED_CONTROL_TOOL, Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, SpawnBinding, SpawnRef,
+    ToolOutcome, TrajectoryId, canonical_tool_name, is_reserved_tool_name,
 };
 use serde_json::value::RawValue;
 use thiserror::Error;
@@ -16,9 +17,7 @@ use tokio_util::sync::CancellationToken;
 use crate::budget::{Exhausted, ForkUnavailable, Limits, RunBudget};
 use crate::provider::{OpenAiCompatible, ProviderError};
 use crate::record::{CallId, Record, Recorded};
-use crate::tools::{
-    ADVERTISED_CONTROL_TOOL, CatalogueError, ToolCatalogue, ToolShim, canonical_tool_name, is_reserved_tool_name,
-};
+use crate::tools::{CatalogueError, ToolCatalogue, ToolShim};
 use crate::wire::{ChatCompletionRequest, WireMessage, WireToolCall};
 
 /// A void child return is a control result, not an information-bearing value.

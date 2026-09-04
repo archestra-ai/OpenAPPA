@@ -2605,8 +2605,10 @@ fn malformed_feedback(error: &EngineError, naming: ToolNaming) -> String {
     }
 }
 
-/// The control tool's own name, without the `appa` family its canonical identity carries.
-const BARE_CONTROL_TOOL: &str = "execute_remedy_plan";
+/// The control tool's own name, without the `appa` family its canonical identity
+/// carries. It is the same spelling a harness advertises to its model, and for the
+/// same reason: a function-calling API rejects the `/` the canonical id contains.
+const BARE_CONTROL_TOOL: &str = appa_runtime_api::ADVERTISED_CONTROL_TOOL;
 
 /// How this deployment's model dispatches the runtime's own control tool. Feedback that
 /// tells a model to take a remedy names a call it has to make, so a served deployment

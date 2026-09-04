@@ -198,6 +198,11 @@ func inventorySpec(agentConfig *adk.AgentConfig, skillsFolder string) appakagent
 			Path: fmt.Sprintf("sse_tools[%d]", index), URL: server.Params.Url, Tools: server.Tools,
 		})
 	}
+	// A url-less remote agent is skipped because this runtime's stock
+	// builder skips it too, so no tool of that name exists to gate
+	// (kagent go/adk/pkg/agent/agent.go). The python lane reads no url
+	// at all: its runtime wires every declared remote agent. Each
+	// inventory follows the tools its own runtime builds.
 	for index, remoteAgent := range agentConfig.RemoteAgents {
 		if remoteAgent.Url == "" {
 			continue
