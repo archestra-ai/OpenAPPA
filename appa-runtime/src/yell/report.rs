@@ -104,8 +104,10 @@ pub(crate) struct Build {
     platform: Platform,
 }
 
+/// Tagged by a `kind` field rather than externally, which would spell a commit
+/// `{"commit": {"commit": "…"}}`.
 #[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum BuildSource {
     Release { reference: &'static str },
     Commit { commit: &'static str },

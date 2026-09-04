@@ -105,6 +105,8 @@ async fn yell(url: &str, yes: bool, message: YellMessage, mode: Mode) -> ExitCod
 /// destination.
 async fn build(url: &str, message: &YellMessage, mode: Mode) -> Result<Finished, UnreachableClass> {
     let endpoint = runtime_report_url(url).ok_or(UnreachableClass::NotLoopback)?;
+    // `reqwest` refuses to build any client until a provider is installed, TLS or not.
+    crate::tls::install_crypto_provider();
     let client = reqwest::Client::builder()
         .timeout(BUILD_TIMEOUT)
         .no_proxy()
@@ -285,6 +287,22 @@ mod tests {
         ] {
             assert!(runtime_report_url(refused).is_none(), "{refused} is not this machine");
         }
+    }
+
+    /// Asking the runtime builds a client, which this crate's `reqwest` refuses to do until a
+    /// crypto provider is installed. A `yell` with no runtime up must produce the metadata-only
+    /// report, not a panic.
+    #[tokio::test]
+    async fn a_runtime_that_is_not_there_is_a_class_and_not_a_panic() {
+        let message = YellMessage::new("nobody is home").expect("a message");
+        let refusal = build("http://127.0.0.1:1", &message, Mode::Baseline)
+            .await
+            .expect_err("nothing is listening on port 1");
+        assert_eq!(refusal, UnreachableClass::NotListening);
+        assert!(
+            local(message, Mode::Baseline, refusal).is_ok(),
+            "the report is still made"
+        );
     }
 
     /// Something answering on the runtime's port is not the runtime. What it says is written to

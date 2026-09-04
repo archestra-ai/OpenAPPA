@@ -125,6 +125,7 @@ pub(crate) enum SendFailure {
 /// recognizes the retry as the duplicate it is.
 pub(crate) async fn send(finished: &Finished, receiver: &Receiver) -> Result<Receipt, SendFailure> {
     let signature = signature(&finished.plain);
+    crate::tls::install_crypto_provider();
     let client = reqwest::Client::builder()
         .timeout(ATTEMPT_TIMEOUT)
         // A redirect is another destination, and the person approved this one.
@@ -230,6 +231,21 @@ mod tests {
     #[test]
     fn the_salt_is_present() {
         assert!(!SALT.trim().is_empty());
+    }
+
+    /// Sending actually builds a client, which this crate's `reqwest` refuses to do until a
+    /// crypto provider is installed — TLS or not. Nothing else in this test module gets that
+    /// far, so without this a `yell` that reached the send would panic in every build.
+    ///
+    /// Time is paused, so the two backoffs cost nothing and the three attempts are still made.
+    #[tokio::test(start_paused = true)]
+    async fn a_send_to_nothing_exhausts_its_attempts_rather_than_panicking() {
+        let receiver = Receiver::parse("http://127.0.0.1:1/report").expect("loopback is a receiver");
+        let finished = Finished::of(br#"{"schema":"openappa.yell.v1"}"#.to_vec()).expect("the fixture fits");
+        assert_eq!(
+            send(&finished, &receiver).await,
+            Err(SendFailure::Unreachable { attempts: 3 })
+        );
     }
 
     /// A report leaves this machine in the clear only to this machine. The override exists so
