@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Installs kagent and the demo chart on the current cluster, in the
-# shape the live subset needs: the images kind-up.sh loaded, no go cell,
+# shape the live A2A matrix needs: the images kind-up.sh loaded, no go cell,
 # no seed job, and one OpenAI-compatible endpoint for both the agents
 # and the policy's sanitizers. It waits for every pod the subset drives.
 #

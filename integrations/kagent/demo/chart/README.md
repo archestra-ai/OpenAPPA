@@ -73,7 +73,7 @@ sanitizers consult (`llm.model`, `llm.url`). Both read the same Secret
 — the agents through the ModelConfig, the runtime as
 `APPA_LLM_API_KEY` — so one key serves both. Point the pair at any
 OpenAI-compatible endpoint, as
-[../../e2e/ci](../../e2e/ci/) does for the live subset in CI. The
+[../../e2e/ci](../../e2e/ci/) does for the live A2A matrix in CI. The
 sanitizers ask for a `json_schema` answer, so their model must support
 structured outputs.
 
