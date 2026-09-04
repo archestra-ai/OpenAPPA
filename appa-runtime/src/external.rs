@@ -991,7 +991,7 @@ mod tests {
                     hint: None,
                     on: SanitizerPoint::ToolOutput,
                     permits: DeclaredSanitizerTransition::Audience {
-                        from: WireAudience::Readers(vec!["hr".to_string()]),
+                        from: WireAudience::Entries(vec!["hr".to_string()]),
                         to: WireAudience::Public,
                     },
                     parameters: None,

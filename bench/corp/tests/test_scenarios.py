@@ -8,6 +8,7 @@ import pytest
 
 from bench_corp.cli import SCENARIOS_DIR
 from bench_corp.scenario import (
+    audience_entries,
     PolicyProfile,
     ScenarioError,
     canonical_args,
@@ -358,3 +359,32 @@ def test_email_dir_in_data_refused(tmp_path: Path) -> None:
     root = _write_scenario(tmp_path / "bad-email", _MINIMAL, ("hr", "email"))
     with pytest.raises(ScenarioError, match="sink is per-episode"):
         load_scenario(root)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["public", ["alice@northwind.example"], ["internal", "@finance", "alice@northwind.example"], ["self"]],
+)
+def test_an_annotation_audience_in_the_written_grammar_is_admitted(value: object) -> None:
+    expected = [] if value == "public" else value
+    assert audience_entries(value, "answer", "delta.audience", "s") == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "reason"),
+    [
+        ("internal", "wire audience shape"),
+        ([], "wire audience shape"),
+        (["public"], "`public` inside"),
+        (["public", "alice@northwind.example"], "`public` inside"),
+        (["alice@northwind.example", "alice@northwind.example"], "repeats"),
+        (["self", "internal"], "both `self` and `internal`"),
+        (["$to"], "names no audience"),
+        ([""], "names no audience"),
+        (["@"], "names no audience"),
+        (["@slack:"], "names no audience"),
+    ],
+)
+def test_an_annotation_audience_outside_the_written_grammar_is_refused(value: object, reason: str) -> None:
+    with pytest.raises(ScenarioError, match=reason):
+        audience_entries(value, "answer", "delta.audience", "s")

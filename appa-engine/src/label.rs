@@ -455,9 +455,68 @@ pub enum DeclaredAudience {
     Union(Clause),
 }
 
+/// Why a written audience list does not read as one audience. The one grammar for every list
+/// a policy writes and every list an annotation answers.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum AudienceSpelling {
+    #[error("empty reader set")]
+    Empty,
+    #[error("argument placeholder {0:?} is only valid in a `contains`")]
+    Placeholder(String),
+    #[error("`public` is the whole universe and cannot be combined with other entries")]
+    PublicCombined,
+    #[error("`public` is always an admissible annotation audience and is never listed")]
+    PublicListed,
+    #[error("two built-in audiences in one union: the outer one already contains the inner")]
+    SecondChain,
+    #[error("`{0}` is listed twice")]
+    Duplicate(String),
+    #[error("`{0}` names no audience")]
+    Unknown(String),
+}
+
 impl DeclaredAudience {
     pub fn restricted(readers: impl IntoIterator<Item = ReaderId>) -> DeclaredAudience {
         DeclaredAudience::Union(Clause::of_readers(readers.into_iter().collect()))
+    }
+
+    /// One written audience list: the union of its entries. `public` stands alone; `self` and
+    /// `internal` are the built-in symbolic audiences (at most one — the union of two chain
+    /// levels is the outer one, so writing both is a mistake); `@name` mentions a configured
+    /// named audience and `@provider:selector` a source collection directly; everything else
+    /// is a literal reader. An empty list, a placeholder, and a repeated entry are refused.
+    pub fn parse_entries(list: &[String]) -> Result<DeclaredAudience, AudienceSpelling> {
+        if list.is_empty() {
+            return Err(AudienceSpelling::Empty);
+        }
+        if let Some(placeholder) = list.iter().find(|entry| entry.starts_with('$')) {
+            return Err(AudienceSpelling::Placeholder(placeholder.clone()));
+        }
+        let mut seen = BTreeSet::new();
+        let mut chain = None;
+        let mut groups = Vec::new();
+        let mut readers = Vec::new();
+        for entry in list {
+            if !seen.insert(entry.as_str()) {
+                return Err(AudienceSpelling::Duplicate(entry.clone()));
+            }
+            match crate::names::AudienceArgument::parse(entry) {
+                Some(crate::names::AudienceArgument::Public) if list.len() == 1 => {
+                    return Ok(DeclaredAudience::Public);
+                }
+                Some(crate::names::AudienceArgument::Public) => return Err(AudienceSpelling::PublicCombined),
+                Some(crate::names::AudienceArgument::Chain(level)) => {
+                    if chain.replace(level).is_some() {
+                        return Err(AudienceSpelling::SecondChain);
+                    }
+                }
+                Some(crate::names::AudienceArgument::Group(group)) => groups.push(group),
+                Some(crate::names::AudienceArgument::Reader(reader)) => readers.push(reader),
+                None => return Err(AudienceSpelling::Unknown(entry.clone())),
+            }
+        }
+        let clause = Clause::new(chain, groups, readers).expect("every parsed reader is literal");
+        Ok(DeclaredAudience::Union(clause))
     }
 
     /// Test fixture: the declared spelling of a public or single-clause audience.

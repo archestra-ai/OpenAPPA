@@ -231,29 +231,60 @@ def _declared_annotators(name: str, policy: Path) -> dict[str, DeclaredAnnotator
     return declared
 
 
-def _reader_list(value: object, location: str, field: str, name: str) -> list[str]:
-    """One audience value off the wire: `"public"` (no literal readers) or a reader array."""
+_CHAIN_WORDS = frozenset({"self", "internal"})
+
+
+def _spelled_audience(entry: str) -> bool:
+    """Whether one entry is a spelling the policy grammar admits: a chain word, an `@`
+    mention with a name (and a selector after any `:`), or a literal reader."""
+    match entry:
+        case "":
+            return False
+        case _ if entry.startswith("$"):
+            return False
+        case _ if entry.startswith("@"):
+            provider, colon, selector = entry[1:].partition(":")
+            return bool(provider) and (not colon or bool(selector))
+        case _:
+            return True
+
+
+def audience_entries(value: object, location: str, field: str, name: str) -> list[str]:
+    """One audience value off the wire, in the engine's written-list grammar: `"public"`
+    alone (naming no entry), or a non-empty array of distinct spellings — at most one of
+    `self`/`internal`, never `public` inside the array, no argument placeholder."""
+    where = f"{name}: {location}.{field}"
     match value:
         case "public":
             return []
-        case list() as readers if all(isinstance(reader, str) for reader in readers):
-            return [reader for reader in readers if reader != "public"]
+        case list() as entries if entries and all(isinstance(entry, str) for entry in entries):
+            pass
         case _:
-            raise ScenarioError(f"{name}: {location}.{field} is not a wire audience shape")
+            raise ScenarioError(f"{where} is not a wire audience shape: `public` or a non-empty array")
+    if "public" in entries:
+        raise ScenarioError(f"{where} lists `public` inside an array")
+    if len(set(entries)) != len(entries):
+        raise ScenarioError(f"{where} repeats an entry")
+    if len(_CHAIN_WORDS & set(entries)) > 1:
+        raise ScenarioError(f"{where} names both `self` and `internal`")
+    for entry in entries:
+        if not _spelled_audience(entry):
+            raise ScenarioError(f"{where} entry {entry!r} names no audience")
+    return entries
 
 
-def _readers_of(value: object, location: str, field: str, name: str) -> list[str]:
-    """Every literal reader an annotation audience field names. A `delta.audience` is a
+def _audiences_of(value: object, location: str, field: str, name: str) -> list[str]:
+    """Every audience entry an annotation audience field names. A `delta.audience` is a
     bare value; a `requires.audience` holds a `contains` floor, a `within` cap, or both."""
     match value:
         case dict() as bounds if bounds and set(bounds) <= {"contains", "within"}:
             return [
-                reader
+                entry
                 for key, bound in bounds.items()
-                for reader in _reader_list(bound, location, f"{field}.{key}", name)
+                for entry in audience_entries(bound, location, f"{field}.{key}", name)
             ]
         case _:
-            return _reader_list(value, location, field, name)
+            return audience_entries(value, location, field, name)
 
 
 def _within_mandate(
@@ -274,9 +305,9 @@ def _within_mandate(
             raise ScenarioError(f"{name}: {location}.annotation.{field}.trust {trust!r} is outside the mandate")
         audience = holder.get("audience")
         if audience is not None:
-            readers = _readers_of(audience, location, f"annotation.{field}.audience", name)
-            if spec.audiences is not None and not set(readers) <= spec.audiences:
-                outside = sorted(set(readers) - spec.audiences)
+            entries = _audiences_of(audience, location, f"annotation.{field}.audience", name)
+            if spec.audiences is not None and not set(entries) <= spec.audiences:
+                outside = sorted(set(entries) - spec.audiences)
                 raise ScenarioError(f"{name}: {location}.annotation.{field}.audience names {outside} outside the mandate")
     emits = annotation["emits"]
     if not isinstance(emits, list):
