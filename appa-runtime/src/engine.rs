@@ -98,6 +98,10 @@ pub struct ReleasedCall {
     /// start so the child names the exact fork that opened it. `None` for
     /// every ordinary released call.
     pub fork: Option<SpawnBinding>,
+    /// The dispatch this release opened. The engine has always carried it on `Released`;
+    /// the runtime keeps it so a diagnostic can tie a hook to the dispatch it produced.
+    /// It never reaches an adapter: `HookDecision` is the wire type and carries no id.
+    pub dispatch: EngineDispatchId,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1243,7 +1247,7 @@ impl RuntimeEngine {
                     SanitizerSubject::Input { call: &call },
                 ) {
                     Ok(derived) => derived,
-                    Err(next) => return Ok(next),
+                    Err(next) => return Ok(*next),
                 };
                 // A rewrite into an Annotated declaration — its own or another — is
                 // annotated afresh about the rewritten arguments before the engine judges
@@ -1285,7 +1289,7 @@ impl RuntimeEngine {
                     source,
                     derived,
                 }),
-                Err(next) => return Ok(next),
+                Err(next) => return Ok(*next),
             },
             OfferConsult::Authorities { call, required } => {
                 match self.offer_authorities(&views, &engine_offer, &call, &required, evidence) {
@@ -1862,16 +1866,16 @@ impl RuntimeEngine {
         source: RawResultDigest,
         body: ValueBody,
         subject: SanitizerSubject<'_>,
-    ) -> Result<ValueBody, EngineDecision> {
+    ) -> Result<ValueBody, Box<EngineDecision>> {
         match sanitizer_derivation(evidence, sanitizer.as_str(), &source) {
             SanitizerAnswer::Derived(derived) => Ok(derived),
-            SanitizerAnswer::Missing => Err(EngineDecision::deliver(Next::ResolveExternal(vec![
+            SanitizerAnswer::Missing => Err(Box::new(EngineDecision::deliver(Next::ResolveExternal(vec![
                 self.sanitizer_request(sanitizer, source, body, subject),
-            ]))),
-            SanitizerAnswer::NoAnswer => Err(no_answer(format!(
+            ])))),
+            SanitizerAnswer::NoAnswer => Err(Box::new(no_answer(format!(
                 "[appa] sanitizer {} gave no answer; the offer stands and may be executed again",
                 sanitizer.as_str()
-            ))),
+            )))),
         }
     }
 
@@ -2466,6 +2470,7 @@ fn released(release: &Released) -> ReleasedCall {
         tool: release.call.tool().as_str().to_string(),
         bytes: release.call.canonical_arguments().canonical_bytes().to_vec(),
         fork: release.fork.as_ref().map(fork_binding),
+        dispatch: release.dispatch.clone(),
     }
 }
 

@@ -60,6 +60,10 @@ struct Vouch {
 pub(crate) enum ToolCallDecision {
     Allow {
         spawn: Option<SpawnBinding>,
+        /// The dispatch this release opened. Never reaches an adapter — `HookDecision` is
+        /// the wire type and carries no id — but the hook dispatcher needs it to tie a
+        /// recorded event to the fact the same call produced.
+        dispatch: appa_engine::value::DispatchId,
     },
     Deny {
         feedback: String,
@@ -422,6 +426,7 @@ impl Prepared {
                 executing: std::sync::Mutex::new(std::collections::BTreeSet::new()),
                 permits: std::sync::Mutex::new(std::collections::BTreeMap::new()),
                 prompted: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+                events: std::sync::Mutex::new(crate::events::EventLog::default()),
                 gates: self.gates,
                 named_spawns: std::sync::atomic::AtomicBool::new(false),
             }),
@@ -440,6 +445,9 @@ struct Inner {
     /// `Stop` hook for a turn the user interrupted, so the prompt is the only sign the
     /// previous turn is over; the next tool call or turn end settles what it left behind.
     prompted: std::sync::Mutex<std::collections::BTreeSet<String>>,
+    /// What this runtime did, as opposed to what the engine decided: bounded, in this
+    /// process, and gone on restart. A diagnostic only — see [`crate::events`].
+    events: std::sync::Mutex<crate::events::EventLog>,
     /// The gates every process-costing consult of this runtime passes; deployment reloads
     /// clone them, so old and new snapshots contend on the same permits.
     gates: ConsultGates,
@@ -453,6 +461,13 @@ pub(crate) fn acting_trajectory(actor: &Actor) -> &TrajectoryId {
 }
 
 impl Runtime {
+    /// Note one thing this runtime did. Infallible and best-effort by construction: a
+    /// diagnostic must never fail a decision the engine has already made, and the lock is
+    /// held only for the insert.
+    pub(crate) fn record(&self, root: Option<&TrajectoryId>, event: crate::events::RuntimeEvent) {
+        self.inner.record(root, event);
+    }
+
     /// Settle which contracts may release a spawn. Called once by the binary, for the
     /// adapter it serves, before the runtime is shared; the default is `Wildcard`.
     pub fn with_spawn_coverage(self, coverage: SpawnCoverage) -> Runtime {
@@ -471,6 +486,36 @@ impl Inner {
         } else {
             SpawnCoverage::Wildcard
         }
+    }
+
+    /// Note a failed store operation as a closed class.
+    ///
+    /// Takes the *typed* error, deliberately. Every one of these errors carries free text —
+    /// a root id, a path, a `rusqlite` message — and the call sites below convert them to
+    /// strings a line later. Classifying after that conversion would mean reading prose, so
+    /// the class is taken here, where the variant is still a variant.
+    fn note_store_error<'a>(
+        &self,
+        root: Option<&TrajectoryId>,
+        operation: crate::events::StoreOperation,
+        error: impl Into<appa_eventlog::StoreErrorClass> + 'a,
+    ) {
+        self.record(
+            root,
+            crate::events::RuntimeEvent::StoreError {
+                operation,
+                class: error.into(),
+            },
+        );
+    }
+
+    /// See [`Runtime::record`]. Lives here because a `Session` holds the `Inner`, not the
+    /// `Runtime`, and the consults worth timing happen inside a session.
+    pub(crate) fn record(&self, root: Option<&TrajectoryId>, event: crate::events::RuntimeEvent) {
+        self.events
+            .lock()
+            .expect("the event mutex is never poisoned: no panic runs while it is held")
+            .record(root, event);
     }
 
     fn deployment(&self) -> Arc<Deployment> {
@@ -541,6 +586,7 @@ impl Inner {
     pub(super) fn log(&self, root: &TrajectoryId) -> Result<Log, EventError> {
         self.store
             .log(&crate::engine::engine_id(root))
+            .inspect_err(|error| self.note_store_error(Some(root), crate::events::StoreOperation::Read, error))
             .map_err(|error| match error {
                 appa_eventlog::ReadError::UnknownRoot { .. } => EventError::UnknownTrajectory,
                 appa_eventlog::ReadError::Undecodable(detail) => EventError::UntrustedLog(detail),
@@ -627,6 +673,15 @@ impl Runtime {
             changed,
             "reloaded the serving deployment"
         );
+        // Deployment-wide: a reload belongs to no trajectory, and every trajectory alive
+        // across it needs to see that its policy moved under it.
+        self.record(
+            None,
+            crate::events::RuntimeEvent::Reload {
+                policy_key: key.clone(),
+                changed,
+            },
+        );
         Ok(Reloaded {
             policy_key: key,
             policy_identity: identity,
@@ -646,6 +701,10 @@ impl Runtime {
             .inner
             .store
             .create_root(opening, deployment.config.policy_file().bytes())
+            .inspect_err(|error| {
+                self.inner
+                    .note_store_error(Some(&id), crate::events::StoreOperation::Open, error)
+            })
             .map_err(|error| match error {
                 appa_eventlog::CreateError::AlreadyExists { .. } => EventError::TrajectoryExists,
                 error => EventError::Storage(error.to_string()),
@@ -661,6 +720,10 @@ impl Runtime {
             .inner
             .store
             .has_root(&crate::engine::engine_id(root))
+            .inspect_err(|error| {
+                self.inner
+                    .note_store_error(Some(root), crate::events::StoreOperation::Read, error)
+            })
             .map_err(|error| EventError::Storage(error.to_string()))?;
         if !known {
             return Err(EventError::UnknownTrajectory);

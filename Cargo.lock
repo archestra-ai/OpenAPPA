@@ -183,6 +183,7 @@ dependencies = [
  "appa-engine",
  "appa-policy",
  "rusqlite",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror",
