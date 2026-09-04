@@ -54,6 +54,13 @@ OpenAPPA lets an enterprise apply centralized security policies across its fleet
 
 ## Add an Integration
 
+OpenAPPA's integration surface centers on the [`POST /hook`](#endpoints) endpoint. The runtime handles five core lifecycle events for single-agent workflows, plus three optional events for child agents (subagents).
+
+Connecting an agent harness requires two steps:
+
+1. Configure your [agent harness](#connect-the-agent-hooks) to intercept execution at these lifecycle events.
+2. Implement or select an [Appa adapter](#implement-the-appa-adapter) that converts your harness's wire payloads into OpenAPPA events.
+
 > **Ask your coding agent**
 >
 > Copy this prompt into the coding agent that has access to your agent's source code:
@@ -73,12 +80,6 @@ OpenAPPA lets an enterprise apply centralized security policies across its fleet
 > checklist and the repository's available checks. Explain what you changed,
 > what you verified, and any required hook the harness cannot expose.
 > ```
-
-OpenAPPA's integration surface centers on the [`POST /hook`](#endpoints) endpoint. The runtime handles five core lifecycle events for single-agent workflows, plus three optional events for child agents (subagents).
-
-Connecting an agent harness requires two steps:
-1. Configure your [agent harness](#connect-the-agent-hooks) to intercept execution at these lifecycle events.
-2. Implement or select an [Appa adapter](#implement-the-appa-adapter) that converts your harness's wire payloads into OpenAPPA events.
 
 ### Lifecycle Events
 
