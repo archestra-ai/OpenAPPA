@@ -6,11 +6,11 @@
 //! *whether to send* lives in the CLI and the tool handler. Here the only questions are shape
 //! and size.
 //!
-//! Size is a two-sided bound. The receiver refuses a body over 32 MiB on the wire and over
-//! 256 MiB decoded, so this module refuses at 28 MiB and 224 MiB — the headroom covers the
-//! request the receiver measures, which is this body plus its headers. A report that does not
-//! fit is not truncated here: [`finalize`](Report::finalize) reports the measurement and the
-//! caller asks the runtime for a smaller export, which renumbers from its own start.
+//! Size is a two-sided bound. [`MAX_GZIPPED_BYTES`] and [`MAX_PLAIN_BYTES`] sit under the caps
+//! `receiver/appa-yell` enforces, by the width of a request's headers — which is what the
+//! receiver measures and this module does not. A report that does not fit is not truncated
+//! here: [`finalize`](Report::finalize) reports the measurement and the caller asks the runtime
+//! for a smaller export, which renumbers from its own start.
 
 use std::path::{Path, PathBuf};
 

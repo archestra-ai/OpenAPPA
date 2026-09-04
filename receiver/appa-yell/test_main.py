@@ -99,6 +99,34 @@ def test_a_document_that_expands_past_the_cap_is_refused_without_being_held(clie
     assert answer.status_code == 413
 
 
+def test_a_second_gzip_member_behind_the_document_is_refused(client):
+    """gzip concatenates. A member behind the first is never decompressed here, so
+    a body carrying one would be stored without having been checked, and what a
+    reader expands would not be what this endpoint validated or measured."""
+    plain = json.dumps(one_report()).encode()
+    body = gzip.compress(plain) + gzip.compress(b"\x00" * (main.MAX_PLAIN_BYTES + 1))
+    assert len(body) < main.MAX_COMPRESSED_BYTES, "the smuggled member has to fit under the wire cap"
+    answer = client.post(
+        "/",
+        data=body,
+        headers={
+            "Content-Encoding": "gzip",
+            "X-Appa-Signature": "v1=" + hmac.new(main.SALT, plain, hashlib.sha256).hexdigest(),
+        },
+    )
+    assert answer.status_code == 400
+
+
+def test_a_signed_document_cannot_raise_past_the_refusals(client):
+    """Anyone can sign, because the salt is public. So every shape reachable with a
+    valid signature has to land on a refusal rather than an unhandled exception."""
+    nested = b'{"a":' * 4000 + b"1" + b"}" * 4000
+    assert post(client, plain=nested).status_code == 400
+
+    surrogate = json.dumps(one_report(message="\ud800"), ensure_ascii=True).encode()
+    assert post(client, plain=surrogate).status_code == 400
+
+
 def test_the_decompression_cap_is_the_clients_own_limit():
     """The two have to agree. A document a runtime is willing to send and this
     endpoint is not willing to hold would fail every attempt, forever, and the
@@ -180,6 +208,11 @@ def test_the_signature_is_over_the_document_and_not_the_gzip():
 
 
 def test_the_salt_is_the_one_the_client_compiles_in():
-    shipped = (Path(__file__).parent / "salt.txt").read_text().strip().encode()
-    assert main.SALT == shipped
-    assert shipped
+    """Both sides read one file, so there is nothing to keep in sync — but only
+    while the client keeps reading *that* file. This checks it still does."""
+    assert main.SALT, "an empty salt would let every request through the filter"
+    client_source = (Path(__file__).parents[2] / "appa-runtime/src/yell/client.rs").read_text()
+    included = re.search(r'include_str!\("([^"]*salt\.txt)"\)', client_source)
+    assert included, "the client still compiles in a salt file"
+    compiled = (Path(__file__).parents[2] / "appa-runtime/src/yell" / included.group(1)).resolve()
+    assert compiled == (Path(__file__).parent / "salt.txt").resolve()

@@ -21,6 +21,7 @@ from typing import Any
 
 import functions_framework
 from google.api_core import exceptions as gcloud_exceptions
+from google.auth.exceptions import GoogleAuthError
 from google.cloud import storage
 
 logger = logging.getLogger(__name__)
@@ -100,6 +101,13 @@ def plain_body(request: Any) -> tuple[bytes, bytes]:
         raise Refusal(413, "the document is larger than this endpoint accepts")
     if not decompressor.eof:
         raise Refusal(400, "the gzip stream is truncated")
+
+    # The body has to be one member and nothing else. gzip concatenates: a second
+    # member behind the first decompresses to whatever it likes, is never read
+    # here, and would be stored anyway — so what is kept would not be what was
+    # checked, and the cap above would bound nothing a reader ever sees.
+    if decompressor.unused_data or decompressor.unconsumed_tail:
+        raise Refusal(400, "the body carries more than one gzip member")
     return plain, compressed
 
 
@@ -120,9 +128,12 @@ def validated(plain: bytes) -> dict[str, Any]:
     fields whenever the engine does; validating that here would refuse valid
     reports from a newer runtime, which is exactly the runtime worth hearing from.
     """
+    # RecursionError is not a ValueError: a few thousand nested arrays cost almost
+    # nothing to compress and would otherwise leave the parser to raise past every
+    # handler here. Anyone can sign a document, so anyone can send one.
     try:
         document = json.loads(plain)
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except (ValueError, RecursionError):
         raise Refusal(400, "the document is not JSON") from None
     if not isinstance(document, dict):
         raise Refusal(400, "the document is not an object")
@@ -141,7 +152,12 @@ def validated(plain: bytes) -> dict[str, Any]:
     message = document["message"]
     if not isinstance(message, str) or not message.strip():
         raise Refusal(400, "the message is empty")
-    if len(message.encode()) > MAX_MESSAGE_BYTES:
+    try:
+        # JSON admits a lone surrogate; UTF-8 does not. Nobody typed one.
+        length = len(message.encode())
+    except UnicodeError:
+        raise Refusal(400, "the message is not text") from None
+    if length > MAX_MESSAGE_BYTES:
         raise Refusal(413, "the message is longer than this endpoint accepts")
     if not isinstance(document["origin"], dict):
         raise Refusal(400, "the origin is not an object")
@@ -167,18 +183,25 @@ def store(plain: bytes, compressed: bytes) -> tuple[str, bool]:
     by whoever sent it, and naming objects by it would let one caller overwrite
     another's report.
     """
-    # The stored object is the body as it arrived: it decompresses to exactly the
-    # document that was validated, so recompressing it would spend a second pass
-    # over 32 MiB to arrive at the same content.
+    # The stored object is the body as it arrived, which `plain_body` has already
+    # established is one gzip member and decompresses to exactly this document.
+    # Recompressing it would spend a second pass over 32 MiB for the same content.
     digest = hashlib.sha256(plain).hexdigest()
-    blob = bucket().blob(f"reports/{digest}.json.gz")
     try:
+        # Resolved inside the guard: building the client authenticates, and an
+        # instance that cannot reach its credentials is a storage failure like
+        # any other rather than an unhandled exception on a public surface.
+        blob = bucket().blob(f"reports/{digest}.json.gz")
+        # Declared with the upload rather than patched onto it afterwards: a
+        # second call could fail against an object that is already stored, and
+        # this function would answer with a refusal for a report it had kept.
+        blob.content_encoding = "gzip"
         # Create-only. A report is immutable once stored, and a second write of
         # the same name is the duplicate this returns rather than an overwrite.
         blob.upload_from_string(compressed, content_type="application/json", if_generation_match=0)
     except gcloud_exceptions.PreconditionFailed:
         return digest, True
-    except gcloud_exceptions.GoogleAPIError:
+    except (gcloud_exceptions.GoogleAPIError, GoogleAuthError):
         logger.exception("the report could not be stored")
         raise Refusal(503, "the report could not be stored; try again") from None
     return digest, False

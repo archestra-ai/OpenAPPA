@@ -7,16 +7,18 @@ else.
 
 ## What it refuses
 
-In this order, before anything is stored:
+In this order, so a caller learns nothing about a document it did not sign:
 
-| Refusal | Why |
-| --- | --- |
-| `405` | the request is not a POST |
-| `415` | the body is not gzipped — refused before the body is read at all |
-| `413` | the compressed body, the document it expands to, the message, or the trajectory's entry count is over a cap |
-| `400` | the body is not a gzip stream, not JSON, or not an envelope this version knows |
-| `401` | the request carries no matching `X-Appa-Signature` |
-| `503` | storage refused the write; the same report may be sent again |
+| Stage | Refusal | Why |
+| --- | --- | --- |
+| method | `405` | the request is not a POST |
+| the body | `415` | it is not gzipped — refused before the body is read at all |
+| | `413` | the compressed body, or the document it expands to, is over a cap |
+| | `400` | it is not a gzip stream, is truncated, or carries a second gzip member behind the first |
+| the salt | `401` | there is no matching `X-Appa-Signature` |
+| the document | `400` | it is not JSON, or not an envelope this version knows |
+| | `413` | the message or the trajectory's entry count is over a cap |
+| storage | `503` | the write failed; the same report may be sent again |
 
 The signature is a filter, not an identity. The salt in `salt.txt` ships in
 this repository and is compiled into every build, so it turns away a scanner
