@@ -25,7 +25,10 @@ COPY appa-builtin appa-builtin
 COPY appa-eventlog appa-eventlog
 COPY bench bench
 COPY website-chat-playground website-chat-playground
-COPY integrations integrations
+# appa's build.rs stages these two plugin trees into the binary's build
+# identity. Kagent harness and chart changes must not invalidate this compile.
+COPY integrations/claude-code integrations/claude-code
+COPY integrations/appa-guide integrations/appa-guide
 COPY batteries batteries
 COPY website/content/docs/contracts.md website/content/docs/contracts.md
 RUN cargo build --release --locked --package appa
