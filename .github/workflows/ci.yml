@@ -547,8 +547,8 @@ jobs:
   # same-named twin would report skipped beside a real failure and
   # satisfy the requirement anyway, which is how a twin masks red e2e.
   #
-  # Informational: five A2A cases against a real model on a kind cluster.
-  # `continue-on-error` keeps a flaky model or a rate limit out of the gate.
+  # Five A2A cases against a real model on a kind cluster. Each test gets
+  # three total attempts; a test that exhausts them fails the gate.
   #
   # The steps below own the runner. The scripts under e2e/ci own the stack:
   #   kind-up.sh    loads the three `:ci` images into the cluster. It keeps
@@ -658,13 +658,11 @@ jobs:
 
       - name: Run the five A2A cases
         id: live-e2e
-        continue-on-error: true
         run: bash integrations/kagent/e2e/ci/run-subset.sh
 
-      # The informational live step may fail, so a diagnostic command must not
-      # replace its outcome.
+      # A diagnostic command must not replace the live test failure.
       - name: Collect cluster diagnostics
-        if: steps.live-e2e.outcome == 'failure'
+        if: failure()
         env:
           DIAGNOSTICS_DIR: ${{ runner.temp }}/kagent-e2e-diagnostics
         run: |
@@ -678,7 +676,7 @@ jobs:
           df -h /
 
       - name: Upload the cluster diagnostics
-        if: steps.live-e2e.outcome == 'failure'
+        if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: kagent-e2e-subset-diagnostics

@@ -73,19 +73,18 @@ started=$(date +%s)
 status=0
 (
   cd "$a2a"
-  # pytest-rerunfailures serves the three steer-dependent cases, which
-  # carry `@pytest.mark.flaky(reruns=1)` themselves. No blanket
-  # `--reruns`: the other cases must fail on their first failure.
+  # Every selected case gets three total attempts. Per-test flaky markers
+  # use the same floor for the full matrix outside this subset.
   APPA_A2A_E2E=1 APPA_A2A_URL="$agent_url" APPA_MOCK_URL="$mock_url" \
     uv run --with "pytest>=8" --with pytest-rerunfailures \
-    pytest -v -rA --durations=0 -k "$cases" .
+    pytest -v -rA --durations=0 --reruns 2 -k "$cases" .
 ) 2>&1 | tee "$log" || status=$?
 seconds=$(( $(date +%s) - started ))
 echo "== pytest exited $status after ${seconds}s"
 
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
   {
-    echo "### kagent live subset (informational)"
+    echo "### kagent live subset"
     echo
     echo "| Field | Value |"
     echo "|---|---|"
