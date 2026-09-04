@@ -27,9 +27,15 @@ use crate::runtime_cli::Adapter;
 pub(crate) const SCHEMA: &str = "openappa.yell.v1";
 
 /// The largest body this client puts on the wire, gzipped, and the largest document behind it.
-/// Both sit under the receiver's own limits by the width of a request's headers.
+///
+/// Both sit under `receiver/appa-yell`'s own caps by the width of a request's headers, and the
+/// plain cap is the one that has to agree: a receiver decompresses before it can validate, so
+/// a document this client is willing to send and that receiver is not willing to hold would
+/// fail every attempt forever. The facts alone are bounded well below it
+/// ([`super::diagnostic::MAX_FACT_BYTES`]), and a trajectory large enough to pass it is
+/// rebuilt smaller by the size loop rather than refused.
 pub(crate) const MAX_GZIPPED_BYTES: usize = 28 * 1024 * 1024;
-pub(crate) const MAX_PLAIN_BYTES: usize = 224 * 1024 * 1024;
+pub(crate) const MAX_PLAIN_BYTES: usize = 32 * 1024 * 1024;
 
 /// The longest message a person or an agent can send. Longer is a paste of something else.
 pub(crate) const MAX_MESSAGE_BYTES: usize = 64 * 1024;

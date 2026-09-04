@@ -39,6 +39,7 @@ jobs:
       installer: ${{ steps.filter.outputs.installer }}
       corp: ${{ steps.filter.outputs.corp }}
       agentthreatbench: ${{ steps.filter.outputs.agentthreatbench }}
+      receiver: ${{ steps.filter.outputs.receiver }}
     steps:
       # A pull request reads its file list from the API and needs no
       # checkout. Every other event diffs with git and needs the history.
@@ -60,6 +61,12 @@ jobs:
               - 'integrations/kagent/appa-kagent-adk/**'
               - 'integrations/kagent/tests/**'
               - 'integrations/kagent/fixtures/**'
+              - '.github/workflows/ci.yml'
+            receiver:
+              - 'receiver/**'
+              # The receiver's decompression cap has to agree with the
+              # client's; a change to either one re-checks both.
+              - 'appa-runtime/src/yell/report.rs'
               - '.github/workflows/ci.yml'
             go:
               - 'integrations/kagent/appa-kagent-adk-go/**'
@@ -573,6 +580,32 @@ jobs:
 
       - name: AgentThreatBench tests
         run: uv run --project bench/agentthreatbench pytest bench/agentthreatbench/tests
+
+  receiver-checks:
+    name: Yell Receiver Checks
+    needs: changes
+    if: needs.changes.outputs.receiver == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+
+      - name: appa-yell lint
+        run: |
+          uv run --project receiver/appa-yell ruff check receiver/appa-yell
+          uv run --project receiver/appa-yell ruff format --check receiver/appa-yell
+
+      - name: appa-yell tests
+        run: uv run --project receiver/appa-yell pytest receiver/appa-yell
 
   kagent-python-checks:
     name: kagent Python Checks

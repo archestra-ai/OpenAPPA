@@ -1,0 +1,65 @@
+name: Deploy appa-yell
+
+# The receiver behind `appa yell`. Its tests and lint run in ci.yml; this
+# workflow only deploys, on a manual dispatch from main, like appa-demo's.
+#
+# This workflow owns the function's *code* and nothing else. Scaling, ingress,
+# IAM, the runtime service account, the bucket and its retention belong to the
+# Terraform root in the infra repository, which is applied separately. That is
+# why the deploy below passes no such flag: `gcloud functions deploy` leaves
+# every setting it is not given alone, so CI cannot roll infrastructure back.
+#
+# Required repository secrets: APPA_YELL_GCP_SERVICE_ACCOUNT,
+# APPA_YELL_GCP_WORKLOAD_IDENTITY_PROVIDER (a deploy identity of its own, not
+# appa-demo's). Required repository variable: APPA_YELL_ENDPOINT.
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+env:
+  FUNCTION: appa-yell
+  REGION: europe-west1
+
+jobs:
+  deploy:
+    name: Deploy and smoke test
+    if: github.ref == 'refs/heads/main' # a dispatch on any other ref deploys nothing
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: appa-yell-deploy
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write # Required for Workload Identity Federation.
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          service_account: ${{ secrets.APPA_YELL_GCP_SERVICE_ACCOUNT }}
+          workload_identity_provider: ${{ secrets.APPA_YELL_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+
+      - name: Set up Google Cloud
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      - name: Deploy the function source
+        run: |
+          gcloud functions deploy "$FUNCTION" \
+            --gen2 \
+            --region "$REGION" \
+            --source receiver/appa-yell \
+            --runtime python312 \
+            --entry-point receive
+
+      - name: Smoke test the deployed endpoint
+        env:
+          APPA_YELL_ENDPOINT: ${{ vars.APPA_YELL_ENDPOINT }}
+        run: python3 receiver/appa-yell/smoke.py
