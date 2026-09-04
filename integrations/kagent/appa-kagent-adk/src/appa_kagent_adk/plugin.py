@@ -49,7 +49,10 @@ a remedy releases — and the model dispatches the raw ADK name, so every
 runtime string the plugin hands the model is spelled back through the
 inventory first (``_for_model``). The bytes a child's return crossed
 with are the exception: they reach the parent as the runtime crossed
-them.
+them. A ``replace_output`` carries either kind — the admitted value of
+a confined or sanitized result, or the runtime's staged-narrowing text
+naming the control tool — and the wire tells them apart nowhere, so it
+is spelled back with the rest.
 
 The plugin also declares the return of a spawn itself. A ``deny_call``
 that offers a return route never reaches the model: the plugin takes
@@ -529,10 +532,16 @@ class AppaPluginKagent(BasePlugin):
             raise AppaFailClosed(f"the tool {tool.name} is outside the gated inventory, and its result cannot cross")
         root_id, child_id = self._ids(tool_context)
         arguments = _plain_json(tool_args)
-        # A result of None with no failure is a deferred or long-running
-        # call. Nothing entered attention, and the dispatch is genuinely
-        # unresolved here.
-        outcome = wire.indeterminate() if result is None else wire.success(_plain_json(result))
+        # ADK hands this callback the tool's own return value unchanged,
+        # and skips the response event only afterwards, only where the
+        # tool is long running and returned nothing. So a None from a
+        # long-running tool or a spawn is a call that delivers later, and
+        # the dispatch stays unresolved; every other None is a call that
+        # completed, and the null it returned is the body ADK gives the
+        # model as {"result": null} — a success without a body would say
+        # instead that the result was not carried, which it was.
+        deferred = tool.is_long_running or is_spawn(spelled)
+        outcome = wire.indeterminate() if result is None and deferred else wire.success(_plain_json(result))
         if is_spawn(spelled):
             spawned_id, value = _spawn_return(result)
             decision = await self._post(
@@ -553,6 +562,11 @@ class AppaPluginKagent(BasePlugin):
         if decision.kind == "ack":
             return self._remedy_rendering(tool, result)
         if decision.kind == "replace_output":
+            # One kind, two contents: the admitted value of a confined or
+            # sanitized result, and the runtime's own staged-narrowing
+            # text, which names the control tool by a spelling ADK cannot
+            # dispatch. Nothing on the wire tells them apart, so both are
+            # spelled back.
             return {"result": self._for_model(decision.output)}
         if decision.kind == "block":
             return _withheld(self._for_model(decision.reason))

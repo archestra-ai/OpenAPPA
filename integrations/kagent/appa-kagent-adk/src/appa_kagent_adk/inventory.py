@@ -23,10 +23,13 @@ so every spelling the wire carries names one tool the model can call.
   server decides the tool list at runtime, and the gate cannot name
   what it did not see. The toolset is the first DNS label of the server
   host in ``params.url``, the name the RemoteMCPServer resource carries
-  in the cluster. The builder refuses an endpoint the cluster does not
-  serve — the accepted hosts are the Kubernetes service forms of that
-  same name and loopback — so a foreign authority cannot claim the
-  policy identity of a trusted toolset.
+  in the cluster. The builder refuses an endpoint outside the accepted
+  hosts — the Kubernetes service forms of that same name, and loopback
+  — so the address is a cluster service form and not an arbitrary host.
+  It establishes no more than that: the toolset is the first label
+  alone, so a service of the same name in another namespace spells the
+  same identity, and an ``ExternalName`` Service resolves an accepted
+  address to a name outside the cluster.
 - kagent renders a remote agent's tool name as
   ``<namespace>__NS__<agent>`` with hyphens as underscores. Both halves
   are DNS-1123 labels, which carry no underscore, so the real names
@@ -307,12 +310,15 @@ def _toolset_of(host: str) -> str | None:
 
 
 def _in_cluster(host: str) -> bool:
-    """Whether ``host`` is an in-cluster address of the service its first label names.
+    """Whether ``host`` is a Kubernetes service form of the service its first label names.
 
-    The Kubernetes service forms all resolve to the Service the first
-    label names, so the toolset name and the endpoint the arguments
-    reach are the same authority. Every other host is a foreign
-    authority claiming that name. ``<service>.<namespace>`` is one form
+    The accepted forms are cluster service addresses that resolve
+    through cluster DNS, and every other host is refused, so the
+    endpoint an MCP entry names is a service of the cluster rather than
+    an arbitrary host. It pins no single Service: the toolset is the
+    first label alone, so the same name in another namespace passes,
+    and an ``ExternalName`` Service resolves an accepted address to a
+    name outside the cluster. ``<service>.<namespace>`` is one form
     short of a public domain name, and no rule tells the two apart, so
     the qualified form must carry ``svc``.
     """

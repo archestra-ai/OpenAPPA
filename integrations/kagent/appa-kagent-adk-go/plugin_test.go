@@ -343,6 +343,13 @@ func (t *fakeTool) Name() string        { return t.name }
 func (t *fakeTool) Description() string { return "" }
 func (t *fakeTool) IsLongRunning() bool { return false }
 
+// longRunningTool returns a resource id first and finishes the
+// operation later, the tool kind the ADK builds no response event for
+// while it answers with nothing.
+type longRunningTool struct{ fakeTool }
+
+func (t *longRunningTool) IsLongRunning() bool { return true }
+
 func textContent(texts ...string) *genai.Content {
 	content := &genai.Content{}
 	for _, text := range texts {
@@ -993,16 +1000,60 @@ func TestTheErrorPathDoesNotDoubleReportAtTheAfterToolPoint(t *testing.T) {
 }
 
 func TestADeferredResultCrossesAsIndeterminate(t *testing.T) {
+	// A long-running tool and a spawn both deliver later, so the nil
+	// result each hands this point leaves its dispatch open.
+	for _, deferred := range []tool.Tool{
+		&longRunningTool{fakeTool{"ask_user"}},
+		&fakeTool{"kagent__NS__billing_agent"},
+	} {
+		h := newHook(t, ack)
+		p := pluginOver(t, h)
+		if _, err := p.afterTool(
+			newFakeContext(newFakeSession("s1")), deferred,
+			map[string]any{}, nil, nil); err != nil {
+			t.Fatalf("a deferred result must cross: %v", err)
+		}
+		wantOutcome := map[string]any{"status": "indeterminate"}
+		if got := h.recorded()[0]["outcome"]; !reflect.DeepEqual(got, wantOutcome) {
+			t.Errorf("%s: a nil result that delivers later is an unresolved dispatch: got %v", deferred.Name(), got)
+		}
+	}
+}
+
+func TestACompletedVoidResultCrossesAsTheNullBodyTheModelReads(t *testing.T) {
+	// The ADK hands this point the tool's own result and skips the
+	// response event only afterwards, only for a call that has not
+	// finished. A tool that is not long running has completed here, and
+	// its dispatch closes on the null it returned.
 	h := newHook(t, ack)
 	p := pluginOver(t, h)
 	if _, err := p.afterTool(
-		newFakeContext(newFakeSession("s1")), &fakeTool{"ask_user"},
-		map[string]any{}, nil, nil); err != nil {
-		t.Fatalf("a deferred result must cross: %v", err)
+		newFakeContext(newFakeSession("s1")), &fakeTool{"k8s_annotate"},
+		map[string]any{"note": "seen"}, nil, nil); err != nil {
+		t.Fatalf("a completed void result must cross: %v", err)
 	}
-	wantOutcome := map[string]any{"status": "indeterminate"}
+	wantOutcome := map[string]any{"status": "success", "body": nil}
 	if got := h.recorded()[0]["outcome"]; !reflect.DeepEqual(got, wantOutcome) {
-		t.Errorf("a nil result with no error is an unresolved dispatch: got %v", got)
+		t.Errorf("a completed call closes its dispatch: got %v", got)
+	}
+}
+
+func TestAReplacedOutputReachesTheModelInNamesItCanDispatch(t *testing.T) {
+	// replace_output carries the runtime's own staged-narrowing text as
+	// well as an admitted value, and that text names tools by the
+	// spelling the wire carries. The model dispatches the ADK name.
+	spelled := `take mcp:demo-tools/read_ledger through appa:execute_remedy_plan(offer_id: "o1")`
+	h := newHook(t, map[string]any{"protocol": 1, "decision": "replace_output", "output": spelled})
+	p := pluginOver(t, h)
+	returned, err := p.afterTool(
+		newFakeContext(newFakeSession("s1")), &fakeTool{"k8s_get_pods"},
+		map[string]any{}, map[string]any{"pods": []any{}}, nil)
+	if err != nil {
+		t.Fatalf("the replaced output must substitute, not fail: %v", err)
+	}
+	want := map[string]any{"result": `take read_ledger through execute_remedy_plan(offer_id: "o1")`}
+	if !reflect.DeepEqual(returned, want) {
+		t.Errorf("the replaced output must reach the model in dispatchable names, got %v", returned)
 	}
 }
 

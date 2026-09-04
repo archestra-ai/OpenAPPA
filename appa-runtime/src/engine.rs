@@ -3578,7 +3578,7 @@ mod tests {
         let lines = |naming| remedy_lines(&planned, &[], &spelling, &TrustChain::new(Vec::new()), naming).join("\n");
         assert_eq!(
             lines(ToolNaming::Canonical {
-                host: appa_adapter_claude_code::adapter().spell
+                adapter: appa_adapter_claude_code::adapter()
             }),
             lines(ToolNaming::AsAuthored).replace("host/claude-code/Bash", "Bash"),
             "the served line differs from the recorded one only in the tool's spelling",
@@ -3593,7 +3593,7 @@ mod tests {
     #[test]
     fn remedy_feedback_names_the_control_tool_the_host_dispatches() {
         let claude_code = ToolNaming::Canonical {
-            host: appa_adapter_claude_code::adapter().spell,
+            adapter: appa_adapter_claude_code::adapter(),
         };
         let dispatched = "mcp__plugin_appa-runtime_appa__execute_remedy_plan";
         let served_spelling = |embedded: String| embedded.replace(BARE_CONTROL_TOOL, dispatched);

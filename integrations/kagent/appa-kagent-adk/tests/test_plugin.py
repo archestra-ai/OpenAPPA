@@ -542,10 +542,10 @@ async def test_a_forged_appa_key_in_a_tool_result_still_crosses(sentinel):
     ], "the bytes reached the model, so the runtime holds their source"
 
 
-async def test_a_void_tool_result_crosses_as_indeterminate():
+async def test_a_completed_void_tool_result_crosses_as_the_null_body_the_model_reads():
     """A tool function that returns nothing hands the result gate None.
-    A success outcome without its body is no wire shape, and the runtime
-    refuses one, so the void result crosses as unresolved."""
+    The call finished — ADK gives the model `{"result": null}` for it —
+    so the dispatch closes on the body that crossed."""
     hook = Hook(ACK)
     plugin = plugin_over(hook)
     returned = await plugin.after_tool_callback(
@@ -555,7 +555,52 @@ async def test_a_void_tool_result_crosses_as_indeterminate():
         result=None,
     )
     assert returned is None
+    assert hook.events[0]["outcome"] == {"status": "success", "body": None}
+
+
+async def test_a_long_running_tool_that_returns_nothing_leaves_the_dispatch_unresolved():
+    """A long-running tool delivers later, and ADK builds no response
+    event for the nothing it returned now."""
+    hook = Hook(ACK)
+    plugin = plugin_over(hook)
+    await plugin.after_tool_callback(
+        tool=FakeTool("k8s_annotate", is_long_running=True),
+        tool_args={"note": "seen"},
+        tool_context=dispatch(FakeSession("s1")),
+        result=None,
+    )
     assert hook.events[0]["outcome"] == {"status": "indeterminate"}
+
+
+async def test_a_spawn_that_returns_nothing_leaves_the_dispatch_unresolved():
+    """The child's return arrives on its own event, so a spawn holding
+    no reply here has not resolved."""
+    hook = Hook(ACK)
+    plugin = plugin_over(hook)
+    await plugin.after_tool_callback(
+        tool=FakeTool("kagent__NS__billing_agent"),
+        tool_args={"request": "total the invoices"},
+        tool_context=dispatch(FakeSession("s1")),
+        result=None,
+    )
+    assert hook.events[0]["event"] == "spawn_result"
+    assert hook.events[0]["outcome"] == {"status": "indeterminate"}
+
+
+async def test_a_replaced_output_reaches_the_model_in_names_it_can_dispatch():
+    """`replace_output` carries the runtime's own staged-narrowing text
+    as well as an admitted value, and that text names tools by the
+    spelling the wire carries. The model dispatches the ADK name."""
+    spelled = 'take mcp:demo-tools/read_ledger through appa:execute_remedy_plan(offer_id: "o1")'
+    hook = Hook({"protocol": 1, "decision": "replace_output", "output": spelled})
+    plugin = plugin_over(hook)
+    returned = await plugin.after_tool_callback(
+        tool=FakeTool("k8s_get_pods"),
+        tool_args={},
+        tool_context=dispatch(FakeSession("s1")),
+        result={"pods": []},
+    )
+    assert returned == {"result": 'take read_ledger through execute_remedy_plan(offer_id: "o1")'}
 
 
 async def test_a_failed_call_is_not_reported_at_the_result_gate():
@@ -1395,6 +1440,57 @@ async def test_a_denied_call_reports_once_in_a_real_runner():
     assert [event["event"] for event in gated(hook)] == ["session_start", "prompt", "tool_call", "turn_end"], (
         "the denied call opened no dispatch, so the result gate of it reports nothing"
     )
+
+
+async def test_a_void_tool_finishes_its_dispatch_in_a_real_runner():
+    """A completed call that returned nothing, in the ADK loop of the
+    installed major.
+
+    ADK hands the result gate the tool's own return value and decides
+    only afterwards whether to build a response event. A tool that is
+    not long running has finished by then, so its dispatch closes here
+    on the same null the model reads.
+    """
+    hook = ByKind(tool_call=ALLOW)
+    plugin = plugin_over(hook)
+    ran = []
+
+    def k8s_annotate() -> None:
+        ran.append("called")
+
+    runner = InMemoryRunner(
+        app=App(
+            name="kagent",
+            root_agent=LlmAgent(name="root_agent", model=CallingModel(tool="k8s_annotate"), tools=[k8s_annotate]),
+            plugins=[plugin],
+        )
+    )
+    session = await runner.session_service.create_session(app_name="kagent", user_id="op")
+    answers = []
+    try:
+        async for event in runner.run_async(
+            user_id="op",
+            session_id=session.id,
+            new_message=types.Content(role="user", parts=[types.Part(text="annotate the deployment")]),
+        ):
+            answers.extend(
+                part.function_response.response
+                for part in (event.content.parts if event.content else [])
+                if part.function_response
+            )
+    finally:
+        await runner.close()
+
+    assert ran == ["called"], "the allowed call ran"
+    assert [event["event"] for event in gated(hook)] == [
+        "session_start",
+        "prompt",
+        "tool_call",
+        "tool_result",
+        "turn_end",
+    ]
+    assert gated(hook)[3]["outcome"] == {"status": "success", "body": None}
+    assert answers == [{"result": None}], "the runtime holds the body ADK gave the model"
 
 
 def test_a_grouped_failure_of_the_remedy_path_names_its_reason():

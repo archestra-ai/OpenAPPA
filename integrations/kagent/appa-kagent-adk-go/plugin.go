@@ -59,7 +59,10 @@
 // so every runtime string the plugin hands the model is spelled back
 // through the inventory first (forModel). The bytes a child's return
 // crossed with are the exception: they reach the parent as the runtime
-// crossed them.
+// crossed them. A replace_output carries either kind — the admitted
+// value of a confined or sanitized result, or the runtime's
+// staged-narrowing text naming the control tool — and the wire tells
+// them apart nowhere, so it is spelled back with the rest.
 package appakagentadk
 
 import (
@@ -1147,12 +1150,16 @@ func (p *AppaPluginKagent) afterTool(ctx agent.Context, t tool.Tool, args, resul
 		return nil, failClosed("the tool %s is outside the gated inventory, and its result cannot cross", t.Name())
 	}
 	arguments := plainJSON(orEmpty(args))
-	// A nil result with no error is a deferred or long-running tool:
-	// nothing has entered attention, and the dispatch is genuinely
-	// unresolved at this point.
-	outcome := indeterminateOutcome()
-	if result != nil {
-		outcome = successOutcome(plainJSON(result))
+	// A nil result is the tool's own return of nothing, which the ADK
+	// hands this point before it decides whether the call has finished.
+	// A long-running tool and a spawn both deliver later, so the nil
+	// each hands here leaves its dispatch unresolved; every other nil
+	// is a completed call, and the null it returned is the body the
+	// model reads — a success without a body would say instead that the
+	// result was not carried, which it was.
+	outcome := successOutcome(plainJSON(result))
+	if result == nil && (t.IsLongRunning() || IsSpawn(spelled)) {
+		outcome = indeterminateOutcome()
 	}
 	if IsSpawn(spelled) {
 		spawnedID, value := spawnReturn(result)
@@ -1183,6 +1190,11 @@ func (p *AppaPluginKagent) afterTool(ctx agent.Context, t tool.Tool, args, resul
 	case "ack":
 		return p.remedyRendering(t, result), nil
 	case "replace_output":
+		// One kind, two contents: the admitted value of a confined or
+		// sanitized result, and the runtime's own staged-narrowing text,
+		// which names the control tool by a spelling the ADK cannot
+		// dispatch. Nothing on the wire tells them apart, so both are
+		// spelled back.
 		return map[string]any{"result": p.forModel(decision.Output)}, nil
 	case "block":
 		return withheldResult(p.forModel(decision.Reason)), nil

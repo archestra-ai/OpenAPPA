@@ -536,11 +536,11 @@ On the go cells the stock executor does not land the lineage headers in session 
 - A successful child reply arrives as `{"result": ...}` for Task replies and as a bare string for direct Message replies. The python plugin reads both shapes. The Go plugin reads the result map, because `functiontool` in adk-go normalizes both replies into it.
 - Parent and child run as separate workloads (Deployments on lane A/B1, Substrate Actors on B2). So the hooks of one trajectory come from two plugin instances. Both must reach the same `appa-runtime`. A per-pod runtime never sees the spawn of the parent, so it refuses the `child_start` of the child (`SpawnNotTaken`), and the delegation fails closed.
 
-Delegation needs a name. The runtime serves kagent under `SpawnCoverage::Declared` (`appa-runtime/src/api/mod.rs`, the binary picks it per adapter). A spawn releases only under a contract written for the canonical id of the agent, `agent/<namespace>/<agent>`. The wildcard, which covers every ordinary call the policy does not write, covers no spawn.
+Delegation needs a name. The runtime serves kagent under `SpawnCoverage::Declared` (`appa-runtime/src/api/mod.rs`, derived from the adapter a served deployment is opened with, so no caller can set it apart from the adapter). A spawn releases only under a contract written for the canonical id of the agent, `agent/<namespace>/<agent>`. The wildcard, which covers every ordinary call the policy does not write, covers no spawn.
 
 The runtime denies an unnamed agent before the engine sees the call, and no child ever opens. The model reads `EventError::UndeclaredSpawn` as its feedback. An ordinary call to a tool nothing covers keeps its operational refusal. Only the spawn gets a policy denial the model reads, because the model can act on it by not delegating.
 
-Claude Code keeps `SpawnCoverage::Wildcard`. The packaged quickstart policy names no agent, so the runtime denies every delegation there. A policy that names an agent releases that spawn. The demo policy names the log analysts and deliberately not the release managers. The blocked case in both matrices proves the denial on both cells, and `appa-runtime/tests/kagent_spawns.rs` proves the rule against a wildcard policy.
+Claude Code keeps `SpawnCoverage::Wildcard`. The packaged quickstart policy names no agent, so the runtime denies every delegation there. A policy that names an agent releases that spawn. The demo policy names the log analysts and deliberately not the release managers. The blocked case in both matrices proves the denial on both cells, and `api::spawn_coverage_tests` in `appa-runtime/src/api/mod.rs` proves the rule against a wildcard policy on both adapters.
 
 ## Known gaps and handling
 

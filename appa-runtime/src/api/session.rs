@@ -263,7 +263,10 @@ impl Session {
         if let Some(open) = self.substituted_release(&call)? {
             return self.claim_or_abandon(call, open).await;
         }
-        if spawn && self.inner.spawn_coverage() == super::SpawnCoverage::Declared && !self.names_tool(&call.tool)? {
+        if spawn
+            && self.inner.naming.spawn_coverage() == super::SpawnCoverage::Declared
+            && !self.names_tool(&call.tool)?
+        {
             tracing::debug!(trajectory = %self.trajectory.0, tool = %call.tool, "spawn denied: the policy names no such agent");
             return Err(EventError::UndeclaredSpawn {
                 tool: call.tool.clone(),

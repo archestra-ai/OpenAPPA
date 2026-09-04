@@ -49,10 +49,13 @@ pub struct Derived {
     pub spawn: bool,
 }
 
-/// The server-side derivation for one call: total over the adapter's raw
-/// domain, a refusal outside it. A plain `fn` pointer — no state, no
-/// runtime access — for the same reason [`Codec`](crate::Codec) is.
-pub type DeriveFn = fn(&Actor, &ProposedCall) -> Result<Derived, ParseRefusal>;
+/// The server-side derivation for one raw tool spelling: total over the
+/// adapter's raw domain, a refusal outside it. The spelling is all it
+/// reads — who calls and with which arguments decides no identity, and
+/// the one argument-dependent question an adapter answers is
+/// [`NamesChildrenFn`]. A plain `fn` pointer — no state, no runtime
+/// access — for the same reason [`Codec`](crate::Codec) is.
+pub type DeriveFn = fn(&str) -> Result<Derived, ParseRefusal>;
 
 /// The family children one call's arguments name by the host's own
 /// on-disk spellings of a child's transcript or output file. A
@@ -522,9 +525,9 @@ impl WireEvent {
         // with that derivation's spawn answer. An outcome needs nothing
         // else the adapter derives: it names no child, so it never pays
         // the scan over its arguments.
-        let derived_call = |actor: &Actor| -> Result<(ProposedCall, bool), ParseRefusal> {
+        let derived_call = || -> Result<(ProposedCall, bool), ParseRefusal> {
             let raw = raw_call()?;
-            let derived = (served.derive)(actor, &raw)?;
+            let derived = (served.derive)(&raw.tool)?;
             Ok((
                 ProposedCall {
                     tool: derived.canonical.into_string(),
@@ -558,7 +561,7 @@ impl WireEvent {
             EventName::ToolCall => {
                 let actor = actor()?;
                 let raw = raw_call()?;
-                let derived = (served.derive)(&actor, &raw)?;
+                let derived = (served.derive)(&raw.tool)?;
                 // A ruling answers the review of the offer a control
                 // call quotes, and only the control call spends one.
                 // On any other call the runtime would judge the flow
@@ -597,7 +600,7 @@ impl WireEvent {
             // where the derivation gives no spawn to spend them on.
             EventName::ToolResult | EventName::SpawnResult => {
                 let actor = actor()?;
-                let (call, spawn) = derived_call(&actor)?;
+                let (call, spawn) = derived_call()?;
                 let outcome = outcome()?;
                 let child = self
                     .spawned_id
@@ -897,18 +900,18 @@ mod tests {
     /// as every real adapter gives it one.
     const CONTROL_RAW: &str = "execute_remedy_plan";
 
-    fn derive(_: &Actor, call: &ProposedCall) -> Result<Derived, ParseRefusal> {
-        if call.tool == CONTROL_RAW {
+    fn derive(raw: &str) -> Result<Derived, ParseRefusal> {
+        if raw == CONTROL_RAW {
             return Ok(Derived {
                 canonical: CanonicalTool::control(),
                 spawn: false,
             });
         }
         let canonical =
-            CanonicalTool::parse(&format!("host/test/{}", call.tool)).map_err(|error| malformed(error.to_string()))?;
+            CanonicalTool::parse(&format!("host/test/{raw}")).map_err(|error| malformed(error.to_string()))?;
         Ok(Derived {
             canonical,
-            spawn: matches!(call.tool.as_str(), "spawn" | "Agent"),
+            spawn: matches!(raw, "spawn" | "Agent"),
         })
     }
 

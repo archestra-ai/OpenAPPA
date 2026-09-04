@@ -11,7 +11,7 @@ mod common;
 
 use common::offers;
 
-use appa_runtime::api::{AuditEvent, OfferId, RemedyOutcome, Runtime, SpawnCoverage, TrajectoryId};
+use appa_runtime::api::{AuditEvent, OfferId, RemedyOutcome, Runtime, TrajectoryId};
 use appa_runtime::config::Config;
 use appa_runtime::hooks;
 use appa_runtime_api::Actor;
@@ -88,9 +88,7 @@ fn open(dir: &tempfile::TempDir) -> Runtime {
     let path = dir.path().join("appa.toml");
     std::fs::write(&path, POLICY).expect("the fixture writes");
     let config = Config::load(&path).expect("the fixture validates");
-    let runtime = Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens");
-    // The kagent runtime covers a spawn only where the policy names the agent.
-    runtime.with_spawn_coverage(SpawnCoverage::Declared)
+    Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens")
 }
 
 /// The wire envelope every kagent event travels in.

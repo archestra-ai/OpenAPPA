@@ -80,8 +80,7 @@ fn spell(canonical: &CanonicalTool) -> Option<String> {
 
 /// The crate-level mapping table. `CanonicalTool::of` refuses an empty segment, a
 /// character outside the grammar, and a namespace containing `__`.
-fn derive(_: &Actor, call: &ProposedCall) -> Result<Derived, ParseRefusal> {
-    let raw = call.tool.as_str();
+fn derive(raw: &str) -> Result<Derived, ParseRefusal> {
     let refused = |detail: String| ParseRefusal::Malformed {
         detail: format!("tool {raw:?} is outside the kagent adapter's domain: {detail}"),
     };
@@ -134,8 +133,7 @@ mod tests {
     }
 
     fn derived(tool: &str) -> Result<Derived, ParseRefusal> {
-        let (actor, call) = proposed(tool);
-        (adapter().derive)(&actor, &call)
+        (adapter().derive)(tool)
     }
 
     /// A kagent child is bound at `child_start`, never named by a call's arguments, so a

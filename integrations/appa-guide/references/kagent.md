@@ -86,7 +86,10 @@ A rule names a tool by its canonical tool id:
   service forms of the same name (`<service>`,
   `<service>.<namespace>.svc`,
   `<service>.<namespace>.svc.cluster.local`) or at loopback, so the
-  contract names one endpoint.
+  endpoint is a cluster service address and not an arbitrary host. The
+  name is that first label alone: a service of the same name in another
+  namespace, or an `ExternalName` Service pointing outside the cluster,
+  carries the same contract.
 - An agent called as a tool: `agent/<namespace>/<name>`. The wildcard
   covers no spawn: a delegation needs a contract that names the agent,
   or it stays blocked.

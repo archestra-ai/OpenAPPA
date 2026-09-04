@@ -48,7 +48,7 @@
 //! | `SessionStart` | `SessionStart` |
 //! | `UserPromptSubmit` | `Prompt` |
 //! | `PreToolUse` | `ToolCall`; the `Agent` (`Task`) tool is the spawn |
-//! | `PostToolUse` for `Agent` (`Task`) | `SpawnResult` when the response names the subagent (`agentId`) or carries its message (`content`); `ToolResult` otherwise |
+//! | `PostToolUse` for `Agent` (`Task`) | `SpawnResult`, naming the subagent (`agentId`) and carrying its message (`content`) where the response has them |
 //! | `PostToolUse`, `PostToolUseFailure` | `ToolResult` (the Q14 outcome mapping) |
 //! | `SubagentStart` | `ChildStart`, naming the family's spawn in flight |
 //! | `SubagentStop` | `ChildEnd` carrying `last_assistant_message` as the return; `TurnEnd` for a helper with an empty `agent_type` |
@@ -80,7 +80,12 @@
 //! delivers the child's message in `content` after the child's stop, and
 //! the same `SpawnResult` replays the crossing the stop decided; a
 //! message the runtime never checked at a stop is withheld from the
-//! parent. Claude Code's own helper agents stop with an empty
+//! parent. Every post-use hook of the spawn's tool is that spawn's
+//! result, whatever its response carries: which lifecycle a result runs
+//! is the runtime's derivation from the tool, so a response that names
+//! no child and carries no message is the same event with both fields
+//! empty, never another lifecycle the runtime would then contradict.
+//! Claude Code's own helper agents stop with an empty
 //! `agent_type`, no `SubagentStart` and no tool calls: their stop is the
 //! child's `TurnEnd`, and no return is claimed. A call whose arguments
 //! name a family child's output file or transcript (`names_children`)
@@ -109,10 +114,15 @@
 //! Code applies the replacement only when it has the tool's own output
 //! shape — otherwise it silently keeps the original. So the codec never
 //! answers with a bare placeholder: it restates the response it was
-//! handed with its leaves redacted. For the spawn's result the swap is
-//! the `content` text — the one field of the `Agent` response Claude
-//! Code shows the parent model; the rest, the run's own metadata, stays
-//! for the transcript. For every other builtin tool every leaf is
+//! handed with its leaves redacted. Which restatement one result gets
+//! follows the tool that produced it, as the runtime's own derivation
+//! does, and never the event it arrived as. For the spawn's result the
+//! swap is the `content` text — the one field of the `Agent` response
+//! Claude Code shows the parent model; the rest stays for the transcript
+//! where it is one of the metadata keys that response carries, and is
+//! redacted like any other leaf where it is not, so a response under the
+//! spawn's name that is not the spawn's own shape carries nothing to the
+//! model. For every other builtin tool every leaf is
 //! redacted: the text takes the tool's content field — `Bash` `stdout`,
 //! `Read` `file.content`, `Grep` `content`, `WebFetch` `result`, `Write`
 //! `content` — or, where the shape has no known one, the place of its
@@ -221,10 +231,10 @@ fn spell(tool: &CanonicalTool) -> Option<String> {
     (canonical(&raw).as_ref() == Ok(tool)).then_some(raw)
 }
 
-fn derive(_: &Actor, call: &ProposedCall) -> Result<Derived, ParseRefusal> {
+fn derive(raw: &str) -> Result<Derived, ParseRefusal> {
     Ok(Derived {
-        canonical: canonical(&call.tool)?,
-        spawn: is_spawn_tool(&call.tool),
+        canonical: canonical(raw)?,
+        spawn: is_spawn_tool(raw),
     })
 }
 
@@ -400,32 +410,30 @@ impl WireEvent {
         }
     }
 
-    /// The spawn's result when the parent's `Agent` response names the
-    /// subagent (`agentId`) or carries its message (`content`): a launch
-    /// acknowledgement names the child and carries no message. A response
-    /// with neither fills no spawn field; which lifecycle the runtime runs
-    /// is its own derivation from the tool, never this shape.
-    fn spawn_return(&self) -> Option<(Option<TrajectoryId>, Option<String>)> {
-        let response = self.tool_response.as_ref()?;
+    /// The subagent the parent's `Agent` response names (`agentId`) and
+    /// the message it carries (`content`), each where the response has
+    /// it: a launch acknowledgement names the child and carries no
+    /// message, and a response with neither fills no spawn field. Which
+    /// lifecycle the runtime runs is its own derivation from the tool,
+    /// never this shape, so an unrecognized response is the spawn's
+    /// result with both fields empty rather than another lifecycle.
+    fn spawn_return(&self) -> (Option<TrajectoryId>, Option<String>) {
+        let Some(response) = self.tool_response.as_ref() else {
+            return (None, None);
+        };
         let child = response
             .get("agentId")
             .and_then(|id| non_empty(id.as_str()))
             .map(|agent| self.child_id(agent));
-        let content = response.get("content").filter(|content| !content.is_null());
-        if child.is_none() && content.is_none() {
-            return None;
-        }
-        let value = content.map(|content| match text_blocks(content) {
-            Some(texts) => texts.join("\n"),
-            None => content.to_string(),
-        });
-        Some((
-            child,
-            value
-                .as_deref()
-                .and_then(|value| non_empty(Some(value)))
-                .map(str::to_string),
-        ))
+        let value = response
+            .get("content")
+            .filter(|content| !content.is_null())
+            .map(|content| match text_blocks(content) {
+                Some(texts) => texts.join("\n"),
+                None => content.to_string(),
+            })
+            .filter(|value| !value.is_empty());
+        (child, value)
     }
 }
 
@@ -486,20 +494,16 @@ fn parse(body: &[u8]) -> Result<Option<HookEvent>, ParseRefusal> {
             None => Err(malformed("PreToolUse without a tool call")),
         },
         "PostToolUse" => match event.call() {
-            Some(call) if is_spawn_tool(&call.tool) => match event.spawn_return() {
-                Some((child, value)) => Ok(Some(HookEvent::SpawnResult {
+            Some(call) if is_spawn_tool(&call.tool) => {
+                let (child, value) = event.spawn_return();
+                Ok(Some(HookEvent::SpawnResult {
                     actor: event.actor(),
                     call,
                     outcome: map_outcome(event.tool_response.as_ref()),
                     child,
                     value,
-                })),
-                None => Ok(Some(HookEvent::ToolResult {
-                    actor: event.actor(),
-                    call,
-                    outcome: map_outcome(event.tool_response.as_ref()),
-                })),
-            },
+                }))
+            }
             Some(call) => Ok(Some(HookEvent::ToolResult {
                 actor: event.actor(),
                 call,
@@ -610,25 +614,80 @@ struct Replacement {
 
 fn replacement(event: &HookEvent, text: &str) -> Option<Replacement> {
     match event {
-        HookEvent::SpawnResult { outcome, .. } => Some(spawn_replacement(delivered(outcome)?, text)),
-        HookEvent::ToolResult { call, outcome, .. } => Some(tool_replacement(&call.tool, delivered(outcome)?, text)),
+        HookEvent::SpawnResult { call, outcome, .. } | HookEvent::ToolResult { call, outcome, .. } => {
+            Some(restated(&call.tool, delivered(outcome)?, text))
+        }
         _ => None,
     }
 }
 
+/// One delivered response restated in place of itself, keyed on the tool that produced it
+/// exactly as the runtime's own derivation is. The event a result arrived as decides
+/// nothing here: a spawn's response is restated as one under the spawn's tools and by the
+/// ordinary redaction under every other, so the two readings of one result cannot disagree.
+fn restated(tool: &str, response: serde_json::Value, text: &str) -> Replacement {
+    match is_spawn_tool(tool) {
+        true => spawn_replacement(response, text),
+        false => tool_replacement(tool, response, text),
+    }
+}
+
+/// The keys Claude Code's `Agent` response carries beside `content`: the run's own
+/// metadata, which names no part of the subagent's message. Every key of every recorded
+/// `Agent` response in `runtime/tests/fixtures`, over the synchronous and the asynchronous
+/// shape. A key a later version adds is redacted until it is listed here, so the list
+/// going stale withholds more, never less.
+fn is_spawn_metadata(key: &str) -> bool {
+    matches!(
+        key,
+        "agentId"
+            | "agentType"
+            | "canReadOutputFile"
+            | "description"
+            | "harnessNoteCount"
+            | "harnessSectionHash"
+            | "harnessTailCount"
+            | "isAsync"
+            | "outputFile"
+            | "prompt"
+            | "resolvedModel"
+            | "status"
+            | "toolStats"
+            | "totalDurationMs"
+            | "totalTokens"
+            | "totalToolUseCount"
+            | "usage"
+    )
+}
+
 /// The spawn's result restated: the swap is the `content` text, the one field of the
 /// `Agent` response Claude Code shows the parent model, and the run's own metadata stays
-/// for the transcript.
-fn spawn_replacement(mut response: serde_json::Value, text: &str) -> Replacement {
-    let output = match response.as_object_mut() {
-        Some(object) => {
+/// for the transcript. A field that is not one of the response's known metadata keys is
+/// a payload this codec does not recognize, so its leaves are redacted as an ordinary
+/// tool's are: a response under the spawn's name that is not the spawn's own shape — the
+/// bytes a refused hook still carries included — crosses nothing.
+fn spawn_replacement(response: serde_json::Value, text: &str) -> Replacement {
+    let output = match response {
+        serde_json::Value::Object(fields) => {
+            // The text takes the `content` field, never a leaf.
+            let mut placed = true;
+            let mut object: serde_json::Map<String, serde_json::Value> = fields
+                .into_iter()
+                .map(|(key, field)| match is_spawn_metadata(&key) {
+                    true => (key, field),
+                    false => {
+                        let redacted = redact(field, Some(&key), text, None, &mut placed);
+                        (key, redacted)
+                    }
+                })
+                .collect();
             object.insert(
                 "content".to_string(),
                 serde_json::json!([{ "type": "text", "text": text }]),
             );
-            response
+            serde_json::Value::Object(object)
         }
-        None => serde_json::Value::String(text.to_string()),
+        _ => serde_json::Value::String(text.to_string()),
     };
     Replacement { output, context: None }
 }
@@ -794,10 +853,7 @@ fn withholding(body: &[u8], reason: &str) -> Option<serde_json::Value> {
     let text = withheld(reason);
     match event.hook_event_name.as_str() {
         "PostToolUse" | "PostToolUseFailure" => Some(match (event.tool_name.as_deref(), event.tool_response) {
-            (Some(tool), Some(response)) if is_spawn_tool(tool) => {
-                replaced(spawn_replacement(response, &text), Some(reason))
-            }
-            (Some(tool), Some(response)) => replaced(tool_replacement(tool, response, &text), Some(reason)),
+            (Some(tool), Some(response)) => replaced(restated(tool, response, &text), Some(reason)),
             _ => block(reason),
         }),
         _ => None,
@@ -855,9 +911,8 @@ mod tests {
         )
     }
 
-    fn derived(tool: &str, arguments: serde_json::Value) -> Result<Derived, ParseRefusal> {
-        let (actor, call) = proposed(tool, arguments);
-        (adapter().derive)(&actor, &call)
+    fn derived(tool: &str) -> Result<Derived, ParseRefusal> {
+        (adapter().derive)(tool)
     }
 
     fn named_children(tool: &str, arguments: serde_json::Value) -> Vec<TrajectoryId> {
@@ -948,19 +1003,12 @@ mod tests {
     #[test]
     fn the_derivation_carries_the_canonical_identity_and_spawn() {
         for tool in ["Agent", "Task"] {
-            let derived = derived(tool, serde_json::json!({"prompt": "list files"})).expect("derives");
+            let derived = derived(tool).expect("derives");
             assert!(derived.spawn, "{tool} is the spawn");
             assert_eq!(derived.canonical.as_str(), format!("host/claude-code/{tool}"));
         }
-        assert!(
-            !derived("Bash", serde_json::json!({"command": "ls"}))
-                .expect("derives")
-                .spawn
-        );
-        assert!(matches!(
-            derived("mcp__github", serde_json::json!({})),
-            Err(ParseRefusal::Malformed { .. })
-        ));
+        assert!(!derived("Bash").expect("derives").spawn);
+        assert!(matches!(derived("mcp__github"), Err(ParseRefusal::Malformed { .. })));
     }
 
     #[test]
@@ -1338,10 +1386,13 @@ mod tests {
     #[test]
     fn a_blank_agent_id_names_no_child() {
         let event = agent_post_tool_use(serde_json::json!({"status": "async_launched", "agentId": ""}));
-        assert!(
-            matches!(parse_value(&event), Ok(Some(HookEvent::ToolResult { .. }))),
-            "an acknowledgement naming no subagent is a plain tool result"
-        );
+        match parse_value(&event) {
+            Ok(Some(HookEvent::SpawnResult { child, value, .. })) => {
+                assert_eq!(child, None, "a blank agentId names no child");
+                assert_eq!(value, None);
+            }
+            other => panic!("the spawn's post-use hook is its result: {other:?}"),
+        }
         let call = serde_json::json!({
             "hook_event_name": "PreToolUse",
             "session_id": "s1",
@@ -1397,21 +1448,26 @@ mod tests {
         }
         let mut anonymous = launched;
         anonymous.as_object_mut().expect("an object").remove("agentId");
-        assert!(
-            matches!(
-                parse_value(&agent_post_tool_use(anonymous)),
-                Ok(Some(HookEvent::ToolResult { .. }))
-            ),
-            "a response naming no subagent is a plain tool result",
-        );
+        match parse_value(&agent_post_tool_use(anonymous)) {
+            Ok(Some(HookEvent::SpawnResult { child, value, .. })) => {
+                assert_eq!(child, None, "a response naming no subagent names no child");
+                assert_eq!(value, None);
+            }
+            other => panic!("the spawn's post-use hook is its result: {other:?}"),
+        }
         let mut undelivered = agent_post_tool_use(serde_json::Value::Null);
         undelivered
             .as_object_mut()
             .expect("the fixture is an object")
             .remove("tool_response");
         match parse_value(&undelivered) {
-            Ok(Some(HookEvent::ToolResult { outcome, .. })) => assert_eq!(outcome, ToolOutcome::Indeterminate),
-            other => panic!("expected a ToolResult event, got {other:?}"),
+            Ok(Some(HookEvent::SpawnResult {
+                outcome, child, value, ..
+            })) => {
+                assert_eq!(outcome, ToolOutcome::Indeterminate);
+                assert_eq!((child, value), (None, None));
+            }
+            other => panic!("the spawn's post-use hook is its result: {other:?}"),
         }
     }
 
@@ -1929,6 +1985,105 @@ mod tests {
             }),
         );
         assert_eq!(render(&event, &HookDecision::Ack), serde_json::json!({}));
+    }
+
+    /// A response the codec does not recognize as the spawn's own shape crosses no leaf,
+    /// whichever side reads it: the parsed spawn result and the bytes a refused hook still
+    /// carries are both restated leaf by leaf, as an ordinary tool's response is. The
+    /// metadata the `Agent` response does carry is what stays.
+    #[test]
+    fn an_unrecognized_response_under_the_spawns_tool_carries_nothing_across() {
+        let response = serde_json::json!({
+            "result": "the secret",
+            "nested": {"note": "the secret", "count": 3},
+            "flag": true,
+        });
+        let refused = serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "session_id": "s1",
+            "tool_name": "Agent",
+            "tool_response": response.clone(),
+        });
+        assert!(parse_value(&refused).is_err(), "the fixture is one parse refuses");
+        let salvaged = withholding(
+            &serde_json::to_vec(&refused).expect("the fixture serializes"),
+            "unreadable",
+        )
+        .expect("a post-use hook reports a result");
+        let rendered = render(
+            &spawn_result(response),
+            &HookDecision::Block {
+                reason: "unreadable".to_string(),
+            },
+        );
+        for answer in [salvaged, rendered] {
+            let output = &answer["hookSpecificOutput"]["updatedToolOutput"];
+            assert!(
+                !output.to_string().contains("the secret"),
+                "an unrecognized payload never reaches the model: {answer}",
+            );
+            assert_eq!(
+                output["content"],
+                serde_json::json!([{"type": "text", "text": withheld("unreadable")}]),
+                "the swap is still the message the parent model reads: {answer}",
+            );
+            assert_eq!(output["result"], REDACTED);
+            assert_eq!(output["nested"]["note"], REDACTED);
+            assert_eq!(output["nested"]["count"], 0);
+            assert_eq!(output["flag"], false);
+        }
+
+        let launched = serde_json::json!({
+            "isAsync": true,
+            "status": "async_launched",
+            "agentId": "a2",
+            "agentType": "Explore",
+            "description": "Compute 6*7",
+            "prompt": "Compute 6*7",
+            "outputFile": "/tmp/a2.md",
+            "canReadOutputFile": false,
+            "resolvedModel": "the model",
+            "totalDurationMs": 15484,
+        });
+        let answer = render(
+            &spawn_result(launched.clone()),
+            &HookDecision::Block {
+                reason: "unreadable".to_string(),
+            },
+        );
+        let output = &answer["hookSpecificOutput"]["updatedToolOutput"];
+        for (key, value) in launched.as_object().expect("the fixture is an object") {
+            assert_eq!(&output[key], value, "the run's own metadata stays: {answer}");
+        }
+    }
+
+    /// The codec's reading of a post-use hook and the derivation that decides the
+    /// lifecycle agree on every response shape: under the spawn's tools the event is the
+    /// spawn's result, with the child and the returned message each present only where the
+    /// response has one, and under any other tool it is never one.
+    #[test]
+    fn every_post_use_of_the_spawns_tool_is_a_spawn_result() {
+        let responses = [
+            agent_response(),
+            serde_json::json!({"agentId": "a1"}),
+            serde_json::json!({"content": [{"type": "text", "text": "x"}]}),
+            serde_json::json!({"result": "the secret"}),
+            serde_json::json!({}),
+            serde_json::Value::Null,
+        ];
+        for tool in ["Agent", "Task", "Bash"] {
+            let spawn = derived(tool).expect("derives").spawn;
+            for response in &responses {
+                let mut event = agent_post_tool_use(response.clone());
+                event["tool_name"] = serde_json::Value::String(tool.to_string());
+                let parsed = parse_value(&event);
+                assert_eq!(
+                    matches!(parsed, Ok(Some(HookEvent::SpawnResult { .. }))),
+                    spawn,
+                    "{tool} on {response}: the codec and the derivation disagree ({parsed:?})",
+                );
+            }
+        }
     }
 
     /// A post-use hook this codec cannot read still reports a result the tool produced, so

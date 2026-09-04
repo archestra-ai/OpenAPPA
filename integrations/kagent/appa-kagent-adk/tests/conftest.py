@@ -114,8 +114,11 @@ class FakeAgent:
 
 
 class FakeTool:
-    def __init__(self, name: str):
+    def __init__(self, name: str, is_long_running: bool = False):
         self.name = name
+        # ADK declares it on `BaseTool` with this default, so every tool
+        # a callback sees carries it.
+        self.is_long_running = is_long_running
 
 
 class FakePart:

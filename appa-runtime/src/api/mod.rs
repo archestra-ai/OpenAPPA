@@ -24,7 +24,7 @@ use crate::elicit::Elicitation;
 use crate::engine::{EngineRefusal, Liveness, PolicyEngine, RuntimeEngine};
 use crate::external::{ConsultGates, ExternalServices};
 use appa_eventlog::{Backend, Log, LogStore};
-use appa_runtime_api::SpellFn;
+use appa_runtime_api::{Adapter, AdapterName};
 
 /// One remedy offer as it is quoted and carried.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -317,16 +317,18 @@ pub(crate) struct Deployment {
     externals: ExternalServices,
 }
 
-/// How the deployment reading this policy names tools, and — the same question read from
-/// the model's side — how it spells a recorded name back when it addresses the model.
+/// Which deployment this is, and with it every rule the harness fixes rather than the
+/// policy: how the policy names tools, how a recorded name is spelled back when the runtime
+/// addresses the model, and which contracts may release a spawn.
 ///
-/// A served deployment reads a wire event, whose adapter derives a canonical identity, so
-/// its policy names tools that way and the served adapter's inverse gives the host spelling
-/// the model can dispatch. A host that embeds the runtime, and `appa replay`, name tools
-/// their own way: what the runtime records is already the name their model calls.
-#[derive(Clone, Copy, Debug)]
+/// A served deployment answers exactly one host, and carries that host's adapter: the
+/// adapter derives a canonical identity for every call, so the policy names tools that way,
+/// and its inverse gives the host spelling the model can dispatch. A host that embeds the
+/// runtime, and `appa replay`, name tools their own way: what the runtime records is already
+/// the name their model calls.
+#[derive(Clone, Copy)]
 pub(crate) enum ToolNaming {
-    Canonical { host: SpellFn },
+    Canonical { adapter: Adapter },
     AsAuthored,
 }
 
@@ -338,10 +340,25 @@ impl ToolNaming {
     pub(crate) fn model_spelling(self, recorded: &str) -> String {
         match self {
             ToolNaming::AsAuthored => recorded.to_string(),
-            ToolNaming::Canonical { host } => appa_runtime_api::CanonicalTool::parse(bare_tool_name(recorded))
+            ToolNaming::Canonical { adapter } => appa_runtime_api::CanonicalTool::parse(bare_tool_name(recorded))
                 .ok()
-                .and_then(|tool| host(&tool))
+                .and_then(|tool| (adapter.spell)(&tool))
                 .unwrap_or_else(|| recorded.to_string()),
+        }
+    }
+
+    /// Which contracts may release a spawn here. The served adapter settles it, so a
+    /// deployment cannot serve one host under another's rule: kagent's spawns are other
+    /// agents called as tools, and a child trajectory is not something a per-call
+    /// annotation can stand for. Claude Code's `Task` keeps the wildcard's cover, and so
+    /// does a host that embeds the runtime and delegates under contracts it writes itself.
+    pub(crate) fn spawn_coverage(self) -> SpawnCoverage {
+        match self {
+            ToolNaming::Canonical { adapter } => match adapter.name {
+                AdapterName::ClaudeCode => SpawnCoverage::Wildcard,
+                AdapterName::Kagent => SpawnCoverage::Declared,
+            },
+            ToolNaming::AsAuthored => SpawnCoverage::Wildcard,
         }
     }
 }
@@ -417,11 +434,10 @@ pub struct Runtime {
 /// `Declared`: only a contract written for the tool's name; the wildcard, which covers
 /// every ordinary call the policy does not write, covers no spawn. An agent the policy never
 /// names is denied before it runs, with the reason as the model's feedback. `Wildcard`: the
-/// wildcard covers a spawn as it covers any call. The harness adapter picks: kagent's spawns
-/// are other agents called as tools, and a child trajectory is not something a per-call
-/// annotation can stand for.
+/// wildcard covers a spawn as it covers any call. No caller chooses: the deployment reads it
+/// off [`ToolNaming`], which carries the adapter a served runtime answers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SpawnCoverage {
+pub(crate) enum SpawnCoverage {
     Declared,
     Wildcard,
 }
@@ -467,7 +483,6 @@ impl Prepared {
                 prompted: std::sync::Mutex::new(std::collections::BTreeSet::new()),
                 gates: self.gates,
                 naming: self.naming,
-                named_spawns: std::sync::atomic::AtomicBool::new(false),
             }),
         })
     }
@@ -487,12 +502,10 @@ struct Inner {
     /// The gates every process-costing consult of this runtime passes; deployment reloads
     /// clone them, so old and new snapshots contend on the same permits.
     gates: ConsultGates,
-    /// How this deployment's policy names tools, and with it the spelling the model can
-    /// dispatch. Settled at open and unchanged by a reload: it is the deployment kind,
-    /// not the policy.
+    /// Which deployment this is: how its policy names tools, the spelling the model can
+    /// dispatch, and which contracts release a spawn. Settled at open and unchanged by a
+    /// reload — it is the deployment kind, not the policy.
     naming: ToolNaming,
-    /// `true` under [`SpawnCoverage::Declared`]: set once, before the runtime is shared.
-    named_spawns: std::sync::atomic::AtomicBool,
 }
 
 /// The trajectory an actor's events belong to: the child when the harness names one.
@@ -500,27 +513,7 @@ pub(crate) fn acting_trajectory(actor: &Actor) -> &TrajectoryId {
     actor.child.as_ref().unwrap_or(&actor.root)
 }
 
-impl Runtime {
-    /// Settle which contracts may release a spawn. Called once by the binary, for the
-    /// adapter it serves, before the runtime is shared; the default is `Wildcard`.
-    pub fn with_spawn_coverage(self, coverage: SpawnCoverage) -> Runtime {
-        self.inner.named_spawns.store(
-            coverage == SpawnCoverage::Declared,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        self
-    }
-}
-
 impl Inner {
-    pub(super) fn spawn_coverage(&self) -> SpawnCoverage {
-        if self.named_spawns.load(std::sync::atomic::Ordering::Relaxed) {
-            SpawnCoverage::Declared
-        } else {
-            SpawnCoverage::Wildcard
-        }
-    }
-
     fn deployment(&self) -> Arc<Deployment> {
         Arc::clone(
             &self
@@ -623,15 +616,16 @@ impl Runtime {
 
     /// The deployment `appa runtime` serves: [`Runtime::open`], plus the served-deployment
     /// rule that the policy names every tool canonically. One compile answers both. The
-    /// served adapter comes in because a served deployment answers exactly one host, whose
-    /// spelling of a tool is what the runtime says where it addresses that host's model.
+    /// served adapter comes in because a served deployment answers exactly one host: its
+    /// spelling of a tool is what the runtime says where it addresses that host's model,
+    /// and its rule is which contracts release a spawn.
     pub(crate) fn open_served(
         config: Config,
         db: PathBuf,
         modules: Option<PathBuf>,
-        adapter: appa_runtime_api::Adapter,
+        adapter: Adapter,
     ) -> Result<Runtime, OpenError> {
-        let prepared = Prepared::new(config, modules, ToolNaming::Canonical { host: adapter.spell })?;
+        let prepared = Prepared::new(config, modules, ToolNaming::Canonical { adapter })?;
         prepared.assemble(Backend::Sqlite { path: db })
     }
 
@@ -1413,10 +1407,10 @@ mod deployment_tests {
     #[test]
     fn a_served_deployment_spells_a_recorded_name_the_way_its_host_dispatches_it() {
         let claude_code = ToolNaming::Canonical {
-            host: appa_adapter_claude_code::adapter().spell,
+            adapter: appa_adapter_claude_code::adapter(),
         };
         let kagent = ToolNaming::Canonical {
-            host: appa_adapter_kagent::adapter().spell,
+            adapter: appa_adapter_kagent::adapter(),
         };
         for (naming, recorded, expected) in [
             (claude_code, "host/claude-code/Read", "Read"),
@@ -2006,5 +2000,186 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             matches!(runtime.live(&root, &root), Err(EventError::PolicyUnavailable(_))),
             "the root's policy file is gone, which is not a storage failure"
         );
+    }
+}
+
+/// Spawn coverage is the deployment's, not a caller's: a served runtime reads it off the
+/// adapter it answers, so it cannot serve one host under another host's rule.
+#[cfg(test)]
+mod spawn_coverage_tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+    use crate::config::Config;
+    use appa_runtime_api::{HookDecision, HookEvent};
+    use axum::Router;
+    use axum::extract::State;
+    use axum::routing::post;
+
+    /// The agent no contract in the fixture policy names.
+    const UNNAMED: &str = "agent/NS/release_manager";
+
+    fn root() -> TrajectoryId {
+        TrajectoryId("coverage-root".to_string())
+    }
+
+    fn acting() -> Actor {
+        Actor {
+            root: root(),
+            child: None,
+        }
+    }
+
+    /// An annotator that lets everything through unchanged, counting its consults.
+    async fn permissive_annotator() -> (String, Arc<Mutex<usize>>) {
+        let consults = Arc::new(Mutex::new(0usize));
+        let router = Router::new()
+            .route(
+                "/annotate",
+                post(|State(consults): State<Arc<Mutex<usize>>>, _body: String| async move {
+                    *consults.lock().expect("the consult counter is never poisoned") += 1;
+                    axum::Json(serde_json::json!({
+                        "version": 1,
+                        "answer": {
+                            "delta": {},
+                            "requires": { "history": [], "attention": [] },
+                            "emits": [],
+                        }
+                    }))
+                }),
+            )
+            .with_state(Arc::clone(&consults));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("an ephemeral loopback port binds");
+        let addr = listener.local_addr().expect("the bound address is readable");
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.expect("the stub serves");
+        });
+        (format!("http://{addr}/annotate"), consults)
+    }
+
+    /// One agent this deployment delegates to, by the canonical name both adapters derive,
+    /// and a wildcard over everything else. Every name is canonical, so a served deployment
+    /// of either host loads it.
+    fn config(dir: &tempfile::TempDir, url: &str) -> Config {
+        let text = format!(
+            r#"
+[policy]
+version = 2
+
+[[policy.annotator]]
+name = "gatekeeper"
+
+[[policy.tool]]
+name = "agent/NS/log_analyst"
+delta = {{}}
+
+[[policy.tool]]
+name = "*"
+annotator = "gatekeeper"
+
+[policy.deployment]
+context_control = true
+
+[externals]
+timeout_ms = 2000
+max_body_bytes = 65536
+
+[externals.annotators.gatekeeper]
+url = "{url}"
+"#
+        );
+        let path = dir.path().join("appa.toml");
+        std::fs::write(&path, text).expect("the fixture writes");
+        Config::load(&path).expect("the fixture validates")
+    }
+
+    /// The deployment under `adapter`, or — `None` — the one an embedding host opens.
+    async fn opened(dir: &tempfile::TempDir, url: &str, adapter: Option<Adapter>) -> Runtime {
+        let config = config(dir, url);
+        let db = dir.path().join("appa.db");
+        let runtime = match adapter {
+            Some(adapter) => Runtime::open_served(config, db, None, adapter).expect("the served deployment opens"),
+            None => Runtime::open(config, db, None).expect("the embedded deployment opens"),
+        };
+        assert_eq!(
+            crate::hooks::handle(&runtime, HookEvent::SessionStart { root: root() }).await,
+            HookDecision::Ack
+        );
+        runtime
+    }
+
+    async fn call(runtime: &Runtime, tool: &str, spawn: bool) -> HookDecision {
+        crate::hooks::handle(
+            runtime,
+            HookEvent::ToolCall {
+                actor: acting(),
+                call: ProposedCall {
+                    tool: tool.to_string(),
+                    arguments: raw(serde_json::json!({ "request": "summarize the crash logs" })),
+                },
+                spawn,
+                ruling: None,
+            },
+        )
+        .await
+    }
+
+    /// Served under kagent: an agent no contract names cannot run as a child, and the
+    /// refusal stands before any evidence is gathered. The same name proposed as an
+    /// ordinary call is the wildcard's to cover, as any other call is.
+    #[tokio::test]
+    async fn a_kagent_deployment_covers_no_spawn_the_policy_does_not_name() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let (url, consults) = permissive_annotator().await;
+        let runtime = opened(&dir, &url, Some(appa_adapter_kagent::adapter())).await;
+
+        let denied = call(&runtime, UNNAMED, true).await;
+        let HookDecision::DenyCall { offers, review, .. } = &denied else {
+            panic!("an unnamed agent spawns nothing, got {denied:?}");
+        };
+        assert!(offers.is_empty(), "no contract, no offer: {denied:?}");
+        assert!(review.is_empty(), "nothing to review: {denied:?}");
+        assert_eq!(
+            *consults.lock().expect("the counter reads"),
+            0,
+            "no consult stands in for a missing declaration"
+        );
+
+        assert_eq!(
+            call(&runtime, UNNAMED, false).await,
+            HookDecision::AllowCall { spawn: None },
+            "the wildcard covers the ordinary call under the same name"
+        );
+        assert_eq!(
+            *consults.lock().expect("the counter reads"),
+            1,
+            "the wildcard annotated the ordinary call"
+        );
+    }
+
+    /// Every other deployment keeps the wildcard's cover over a spawn: the served Claude
+    /// Code runtime, whose `Task` is an ordinary call the policy need not name, and a host
+    /// that embeds the runtime. The spawn is judged like any call and held on the return
+    /// menu, which is a decision no unnamed agent reaches under kagent.
+    #[tokio::test]
+    async fn every_other_deployment_lets_the_wildcard_cover_a_spawn() {
+        for adapter in [Some(appa_adapter_claude_code::adapter()), None] {
+            let dir = tempfile::tempdir().expect("a temp dir is creatable");
+            let (url, consults) = permissive_annotator().await;
+            let runtime = opened(&dir, &url, adapter).await;
+
+            let held = call(&runtime, UNNAMED, true).await;
+            let HookDecision::DenyCall { offers, .. } = &held else {
+                panic!("a covered spawn is held on the return menu, got {held:?}");
+            };
+            assert!(!offers.is_empty(), "the wildcard covered the spawn: {held:?}");
+            assert_eq!(
+                *consults.lock().expect("the counter reads"),
+                1,
+                "the wildcard annotated the spawn as it annotates any call"
+            );
+        }
     }
 }
