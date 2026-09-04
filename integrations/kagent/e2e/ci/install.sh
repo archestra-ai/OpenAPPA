@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Installs kagent and the demo chart on the current cluster, in the
-# shape the live subset needs: the images kind-up.sh loaded, no go cell,
+# shape the live A2A matrix needs: the images kind-up.sh loaded, no go cell,
 # no seed job, and one OpenAI-compatible endpoint for both the agents
 # and the policy's sanitizers. It waits for every pod the subset drives.
 #
@@ -24,7 +24,7 @@ chart=$(cd "$here/../../demo/chart" && pwd)
 namespace=${APPA_E2E_NAMESPACE:-kagent}
 kagent_version=${KAGENT_VERSION:-0.9.12}
 tag=${APPA_E2E_IMAGE_TAG:-ci}
-model=${APPA_E2E_MODEL:-nvidia/nemotron-3-super-120b-a12b:free}
+model=${APPA_E2E_MODEL:-openai/gpt-5.6-luna}
 base_url=${APPA_E2E_BASE_URL:-https://openrouter.ai/api/v1}
 wait_seconds=${APPA_E2E_WAIT_SECONDS:-300}
 key=${OPENROUTER_API_KEY:-}
