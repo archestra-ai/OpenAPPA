@@ -106,6 +106,20 @@ persistence:
 env: {}
 envFrom: []
 
+# Optionally install the configuring kagent Agent with this runtime.
+appaGuide:
+  enabled: false
+  name: appa-guide
+  namespace: kagent
+  modelConfig: default-model-config
+  toolServer:
+    name: kagent-tool-server
+  skill:
+    url: https://github.com/archestra-ai/OpenAPPA
+    # Empty pins the skill to v<chart appVersion>.
+    ref: ""
+    path: integrations/appa-guide
+
 test:
   image:
     repository: busybox

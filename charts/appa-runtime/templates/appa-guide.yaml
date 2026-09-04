@@ -1,0 +1,62 @@
+{{- if .Values.appaGuide.enabled }}
+apiVersion: kagent.dev/v1alpha2
+kind: Agent
+metadata:
+  name: {{ .Values.appaGuide.name }}
+  namespace: {{ .Values.appaGuide.namespace | quote }}
+  labels:
+    {{- include "appa-runtime.labels" . | nindent 4 }}
+spec:
+  type: Declarative
+  description: Configure and maintain OpenAPPA policies, batteries, and runtime settings.
+  skills:
+    gitRefs:
+      - url: {{ .Values.appaGuide.skill.url | quote }}
+        ref: {{ .Values.appaGuide.skill.ref | default (printf "v%s" .Chart.AppVersion) | quote }}
+        path: {{ .Values.appaGuide.skill.path | quote }}
+        name: appa-guide
+  declarative:
+    systemMessage: |
+      You configure OpenAPPA for this kagent cluster. When the operator says
+      init or adjust, or asks to manage runtimes, Agents, tools, batteries,
+      or policy, your first tool call must be skills with command appa-guide.
+      Invoke it exactly once and follow it exactly. Your second tool call must
+      be read_file for /skills/appa-guide/references/kagent.md with offset 1
+      and limit 0. Follow the complete result. On init, finish all read-only
+      inspection and present the proposal without asking whether to continue.
+      Inventory Agents and RemoteMCPServers across all namespaces. This Agent
+      runs in {{ .Values.appaGuide.namespace }}. Its shared runtime is the
+      {{ include "appa-runtime.fullname" . }} Service in {{ .Release.Namespace }}.
+      List runtime namespace pods with output wide, fetch the matching pod by
+      exact name, and verify the Service selector. Run inspection calls one at
+      a time. Do not respond until the full init checklist and comparison are
+      complete. Work only through your k8s tools and read_file. Do not change
+      policy until the operator approves the proposal in chat. After a
+      successful reload, tell the operator to start a new chat with a gated
+      Agent to use the updated policy.
+    modelConfig: {{ .Values.appaGuide.modelConfig | quote }}
+    tools:
+      - type: McpServer
+        mcpServer:
+          name: {{ .Values.appaGuide.toolServer.name | quote }}
+          kind: RemoteMCPServer
+          toolNames:
+            - k8s_get_resources
+            - k8s_get_resource_yaml
+            - k8s_get_events
+            - k8s_get_pod_logs
+            - k8s_apply_manifest
+            - k8s_patch_resource
+            - k8s_delete_resource
+            - k8s_execute_command
+            - helm_list_releases
+            - helm_get_release
+            - helm_upgrade
+            - helm_uninstall
+    deployment:
+      env:
+        - name: APPA_ENABLED
+          value: "true"
+        - name: APPA_RUNTIME_URL
+          value: {{ printf "http://%s.%s.svc.cluster.local:%v" (include "appa-runtime.fullname" .) .Release.Namespace .Values.service.port | quote }}
+{{- end }}

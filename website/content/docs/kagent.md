@@ -203,79 +203,29 @@ With `appa-guide` already available, send: `update the kagent controller to the 
 Deploy one policy runtime for the agents you want to protect:
 
 ```sh
+APPA_VERSION=0.10.0 # x-release-please-version
 helm upgrade --install appa-runtime oci://ghcr.io/archestra-ai/charts/appa-runtime \
-  --version 0.9.0 \
+  --version "$APPA_VERSION" \
   --namespace appa --create-namespace \
   --set persistence.enabled=true \
   --set persistence.size=8Gi \
+  --set appaGuide.enabled=true \
+  --set appaGuide.namespace=kagent \
   --force-conflicts \
   --wait --timeout 10m
 ```
 
-Agents reach this runtime at `http://appa-runtime.appa.svc.cluster.local:18789`. The runtime stores its trajectory log on the persistent volume and reads policy from the `appa-policy` ConfigMap.
+Agents reach this runtime at `http://appa-runtime.appa.svc.cluster.local:18789`. The runtime stores its trajectory log on the persistent volume and reads policy from the `appa-policy` ConfigMap. The same release installs `appa-guide` in the `kagent` namespace.
 
 With `appa-guide` already available, send: `install or upgrade the shared OpenAPPA runtime with persistent battery storage`.
 
-### 3. Install appa-guide
+### 3. Confirm appa-guide
 
-Install the configuring Agent against the shared runtime. This bootstraps the one Agent that can wire and configure the others:
+The runtime chart installed the configuring Agent against its bootstrap policy. Wait for kagent to accept it and finish its rollout:
 
 ```sh
-kubectl apply -f - <<'EOF'
-apiVersion: kagent.dev/v1alpha2
-kind: Agent
-metadata:
-  name: appa-guide
-  namespace: kagent
-spec:
-  type: Declarative
-  description: "Configure and maintain OpenAPPA policies, batteries, and runtime settings."
-  skills:
-    gitRefs:
-      - url: "https://github.com/archestra-ai/OpenAPPA"
-        ref: "main"
-        path: "integrations/appa-guide"
-        name: "appa-guide"
-  declarative:
-    systemMessage: |
-      Configure OpenAPPA for this kagent cluster. For quickstart, init, or adjust,
-      your first tool call must be skills with command appa-guide. Invoke it once.
-      Your second tool call must be read_file for
-      /skills/appa-guide/references/kagent.md with offset 1 and limit 0. Follow the
-      complete result. On init, finish
-      all read-only inspection and present the proposal without asking whether to
-      continue. Inventory Agents across all namespaces. This Agent runs in kagent;
-      derive each runtime namespace from APPA_RUNTIME_URL. Resolve runtime pods
-      through the Service selector. List namespace pods with output wide because
-      k8s_get_resources has no label-selector argument, then verify exact pod YAML.
-      Run inspection calls sequentially.
-      Do not respond until the full init checklist and comparison are complete.
-    modelConfig: "default-model-config"
-    tools:
-      - type: McpServer
-        mcpServer:
-          name: kagent-tool-server
-          kind: RemoteMCPServer
-          toolNames:
-            - k8s_get_resources
-            - k8s_get_resource_yaml
-            - k8s_get_events
-            - k8s_get_pod_logs
-            - k8s_apply_manifest
-            - k8s_patch_resource
-            - k8s_delete_resource
-            - k8s_execute_command
-            - helm_list_releases
-            - helm_get_release
-            - helm_upgrade
-            - helm_uninstall
-    deployment:
-      env:
-        - name: APPA_ENABLED
-          value: "true"
-        - name: APPA_RUNTIME_URL
-          value: "http://appa-runtime.appa.svc.cluster.local:18789"
-EOF
+kubectl wait agent/appa-guide -n kagent \
+  --for=condition=Ready=True --timeout=5m
 ```
 
 ### 4. Wire existing agents to the runtime

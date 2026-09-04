@@ -26,6 +26,22 @@ An unreleased checkout can name an image tag that is not published yet.
 Set `image.repository` and `image.tag` to the image built from that
 checkout.
 
+## appa-guide
+
+The chart can install the configuring kagent Agent with the runtime:
+
+```sh
+helm install appa-runtime oci://ghcr.io/archestra-ai/charts/appa-runtime \
+  --version "$APPA_VERSION" --namespace appa --create-namespace \
+  --set appaGuide.enabled=true \
+  --set appaGuide.namespace=kagent
+```
+
+The option is off by default because the runtime chart also supports
+clusters without kagent. The target namespace, kagent model config, and
+tool-server name are configurable under `appaGuide`. An empty
+`appaGuide.skill.ref` pins the skill to the chart's `v<appVersion>` tag.
+
 GHCR packages start private. An organization owner must make the
 `charts/appa-runtime` package public after its first publish before an
 anonymous OCI install can pull it.

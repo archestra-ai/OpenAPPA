@@ -57,6 +57,7 @@ must_not_contain '/var/lib/appa/batteries'
 must_not_contain '/var/lib/appa/release-batteries'
 must_not_contain 'kind: PersistentVolumeClaim'
 must_not_contain 'kind: NetworkPolicy'
+must_not_contain 'kind: Agent'
 must_contain 'emptyDir: {}'
 must_contain 'runAsNonRoot: true'
 must_contain 'runAsUser: 65532'
@@ -68,6 +69,21 @@ must_contain 'value: "/etc/appa/appa.toml"'
 expect 2 '^          readinessProbe:$'
 expect 1 '^          livenessProbe:$'
 expect 1 '^          startupProbe:$'
+
+must_render --set appaGuide.enabled=true
+expect 1 '^kind: Agent$'
+must_contain 'name: appa-guide'
+must_contain 'namespace: "kagent"'
+must_contain 'ref: "v0.10.0"'
+must_contain 'http://appa-runtime.appa.svc.cluster.local:18789'
+must_contain 'name: "kagent-tool-server"'
+must_contain 'your first tool call must be skills with command appa-guide'
+
+must_render --set appaGuide.enabled=true --set appaGuide.namespace=platform \
+  --set appaGuide.skill.ref=main --set appaGuide.modelConfig=platform-model
+must_contain 'namespace: "platform"'
+must_contain 'ref: "main"'
+must_contain 'modelConfig: "platform-model"'
 
 must_render --set persistence.enabled=true --set persistence.size=10Gi
 must_contain 'kind: PersistentVolumeClaim'
