@@ -199,7 +199,7 @@ Harness.spec.workload.image = appa-kagent-adk-go@sha256:…
 
 The quickstart is optional and orthogonal to everything above — same plugins, same wire, same codec, same python runtime layer as `appa-kagent-adk`. Skipping it changes nothing. It exists so one operator can gate one agent in minutes, with no separate `appa-runtime` deployment.
 
-`appa-kagent-quickstart` is one python-only image. It bundles the python runtime layer (`appa-kagent-adk`) and `appa-runtime` itself on the stock kagent app image. The entrypoint starts `appa-runtime` on `127.0.0.1:8787` with the policy `APPA_CONFIG` names, by default the packaged example policy. It sets `APPA_RUNTIME_URL` to it and execs `appa-kagent-adk`. A pod that arrives with `APPA_RUNTIME_URL` already set does not start the bundled runtime and execs `appa-kagent-adk` against that shared `appa-runtime`.
+`appa-kagent-quickstart` is one python-only image. It bundles the python runtime layer (`appa-kagent-adk`), `appa-runtime`, and the release batteries on the stock kagent app image. The entrypoint starts `appa-runtime` on `127.0.0.1:8787` with the policy `APPA_CONFIG` names, by default the packaged example policy. When `APPA_CONFIG_CONTENTS` is present, it writes that complete policy into the agent data directory first. It sets `APPA_RUNTIME_URL` to the loopback runtime and execs `appa-kagent-adk`. A pod that arrives with `APPA_RUNTIME_URL` already set does not start the bundled runtime and execs `appa-kagent-adk` against that shared `appa-runtime`.
 
 The demo uses the image both ways. It is the kagent `controller.agentImage` for the fleet, set on the kagent install as the chart prerequisite. It is also the container of the shared runtime pod, run as `appa runtime`. As the agent image it keeps the stock args, port, and readiness contract. The bundled runtime serves `/mcp` too, so remedy plans execute the same way.
 
@@ -228,7 +228,7 @@ Quickstart limits:
 
 - Trajectory state and `appa.db` live in the pod and die with it.
 - A parent and a called agent run as two pods. With two bundled runtimes, the `child_start` of the child reaches a runtime that saw no spawn. That runtime refuses it (`SpawnNotTaken`), and the child fails closed. Cross-workload delegation needs one `appa-runtime` that both reach: set `APPA_RUNTIME_URL` on both agents, and neither pod starts its bundled runtime. The demo chart sets it on all six agents, so every pod runs against the shared runtime pod.
-- The bundled runtime loads one policy file, `APPA_CONFIG` (default: the packaged example). Real policy work moves to a deployed `appa-runtime`.
+- The bundled runtime loads one policy file, `APPA_CONFIG` (default: the packaged example). `APPA_CONFIG_CONTENTS` gives each Agent a complete configurable policy and rolls its pod when that source changes.
 
 ## Runtime adapters
 
@@ -617,9 +617,9 @@ seed Job    post-install, post-upgrade ─▶ kagent-controller
 
 Every unit lives in this repository.
 
-[release.yml](../../.github/workflows/release.yml) publishes five images to `ghcr.io/archestra-ai` at the release version, for `linux/amd64`. They are `appa-kagent-quickstart`, `appa-kagent-adk`, `appa-kagent-adk-go`, `appa-demo-tools` and `appa-demo-mocks`. Each build attaches an SBOM and a provenance attestation. A last step tags `golang-adk` at that version on the digest of `appa-kagent-adk-go`, the name the kagent controller derives for the Go runtime. The step then reads the alias back, and it fails the job on another digest. The GitHub release waits for the whole job.
+[release.yml](../../.github/workflows/release.yml) publishes six images to `ghcr.io/archestra-ai` at the release version. `appa-runtime` and `appa-kagent-quickstart` publish for `linux/amd64` and `linux/arm64`. `appa-kagent-adk`, `appa-kagent-adk-go`, `appa-demo-tools`, and `appa-demo-mocks` publish for `linux/amd64`. Each build attaches an SBOM and a provenance attestation. The workflow also publishes the `appa-runtime` chart as an OCI artifact and a GitHub release asset. A last step tags `golang-adk` at that version on the digest of `appa-kagent-adk-go`, the name the kagent controller derives for the Go runtime. The step then reads the alias back, and it fails the job on another digest. The GitHub release waits for the image and chart jobs.
 
-Every Dockerfile pins each `FROM` and `COPY --from` base by digest, with the tag beside it for the reader. The job `kagent-images-build` in [ci.yml](../../.github/workflows/ci.yml) builds all five on a pull request that can break them, and pushes none. No workflow scans the images.
+Every Dockerfile pins each `FROM` and `COPY --from` base by digest, with the tag beside it for the reader. The image jobs in [ci.yml](../../.github/workflows/ci.yml) build all six on a pull request that can break them, including native arm64 checks for the shared runtime and quickstart. They push none. No workflow scans the images.
 
 ## Verification matrix
 

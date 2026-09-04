@@ -146,7 +146,16 @@ If you run Go agents, also set `controller.goAgentImage`:
 
 The policy governs only declared tools. Unlisted tool calls stop fail-closed before execution.
 
-Deploy an `appa-runtime` with an `appa.toml` declaring your tools. A wildcard entry (`name = "*"`) covers unlisted tools through an annotator.
+Deploy a shared `appa-runtime` with the production chart in `charts/appa-runtime`. The image of this version bundles the batteries of the release. `GET /batteries` lists them.
+
+```sh
+helm install appa-runtime charts/appa-runtime -n kagent --create-namespace
+```
+
+Set `persistence.enabled=true` to keep the trajectory log and to let the appa-guide skill refresh batteries.
+Tagged releases also publish this chart at `oci://ghcr.io/archestra-ai/charts/appa-runtime`.
+
+A wildcard entry (`name = "*"`) covers unlisted tools through an annotator.
 
 Agent delegation requires explicit tool entries under the wire name `<namespace>__NS__<agent>` (hyphens as underscores). Wildcards do not cover delegation spawns. See [Policy contracts](/contracts) for syntax.
 

@@ -1,0 +1,17 @@
+OpenAPPA runtime {{ .Chart.AppVersion }} is the shared gate in this namespace.
+
+Agents reach it at:
+
+  http://{{ include "appa-runtime.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}
+
+Set that URL as APPA_RUNTIME_URL on each gated agent, with APPA_ENABLED=true.
+
+Bundled batteries: GET /batteries on that address.
+Persistent volume: {{ if .Values.persistence.enabled }}on ({{ include "appa-runtime.pvcName" . }}){{ else }}off — the skill will not refresh batteries{{ end }}.
+{{- if and .Values.persistence.enabled .Values.persistence.keep (not .Values.persistence.existingClaim) }}
+The chart-created PVC stays after helm uninstall because persistence.keep is true.
+{{- end }}
+Policy upgrades: {{ if .Values.config.existingConfigMap }}operator-owned ConfigMap {{ .Values.config.existingConfigMap }}{{ else if .Values.config.contents }}Helm replaces the key from config.contents{{ else }}Helm preserves the live chart-created key{{ end }}.
+{{- if .Values.persistence.enabled }}
+The skill refreshes /var/lib/appa/release-batteries from the latest verified semver release and preserves /var/lib/appa/batteries.
+{{- end }}

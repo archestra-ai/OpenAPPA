@@ -6,6 +6,7 @@ OpenAPPA makes every declarative kagent agent on Kubernetes ready to gate throug
 
 - **Operator guide**: [website/content/docs/kagent.md](../../website/content/docs/kagent.md)
 - **Implementation specification**: [IMPLEMENTATION.md](IMPLEMENTATION.md)
+- **Shared runtime Helm chart**: [charts/appa-runtime/README.md](../../charts/appa-runtime/README.md)
 - **Demo Helm chart**: [demo/chart/README.md](demo/chart/README.md)
 
 ## Components
@@ -35,7 +36,7 @@ Wraps kagent's published Python runtime container image. It ships `AppaPluginKag
 Implements `AppaPluginKagent` for Google Go ADK v2. It provides a replacement runtime main that registers the plugin, manages session lineage headers across agent-to-agent delegation, and coordinates human-in-the-loop approvals.
 
 ### 3. Quickstart Image (`appa-kagent-quickstart/`)
-A self-contained container image bundling both Python and Go runtimes together with an embedded `appa-runtime` binary. `APPA_ENABLED` selects the mode and is off by default: the image then serves the agent as the stock kagent image does and starts no runtime. With `APPA_ENABLED=true` and no `APPA_RUNTIME_URL`, the image starts `appa-runtime` on `127.0.0.1:8787` using a packaged default policy. With `APPA_RUNTIME_URL` supplied, it connects to the shared runtime service instead.
+A self-contained container image bundling the Python runtime with an embedded `appa-runtime` binary. `APPA_ENABLED` selects the mode and is off by default: the image then serves the agent as the stock kagent image does and starts no runtime. With `APPA_ENABLED=true` and no `APPA_RUNTIME_URL`, the image starts `appa-runtime` on `127.0.0.1:8787` using a packaged default policy. `APPA_CONFIG_CONTENTS` supplies a complete per-Agent policy for that bundled mode. With `APPA_RUNTIME_URL` supplied, the image connects to the shared runtime service instead.
 
 ### 4. Codec Crate (`appa-adapter-kagent`)
 The Rust codec crate lives at [`appa-adapter-kagent/`](../../appa-adapter-kagent) in the workspace root. It is compiled directly into `appa-runtime` and parses wire events sent by `AppaPluginKagent`.
@@ -83,6 +84,21 @@ spec:
 
 An agent with `APPA_ENABLED=true` refuses to start without its runtime. The wrapped runtime refuses a gated start that names no `APPA_RUNTIME_URL`. The quickstart image exits when its bundled `appa-runtime` never answers. So an agent you asked to gate never runs ungated.
 
+### Deploy a shared runtime
+
+The production chart installs one `appa-runtime` with a relay, the
+release batteries, and optional persistence:
+
+```sh
+helm install appa-runtime ../../charts/appa-runtime -n kagent \
+  --set persistence.enabled=true
+```
+
+`GET /batteries` on that Service lists the batteries this release
+bundled. The appa-guide skill translates matched declarations to exact
+kagent tool names. With persistence on, it can refresh a separate
+release layer from the latest checksummed semver release.
+
 ### Deploy the Interactive Demo
 
 Deploy the demo chart with your OpenRouter API key:
@@ -110,6 +126,7 @@ To build and test the integration images locally (for example, on a local `kind`
 
 ```sh
 # Build images
+docker build -f ../../appa-runtime/Dockerfile -t appa-runtime:dev ../../
 docker build -f appa-kagent-quickstart/Dockerfile -t appa-kagent-quickstart:dev ../../
 docker build -t golang-adk:dev appa-kagent-adk-go   # the go cell: kagent derives this name for runtime: go
 docker build -t appa-demo-tools:dev demo
@@ -117,6 +134,7 @@ docker build -t appa-demo-mocks:dev demo/mocks
 
 # Load images into kind
 kind load docker-image \
+  appa-runtime:dev \
   appa-kagent-quickstart:dev \
   golang-adk:dev \
   appa-demo-tools:dev \

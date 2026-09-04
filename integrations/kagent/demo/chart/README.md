@@ -128,12 +128,14 @@ so the relay and the mocks are its sidecars (the plan's
 
 ## Images
 
-The release workflow publishes five images to `ghcr.io/archestra-ai`
-at the release version, for `linux/amd64`: `appa-kagent-quickstart`,
-`appa-kagent-adk`, `appa-kagent-adk-go`, `appa-demo-tools` and
-`appa-demo-mocks`. It also publishes `golang-adk` at that version, on
-the same digest as `appa-kagent-adk-go`. kagent's controller derives
-the go runtime image under that name.
+The release workflow publishes six images to `ghcr.io/archestra-ai` at
+the release version: `appa-runtime`, `appa-kagent-quickstart`,
+`appa-kagent-adk`, `appa-kagent-adk-go`, `appa-demo-tools`, and
+`appa-demo-mocks`. The first two support `linux/amd64` and
+`linux/arm64`. The other four support `linux/amd64`. It also publishes
+`golang-adk` at that version, on the same digest as
+`appa-kagent-adk-go`. kagent's controller derives the Go runtime image
+under that name.
 
 The chart's image defaults name `appa-kagent-quickstart`,
 `appa-demo-tools` and `appa-demo-mocks` in that registry, at the

@@ -1,0 +1,210 @@
+{{- if or (hasKey .Values.env "APPA_BATTERIES_DIR") (hasKey .Values.env "APPA_CONFIG") }}
+{{- fail "env.APPA_BATTERIES_DIR and env.APPA_CONFIG are reserved; the chart derives them" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "appa-runtime.fullname" . }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "appa-runtime.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "appa-runtime.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        {{- if not .Values.config.existingConfigMap }}
+        checksum/policy: {{ include "appa-runtime.managedPolicy" . | sha256sum | quote }}
+        {{- end }}
+        checksum/relay: {{ .Files.Get "files/relay.conf" | sha256sum | quote }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "appa-runtime.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "appa-runtime.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automount }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- if .Values.persistence.enabled }}
+      initContainers:
+        - name: recover-battery-refresh
+          image: {{ include "appa-runtime.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              target=/var/lib/appa/release-batteries
+              backup=/var/lib/appa/.release-batteries.previous
+              if [ ! -e "$target" ] && { [ -e "$backup" ] || [ -L "$backup" ]; }; then
+                test -d "$backup"
+                test ! -L "$backup"
+                mv -- "$backup" "$target"
+              fi
+              mkdir -p /var/lib/appa/batteries "$target"
+              rm -rf /var/lib/appa/.release-batteries.new-* \
+                /var/lib/appa/.release-batteries.failed-* \
+                /var/lib/appa/.release-batteries.trash-*
+          resources:
+            requests:
+              cpu: 5m
+              memory: 16Mi
+            limits:
+              memory: 32Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/appa
+      {{- end }}
+      containers:
+        - name: runtime
+          image: {{ include "appa-runtime.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          command:
+            - /usr/local/bin/appa
+            - runtime
+            - --adapter
+            - kagent
+            - --config
+            - {{ printf "/etc/appa/%s" .Values.config.key | quote }}
+            - --db
+            - /var/lib/appa/appa.db
+            - --listen
+            - 127.0.0.1:18787
+            {{- if .Values.persistence.enabled }}
+            - --batteries-dir
+            - /var/lib/appa/batteries
+            - --batteries-dir
+            - /var/lib/appa/release-batteries
+            {{- end }}
+            - --batteries-dir
+            - /opt/appa/batteries
+            {{- if .Values.verbosity }}
+            - {{ .Values.verbosity | quote }}
+            {{- end }}
+          env:
+            - name: APPA_CONFIG
+              value: {{ printf "/etc/appa/%s" .Values.config.key | quote }}
+            - name: APPA_BATTERIES_DIR
+              {{- if .Values.persistence.enabled }}
+              value: /var/lib/appa/batteries:/var/lib/appa/release-batteries:/opt/appa/batteries
+              {{- else }}
+              value: /opt/appa/batteries
+              {{- end }}
+            {{- range $key, $value := .Values.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+          {{- with .Values.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          startupProbe:
+            exec:
+              command:
+                - python3
+                - -c
+                - 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:18787/health", timeout=2).read()'
+            failureThreshold: 30
+            periodSeconds: 2
+          readinessProbe:
+            exec:
+              command:
+                - python3
+                - -c
+                - 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:18787/health", timeout=2).read()'
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command:
+                - python3
+                - -c
+                - 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:18787/health", timeout=2).read()'
+            periodSeconds: 20
+          volumeMounts:
+            - name: policy
+              mountPath: /etc/appa
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/appa
+            - name: tmp
+              mountPath: /tmp
+        - name: relay
+          image: {{ include "appa-runtime.relayImage" . }}
+          imagePullPolicy: {{ .Values.relay.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.relay.securityContext | nindent 12 }}
+          ports:
+            - name: relay
+              containerPort: 18789
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: relay
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.relay.resources | nindent 12 }}
+          volumeMounts:
+            - name: relay
+              mountPath: /etc/nginx/conf.d
+              readOnly: true
+            - name: relay-cache
+              mountPath: /var/cache/nginx
+            - name: relay-run
+              mountPath: /var/run
+            - name: relay-tmp
+              mountPath: /tmp
+      volumes:
+        - name: policy
+          configMap:
+            name: {{ include "appa-runtime.configMapName" . }}
+        - name: relay
+          configMap:
+            name: {{ include "appa-runtime.fullname" . }}-relay
+        - name: tmp
+          emptyDir: {}
+        - name: relay-cache
+          emptyDir: {}
+        - name: relay-run
+          emptyDir: {}
+        - name: relay-tmp
+          emptyDir: {}
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "appa-runtime.pvcName" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
