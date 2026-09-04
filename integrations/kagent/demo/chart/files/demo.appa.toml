@@ -152,7 +152,9 @@ delta = {}
 # --- the configuring actor: the appa-guide agent ---
 # The guide agent runs the routing skill against these tools. Reads are
 # unrestricted; cluster and Helm writes sit behind a person (kagent's
-# Approve card is the oncall authority's channel), and exec needs trusted data.
+# Approve card is the oncall authority's channel). The command annotator
+# permits read-only inspection and puts every state-changing helper behind
+# that same person.
 # The skill's file helpers that it never uses (bash, write_file,
 # edit_file) stay undeclared, so they are refused.
 [[policy.tool]]
@@ -195,13 +197,16 @@ delta = {}
 trust = "trusted"
 attention = ["human-approval"]
 
+[[policy.annotator]]
+name = "appa-guide-command"
+ranks = ["trusted"]
+audiences = []
+marks = ["human-approval"]
+effects = []
+
 [[policy.tool]]
 name = "k8s_execute_command"
-delta = {}
-
-[policy.tool.requires]
-trust = "trusted"
-attention = ["human-approval"]
+annotator = "appa-guide-command"
 
 [[policy.tool]]
 name = "helm_list_releases"
@@ -278,6 +283,9 @@ max_body_bytes = 65536
 
 [externals.authorities.oncall]
 builtin = "hitl"
+
+[externals.annotators.appa-guide-command]
+command = ["/usr/local/bin/appa-guide-command-annotator"]
 
 # The mock externals (demo/mocks/) answer these two on the runtime's
 # loopback — a url binding takes cleartext http to loopback only.

@@ -80,6 +80,7 @@ must_contain 'name: "kagent-tool-server"'
 must_contain 'your first tool call must be skills with command appa-guide'
 must_contain 'Inventory Agents as JSON and RemoteMCPServers with a wide list'
 must_contain 'immediately call execute_remedy_plan with its exact offer id'
+must_contain 'copy pod_name and namespace from the same fetched Pod YAML'
 
 must_render --set appaGuide.enabled=true --set appaGuide.namespace=platform \
   --set appaGuide.skill.ref=main --set appaGuide.modelConfig=platform-model

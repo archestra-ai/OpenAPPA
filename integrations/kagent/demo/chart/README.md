@@ -114,7 +114,7 @@ structured outputs.
 | `agents.go.enabled` | `true` | Also render the go cell: `cluster-ops-go`, `log-analyst-go`, and `release-manager-go` on kagent's go runtime (needs the published `golang-adk` image beside the python one). |
 | `agents.go.childName` | `log-analyst-go` | The go child `cluster-ops-go` delegates to. The policy names it the same way. |
 | `guide.enabled` | `true` | Install the `appa-guide` agent: the routing skill over the kagent tool server's k8s tools, gated by the shared runtime. |
-| `guide.skill.git.*` | this repo, `main`, `integrations/appa-guide` | Where kagent clones the canonical skill. Claude packaging stages the same directory into its plugin. The cluster must reach the repo (or a fork). |
+| `guide.skill.git.*` | this repo, `v<appVersion>`, `integrations/appa-guide` | Where kagent clones the canonical skill. An empty ref pins the release tag; set a ref explicitly for development. Claude packaging stages the same directory into its plugin. The cluster must reach the repo (or a fork). |
 | `guide.toolServer` | `kagent-tool-server` | The RemoteMCPServer serving the `k8s_*` tools. |
 
 kagent compiles an agent that calls another agent as a tool only once

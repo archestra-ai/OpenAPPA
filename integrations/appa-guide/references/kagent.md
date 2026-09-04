@@ -117,12 +117,17 @@ error.
 5. If exec is available, invoke `appa-guide-inspect` in the runtime pod.
    In a multi-container pod, the runtime container must be first because
    kagent 0.9.12 ignores the tool's `container` field. The command returns
-   the mounted root config, `appa describe`, and `GET /batteries`. Compare
-   its root config with the ConfigMap source. If they disagree after the
-   kubelet sync window, stop and report the mismatch. If the command is
-   unavailable or no route answers, say the description and battery
-   inventory are unavailable. Never treat them as empty and never infer
-   batteries from an image or release name.
+   the mounted root config, `appa describe`, `GET /batteries`, and battery
+   refresh state. The refresh state names the current release tag, any
+   checked candidate, and whether a previous layer awaits commit or
+   rollback. Compare its root config with the ConfigMap source. If they
+   disagree after the kubelet sync window, stop and report the mismatch.
+   If the command is unavailable or no route answers, say the description
+   and battery inventory are unavailable. Never treat them as empty and
+   never infer batteries from an image or release name.
+   For this and every later `appa-guide-*` call, copy `pod_name` and
+   `namespace` from the same fetched Pod YAML. Never combine a pod name
+   with a namespace from an example, Helm release, or another runtime.
 
 ## Inventory
 
@@ -282,7 +287,9 @@ Show:
 - how the remaining installed tools will behave;
 - installed tools the proposal leaves undeclared: covered by a wildcard
   entry when the config has one, refused otherwise;
-- blocked delegations;
+- blocked delegations: every Agent delegation whose exact wire name is
+  absent from policy is blocked, even when that omission is deliberate;
+  never report it as covered or unblocked;
 - every ungated agent: "`<agent>` runs ungated, and nothing in this
   policy applies to it.";
 - every uninspected server: "`<server>` is configured, but the cluster

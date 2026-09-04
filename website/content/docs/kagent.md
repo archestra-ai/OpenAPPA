@@ -215,7 +215,7 @@ helm upgrade --install appa-runtime oci://ghcr.io/archestra-ai/charts/appa-runti
   --wait --timeout 10m
 ```
 
-Agents reach this runtime at `http://appa-runtime.appa.svc.cluster.local:18789`. The runtime stores its trajectory log on the persistent volume and reads policy from the `appa-policy` ConfigMap. The same release installs `appa-guide` in the `kagent` namespace.
+Agents reach this runtime at `http://appa-runtime.appa.svc.cluster.local:18789`. The runtime stores its trajectory log on the persistent volume and reads policy from the `appa-runtime-policy` ConfigMap. The same release installs `appa-guide` in the `kagent` namespace.
 
 With `appa-guide` already available, send: `install or upgrade the shared OpenAPPA runtime with persistent battery storage`.
 
@@ -288,7 +288,7 @@ kubectl logs -n appa deployment/appa-runtime -c runtime --tail=50
 
 ## Manage integration with appa-guide
 
-The demo chart installs `appa-guide`. For an existing-agent integration, install it in step 5 above. Its two modes match the Claude Code experience: `init` creates the initial configuration, and `adjust` changes an existing configuration.
+Both the demo chart and the shared runtime chart install `appa-guide`. For an existing-Agent integration, enable it in step 2 and confirm it in step 3. Its two modes match the Claude Code experience: `init` creates the initial configuration, and `adjust` changes an existing configuration.
 
 Run these interactions in order:
 
@@ -365,7 +365,7 @@ When agents call other agents through [A2A (Agent-to-Agent)](https://kagent.dev/
 
 ## Policy example
 
-Policies are declarative TOML files stored in the `appa-policy` ConfigMap or version control. This example policy excerpt governs cluster tools and human review:
+Policies are declarative TOML files stored in the runtime policy ConfigMap or version control. This example policy excerpt governs cluster tools and human review:
 
 ```toml
 # In-cluster secret read: results carry the ops audience

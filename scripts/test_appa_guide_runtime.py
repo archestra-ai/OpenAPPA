@@ -29,6 +29,7 @@ class GuideRuntimeTests(unittest.TestCase):
                 mock.patch.dict(guide.os.environ, {"APPA_CONFIG": str(config)}),
                 mock.patch.object(guide.subprocess, "run", return_value=described) as run,
                 mock.patch.object(guide, "runtime_request", return_value=b'{"batteries":[]}'),
+                mock.patch.object(guide, "refresh_state", return_value={"supported": False}),
                 mock.patch.object(guide.sys, "stdout", stdout),
             ):
                 guide.inspect()
@@ -40,6 +41,51 @@ class GuideRuntimeTests(unittest.TestCase):
             self.assertIn(b"version = 2", output.getvalue())
             self.assertIn(b"Config: loadable", output.getvalue())
             self.assertIn(b'{"batteries": []}', output.getvalue())
+            self.assertIn(b'{"supported": false}', output.getvalue())
+
+    def test_command_annotation_separates_inspection_from_mutation(self) -> None:
+        def consult(command: str) -> dict:
+            return {
+                "version": 1,
+                "kind": "annotation",
+                "name": "appa-guide-command",
+                "artifact": {"args": {"arguments": {"command": command}}},
+            }
+
+        inspected = guide.annotate_command(consult("appa-guide-inspect"))
+        self.assertEqual(inspected["answer"]["requires"]["attention"], [])
+        for command in guide.MUTATING_COMMANDS:
+            annotated = guide.annotate_command(consult(command))
+            self.assertEqual(annotated["answer"]["requires"]["attention"], ["human-approval"])
+        with self.assertRaisesRegex(ValueError, "not an appa-guide runtime operation"):
+            guide.annotate_command(consult("curl -s http://127.0.0.1/reload"))
+
+    def test_inspection_reports_the_current_and_pending_release_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "release-batteries"
+            target.mkdir()
+            (target / ".appa-release").write_text("v1.2.3\n", encoding="utf-8")
+            (root / ".release-batteries.previous").mkdir()
+            candidate = root / "candidate"
+            candidate.write_text("v1.3.0\n", encoding="utf-8")
+            refresh = root / "appa-refresh-batteries"
+            refresh.write_text("", encoding="utf-8")
+            with (
+                mock.patch.dict(guide.os.environ, {"APPA_BATTERY_REFRESH_TARGET": str(target)}),
+                mock.patch.object(guide, "CANDIDATE", candidate),
+                mock.patch.object(guide, "REFRESH", str(refresh)),
+            ):
+                state = guide.refresh_state()
+        self.assertEqual(
+            state,
+            {
+                "supported": True,
+                "release": "v1.2.3",
+                "candidate": "v1.3.0",
+                "pending_previous_layer": True,
+            },
+        )
 
     def test_refresh_stage_uses_the_release_recorded_by_check(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

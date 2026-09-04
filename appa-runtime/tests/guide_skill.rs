@@ -82,6 +82,7 @@ fn the_kagent_reference_carries_the_full_flow() {
         "__NS__",
         "Approve/Reject card",
         "opens the Approve/Reject card",
+        "same fetched Pod YAML",
         "/batteries",
         "APPA_CONFIG_CONTENTS",
         "Replace only `name`",
@@ -165,7 +166,7 @@ fn only_the_shared_runtime_image_carries_battery_refresh_helpers() {
 }
 
 #[test]
-fn every_kagent_exec_requires_human_approval() {
+fn kagent_exec_is_annotated_by_exact_guide_operation() {
     let root = repo_root();
     for path in [
         "charts/appa-runtime/files/appa.toml",
@@ -176,10 +177,9 @@ fn every_kagent_exec_requires_human_approval() {
             .split("[[policy.tool]]")
             .find(|entry| entry.contains("name = \"k8s_execute_command\""))
             .expect("kagent policy declares command execution");
-        assert!(
-            command.contains("attention = [\"human-approval\"]"),
-            "{path} gates reload and command execution behind a person"
-        );
+        assert!(command.contains("annotator = \"appa-guide-command\""));
+        assert!(policy.contains("marks = [\"human-approval\"]"));
+        assert!(policy.contains("/usr/local/bin/appa-guide-command-annotator"));
     }
 }
 

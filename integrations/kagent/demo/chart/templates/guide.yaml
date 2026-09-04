@@ -18,7 +18,7 @@ spec:
   skills:
     gitRefs:
       - url: {{ .Values.guide.skill.git.url | quote }}
-        ref: {{ .Values.guide.skill.git.ref | quote }}
+        ref: {{ .Values.guide.skill.git.ref | default (printf "v%s" .Chart.AppVersion) | quote }}
         path: {{ .Values.guide.skill.git.path | quote }}
         name: {{ .Values.guide.skill.name | quote }}
   declarative:
@@ -46,6 +46,8 @@ spec:
       When feedback offers human-approval, immediately call
       execute_remedy_plan with its exact offer id to open the confirmation
       card, then wait for the ruling. Never summarize instead of opening it.
+      For every appa-guide-* call, copy pod_name and namespace from the same
+      fetched Pod YAML. Never combine values from different resources.
       Work only through
       your k8s tools and read_file. Do not
       change the policy until the operator approves the proposal in

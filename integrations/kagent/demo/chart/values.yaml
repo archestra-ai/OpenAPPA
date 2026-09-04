@@ -95,7 +95,8 @@ guide:
   skill:
     git:
       url: https://github.com/archestra-ai/OpenAPPA
-      ref: main
+      # Empty pins the skill to v<chart appVersion>.
+      ref: ""
       path: integrations/appa-guide
     name: appa-guide
   # The kagent tool server that serves the k8s_* tools.

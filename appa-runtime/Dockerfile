@@ -44,7 +44,7 @@ COPY --chown=appa:appa batteries /opt/appa/batteries
 COPY --chown=appa:appa scripts/appa-refresh-batteries.py /usr/local/bin/appa-refresh-batteries
 COPY --chown=appa:appa scripts/appa-guide-runtime.py /opt/appa/appa-guide-runtime
 RUN chmod 0755 /usr/local/bin/appa-refresh-batteries /opt/appa/appa-guide-runtime \
-    && for operation in inspect reload refresh-check refresh-stage refresh-commit refresh-rollback; do \
+    && for operation in inspect reload refresh-check refresh-stage refresh-commit refresh-rollback command-annotator; do \
          ln -s /opt/appa/appa-guide-runtime "/usr/local/bin/appa-guide-${operation}"; \
        done
 
