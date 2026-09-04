@@ -336,7 +336,9 @@ impl AudienceVocabulary {
         self.groups.iter().cloned().map(SymbolicAtom::Group)
     }
 
-    pub(crate) fn permits_clause(&self, clause: &Clause) -> bool {
+    /// Whether every atom of one clause is a member: the one admission test for a produced
+    /// audience, the same at the runtime's answer seam and in the engine's check.
+    pub fn permits_clause(&self, clause: &Clause) -> bool {
         clause.chain().is_none_or(|level| self.chain.contains(&level))
             && clause.groups().all(|group| self.groups.contains(group))
             && clause.readers().iter().all(|reader| self.readers.contains(reader))

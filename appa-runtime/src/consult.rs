@@ -19,6 +19,7 @@ use appa_engine::audience::MemberClaims;
 use appa_engine::authority::{Authority, DeclaredTransition, Sanitizer};
 use appa_engine::check::Gap;
 use appa_engine::label::{Clause, DeclaredAudience, ReaderId, Trust};
+use appa_engine::registry::AudienceVocabulary;
 use appa_engine::registry::TrustChain;
 
 /// Which registered external a consult addresses. Closed: the wire
@@ -440,17 +441,22 @@ struct RequiredAudienceWire {
     within: Option<serde_json::Value>,
 }
 
-/// One answered audience read against the mandate: every entry is a spelling the
-/// declaration lists, and the list parses as one declared audience — `public` alone, at most
-/// one chain word, no repeated entry.
+/// One answered audience read against the mandate: the list parses as one declared audience
+/// — `public` is the token, never an array entry; at most one chain word; no repeated entry —
+/// and every atom it names is in the mandate's vocabulary, so a reader answered in another
+/// spelling of the mandate's canonical one still meets it.
 fn declared_audience(audience: &WireAudience, declaration: &AnnotationDeclaration) -> Option<DeclaredAudience> {
     match audience {
         WireAudience::Public => Some(DeclaredAudience::Public),
-        WireAudience::Entries(entries) => entries
-            .iter()
-            .all(|entry| declaration.audiences.contains(entry))
-            .then(|| DeclaredAudience::parse_entries(entries).ok())
-            .flatten(),
+        WireAudience::Entries(entries) => {
+            let mandate = AudienceVocabulary::parse_entries(&declaration.audiences).ok()?;
+            match DeclaredAudience::parse_entries(entries).ok()? {
+                DeclaredAudience::Public => None,
+                DeclaredAudience::Union(clause) => mandate
+                    .permits_clause(&clause)
+                    .then_some(DeclaredAudience::Union(clause)),
+            }
+        }
     }
 }
 
@@ -1276,6 +1282,22 @@ mod tests {
                     Clause::new([ChainAudience::Internal], [], []).expect("a chain clause")
                 )),
             })
+        );
+
+        let with_reader = AnnotationDeclaration {
+            audiences: vec!["alice@corp.example".to_string()],
+            ..annotation_declaration()
+        };
+        assert_eq!(
+            AnnotationAnswer::from_wire(
+                &neutral(serde_json::json!({"delta": {"audience": ["alice@CORP.example"]}})),
+                &with_reader
+            )
+            .map(|answer| answer.delta_audience),
+            Some(Some(DeclaredAudience::restricted([ReaderId::new(
+                "alice@corp.example"
+            )]))),
+            "a reader is one identity under every spelling of its domain"
         );
 
         let both_chain_words = AnnotationDeclaration {
