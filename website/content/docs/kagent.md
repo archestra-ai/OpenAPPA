@@ -294,7 +294,8 @@ spec:
       all read-only inspection and present the proposal without asking whether to
       continue. Inventory Agents across all namespaces. This Agent runs in kagent;
       derive each runtime namespace from APPA_RUNTIME_URL. Resolve runtime pods
-      through the Service selector; never infer pod names from Helm release names.
+      through the Service selector. List namespace pods as JSON because
+      k8s_get_resources has no label-selector argument. Never infer pod names.
       Do not respond until the full init checklist and comparison are complete.
     modelConfig: "default-model-config"
     tools:

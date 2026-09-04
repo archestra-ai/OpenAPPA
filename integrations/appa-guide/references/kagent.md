@@ -36,9 +36,12 @@ unavailable state is reported:
 2. Read this complete reference.
 3. List Agents across all namespaces and identify each target runtime.
 4. For each shared runtime URL, read its Service, list pods in that
-   namespace, and select a pod matching the Service selector. Never
-   construct a pod name from a Helm release or Service name. Read the
-   policy ConfigMap and invoke `appa-guide-inspect` in that runtime pod.
+   namespace, and select a pod matching the Service selector. The
+   `k8s_get_resources` tool has no label-selector argument. Call it once
+   with `resource_type: pod`, the exact namespace, and `output: json`,
+   then inspect each returned pod's labels. Never construct a pod name
+   from a Helm release or Service name. Read the policy ConfigMap and
+   invoke `appa-guide-inspect` in that runtime pod.
 5. List every `RemoteMCPServer` across all namespaces. Fetch each by
    exact name and namespace with `k8s_get_resource_yaml`, then record its
    discovered tools or unavailable state.
@@ -85,7 +88,9 @@ error.
    shared mode. `APPA_ENABLED=true` without that URL is bundled mode.
 2. In shared mode, parse the URL's Service and namespace. Read that
    Service, list pods in its namespace, and select a pod matching its
-   selector. Never infer a pod name from a Helm release or Service name.
+   selector. Do not pass a label selector to `k8s_get_resources`; list
+   namespace pods once as JSON and inspect their labels. Never infer a
+   pod name from a Helm release or Service name.
    The production chart selects `app=appa-runtime`. Record the `--config`,
    `--listen`, and ordered `--batteries-dir` or `APPA_BATTERIES_DIR`
    values. Record the policy ConfigMap and data volume.
