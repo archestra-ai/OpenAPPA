@@ -61,17 +61,44 @@ const namespaceMark = "__NS__"
 // segment is one segment of a canonical tool id, as the runtime admits it.
 var segment = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
-// spelledCandidate matches a wire spelling as it stands in a runtime
-// string: two or three segments, class:name or class:namespace/name.
-// Each run of segment characters is maximal, so a spelling inside a
-// longer run is no candidate here, and the inventory alone decides
-// which candidate is a spelling it gave out.
-var spelledCandidate = regexp.MustCompile(`[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?`)
+// segmentRun is one segment of a wire spelling as it stands in a
+// runtime string: a run that starts and ends on a core character and
+// is maximal over them.
+const segmentRun = `[A-Za-z0-9_-](?:[A-Za-z0-9_.-]*[A-Za-z0-9_-])?`
 
-// spellingEdge holds the characters that continue a wire spelling. A
-// candidate that follows one is the tail of a longer run, not a whole
-// spelling, and it stands.
-const spellingEdge = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.:/-"
+// spelledCandidate matches a wire spelling: two or three segments,
+// class:name or class:namespace/name. The inventory alone decides
+// which candidate is a spelling it gave out, and Despell replaces one
+// only where the identifier continues on neither side.
+var spelledCandidate = regexp.MustCompile(segmentRun + `:` + segmentRun + `(?:/` + segmentRun + `)?`)
+
+// spellingCore holds the characters that always continue a wire
+// spelling; spellingSeparator holds the ones that continue it only
+// where a core character follows, so the period that ends a sentence
+// closes the identifier and the period inside list.json does not.
+const (
+	spellingCore      = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
+	spellingSeparator = ".:/"
+)
+
+// charAt is the byte at index, or 0 outside text.
+func charAt(text string, index int) byte {
+	if index < 0 || index >= len(text) {
+		return 0
+	}
+	return text[index]
+}
+
+// continues reports whether an identifier runs on past one of its
+// edges. adjacent is the byte next to the candidate and beyond the one
+// past it, read away from the candidate; both are 0 at the ends of the
+// text, and a byte of a multi-byte rune is neither core nor separator.
+func continues(adjacent, beyond byte) bool {
+	if strings.IndexByte(spellingCore, adjacent) >= 0 {
+		return true
+	}
+	return strings.IndexByte(spellingSeparator, adjacent) >= 0 && strings.IndexByte(spellingCore, beyond) >= 0
+}
 
 func MCPSpelling(toolset, tool string) string      { return "mcp:" + toolset + "/" + tool }
 func AgentSpelling(namespace, agent string) string { return "agent:" + namespace + "/" + agent }
@@ -108,12 +135,20 @@ func (i Inventory) Len() int { return len(i.spellings) }
 // passes through here first. The substitution is closed: a whole
 // spelling this inventory carries is replaced, and every other byte
 // stands — a spelling it never gave out included.
+//
+// A whole spelling is one the identifier continues on neither side, so
+// mcp:demo/list inside mcp:demo/list/extra names no tool this
+// inventory gave out and stands, while the period that ends the
+// sentence after one is punctuation and is kept.
 func (i Inventory) Despell(text string) string {
 	var spelled strings.Builder
 	written := 0
 	for _, span := range spelledCandidate.FindAllStringIndex(text, -1) {
 		start, end := span[0], span[1]
-		if start > 0 && strings.IndexByte(spellingEdge, text[start-1]) >= 0 {
+		if continues(charAt(text, start-1), charAt(text, start-2)) {
+			continue
+		}
+		if continues(charAt(text, end), charAt(text, end+1)) {
 			continue
 		}
 		name, gaveOut := i.names[text[start:end]]

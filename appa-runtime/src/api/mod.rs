@@ -671,21 +671,13 @@ impl Runtime {
     /// reloading a policy). The caller reads the file; the runtime never
     /// learns where a configuration came from, so an embedding host
     /// reloads a composed policy the same way.
+    ///
+    /// How this deployment names tools is its own state and no caller's choice, so the
+    /// reload holds the naming it opened with: a served deployment's rule that the policy
+    /// names every tool canonically survives the reload, and a refused candidate changes
+    /// nothing — the deployment that was serving keeps serving.
     pub fn reload(&self, config: Config) -> Result<Reloaded, OpenError> {
-        self.reload_named(config, ToolNaming::AsAuthored)
-    }
-
-    /// The reload `appa runtime` serves: [`Runtime::reload`] under the naming this
-    /// deployment opened with, so the served-deployment rule that the policy names every
-    /// tool canonically holds across a reload and the served adapter stays the one this
-    /// process was started for. A refused reload changes nothing — the deployment that
-    /// was serving keeps serving.
-    pub(crate) fn reload_served(&self, config: Config) -> Result<Reloaded, OpenError> {
-        self.reload_named(config, self.inner.naming)
-    }
-
-    fn reload_named(&self, config: Config, naming: ToolNaming) -> Result<Reloaded, OpenError> {
-        let deployment = Deployment::load(config, &self.inner.modules, self.inner.gates.clone(), naming)?;
+        let deployment = Deployment::load(config, &self.inner.modules, self.inner.gates.clone(), self.inner.naming)?;
         let identity = deployment.resident().identity_hex();
         let deployment = Arc::new(deployment);
         // The gate's bound and the serving snapshot change as one transition under the
@@ -1891,6 +1883,34 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 "the stored policy confines {confined}: {decision:?}"
             );
         }
+    }
+
+    /// How a deployment names tools is its own state, not a caller's choice, so the
+    /// served-deployment rule holds wherever a policy arrives: a policy naming a tool the
+    /// host's raw way is refused at startup and refused again by the reload `/reload`
+    /// answers 422 for.
+    #[test]
+    fn a_served_deployment_refuses_a_non_canonical_policy_at_startup_and_on_reload() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let db = dir.path().join("appa.db");
+        let raw = || {
+            claude_config(
+                r#"
+                version = 2
+                [[tool]]
+                name = "Bash"
+                "#,
+            )
+        };
+        assert!(matches!(
+            Runtime::open_served(raw(), db.clone(), None, appa_adapter_claude_code::adapter()),
+            Err(OpenError::NonCanonicalTool { .. })
+        ));
+
+        let served = Runtime::open_served(served_policy(), db, None, appa_adapter_claude_code::adapter())
+            .expect("the served deployment opens");
+        assert!(matches!(served.reload(raw()), Err(OpenError::NonCanonicalTool { .. })));
+        served.reload(served_policy()).expect("a canonical policy reloads");
     }
 
     #[test]

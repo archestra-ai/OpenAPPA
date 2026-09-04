@@ -113,6 +113,48 @@ def test_every_spelling_despells_back_to_the_name_adk_dispatches():
         assert built.despell(f"call {spelling} now") == f"call {name} now"
 
 
+LIST_PODS = "mcp:demo-tools/list_pods"
+LOG_ANALYST = "agent:kagent/log-analyst"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # The plain cases: a spelling the runtime named, whole.
+        pytest.param(f"call {LIST_PODS} now", "call list_pods now", id="in-a-sentence"),
+        pytest.param(LIST_PODS, "list_pods", id="the-whole-text"),
+        pytest.param(f"blocked {LOG_ANALYST}", "blocked kagent__NS__log_analyst", id="the-agent-class"),
+        pytest.param(
+            f"{LIST_PODS} then {LOG_ANALYST}.",
+            "list_pods then kagent__NS__log_analyst.",
+            id="two-spellings",
+        ),
+        # Punctuation after a spelling is punctuation, and it stands.
+        pytest.param(f"Retry {LIST_PODS}.", "Retry list_pods.", id="a-period"),
+        pytest.param(f"Retry {LIST_PODS}, then stop", "Retry list_pods, then stop", id="a-comma"),
+        pytest.param(f"blocked {LIST_PODS}: no body", "blocked list_pods: no body", id="a-colon"),
+        pytest.param(f"[{LIST_PODS}]", "[list_pods]", id="a-closing-bracket"),
+        pytest.param(f'"{LIST_PODS}"', '"list_pods"', id="a-quote"),
+        # A spelling that only opens a longer identifier names no tool
+        # the runtime gave out, and the whole run stands.
+        pytest.param(f"blocked {LIST_PODS}/response", f"blocked {LIST_PODS}/response", id="a-longer-path"),
+        pytest.param(f"{LIST_PODS}.json", f"{LIST_PODS}.json", id="a-dotted-suffix"),
+        pytest.param(f"{LIST_PODS}x", f"{LIST_PODS}x", id="a-longer-last-segment"),
+        pytest.param(f"x{LIST_PODS}", f"x{LIST_PODS}", id="a-longer-first-segment"),
+        pytest.param(f"notes/{LIST_PODS}", f"notes/{LIST_PODS}", id="preceded-by-a-path"),
+        pytest.param(f"a/{LIST_PODS}/b", f"a/{LIST_PODS}/b", id="inside-a-longer-identifier"),
+        # A spelling of the right shape this inventory never gave out.
+        pytest.param("mcp:other/list_pods", "mcp:other/list_pods", id="never-issued"),
+    ],
+)
+def test_despell_replaces_a_whole_spelling_and_leaves_every_longer_identifier(text, expected):
+    built = inventory(
+        http_tools=[DEMO_TOOLS],
+        remote_agents=[{"name": "kagent__NS__log_analyst", "url": "http://x"}],
+    )
+    assert built.despell(text) == expected
+
+
 def test_the_builtin_groups_follow_the_config_and_the_environment():
     plain = inventory()
     assert plain.spelling("load_memory") is None

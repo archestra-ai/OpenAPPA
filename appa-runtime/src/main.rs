@@ -213,7 +213,7 @@ fn health_answer(stale: bool, pid: u32) -> String {
 async fn reload(State(state): State<AppState>) -> Result<axum::Json<Reloaded>, (axum::http::StatusCode, String)> {
     let config = Config::load(&state.config)
         .map_err(|error| (axum::http::StatusCode::UNPROCESSABLE_ENTITY, error.to_string()))?;
-    match state.runtime.reload_served(config) {
+    match state.runtime.reload(config) {
         Ok(reloaded) => Ok(axum::Json(reloaded)),
         Err(refusal) => {
             tracing::warn!(%refusal, "the reload was refused; the running deployment keeps serving");

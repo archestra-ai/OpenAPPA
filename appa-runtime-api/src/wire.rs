@@ -176,13 +176,24 @@ fn status_name(status: OutcomeStatus) -> &'static str {
 /// that is `null` and not an absent one. `success` without the field is
 /// malformed, never a guess: the host that carries no body says so with
 /// `success_without_body`.
+///
+/// `message` keeps its presence the same way, and its type is checked
+/// apart from it: the outer `Option` is whether the host spelled the
+/// field, the inner one whether it spelled a string there. A status
+/// with no place for a message refuses one that is `null` exactly as it
+/// refuses one that is a string, and a `failure` whose message is
+/// `null` carries none.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireOutcome {
     pub status: OutcomeStatus,
     #[serde(default, deserialize_with = "present_body", skip_serializing_if = "Option::is_none")]
     pub body: Option<Box<RawValue>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "present_message",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub message: Option<Option<String>>,
 }
 
 /// `Option`'s own deserializer reads a present `null` as absent, which
@@ -191,6 +202,14 @@ pub struct WireOutcome {
 /// and everything else — `null` included — is the value as spelled.
 fn present_body<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Box<RawValue>>, D::Error> {
     Box::<RawValue>::deserialize(deserializer).map(Some)
+}
+
+/// The same for `message`, whose value is a string: the field's
+/// presence is this function's `Some`, and the `null` a host spelled
+/// there stays the inner `None` instead of folding into an absent
+/// field.
+fn present_message<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(deserializer).map(Some)
 }
 
 impl WireOutcome {
@@ -216,7 +235,7 @@ impl WireOutcome {
             ToolOutcome::Failure { message } => Self {
                 status: OutcomeStatus::Failure,
                 body: None,
-                message: Some(message.clone()),
+                message: Some(Some(message.clone())),
             },
             ToolOutcome::Indeterminate => Self {
                 status: OutcomeStatus::Indeterminate,
@@ -230,11 +249,15 @@ impl WireOutcome {
     /// and the offending field for everything else. A field the status
     /// has no place for is refused rather than dropped: the host
     /// observed it, and an envelope that fails closed keeps it out of
-    /// the trajectory without losing that it was there.
+    /// the trajectory without losing that it was there. Presence alone
+    /// decides that refusal: a field spelled `null` is one the host
+    /// spelled, and the value's type is checked after it, where a
+    /// `failure` reads the message it carries.
     fn into_outcome(self) -> Result<ToolOutcome, ParseRefusal> {
         let status = status_name(self.status);
         let without = |field: &str| malformed(format!("a {status} outcome without its {field}"));
         let carrying = |field: &str| malformed(format!("a {status} outcome carrying a {field}"));
+        let spelled_null = |field: &str| malformed(format!("a {status} outcome whose {field} is null"));
         match (self.status, self.body, self.message) {
             (OutcomeStatus::Success, Some(body), None) => Ok(ToolOutcome::Success {
                 body: OutcomeBody::Available(body.get().to_string()),
@@ -246,7 +269,8 @@ impl WireOutcome {
             }),
             (OutcomeStatus::SuccessWithoutBody, Some(_), _) => Err(carrying("body")),
             (OutcomeStatus::SuccessWithoutBody, None, Some(_)) => Err(carrying("message")),
-            (OutcomeStatus::Failure, None, Some(message)) => Ok(ToolOutcome::Failure { message }),
+            (OutcomeStatus::Failure, None, Some(Some(message))) => Ok(ToolOutcome::Failure { message }),
+            (OutcomeStatus::Failure, None, Some(None)) => Err(spelled_null("message")),
             (OutcomeStatus::Failure, Some(_), _) => Err(carrying("body")),
             (OutcomeStatus::Failure, None, None) => Err(without("message")),
             (OutcomeStatus::Indeterminate, None, None) => Ok(ToolOutcome::Indeterminate),
@@ -1176,11 +1200,15 @@ mod tests {
     }
 
     /// Every status crossed with every presence of `body` and
-    /// `message`. Each status admits exactly one shape and crosses as
-    /// itself there; every other combination is refused rather than
-    /// read with the field the status has no place for dropped. A
-    /// success says whether it carries a body; the wire never guesses
-    /// one for it, and a body that is `null` stays one.
+    /// `message`, each field spelled as JSON so that a present `null`
+    /// is one of the rows. Each status admits exactly one shape and
+    /// crosses as itself there; every other combination is refused
+    /// rather than read with the field the status has no place for
+    /// dropped. A success says whether it carries a body; the wire
+    /// never guesses one for it, and a body that is `null` stays one.
+    /// A message that is `null` is a field the host spelled, so it is
+    /// refused wherever a string message is, and it carries no message
+    /// for the one status that reads one.
     #[test]
     fn an_outcome_is_admitted_only_in_the_one_shape_its_status_has() {
         let posted = |outcome: &str| {
@@ -1190,13 +1218,13 @@ mod tests {
         };
         for status in ["success", "success_without_body", "failure", "indeterminate"] {
             for body in [None, Some("null"), Some(r#"{"content":"done"}"#)] {
-                for message in [None, Some("connection refused")] {
+                for message in [None, Some("null"), Some(r#""connection refused""#)] {
                     let mut outcome = format!(r#"{{"status":"{status}""#);
                     if let Some(body) = body {
                         outcome.push_str(&format!(r#","body":{body}"#));
                     }
                     if let Some(message) = message {
-                        outcome.push_str(&format!(r#","message":"{message}""#));
+                        outcome.push_str(&format!(r#","message":{message}"#));
                     }
                     outcome.push('}');
                     let expected = match (status, body, message) {
@@ -1206,8 +1234,8 @@ mod tests {
                         ("success_without_body", None, None) => Some(ToolOutcome::Success {
                             body: OutcomeBody::Unavailable,
                         }),
-                        ("failure", None, Some(message)) => Some(ToolOutcome::Failure {
-                            message: message.to_string(),
+                        ("failure", None, Some(r#""connection refused""#)) => Some(ToolOutcome::Failure {
+                            message: "connection refused".to_string(),
                         }),
                         ("indeterminate", None, None) => Some(ToolOutcome::Indeterminate),
                         _ => None,

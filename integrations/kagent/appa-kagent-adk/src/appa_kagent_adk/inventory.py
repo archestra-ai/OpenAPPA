@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import string
 from collections.abc import Mapping
 from dataclasses import dataclass
 from importlib import resources
@@ -59,12 +60,35 @@ _MCP_KEYS = ("http_tools", "sse_tools")
 _NAMESPACE_MARK = "__NS__"
 # One segment of a canonical tool id, as the runtime admits it.
 _SEGMENT = re.compile(r"^[A-Za-z0-9_.-]+$")
+# The characters an identifier is built of. A core character always
+# continues one; a separator continues one only where a core character
+# follows it, so the period that ends a sentence closes the identifier
+# and the period inside ``list.json`` does not.
+_CORE = frozenset(string.ascii_letters + string.digits + "_-")
+_SEPARATOR = frozenset(".:/")
 # A wire spelling as it stands in a runtime string: two or three
-# segments, ``class:name`` or ``class:namespace/name``. Each run of
-# segment characters is maximal, so a spelling inside a longer run is
-# no candidate here, and the inventory alone decides which candidate is
-# a spelling it gave out.
-_SPELLED = re.compile(r"(?<![A-Za-z0-9_.:/-])[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?")
+# segments, ``class:name`` or ``class:namespace/name``, each segment a
+# run that starts and ends on a core character and is maximal over
+# them. The inventory alone decides which candidate is a spelling it
+# gave out, and ``despell`` replaces one only where the identifier
+# continues on neither side.
+_SEGMENT_RUN = r"[A-Za-z0-9_-](?:[A-Za-z0-9_.-]*[A-Za-z0-9_-])?"
+_SPELLED = re.compile(rf"{_SEGMENT_RUN}:{_SEGMENT_RUN}(?:/{_SEGMENT_RUN})?")
+
+
+def _char(text: str, index: int) -> str:
+    """The character at ``index``, or the empty string outside ``text``."""
+    return text[index] if 0 <= index < len(text) else ""
+
+
+def _continues(adjacent: str, beyond: str) -> bool:
+    """Whether an identifier runs on past one of its edges.
+
+    ``adjacent`` is the character next to the candidate and ``beyond``
+    the one past it, read away from the candidate; both are empty at
+    the ends of the text.
+    """
+    return adjacent in _CORE or (adjacent in _SEPARATOR and beyond in _CORE)
 
 
 def mcp_spelling(toolset: str, tool: str) -> str:
@@ -118,8 +142,22 @@ class ToolInventory:
         model passes through here first. The substitution is closed: a
         whole spelling this inventory carries is replaced, and every
         other byte stands — a spelling it never gave out included.
+
+        A whole spelling is one the identifier continues on neither
+        side, so ``mcp:demo/list`` inside ``mcp:demo/list/extra`` names
+        no tool this inventory gave out and stands, while the period
+        that ends the sentence after one is punctuation and is kept.
         """
-        return _SPELLED.sub(lambda match: self.names.get(match.group(), match.group()), text)
+
+        def replace(match: re.Match[str]) -> str:
+            start, end = match.start(), match.end()
+            if _continues(_char(text, start - 1), _char(text, start - 2)):
+                return match.group()
+            if _continues(_char(text, end), _char(text, end + 1)):
+                return match.group()
+            return self.names.get(match.group(), match.group())
+
+        return _SPELLED.sub(replace, text)
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], environ: Mapping[str, str] = os.environ) -> ToolInventory:

@@ -148,6 +148,42 @@ func TestEverySpellingDespellsBackToTheNameADKDispatches(t *testing.T) {
 	}
 }
 
+func TestDespellReplacesAWholeSpellingAndLeavesEveryLongerIdentifier(t *testing.T) {
+	inventory := mustBuild(t, InventorySpec{
+		MCPServers:   []MCPServerSpec{demoTools},
+		RemoteAgents: []RemoteAgentSpec{{Path: "remote_agents[0].name", Name: "kagent__NS__log_analyst"}},
+	})
+	const listPods = "mcp:demo-tools/list_pods"
+	const logAnalyst = "agent:kagent/log-analyst"
+	for _, row := range []struct{ id, text, want string }{
+		// The plain cases: a spelling the runtime named, whole.
+		{"in-a-sentence", "call " + listPods + " now", "call list_pods now"},
+		{"the-whole-text", listPods, "list_pods"},
+		{"the-agent-class", "blocked " + logAnalyst, "blocked kagent__NS__log_analyst"},
+		{"two-spellings", listPods + " then " + logAnalyst + ".", "list_pods then kagent__NS__log_analyst."},
+		// Punctuation after a spelling is punctuation, and it stands.
+		{"a-period", "Retry " + listPods + ".", "Retry list_pods."},
+		{"a-comma", "Retry " + listPods + ", then stop", "Retry list_pods, then stop"},
+		{"a-colon", "blocked " + listPods + ": no body", "blocked list_pods: no body"},
+		{"a-closing-bracket", "[" + listPods + "]", "[list_pods]"},
+		{"a-quote", `"` + listPods + `"`, `"list_pods"`},
+		// A spelling that only opens a longer identifier names no tool
+		// the runtime gave out, and the whole run stands.
+		{"a-longer-path", "blocked " + listPods + "/response", "blocked " + listPods + "/response"},
+		{"a-dotted-suffix", listPods + ".json", listPods + ".json"},
+		{"a-longer-last-segment", listPods + "x", listPods + "x"},
+		{"a-longer-first-segment", "x" + listPods, "x" + listPods},
+		{"preceded-by-a-path", "notes/" + listPods, "notes/" + listPods},
+		{"inside-a-longer-identifier", "a/" + listPods + "/b", "a/" + listPods + "/b"},
+		// A spelling of the right shape this inventory never gave out.
+		{"never-issued", "mcp:other/list_pods", "mcp:other/list_pods"},
+	} {
+		if got := inventory.Despell(row.text); got != row.want {
+			t.Errorf("%s: %q despells to %q, want %q", row.id, row.text, got, row.want)
+		}
+	}
+}
+
 func TestTheBuiltinGroupsFollowTheSwitches(t *testing.T) {
 	plain := mustBuild(t, InventorySpec{})
 	for _, name := range []string{"load_memory", "read_file", "create_share_link"} {

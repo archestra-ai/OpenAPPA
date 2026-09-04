@@ -543,6 +543,83 @@ async fn an_unanswered_pre_use_hook_prints_no_replacement() {
     assert_eq!(stdout, "", "a call that never ran has no output to replace");
 }
 
+/// A host event the adapter reads but that cannot cross the wire: an empty session id
+/// names no trajectory, so the translation fails after the event is already understood.
+/// The tool has run by then, so the event is answered rather than dropped — the result is
+/// withheld and the exit is the zero the harness applies a replacement from. The same
+/// failure on a call that has not run is stopped by the exit code alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_event_that_cannot_cross_the_wire_still_withholds_the_result_it_reports() {
+    // A runtime that allows whatever reaches it: nothing here may, so an allowed call is
+    // what a client that posted this event would print.
+    let url = serve(Router::new().route("/hook", post(|| async { r#"{"protocol":1,"decision":"allow_call"}"# }))).await;
+    let ran = r#"{"hook_event_name":"PostToolUse","session_id":"","tool_name":"Bash","tool_input":{"command":"ls"},"tool_response":{"stdout":"readme.txt"}}"#;
+    let proposed =
+        r#"{"hook_event_name":"PreToolUse","session_id":"","tool_name":"Bash","tool_input":{"command":"ls"}}"#;
+    let claude = ["--adapter", "claude-code"];
+    let (ran, proposed) =
+        tokio::task::spawn_blocking(move || (run_client(&claude, &url, ran), run_client(&claude, &url, proposed)))
+            .await
+            .expect("the blocking task joins");
+
+    let (code, stdout) = ran;
+    assert_eq!(
+        code, 0,
+        "the harness applies the replacement only from a hook that exits zero: {stdout}"
+    );
+    let answer: serde_json::Value = serde_json::from_str(&stdout).expect("the withholding renders as JSON");
+    assert_eq!(answer["hookSpecificOutput"]["hookEventName"], "PostToolUse", "{answer}");
+    assert!(
+        !answer["hookSpecificOutput"]["updatedToolOutput"].is_null(),
+        "the produced output is replaced, not left in front of the model: {answer}"
+    );
+    assert!(
+        !answer.to_string().contains("readme.txt"),
+        "the withheld body never reaches the model: {answer}"
+    );
+
+    let (code, stdout) = proposed;
+    assert_eq!(code, 2, "a call that never ran is stopped by the exit code");
+    assert_eq!(stdout, "", "a call that never ran has no output to replace");
+}
+
+/// A withholding carries its whole effect through what the client prints, so one the
+/// harness never received withheld nothing. Here the read end of the client's stdout is
+/// closed before it answers, so the write fails: the client must not exit zero and report a
+/// replacement that never arrived.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_withholding_that_cannot_be_written_does_not_exit_zero() {
+    let url = refused_url().await;
+    let ran = r#"{"hook_event_name":"PostToolUse","session_id":"plugin-test","tool_name":"Bash","tool_input":{"command":"ls"},"tool_response":{"stdout":"readme.txt"}}"#;
+    let code = tokio::task::spawn_blocking(move || {
+        let mut child = Command::new(built_binary())
+            .arg("hook")
+            .args(["--adapter", "claude-code"])
+            .arg("--url")
+            .arg(&url)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the hook client spawns");
+        drop(child.stdout.take().expect("the child has a stdout pipe"));
+        child
+            .stdin
+            .as_mut()
+            .expect("the child has a stdin pipe")
+            .write_all(ran.as_bytes())
+            .expect("the event writes to the hook's stdin");
+        child
+            .wait()
+            .expect("the hook client finishes")
+            .code()
+            .expect("the hook client exits with a code")
+    })
+    .await
+    .expect("the blocking task joins");
+    assert_eq!(code, 2, "a replacement the harness never received must not exit zero");
+}
+
 /// Run the shipped Windows hook under whatever PowerShell this machine has, and
 /// answer `None` where it has none: the script is shipped for Windows, and the
 /// developer machines that build this crate mostly cannot run it. The paths a

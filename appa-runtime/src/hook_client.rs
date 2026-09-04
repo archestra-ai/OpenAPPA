@@ -225,25 +225,32 @@ fn decision_of(body: &[u8]) -> Result<HookDecision, String> {
     })
 }
 
-fn print(answer: &serde_json::Value) {
+/// Put one answer where the harness reads it. Whether a failed write matters is the
+/// caller's to weigh: an answer the harness never received decided nothing, and a
+/// withholding is the answer that carries its whole effect this way.
+fn print(answer: &serde_json::Value) -> std::io::Result<()> {
     let mut stdout = std::io::stdout();
-    stdout.write_all(answer.to_string().as_bytes()).ok();
-    stdout.flush().ok();
+    stdout.write_all(answer.to_string().as_bytes())?;
+    stdout.flush()
 }
 
-/// The host event translated onto the wire: `None` for a hook the adapter does not
-/// gate, whose answer is the empty opinion without a round trip.
-fn translate(codec: &Codec, adapter: AdapterName, host_event: &[u8]) -> Result<Option<(HookEvent, Vec<u8>)>, String> {
-    let event = match (codec.parse)(host_event) {
-        Ok(Some(event)) => event,
-        Ok(None) => return Ok(None),
-        Err(ParseRefusal::Unreadable { detail } | ParseRefusal::Malformed { detail }) => return Err(detail),
-    };
-    let wire = WireEvent::from_event(adapter, &event).map_err(|refusal| match refusal {
+/// The host event read as the typed event it reports: `None` for a hook the adapter does
+/// not gate, whose answer is the empty opinion without a round trip.
+fn parse_host_event(codec: &Codec, host_event: &[u8]) -> Result<Option<HookEvent>, String> {
+    match (codec.parse)(host_event) {
+        Ok(event) => Ok(event),
+        Err(ParseRefusal::Unreadable { detail } | ParseRefusal::Malformed { detail }) => Err(detail),
+    }
+}
+
+/// One parsed event on the canonical wire. Crossing is a step of its own because the event
+/// outlives its failure: an event that cannot cross still reports what the host did, so a
+/// result the tool already produced is withheld rather than left in front of the model.
+fn wire_body(adapter: AdapterName, event: &HookEvent) -> Result<Vec<u8>, String> {
+    let wire = WireEvent::from_event(adapter, event).map_err(|refusal| match refusal {
         ParseRefusal::Unreadable { detail } | ParseRefusal::Malformed { detail } => detail,
     })?;
-    let body = serde_json::to_vec(&wire).map_err(|error| format!("the wire event does not serialize: {error}"))?;
-    Ok(Some((event, body)))
+    serde_json::to_vec(&wire).map_err(|error| format!("the wire event does not serialize: {error}"))
 }
 
 pub fn run(url: &str, adapter: AdapterName, turn_end: bool) -> ExitCode {
@@ -256,16 +263,23 @@ pub fn run(url: &str, adapter: AdapterName, turn_end: bool) -> ExitCode {
     if let Err(error) = std::io::stdin().read_to_end(&mut host_event) {
         return block(&format!("the hook event could not be read: {error}"));
     }
-    let (event, body) = match translate(&codec, adapter, &host_event) {
+    let event = match parse_host_event(&codec, &host_event) {
         // A hook the adapter does not gate is the empty opinion, with no round trip.
         Ok(None) => {
             if decides == Decides::Authorization {
-                print(&serde_json::json!({}));
+                let _ = print(&serde_json::json!({}));
             }
             return ExitCode::SUCCESS;
         }
-        Ok(Some(translated)) => translated,
+        Ok(Some(event)) => event,
         Err(failure) => return unanswered(&codec, None, &failure, decides),
+    };
+    // A parsed event that cannot cross the wire is still an event to answer: it is handed
+    // to the withholding path rather than dropped, so a result that already ran is taken
+    // out of the model's attention instead of staying in front of it.
+    let body = match wire_body(adapter, &event) {
+        Ok(body) => body,
+        Err(failure) => return unanswered(&codec, Some(&event), &failure, decides),
     };
     let answered =
         Endpoint::parse(url).and_then(|endpoint| post(&endpoint, &body, &Deadline::spanning(decides.budget())));
@@ -278,7 +292,7 @@ pub fn run(url: &str, adapter: AdapterName, turn_end: bool) -> ExitCode {
     }
     match (decision_of(&answer.body), answer.is_success()) {
         (Ok(decision), true) => {
-            print(&(codec.render)(&event, &decision));
+            let _ = print(&(codec.render)(&event, &decision));
             ExitCode::SUCCESS
         }
         // A refusal is rendered too, and for a result that already ran the rendering
@@ -330,7 +344,7 @@ fn carry_out(codec: &Codec, event: &HookEvent, refused: Refused, failure: &str) 
         Refused::Withheld(withholding) => withhold(codec, event, &withholding, failure),
         Refused::Stopped(answered) => {
             if let Some(decision) = answered {
-                print(&(codec.render)(event, &decision));
+                let _ = print(&(codec.render)(event, &decision));
             }
             block(failure)
         }
@@ -340,10 +354,17 @@ fn carry_out(codec: &Codec, event: &HookEvent, refused: Refused, failure: &str) 
 /// Take a result the tool already produced out of the model's attention, by printing the
 /// replacement that stands in for it and exiting zero — the exit code the harness reads a
 /// replacement from.
+///
+/// A replacement that could not be written is no withholding: the result the tool produced
+/// is still in front of the model, and exiting zero would claim a replacement the harness
+/// never received. The blocking exit is what is left to say so — it surfaces the failure on
+/// stderr and stops the turn rather than reporting a withholding that did not happen.
 fn withhold(codec: &Codec, event: &HookEvent, withholding: &HookDecision, failure: &str) -> ExitCode {
     eprintln!("OpenAPPA hook withheld the result: {failure}");
-    print(&(codec.render)(event, withholding));
-    ExitCode::SUCCESS
+    match print(&(codec.render)(event, withholding)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => block(&format!("{failure}; the withholding could not be written: {error}")),
+    }
 }
 
 /// Fail closed on a hook the runtime did not answer. A turn end decides nothing and
@@ -490,10 +511,11 @@ mod tests {
         let codec = codec_for(AdapterName::ClaudeCode).expect("claude code translates");
         let host =
             br#"{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"Agent","tool_input":{"prompt":"go"}}"#;
-        let (event, body) = translate(&codec, AdapterName::ClaudeCode, host)
-            .expect("the event translates")
+        let event = parse_host_event(&codec, host)
+            .expect("the event parses")
             .expect("PreToolUse is gated");
         assert!(matches!(event, HookEvent::ToolCall { .. }));
+        let body = wire_body(AdapterName::ClaudeCode, &event).expect("the event crosses");
         let wire: serde_json::Value = serde_json::from_slice(&body).expect("the wire is JSON");
         assert_eq!(wire["protocol"], appa_runtime_api::PROTOCOL);
         assert_eq!(wire["adapter"], "claude-code");
@@ -508,20 +530,34 @@ mod tests {
 
         let ungated = br#"{"hook_event_name":"Notification","session_id":"s1"}"#;
         assert!(
-            translate(&codec, AdapterName::ClaudeCode, ungated)
-                .expect("an ungated hook translates")
+            parse_host_event(&codec, ungated)
+                .expect("an ungated hook parses")
                 .is_none()
         );
-        assert!(translate(&codec, AdapterName::ClaudeCode, b"not json").is_err());
+        assert!(parse_host_event(&codec, b"not json").is_err());
         assert!(
-            translate(
-                &codec,
-                AdapterName::ClaudeCode,
-                br#"{"hook_event_name":"PreToolUse","session_id":"s1"}"#
-            )
-            .is_err(),
+            parse_host_event(&codec, br#"{"hook_event_name":"PreToolUse","session_id":"s1"}"#).is_err(),
             "a malformed host event blocks before any round trip"
         );
+    }
+
+    /// An event the host spells well enough to parse, but that carries no id the wire can
+    /// take, is still an event: parsing keeps it, and the failure to cross is answered with
+    /// the event in hand rather than with nothing.
+    #[test]
+    fn an_event_that_cannot_cross_the_wire_survives_its_failure() {
+        let codec = codec_for(AdapterName::ClaudeCode).expect("claude code translates");
+        let host = br#"{"hook_event_name":"PostToolUse","session_id":"","tool_name":"Bash",
+            "tool_input":{"command":"ls"},"tool_response":{"stdout":"root:x:0:0"}}"#;
+        let event = parse_host_event(&codec, host)
+            .expect("an empty session id still parses")
+            .expect("PostToolUse is gated");
+        assert!(matches!(event, HookEvent::ToolResult { .. }));
+        assert!(
+            wire_body(AdapterName::ClaudeCode, &event).is_err(),
+            "an empty root id names no trajectory the wire can carry"
+        );
+        assert!(reports_a_result(&event));
     }
 
     /// Every non-2xx answer to an event that reports a result ends in a rendered
@@ -535,8 +571,8 @@ mod tests {
         let codec = codec_for(AdapterName::ClaudeCode).expect("claude code translates");
         let host = br#"{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"Bash",
             "tool_input":{"command":"cat /etc/passwd"},"tool_response":{"stdout":"root:x:0:0"},"tool_use_id":"t1"}"#;
-        let (event, _) = translate(&codec, AdapterName::ClaudeCode, host)
-            .expect("the event translates")
+        let event = parse_host_event(&codec, host)
+            .expect("the event parses")
             .expect("PostToolUse is gated");
         assert!(matches!(event, HookEvent::ToolResult { .. }));
 
@@ -566,8 +602,8 @@ mod tests {
         let codec = codec_for(AdapterName::ClaudeCode).expect("claude code translates");
         let host =
             br#"{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"Bash","tool_input":{"command":"ls"}}"#;
-        let (event, _) = translate(&codec, AdapterName::ClaudeCode, host)
-            .expect("the event translates")
+        let event = parse_host_event(&codec, host)
+            .expect("the event parses")
             .expect("PreToolUse is gated");
         let refuse = HookDecision::Refuse {
             detail: "storage failure: disk full".to_string(),
