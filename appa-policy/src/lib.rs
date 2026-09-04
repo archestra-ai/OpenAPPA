@@ -1764,10 +1764,15 @@ annotator = "acl"
         let with =
             |audience: &str| format!("version = 2\n[[tool]]\nname = \"post\"\ndelta = {{ audience = {audience} }}\n");
         assert!(Config::from_toml_str(&with("[\"alice\", \"bob\"]")).is_ok());
-        assert!(matches!(
-            Config::from_toml_str(&with("[\"alice\", \"alice\"]")),
-            Err(ConfigError::BadAudience { .. })
-        ));
+        for repeated in ["[\"alice\", \"alice\"]", "[\"a@CORP.example\", \"a@corp.example\"]"] {
+            assert!(
+                matches!(
+                    Config::from_toml_str(&with(repeated)),
+                    Err(ConfigError::BadAudience { .. })
+                ),
+                "{repeated} names one reader twice"
+            );
+        }
     }
 
     #[test]

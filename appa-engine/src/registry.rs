@@ -252,12 +252,28 @@ impl TrustChain {
 /// both chain words may be listed — and `public` is never a member: it is always admissible. A
 /// produced audience is admitted when every atom of every clause is a member; a symbolic
 /// member stays symbolic in the label exactly as a declaration writing it would, so membership
-/// is the act's question, never the annotation's.
+/// is the act's question, never the annotation's. On the wire it is its entry list, so a
+/// vocabulary that arrives as data passes the same grammar a written one does.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "Vec<String>", into = "Vec<String>")]
 pub struct AudienceVocabulary {
     chain: BTreeSet<ChainAudience>,
     groups: BTreeSet<GroupRef>,
     readers: BTreeSet<ReaderId>,
+}
+
+impl TryFrom<Vec<String>> for AudienceVocabulary {
+    type Error = AudienceSpelling;
+
+    fn try_from(list: Vec<String>) -> Result<AudienceVocabulary, AudienceSpelling> {
+        AudienceVocabulary::parse_entries(&list)
+    }
+}
+
+impl From<AudienceVocabulary> for Vec<String> {
+    fn from(vocabulary: AudienceVocabulary) -> Vec<String> {
+        vocabulary.entries().collect()
+    }
 }
 
 impl AudienceVocabulary {
@@ -2010,11 +2026,42 @@ mod tests {
         assert_eq!(parsed(&["$to"]), Err(AudienceSpelling::Placeholder("$to".to_string())));
         assert_eq!(parsed(&[""]), Err(AudienceSpelling::Unknown(String::new())));
         assert_eq!(parsed(&["@"]), Err(AudienceSpelling::Unknown("@".to_string())));
-        for repeated in [["self", "self"], ["@team", "@team"], ["alice", "alice"]] {
+        for repeated in [
+            ["self", "self"],
+            ["@team", "@team"],
+            ["alice", "alice"],
+            ["a@CORP.example", "a@corp.example"],
+        ] {
             assert_eq!(
                 parsed(&repeated),
                 Err(AudienceSpelling::Duplicate(repeated[1].to_string())),
                 "{repeated:?}"
+            );
+        }
+    }
+
+    /// A vocabulary arriving as data is its entry list and passes the written grammar: the
+    /// derived field shape never bypasses `parse_entries`.
+    #[test]
+    fn an_audience_vocabulary_round_trips_as_its_entry_list_and_is_validated_on_the_way_in() {
+        let vocabulary =
+            AudienceVocabulary::parse_entries(&["@team".to_string(), "alice".to_string(), "internal".to_string()])
+                .expect("a fixture vocabulary parses");
+        let wire = serde_json::to_value(&vocabulary).expect("serializes");
+        assert_eq!(wire, serde_json::json!(["internal", "@team", "alice"]));
+        assert_eq!(
+            serde_json::from_value::<AudienceVocabulary>(wire).expect("its own rendering deserializes"),
+            vocabulary
+        );
+        for refused in [
+            serde_json::json!(["public"]),
+            serde_json::json!(["alice", "alice"]),
+            serde_json::json!(["$to"]),
+            serde_json::json!({"chain": [], "groups": [], "readers": ["public"]}),
+        ] {
+            assert!(
+                serde_json::from_value::<AudienceVocabulary>(refused.clone()).is_err(),
+                "{refused} is refused on the way in"
             );
         }
     }
