@@ -118,8 +118,6 @@ pub(crate) struct Policy {
     /// The composed `[policy]` table. Carried because a denial means nothing without the
     /// clause that produced it.
     pub(crate) document: Value,
-    /// Which names are bound to what kind of external, and none of what they are bound to.
-    pub(crate) externals: super::policy::Externals,
     /// This policy's identity. Baseline only: it is what would tie two reports to one
     /// deployment.
     pub(crate) digest: Option<String>,
@@ -155,9 +153,9 @@ pub(crate) struct Source<'a> {
     pub(crate) facts: &'a [Fact],
     pub(crate) events: crate::events::Events,
     pub(crate) trust_chain: Vec<String>,
-    /// The composed `[policy]` table and the bindings around it, or `None` when the policy did
-    /// not resolve.
-    pub(crate) policy: Option<(toml::Value, crate::config::Externals, String)>,
+    /// The composed `[policy]` table this trajectory pinned, with its key, or `None` when the
+    /// stored policy did not parse.
+    pub(crate) policy: Option<(toml::Value, String)>,
     /// The tool names the serving policy writes. A tool name in a fact or a hook is the
     /// model's string until this set vouches for it.
     pub(crate) vouched: BTreeSet<String>,
@@ -213,12 +211,11 @@ pub(crate) fn build(source: Source<'_>, mode: Mode) -> Export {
 
     // The policy is numbered first, so a reader meets a name where it is declared rather than
     // where it happened to be used.
-    let policy = source.policy.as_ref().map(|(document, externals, digest)| {
+    let policy = source.policy.as_ref().map(|(document, digest)| {
         let stripped = super::policy::strip_policy(document, &mut tokens, mode);
         record_drift(&mut unclassified, &stripped, "policy");
         Policy {
             document: stripped.value,
-            externals: super::policy::strip_externals(externals, &mut tokens, mode),
             digest: match mode {
                 Mode::Baseline => Some(digest.clone()),
                 Mode::Pseudonymized => None,

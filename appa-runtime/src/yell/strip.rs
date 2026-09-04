@@ -63,15 +63,14 @@ pub(crate) enum Rule {
     /// the stored policy's key. Carried as it stands in [`Mode::Baseline`], dropped under
     /// pseudonymization, where the whole point is that two reports cannot be tied together.
     Fingerprint,
-    /// Prose a deployer wrote: a tool `description`, an authority `hint`. It is the
-    /// deployment's own text and often says exactly why a policy is shaped as it is, so
-    /// Baseline carries it; nothing bounds what a sentence contains, so pseudonymization
-    /// drops it. Behaves as [`Rule::Fingerprint`] does and is named apart from it because the
-    /// reason differs, and the reason is what a table entry has to get right.
-    Prose,
-    /// Carried in no mode. For a field whose presence is worth classifying — so that it
-    /// raises no drift — but whose content may never leave: an endpoint's bearer token, a
-    /// bound command's argv and working directory.
+    /// Carried in no mode, for a field that legitimately appears and whose content may never
+    /// leave: a deployer's `description` and `hint`. Those are the deployment's own sentences,
+    /// and a sentence is bounded by nothing — it holds a path, an endpoint or a colleague as
+    /// readily as the reason a rule exists.
+    ///
+    /// This is for content that *is* expected. A field that cannot appear in valid input is
+    /// left unnamed instead, so that one appearing raises drift, which is the only signal that
+    /// something upstream changed.
     Never,
     /// A deployment-defined name, carried through the report's substitution table.
     Token(Class),
@@ -97,6 +96,10 @@ pub(crate) enum Rule {
     Elements(Class),
     /// An array whose items each follow one rule.
     Each(&'static Rule),
+    /// One value or an array of them, for a field the schema leaves untagged over the two.
+    /// `[deployment.starting_label] audience` is written either as the bare token `public` or
+    /// as a list, and a rule that reads only the list refuses the commoner spelling.
+    OneOrMany(&'static Rule),
     /// A map whose *keys* are deployment-defined names, and whose values follow their own
     /// rule.
     MapKeys(Class, &'static Rule),
@@ -143,7 +146,7 @@ impl Rule {
     fn omitted(&self, mode: Mode) -> bool {
         match self {
             Rule::Never => true,
-            Rule::Fingerprint | Rule::Prose => mode == Mode::Pseudonymized,
+            Rule::Fingerprint => mode == Mode::Pseudonymized,
             _ => false,
         }
     }
@@ -228,7 +231,7 @@ impl Walk<'_> {
                 Value::Object(_) | Value::Array(_) => self.unclassify(path),
                 scalar => scalar.clone(),
             },
-            Rule::Fingerprint | Rule::Prose => match self.mode {
+            Rule::Fingerprint => match self.mode {
                 Mode::Baseline => self.apply(&Rule::Keep, value, path),
                 Mode::Pseudonymized => Value::Null,
             },
@@ -260,15 +263,10 @@ impl Walk<'_> {
                 ),
                 None => self.unclassify(path),
             },
-            Rule::Each(inner) => match value.as_array() {
-                Some(items) => Value::Array(
-                    items
-                        .iter()
-                        .enumerate()
-                        .map(|(index, item)| self.apply(inner, item, &format!("{path}[{index}]")))
-                        .collect(),
-                ),
-                None => self.unclassify(path),
+            Rule::Each(inner) => self.each(inner, value, path),
+            Rule::OneOrMany(inner) => match value.is_array() {
+                true => self.each(inner, value, path),
+                false => self.apply(inner, value, path),
             },
             Rule::MapKeys(class, inner) => match value.as_object() {
                 Some(map) => {
@@ -300,6 +298,19 @@ impl Walk<'_> {
             },
             Rule::ReturnSchema => self.return_schema(value, path),
             Rule::Table(table) => self.table(table, value, path),
+        }
+    }
+
+    fn each(&mut self, inner: &'static Rule, value: &Value, path: &str) -> Value {
+        match value.as_array() {
+            Some(items) => Value::Array(
+                items
+                    .iter()
+                    .enumerate()
+                    .map(|(index, item)| self.apply(inner, item, &format!("{path}[{index}]")))
+                    .collect(),
+            ),
+            None => self.unclassify(path),
         }
     }
 

@@ -46,6 +46,10 @@ pub(crate) enum Class {
     Authority,
     Tool,
     Effect,
+    /// A tag a policy hangs on a declaration. Distinct from an effect: the engine keeps
+    /// `TagName` and `EffectKind` apart, so one class for both would assert that a tag and an
+    /// effect spelled alike are the same thing.
+    Tag,
     Sanitizer,
     Annotator,
     Mark,
@@ -93,6 +97,7 @@ impl Class {
             Class::Authority
             | Class::Tool
             | Class::Effect
+            | Class::Tag
             | Class::Sanitizer
             | Class::Annotator
             | Class::Mark
@@ -105,7 +110,7 @@ impl Class {
     }
 
     /// Every class, so that one can be checked against all of them.
-    const ALL: [Class; 19] = [
+    const ALL: [Class; 20] = [
         Class::Trajectory,
         Class::Reader,
         Class::Argument,
@@ -113,6 +118,7 @@ impl Class {
         Class::Authority,
         Class::Tool,
         Class::Effect,
+        Class::Tag,
         Class::Sanitizer,
         Class::Annotator,
         Class::Mark,
@@ -153,6 +159,7 @@ impl Class {
             Class::Authority => "authority",
             Class::Tool => "tool",
             Class::Effect => "effect",
+            Class::Tag => "tag",
             Class::Sanitizer => "sanitizer",
             Class::Annotator => "annotator",
             Class::Mark => "mark",

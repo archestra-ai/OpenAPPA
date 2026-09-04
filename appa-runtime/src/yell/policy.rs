@@ -16,13 +16,22 @@
 //! outside this schema. That makes drift here mean one thing — the schema grew and this
 //! inventory did not — rather than "a deployment wrote something unexpected".
 //!
+//! Two of the six free-form `toml::Value` fields the schema does hold — the inline
+//! `implementation` on a tool, authority, sanitizer or annotator, and `url`/`command` on
+//! `[identity]` — are refused during conversion (`ConfigError::ForbiddenInlineBinding`), so a
+//! loaded policy carries none. They are deliberately *not* named below: one appearing in a
+//! pinned document means the loader's contract changed, and drift is the only thing that
+//! would say so.
+//!
 //! # What the two modes differ on
 //!
-//! Baseline is the deployment reading its own policy back, so it spells its own names and
-//! keeps the prose it wrote. Pseudonymization replaces the names and drops the prose. Neither
-//! mode carries an endpoint, a bearer token, a command's argv or its working directory: those
-//! are the deployment's infrastructure rather than its rules, and no reader of a report needs
-//! them to follow a decision.
+//! Baseline is the deployment reading its own policy back, so it spells the names it chose;
+//! pseudonymization replaces them. What differs between the modes is naming, and only naming.
+//!
+//! Prose is in neither. A `description` and a `hint` are the deployer's own sentences, and a
+//! sentence is bounded by nothing: it holds a path, an endpoint, the name of a credential
+//! variable, or a colleague, as readily as it holds the reason a rule exists. The structure
+//! is what explains a decision, and the structure is all of it that leaves.
 
 use serde_json::Value;
 
@@ -71,8 +80,8 @@ static TOOL: Table = Table {
     name: "policy.tool",
     entries: &[
         ("name", Rule::Token(Class::Tool)),
-        ("description", Rule::Prose),
-        ("tags", Rule::Elements(Class::Effect)),
+        ("description", Rule::Never),
+        ("tags", Rule::Elements(Class::Tag)),
         ("delta", Rule::Table(&LABEL_WRITE)),
         ("requires", Rule::Table(&REQUIRES)),
         ("effects", Rule::Elements(Class::Effect)),
@@ -81,11 +90,6 @@ static TOOL: Table = Table {
         // reads both: they are the same dialect.
         ("parameters", Rule::ReturnSchema),
         ("annotator", Rule::Token(Class::Annotator)),
-        // `implementation` is refused at compile time for a tool, an authority and a
-        // sanitizer alike (`ConfigError::ForbiddenInlineBinding`), so a loaded policy carries
-        // none. Named anyway, and carried in no mode: if the loader ever admits one it holds
-        // a URL or an argv, and this is not the place to discover that.
-        ("implementation", Rule::Never),
     ],
 };
 
@@ -103,10 +107,9 @@ static AUTHORITY: Table = Table {
     name: "policy.authority",
     entries: &[
         ("name", Rule::Token(Class::Authority)),
-        ("hint", Rule::Prose),
+        ("hint", Rule::Never),
         ("permits", Rule::Table(&PERMITS)),
-        ("tags", Rule::Elements(Class::Effect)),
-        ("implementation", Rule::Never),
+        ("tags", Rule::Elements(Class::Tag)),
     ],
 };
 
@@ -134,10 +137,9 @@ static SANITIZER: Table = Table {
         ("name", Rule::Token(Class::Sanitizer)),
         // Which surfaces this sanitizer binds to.
         ("on", Rule::Elements(Class::Surface)),
-        ("hint", Rule::Prose),
-        ("tags", Rule::Elements(Class::Effect)),
+        ("hint", Rule::Never),
+        ("tags", Rule::Elements(Class::Tag)),
         ("permits", Rule::Table(&SANITIZER_PERMITS)),
-        ("implementation", Rule::Never),
     ],
 };
 
@@ -145,7 +147,7 @@ static ANNOTATOR: Table = Table {
     name: "policy.annotator",
     entries: &[
         ("name", Rule::Token(Class::Annotator)),
-        ("hint", Rule::Prose),
+        ("hint", Rule::Never),
         // A stock transport's name: `claude-code`, `llm`. Engine vocabulary, not the
         // deployment's.
         ("builtin", Rule::Keep),
@@ -156,7 +158,6 @@ static ANNOTATOR: Table = Table {
         ("audiences", Rule::Each(&READER)),
         ("marks", Rule::Elements(Class::Mark)),
         ("effects", Rule::Elements(Class::Effect)),
-        ("implementation", Rule::Never),
     ],
 };
 
@@ -174,7 +175,9 @@ static AUDIENCE_GROUP: Table = Table {
     name: "policy.audience.group",
     entries: &[
         ("name", Rule::Token(Class::Group)),
-        ("within", Rule::Token(Class::Group)),
+        // `within` asserts containment in a built-in audience, so its only values are `self`
+        // and `internal` — the engine's words, not a group the deployment named.
+        ("within", Rule::Keep),
         ("from", Rule::Elements(Class::Source)),
     ],
 };
@@ -190,13 +193,7 @@ static AUDIENCE: Table = Table {
 
 static IDENTITY: Table = Table {
     name: "policy.identity",
-    entries: &[
-        ("implementation", Rule::Token(Class::Identity)),
-        // An inline binding: a URL, or an argv and a working directory. Infrastructure, not
-        // rules.
-        ("url", Rule::Never),
-        ("command", Rule::Never),
-    ],
+    entries: &[("implementation", Rule::Token(Class::Identity))],
 };
 
 // ---------------------------------------------------------------- deployment
@@ -205,9 +202,9 @@ static STARTING_LABEL: Table = Table {
     name: "policy.deployment.starting_label",
     entries: &[
         ("trust", TRUST),
-        // Either the bare token `public` or a list of audience tokens, so both shapes reach
-        // this entry and the rule has to read both.
-        ("audience", Rule::Each(&READER)),
+        // Untagged in the schema: either the bare token `public` or a list of them, and both
+        // shapes reach this one entry.
+        ("audience", Rule::OneOrMany(&READER)),
     ],
 };
 
@@ -288,115 +285,27 @@ fn declared_tools(document: &Value) -> std::collections::BTreeSet<String> {
         .unwrap_or_default()
 }
 
-/// How a deployment's externals are bound, without any of what they are bound to.
-///
-/// Written as a typed projection rather than a walk, because unlike the policy document this
-/// comes from Rust structs and not from free-form TOML: the fields are known at compile time,
-/// so the deny-by-default machinery has nothing to protect against here. What a reader needs
-/// is which names are bound and how they are served — an authority answering over HTTP and
-/// one running a local command fail in entirely different ways — and that is all this is.
-#[derive(Debug, serde::Serialize)]
-pub(crate) struct Externals {
-    pub(crate) timeout_ms: u64,
-    pub(crate) review_timeout_ms: u64,
-    pub(crate) max_body_bytes: usize,
-    pub(crate) bindings: Vec<Binding>,
-}
-
-#[derive(Debug, serde::Serialize)]
-pub(crate) struct Binding {
-    /// Which kind of external this is: `authority`, `sanitizer`, `annotator`,
-    /// `audience_source`, `identity`. The same words the runtime events use, so a reader can
-    /// line a binding up with the consults it answered.
-    pub(crate) role: &'static str,
-    pub(crate) name: String,
-    pub(crate) served: Served,
-}
-
-/// How one binding is served. An endpoint's URL is tokenized rather than carried: it is the
-/// deployment's address, not its vocabulary, and the one thing worth knowing — that two
-/// bindings reach the same service — survives a token. A command's argv and working directory
-/// are filesystem paths and are carried nowhere; that it *is* a command, and whether it takes
-/// a credential, is the part that explains a failure.
-#[derive(Debug, serde::Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum Served {
-    Endpoint { url: String, authenticated: bool },
-    Command { argc: usize, authenticated: bool },
-    Builtin { name: String },
-}
-
-pub(crate) fn strip_externals(externals: &crate::config::Externals, tokens: &mut Tokens, mode: Mode) -> Externals {
-    use crate::config::{AnnotatorImplementation, Implementation};
-
-    let mut bindings = Vec::new();
-    let mut push = |role: &'static str, name: &str, served: Served| {
-        bindings.push(Binding {
-            role,
-            name: name.to_string(),
-            served,
-        });
-    };
-    let served = |implementation: &Implementation, tokens: &mut Tokens| match implementation {
-        Implementation::Resolver(endpoint) => Served::Endpoint {
-            url: tokens.token(mode, Class::Url, &endpoint.url),
-            authenticated: endpoint.token.is_some(),
-        },
-        Implementation::Command(command) => Served::Command {
-            argc: command.argv.len(),
-            authenticated: command.token_env.is_some(),
-        },
-        Implementation::Builtin(name) => Served::Builtin { name: name.clone() },
-    };
-
-    for (role, entries) in [
-        ("authority", &externals.authorities),
-        ("sanitizer", &externals.sanitizers),
-        ("audience_source", &externals.audience),
-        ("identity", &externals.identity),
-    ] {
-        for (name, implementation) in entries {
-            let name = tokens.token(mode, role_class(role), name);
-            push(role, &name, served(implementation, tokens));
-        }
-    }
-    for (name, implementation) in &externals.annotators {
-        let name = tokens.token(mode, Class::Annotator, name);
-        let shape = match implementation {
-            AnnotatorImplementation::Resolver(endpoint) => Served::Endpoint {
-                url: tokens.token(mode, Class::Url, &endpoint.url),
-                authenticated: endpoint.token.is_some(),
-            },
-            AnnotatorImplementation::Command(command) => Served::Command {
-                argc: command.argv.len(),
-                authenticated: command.token_env.is_some(),
-            },
-        };
-        push("annotator", &name, shape);
-    }
-
-    Externals {
-        timeout_ms: externals.timeout.as_millis() as u64,
-        review_timeout_ms: externals.review_timeout.as_millis() as u64,
-        max_body_bytes: externals.max_body_bytes,
-        bindings,
-    }
-}
-
-fn role_class(role: &str) -> Class {
-    match role {
-        "authority" => Class::Authority,
-        "sanitizer" => Class::Sanitizer,
-        "audience_source" => Class::Source,
-        _ => Class::Identity,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Strip a fixture that the policy compiler accepts.
+    ///
+    /// The compile is the point. A fixture that only parses as TOML proves nothing about this
+    /// inventory: it can name a field the schema does not have, or spell a closed value the
+    /// loader rejects, and still walk cleanly. Going through `appa_policy::Config` makes the
+    /// fixture a policy a deployment could actually run, so "every section is classified"
+    /// means what it says.
     fn stripped(text: &str, mode: Mode) -> Stripped {
+        appa_policy::Config::from_toml_str(text).expect("the fixture is a policy the loader accepts");
+        let document: toml::Value = toml::from_str(text).expect("the fixture parses");
+        let mut tokens = Tokens::default();
+        strip_policy(&document, &mut tokens, mode)
+    }
+
+    /// Strip a fixture the loader would refuse. Only for the cases whose whole point is input
+    /// outside the schema — everything a deployment can actually run goes through `stripped`.
+    fn stripped_raw(text: &str, mode: Mode) -> Stripped {
         let document: toml::Value = toml::from_str(text).expect("the fixture parses");
         let mut tokens = Tokens::default();
         strip_policy(&document, &mut tokens, mode)
@@ -429,17 +338,18 @@ mod tests {
 
         [[sanitizer]]
         name = "redact"
-        on = ["tool_result"]
+        on = ["tool_output"]
         [sanitizer.permits.trust]
         from = "suspicious"
         to = "trusted"
 
         [audience]
         [audience.internal]
-        from = ["directory:full-members"]
+        from = ["google-workspace:full-members"]
         [[audience.group]]
         name = "finance"
-        from = ["directory:group/<group-address>"]
+        within = "internal"
+        from = ["google-workspace:group/<group-address>"]
 
         [identity]
         implementation = "verified-email"
@@ -496,20 +406,32 @@ mod tests {
         assert_eq!(stripped.value["version"], 2);
     }
 
-    /// A hint is the deployer's own sentence and nothing bounds what is in it. Baseline
-    /// carries it because the deployment wrote it about itself; pseudonymization does not.
+    /// A hint and a description are the deployer's own sentences, and a sentence is bounded by
+    /// nothing: it holds a path or a colleague as readily as the reason a rule exists. The
+    /// structure explains the decision; the prose leaves in neither mode.
     #[test]
-    fn a_hint_is_carried_in_one_mode_only() {
-        let baseline = stripped(FIXTURE, Mode::Baseline);
-        assert!(baseline.value["authority"][0]["hint"].is_string());
-        let pseudonymized = stripped(FIXTURE, Mode::Pseudonymized);
-        assert!(pseudonymized.value["authority"][0].get("hint").is_none());
+    fn prose_leaves_in_neither_mode() {
+        for mode in [Mode::Baseline, Mode::Pseudonymized] {
+            let stripped = stripped(FIXTURE, mode);
+            assert!(stripped.value["authority"][0].get("hint").is_none(), "{mode:?}");
+            assert!(
+                stripped.value["tool"][0].get("description").is_none(),
+                "a description is prose too, in {mode:?}"
+            );
+            assert!(stripped.unclassified.is_empty(), "prose is classified, not drift");
+            let rendered = serde_json::to_string(&stripped.value).expect("serializes");
+            for spelled in ["/Users/alice", "alice@corp.example"] {
+                assert!(!rendered.contains(spelled), "{spelled} survived {mode:?}");
+            }
+        }
     }
 
-    /// An inline binding is infrastructure, not rules: it holds an endpoint or an argv, and
-    /// no mode carries either.
+    /// An inline binding cannot reach a loaded policy — the loader refuses one everywhere it
+    /// can be written. So the inventory deliberately does not name it: if one ever appears in
+    /// a pinned document, the loader's contract changed, and drift is the only thing that
+    /// would say so. It carries nothing either way.
     #[test]
-    fn an_inline_binding_is_carried_in_no_mode() {
+    fn an_inline_binding_drifts_rather_than_being_quietly_dropped() {
         let text = r#"
             version = 2
             trust_chain = ["trusted"]
@@ -520,8 +442,16 @@ mod tests {
             token_env = "APPA_PROVIDER_DIRECTORY"
         "#;
         for mode in [Mode::Baseline, Mode::Pseudonymized] {
-            let stripped = stripped(text, mode);
-            assert!(stripped.unclassified.is_empty(), "an inline binding is classified");
+            let stripped = stripped_raw(text, mode);
+            assert_eq!(
+                stripped
+                    .unclassified
+                    .iter()
+                    .map(|drift| drift.path.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["identity.url"],
+                "the walk says where it found something it does not know"
+            );
             let rendered = serde_json::to_string(&stripped.value).expect("serializes");
             assert!(
                 !rendered.contains("directory.corp.example") && !rendered.contains("APPA_PROVIDER"),
@@ -538,10 +468,15 @@ mod tests {
         let text = r#"
             version = 2
             trust_chain = ["trusted"]
+            [audience]
+            [[audience.group]]
+            name = "finance"
+            within = "internal"
+            from = ["slack:user-group/<handle>"]
             [[tool]]
             name = "Send"
             [tool.requires.audience]
-            contains = ["public", "internal", "@finance", "alice@corp.example", "$recipients"]
+            contains = ["internal", "@finance", "alice@corp.example"]
         "#;
         for mode in [Mode::Baseline, Mode::Pseudonymized] {
             let stripped = stripped(text, mode);
@@ -556,19 +491,44 @@ mod tests {
                 .iter()
                 .map(|entry| entry.as_str().expect("a string"))
                 .collect();
-            assert_eq!(entries[0], "public", "the engine's own word, in {mode:?}");
-            assert_eq!(entries[1], "internal");
-            assert_ne!(entries[3], "alice@corp.example", "a written-out reader is a person");
-            assert!(entries[4].starts_with('$'), "an argument placeholder stays one");
+            assert_eq!(entries[0], "internal", "the engine's own word, in {mode:?}");
+            assert_ne!(entries[2], "alice@corp.example", "a written-out reader is a person");
             let rendered = serde_json::to_string(&carried).expect("serializes");
             assert!(!rendered.contains("alice"), "the address survived {mode:?}: {rendered}");
         }
         // Baseline still spells the group the deployment named; pseudonymization does not.
         let baseline = stripped(text, Mode::Baseline);
         assert_eq!(
-            baseline.value["tool"][0]["requires"]["audience"]["contains"][2],
+            baseline.value["tool"][0]["requires"]["audience"]["contains"][1],
             "@finance"
         );
+        let pseudonymized = stripped(text, Mode::Pseudonymized);
+        assert_ne!(
+            pseudonymized.value["tool"][0]["requires"]["audience"]["contains"][1],
+            "@finance"
+        );
+    }
+
+    /// A `$argument` placeholder keeps its shape and loses the model-facing key it names. It
+    /// stands alone in a `contains`, so it gets a fixture of its own.
+    #[test]
+    fn an_argument_placeholder_keeps_its_shape() {
+        let text = r#"
+            version = 2
+            trust_chain = ["trusted"]
+            [[tool]]
+            name = "Send"
+            parameters = { type = "object", properties = { recipients = { type = "string" } }, required = ["recipients"] }
+            [tool.requires.audience]
+            contains = ["$recipients"]
+        "#;
+        for mode in [Mode::Baseline, Mode::Pseudonymized] {
+            let stripped = stripped(text, mode);
+            let carried = stripped.value["tool"][0]["requires"]["audience"]["contains"][0].clone();
+            let spelled = carried.as_str().expect("a string");
+            assert!(spelled.starts_with('$'), "a placeholder stays one in {mode:?}");
+            assert_ne!(spelled, "$recipients", "the key it names is the model's namespace");
+        }
     }
 
     /// The property the walk exists for, asserted here too because this inventory is written
@@ -580,7 +540,7 @@ mod tests {
             [surprise]
             secret = "s3cret-value"
         "#;
-        let stripped = stripped(text, Mode::Baseline);
+        let stripped = stripped_raw(text, Mode::Baseline);
         assert_eq!(stripped.value["surprise"], super::super::strip::UNCLASSIFIED);
         let rendered = serde_json::to_string(&stripped.value).expect("serializes");
         assert!(!rendered.contains("s3cret-value"));
