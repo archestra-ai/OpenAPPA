@@ -6,7 +6,7 @@ mod wire;
 
 pub use wire::{
     Accepted, Adapter, AsSpoken, DecisionName, DeriveFn, Derived, EventName, NamesChildrenFn, OutcomeStatus, PROTOCOL,
-    SpellFn, WireDecision, WireEvent, WireOffer, WireOutcome, WireReturn, WireReview, WireRuling,
+    SpellFn, WireDecision, WireEvent, WireOffer, WireOutcome, WireReturn, WireReview,
 };
 
 /// The hosts this runtime can serve. The one place harness names appear
@@ -341,7 +341,8 @@ pub enum SpawnRef {
 /// [`Review`] text and returns the answer here; the runtime spends it
 /// as the human authority's answer for that one execution, exactly as
 /// an elicitation's Accept or Decline.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Ruling {
     Approve,
     Deny,

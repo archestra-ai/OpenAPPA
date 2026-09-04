@@ -199,38 +199,13 @@ fn fields_read(name: EventName) -> &'static [Field] {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WireRuling {
-    Approve,
-    Deny,
-}
-
-impl From<WireRuling> for Ruling {
-    fn from(ruling: WireRuling) -> Self {
-        match ruling {
-            WireRuling::Approve => Ruling::Approve,
-            WireRuling::Deny => Ruling::Deny,
-        }
-    }
-}
-
-impl From<Ruling> for WireRuling {
-    fn from(ruling: Ruling) -> Self {
-        match ruling {
-            Ruling::Approve => WireRuling::Approve,
-            Ruling::Deny => WireRuling::Deny,
-        }
-    }
-}
-
 /// A ruling is a person's answer the host obtained through its own
 /// review channel, and the runtime spends it as the human authority's.
 /// Under a host that has no such channel ([`ReviewChannel::Runtime`])
 /// nothing on the wire could have carried a person's answer, so the
 /// envelope is refused — a local process that reaches `/hook` cannot
 /// spell an approval that host never asked for.
-fn checked_ruling(adapter: AdapterName, ruling: Option<WireRuling>) -> Result<Option<WireRuling>, ParseRefusal> {
+fn checked_ruling(adapter: AdapterName, ruling: Option<Ruling>) -> Result<Option<Ruling>, ParseRefusal> {
     match (ruling, adapter.review_channel()) {
         (None, _) => Ok(None),
         (Some(ruling), ReviewChannel::Host) => Ok(Some(ruling)),
@@ -398,7 +373,7 @@ pub struct WireEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arguments: Option<Box<RawValue>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ruling: Option<WireRuling>,
+    pub ruling: Option<Ruling>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<WireOutcome>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -478,7 +453,7 @@ impl WireEvent {
     /// prefix, onto the wire without the prefix.
     pub fn from_event(adapter: AdapterName, event: &HookEvent) -> Result<Self, ParseRefusal> {
         let ids = |actor: &Actor| host_ids(adapter, actor);
-        let mut wire = match event {
+        let wire = match event {
             HookEvent::SessionStart { root } => {
                 let (root_id, _) = ids(&Actor {
                     root: root.clone(),
@@ -515,7 +490,7 @@ impl WireEvent {
                     child_id,
                     tool: Some(call.tool.clone()),
                     arguments: Some(call.arguments.clone()),
-                    ruling: checked_ruling(adapter, ruling.map(WireRuling::from))?,
+                    ruling: checked_ruling(adapter, *ruling)?,
                     ..Self::bare(adapter, EventName::ToolCall)
                 }
             }
@@ -581,7 +556,6 @@ impl WireEvent {
                 }
             }
         };
-        wire.protocol = PROTOCOL;
         Ok(wire)
     }
 
@@ -693,7 +667,7 @@ impl WireEvent {
                 // refused here rather than silently ignored.
                 let ruling = match (ruling, derived.canonical.is_control()) {
                     (None, _) => None,
-                    (Some(ruling), true) => Some(Ruling::from(ruling)),
+                    (Some(ruling), true) => Some(ruling),
                     (Some(_), false) => {
                         return Err(malformed(format!(
                             "a ruling on {}, which is not the runtime's control call",
@@ -1382,7 +1356,7 @@ mod tests {
             ruling,
         };
         let wire = WireEvent::from_event(AdapterName::Kagent, &call(Some(Ruling::Deny))).expect("translates");
-        assert_eq!(wire.ruling, Some(WireRuling::Deny));
+        assert_eq!(wire.ruling, Some(Ruling::Deny));
         let refused = WireEvent::from_event(AdapterName::ClaudeCode, &call(Some(Ruling::Approve)));
         assert!(matches!(refused, Err(ParseRefusal::Malformed { .. })), "{refused:?}");
     }
