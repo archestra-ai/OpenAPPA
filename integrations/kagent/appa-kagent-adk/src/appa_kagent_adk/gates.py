@@ -15,9 +15,10 @@ The entrypoint brings each under the tool gate here:
   the persist's result never enters attention. A transport failure or a
   refused report still fails closed.
 
-The synthetic tool names are ``appa_code_execution`` and
-``appa_memory_persist`` — the spellings a policy's ``[[tool]]`` entries
-and mandates address.
+Each flow crosses under its ``gate:`` spelling, ``gate:code_execution``
+and ``gate:memory_persist``; the runtime names them
+``host/kagent-gate/code_execution`` and ``host/kagent-gate/memory_persist``,
+the ids a policy's ``[[tool]]`` entries and mandates address.
 """
 
 from __future__ import annotations
@@ -29,12 +30,13 @@ import httpx
 
 from . import wire
 from .identity import SessionIdentity
+from .inventory import gate_spelling
 from .plugin import AppaFailClosed, AppaPluginKagent
 
 logger = logging.getLogger("appa_kagent_adk.gates")
 
-CODE_EXECUTION_TOOL = "appa_code_execution"
-MEMORY_PERSIST_TOOL = "appa_memory_persist"
+CODE_EXECUTION_TOOL = gate_spelling("code_execution")
+MEMORY_PERSIST_TOOL = gate_spelling("memory_persist")
 
 _STOCK_MEMORY_CALLBACK = "auto_save_session_to_memory_callback"
 
@@ -88,7 +90,7 @@ class GatedCodeExecutor:
         session = invocation_context.session
         root_id, child_id = self._gate.ids(session)
         arguments = {"code": code_execution_input.code}
-        decision = self._gate.post(wire.tool_call(root_id, CODE_EXECUTION_TOOL, arguments, False, child_id))
+        decision = self._gate.post(wire.tool_call(root_id, CODE_EXECUTION_TOOL, arguments, child_id))
         if decision.kind == "deny_call":
             return CodeExecutionResult(stdout="", stderr=decision.feedback or "")
         if decision.kind not in ("allow_call", "pass_control"):

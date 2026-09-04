@@ -80,7 +80,7 @@ change, ask what they want OpenAPPA to do differently.
   configuration cannot express the requested behavior, say so and offer
   only behaviors the current config format supports.
 - Do not configure the configuring actor: skip the agent running this
-  skill and the reserved `execute_remedy_plan` tool.
+  skill and the reserved `appa/execute_remedy_plan` tool.
 
 After a successful reload, give a brief human-readable summary of the
 behavior now in effect: one to three short sentences on what information

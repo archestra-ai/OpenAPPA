@@ -37,6 +37,12 @@ that object answers to. A tool of the same name from anywhere else
 crosses the tool gate like any other, and the config guard refuses a
 rendered config that declares one.
 
+Every other tool crosses under the spelling its inventory gives it
+(``inventory``): the entrypoint builds that inventory from the rendered
+config at startup, and a name outside it is refused at the call gate
+with a deny the model reads, never forwarded. A spelled ``agent:``
+tool is a spawn, and its result crosses as ``spawn_result``.
+
 The plugin also declares the return of a spawn itself. A ``deny_call``
 that offers a return route never reaches the model: the plugin takes
 the bare floor, runs that plan on the ``/mcp`` endpoint of the runtime,
@@ -59,6 +65,8 @@ from google.genai import types
 
 from . import wire
 from .identity import SessionIdentity
+from .inventory import ToolInventory, is_spawn
+from .wire import RETURN_TOOL
 
 logger = logging.getLogger("appa_kagent_adk.plugin")
 
@@ -72,13 +80,10 @@ _REVIEW_PENDING = (
     "confirmation; wait for the answer and do not call the tool again."
 )
 
-RETURN_TOOL = "appa_return"
-"""The name of the tool a child scope stops through.
+__all__ = ["AppaFailClosed", "AppaPluginKagent", "RETURN_TOOL"]
 
-APPA owns the gate object, and only that object crosses no tool gate.
-The name is what the model types, and anything else that answers to it
-is somebody else's tool.
-"""
+# The call gate's own refusal of a name the inventory does not carry.
+_OUTSIDE_INVENTORY = "[appa] the tool {tool} is outside the gated inventory of this agent, so the call was refused"
 
 # What the return gate hands the model back. A crossing names the bytes
 # the child must repeat, so its outgoing reply carries what crossed.
@@ -87,15 +92,6 @@ _RETURN_CROSSED = (
 )
 _RETURN_VOID = "[appa] the void return crossed. End this errand now with an empty final message."
 _RETURN_BLOCKED = "[appa] this return did not cross: {reason}"
-
-# Agent-as-tool classes, by name: ADK's own AgentTool family plus
-# kagent's remote A2A tool. Name-based so the plugin imports no kagent
-# code and no version-specific ADK module.
-_SPAWN_TOOL_TYPES = (
-    "AgentTool",
-    "GoogleSearchAgentTool",
-    "KAgentRemoteA2ATool",
-)
 
 _GATED_TIMEOUT_SECONDS = 120.0
 _TURN_END_TIMEOUT_SECONDS = 30.0
@@ -118,8 +114,8 @@ class AppaPluginKagent(BasePlugin):
         self,
         runtime_url: str,
         *,
+        inventory: ToolInventory,
         client_factory: Callable[[], httpx.AsyncClient] | None = None,
-        spawn_tool_types: tuple[str, ...] = _SPAWN_TOOL_TYPES,
         identity: SessionIdentity | None = None,
         remedy_call: Callable[[dict[str, Any]], Awaitable[str]] | None = None,
     ):
@@ -134,7 +130,7 @@ class AppaPluginKagent(BasePlugin):
         # next gated event instead of failing the whole next request.
         self._client_factory = client_factory or (lambda: httpx.AsyncClient(timeout=_GATED_TIMEOUT_SECONDS))
         self._client = self._client_factory()
-        self._spawn_tool_types = spawn_tool_types
+        self._inventory = inventory
         # Shared with the entrypoint gates. The gates classify from the
         # session state, which the kagent executor lands before each
         # run, so a synthetic call lands in the trajectory the run
@@ -249,8 +245,9 @@ class AppaPluginKagent(BasePlugin):
     def _is_fresh(self, session: Any) -> bool:
         return self._identity.is_fresh(session)
 
-    def _is_spawn(self, tool: Any) -> bool:
-        return type(tool).__name__ in self._spawn_tool_types
+    def _spelling(self, tool: Any) -> str | None:
+        """The wire spelling of a dispatched tool, or None outside the inventory."""
+        return self._inventory.spelling(tool.name)
 
     def _claim_scope(self, invocation_id: str, agent_name: str) -> bool:
         """Whether this agent scope is the invocation's own: the first scope it opened, or a re-entry of it.
@@ -277,11 +274,12 @@ class AppaPluginKagent(BasePlugin):
 
         The entrypoint wraps ADK features that move a value without a
         FunctionTool call — code execution, the memory write-back — and
-        brings each under the tool gate through this method. The caller
-        enforces the decision.
+        brings each under the tool gate through this method, under the
+        ``gate:`` spelling it hands over. The caller enforces the
+        decision.
         """
         root_id, child_id = self._identity.ids(session)
-        return await self._post(wire.tool_call(root_id, tool, arguments, False, child_id))
+        return await self._post(wire.tool_call(root_id, tool, arguments, child_id))
 
     async def report_synthetic_result(
         self, session: Any, tool: str, arguments: dict[str, Any], body: Any
@@ -448,6 +446,14 @@ class AppaPluginKagent(BasePlugin):
             # the same name from anywhere else is somebody else's, and
             # it crosses the gate like any other.
             return None
+        spelled = self._spelling(tool)
+        if spelled is None:
+            # A name the inventory never saw has no spelling on the wire,
+            # so nothing crosses: the gate refuses it here and the model
+            # reads the refusal as the result of its call.
+            logger.warning("the tool %s is outside the gated inventory, so the call is refused", tool.name)
+            self._settle(tool_context)
+            return {"result": _OUTSIDE_INVENTORY.format(tool=tool.name), _DENY_KEY: _DENIED}
         ruling = None
         if tool.name == wire.RESERVED_TOOL:
             offer = str(tool_args.get("offer_id", ""))
@@ -466,7 +472,7 @@ class AppaPluginKagent(BasePlugin):
             else:
                 ruling = "approve" if confirmation.confirmed else "deny"
                 self._reviews.pop(offer, None)
-        call = wire.tool_call(root_id, tool.name, _plain_json(tool_args), self._is_spawn(tool), child_id, ruling=ruling)
+        call = wire.tool_call(root_id, spelled, _plain_json(tool_args), child_id, ruling=ruling)
         decision = await self._post(call)
         route = _return_offer(decision)
         if route is not None:
@@ -499,16 +505,19 @@ class AppaPluginKagent(BasePlugin):
             # payload — a tool result carries whatever its tool spells,
             # the `appa` key included.
             return None
+        spelled = self._spelling(tool)
+        if spelled is None:
+            raise AppaFailClosed(f"the tool {tool.name} is outside the gated inventory, and its result cannot cross")
         root_id, child_id = self._ids(tool_context)
         arguments = _plain_json(tool_args)
         # A result of None with no failure is a deferred or long-running
         # call. Nothing entered attention, and the dispatch is genuinely
         # unresolved here.
         outcome = wire.indeterminate() if result is None else wire.success(_plain_json(result))
-        if self._is_spawn(tool):
+        if is_spawn(spelled):
             spawned_id, value = _spawn_return(result)
             decision = await self._post(
-                wire.spawn_result(root_id, tool.name, arguments, outcome, spawned_id, value, child_id)
+                wire.spawn_result(root_id, spelled, arguments, outcome, spawned_id, value, child_id)
             )
             if decision.kind == "ack":
                 return None
@@ -519,7 +528,7 @@ class AppaPluginKagent(BasePlugin):
             if decision.kind == "block":
                 return _withheld(decision.reason or "")
             raise AppaFailClosed(f"appa answered the spawn result with {decision.detail or decision.kind}")
-        decision = await self._post(wire.tool_result(root_id, tool.name, arguments, outcome, child_id))
+        decision = await self._post(wire.tool_result(root_id, spelled, arguments, outcome, child_id))
         if decision.kind == "ack":
             return None
         if decision.kind == "replace_output":
@@ -533,9 +542,12 @@ class AppaPluginKagent(BasePlugin):
         # of a handled failure too, and that second report would
         # double-count one dispatch.
         self._settle(tool_context)
+        spelled = self._spelling(tool)
+        if spelled is None:
+            raise AppaFailClosed(f"the tool {tool.name} is outside the gated inventory, and its failure cannot cross")
         root_id, child_id = self._ids(tool_context)
         decision = await self._post(
-            wire.tool_result(root_id, tool.name, _plain_json(tool_args), wire.failure(str(error)), child_id)
+            wire.tool_result(root_id, spelled, _plain_json(tool_args), wire.failure(str(error)), child_id)
         )
         if decision.kind == "ack":
             return None  # the original error propagates
@@ -562,7 +574,7 @@ class AppaPluginKagent(BasePlugin):
         deny goes to the model as it stands.
         """
         arguments = {"offer_id": offer.offer_id, "label": {}}
-        vouch = await self._post(wire.tool_call(root_id, wire.RESERVED_TOOL, arguments, False, child_id))
+        vouch = await self._post(wire.tool_call(root_id, wire.CONTROL_TOOL, arguments, child_id))
         if vouch.kind != "pass_control":
             logger.info(
                 "appa answered the return declaration %s with %s, so the block goes to the model",

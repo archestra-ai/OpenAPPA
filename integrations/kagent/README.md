@@ -37,8 +37,8 @@ Implements `AppaPluginKagent` for Google Go ADK v2. It provides a replacement ru
 ### 3. Quickstart Image (`appa-kagent-quickstart/`)
 A self-contained container image bundling both Python and Go runtimes together with an embedded `appa-runtime` binary. `APPA_ENABLED` selects the mode and is off by default: the image then serves the agent as the stock kagent image does and starts no runtime. With `APPA_ENABLED=true` and no `APPA_RUNTIME_URL`, the image starts `appa-runtime` on `127.0.0.1:8787` using a packaged default policy. With `APPA_RUNTIME_URL` supplied, it connects to the shared runtime service instead.
 
-### 4. Codec Crate (`appa-adapter-kagent`)
-The Rust codec crate lives at [`appa-adapter-kagent/`](../../appa-adapter-kagent) in the workspace root. It is compiled directly into `appa-runtime` and parses wire events sent by `AppaPluginKagent`.
+### 4. Adapter Crate (`appa-adapter-kagent`)
+The Rust adapter crate lives at [`appa-adapter-kagent/`](../../appa-adapter-kagent) in the workspace root. It is compiled directly into `appa-runtime`. Both plugins post the canonical hook envelope ([`appa-runtime-api/src/wire.rs`](../../appa-runtime-api/src/wire.rs)) to `POST /hook`; the crate derives the canonical tool id and whether a call is a spawn from the structured tool spelling they send (`mcp:<toolset>/<tool>`, `agent:<namespace>/<agent>`, `builtin:<name>`, `gate:<name>`, `appa:execute_remedy_plan`).
 
 ### 5. Guide Skill (`../appa-guide/`)
 The host-neutral `appa-guide` skill routes to a Claude Code or kagent reference. The demo attaches the canonical directory through kagent `gitRefs` and supplies the stock `k8s_*` tools. Applying a policy requires the kagent Approve / Reject card.

@@ -24,8 +24,19 @@ const MAX_BODY_BYTES: usize = 256 * 1024;
 const BRIDGE_TIMEOUT: Duration = Duration::from_secs(30);
 const CONSULT_TIMEOUT: Duration = Duration::from_secs(30);
 
-const CONTROL_TOOL: &str = "execute_remedy_plan";
+/// The control tool as the model sees it. Function-calling APIs reject `/` in a
+/// tool name, so the canonical id (`appa_runtime_api::CONTROL_TOOL`) is only
+/// used on the runtime side of `canonical_tool_name`.
+const ADVERTISED_CONTROL_TOOL: &str = "execute_remedy_plan";
 const OFFER_ARGUMENT: &str = "offer_id";
+
+/// Translates a name the model called into the name the runtime knows.
+fn canonical_tool_name(advertised: &str) -> &str {
+    match advertised {
+        ADVERTISED_CONTROL_TOOL => appa_runtime_api::CONTROL_TOOL,
+        host_tool => host_tool,
+    }
+}
 
 create_exception!(appa_agent_python, AppaError, PyRuntimeError);
 
@@ -338,7 +349,7 @@ impl SessionInner {
             return Err("tool arguments must be a JSON object".to_string());
         }
         let call = ProposedCall {
-            tool: tool.to_string(),
+            tool: canonical_tool_name(tool).to_string(),
             arguments,
         };
 
@@ -362,7 +373,9 @@ impl SessionInner {
 
     fn execute_remedy(&self, child: Option<&TrajectoryId>, call: &ProposedCall) -> String {
         let Ok((offer, arguments)) = appa_runtime::api::parse_control_arguments(call.arguments.get()) else {
-            return format!("{CONTROL_TOOL} needs an {OFFER_ARGUMENT}, quoted exactly as the feedback surfaced it.");
+            return format!(
+                "{ADVERTISED_CONTROL_TOOL} needs an {OFFER_ARGUMENT}, quoted exactly as the feedback surfaced it."
+            );
         };
         match self
             .tokio
@@ -1222,7 +1235,7 @@ delta    = {}
 
         let taken = session
             .root_check(
-                CONTROL_TOOL,
+                ADVERTISED_CONTROL_TOOL,
                 &format!(r#"{{"{OFFER_ARGUMENT}":"{}"}}"#, offer_id(&blocked)),
             )
             .unwrap();
@@ -1243,7 +1256,7 @@ delta    = {}
     fn an_unsurfaced_offer_authorizes_nothing() {
         let mut session = session(None);
         let answered = session
-            .root_check(CONTROL_TOOL, r#"{"offer_id":"offer-nobody-surfaced-0"}"#)
+            .root_check(ADVERTISED_CONTROL_TOOL, r#"{"offer_id":"offer-nobody-surfaced-0"}"#)
             .unwrap();
         assert_eq!(kind(&answered), "blocked");
         assert_eq!(
@@ -1257,11 +1270,14 @@ delta    = {}
     fn the_control_tool_answers_without_opening_a_dispatch() {
         let mut session = session(None);
         let refused = session
-            .root_check(CONTROL_TOOL, r#"{"offer_id":"offer-nobody-surfaced"}"#)
+            .root_check(ADVERTISED_CONTROL_TOOL, r#"{"offer_id":"offer-nobody-surfaced"}"#)
             .unwrap();
         assert_eq!(kind(&refused), "blocked");
         assert!(session.pending.is_none(), "no outcome is owed");
-        assert_eq!(kind(&session.root_check(CONTROL_TOOL, "{}").unwrap()), "control");
+        assert_eq!(
+            kind(&session.root_check(ADVERTISED_CONTROL_TOOL, "{}").unwrap()),
+            "control"
+        );
         assert!(session.pending.is_none(), "no outcome is owed");
     }
 
@@ -1384,7 +1400,7 @@ trust = { from = "suspicious", to = "trusted" }
         let taken = session
             .check(
                 Some(&child()),
-                CONTROL_TOOL,
+                ADVERTISED_CONTROL_TOOL,
                 &format!(r#"{{"{OFFER_ARGUMENT}":"{}"}}"#, offer_id(&blocked)),
                 false,
             )
@@ -1551,7 +1567,7 @@ trust = { from = "suspicious", to = "trusted" }
         let blocked = session.root_check("read_external", "{}").unwrap();
         session
             .root_check(
-                CONTROL_TOOL,
+                ADVERTISED_CONTROL_TOOL,
                 &format!(r#"{{"{OFFER_ARGUMENT}":"{}"}}"#, offer_id(&blocked)),
             )
             .unwrap();

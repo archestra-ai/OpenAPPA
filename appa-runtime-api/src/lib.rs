@@ -5,7 +5,7 @@
 mod wire;
 
 pub use wire::{
-    Accepted, Adapter, AsSpoken, DecisionName, Derived, DeriveFn, EventName, OutcomeStatus, PROTOCOL, WireDecision,
+    Accepted, Adapter, AsSpoken, DecisionName, DeriveFn, Derived, EventName, OutcomeStatus, PROTOCOL, WireDecision,
     WireEvent, WireOffer, WireOutcome, WireReturn, WireReview, WireRuling,
 };
 
@@ -106,9 +106,9 @@ fn is_segment(segment: &str) -> bool {
 impl CanonicalTool {
     pub fn parse(name: &str) -> Result<Self, CanonicalToolError> {
         let refuse_shape = || CanonicalToolError::Shape { name: name.to_string() };
-        let (family, rest) = name.split_once('/').ok_or_else(|| CanonicalToolError::Family {
-            name: name.to_string(),
-        })?;
+        let (family, rest) = name
+            .split_once('/')
+            .ok_or_else(|| CanonicalToolError::Family { name: name.to_string() })?;
         match family {
             "appa" => {
                 if name == CONTROL_TOOL {
@@ -132,9 +132,7 @@ impl CanonicalTool {
                 }
                 Ok(Self(name.to_string()))
             }
-            _ => Err(CanonicalToolError::Family {
-                name: name.to_string(),
-            }),
+            _ => Err(CanonicalToolError::Family { name: name.to_string() }),
         }
     }
 
@@ -179,10 +177,17 @@ mod canonical_tests {
             "mcp/a.b-c_d/T.o-o_l",
             CONTROL_TOOL,
         ] {
-            assert_eq!(CanonicalTool::parse(name).map(|tool| tool.into_string()), Ok(name.to_string()));
+            assert_eq!(
+                CanonicalTool::parse(name).map(|tool| tool.into_string()),
+                Ok(name.to_string())
+            );
         }
         assert!(CanonicalTool::parse(CONTROL_TOOL).expect("control").is_control());
-        assert!(!CanonicalTool::parse("mcp/appa/execute_remedy_plan").expect("mcp").is_control());
+        assert!(
+            !CanonicalTool::parse("mcp/appa/execute_remedy_plan")
+                .expect("mcp")
+                .is_control()
+        );
         for name in [
             "",
             "Bash",
@@ -211,7 +216,10 @@ mod canonical_tests {
         assert!(serde_json::from_str::<CanonicalTool>(r#""github""#).is_err());
         for name in AdapterName::ALL {
             assert_eq!(name.as_str().parse::<AdapterName>(), Ok(name));
-            assert_eq!(serde_json::to_string(&name).expect("serializes"), format!("{:?}", name.as_str()));
+            assert_eq!(
+                serde_json::to_string(&name).expect("serializes"),
+                format!("{:?}", name.as_str())
+            );
         }
         assert!("ClaudeCode".parse::<AdapterName>().is_err());
         assert_eq!(AdapterName::ClaudeCode.root("s1").0, "cc:s1");

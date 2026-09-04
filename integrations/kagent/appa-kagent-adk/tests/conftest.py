@@ -13,9 +13,30 @@ from typing import Any, Protocol
 
 import httpx
 
+from appa_kagent_adk.inventory import ToolInventory
 from appa_kagent_adk.plugin import AppaPluginKagent
 
 RUNTIME_URL = "http://127.0.0.1:8787"
+
+# The rendered config the tests' inventory comes from: one MCP server
+# named by its host, and two remote agents as kagent renders them.
+INVENTORY_CONFIG = {
+    "model": {"type": "openai", "model": "gpt-5.2"},
+    "description": "a demo agent",
+    "instruction": "help with the cluster",
+    "http_tools": [
+        {
+            "params": {"url": "http://demo-tools.kagent.svc.cluster.local:3000/mcp"},
+            "tools": ["k8s_scale", "k8s_get_pods", "read_ledger", "k8s_annotate", "restart_deployment"],
+        }
+    ],
+    "remote_agents": [
+        {"name": "kagent__NS__billing_agent", "url": "http://billing-agent:8080"},
+        {"name": "kagent__NS__log_analyst", "url": "http://log-analyst:8080"},
+    ],
+}
+
+INVENTORY = ToolInventory.from_config(INVENTORY_CONFIG, environ={})
 
 
 class FakeSession:
@@ -74,12 +95,6 @@ class FakeTool:
         self.name = name
 
 
-# Spawn classification is by type name, so these two classes carry the
-# names the plugin recognizes.
-AgentTool = type("AgentTool", (), {"__init__": lambda self, name: setattr(self, "name", name)})
-KAgentRemoteA2ATool = type("KAgentRemoteA2ATool", (), {"__init__": lambda self, name: setattr(self, "name", name)})
-
-
 class FakePart:
     def __init__(self, text: str | None = None):
         self.text = text
@@ -101,7 +116,7 @@ class Hook:
         def handle(request: httpx.Request) -> httpx.Response:
             self.events.append(json.loads(request.content))
             if not self.answers:
-                return httpx.Response(200, json={"decision": "ack"})
+                return httpx.Response(200, json={"protocol": 1, "decision": "ack"})
             answer = self.answers.pop(0)
             if isinstance(answer, Exception):
                 raise answer
@@ -130,10 +145,13 @@ class Remedy:
         return self.answer
 
 
-def plugin_over(hook: ScriptedRuntime, remedy: Remedy | None = None) -> AppaPluginKagent:
+def plugin_over(
+    hook: ScriptedRuntime, remedy: Remedy | None = None, inventory: ToolInventory = INVENTORY
+) -> AppaPluginKagent:
     transport = hook.transport()
     return AppaPluginKagent(
         RUNTIME_URL,
+        inventory=inventory,
         client_factory=lambda: httpx.AsyncClient(transport=transport),
         remedy_call=remedy,
     )

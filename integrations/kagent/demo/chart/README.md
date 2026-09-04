@@ -46,10 +46,10 @@ Leave `openai.apiKey` unset to paste the key in the dashboard instead
 The defaults match the public playground: `openai/gpt-5.6-luna` through
 `https://openrouter.ai/api/v1`.
 
-The policy names the delegated children by their wire spelling,
-`<namespace>__NS__<child>` with hyphens as underscores
+The policy names the delegated children by their canonical ids,
+`agent/<namespace>/<child>`
 ([files/demo.appa.toml](files/demo.appa.toml)). The chart renders the
-two names from the release namespace, `agents.childName` and
+two ids from the release namespace, `agents.childName` and
 `agents.go.childName`. Both delegations stay declared in any namespace
 and under any distinct child names. The chart fails to render when
 two of these names coincide: `cluster-ops`, `release-manager`,
@@ -60,8 +60,9 @@ The policy declares both children even without the go cell, so
 runtime pod.
 The names must be DNS-1123 labels
 ([values.schema.json](values.schema.json)). The seeded showcase chats
-are captured transcripts and keep the `kagent__NS__…` spellings of
-their capture.
+are captured transcripts and keep the `kagent__NS__…` function-call
+names of their capture: that is how kagent renders an agent tool, and
+the entrypoint maps it to the `agent/…` id the policy names.
 
 The seed Job posts to `kagent-controller` in the release namespace. In
 another namespace set `seed.controllerUrl` to the controller address,
@@ -91,7 +92,7 @@ structured outputs.
 | `mocks.approvalWindowSeconds` | `25` | How long the change board waits for a ruling, inside the policy's `externals.timeout_ms` (30 s). |
 | `seed.enabled` | `true` | Replay the showcase chats into `cluster-ops` after install. The go twin gets none. |
 | `seed.controllerUrl` | `""` | The kagent controller the seed Job posts to. Empty means `kagent-controller` in the release namespace. |
-| `agents.childName` | `log-analyst` | The python child `cluster-ops` delegates to. The policy names it `<namespace>__NS__<childName>`, hyphens as underscores. |
+| `agents.childName` | `log-analyst` | The python child `cluster-ops` delegates to. The policy names it `agent/<namespace>/<childName>`. |
 | `agents.go.enabled` | `true` | Also render the go cell: `cluster-ops-go`, `log-analyst-go`, and `release-manager-go` on kagent's go runtime (needs the published `golang-adk` image beside the python one). |
 | `agents.go.childName` | `log-analyst-go` | The go child `cluster-ops-go` delegates to. The policy names it the same way. |
 | `guide.enabled` | `true` | Install the `appa-guide` agent: the routing skill over the kagent tool server's k8s tools, gated by the shared runtime. |

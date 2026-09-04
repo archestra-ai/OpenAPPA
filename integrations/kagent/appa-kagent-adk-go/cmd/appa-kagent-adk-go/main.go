@@ -363,21 +363,6 @@ func withReservedToolset(agentConfig *adk.AgentConfig, runtimeURL string) {
 	})
 }
 
-// spawnToolNames lists the agent-as-tool wire names of the rendered
-// config: the remote agents, under the names the stock builder
-// dispatches them by. Entries the stock builder skips (no URL) are
-// skipped here too.
-func spawnToolNames(agentConfig *adk.AgentConfig) []string {
-	var names []string
-	for _, remoteAgent := range agentConfig.RemoteAgents {
-		if remoteAgent.Url == "" {
-			continue
-		}
-		names = append(names, remoteAgent.Name)
-	}
-	return names
-}
-
 // applyConfigDeltas changes the rendered config before the stock
 // builder reads it: deltas 1 and 3. The reserved-tool toolset joins
 // the config, so the stock HttpTools path constructs it like every
@@ -397,15 +382,15 @@ func applyConfigDeltas(gate gating, agentConfig *adk.AgentConfig, logger logr.Lo
 // delta 2. Order is load-bearing. ADK stops a callback chain at the
 // first non-nil answer, and no stock plugin answers a gated callback.
 // So a plugin appended last never short-circuits a gate. While the
-// knob is off the plugin list stays the stock list.
-func appendAppaPlugin(gate gating, runnerConfig *adkrunner.Config, agentConfig *adk.AgentConfig, logger logr.Logger) error {
+// knob is off the plugin list stays the stock list. The inventory is
+// the one the config guard built from the rendered config.
+func appendAppaPlugin(gate gating, runnerConfig *adkrunner.Config, inventory appakagentadk.Inventory, logger logr.Logger) error {
 	if !gate.enabled() {
 		return nil
 	}
-	spawnTools := spawnToolNames(agentConfig)
 	appaPlugin, err := appakagentadk.New(appakagentadk.Config{
 		RuntimeURL: gate.runtimeURL,
-		SpawnTools: spawnTools,
+		Inventory:  inventory,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create AppaPluginKagent: %w", err)
@@ -415,7 +400,7 @@ func appendAppaPlugin(gate gating, runnerConfig *adkrunner.Config, agentConfig *
 		return fmt.Errorf("failed to wire AppaPluginKagent into the ADK plugin surface: %w", err)
 	}
 	runnerConfig.PluginConfig.Plugins = append(runnerConfig.PluginConfig.Plugins, adkPlugin)
-	logger.Info("Registered AppaPluginKagent", "runtimeURL", gate.runtimeURL, "spawnTools", len(spawnTools))
+	logger.Info("Registered AppaPluginKagent", "runtimeURL", gate.runtimeURL, "inventory", inventory.Len())
 	return nil
 }
 
@@ -460,7 +445,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	agentConfig, agentCard := loadAgentConfigs(gate, configDir, logger)
+	agentConfig, inventory, agentCard := loadAgentConfigs(gate, configDir, logger)
 	logger.Info("Loaded agent config", "configDir", configDir)
 	logger.Info("Agent configuration",
 		"model", agentConfig.Model.GetType(),
@@ -569,7 +554,7 @@ func main() {
 	runnerConfig.SessionService = withLineageHeaders(gate, runnerConfig.SessionService)
 	executorSessionService := withLineageHeaders(gate, sessionService)
 
-	if err := appendAppaPlugin(gate, &runnerConfig, agentConfig, logger); err != nil {
+	if err := appendAppaPlugin(gate, &runnerConfig, inventory, logger); err != nil {
 		logger.Error(err, "Failed to register AppaPluginKagent")
 		os.Exit(1)
 	}
@@ -631,21 +616,24 @@ func main() {
 // runs from the bytes it checked, and nothing reads the file again. The
 // stock validation then runs on the decoded config, and the stock
 // loader reads the agent card from disk.
-func loadAgentConfigs(gate gating, configDir string, logger logr.Logger) (*adk.AgentConfig, *a2atype.AgentCard) {
+// loadAgentConfigs reads the rendered config and card. In the gated
+// mode the config passes the guard, and the inventory it returns spells
+// every tool the gate admits; the stock mode builds none.
+func loadAgentConfigs(gate gating, configDir string, logger logr.Logger) (*adk.AgentConfig, appakagentadk.Inventory, *a2atype.AgentCard) {
 	if !gate.enabled() {
 		agentConfig, agentCard, err := config.LoadAgentConfigs(configDir)
 		if err != nil {
 			logger.Error(err, "Failed to load agent config (model configuration is required)", "configDir", configDir)
 			os.Exit(1)
 		}
-		return agentConfig, agentCard
+		return agentConfig, appakagentadk.Inventory{}, agentCard
 	}
 	raw, err := os.ReadFile(filepath.Join(configDir, "config.json"))
 	if err != nil {
 		logger.Error(err, "Failed to read agent config", "configDir", configDir)
 		os.Exit(1)
 	}
-	agentConfig, err := decodeGuarded(raw)
+	agentConfig, inventory, err := decodeGuarded(raw, os.Getenv(skillsFolderEnv))
 	var refusal *configRefusal
 	if errors.As(err, &refusal) {
 		logger.Error(err, "Refusing to start", "configDir", configDir)
@@ -664,7 +652,7 @@ func loadAgentConfigs(gate gating, configDir string, logger logr.Logger) (*adk.A
 		logger.Error(err, "Failed to load agent card", "configDir", configDir)
 		os.Exit(1)
 	}
-	return agentConfig, agentCard
+	return agentConfig, inventory, agentCard
 }
 
 func deriveAppName(kagentName, kagentNamespace string, agentCard *a2atype.AgentCard, logger logr.Logger) string {

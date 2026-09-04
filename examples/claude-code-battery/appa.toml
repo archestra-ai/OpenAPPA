@@ -45,7 +45,7 @@ token_env = "APPA_PROVIDER_SLACK_TOKEN"   # the one variable this command inheri
 # Root contracts run before every included battery. This local rule bypasses
 # the shipped Bash classifier for `cargo test` and adds a fresh approval step.
 [[policy.tool]]
-name = "Bash(command:cargo test)"
+name = "host/claude-code/Bash(command:cargo test)"
 
 [policy.tool.requires]
 trust = "trusted"
@@ -64,7 +64,7 @@ audiences = []
 marks = ["hitl"]
 
 [[policy.tool]]
-name = "Read"
+name = "host/claude-code/Read"
 description = "Reads a file and returns its contents."
 annotator = "local.read-sensitivity"
 

@@ -7,8 +7,18 @@ use appa_runtime_api::{OutcomeBody, ProposedCall, ToolOutcome};
 use crate::http::{HttpClient, read_body_capped};
 use crate::wire::WireTool;
 
-/// Runtime control tool for executing remedies.
-pub(crate) const CONTROL_TOOL: &str = "execute_remedy_plan";
+/// The control tool as the model sees it. Function-calling APIs reject `/` in a
+/// tool name, so the canonical id (`appa_runtime_api::CONTROL_TOOL`) is only
+/// used on the runtime side of `canonical_tool_name`.
+pub(crate) const ADVERTISED_CONTROL_TOOL: &str = "execute_remedy_plan";
+
+/// Translates a name the model called into the name the runtime knows.
+pub(crate) fn canonical_tool_name(advertised: &str) -> &str {
+    match advertised {
+        ADVERTISED_CONTROL_TOOL => appa_runtime_api::CONTROL_TOOL,
+        host_tool => host_tool,
+    }
+}
 
 /// Host tools combined with the runtime control tool.
 #[derive(Clone, Debug)]
@@ -36,7 +46,7 @@ impl ToolCatalogue {
 
 fn control_tool_schema() -> WireTool {
     WireTool::new(
-        CONTROL_TOOL,
+        ADVERTISED_CONTROL_TOOL,
         "Execute one remedy plan by the offer id that blocking feedback surfaced. The id must be \
          quoted exactly. Accepting a narrowing permanently restricts this trajectory, so run any \
          later work that needs its current label before you accept. A plan that declares a \
@@ -174,7 +184,7 @@ mod tests {
             .into_iter()
             .map(|tool| tool.function.name)
             .collect();
-        assert_eq!(names, vec!["read_hr".to_string(), CONTROL_TOOL.to_string()]);
+        assert_eq!(names, vec!["read_hr".to_string(), ADVERTISED_CONTROL_TOOL.to_string()]);
     }
 
     #[test]
@@ -188,6 +198,6 @@ mod tests {
             .into_iter()
             .map(|tool| tool.function.name)
             .collect();
-        assert_eq!(names, vec!["read_hr".to_string(), CONTROL_TOOL.to_string()]);
+        assert_eq!(names, vec!["read_hr".to_string(), ADVERTISED_CONTROL_TOOL.to_string()]);
     }
 }

@@ -16,11 +16,14 @@ It replays the stock kagent startup — the same public calls
 adds the OpenAPPA construction deltas:
 
 1. Refuse what the runtime cannot gate: unknown config fields, compiled
-   ``sub_agents``, a divergent compaction summarizer (``config_guard``).
+   ``sub_agents``, a divergent compaction summarizer (``config_guard``),
+   and an MCP entry with no tool filter (``inventory``).
 2. Bring the out-of-band flows under the tool gate: wrap the code
    executor and the memory persist callback (``gates``).
-3. Rebuild the stock plugin list with the stock conditions, then append
-   ``AppaPluginKagent`` last.
+3. Build the tool inventory from the rendered config, the spelling of
+   every tool this agent can dispatch (``inventory``). Rebuild the stock
+   plugin list with the stock conditions, then append
+   ``AppaPluginKagent`` last, over that inventory.
 4. Append the reserved-tool toolset over ``$APPA_RUNTIME_URL/mcp``.
 5. Fill the OpenAI model's ``reasoning_effort`` from
    ``$APPA_KAGENT_OPENAI_REASONING_EFFORT`` when the rendered config
@@ -48,6 +51,7 @@ import pydantic
 
 from .config_guard import ConfigRefused
 from .identity import SessionIdentity
+from .inventory import ToolInventory
 from .plugin import AppaPluginKagent
 from .wire import RESERVED_TOOL
 
@@ -246,13 +250,15 @@ def build_server(filepath: str, runtime_url: str):
     config_guard.refuse_unsupported(config, AgentConfig)
     agent_config = AgentConfig.model_validate(config)
     config_guard.refuse_divergent_summarizer(agent_config)
+    inventory = ToolInventory.from_config(config)
+    logger.info("the gated inventory spells %d tools", len(inventory.spellings))
     agent_card = AgentCard.model_validate(_read_document(filepath, "agent-card.json"))
 
     app_cfg = KAgentConfig()
     sts_integration, plugins = _stock_plugins(agent_config)
 
     identity = SessionIdentity()
-    plugin = AppaPluginKagent(runtime_url, identity=identity)
+    plugin = AppaPluginKagent(runtime_url, inventory=inventory, identity=identity)
     # Appended last: no stock plugin overrides a gated callback. The
     # callbacks the stock plugins do override (before_run, after_run,
     # before_model) return None, so the chain reaches this plugin.

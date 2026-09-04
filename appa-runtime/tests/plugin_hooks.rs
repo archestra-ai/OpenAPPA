@@ -1,11 +1,15 @@
 mod common;
-use common::serve;
+use common::{serve, serve_runtime};
 
 use std::io::Write;
 use std::process::{Command, Stdio};
 
 use axum::Router;
 use axum::routing::post;
+
+/// The gated hook every command here posts: a call the runtime must decide.
+const PRE_TOOL_USE: &str =
+    r#"{"hook_event_name":"PreToolUse","session_id":"plugin-test","tool_name":"Bash","tool_input":{"command":"ls"}}"#;
 
 /// The hooks that report the root actor's finished turn. Every blocking
 /// outcome on one of these means "do not stop", so none of them may carry
@@ -219,7 +223,7 @@ fn run_hook(command: &str, url: &str) -> (i32, String) {
 }
 
 fn run_gated(command: &str, url: &str, gated: bool) -> (i32, String) {
-    let mut child = Command::new("sh")
+    let child = Command::new("sh")
         .arg("-c")
         .arg(command)
         .env("APPA_RUNTIME_URL", url)
@@ -231,13 +235,18 @@ fn run_gated(command: &str, url: &str, gated: bool) -> (i32, String) {
         .stderr(Stdio::null())
         .spawn()
         .expect("the hook command spawns");
+    finish(child, PRE_TOOL_USE)
+}
+
+/// Feed `stdin` to a spawned hook and collect its exit code and stdout.
+fn finish(mut child: std::process::Child, stdin: &str) -> (i32, String) {
     // An ungated hook may exit before reading its stdin, closing the pipe
     // mid-write; that is a pass condition, so only a non-EPIPE error fails.
     if let Err(error) = child
         .stdin
         .as_mut()
         .expect("the child has a stdin pipe")
-        .write_all(br#"{"hook_event_name":"PreToolUse","session_id":"plugin-test"}"#)
+        .write_all(stdin.as_bytes())
     {
         assert_eq!(
             error.kind(),
@@ -264,15 +273,99 @@ async fn refused_url() -> String {
     url
 }
 
+/// A 2xx wire decision is rendered into Claude Code's hook answer and exits 0.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_2xx_answer_passes_its_body_through_with_exit_0() {
-    let url = serve(Router::new().route("/hook", post(|| async { r#"{"decision":"block","reason":"denied"}"# }))).await;
+async fn a_2xx_answer_is_rendered_for_the_host_with_exit_0() {
+    let url = serve(Router::new().route(
+        "/hook",
+        post(|| async { r#"{"protocol":1,"decision":"block","reason":"denied"}"# }),
+    ))
+    .await;
     let command = shipped_command();
     let (code, stdout) = tokio::task::spawn_blocking(move || run_hook(&command, &url))
         .await
         .expect("the blocking task joins");
     assert_eq!(code, 0);
-    assert_eq!(stdout, r#"{"decision":"block","reason":"denied"}"#);
+    let answer: serde_json::Value = serde_json::from_str(&stdout).expect("the answer is JSON");
+    assert_eq!(answer, serde_json::json!({"decision": "block", "reason": "denied"}));
+}
+
+/// A 2xx body that is no wire decision is not passed through: the hook fails closed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_2xx_answer_that_is_no_wire_decision_exits_2() {
+    let url = serve(Router::new().route("/hook", post(|| async { "{}" }))).await;
+    let command = shipped_command();
+    let (code, stdout) = tokio::task::spawn_blocking(move || run_hook(&command, &url))
+        .await
+        .expect("the blocking task joins");
+    assert_eq!(code, 2, "an answer off the wire must block the action");
+    assert_eq!(stdout, "");
+}
+
+fn run_client(args: &[&str], url: &str, stdin: &str) -> (i32, String) {
+    let child = Command::new(built_binary())
+        .arg("hook")
+        .args(args)
+        .arg("--url")
+        .arg(url)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the hook client spawns");
+    finish(child, stdin)
+}
+
+/// `appa hook --adapter claude-code` end to end against a served runtime: the
+/// Claude Code hook is translated onto the wire, the runtime decides under a
+/// policy naming the canonical tool, and the decision comes back in Claude Code's
+/// shape with the exit code its outcome takes.
+#[test]
+fn the_hook_client_translates_both_ways_against_a_served_runtime() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let config = dir.path().join("appa.toml");
+    std::fs::write(
+        &config,
+        "[policy]\nversion = 2\n\n[[policy.tool]]\nname = \"host/claude-code/Bash\"\n\n\
+         [externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n",
+    )
+    .expect("the config writes");
+    let runtime = serve_runtime(&config, &dir.path().join("appa.db"));
+    let claude = ["--adapter", "claude-code"];
+
+    let (code, stdout) = run_client(&claude, &runtime.url, PRE_TOOL_USE);
+    assert_eq!(code, 0, "{stdout}");
+    let answer: serde_json::Value = serde_json::from_str(&stdout).expect("the answer is JSON");
+    assert_eq!(answer["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+    assert_eq!(answer["hookSpecificOutput"]["permissionDecision"], "allow", "{answer}");
+
+    let ran = r#"{"hook_event_name":"PostToolUse","session_id":"plugin-test","tool_name":"Bash","tool_input":{"command":"ls"},"tool_response":{"stdout":"readme.txt"}}"#;
+    let (code, stdout) = run_client(&claude, &runtime.url, ran);
+    assert_eq!(code, 0, "{stdout}");
+    assert_eq!(stdout, "{}", "a kept result answers with no opinion");
+
+    // Nothing covers Write: the runtime refuses the call typed, and the client blocks.
+    let uncovered = r#"{"hook_event_name":"PreToolUse","session_id":"plugin-test","tool_name":"Write","tool_input":{"file_path":"x","content":"y"}}"#;
+    let (code, stdout) = run_client(&claude, &runtime.url, uncovered);
+    assert_eq!(code, 2, "a runtime refusal must block the action: {stdout}");
+    let answer: serde_json::Value = serde_json::from_str(&stdout).expect("the refusal renders");
+    assert!(answer["error"].is_string(), "{answer}");
+
+    let ungated = r#"{"hook_event_name":"Notification","session_id":"plugin-test"}"#;
+    let (code, stdout) = run_client(&claude, &runtime.url, ungated);
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "{}", "an ungated hook answers without a round trip");
+
+    let (code, stdout) = run_client(&["--adapter", "kagent"], &runtime.url, PRE_TOOL_USE);
+    assert_eq!(
+        code, 2,
+        "kagent posts the wire itself; the client refuses to translate for it"
+    );
+    assert_eq!(stdout, "");
+
+    let (code, stdout) = run_client(&["--adapter", "sky-net"], &runtime.url, PRE_TOOL_USE);
+    assert_ne!(code, 0, "an unknown adapter is refused");
+    assert_eq!(stdout, "");
 }
 
 #[tokio::test(flavor = "multi_thread")]

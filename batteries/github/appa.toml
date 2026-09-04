@@ -12,11 +12,11 @@
 # tool you use against that repository — here the issue tools:
 #
 #   [[policy.tool]]
-#   name = "mcp__github__issue_read(repo:my-private-repo)"
+#   name = "mcp/github/issue_read(repo:my-private-repo)"
 #   delta = { trust = "suspicious", audience = ["internal"] }
 #
 #   [[policy.tool]]
-#   name = "mcp__github__issue_write(repo:my-private-repo)"
+#   name = "mcp/github/issue_write(repo:my-private-repo)"
 #   delta = {}
 #
 #   [policy.tool.requires]
@@ -35,119 +35,119 @@ version = 2
 # --- who am I: no outside content, nothing sent ---
 
 [[policy.tool]]
-name = "mcp__github__get_me"
+name = "mcp/github/get_me"
 delta = {}
 
 [[policy.tool]]
-name = "mcp__github__get_teams"
+name = "mcp/github/get_teams"
 delta = {}
 
 [[policy.tool]]
-name = "mcp__github__get_team_members"
+name = "mcp/github/get_team_members"
 delta = {}
 
 [[policy.tool]]
-name = "mcp__github__search_users"
+name = "mcp/github/search_users"
 delta = {}
 
 # --- reads: content other people wrote ---
 
 [[policy.tool]]
-name = "mcp__github__search_repositories"
+name = "mcp/github/search_repositories"
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
-name = "mcp__github__get_file_contents"
+name = "mcp/github/get_file_contents"
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
-name = "mcp__github__list_branches"
+name = "mcp/github/list_branches"
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
-name = "mcp__github__list_commits"
+name = "mcp/github/list_commits"
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
-name = "mcp__github__get_commit"
+name = "mcp/github/get_commit"
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
-name = "mcp__github__search_code"
+name = "mcp/github/search_code"
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
-name = "mcp__github__search_commits"
+name = "mcp/github/search_commits"
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
-name = "mcp__github__list_tags"
+name = "mcp/github/list_tags"
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
-name = "mcp__github__get_tag"
+name = "mcp/github/get_tag"
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
-name = "mcp__github__list_releases"
+name = "mcp/github/list_releases"
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
-name = "mcp__github__get_latest_release"
+name = "mcp/github/get_latest_release"
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
-name = "mcp__github__get_release_by_tag"
+name = "mcp/github/get_release_by_tag"
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
-name = "mcp__github__list_repository_collaborators"
+name = "mcp/github/list_repository_collaborators"
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
-name = "mcp__github__list_issues"
+name = "mcp/github/list_issues"
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
-name = "mcp__github__run_secret_scanning"
+name = "mcp/github/run_secret_scanning"
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
-name = "mcp__github__search_issues"
+name = "mcp/github/search_issues"
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
-name = "mcp__github__issue_read"
+name = "mcp/github/issue_read"
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
-name = "mcp__github__get_label"
+name = "mcp/github/get_label"
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
-name = "mcp__github__list_issue_fields"
+name = "mcp/github/list_issue_fields"
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
-name = "mcp__github__list_issue_types"
+name = "mcp/github/list_issue_types"
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
-name = "mcp__github__list_pull_requests"
+name = "mcp/github/list_pull_requests"
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
-name = "mcp__github__search_pull_requests"
+name = "mcp/github/search_pull_requests"
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
-name = "mcp__github__pull_request_read"
+name = "mcp/github/pull_request_read"
 delta = { trust = "suspicious" }
 
 # --- writes: the repository is assumed public, so only public data may go in ---
 
 [[policy.tool]]
-name = "mcp__github__create_repository"
+name = "mcp/github/create_repository"
 delta = {}
 
 [policy.tool.requires]
@@ -155,7 +155,7 @@ trust = "trusted"
 audience = { contains = ["public"] }
 
 [[policy.tool]]
-name = "mcp__github__fork_repository"
+name = "mcp/github/fork_repository"
 delta = {}
 
 [policy.tool.requires]
@@ -163,7 +163,7 @@ trust = "trusted"
 audience = { contains = ["public"] }
 
 [[policy.tool]]
-name = "mcp__github__create_branch"
+name = "mcp/github/create_branch"
 delta = {}
 
 [policy.tool.requires]
@@ -171,7 +171,7 @@ trust = "trusted"
 audience = { contains = ["public"] }
 
 [[policy.tool]]
-name = "mcp__github__create_or_update_file"
+name = "mcp/github/create_or_update_file"
 delta = {}
 
 [policy.tool.requires]
@@ -179,7 +179,7 @@ trust = "trusted"
 audience = { contains = ["public"] }
 
 [[policy.tool]]
-name = "mcp__github__push_files"
+name = "mcp/github/push_files"
 delta = {}
 
 [policy.tool.requires]
@@ -187,7 +187,7 @@ trust = "trusted"
 audience = { contains = ["public"] }
 
 [[policy.tool]]
-name = "mcp__github__delete_file"
+name = "mcp/github/delete_file"
 delta = {}
 
 [policy.tool.requires]
@@ -195,7 +195,7 @@ trust = "trusted"
 audience = { contains = ["public"] }
 
 [[policy.tool]]
-name = "mcp__github__issue_write"
+name = "mcp/github/issue_write"
 delta = {}
 
 [policy.tool.requires]
@@ -203,7 +203,7 @@ trust = "trusted"
 audience = { contains = ["public"] }
 
 [[policy.tool]]
-name = "mcp__github__sub_issue_write"
+name = "mcp/github/sub_issue_write"
 delta = {}
 
 [policy.tool.requires]
@@ -211,7 +211,7 @@ trust = "trusted"
 audience = { contains = ["public"] }
 
 [[policy.tool]]
-name = "mcp__github__add_issue_comment"
+name = "mcp/github/add_issue_comment"
 delta = {}
 
 [policy.tool.requires]
@@ -219,7 +219,7 @@ trust = "trusted"
 audience = { contains = ["public"] }
 
 [[policy.tool]]
-name = "mcp__github__create_pull_request"
+name = "mcp/github/create_pull_request"
 delta = {}
 
 [policy.tool.requires]
@@ -227,7 +227,7 @@ trust = "trusted"
 audience = { contains = ["public"] }
 
 [[policy.tool]]
-name = "mcp__github__update_pull_request"
+name = "mcp/github/update_pull_request"
 delta = {}
 
 [policy.tool.requires]
@@ -235,7 +235,7 @@ trust = "trusted"
 audience = { contains = ["public"] }
 
 [[policy.tool]]
-name = "mcp__github__update_pull_request_branch"
+name = "mcp/github/update_pull_request_branch"
 delta = {}
 
 [policy.tool.requires]
@@ -243,7 +243,7 @@ trust = "trusted"
 audience = { contains = ["public"] }
 
 [[policy.tool]]
-name = "mcp__github__merge_pull_request"
+name = "mcp/github/merge_pull_request"
 delta = {}
 
 [policy.tool.requires]
@@ -251,7 +251,7 @@ trust = "trusted"
 audience = { contains = ["public"] }
 
 [[policy.tool]]
-name = "mcp__github__pull_request_review_write"
+name = "mcp/github/pull_request_review_write"
 delta = {}
 
 [policy.tool.requires]
@@ -259,7 +259,7 @@ trust = "trusted"
 audience = { contains = ["public"] }
 
 [[policy.tool]]
-name = "mcp__github__add_comment_to_pending_review"
+name = "mcp/github/add_comment_to_pending_review"
 delta = {}
 
 [policy.tool.requires]
@@ -267,7 +267,7 @@ trust = "trusted"
 audience = { contains = ["public"] }
 
 [[policy.tool]]
-name = "mcp__github__add_reply_to_pull_request_comment"
+name = "mcp/github/add_reply_to_pull_request_comment"
 delta = {}
 
 [policy.tool.requires]
@@ -275,7 +275,7 @@ trust = "trusted"
 audience = { contains = ["public"] }
 
 [[policy.tool]]
-name = "mcp__github__request_copilot_review"
+name = "mcp/github/request_copilot_review"
 delta = {}
 
 [policy.tool.requires]

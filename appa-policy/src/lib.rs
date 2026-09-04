@@ -1575,6 +1575,12 @@ confined_results = ["lookup"]
             config.registry().classify(&appa_engine::value::ToolName::new("ghost")),
             Some(appa_engine::registry::ToolKind::Wildcard)
         );
+        assert_ne!(
+            config.registry().classify(&appa_engine::value::ToolName::new("*")),
+            Some(appa_engine::registry::ToolKind::Declared),
+            "the wildcard's spelling names no tool"
+        );
+        assert_eq!(config.registry().tools().count(), 0, "the wildcard is in no listing");
     }
 
     #[test]
@@ -1621,6 +1627,15 @@ confined_results = ["lookup"]
                 "wildcard metadata {metadata:?} must be refused"
             );
         }
+        let selected = "version = 2\n[[annotator]]\nname = \"any\"\n\
+                        [[tool]]\nname = \"*(path:*)\"\nannotator = \"any\"\n";
+        assert!(
+            matches!(
+                Config::from_toml_str(selected),
+                Err(ConfigError::Registry(LoadError::WildcardMetadata))
+            ),
+            "a wildcard with an argument selector must be refused"
+        );
     }
 
     #[test]

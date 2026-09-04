@@ -377,22 +377,22 @@ mod tests {
             version = 2
 
             [[policy.tool]]
-            name = "Bash"
+            name = "host/claude-code/Bash"
 
             [[policy.tool]]
-            name = "Write"
+            name = "host/claude-code/Write"
 
             [[policy.tool]]
-            name = "AskUserQuestion"
+            name = "host/claude-code/AskUserQuestion"
 
             [[policy.tool]]
-            name = "Task"
+            name = "host/claude-code/Task"
 
             [[policy.tool]]
-            name = "Agent"
+            name = "host/claude-code/Agent"
 
             [[policy.tool]]
-            name = "Read"
+            name = "host/claude-code/Read"
 
             [policy.deployment]
             context_control = true
@@ -417,7 +417,7 @@ mod tests {
 
     fn spawn_call() -> crate::api::ProposedCall {
         crate::api::ProposedCall {
-            tool: "Task".to_string(),
+            tool: "host/claude-code/Task".to_string(),
             arguments: crate::api::raw(serde_json::json!({"prompt": "look it up"})),
         }
     }
@@ -901,7 +901,7 @@ mod tests {
         let event = serde_json::json!({
             "hook_event_name": "PreToolUse",
             "session_id": "s1",
-            "tool_name": "mcp__appa__execute_remedy_plan",
+            "tool_name": CONTROL_TOOL_FIXTURE_NAME,
             "tool_input": {},
         });
         let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&event).expect("serializes")).await;
@@ -921,25 +921,88 @@ mod tests {
         assert_eq!(answer["hookSpecificOutput"]["permissionDecision"], "allow");
     }
 
+    /// The wire carries the host's raw spelling; the served adapter derives which
+    /// call is the control tool. A lookalike on another server, and the bare name
+    /// a host tool could take, both derive an ordinary tool nothing covers.
     #[tokio::test]
     async fn a_lookalike_control_tool_is_checked() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_runtime(&dir);
-        let event = serde_json::json!({
-            "hook_event_name": "PreToolUse",
-            "session_id": "s1",
-            "tool_name": "mcp__evil__execute_remedy_plan",
-            "tool_input": {"offer_id": "whatever"},
-        });
-        let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&event).expect("serializes")).await;
-        // Not the exemption's allow: the lookalike reaches the engine, and nothing
-        // covers the name, so the refusal is typed and rides the error wire.
-        assert_eq!(status, 409, "a colliding name must reach the engine, not the exemption");
+        for (raw, canonical) in [
+            ("mcp__evil__execute_remedy_plan", "mcp/evil/execute_remedy_plan"),
+            ("mcp__appa__execute_remedy_plan", "mcp/appa/execute_remedy_plan"),
+            ("execute_remedy_plan", "host/claude-code/execute_remedy_plan"),
+        ] {
+            let event = serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "session_id": "s1",
+                "tool_name": raw,
+                "tool_input": {"offer_id": "whatever"},
+            });
+            let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&event).expect("serializes")).await;
+            // Not the exemption's allow: the lookalike reaches the engine, and nothing
+            // covers the name, so the refusal is typed and rides the error wire.
+            assert_eq!(status, 409, "{raw} must reach the engine, not the exemption: {answer}");
+            assert!(
+                answer["error"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains(canonical)),
+                "the refusal names the derived tool: {answer}"
+            );
+        }
+    }
+
+    /// The wire is one protocol and one adapter: an event under another protocol, or
+    /// for another host, is refused before any session is touched.
+    #[tokio::test]
+    async fn another_protocol_or_another_adapters_event_is_refused() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let adapter = appa_adapter_claude_code::adapter();
+        let foreign_protocol = br#"{"protocol":2,"adapter":"claude-code","event":"session_start","root_id":"s1"}"#;
+        let (status, reply) = answer(&runtime, &adapter, foreign_protocol).await;
+        assert_eq!(status, 409, "{reply}");
+        assert!(reply["error"].is_string(), "{reply}");
+
+        let foreign_adapter = br#"{"protocol":1,"adapter":"kagent","event":"session_start","root_id":"s1"}"#;
+        let (status, reply) = answer(&runtime, &adapter, foreign_adapter).await;
+        assert_eq!(status, 409, "{reply}");
+        assert!(reply["error"].is_string(), "{reply}");
         assert!(
-            answer["error"]
-                .as_str()
-                .is_some_and(|detail| detail.contains("mcp__evil__execute_remedy_plan")),
-            "the refusal names the tool: {answer}"
+            runtime.status(&TrajectoryId("cc:s1".to_string())).is_none()
+                && runtime.status(&TrajectoryId("kagent:s1".to_string())).is_none(),
+            "a refused envelope opens nothing"
+        );
+
+        let served = br#"{"protocol":1,"adapter":"claude-code","event":"session_start","root_id":"s1"}"#;
+        assert_eq!(answer(&runtime, &adapter, served).await.0, 200);
+        assert!(runtime.status(&TrajectoryId("cc:s1".to_string())).is_some());
+    }
+
+    /// Whether a call is a spawn is derived from the raw spelling, never read off the
+    /// wire: a `spawn` claim on an ordinary tool releases it as an ordinary call, and
+    /// the spawn tool is held on the return menu with no claim at all.
+    #[tokio::test]
+    async fn a_wire_spawn_claim_is_ignored_and_the_spawn_is_derived() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let adapter = appa_adapter_claude_code::adapter();
+        let claimed = br#"{"protocol":1,"adapter":"claude-code","event":"tool_call","root_id":"s1","tool":"Bash","spawn":true,"arguments":{"command":"ls"}}"#;
+        let (status, reply) = answer(&runtime, &adapter, claimed).await;
+        assert_eq!(status, 200, "{reply}");
+        assert_eq!(reply["decision"], "allow_call", "{reply}");
+        assert!(reply.get("spawn_binding").is_none(), "no fork was prepared: {reply}");
+
+        let derived = br#"{"protocol":1,"adapter":"claude-code","event":"tool_call","root_id":"s2","tool":"Agent","spawn":false,"arguments":{"prompt":"go"}}"#;
+        let (status, reply) = answer(&runtime, &adapter, derived).await;
+        assert_eq!(status, 200, "{reply}");
+        assert_eq!(
+            reply["decision"], "deny_call",
+            "the spawn is held on the return menu: {reply}"
+        );
+        assert!(
+            reply["offers"].as_array().is_some_and(|offers| !offers.is_empty()),
+            "{reply}"
         );
     }
 
@@ -981,7 +1044,7 @@ mod tests {
             "hook_event_name": "PreToolUse",
             "session_id": "s1",
             "agent_id": "a1",
-            "tool_name": "execute_remedy_plan",
+            "tool_name": CONTROL_TOOL_FIXTURE_NAME,
             "tool_input": {"offer_id": "offer-1"},
         });
         let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&control).expect("serializes")).await;
@@ -992,7 +1055,7 @@ mod tests {
             "hook_event_name": "PostToolUse",
             "session_id": "s1",
             "agent_id": "a1",
-            "tool_name": "execute_remedy_plan",
+            "tool_name": CONTROL_TOOL_FIXTURE_NAME,
             "tool_input": {"offer_id": "offer-1"},
             "tool_response": {"ok": true},
         });
@@ -1068,7 +1131,7 @@ mod tests {
         let runtime = open_runtime(&dir);
         let root = appa_runtime_api::TrajectoryId("cc:s1".to_string());
         let call = || crate::api::ProposedCall {
-            tool: "Agent".to_string(),
+            tool: "host/claude-code/Agent".to_string(),
             arguments: crate::api::raw(serde_json::json!({"prompt": "list files"})),
         };
         let result = || HookEvent::SpawnResult {
@@ -1120,7 +1183,7 @@ mod tests {
                     child: Some(child.clone()),
                 },
                 call: crate::api::ProposedCall {
-                    tool: "Bash".to_string(),
+                    tool: "host/claude-code/Bash".to_string(),
                     arguments: crate::api::raw(serde_json::json!({"command": "ls"})),
                 },
                 spawn: false,
@@ -1158,7 +1221,7 @@ mod tests {
                     child: Some(appa_runtime_api::TrajectoryId("cc:s1:a2".to_string())),
                 },
                 call: crate::api::ProposedCall {
-                    tool: "Bash".to_string(),
+                    tool: "host/claude-code/Bash".to_string(),
                     arguments: crate::api::raw(serde_json::json!({"command": "ls"})),
                 },
                 spawn: false,

@@ -71,12 +71,12 @@ expect_env() {
 }
 
 # The defaults render both cells and the guide agent, and the policy
-# declares both children by their wire spelling.
+# declares both children by their canonical ids, agent/<namespace>/<child>.
 must_render kagent
 expect 7 '^kind: Agent$'
 expect 1 '^  name: appa-guide$'
-expect 1 '^    name = "kagent__NS__log_analyst"$'
-expect 1 '^    name = "kagent__NS__log_analyst_go"$'
+expect 1 '^    name = "agent/kagent/log-analyst"$'
+expect 1 '^    name = "agent/kagent/log-analyst-go"$'
 
 # Every rendered agent carries the gate knob beside the runtime URL.
 # The runtime image is a drop-in replacement for the stock kagent image
@@ -131,8 +131,8 @@ expect 5 'name: "123"$'
 expect 2 'name: "null"$'
 expect 7 '^    modelConfig: "123"$'
 expect 1 '^  apiKeySecret: "123"$'
-expect 1 '^    name = "123__NS__123"$'
-expect 1 '^    name = "123__NS__null"$'
+expect 1 '^    name = "agent/123/123"$'
+expect 1 '^    name = "agent/123/null"$'
 
 # The model profile the policy's sanitizers consult. The defaults name
 # the playground model and endpoint. One override reaches both the agents'

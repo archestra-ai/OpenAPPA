@@ -10,14 +10,14 @@
 # out without a question:
 #
 #   [[policy.tool]]
-#   name = "mcp__claude_ai_Slack__slack_send_message(thread_ts:*)"
+#   name = "mcp/claude_ai_Slack/slack_send_message(thread_ts:*)"
 #   requires = { trust = "trusted" }
 #   delta = {}
 #
 # Or one channel, by its id:
 #
 #   [[policy.tool]]
-#   name = "mcp__claude_ai_Slack__slack_send_message(channel_id:C0ABC123)"
+#   name = "mcp/claude_ai_Slack/slack_send_message(channel_id:C0ABC123)"
 #   requires = { trust = "trusted" }
 #   delta = {}
 #
@@ -31,73 +31,73 @@ version = 2
 # --- reads: internal ---
 
 [[policy.tool]]
-name = "mcp__claude_ai_Slack__slack_read_channel"
+name = "mcp/claude_ai_Slack/slack_read_channel"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Slack__slack_read_thread"
+name = "mcp/claude_ai_Slack/slack_read_thread"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Slack__slack_read_canvas"
+name = "mcp/claude_ai_Slack/slack_read_canvas"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Slack__slack_read_file"
+name = "mcp/claude_ai_Slack/slack_read_file"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Slack__slack_read_user_profile"
+name = "mcp/claude_ai_Slack/slack_read_user_profile"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Slack__slack_list_channel_members"
+name = "mcp/claude_ai_Slack/slack_list_channel_members"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Slack__slack_get_reactions"
+name = "mcp/claude_ai_Slack/slack_get_reactions"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Slack__slack_search_public"
+name = "mcp/claude_ai_Slack/slack_search_public"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Slack__slack_search_public_and_private"
+name = "mcp/claude_ai_Slack/slack_search_public_and_private"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Slack__slack_search_channels"
+name = "mcp/claude_ai_Slack/slack_search_channels"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Slack__slack_search_users"
+name = "mcp/claude_ai_Slack/slack_search_users"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Slack__slack_search_emojis"
+name = "mcp/claude_ai_Slack/slack_search_emojis"
 
 [policy.tool.delta]
 audience = ["internal"]
@@ -105,19 +105,19 @@ audience = ["internal"]
 # --- writes nobody else reads yet: trusted data, no approval ---
 
 [[policy.tool]]
-name = "mcp__claude_ai_Slack__slack_add_reaction"
+name = "mcp/claude_ai_Slack/slack_add_reaction"
 requires = { trust = "trusted" }
 delta = {}
 
 [[policy.tool]]
-name = "mcp__claude_ai_Slack__slack_send_message_draft"
+name = "mcp/claude_ai_Slack/slack_send_message_draft"
 requires = { trust = "trusted" }
 delta = {}
 
 # --- writes other people read: trusted data, reaching internal audience ---
 
 [[policy.tool]]
-name = "mcp__claude_ai_Slack__slack_send_message"
+name = "mcp/claude_ai_Slack/slack_send_message"
 delta = {}
 
 [policy.tool.requires]
@@ -125,7 +125,7 @@ trust = "trusted"
 audience = { contains = ["internal"] }
 
 [[policy.tool]]
-name = "mcp__claude_ai_Slack__slack_schedule_message"
+name = "mcp/claude_ai_Slack/slack_schedule_message"
 delta = {}
 
 [policy.tool.requires]
@@ -133,7 +133,7 @@ trust = "trusted"
 audience = { contains = ["internal"] }
 
 [[policy.tool]]
-name = "mcp__claude_ai_Slack__slack_create_canvas"
+name = "mcp/claude_ai_Slack/slack_create_canvas"
 delta = {}
 
 [policy.tool.requires]
@@ -141,7 +141,7 @@ trust = "trusted"
 audience = { contains = ["internal"] }
 
 [[policy.tool]]
-name = "mcp__claude_ai_Slack__slack_update_canvas"
+name = "mcp/claude_ai_Slack/slack_update_canvas"
 delta = {}
 
 [policy.tool.requires]
@@ -149,7 +149,7 @@ trust = "trusted"
 audience = { contains = ["internal"] }
 
 [[policy.tool]]
-name = "mcp__claude_ai_Slack__slack_create_conversation"
+name = "mcp/claude_ai_Slack/slack_create_conversation"
 delta = {}
 
 [policy.tool.requires]

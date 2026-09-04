@@ -124,6 +124,7 @@ name = "appa-adapter-claude-code"
 version = "0.8.0"
 dependencies = [
  "appa-runtime-api",
+ "proptest",
  "serde",
  "serde_json",
  "tracing",
@@ -134,9 +135,8 @@ name = "appa-adapter-kagent"
 version = "0.8.0"
 dependencies = [
  "appa-runtime-api",
- "serde",
+ "proptest",
  "serde_json",
- "tracing",
 ]
 
 [[package]]

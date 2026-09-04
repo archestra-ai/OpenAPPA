@@ -52,25 +52,25 @@ This monotonic structure provides a **formally provable non-interference guarant
 
 ## Worked example: preserve reach or approve the exact call
 
-To see how this works in practice, consider an agent configured with three tools: `get_ticket_from_crm`, `send_email`, and `file_github_issue`:
+To see how this works in practice, consider an agent configured with three tools: `mcp/crm/get_ticket`, `mcp/mail/send_email`, and `mcp/github/file_issue`. A policy names a tool by its canonical tool id, `<family>/<namespace>/<tool>` — here three MCP tools, each under its server:
 
 ```toml
 [audience.internal]
 from = ["google-workspace:full-members"]   # who "internal" means, read from the directory per act
 
 [[tool]]
-name  = "get_ticket_from_crm"
+name  = "mcp/crm/get_ticket"
 delta = { audience = ["internal"] }   # reading CRM data restricts the trajectory to the built-in internal audience
 
 [[tool]]
-name       = "send_email"
+name       = "mcp/mail/send_email"
 parameters = { type = "object", properties = { recipient = { type = "string" }, body = { type = "string" } }, required = ["recipient", "body"] }
 requires   = { audience = { contains = ["$recipient"] } }   # recipient must be in current audience
 delta      = {}
 effects    = ["egress"]
 
 [[tool]]
-name     = "file_github_issue"
+name     = "mcp/github/file_issue"
 requires = { audience = { contains = ["public"] } }         # requires public reach
 delta    = {}
 effects  = ["egress", "mutation"]
@@ -104,17 +104,17 @@ url = "https://audience.corp/google-workspace"   # answers the internal membersh
 
 ### What happens when the agent reads a ticket?
 
-When the agent calls `get_ticket_from_crm()`, OpenAPPA intercepts the dispatch before execution and presents three clear paths:
+When the agent calls `mcp/crm/get_ticket`, OpenAPPA intercepts the dispatch before execution and presents three clear paths:
 
 | Execution Path | Trajectory Label Impact | Downstream Dispatch Impact |
 |---|---|---|
-| **Accept Narrowing** | Trajectory becomes `internal`. | `file_github_issue` is blocked; `send_email` requires authority approval for external recipients. |
+| **Accept Narrowing** | Trajectory becomes `internal`. | `mcp/github/file_issue` is blocked; `mcp/mail/send_email` requires authority approval for external recipients. |
 | **Sanitize the Result** | Trajectory stays `{public, trusted}`. | Raw ticket is withheld from the model; `remove_pii`'s sanitized derivation is admitted in its place. |
 | **Child Branch + Sanitizer** | Parent stays `{public, trusted}`; child narrows to `internal`. | Parent declares the sanitized route at the spawn; child reads raw ticket, reasons over it, and returns the sanitized derivation across the merge boundary. |
 
 :::fig-two-endings:::
 
-If the agent accepts narrowing to `internal` and later attempts `send_email(body, "auditor@external.com")`, OpenAPPA reads the configured `internal` sources for this act, finds `auditor@external.com` is not a member, halts dispatch, and returns a remedy plan pointing to the `user` authority. Once the human approves, the email dispatches and the event is permanently logged — with the membership answer pinned to it, so replay reaches the same decision without a directory call.
+If the agent accepts narrowing to `internal` and later attempts `mcp/mail/send_email` with the recipient `auditor@external.com`, OpenAPPA reads the configured `internal` sources for this act, finds `auditor@external.com` is not a member, halts dispatch, and returns a remedy plan pointing to the `user` authority. Once the human approves, the email dispatches and the event is permanently logged — with the membership answer pinned to it, so replay reaches the same decision without a directory call.
 
 ## Sub-agents isolate sensitive reads
 
@@ -173,6 +173,12 @@ The wildcard entry carries no static contract and no metadata: it exists only to
 
 To inspect data before the LLM sees it, the deployment can list a tool in `confined_results`: the host then withholds the raw result, and a `tool_output` sanitizer's derivation can be admitted in its place. If the admitted label restricts the trajectory, OpenAPPA offers the agent the narrowing choice before delivery.
 
+## Adapters connect a host to the runtime
+
+A host — Claude Code, a kagent agent pod — spells its tools its own way: Claude Code says `mcp__github__create_issue`, kagent names a tool by its toolset. The policy never sees that raw tool spelling. It names every tool by its canonical tool id, `<family>/<namespace>/<tool>`, with the families `mcp` (a tool of one MCP server), `host` (a tool the host itself provides), and `agent` (an agent called as a tool). `appa/execute_remedy_plan` is the runtime's own control tool, which no policy declares.
+
+An **adapter** connects a host to APPA. It translates the host's events into the hook protocol: one versioned wire envelope (`protocol: 1`), posted to the runtime's `/hook` endpoint, that carries the raw tool spelling and nothing the runtime would have to trust. The runtime derives the canonical tool id, whether the call starts a child trajectory, and the child's name from the adapter and the raw spelling; the host asserts none of these. The raw spelling stays in the trajectory record for host dispatch, diagnostics, and replay. Claude Code and kagent are the initial adapters: the Claude Code plugin's hooks run `appa hook --adapter claude-code`, which translates Claude Code's hook JSON to the envelope and the decision back; the kagent plugins post the envelope directly. The [Policy reference](/contracts#tool-names) has the mapping tables.
+
 ## Deployment: Where OpenAPPA fits in your stack
 
 You can drop OpenAPPA into your architecture at three levels:
@@ -180,7 +186,7 @@ You can drop OpenAPPA into your architecture at three levels:
 | Deployment Option | How it works | Best for |
 |---|---|---|
 | **LLM Gateway** | Point your agent's `BASE_URL` to OpenAPPA. It intercepts tool calls directly in the inference stream. | Zero-code integration across existing agent stacks. |
-| **Agent Middleware / Hooks** | Add pre-tool hooks inside your agent loop (e.g. Claude Code, LangChain, PydanticAI). | Local CLI tools and custom Python/TypeScript agents. |
+| **Agent Middleware / Hooks** | An adapter posts the host's lifecycle events to the runtime's `/hook` endpoint before each tool runs (Claude Code, kagent, or a custom agent loop). | Local CLI tools and custom Python/TypeScript agents. |
 | **Tool Proxy** | Run OpenAPPA in front of your remote APIs or MCP servers. | Shared enterprise tool infrastructure and microservices. |
 
 ## Threat model: What OpenAPPA protects

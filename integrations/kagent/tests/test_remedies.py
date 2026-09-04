@@ -31,6 +31,11 @@ ROLLBACK_APPROVED = "roll back the checkout-api deployment for an approving boar
 ROLLBACK_DENIED = "roll back the checkout-api deployment for a denying board"
 ROLLBACK_SILENT = "roll back the checkout-api deployment for a silent board"
 
+# The change board waits on the canonical tool id, the name the policy
+# carries — a consult names the call the runtime derived, not the bare
+# name kagent dispatches.
+ROLLBACK_CONSULT = "mcp/localhost/rollback_deployment"
+
 # The offer actions the runtime renders (`appa-runtime/src/engine.rs`,
 # `remedy_instruction`). A `{"remedy": ...}` turn names one of them.
 ACCEPT = "Accept this change"
@@ -297,7 +302,7 @@ def test_the_remote_change_board_approves_and_the_rollback_runs(stack, board):
     change board while the task runs, a member rules on the board's own
     channel, and the ruling releases the exact call. The A2A task never
     suspends, because the person sits on the remote side."""
-    member = board.rule_in_background("rollback_deployment", "approve")
+    member = board.rule_in_background(ROLLBACK_CONSULT, "approve")
     task = stack.say(
         ROLLBACK_APPROVED,
         [
@@ -309,6 +314,7 @@ def test_the_remote_change_board_approves_and_the_rollback_runs(stack, board):
     )
     member.join(5)
     assert task.state == "completed"
+    assert board.ruled, "the member ruled on the parked consult"
     assert task.confirmation() is None, "the board rules out of band, so the caller is never asked"
     rollbacks = task.responses("rollback_deployment")
     assert len(rollbacks) == 2, f"the call was denied, then proposed again: {rollbacks}"
@@ -326,7 +332,7 @@ def test_the_remote_change_board_approves_and_the_rollback_runs(stack, board):
 def test_the_remote_change_board_denies_and_the_rollback_stays_blocked(stack, board):
     """The same conversation, a denying board. The ruling is the board's,
     so the plan grants nothing and the deployment is never rolled back."""
-    member = board.rule_in_background("rollback_deployment", "deny")
+    member = board.rule_in_background(ROLLBACK_CONSULT, "deny")
     task = stack.say(
         ROLLBACK_DENIED,
         [
@@ -338,6 +344,7 @@ def test_the_remote_change_board_denies_and_the_rollback_stays_blocked(stack, bo
     )
     member.join(5)
     assert task.state == "completed"
+    assert board.ruled, "the member ruled on the parked consult, so the denial is the board's and not a silence"
     assert task.confirmation() is None, "the board rules out of band, so the caller is never asked"
     remedies = task.responses("execute_remedy_plan")
     assert remedies, "the reserved call answered the model"

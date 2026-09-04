@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::{env, ffi::OsString, iter};
 
+use appa_runtime_api::AdapterName;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -18,8 +19,8 @@ enum Command {
         #[arg(long, env = "APPA_CONFIG")]
         config: Option<PathBuf>,
 
-        #[arg(long, value_enum, default_value_t = Adapter::ClaudeCode)]
-        adapter: Adapter,
+        #[arg(long, default_value_t = AdapterName::ClaudeCode)]
+        adapter: AdapterName,
     },
 
     /// Initialize OpenAPPA for an agent harness.
@@ -51,25 +52,14 @@ enum Command {
         #[arg(long, env = "APPA_RUNTIME_URL", default_value = "http://127.0.0.1:8787")]
         url: String,
 
+        /// The host whose hook event arrives on stdin.
+        #[arg(long, default_value_t = AdapterName::ClaudeCode)]
+        adapter: AdapterName,
+
         /// Report a finished turn, whose answer never blocks the harness.
         #[arg(long)]
         turn_end: bool,
     },
-}
-
-#[derive(Clone, Copy, clap::ValueEnum)]
-enum Adapter {
-    ClaudeCode,
-    Kagent,
-}
-
-impl Adapter {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::ClaudeCode => "claude-code",
-            Self::Kagent => "kagent",
-        }
-    }
 }
 
 #[derive(Subcommand)]
@@ -89,7 +79,7 @@ fn main() -> ExitCode {
     }
 
     match Args::parse().command {
-        Command::Hook { url, turn_end } => appa_runtime::hook_client::run(&url, turn_end),
+        Command::Hook { url, adapter, turn_end } => appa_runtime::hook_client::run(&url, adapter, turn_end),
         Command::Replay {
             config,
             modules_dir,

@@ -39,9 +39,21 @@ const TERMS = {
   remedies:
     "Actionable paths returned on a policy refusal explaining how to unblock execution safely (e.g. human approval, sanitizer, or narrowing acceptance).",
 
+  /* Tool identity */
+  "canonical tool id":
+    "The name a policy gives a tool: <family>/<namespace>/<tool>, with the families mcp (a tool of one MCP server), host (a tool the host provides), and agent (an agent called as a tool). The runtime derives it from the adapter and the host's raw tool spelling; the policy never sees the raw spelling.",
+  "<family>/<namespace>/<tool>":
+    "The shape of a canonical tool id. The family is mcp, host, or agent; each segment matches [A-Za-z0-9_.-]+; a namespace never contains __. The one id outside these families is appa/execute_remedy_plan.",
+  "appa/execute_remedy_plan":
+    "The runtime's own control tool, the one member of the appa family. A policy cannot declare it; the runtime recognizes it before any contract and runs the remedy plan the call quotes.",
+  adapter:
+    "What connects a host to APPA: it translates the host's events into the hook protocol's wire envelope and the decision back. The runtime derives the canonical tool id, spawn-ness, and child names from the adapter and the raw tool spelling. Claude Code and kagent are the initial adapters.",
+  "raw tool spelling":
+    "The host's own name for a tool, such as mcp__github__create_issue in Claude Code. It crosses the wire and stays in the trajectory record for dispatch, diagnostics, and replay; the policy sees only the canonical tool id.",
+
   /* Tool contracts */
   "Tool(argument:pattern)":
-    "An ordered tool contract selector. A selector holds one or more comma-separated argument:pattern clauses, and a contract matches only when every clause matches its own top-level string argument. OpenAPPA uses the first matching contract. An asterisk matches any text; a bare tool name is the fallback. A sanitizer rewrite that selects another contract is judged as a new call under it.",
+    "An ordered tool contract selector. A selector holds one or more comma-separated argument:pattern clauses, and a contract matches only when every clause matches its own top-level string argument. OpenAPPA uses the first matching contract. An asterisk matches any text; a bare canonical tool id is the fallback. A sanitizer rewrite that selects another contract is judged as a new call under it.",
   delta:
     "The label contribution of an admitted call result. A delta never expands permissions: it intersects reader sets, lowers the trust rank, or leaves the trajectory label unchanged.",
   requires:

@@ -3192,7 +3192,7 @@ mod tests {
     /// The policy's wildcard: `name = "*"`, no metadata, routed through `by`.
     fn wildcard(by: &str) -> crate::contract::ToolDeclaration {
         crate::contract::ToolDeclaration::Annotated {
-            name: ToolName::new(crate::registry::WILDCARD_TOOL_NAME),
+            name: ToolName::new(crate::registry::WILDCARD_SPELLING),
             tags: vec![],
             description: None,
             parameters: crate::params::ToolParameters::open(),

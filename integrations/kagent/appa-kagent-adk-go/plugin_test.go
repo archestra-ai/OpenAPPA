@@ -38,8 +38,8 @@ import (
 )
 
 var (
-	ack   = map[string]any{"decision": "ack"}
-	allow = map[string]any{"decision": "allow_call"}
+	ack   = map[string]any{"protocol": 1, "decision": "ack"}
+	allow = map[string]any{"protocol": 1, "decision": "allow_call"}
 )
 
 // hook is the scripted runtime: answers in order, records every event.
@@ -120,9 +120,30 @@ func (h *hook) kinds() []string {
 	return kinds
 }
 
-func pluginOver(t *testing.T, h *hook, spawnTools ...string) *AppaPluginKagent {
+// testInventory spells the tools the tests dispatch: one MCP server
+// named by its host, and two remote agents as kagent renders them.
+func testInventory(t *testing.T) Inventory {
 	t.Helper()
-	p, err := New(Config{RuntimeURL: h.server.URL, SpawnTools: spawnTools})
+	inventory, err := BuildInventory(InventorySpec{
+		MCPServers: []MCPServerSpec{{
+			Path:  "http_tools[0]",
+			URL:   "http://demo-tools.kagent.svc.cluster.local:3000/mcp",
+			Tools: []string{"k8s_scale", "k8s_get_pods", "list_pods", "read_ledger", "k8s_annotate", "restart_deployment"},
+		}},
+		RemoteAgents: []RemoteAgentSpec{
+			{Path: "remote_agents[0].name", Name: "kagent__NS__billing_agent"},
+			{Path: "remote_agents[1].name", Name: "kagent__NS__log_analyst"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("the test inventory must build: %v", err)
+	}
+	return inventory
+}
+
+func pluginOver(t *testing.T, h *hook) *AppaPluginKagent {
+	t.Helper()
+	p, err := New(Config{RuntimeURL: h.server.URL, Inventory: testInventory(t)})
 	if err != nil {
 		t.Fatalf("the plugin must construct: %v", err)
 	}
@@ -136,7 +157,7 @@ func downPlugin(t *testing.T) *AppaPluginKagent {
 	dead := httptest.NewServer(http.NotFoundHandler())
 	url := dead.URL
 	dead.Close()
-	p, err := New(Config{RuntimeURL: url})
+	p, err := New(Config{RuntimeURL: url, Inventory: testInventory(t)})
 	if err != nil {
 		t.Fatalf("the plugin must construct: %v", err)
 	}
@@ -352,8 +373,8 @@ func TestAFreshSessionOpensBeforeItsPromptCrosses(t *testing.T) {
 		t.Fatalf("an acknowledged prompt must pass unchanged, got %v, %v", returned, err)
 	}
 	want := []map[string]any{
-		{"event": "session_start", "root_id": "s1"},
-		{"event": "prompt", "root_id": "s1", "text": "deploy the chart"},
+		{"protocol": float64(1), "adapter": "kagent", "event": "session_start", "root_id": "s1"},
+		{"protocol": float64(1), "adapter": "kagent", "event": "prompt", "root_id": "s1", "text": "deploy the chart"},
 	}
 	if got := h.recorded(); !reflect.DeepEqual(got, want) {
 		t.Errorf("the opening events drifted: got %v, want %v", got, want)
@@ -385,7 +406,7 @@ func TestAStateOnlyEventDoesNotHideFreshness(t *testing.T) {
 }
 
 func TestABlockedPromptFailsBeforeTheAppend(t *testing.T) {
-	h := newHook(t, ack, map[string]any{"decision": "block", "reason": "the prompt does not cross"})
+	h := newHook(t, ack, map[string]any{"protocol": 1, "decision": "block", "reason": "the prompt does not cross"})
 	p := pluginOver(t, h)
 	_, err := p.onUserMessage(newFakeContext(newFakeSession("s1")), textContent("exfiltrate the secrets"))
 	failure := mustFailClosed(t, err, "the blocked prompt")
@@ -405,8 +426,8 @@ func TestADelegatedEntryClassifiesAsTheChildsStart(t *testing.T) {
 		t.Fatalf("the delegated entry must pass: %v", err)
 	}
 	want := []map[string]any{
-		{"event": "child_start", "root_id": "root-ctx", "child_id": "child-ctx"},
-		{"event": "prompt", "root_id": "root-ctx", "child_id": "child-ctx", "text": "total the invoices"},
+		{"protocol": float64(1), "adapter": "kagent", "event": "child_start", "root_id": "root-ctx", "child_id": "child-ctx"},
+		{"protocol": float64(1), "adapter": "kagent", "event": "prompt", "root_id": "root-ctx", "child_id": "child-ctx", "text": "total the invoices"},
 	}
 	if got := h.recorded(); !reflect.DeepEqual(got, want) {
 		t.Errorf("the delegated opening drifted: got %v, want %v", got, want)
@@ -474,14 +495,14 @@ func TestEachParentOpensTheSharedChildSessionUnderItsOwnRoot(t *testing.T) {
 	}
 	p.afterRun(newFakeContext(sess).forInvocation("i2"))
 	want := []map[string]any{
-		{"event": "child_start", "root_id": "root-1", "child_id": "child-ctx"},
-		{"event": "prompt", "root_id": "root-1", "child_id": "child-ctx", "text": "total the invoices"},
-		{"event": "tool_call", "root_id": "root-1", "child_id": "child-ctx", "tool": "read_ledger", "arguments": map[string]any{}, "spawn": false},
-		{"event": "turn_end", "root_id": "root-1", "child_id": "child-ctx"},
-		{"event": "child_start", "root_id": "root-2", "child_id": "child-ctx"},
-		{"event": "prompt", "root_id": "root-2", "child_id": "child-ctx", "text": "list the pods"},
-		{"event": "tool_call", "root_id": "root-2", "child_id": "child-ctx", "tool": "k8s_get_pods", "arguments": map[string]any{}, "spawn": false},
-		{"event": "turn_end", "root_id": "root-2", "child_id": "child-ctx"},
+		{"protocol": float64(1), "adapter": "kagent", "event": "child_start", "root_id": "root-1", "child_id": "child-ctx"},
+		{"protocol": float64(1), "adapter": "kagent", "event": "prompt", "root_id": "root-1", "child_id": "child-ctx", "text": "total the invoices"},
+		{"protocol": float64(1), "adapter": "kagent", "event": "tool_call", "root_id": "root-1", "child_id": "child-ctx", "tool": "mcp:demo-tools/read_ledger", "arguments": map[string]any{}},
+		{"protocol": float64(1), "adapter": "kagent", "event": "turn_end", "root_id": "root-1", "child_id": "child-ctx"},
+		{"protocol": float64(1), "adapter": "kagent", "event": "child_start", "root_id": "root-2", "child_id": "child-ctx"},
+		{"protocol": float64(1), "adapter": "kagent", "event": "prompt", "root_id": "root-2", "child_id": "child-ctx", "text": "list the pods"},
+		{"protocol": float64(1), "adapter": "kagent", "event": "tool_call", "root_id": "root-2", "child_id": "child-ctx", "tool": "mcp:demo-tools/k8s_get_pods", "arguments": map[string]any{}},
+		{"protocol": float64(1), "adapter": "kagent", "event": "turn_end", "root_id": "root-2", "child_id": "child-ctx"},
 	}
 	if got := h.recorded(); !reflect.DeepEqual(got, want) {
 		t.Errorf("each parent must open and drive the shared child session under its own root: got %v, want %v", got, want)
@@ -504,9 +525,9 @@ func TestTheSameParentSendsNoSecondChildStart(t *testing.T) {
 		t.Fatalf("the second delegation must pass: %v", err)
 	}
 	want := []map[string]any{
-		{"event": "child_start", "root_id": "root-1", "child_id": "child-ctx"},
-		{"event": "prompt", "root_id": "root-1", "child_id": "child-ctx", "text": "total the invoices"},
-		{"event": "prompt", "root_id": "root-1", "child_id": "child-ctx", "text": "now the refunds"},
+		{"protocol": float64(1), "adapter": "kagent", "event": "child_start", "root_id": "root-1", "child_id": "child-ctx"},
+		{"protocol": float64(1), "adapter": "kagent", "event": "prompt", "root_id": "root-1", "child_id": "child-ctx", "text": "total the invoices"},
+		{"protocol": float64(1), "adapter": "kagent", "event": "prompt", "root_id": "root-1", "child_id": "child-ctx", "text": "now the refunds"},
 	}
 	if got := h.recorded(); !reflect.DeepEqual(got, want) {
 		t.Errorf("an opened pair sends no second child_start: got %v, want %v", got, want)
@@ -517,7 +538,7 @@ func TestARefusedChildStartFailsClosedAndTheNextEntryOpensAgain(t *testing.T) {
 	// The pair joins the opened set only after the runtime acked, so a
 	// refused opening fails the entry closed and is sent again on the
 	// next entry.
-	h := newHook(t, map[string]any{"decision": "refuse", "detail": "storage failure"}, ack, ack)
+	h := newHook(t, map[string]any{"protocol": 1, "decision": "refuse", "detail": "storage failure"}, ack, ack)
 	p := pluginOver(t, h)
 	sess := newFakeSession("child-ctx").withHeaders(map[string]any{rootHeader: "root-1"})
 	_, err := p.onUserMessage(newFakeContext(sess).forInvocation("i1"), textContent("total the invoices"))
@@ -558,7 +579,7 @@ func TestARootSessionStillOpensOnceAtItsFirstContent(t *testing.T) {
 // -- the tool gate ------------------------------------------------
 
 func TestAnAllowedCallPassesAndADeniedCallAnswersTheModel(t *testing.T) {
-	h := newHook(t, allow, map[string]any{"decision": "deny_call", "feedback": "blocked: quotes offer offer-1"})
+	h := newHook(t, allow, map[string]any{"protocol": 1, "decision": "deny_call", "feedback": "blocked: quotes offer offer-1"})
 	p := pluginOver(t, h)
 	ctx := newFakeContext(newFakeSession("s1"))
 	allowed, err := p.beforeTool(ctx, &fakeTool{"k8s_scale"}, map[string]any{"replicas": 3})
@@ -574,37 +595,90 @@ func TestAnAllowedCallPassesAndADeniedCallAnswersTheModel(t *testing.T) {
 		t.Errorf("the deny map drifted: got %v, want %v", deniedResult, wantDeny)
 	}
 	wantEvent := map[string]any{
+		"protocol":  float64(1),
+		"adapter":   "kagent",
 		"event":     "tool_call",
 		"root_id":   "s1",
-		"tool":      "k8s_scale",
+		"tool":      "mcp:demo-tools/k8s_scale",
 		"arguments": map[string]any{"replicas": float64(3)},
-		"spawn":     false,
 	}
 	if got := h.recorded()[0]; !reflect.DeepEqual(got, wantEvent) {
 		t.Errorf("the tool_call event drifted: got %v, want %v", got, wantEvent)
 	}
 }
 
-func TestTheConfiguredSpawnToolsClassifyAsTheSpawn(t *testing.T) {
-	h := newHook(t, allow, allow)
-	p := pluginOver(t, h, "billing-agent")
+func TestEveryToolCrossesUnderItsInventorySpellingAndAssertsNoSpawn(t *testing.T) {
+	// The wire carries the structured spelling of the inventory and no
+	// spawn flag: the runtime derives both the canonical tool and
+	// whether the call is a spawn from the spelling.
+	h := newHook(t, allow, allow, allow)
+	p := pluginOver(t, h)
 	ctx := newFakeContext(newFakeSession("s1"))
-	for _, name := range []string{"billing-agent", "k8s_scale"} {
+	for _, name := range []string{"kagent__NS__billing_agent", "k8s_scale", "ask_user"} {
 		if _, err := p.beforeTool(ctx, &fakeTool{name}, map[string]any{}); err != nil {
 			t.Fatalf("the %s call must pass: %v", name, err)
 		}
 	}
-	var spawns []bool
+	var tools []string
 	for _, event := range h.recorded() {
-		spawns = append(spawns, event["spawn"].(bool))
+		tools = append(tools, event["tool"].(string))
+		if _, present := event["spawn"]; present {
+			t.Errorf("the wire asserts no spawn, got %v", event)
+		}
+		if event["protocol"] != float64(1) || event["adapter"] != "kagent" {
+			t.Errorf("every event carries the envelope, got %v", event)
+		}
 	}
-	if !reflect.DeepEqual(spawns, []bool{true, false}) {
-		t.Errorf("spawn classification drifted: got %v", spawns)
+	want := []string{"agent:kagent/billing-agent", "mcp:demo-tools/k8s_scale", "builtin:ask_user"}
+	if !reflect.DeepEqual(tools, want) {
+		t.Errorf("the spellings drifted: got %v, want %v", tools, want)
+	}
+}
+
+func TestAToolOutsideTheInventoryIsRefusedAtTheGateAndNeverForwarded(t *testing.T) {
+	// A name the rendered config never declared has no spelling, so the
+	// plugin answers the call itself with a deny and posts nothing. The
+	// result gate then reads the answered call and reports nothing.
+	h := newHook(t)
+	p := pluginOver(t, h)
+	ctx := newFakeContext(newFakeSession("s1"))
+	unknown := &fakeTool{"k8s_delete_namespace"}
+	denied, err := p.beforeTool(ctx, unknown, map[string]any{"name": "prod"})
+	if err != nil {
+		t.Fatalf("the refusal answers the model, not the harness: %v", err)
+	}
+	if denied[denyKey] != "denied" || !strings.Contains(denied["result"].(string), "k8s_delete_namespace") {
+		t.Errorf("the refusal names the tool under the deny marker, got %v", denied)
+	}
+	if reported, err := p.afterTool(ctx, unknown, map[string]any{"name": "prod"}, denied, nil); err != nil || reported != nil {
+		t.Errorf("the answered call reports nothing, got %v, %v", reported, err)
+	}
+	if got := h.recorded(); len(got) != 0 {
+		t.Errorf("nothing crosses for a name the inventory does not carry, got %v", got)
+	}
+}
+
+func TestAResultOfAToolOutsideTheInventoryFailsClosed(t *testing.T) {
+	p := pluginOver(t, newHook(t))
+	unknown := &fakeTool{"k8s_delete_namespace"}
+	_, err := p.afterTool(newFakeContext(newFakeSession("s1")), unknown, map[string]any{}, map[string]any{"deleted": true}, nil)
+	mustFailClosed(t, err, "the result of an undeclared tool")
+	_, err = p.onToolError(newFakeContext(newFakeSession("s1")), unknown, map[string]any{}, errors.New("boom"))
+	mustFailClosed(t, err, "the failure of an undeclared tool")
+}
+
+func TestADecisionUnderAnotherProtocolFailsClosed(t *testing.T) {
+	h := newHook(t, map[string]any{"protocol": 2, "decision": "allow_call"})
+	p := pluginOver(t, h)
+	_, err := p.beforeTool(newFakeContext(newFakeSession("s1")), &fakeTool{"k8s_scale"}, map[string]any{})
+	failure := mustFailClosed(t, err, "a decision under another protocol")
+	if !strings.Contains(failure.Error(), "protocol") {
+		t.Errorf("the failure names the protocol, got %v", failure)
 	}
 }
 
 func TestTheReservedToolPassesControl(t *testing.T) {
-	h := newHook(t, map[string]any{"decision": "pass_control"})
+	h := newHook(t, map[string]any{"protocol": 1, "decision": "pass_control"})
 	p := pluginOver(t, h)
 	returned, err := p.beforeTool(newFakeContext(newFakeSession("s1")), &fakeTool{ReservedTool}, map[string]any{"offer_id": "offer-1"})
 	if err != nil || returned != nil {
@@ -613,7 +687,7 @@ func TestTheReservedToolPassesControl(t *testing.T) {
 }
 
 func TestADenyMapIsNotReportedTwice(t *testing.T) {
-	h := newHook(t, map[string]any{"decision": "deny_call", "feedback": "blocked"})
+	h := newHook(t, map[string]any{"protocol": 1, "decision": "deny_call", "feedback": "blocked"})
 	p := pluginOver(t, h)
 	sess := newFakeSession("s1")
 	blocked, err := p.beforeTool(newFakeContext(sess).forCall("fc-7"), &fakeTool{"k8s_scale"}, map[string]any{})
@@ -669,8 +743,8 @@ func TestAToolResultThatCarriesAnAppaMarkerStillCrosses(t *testing.T) {
 func TestAToolResultCrossesAndEnforcesEachAnswer(t *testing.T) {
 	h := newHook(t,
 		ack,
-		map[string]any{"decision": "replace_output", "output": "the output is confined"},
-		map[string]any{"decision": "block", "reason": "nothing crosses"},
+		map[string]any{"protocol": 1, "decision": "replace_output", "output": "the output is confined"},
+		map[string]any{"protocol": 1, "decision": "block", "reason": "nothing crosses"},
 	)
 	p := pluginOver(t, h)
 	ctx := newFakeContext(newFakeSession("s1"))
@@ -689,9 +763,11 @@ func TestAToolResultCrossesAndEnforcesEachAnswer(t *testing.T) {
 		t.Errorf("block must withhold the result, got %v", returned)
 	}
 	wantEvent := map[string]any{
+		"protocol":  float64(1),
+		"adapter":   "kagent",
 		"event":     "tool_result",
 		"root_id":   "s1",
-		"tool":      "k8s_get_pods",
+		"tool":      "mcp:demo-tools/k8s_get_pods",
 		"arguments": map[string]any{"namespace": "prod"},
 		"outcome":   map[string]any{"status": "success", "body": map[string]any{"pods": []any{"api-1"}}},
 	}
@@ -702,14 +778,14 @@ func TestAToolResultCrossesAndEnforcesEachAnswer(t *testing.T) {
 
 func TestASpawnReturnCrossesAsTheSpawnResultInBothReplyShapes(t *testing.T) {
 	h := newHook(t, ack, ack)
-	p := pluginOver(t, h, "billing-agent")
+	p := pluginOver(t, h)
 	ctx := newFakeContext(newFakeSession("s1"))
-	if _, err := p.afterTool(ctx, &fakeTool{"billing-agent"},
+	if _, err := p.afterTool(ctx, &fakeTool{"kagent__NS__billing_agent"},
 		map[string]any{"request": "total the invoices"},
 		map[string]any{"result": "the total is 42", "subagent_session_id": "child-ctx"}, nil); err != nil {
 		t.Fatalf("the task reply must cross: %v", err)
 	}
-	if _, err := p.afterTool(ctx, &fakeTool{"billing-agent"},
+	if _, err := p.afterTool(ctx, &fakeTool{"kagent__NS__billing_agent"},
 		map[string]any{"request": "go"},
 		map[string]any{"error": "Remote agent 'billing-agent' failed."}, nil); err != nil {
 		t.Fatalf("the failure reply must cross: %v", err)
@@ -731,10 +807,10 @@ func TestASpawnReturnCrossesAsTheSpawnResultInBothReplyShapes(t *testing.T) {
 }
 
 func TestAChildReturnSubstitutesWhatTheParentReceives(t *testing.T) {
-	h := newHook(t, map[string]any{"decision": "child_return", "value": "the redacted summary"})
-	p := pluginOver(t, h, "billing-agent")
+	h := newHook(t, map[string]any{"protocol": 1, "decision": "child_return", "value": "the redacted summary"})
+	p := pluginOver(t, h)
 	returned, err := p.afterTool(
-		newFakeContext(newFakeSession("s1")), &fakeTool{"billing-agent"},
+		newFakeContext(newFakeSession("s1")), &fakeTool{"kagent__NS__billing_agent"},
 		map[string]any{},
 		map[string]any{"result": "the raw child answer", "subagent_session_id": "child-ctx"}, nil)
 	if err != nil {
@@ -818,9 +894,9 @@ func TestAChildScopeOpensAndEndsThroughTheAgentCallbacks(t *testing.T) {
 		t.Fatalf("the child scope must end quietly: %v", err)
 	}
 	want := []map[string]any{
-		{"event": "ping"},
-		{"event": "child_start", "root_id": "s1", "child_id": "i1:billing-agent"},
-		{"event": "turn_end", "root_id": "s1", "child_id": "i1:billing-agent"},
+		{"protocol": float64(1), "adapter": "kagent", "event": "ping"},
+		{"protocol": float64(1), "adapter": "kagent", "event": "child_start", "root_id": "s1", "child_id": "i1:billing-agent"},
+		{"protocol": float64(1), "adapter": "kagent", "event": "turn_end", "root_id": "s1", "child_id": "i1:billing-agent"},
 	}
 	if got := h.recorded(); !reflect.DeepEqual(got, want) {
 		t.Errorf("the agent-scope events drifted: got %v, want %v", got, want)
@@ -828,7 +904,7 @@ func TestAChildScopeOpensAndEndsThroughTheAgentCallbacks(t *testing.T) {
 }
 
 func TestARefusedChildScopeFailsClosed(t *testing.T) {
-	h := newHook(t, ack, map[string]any{"decision": "refuse", "detail": "storage failure"})
+	h := newHook(t, ack, map[string]any{"protocol": 1, "decision": "refuse", "detail": "storage failure"})
 	p := pluginOver(t, h)
 	sess := newFakeSession("s1")
 	if _, err := p.beforeAgent(newFakeContext(sess).forAgent("root-agent")); err != nil {
@@ -883,7 +959,7 @@ func TestEveryLivenessGatePassesWhenTheChannelAnswers(t *testing.T) {
 		t.Fatalf("on_event must pass on a live channel: %v", err)
 	}
 	for _, event := range h.recorded() {
-		if !reflect.DeepEqual(event, map[string]any{"event": "ping"}) {
+		if !reflect.DeepEqual(event, map[string]any{"protocol": float64(1), "adapter": "kagent", "event": "ping"}) {
 			t.Errorf("a liveness gate must send only pings, got %v", event)
 		}
 	}
@@ -900,8 +976,8 @@ func TestAGatedCallbackFailsClosedOnTransportStatusAndContract(t *testing.T) {
 	for _, answer := range []any{
 		409,
 		500,
-		map[string]any{"decision": "approve"},
-		map[string]any{"decision": "deny_call"},
+		map[string]any{"protocol": 1, "decision": "approve"},
+		map[string]any{"protocol": 1, "decision": "deny_call"},
 	} {
 		p := pluginOver(t, newHook(t, answer))
 		mustFailClosed(t, call(p), fmt.Sprintf("the %v answer", answer))
@@ -914,7 +990,7 @@ func TestATurnEndReportsAndNeverBlocks(t *testing.T) {
 	h := newHook(t, ack)
 	p := pluginOver(t, h)
 	p.afterRun(newFakeContext(newFakeSession("s1")))
-	want := []map[string]any{{"event": "turn_end", "root_id": "s1"}}
+	want := []map[string]any{{"protocol": float64(1), "adapter": "kagent", "event": "turn_end", "root_id": "s1"}}
 	if got := h.recorded(); !reflect.DeepEqual(got, want) {
 		t.Errorf("the turn end drifted: got %v, want %v", got, want)
 	}
@@ -927,7 +1003,7 @@ func TestADelegatedChildsTurnEndCarriesItsChildID(t *testing.T) {
 	p := pluginOver(t, h)
 	sess := newFakeSession("child-ctx").withHeaders(map[string]any{rootHeader: "root-ctx"})
 	p.afterRun(newFakeContext(sess))
-	want := []map[string]any{{"event": "turn_end", "root_id": "root-ctx", "child_id": "child-ctx"}}
+	want := []map[string]any{{"protocol": float64(1), "adapter": "kagent", "event": "turn_end", "root_id": "root-ctx", "child_id": "child-ctx"}}
 	if got := h.recorded(); !reflect.DeepEqual(got, want) {
 		t.Errorf("the delegated turn end drifted: got %v, want %v", got, want)
 	}
@@ -982,6 +1058,7 @@ const reviewText = "APPA asks you to rule as the authority \"oncall\".\n\nTool: 
 
 func denyWithReview() map[string]any {
 	return map[string]any{
+		"protocol": 1,
 		"decision": "deny_call",
 		"feedback": "[appa] Blocked",
 		"review":   []any{map[string]any{"offer_id": "offer-1", "text": reviewText}},
@@ -1014,7 +1091,7 @@ func TestTheResumedControlCallCarriesThePersonsRuling(t *testing.T) {
 		confirmed bool
 		ruling    string
 	}{{true, "approve"}, {false, "deny"}} {
-		h := newHook(t, denyWithReview(), map[string]any{"decision": "pass_control"}, map[string]any{"decision": "pass_control"})
+		h := newHook(t, denyWithReview(), map[string]any{"protocol": 1, "decision": "pass_control"}, map[string]any{"protocol": 1, "decision": "pass_control"})
 		p := pluginOver(t, h)
 		sess := newFakeSession("s1")
 		if _, err := p.beforeTool(newFakeContext(sess), &fakeTool{name: "restart_deployment"}, map[string]any{"name": "checkout-api"}); err != nil {
@@ -1030,7 +1107,7 @@ func TestTheResumedControlCallCarriesThePersonsRuling(t *testing.T) {
 		}
 		events := h.recorded()
 		last := events[len(events)-1]
-		if last["tool"] != ReservedTool || last["ruling"] != tc.ruling {
+		if last["tool"] != ControlTool || last["ruling"] != tc.ruling {
 			t.Fatalf("the answer rides the control call, never through the model: %v", last)
 		}
 		// The ruling is spent: quoted again, the offer asks nobody and carries nothing.
@@ -1046,7 +1123,7 @@ func TestTheResumedControlCallCarriesThePersonsRuling(t *testing.T) {
 }
 
 func TestAControlCallForAnOfferNeedingNoPersonNeverAsks(t *testing.T) {
-	h := newHook(t, map[string]any{"decision": "pass_control"})
+	h := newHook(t, map[string]any{"protocol": 1, "decision": "pass_control"})
 	p := pluginOver(t, h)
 	ctx := newFakeContext(newFakeSession("s1"))
 	returned, err := p.beforeTool(ctx, &fakeTool{name: ReservedTool}, map[string]any{"offer_id": "offer-9"})
@@ -1144,7 +1221,7 @@ func TestARefuseAnswerFailsEveryGatedCallbackClosed(t *testing.T) {
 	// The runtime answers refuse when it cannot rule. Every gated
 	// callback stops its own action on that answer, carries the
 	// runtime's detail, and posts nothing further.
-	refuse := json.RawMessage(`{"decision":"refuse","detail":"storage failure"}`)
+	refuse := json.RawMessage(`{"protocol":1,"decision":"refuse","detail":"storage failure"}`)
 	cases := []struct {
 		name  string
 		event string
@@ -1369,7 +1446,7 @@ func TestTheValueOfAChildCrossesAtTheGateAndItsStopReplaysIt(t *testing.T) {
 		t.Fatalf("the gate body must post the stop: %v", err)
 	}
 	want := []map[string]any{
-		{"event": "child_end", "root_id": "root-1", "child_id": "child-ctx", "value": "the total is 42"},
+		{"protocol": float64(1), "adapter": "kagent", "event": "child_end", "root_id": "root-1", "child_id": "child-ctx", "value": "the total is 42"},
 	}
 	if got := gated(h); !reflect.DeepEqual(got, want) {
 		t.Errorf("the value of the child crosses at child_end: got %v, want %v", got, want)
@@ -1387,7 +1464,7 @@ func TestTheValueOfAChildCrossesAtTheGateAndItsStopReplaysIt(t *testing.T) {
 }
 
 func TestAReturnedValueIsEchoedBeforeTheChildStopsWithIt(t *testing.T) {
-	h := newHook(t, map[string]any{"decision": "child_return", "value": "the redacted summary"}, ack)
+	h := newHook(t, map[string]any{"protocol": 1, "decision": "child_return", "value": "the redacted summary"}, ack)
 	p := pluginOver(t, h)
 	ctx := newFakeContext(delegatedChild("root-1"))
 	returned, err := p.returnTool.Run(ctx, map[string]any{"text": "the raw summary"})
@@ -1415,8 +1492,8 @@ func TestAReturnedValueIsEchoedBeforeTheChildStopsWithIt(t *testing.T) {
 
 func TestARefusedEchoFailsClosed(t *testing.T) {
 	h := newHook(t,
-		map[string]any{"decision": "child_return", "value": "the redacted summary"},
-		map[string]any{"decision": "block", "reason": "no"},
+		map[string]any{"protocol": 1, "decision": "child_return", "value": "the redacted summary"},
+		map[string]any{"protocol": 1, "decision": "block", "reason": "no"},
 	)
 	p := pluginOver(t, h)
 	_, err := p.returnTool.Run(newFakeContext(delegatedChild("root-1")), map[string]any{"text": "the raw summary"})
@@ -1430,7 +1507,7 @@ func TestABlockedReturnComesBackAsTheToolResultAndTheChildStopsAgain(t *testing.
 	// Blocking-stop semantics: the reason reaches the model as the tool
 	// result, the model writes another final message, and that stop
 	// reaches the gate too. The second attempt crosses.
-	h := newHook(t, map[string]any{"decision": "block", "reason": "this subagent ended without a return"}, ack)
+	h := newHook(t, map[string]any{"protocol": 1, "decision": "block", "reason": "this subagent ended without a return"}, ack)
 	p := pluginOver(t, h)
 	ctx := newFakeContext(delegatedChild("root-1"))
 	returned, err := p.returnTool.Run(ctx, map[string]any{"text": "one more thing"})
@@ -1472,7 +1549,7 @@ func TestAVoidReturnKeepsItsValueOffTheWireAndStopsEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a void return must cross: %v", err)
 	}
-	want := []map[string]any{{"event": "child_end", "root_id": "root-1", "child_id": "child-ctx"}}
+	want := []map[string]any{{"protocol": float64(1), "adapter": "kagent", "event": "child_end", "root_id": "root-1", "child_id": "child-ctx"}}
 	if got := gated(h); !reflect.DeepEqual(got, want) {
 		t.Errorf("a void return carries no value: got %v, want %v", got, want)
 	}
@@ -1505,31 +1582,25 @@ func TestTheReturnGateCrossesNoToolGate(t *testing.T) {
 	}
 }
 
-func TestAToolNamedAfterTheGateIsGatedLikeAnyOther(t *testing.T) {
-	// The gate is the object the plugin built. A toolset can advertise
-	// a tool of that name, and it must cross both tool points: a name
-	// that skipped the gate would carry a whole answer out of the scope
-	// with no wire event at all.
-	h := newHook(t, allow, ack)
+func TestAToolNamedAfterTheGateIsRefusedLikeAnyUndeclaredTool(t *testing.T) {
+	// The gate is the object the plugin built. A tool that merely
+	// answers to its name is somebody else's, and the config guard
+	// refuses a config that declares one, so it is outside the
+	// inventory: the call gate refuses it, and no child_end posts.
+	h := newHook(t)
 	p := pluginOver(t, h)
 	ctx := newFakeContext(delegatedChild("root-1"))
 	foreign := &fakeTool{ReturnTool}
 	arguments := map[string]any{"text": "the whole final answer"}
-	if returned, err := p.beforeTool(ctx, foreign, arguments); err != nil || returned != nil {
-		t.Fatalf("an allowed foreign call passes, got %v, %v", returned, err)
+	denied, err := p.beforeTool(ctx, foreign, arguments)
+	if err != nil || denied[denyKey] != "denied" {
+		t.Fatalf("a foreign tool of the gate's name is refused, got %v, %v", denied, err)
 	}
-	if _, err := p.afterTool(ctx, foreign, arguments, map[string]any{"result": "sent"}, nil); err != nil {
-		t.Fatalf("the foreign result must cross: %v", err)
+	if reported, err := p.afterTool(ctx, foreign, arguments, denied, nil); err != nil || reported != nil {
+		t.Fatalf("the refused call reports nothing, got %v, %v", reported, err)
 	}
-	if got := h.kinds(); !reflect.DeepEqual(got, []string{"tool_call", "tool_result"}) {
-		t.Fatalf("a tool of the gate's name crosses both points, got %v", got)
-	}
-	call := gated(h)[0]
-	if call["tool"] != ReturnTool || call["child_id"] != "child-ctx" {
-		t.Errorf("the foreign call crosses under its own name, in the child scope, got %v", call)
-	}
-	if text := call["arguments"].(map[string]any)["text"]; text != "the whole final answer" {
-		t.Errorf("what it carries crosses with it, got %v", text)
+	if got := h.recorded(); len(got) != 0 {
+		t.Errorf("a foreign tool of that name posts neither a tool event nor a child_end, got %v", got)
 	}
 }
 
@@ -1573,7 +1644,7 @@ func TestTheReturnGateRunsOnTheStrictToolContextOfTheRun(t *testing.T) {
 		t.Fatalf("the gate body must post the stop on a strict context: %v", err)
 	}
 	want := []map[string]any{
-		{"event": "child_end", "root_id": "root-1", "child_id": "child-ctx", "value": "the total is 42"},
+		{"protocol": float64(1), "adapter": "kagent", "event": "child_end", "root_id": "root-1", "child_id": "child-ctx", "value": "the total is 42"},
 	}
 	if got := gated(h); !reflect.DeepEqual(got, want) {
 		t.Errorf("the pinned pair rides the child end: got %v, want %v", got, want)
@@ -1654,11 +1725,12 @@ func remedyOver(p *AppaPluginKagent) *remedy {
 var (
 	floorOffer     = map[string]any{"offer_id": "offer-1", "returns": "as_spoken"}
 	sanitizedOffer = map[string]any{"offer_id": "offer-2", "returns": map[string]any{"sanitizer": "strip-instructions"}}
-	passControl    = map[string]any{"decision": "pass_control"}
+	passControl    = map[string]any{"protocol": 1, "decision": "pass_control"}
 )
 
 func heldSpawn() map[string]any {
 	return map[string]any{
+		"protocol": 1,
 		"decision": "deny_call",
 		"feedback": "[appa] Blocked. Declare what this subagent may return.",
 		"offers":   []any{floorOffer, sanitizedOffer},
@@ -1667,9 +1739,9 @@ func heldSpawn() map[string]any {
 
 func TestThePluginDeclaresTheBareFloorAndProposesTheSpawnAgain(t *testing.T) {
 	h := newHook(t, heldSpawn(), passControl, allow)
-	p := pluginOver(t, h, "log-analyst")
+	p := pluginOver(t, h)
 	scripted := remedyOver(p)
-	released, err := p.beforeTool(newFakeContext(newFakeSession("s1")), &fakeTool{"log-analyst"},
+	released, err := p.beforeTool(newFakeContext(newFakeSession("s1")), &fakeTool{"kagent__NS__log_analyst"},
 		map[string]any{"request": "read the crash logs"})
 	if err != nil || released != nil {
 		t.Fatalf("the released call runs, and the model never read the block: %v, %v", released, err)
@@ -1686,7 +1758,7 @@ func TestThePluginDeclaresTheBareFloorAndProposesTheSpawnAgain(t *testing.T) {
 	if !reflect.DeepEqual(spawn, again) {
 		t.Errorf("the plugin proposes the identical call after the declaration: got %v, want %v", again, spawn)
 	}
-	if control["tool"] != ReservedTool || control["spawn"] != false {
+	if _, asserted := control["spawn"]; control["tool"] != ControlTool || asserted {
 		t.Errorf("the declaration is an ordinary control call, got %v", control)
 	}
 	wantArguments := map[string]any{"offer_id": "offer-1", "label": map[string]any{}}
@@ -1697,10 +1769,10 @@ func TestThePluginDeclaresTheBareFloorAndProposesTheSpawnAgain(t *testing.T) {
 
 func TestASecondDenyAfterTheDeclarationReachesTheModel(t *testing.T) {
 	h := newHook(t, heldSpawn(), passControl,
-		map[string]any{"decision": "deny_call", "feedback": "[appa] Blocked. No such child."})
-	p := pluginOver(t, h, "log-analyst")
+		map[string]any{"protocol": 1, "decision": "deny_call", "feedback": "[appa] Blocked. No such child."})
+	p := pluginOver(t, h)
 	scripted := remedyOver(p)
-	second, err := p.beforeTool(newFakeContext(newFakeSession("s1")), &fakeTool{"log-analyst"}, map[string]any{})
+	second, err := p.beforeTool(newFakeContext(newFakeSession("s1")), &fakeTool{"kagent__NS__log_analyst"}, map[string]any{})
 	if err != nil {
 		t.Fatalf("a second deny answers the model, not fails: %v", err)
 	}
@@ -1714,10 +1786,10 @@ func TestASecondDenyAfterTheDeclarationReachesTheModel(t *testing.T) {
 }
 
 func TestADeclarationTheRuntimeDoesNotVouchForReachesTheModel(t *testing.T) {
-	h := newHook(t, heldSpawn(), map[string]any{"decision": "deny_call", "feedback": "[appa] this offer no longer stands"})
-	p := pluginOver(t, h, "log-analyst")
+	h := newHook(t, heldSpawn(), map[string]any{"protocol": 1, "decision": "deny_call", "feedback": "[appa] this offer no longer stands"})
+	p := pluginOver(t, h)
 	scripted := remedyOver(p)
-	blocked, err := p.beforeTool(newFakeContext(newFakeSession("s1")), &fakeTool{"log-analyst"}, map[string]any{})
+	blocked, err := p.beforeTool(newFakeContext(newFakeSession("s1")), &fakeTool{"kagent__NS__log_analyst"}, map[string]any{})
 	if err != nil {
 		t.Fatalf("an unvouched declaration answers the model, not fails: %v", err)
 	}
@@ -1732,6 +1804,7 @@ func TestADeclarationTheRuntimeDoesNotVouchForReachesTheModel(t *testing.T) {
 
 func TestADenyWithNoReturnRouteGoesStraightToTheModel(t *testing.T) {
 	h := newHook(t, map[string]any{
+		"protocol": 1,
 		"decision": "deny_call",
 		"feedback": "[appa] Blocked",
 		"offers":   []any{map[string]any{"offer_id": "offer-9"}},
@@ -1752,10 +1825,10 @@ func TestADenyWithNoReturnRouteGoesStraightToTheModel(t *testing.T) {
 
 func TestAFailingRemedyPathFailsTheCallClosed(t *testing.T) {
 	h := newHook(t, heldSpawn(), passControl)
-	p := pluginOver(t, h, "log-analyst")
+	p := pluginOver(t, h)
 	scripted := remedyOver(p)
 	scripted.err = failClosed("the appa /mcp endpoint did not run the remedy plan: connection refused")
-	_, err := p.beforeTool(newFakeContext(newFakeSession("s1")), &fakeTool{"log-analyst"}, map[string]any{})
+	_, err := p.beforeTool(newFakeContext(newFakeSession("s1")), &fakeTool{"kagent__NS__log_analyst"}, map[string]any{})
 	failure := mustFailClosed(t, err, "the unreachable /mcp endpoint")
 	if !strings.Contains(failure.Reason, "did not run the remedy plan") {
 		t.Errorf("the /mcp failure must reach the caller, got %q", failure.Reason)
@@ -1766,7 +1839,7 @@ func TestAFailingRemedyPathFailsTheCallClosed(t *testing.T) {
 
 func TestTheReturnContractRidesTheFirstUserMessageOfAChild(t *testing.T) {
 	contract := "[appa] your return may carry nothing but the parent's label."
-	h := newHook(t, map[string]any{"decision": "context", "text": contract}, ack)
+	h := newHook(t, map[string]any{"protocol": 1, "decision": "context", "text": contract}, ack)
 	p := pluginOver(t, h)
 	message, err := p.onUserMessage(newFakeContext(delegatedChild("root-1")), textContent("total the invoices"))
 	if err != nil {
@@ -1779,8 +1852,8 @@ func TestTheReturnContractRidesTheFirstUserMessageOfAChild(t *testing.T) {
 		t.Errorf("the contract goes in front, and the request the parent sent stands unchanged, got %v", message.Parts)
 	}
 	want := []map[string]any{
-		{"event": "child_start", "root_id": "root-1", "child_id": "child-ctx"},
-		{"event": "prompt", "root_id": "root-1", "child_id": "child-ctx", "text": "total the invoices"},
+		{"protocol": float64(1), "adapter": "kagent", "event": "child_start", "root_id": "root-1", "child_id": "child-ctx"},
+		{"protocol": float64(1), "adapter": "kagent", "event": "prompt", "root_id": "root-1", "child_id": "child-ctx", "text": "total the invoices"},
 	}
 	if got := gated(h); !reflect.DeepEqual(got, want) {
 		t.Errorf("the contract changes no event: got %v, want %v", got, want)
@@ -1790,7 +1863,7 @@ func TestTheReturnContractRidesTheFirstUserMessageOfAChild(t *testing.T) {
 func TestAContextAtARootSessionStartRefuses(t *testing.T) {
 	// Only a fork carries a return contract, so a root that reads one
 	// is an answer outside the contract of this event.
-	h := newHook(t, map[string]any{"decision": "context", "text": "[appa] a contract"})
+	h := newHook(t, map[string]any{"protocol": 1, "decision": "context", "text": "[appa] a contract"})
 	p := pluginOver(t, h)
 	_, err := p.onUserMessage(newFakeContext(newFakeSession("s1")), textContent("first turn"))
 	failure := mustFailClosed(t, err, "the context answer at a root session start")
@@ -1890,7 +1963,9 @@ func TestAChildScopeStopsThroughTheReturnGateInARealRunner(t *testing.T) {
 		t.Fatalf("the child stops through the gate and nowhere else, got %v", kinds)
 	}
 	wantEnd := map[string]any{
-		"event": "child_end", "root_id": "root-1", "child_id": "child-ctx", "value": "the total is 42",
+		"protocol": float64(1),
+		"adapter":  "kagent",
+		"event":    "child_end", "root_id": "root-1", "child_id": "child-ctx", "value": "the total is 42",
 	}
 	if got := gated(h)[2]; !reflect.DeepEqual(got, wantEnd) {
 		t.Errorf("the value of the child crosses at child_end: got %v, want %v", got, wantEnd)
@@ -1944,7 +2019,7 @@ func TestTheCallThePluginAnsweredIsRecognizedAtTheAfterToolPointInARealRunner(t 
 	// were empty at either point, or different between them, the deny
 	// below would not be recognized and a tool_result would follow the
 	// tool_call for a dispatch the runtime never opened.
-	h := newHook(t).answering("tool_call", map[string]any{"decision": "deny_call", "feedback": "blocked: quotes offer offer-1"})
+	h := newHook(t).answering("tool_call", map[string]any{"protocol": 1, "decision": "deny_call", "feedback": "blocked: quotes offer offer-1"})
 	p := pluginOver(t, h)
 	adkPlugin, err := p.ADKPlugin()
 	if err != nil {
@@ -2077,7 +2152,9 @@ func TestAToolsetCannotTakeTheGatesSlotInARealRunner(t *testing.T) {
 		t.Fatalf("the child still stops through the gate and nowhere else, got %v", kinds)
 	}
 	wantEnd := map[string]any{
-		"event": "child_end", "root_id": "root-1", "child_id": "child-ctx", "value": "the total is 42",
+		"protocol": float64(1),
+		"adapter":  "kagent",
+		"event":    "child_end", "root_id": "root-1", "child_id": "child-ctx", "value": "the total is 42",
 	}
 	if got := gated(h)[2]; !reflect.DeepEqual(got, wantEnd) {
 		t.Errorf("the value of the child crosses at child_end: got %v, want %v", got, wantEnd)

@@ -47,8 +47,8 @@ OpenAPPA runs inside the agent pod through the official Google ADK plugin API. E
 
 - **Enforcement occurs before execution**: A tool does not run if a policy requirement fails.
 - **Fail-closed default**: If the policy runtime is unreachable, calls stop.
-- **Runtime support**: Works with both Python (`appa-kagent-adk`) and Go (`appa-kagent-adk-go`) runtimes.
-- **Subagent return gate**: Delegated child agents stop through `appa_return`. OpenAPPA checks returned data at `SpawnResult` before parent context receives it.
+- **Runtime support**: Works with both Python (`appa-kagent-adk`) and Go (`appa-kagent-adk-go`) runtimes. Both plugins post the hook protocol's wire envelope (`protocol: 1`) directly to the runtime's `/hook` endpoint; the runtime serves them with `--adapter kagent` and prefixes every trajectory id with `kagent:`.
+- **Subagent return gate**: Delegated child agents stop through `appa_return`. OpenAPPA checks returned data at `spawn_result` before parent context receives it.
 
 ## Policy scope
 
@@ -148,7 +148,19 @@ The policy governs only declared tools. Unlisted tool calls stop fail-closed bef
 
 Deploy an `appa-runtime` with an `appa.toml` declaring your tools. A wildcard entry (`name = "*"`) covers unlisted tools through an annotator.
 
-Agent delegation requires explicit tool entries under the wire name `<namespace>__NS__<agent>` (hyphens as underscores). Wildcards do not cover delegation spawns. See [Policy contracts](/contracts) for syntax.
+The policy names each tool by its canonical tool id. The kagent adapter maps what the pod dispatches onto these ids:
+
+| kagent dispatches | The policy names it |
+|---|---|
+| A tool of the `RemoteMCPServer` or `ToolServer` served at `<toolset>` | `mcp/<toolset>/<tool>` |
+| An agent called as a tool | `agent/<namespace>/<agent>` |
+| A kagent built-in, such as `ask_user`, `load_memory`, `save_memory`, `prefetch_memory`, or a skill tool | `host/kagent/<name>` |
+| The entrypoint's code-execution and memory-persist gates | `host/kagent-gate/code_execution`, `host/kagent-gate/memory_persist` |
+| The remedy tool | `appa/execute_remedy_plan`, which no policy declares |
+
+The toolset is the first label of the server host in the rendered `params.url`, which is the resource name when the Service carries it. A gated agent must give each MCP entry an explicit `tools` list: without one the server decides the tool list at run time, and the plugin refuses to start.
+
+Agent delegation requires an explicit tool entry under `agent/<namespace>/<agent>`. Wildcards do not cover delegation spawns. See [Policy contracts](/contracts#tool-names) for the grammar.
 
 ### 3. Gate the agents you choose
 
@@ -210,7 +222,7 @@ Open the `cluster-ops` agent in the [kagent dashboard](https://kagent.dev/docs/k
    ```text
    read_secret(name: "payments-provider")
    ```
-   `read_secret` carries `delta = { audience = ["ops"] }`. Admitting that secret would narrow the session's audience to ops readers alone.
+   The contract `mcp/demo-tools/read_secret` carries `delta = { audience = ["ops"] }`. Admitting that secret would narrow the session's audience to ops readers alone.
 
 2. **OpenAPPA denies the read.** OpenAPPA gates the flow that changes the label, preventing the secret from entering model context. The denial provides structured feedback with runnable continuation offers:
    ```text
@@ -226,7 +238,7 @@ Open the `cluster-ops` agent in the [kagent dashboard](https://kagent.dev/docs/k
        execute_remedy_plan(offer_id: "…")
    ```
 
-3. **The agent stays productive.** In this chat, the agent invokes `execute_remedy_plan` to apply the `strip-secret-values` sanitizer. Redacted key names return to the model without credentials. If the agent accepts audience narrowing instead, subsequent calls to `post_status_update` (which require public audience) are blocked.
+3. **The agent stays productive.** In this chat, the agent invokes `execute_remedy_plan` to apply the `strip-secret-values` sanitizer. Redacted key names return to the model without credentials. If the agent accepts audience narrowing instead, subsequent calls to `mcp/demo-tools/post_status_update` (which require public audience) are blocked.
 
 ## 2. Destructive action and human review
 
@@ -254,22 +266,22 @@ When agents call other agents through [A2A (Agent-to-Agent)](https://kagent.dev/
 
 - **Inherited boundaries**: Child agents inherit the parent's data restrictions automatically.
 - **Quarantine**: Untrusted operations (like inspecting raw pod logs) run inside the child agent without affecting the parent context during execution.
-- **Subagent return gate**: The child agent stops by calling the OpenAPPA-owned `appa_return` tool (`ChildEnd`). The parent's gate evaluates `SpawnResult` before outputs enter parent context. If return data would violate parent boundaries, OpenAPPA withholds the data and returns remedy offers.
-- **Explicit authorization**: Agents can only delegate to sub-agents explicitly listed in the policy (`<namespace>__NS__<agent>`). Unlisted agent spawns are blocked fail-closed.
+- **Subagent return gate**: The child agent stops by calling the OpenAPPA-owned `appa_return` tool (the `child_end` event). The parent's gate evaluates `spawn_result` before outputs enter parent context. If return data would violate parent boundaries, OpenAPPA withholds the data and returns remedy offers.
+- **Explicit authorization**: Agents can only delegate to sub-agents explicitly listed in the policy (`agent/<namespace>/<agent>`). Unlisted agent spawns are blocked fail-closed.
 
 ## Policy example
 
 Policies are declarative TOML files checked into version control. This excerpt from [`integrations/kagent/demo/chart/files/demo.appa.toml`](https://github.com/archestra-ai/OpenAPPA/blob/main/integrations/kagent/demo/chart/files/demo.appa.toml) governs the demo agents:
 
 ```toml
-# In-cluster secret read: results carry the ops audience
+# In-cluster secret read from the `demo-tools` toolset: results carry the ops audience
 [[policy.tool]]
-name = "read_secret"
+name = "mcp/demo-tools/read_secret"
 delta = { audience = ["ops"] }
 
 # Outward update: requires public audience and trusted data
 [[policy.tool]]
-name = "post_status_update"
+name = "mcp/demo-tools/post_status_update"
 delta = {}
 
 [policy.tool.requires]
@@ -278,17 +290,16 @@ audience = { contains = ["public"] }
 
 # Production change: requires human operator sign-off
 [[policy.tool]]
-name = "restart_deployment"
+name = "mcp/demo-tools/restart_deployment"
 delta = {}
 
 [policy.tool.requires]
 trust = "trusted"
 attention = ["human-approval"]
 
-# Delegation: the log-analyst agent, called as a tool. kagent dispatches
-# an agent tool as `<namespace>__NS__<agent>`, hyphens as underscores.
+# Delegation: the log-analyst agent in the kagent namespace, called as a tool
 [[policy.tool]]
-name = "kagent__NS__log_analyst"
+name = "agent/kagent/log-analyst"
 delta = {}
 
 # Children run on their own context and declare what returns carry

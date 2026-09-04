@@ -1,18 +1,26 @@
-"""The adapter wire: event construction and decision parsing.
+"""The hook wire: event construction and decision parsing.
 
-One JSON object per callback crosses ``POST $APPA_RUNTIME_URL/hook``.
-The ``appa-adapter-kagent`` codec in the runtime parses these events
-and renders every answer as one decision envelope. This module owns
-both shapes on the python side and imports no ADK code, so the wire
-stays testable against the shared fixtures
+One JSON object per callback crosses ``POST $APPA_RUNTIME_URL/hook``,
+in the canonical envelope every adapter shares
+(``appa-runtime-api/src/wire.rs``): ``protocol`` is the wire version
+and ``adapter`` names this plugin's adapter, and the runtime refuses an
+event that carries another pair. This module owns the event shape and
+the decision envelope on the python side and imports no ADK code, so
+the wire stays testable against the shared fixtures
 (``integrations/kagent/fixtures/wire-events.jsonl``) without an agent
 runtime.
 
 Ids are the harness's own: ``root_id`` is the ADK session id of the
 root trajectory (in a delegated child workload, the root id read from
 the inbound call metadata), and ``child_id`` is the delegated child
-scope's own id. The codec applies the ``kagent:`` prefix; this module
-never does.
+scope's own id. The runtime applies the ``kagent:`` prefix; this
+module never does.
+
+A tool crosses under its structured spelling, never its bare ADK name:
+``mcp:<toolset>/<tool>``, ``agent:<namespace>/<agent>``,
+``builtin:<name>``, ``gate:<name>`` or ``appa:execute_remedy_plan``
+(``inventory``). The runtime derives the canonical tool and whether
+the call is a spawn from that spelling; the wire asserts neither.
 """
 
 from __future__ import annotations
@@ -21,11 +29,22 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+PROTOCOL = 1
+"""The hook wire version this plugin speaks."""
+
+ADAPTER = "kagent"
+"""The adapter name every event carries."""
+
 _OUTCOME_STATUSES = ("success", "failure", "indeterminate")
 
 
+def _envelope(kind: str) -> dict[str, Any]:
+    return {"protocol": PROTOCOL, "adapter": ADAPTER, "event": kind}
+
+
 def _event(kind: str, root_id: str, child_id: str | None, **fields: Any) -> dict[str, Any]:
-    wire: dict[str, Any] = {"event": kind, "root_id": root_id}
+    wire = _envelope(kind)
+    wire["root_id"] = root_id
     if child_id is not None:
         wire["child_id"] = child_id
     for name, value in fields.items():
@@ -36,11 +55,11 @@ def _event(kind: str, root_id: str, child_id: str | None, **fields: Any) -> dict
 
 def ping() -> dict[str, Any]:
     """The liveness probe: parses to no event, answers 200 ``{}``."""
-    return {"event": "ping"}
+    return _envelope("ping")
 
 
 def session_start(root_id: str) -> dict[str, Any]:
-    return {"event": "session_start", "root_id": root_id}
+    return _event("session_start", root_id, None)
 
 
 def prompt(root_id: str, text: str, child_id: str | None = None) -> dict[str, Any]:
@@ -52,21 +71,33 @@ def turn_end(root_id: str, child_id: str | None = None) -> dict[str, Any]:
 
 
 RESERVED_TOOL = "execute_remedy_plan"
-"""The engine's remedy-execution tool, as it crosses the wire."""
+"""The engine's remedy-execution tool, as ADK dispatches it."""
+
+CONTROL_TOOL = "appa:execute_remedy_plan"
+"""The reserved tool's spelling on the wire."""
+
+RETURN_TOOL = "appa_return"
+"""The name of the tool a child scope stops through.
+
+APPA owns the gate object, and only that object crosses no tool gate.
+The name is what the model types, and anything else that answers to it
+is somebody else's tool.
+"""
 
 
 def tool_call(
     root_id: str,
     tool: str,
     arguments: dict[str, Any],
-    spawn: bool,
     child_id: str | None = None,
     ruling: str | None = None,
 ) -> dict[str, Any]:
-    """A proposed call. ``ruling`` (``approve`` or ``deny``) rides only the
-    control call whose offer a person ruled on through kagent's own
-    confirmation; the runtime spends it as the human authority's answer."""
-    return _event("tool_call", root_id, child_id, tool=tool, arguments=arguments, spawn=spawn, ruling=ruling)
+    """A proposed call of ``tool``, under its structured spelling.
+
+    ``ruling`` (``approve`` or ``deny``) rides only the control call
+    whose offer a person ruled on through kagent's own confirmation;
+    the runtime spends it as the human authority's answer."""
+    return _event("tool_call", root_id, child_id, tool=tool, arguments=arguments, ruling=ruling)
 
 
 def tool_result(
@@ -97,21 +128,15 @@ def spawn_result(
 
 
 def child_start(root_id: str, child_id: str, spawn_binding: str | None = None) -> dict[str, Any]:
-    wire: dict[str, Any] = {"event": "child_start", "root_id": root_id, "child_id": child_id}
-    if spawn_binding is not None:
-        wire["spawn_binding"] = spawn_binding
-    return wire
+    return _event("child_start", root_id, child_id, spawn_binding=spawn_binding)
 
 
 def child_end(root_id: str, child_id: str, value: str | None = None) -> dict[str, Any]:
     """The child's stop, carrying the value it returns to its parent.
 
-    An absent ``value`` is a child that returns nothing, and the codec
+    An absent ``value`` is a child that returns nothing, and the runtime
     reads an empty string the same way."""
-    wire: dict[str, Any] = {"event": "child_end", "root_id": root_id, "child_id": child_id}
-    if value is not None:
-        wire["value"] = value
-    return wire
+    return _event("child_end", root_id, child_id, value=value)
 
 
 def success(body: Any) -> dict[str, Any]:
@@ -209,6 +234,9 @@ def parse_decision(body: bytes | str) -> Decision:
         raise WireError(f"unreadable decision envelope: {error}") from error
     if not isinstance(parsed, dict):
         raise WireError("the decision envelope is not an object")
+    protocol = parsed.get("protocol")
+    if isinstance(protocol, bool) or protocol != PROTOCOL:
+        raise WireError(f"a decision under a protocol outside the wire: {protocol!r}")
     kind = parsed.get("decision")
     if not isinstance(kind, str) or kind not in _DECISION_PAYLOADS:
         raise WireError(f"a decision kind outside the wire: {kind!r}")

@@ -1,0 +1,19 @@
+{
+  "python": {
+    "pinned": "kagent-adk v0.9.12",
+    "groups": {
+      "always": ["ask_user"],
+      "memory": ["prefetch_memory", "load_memory", "save_memory"],
+      "skills": ["skills", "bash", "read_file", "write_file", "edit_file"]
+    }
+  },
+  "go": {
+    "pinned": "kagent go/v0.10.0-rc4",
+    "groups": {
+      "always": ["ask_user"],
+      "memory": ["preload_memory", "load_memory", "save_memory"],
+      "skills": ["skills", "read_file", "write_file", "edit_file", "bash"],
+      "share_tools": ["create_share_link", "list_share_links", "delete_share_link"]
+    }
+  }
+}

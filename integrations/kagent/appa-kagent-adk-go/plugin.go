@@ -97,6 +97,9 @@ const (
 	returnBlocked = "[appa] this return did not cross: %s"
 )
 
+// The call gate's own refusal of a name the inventory does not carry.
+const outsideInventory = "[appa] the tool %s is outside the gated inventory of this agent, so the call was refused"
+
 const (
 	denyKey  = "appa"
 	denied   = "denied"
@@ -140,12 +143,10 @@ type Config struct {
 	// RuntimeURL is the appa-runtime base URL (APPA_RUNTIME_URL).
 	// Required.
 	RuntimeURL string
-	// SpawnTools names the agent-as-tool entries of this agent: the
-	// wire names of the remote agents in the rendered config. Calls to
-	// these tools classify as spawns. Name-based because the kagent go
-	// runtime builds remote-agent tools as plain function tools, so no
-	// distinctive type exists to classify by (VERIFICATION.md).
-	SpawnTools []string
+	// Inventory spells every tool this agent can dispatch
+	// (inventory.go). A call of a name outside it is refused at the
+	// gate, and a spelled agent: tool classifies as a spawn.
+	Inventory Inventory
 	// HTTPClient overrides the transport; nil means a default client.
 	// Timeouts are per request, so the client needs none of its own.
 	HTTPClient *http.Client
@@ -155,10 +156,10 @@ type Config struct {
 // enforces the answered decision. Construct it with New and register
 // the plugin ADKPlugin returns.
 type AppaPluginKagent struct {
-	hookURL    string
-	mcpURL     string
-	client     *http.Client
-	spawnTools map[string]struct{}
+	hookURL   string
+	mcpURL    string
+	client    *http.Client
+	inventory Inventory
 	// returnTool is the tool a child scope stops through. adk-go
 	// resolves the call from the request the plugin registered it on.
 	returnTool *returnGate
@@ -238,15 +239,11 @@ func New(cfg Config) (*AppaPluginKagent, error) {
 	if client == nil {
 		client = &http.Client{}
 	}
-	spawnTools := make(map[string]struct{}, len(cfg.SpawnTools))
-	for _, name := range cfg.SpawnTools {
-		spawnTools[name] = struct{}{}
-	}
 	p := &AppaPluginKagent{
 		hookURL:          strings.TrimRight(cfg.RuntimeURL, "/") + "/hook",
 		mcpURL:           strings.TrimRight(cfg.RuntimeURL, "/") + "/mcp",
 		client:           client,
-		spawnTools:       spawnTools,
+		inventory:        cfg.Inventory,
 		invocationAgents: map[string]string{},
 		reviews:          map[string]string{},
 		invocationIDs:    map[string]trajectoryIDs{},
@@ -595,9 +592,10 @@ func isFresh(sess session.Session) bool {
 	return true
 }
 
-func (p *AppaPluginKagent) isSpawn(t tool.Tool) bool {
-	_, spawn := p.spawnTools[t.Name()]
-	return spawn
+// spelling is the wire spelling of a dispatched tool; false outside the
+// inventory.
+func (p *AppaPluginKagent) spelling(t tool.Tool) (string, bool) {
+	return p.inventory.Spelling(t.Name())
 }
 
 // claimScope reports whether the named agent scope is the invocation's
@@ -1003,6 +1001,15 @@ func (p *AppaPluginKagent) beforeTool(ctx agent.Context, t tool.Tool, args map[s
 	if !ok {
 		return nil, failClosed("no trajectory is pinned for invocation %s", ctx.InvocationID())
 	}
+	spelled, known := p.spelling(t)
+	if !known {
+		// A name the inventory never saw has no spelling on the wire,
+		// so nothing crosses: the gate refuses it here and the model
+		// reads the refusal as the result of its call.
+		log.Printf("appa: the tool %s is outside the gated inventory, so the call is refused", t.Name())
+		p.answerOwn(ctx.FunctionCallID())
+		return map[string]any{"result": fmt.Sprintf(outsideInventory, t.Name()), denyKey: denied}, nil
+	}
 	ruling := ""
 	if t.Name() == ReservedTool {
 		offer, _ := args["offer_id"].(string)
@@ -1027,7 +1034,7 @@ func (p *AppaPluginKagent) beforeTool(ctx agent.Context, t tool.Tool, args map[s
 			p.forgetReview(offer)
 		}
 	}
-	call := toolCallEvent(ids.rootID, t.Name(), plainJSON(orEmpty(args)), p.isSpawn(t), ids.childID, ruling)
+	call := toolCallEvent(ids.rootID, spelled, plainJSON(orEmpty(args)), ids.childID, ruling)
 	decision, err := p.post(ctx, call)
 	if err != nil {
 		return nil, err
@@ -1076,6 +1083,10 @@ func (p *AppaPluginKagent) afterTool(ctx agent.Context, t tool.Tool, args, resul
 	if !ok {
 		return nil, failClosed("no trajectory is pinned for invocation %s", ctx.InvocationID())
 	}
+	spelled, known := p.spelling(t)
+	if !known {
+		return nil, failClosed("the tool %s is outside the gated inventory, and its result cannot cross", t.Name())
+	}
 	arguments := plainJSON(orEmpty(args))
 	// A nil result with no error is a deferred or long-running tool:
 	// nothing has entered attention, and the dispatch is genuinely
@@ -1084,9 +1095,9 @@ func (p *AppaPluginKagent) afterTool(ctx agent.Context, t tool.Tool, args, resul
 	if result != nil {
 		outcome = successOutcome(plainJSON(result))
 	}
-	if p.isSpawn(t) {
+	if IsSpawn(spelled) {
 		spawnedID, value := spawnReturn(result)
-		decision, err := p.post(ctx, spawnResultEvent(ids.rootID, t.Name(), arguments, outcome, spawnedID, value, ids.childID))
+		decision, err := p.post(ctx, spawnResultEvent(ids.rootID, spelled, arguments, outcome, spawnedID, value, ids.childID))
 		if err != nil {
 			return nil, err
 		}
@@ -1103,7 +1114,7 @@ func (p *AppaPluginKagent) afterTool(ctx agent.Context, t tool.Tool, args, resul
 			return nil, failClosed("appa answered the spawn result with %s", decision.describe())
 		}
 	}
-	decision, err := p.post(ctx, toolResultEvent(ids.rootID, t.Name(), arguments, outcome, ids.childID))
+	decision, err := p.post(ctx, toolResultEvent(ids.rootID, spelled, arguments, outcome, ids.childID))
 	if err != nil {
 		return nil, err
 	}
@@ -1131,7 +1142,11 @@ func (p *AppaPluginKagent) onToolError(ctx agent.Context, t tool.Tool, args map[
 	if !ok {
 		return nil, failClosed("no trajectory is pinned for invocation %s", ctx.InvocationID())
 	}
-	decision, err := p.post(ctx, toolResultEvent(ids.rootID, t.Name(), plainJSON(orEmpty(args)), failureOutcome(toolErr.Error()), ids.childID))
+	spelled, known := p.spelling(t)
+	if !known {
+		return nil, failClosed("the tool %s is outside the gated inventory, and its failure cannot cross", t.Name())
+	}
+	decision, err := p.post(ctx, toolResultEvent(ids.rootID, spelled, plainJSON(orEmpty(args)), failureOutcome(toolErr.Error()), ids.childID))
 	if err != nil {
 		return nil, err
 	}
@@ -1281,7 +1296,7 @@ func (p *AppaPluginKagent) declareReturn(
 	ctx agent.Context, ids trajectoryIDs, call map[string]any, offer Offer, denial Decision,
 ) (Decision, error) {
 	arguments := map[string]any{"offer_id": offer.OfferID, "label": map[string]any{}}
-	vouch, err := p.post(ctx, toolCallEvent(ids.rootID, ReservedTool, arguments, false, ids.childID, ""))
+	vouch, err := p.post(ctx, toolCallEvent(ids.rootID, ControlTool, arguments, ids.childID, ""))
 	if err != nil {
 		return Decision{}, err
 	}

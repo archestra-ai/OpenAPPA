@@ -6,11 +6,12 @@ publish = false
 
 [dependencies]
 appa-runtime-api = { path = "../appa-runtime-api" }
-serde = { workspace = true }
-# `raw_value` carries a proposed call's arguments as the bytes the plugin
-# sent — the same passthrough rule appa-runtime-api states.
+
+[dev-dependencies]
+proptest = "1"
+# `raw_value` builds a proposed call's arguments in tests as the bytes
+# the plugin would send — the same passthrough rule appa-runtime-api states.
 serde_json = { workspace = true, features = ["raw_value"] }
-tracing = { workspace = true }
 
 [lints]
 workspace = true

@@ -1,8 +1,9 @@
 //! The kagent subagent contract, wire to wire: the marked spawn, the parent's
 //! declaration, the child's start and return, and the parent's spawn result.
 //!
-//! Every case posts the bytes the ADK plugin posts and reads the bytes it reads
-//! back, through `hooks::answer` and the kagent codec. The plugin routes the
+//! Every case posts the bytes the ADK plugin posts — the canonical wire, carrying
+//! kagent's structured raw tool spellings — and reads the bytes it reads back,
+//! through `hooks::answer` under the served kagent adapter. The plugin routes the
 //! declaration itself, so the menu and the return routes are part of the wire
 //! contract, not prose for a model.
 
@@ -15,30 +16,32 @@ use appa_runtime::config::Config;
 use appa_runtime::hooks;
 use appa_runtime_api::Actor;
 
-/// The agent this deployment delegates to, under the name kagent dispatches it by.
-const AGENT: &str = "kagent__NS__log_analyst";
+/// The agent this deployment delegates to, as the kagent plugin spells it on the
+/// wire: an agent called as a tool, which the adapter derives as a spawn.
+const AGENT: &str = "agent:NS/log_analyst";
 
 /// The child's final message on the routes that carry it as spoken.
 const RETURN: &str = "the api pod restarted three times";
 
 /// One agent to delegate to, one read for the child, and the two return
 /// sanitizers a declaration routes through. `scrub` runs inside the runtime, so
-/// the suite needs no external service.
+/// the suite needs no external service. Every contract names the canonical tool
+/// the adapter derives from the wire's raw spelling.
 const POLICY: &str = r#"
 [policy]
 version = 2
 
 [[policy.tool]]
-name = "kagent__NS__log_analyst"
+name = "agent/NS/log_analyst"
 delta = {}
 
 [[policy.tool]]
-name = "get_pod_logs"
+name = "mcp/k8s/get_pod_logs"
 delta = {}
 
 # Ingress authored outside the session: its result narrows whoever admits it.
 [[policy.tool]]
-name = "check_status_page"
+name = "mcp/status/check_status_page"
 delta = { trust = "suspicious" }
 
 # The reserved sanitizer of a structured return: the runtime holds it.
@@ -69,7 +72,7 @@ max_body_bytes = 65536
 builtin = "redact-email"
 "#;
 
-/// The codec prefixes the wire ids: `s1` is the root and `c1` is its child.
+/// The served adapter prefixes the wire ids: `s1` is the root and `c1` is its child.
 fn root() -> TrajectoryId {
     TrajectoryId("kagent:s1".to_string())
 }
@@ -90,21 +93,44 @@ fn open(dir: &tempfile::TempDir) -> Runtime {
     runtime.with_spawn_coverage(SpawnCoverage::Declared)
 }
 
+/// The wire envelope every kagent event travels in.
+fn wire(event: &str, fields: serde_json::Value) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "protocol": appa_runtime_api::PROTOCOL,
+        "adapter": "kagent",
+        "event": event,
+        "root_id": "s1",
+    });
+    for (key, value) in fields.as_object().expect("the fields are an object") {
+        body[key] = value.clone();
+    }
+    body
+}
+
+/// One wire event in, the answer out, with the status it travels under.
+async fn posted(runtime: &Runtime, event: serde_json::Value) -> (u16, serde_json::Value) {
+    let body = serde_json::to_vec(&event).expect("the event serializes");
+    hooks::answer(runtime, &appa_adapter_kagent::adapter(), &body).await
+}
+
 /// One wire event in, the answer out. The status the answer travels under is
 /// asserted here: a kagent plugin treats a non-2xx as a refusal.
 async fn answered(runtime: &Runtime, event: serde_json::Value) -> serde_json::Value {
-    let body = serde_json::to_vec(&event).expect("the event serializes");
-    let (status, answer) = hooks::answer(runtime, &appa_adapter_kagent::codec(), &body).await;
+    let (status, answer) = posted(runtime, event.clone()).await;
     assert_eq!(status, 200, "the hook refused {}: {answer}", event["event"]);
     answer
 }
 
+fn decision(name: &str) -> serde_json::Value {
+    serde_json::json!({"protocol": appa_runtime_api::PROTOCOL, "decision": name})
+}
+
 fn ack() -> serde_json::Value {
-    serde_json::json!({"decision": "ack"})
+    decision("ack")
 }
 
 fn session_start() -> serde_json::Value {
-    serde_json::json!({"event": "session_start", "root_id": "s1"})
+    wire("session_start", serde_json::json!({}))
 }
 
 /// The delegation the parent proposes, argument bytes included: the spawn result
@@ -114,13 +140,10 @@ fn arguments() -> serde_json::Value {
 }
 
 fn spawn() -> serde_json::Value {
-    serde_json::json!({
-        "event": "tool_call",
-        "root_id": "s1",
-        "tool": AGENT,
-        "arguments": arguments(),
-        "spawn": true,
-    })
+    wire(
+        "tool_call",
+        serde_json::json!({"tool": AGENT, "arguments": arguments()}),
+    )
 }
 
 /// The arguments the plugin routes itself: the offer, the bare floor as `label`,
@@ -133,91 +156,70 @@ fn control_arguments(offer: &OfferId, schema: Option<serde_json::Value>) -> serd
 }
 
 fn control_call(arguments: &serde_json::Value) -> serde_json::Value {
-    serde_json::json!({
-        "event": "tool_call",
-        "root_id": "s1",
-        "tool": "execute_remedy_plan",
-        "arguments": arguments,
-        "spawn": false,
-    })
+    wire(
+        "tool_call",
+        serde_json::json!({"tool": "appa:execute_remedy_plan", "arguments": arguments}),
+    )
 }
 
 fn child_start(binding: &str) -> serde_json::Value {
-    serde_json::json!({
-        "event": "child_start",
-        "root_id": "s1",
-        "child_id": "c1",
-        "spawn_binding": binding,
-    })
+    wire(
+        "child_start",
+        serde_json::json!({"child_id": "c1", "spawn_binding": binding}),
+    )
 }
 
 fn child_end(value: &str) -> serde_json::Value {
-    serde_json::json!({
-        "event": "child_end",
-        "root_id": "s1",
-        "child_id": "c1",
-        "value": value,
-    })
+    wire("child_end", serde_json::json!({"child_id": "c1", "value": value}))
 }
 
 /// The child ended with nothing to say. An absent value and an empty one are the
 /// same event, so the plugin may send either.
 fn child_end_void() -> serde_json::Value {
-    serde_json::json!({
-        "event": "child_end",
-        "root_id": "s1",
-        "child_id": "c1",
-        "value": "",
-    })
+    wire("child_end", serde_json::json!({"child_id": "c1", "value": ""}))
 }
 
 /// The child's own read, on the same wire as its parent's calls.
 fn child_call() -> serde_json::Value {
-    serde_json::json!({
-        "event": "tool_call",
-        "root_id": "s1",
-        "child_id": "c1",
-        "tool": "get_pod_logs",
-        "arguments": {"pod": "api-7f9"},
-        "spawn": false,
-    })
+    wire(
+        "tool_call",
+        serde_json::json!({"child_id": "c1", "tool": "mcp:k8s/get_pod_logs", "arguments": {"pod": "api-7f9"}}),
+    )
 }
 
 /// The child reads a page authored outside the session: the read narrows the
 /// reader, so the fork's floor decides whether the child may take it.
 fn ingress_call() -> serde_json::Value {
-    serde_json::json!({
-        "event": "tool_call",
-        "root_id": "s1",
-        "child_id": "c1",
-        "tool": "check_status_page",
-        "arguments": {"service": "api"},
-        "spawn": false,
-    })
+    wire(
+        "tool_call",
+        serde_json::json!({"child_id": "c1", "tool": "mcp:status/check_status_page", "arguments": {"service": "api"}}),
+    )
 }
 
 fn child_result() -> serde_json::Value {
-    serde_json::json!({
-        "event": "tool_result",
-        "root_id": "s1",
-        "child_id": "c1",
-        "tool": "get_pod_logs",
-        "arguments": {"pod": "api-7f9"},
-        "outcome": {"status": "success", "body": {"restarts": 3}},
-    })
+    wire(
+        "tool_result",
+        serde_json::json!({
+            "child_id": "c1",
+            "tool": "mcp:k8s/get_pod_logs",
+            "arguments": {"pod": "api-7f9"},
+            "outcome": {"status": "success", "body": {"restarts": 3}},
+        }),
+    )
 }
 
 /// The parent's after-tool point. The plugin always names the child, and carries
 /// `value` only when the bytes it holds are the bytes that crossed.
 fn spawn_result(value: Option<&str>) -> serde_json::Value {
-    let mut event = serde_json::json!({
-        "event": "spawn_result",
-        "root_id": "s1",
-        "tool": AGENT,
-        "arguments": arguments(),
-        "outcome": {"status": "success", "body": {"result": "the child answered"}},
-        "spawned_id": "c1",
-    });
+    let mut event = wire(
+        "spawn_result",
+        serde_json::json!({
+            "tool": AGENT,
+            "arguments": arguments(),
+            "outcome": {"status": "success", "body": {"result": "the child answered"}},
+            "spawned_id": "c1",
+        }),
+    );
     if let Some(value) = value {
         event["value"] = serde_json::json!(value);
     }
@@ -256,7 +258,7 @@ async fn declared(runtime: &Runtime, route: Option<&str>, schema: Option<serde_j
     let arguments = control_arguments(&route_offer(&held, route), schema);
     assert_eq!(
         answered(runtime, control_call(&arguments)).await,
-        serde_json::json!({"decision": "pass_control"}),
+        decision("pass_control"),
         "the control call names an offer this trajectory pursues",
     );
     // The reserved tool reads exactly these arguments over MCP.
@@ -350,6 +352,70 @@ async fn a_marked_spawn_is_held_on_a_menu_that_carries_every_return_route() {
     );
 }
 
+/// Whether a call is a spawn is the served adapter's derivation from the raw
+/// spelling: a `spawn` claim on the wire moves nothing. An ordinary MCP call
+/// claimed as a spawn releases as the ordinary call it is; the agent called as a
+/// tool is a spawn with no claim at all.
+#[tokio::test]
+async fn a_spawn_is_derived_from_the_raw_spelling_and_never_read_off_the_wire() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = open(&dir);
+    assert_eq!(answered(&runtime, session_start()).await, ack());
+
+    let mut claimed = wire(
+        "tool_call",
+        serde_json::json!({"tool": "mcp:k8s/get_pod_logs", "arguments": {"pod": "api-7f9"}}),
+    );
+    claimed["spawn"] = serde_json::json!(true);
+    assert_eq!(
+        answered(&runtime, claimed).await,
+        decision("allow_call"),
+        "an ordinary call releases with no fork, whatever the wire claims"
+    );
+
+    let mut disclaimed = spawn();
+    disclaimed["spawn"] = serde_json::json!(false);
+    let held = answered(&runtime, disclaimed).await;
+    assert_eq!(
+        held["decision"], "deny_call",
+        "the agent is a spawn, held on the menu: {held}"
+    );
+    assert!(
+        held["offers"].as_array().is_some_and(|offers| !offers.is_empty()),
+        "{held}"
+    );
+}
+
+/// The wire is one protocol and one adapter. An event under another protocol, or
+/// spelled for another host, is refused before it reaches any session, and a raw
+/// spelling outside kagent's structured domain is refused the same way.
+#[tokio::test]
+async fn a_foreign_envelope_or_an_undomained_spelling_is_refused() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = open(&dir);
+    assert_eq!(answered(&runtime, session_start()).await, ack());
+
+    let mut other_protocol = spawn();
+    other_protocol["protocol"] = serde_json::json!(appa_runtime_api::PROTOCOL + 1);
+    let (status, refused) = posted(&runtime, other_protocol).await;
+    assert_eq!(status, 409, "{refused}");
+    assert!(refused["error"].is_string(), "{refused}");
+
+    let mut other_adapter = spawn();
+    other_adapter["adapter"] = serde_json::json!("claude-code");
+    let (status, refused) = posted(&runtime, other_adapter).await;
+    assert_eq!(status, 409, "{refused}");
+    assert!(refused["error"].is_string(), "{refused}");
+
+    let bare = wire(
+        "tool_call",
+        serde_json::json!({"tool": "get_pod_logs", "arguments": {"pod": "api-7f9"}}),
+    );
+    let (status, refused) = posted(&runtime, bare).await;
+    assert_eq!(status, 409, "a spelling outside the adapter's domain: {refused}");
+    assert!(refused["error"].is_string(), "{refused}");
+}
+
 /// The bare declaration: the child is told nothing it could act on, its final
 /// message crosses as spoken, and the parent's spawn result replays it.
 #[tokio::test]
@@ -365,7 +431,7 @@ async fn a_return_declared_as_spoken_crosses_at_the_child_end_and_the_spawn_resu
     );
     assert_eq!(
         answered(&runtime, child_call()).await,
-        serde_json::json!({"decision": "allow_call"}),
+        decision("allow_call"),
         "the child works under the fork"
     );
     assert_eq!(answered(&runtime, child_result()).await, ack());

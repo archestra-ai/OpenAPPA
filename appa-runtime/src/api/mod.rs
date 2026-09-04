@@ -151,6 +151,8 @@ pub enum OpenError {
     UnsupportedPolicy(String),
     #[error("policy declares reserved tool name {0}")]
     ReservedTool(String),
+    #[error("policy declares tool {name}, which a served deployment cannot name: {detail}")]
+    NonCanonicalTool { name: String, detail: String },
     #[error("policy names {kind} {name}, which has no [externals] binding")]
     UnboundExternal { kind: &'static str, name: String },
     #[error("[externals] binds {kind} {name}, which the policy does not declare")]
@@ -1105,7 +1107,7 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
     let rc = policy.registry_config();
     for tool in &rc.tools {
         let name = tool.name().as_str();
-        if is_control_tool(name) {
+        if is_control_tool(bare_tool_name(name)) {
             return Err(OpenError::ReservedTool(name.to_string()));
         }
     }
@@ -1207,6 +1209,34 @@ fn no_undeclared<'a, Implementation>(
             kind,
             name: name.clone(),
         });
+    }
+    Ok(())
+}
+
+/// The tool an authored `[[policy.tool]]` name names, before any `(selector)`.
+fn bare_tool_name(authored: &str) -> &str {
+    authored.split('(').next().unwrap_or(authored)
+}
+
+/// The served-deployment rule: every contract names a canonical tool
+/// (`<family>/<namespace>/<tool>`, or the wildcard `*`), because the wire carries a
+/// host's raw spelling and the served adapter derives the canonical identity a
+/// contract must match. `appa runtime` applies it at startup and on every reload;
+/// a host that embeds the runtime, and `appa replay`, name tools their own way.
+pub(crate) fn require_canonical_tools(config: &Config) -> Result<(), OpenError> {
+    let policy = compile_policy(config)?;
+    for tool in &policy.registry_config().tools {
+        let name = tool.name().as_str();
+        let bare = bare_tool_name(name);
+        if bare == "*" {
+            continue;
+        }
+        if let Err(error) = appa_runtime_api::CanonicalTool::parse(bare) {
+            return Err(OpenError::NonCanonicalTool {
+                name: name.to_string(),
+                detail: error.to_string(),
+            });
+        }
     }
     Ok(())
 }

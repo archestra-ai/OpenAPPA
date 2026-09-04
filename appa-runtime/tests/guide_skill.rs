@@ -75,7 +75,7 @@ fn the_kagent_reference_carries_the_full_flow() {
         "status.discoveredTools",
         "k8s_get_resource_yaml",
         "k8s_apply_manifest",
-        "__NS__",
+        "agent/<namespace>/<name>",
         "Approve/Reject card",
         "/reload",
         "kubelet syncs",
@@ -109,11 +109,11 @@ fn the_kagent_chart_consumes_this_skill_package() {
     assert!(values.contains("integrations/appa-guide"));
 
     let policy = fs::read_to_string(chart.join("files/demo.appa.toml")).expect("the demo policy exists");
-    assert!(policy.contains("name = \"k8s_apply_manifest\""));
+    assert!(policy.contains("name = \"mcp/kagent-tool-server/k8s_apply_manifest\""));
     assert!(policy.contains("attention = [\"human-approval\"]"));
-    assert!(policy.contains("name = \"appa-guide\""));
+    assert!(policy.contains("name = \"host/kagent/skills\""));
     assert!(
-        !policy.contains("name = \"bash\""),
+        !policy.contains("name = \"host/kagent/bash\""),
         "the unused skill helpers stay undeclared"
     );
 }

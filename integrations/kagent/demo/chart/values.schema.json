@@ -10,7 +10,7 @@
         "childName": {
           "type": "string",
           "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$",
-          "description": "The python child cluster-ops delegates to. The policy names it <namespace>__NS__<childName>, hyphens as underscores."
+          "description": "The python child cluster-ops delegates to. The policy names it agent/<namespace>/<childName>."
         },
         "go": {
           "type": "object",
@@ -23,7 +23,7 @@
             "childName": {
               "type": "string",
               "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$",
-              "description": "The go child the go twin delegates to. The policy names it <namespace>__NS__<childName>, hyphens as underscores."
+              "description": "The go child the go twin delegates to. The policy names it agent/<namespace>/<childName>."
             },
             "undeclaredName": {
               "type": "string",

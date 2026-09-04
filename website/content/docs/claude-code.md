@@ -65,6 +65,22 @@ boundary is unavailable.
 
 Before it writes anything, the skill shows the full proposal for approval. The result is deterministic policy config: exact tool contracts, audience rules, and any annotator definitions the setup needs. The model helps draft the file; the OpenAPPA runtime enforces the file.
 
+### Tool names in the policy
+
+The policy names a tool by its canonical tool id, not by Claude Code's own spelling. The Claude Code adapter maps every raw tool spelling onto one id:
+
+| Claude Code spells it | The policy names it |
+|---|---|
+| `mcp__<server>__<tool>`, split at the first `__` after `mcp__` | `mcp/<server>/<tool>` — `mcp__github__create_issue` is `mcp/github/create_issue` |
+| A built-in tool: `Bash`, `Read`, `Edit`, `Agent`, … | `host/claude-code/<name>` — `host/claude-code/Bash` |
+| The remedy tool of the APPA plugin | `appa/execute_remedy_plan`, which no policy declares |
+
+Argument selectors keep their shape: `host/claude-code/Read(file_path:*)`. `Agent` and `Task` start a child trajectory; the runtime derives that from the adapter, so the policy does not declare it. The [Policy reference](/contracts#tool-names) has the grammar.
+
+### How a session reaches the runtime
+
+The plugin's hooks run `appa hook --adapter claude-code` on every event. The command translates Claude Code's hook JSON into the hook protocol's wire envelope (`protocol: 1`), posts it to the runtime's `/hook` endpoint, and translates the decision back into the hook answer Claude Code reads. The envelope carries the raw tool spelling and the session's own ids; the runtime derives the canonical tool id and prefixes the trajectory id with `cc:`. A hook that gets no answer blocks the action.
+
 ## 2. Try a flow that should be blocked
 
 Start a new protected Claude Code session with the updated policy:
@@ -102,7 +118,7 @@ builtin = "claude-code"
 hint    = "Use suspicious for customer data from unvetted sources."
 
 [[tool]]
-name        = "get_customer"
+name        = "mcp/crm/get_customer"
 description = "Reads one customer record."
 annotator   = "classify-customer"
 

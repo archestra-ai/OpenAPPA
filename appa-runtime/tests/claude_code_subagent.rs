@@ -1,5 +1,5 @@
 mod common;
-use common::{offers, repo_root};
+use common::{claude_event, claude_hook, offers, repo_root};
 
 use std::path::Path;
 
@@ -108,9 +108,10 @@ fn re_fired(mut stop: serde_json::Value) -> serde_json::Value {
 }
 
 /// The shipped example with `policy_extra` spliced in after the deployment
-/// table, plus deterministic `Bash` and `Read` tools. These tests exercise
-/// trajectory binding, not the default's model-backed compatibility
-/// fallback; `bash_delta` is what the recorded Bash output carries.
+/// table, plus deterministic `Bash` and `Read` tools under the canonical
+/// names the served adapter derives. These tests exercise trajectory
+/// binding, not the default's model-backed compatibility fallback;
+/// `bash_delta` is what the recorded Bash output carries.
 fn deployment(policy_extra: &str, externals_extra: &str, bash_delta: &str) -> Runtime {
     let example = std::fs::read_to_string(repo_root().join("integrations/claude-code/examples/claude-code.appa.toml"))
         .expect("the shipped example is readable");
@@ -122,8 +123,8 @@ fn deployment(policy_extra: &str, externals_extra: &str, bash_delta: &str) -> Ru
         .split_once(deployment)
         .expect("the example carries the context-controlling deployment");
     let tools = format!(
-        "[[policy.tool]]\nname = \"Bash\"\n{bash_delta}\n\
-         [[policy.tool]]\nname = \"Read\"\ndelta = {{}}\n"
+        "[[policy.tool]]\nname = \"host/claude-code/Bash\"\n{bash_delta}\n\
+         [[policy.tool]]\nname = \"host/claude-code/Read\"\ndelta = {{}}\n"
     );
     let text = format!(
         "{before_deployment}{deployment}{policy_extra}\n{tools}{after_deployment}[externals]{externals}\n{externals_extra}"
@@ -135,9 +136,9 @@ fn deployment(policy_extra: &str, externals_extra: &str, bash_delta: &str) -> Ru
     Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens")
 }
 
+/// One recorded hook through the served dispatcher, as `appa hook` carries it.
 async fn call(runtime: &Runtime, event: &serde_json::Value) -> (u16, serde_json::Value) {
-    let body = serde_json::to_vec(event).expect("the event serializes");
-    hooks::answer(runtime, &appa_adapter_claude_code::codec(), &body).await
+    claude_hook(runtime, event).await
 }
 
 fn forks(runtime: &Runtime, root: &TrajectoryId) -> usize {
@@ -192,11 +193,9 @@ fn blocked(answer: &serde_json::Value) -> &str {
     answer["reason"].as_str().expect("a block carries its reason")
 }
 
+/// The recorded hook as the served runtime reads it: its tool is the canonical one.
 fn parsed(event: &serde_json::Value) -> HookEvent {
-    let body = serde_json::to_vec(event).expect("the event serializes");
-    (appa_adapter_claude_code::codec().parse)(&body)
-        .expect("the recorded event parses")
-        .expect("the recorded event maps to a hook event")
+    claude_event(event).expect("the recorded event maps to a hook event")
 }
 
 /// The parent's own Agent call: the spawn the return menu gates.

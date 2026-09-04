@@ -50,17 +50,18 @@ Fails the render on a missing or repeated name. Renders nothing.
 {{- end -}}
 
 {{/*
-The demo policy with the agent-tool names kagent dispatches:
-<namespace>__NS__<agent>, hyphens as underscores. The names check
-establishes both child values. The model profile the sanitizers consult
-comes from llm.model and llm.url. An empty llm.url drops the url line,
-which leaves the runtime on the OpenAI default endpoint.
+The demo policy with the canonical ids of this release's agent tools,
+agent/<namespace>/<agent>, and of the guide's k8s tools,
+mcp/<guide.toolServer>/<tool>. The names check establishes both child
+values. The model profile the sanitizers consult comes from llm.model
+and llm.url. An empty llm.url drops the url line, which leaves the
+runtime on the OpenAI default endpoint.
 */}}
 {{- define "appa-demo.policy" -}}
 {{- include "appa-demo.requireDistinctAgentNames" . -}}
-{{- $ns := .Release.Namespace | replace "-" "_" -}}
-{{- $child := .Values.agents.childName | replace "-" "_" -}}
-{{- $childGo := .Values.agents.go.childName | replace "-" "_" -}}
+{{- $ns := .Release.Namespace -}}
+{{- $child := .Values.agents.childName -}}
+{{- $childGo := .Values.agents.go.childName -}}
 {{- $llmModel := required "llm.model is required: the model the policy's sanitizers consult" .Values.llm.model -}}
 {{- $llm := printf "model = %q\n" $llmModel -}}
 {{- if .Values.llm.url -}}
@@ -68,7 +69,7 @@ which leaves the runtime on the OpenAI default endpoint.
 {{- end -}}
 {{- /* The file on disk is a loadable policy carrying these defaults, so
        CI opens it (appa-runtime/tests/examples_load.rs). Substitute the
-       defaults, longest agent name first so the plain one cannot match
+       defaults as whole quoted names, so the plain one cannot match
        inside the go one. */ -}}
-{{- .Files.Get "files/demo.appa.toml" | replace "kagent__NS__log_analyst_go" (printf "%s__NS__%s" $ns $childGo) | replace "kagent__NS__log_analyst" (printf "%s__NS__%s" $ns $child) | replace "model = \"openai/gpt-5.6-luna\"\nurl = \"https://openrouter.ai/api/v1\"\n" $llm -}}
+{{- .Files.Get "files/demo.appa.toml" | replace "\"agent/kagent/log-analyst-go\"" (printf "\"agent/%s/%s\"" $ns $childGo) | replace "\"agent/kagent/log-analyst\"" (printf "\"agent/%s/%s\"" $ns $child) | replace "\"mcp/kagent-tool-server/" (printf "\"mcp/%s/" .Values.guide.toolServer) | replace "model = \"openai/gpt-5.6-luna\"\nurl = \"https://openrouter.ai/api/v1\"\n" $llm -}}
 {{- end -}}

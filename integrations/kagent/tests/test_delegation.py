@@ -82,7 +82,7 @@ SANITIZE = "Use sanitizer strip-instructions"
 def status(runtime_url: str, context_id: str) -> dict:
     """The runtime's reading of one root trajectory's current label.
 
-    The kagent codec names a root trajectory `kagent:<context id>`, and
+    The runtime names a kagent root trajectory `kagent:<context id>`, and
     an A2A task carries its context id. The read is a projection: it
     gates nothing and changes nothing.
     """
@@ -151,7 +151,7 @@ def one_child_session(monkeypatch) -> str:
 def test_the_child_s_value_crosses_at_its_own_stop_and_the_parent_replays_it(stack, runtime_url):
     """The declared delegation with nothing to sanitize, end to end.
 
-    The policy names `kagent__NS__log_analyst`, so the spawn is blocked
+    The policy names `agent/kagent/log-analyst`, so the spawn is blocked
     with the return menu, the plugin declares the bare floor, and the
     re-proposed call runs. The child's entry binds the prepared fork.
 

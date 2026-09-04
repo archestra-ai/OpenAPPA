@@ -10,7 +10,8 @@ and do not route around it.
 
 - Read: `k8s_get_resources`, `k8s_get_resource_yaml`.
 - Write and exec: `k8s_apply_manifest`, `k8s_execute_command`.
-- Files: the skill tool `appa-guide` and `read_file`.
+- Files: `skills` (this guide runs as `skills({"command": "appa-guide"})`)
+  and `read_file`.
 
 Use only these. Never kubectl, never bash, never a file write to change
 policy — the policy crosses through `k8s_apply_manifest` or not at all.
@@ -27,8 +28,8 @@ apply by hand. Do not treat this as an error.
 - Batteries are not shipped for kagent yet. If asked, say so and offer
   only root rules. Never invent a battery.
 - Do not configure this agent: skip the agent named `appa-guide`. The
-  router's rule on the reserved `execute_remedy_plan` applies the same
-  way here.
+  router's rule on the reserved `appa/execute_remedy_plan` applies the
+  same way here.
 
 ## Find the live config
 
@@ -47,8 +48,9 @@ apply by hand. Do not treat this as an error.
 ## Inventory
 
 1. List every `RemoteMCPServer`. Each `status.discoveredTools` entry is
-   one tool: its exact wire name and description. A server with no
-   discovered tools is uninspected — never invent its tool list.
+   one tool: its exact name and description. The policy names it
+   `mcp/<server name>/<tool>`. A server with no discovered tools is
+   uninspected — never invent its tool list.
 2. List every `Agent`. From `spec.declarative.tools` record each
    `McpServer` reference and its `toolNames`, and each `type: Agent`
    delegation. Note agents with skills or `executeCodeBlocks`: they add
@@ -63,22 +65,30 @@ apply by hand. Do not treat this as an error.
 4. Cross-check. A `toolNames` entry no server discovered has a name but
    no description; if its boundary is unclear, it belongs in the one
    ambiguity question below.
-5. Count these as installed tools: kagent's built-in `ask_user`, and the
-   entrypoint's synthetic `appa_code_execution` and
-   `appa_memory_persist`. An agent with `spec.declarative.memory` adds
-   the memory tools `load_memory` and `save_memory`. Its memory prefetch
-   hands the model no function to call: no rule covers it, and the
-   memories it appends cross no gate.
+5. Count these as installed tools: kagent's built-in `host/kagent/ask_user`,
+   and the entrypoint's gates `host/kagent-gate/code_execution` and
+   `host/kagent-gate/memory_persist`. An agent with
+   `spec.declarative.memory` adds the memory tools
+   `host/kagent/load_memory` and `host/kagent/save_memory`. Its memory
+   prefetch hands the model no function to call: no rule covers it, and
+   the memories it appends cross no gate.
 6. Compare the installed tools with the root rules. Existing rules stay
    in control, including rules for tools a battery would also cover.
 
-## Wire names
+## Tool names
 
-- MCP tools: the plain tool name. Duplicate names across servers share
-  one contract.
-- An agent called as a tool: `<namespace>__NS__<name>`, hyphens as
-  underscores. The wildcard covers no spawn: a delegation needs a
-  contract that names the agent, or it stays blocked.
+A rule names a tool by its canonical tool id:
+
+- A tool of the `RemoteMCPServer` or `ToolServer` served at
+  `<toolset>`, the first label of the server host in `params.url`:
+  `mcp/<toolset>/<tool>`. The same tool name on two servers is two
+  contracts.
+- An agent called as a tool: `agent/<namespace>/<name>`. The wildcard
+  covers no spawn: a delegation needs a contract that names the agent,
+  or it stays blocked.
+- A kagent built-in: `host/kagent/<name>`. The entrypoint gates:
+  `host/kagent-gate/code_execution` and `host/kagent-gate/memory_persist`.
+- The reserved `appa/execute_remedy_plan` takes no rule.
 
 ## Cover the remaining tools
 

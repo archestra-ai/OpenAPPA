@@ -3,7 +3,8 @@
 Use this battery for Claude Code sessions that need policy-aware shell commands
 and `self` labels on the requester's own secrets.
 
-It covers two built-in tools:
+It covers two built-in tools, which the policy names `host/claude-code/Bash`
+and `host/claude-code/Read`:
 
 - **Bash** — A command that names a credential path (`.env`, `.ssh/`, `.netrc`,
   `.claude.json`, `.aws/credentials`, a private key, ...) requires the
@@ -62,12 +63,12 @@ these root rules require fresh human approval for every `kubectl` command:
 
 ```toml
 [[policy.tool]]
-name = "Bash(command:kubectl)"
+name = "host/claude-code/Bash(command:kubectl)"
 requires = { attention = ["hitl"] }
 delta = { trust = "suspicious", audience = ["internal"] }
 
 [[policy.tool]]
-name = "Bash(command:kubectl *)"
+name = "host/claude-code/Bash(command:kubectl *)"
 requires = { attention = ["hitl"] }
 delta = { trust = "suspicious", audience = ["internal"] }
 

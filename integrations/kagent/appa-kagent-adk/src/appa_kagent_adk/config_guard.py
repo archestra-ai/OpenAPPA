@@ -15,8 +15,7 @@ import pydantic
 from pydantic import AliasChoices
 from pydantic.fields import FieldInfo
 
-from .plugin import RETURN_TOOL
-from .wire import RESERVED_TOOL
+from .wire import RESERVED_TOOL, RETURN_TOOL
 
 # The keys the kagent `_McpTlsMixin` reads from the raw `params` dict of
 # an MCP tool config, in its before-validator `_lift_tls_from_params`.

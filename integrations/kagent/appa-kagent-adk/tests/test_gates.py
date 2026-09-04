@@ -14,8 +14,8 @@ from appa_kagent_adk.gates import (
 from appa_kagent_adk.identity import SessionIdentity
 from appa_kagent_adk.plugin import AppaFailClosed
 
-ALLOW = {"decision": "allow_call"}
-ACK = {"decision": "ack"}
+ALLOW = {"protocol": 1, "decision": "allow_call"}
+ACK = {"protocol": 1, "decision": "ack"}
 
 
 class FakeExecutor:
@@ -53,18 +53,19 @@ def test_allowed_code_runs_and_its_output_crosses_as_a_tool_result():
     assert inner.ran == ["print(6*7)"]
     call, outcome = hook.events
     assert call == {
+        "protocol": 1,
+        "adapter": "kagent",
         "event": "tool_call",
         "root_id": "s1",
         "tool": CODE_EXECUTION_TOOL,
         "arguments": {"code": "print(6*7)"},
-        "spawn": False,
     }
     assert outcome["event"] == "tool_result"
     assert outcome["outcome"]["body"] == {"stdout": "6 * 7 = 42", "stderr": ""}
 
 
 def test_denied_code_never_reaches_the_subprocess():
-    hook = Hook({"decision": "deny_call", "feedback": "blocked: code egress is not permitted"})
+    hook = Hook({"protocol": 1, "decision": "deny_call", "feedback": "blocked: code egress is not permitted"})
     inner = FakeExecutor()
     executor = GatedCodeExecutor(inner, gate_over(hook))
     result = executor.execute_code(FakeInvocationContext(FakeSession("s1")), FakeCodeInput("import socket"))
@@ -74,7 +75,7 @@ def test_denied_code_never_reaches_the_subprocess():
 
 
 def test_a_blocked_code_output_is_withheld_from_the_model():
-    hook = Hook(ALLOW, {"decision": "block", "reason": "nothing crosses"})
+    hook = Hook(ALLOW, {"protocol": 1, "decision": "block", "reason": "nothing crosses"})
     executor = GatedCodeExecutor(FakeExecutor(), gate_over(hook))
     result = executor.execute_code(FakeInvocationContext(FakeSession("s1")), FakeCodeInput("print(6*7)"))
     assert result.stdout == ""
@@ -126,7 +127,7 @@ async def test_an_allowed_persist_runs_the_stock_callback_and_reports():
 
 
 async def test_a_denied_persist_writes_nothing_to_the_memory_backend():
-    hook = Hook({"decision": "deny_call", "feedback": "blocked: the session holds confidential values"})
+    hook = Hook({"protocol": 1, "decision": "deny_call", "feedback": "blocked: the session holds confidential values"})
     plugin = plugin_over(hook)
     ran = []
     agent = FakeAgent([stock_persist_callback(ran)])

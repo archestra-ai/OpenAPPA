@@ -581,10 +581,12 @@ pub(crate) fn covering_declaration(config: &RegistryConfig) -> ProfileDeclaratio
         confined_results: config
             .tools
             .iter()
-            // Coverage names written tools only: the wildcard is not a name a deployment confines.
-            .filter(|declaration| declaration.name().as_str() != crate::registry::WILDCARD_TOOL_NAME)
-            .map(|declaration| {
-                crate::registry::base_tool_name(declaration.name()).expect("test contracts have valid names")
+            .filter_map(|declaration| {
+                match crate::registry::contract_name(declaration.name()).expect("test contracts have valid names") {
+                    crate::registry::ContractName::Named(name) => Some(name),
+                    // Coverage names written tools only: the wildcard is not a name a deployment confines.
+                    crate::registry::ContractName::Wildcard => None,
+                }
             })
             .collect(),
         provider_surfaces: BTreeMap::new(),

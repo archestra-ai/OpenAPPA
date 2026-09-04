@@ -39,10 +39,12 @@ image. The plan names that image `ghcr.io/archestra-ai/appa-kagent-adk`.
 
 The operator guide lives at `website/content/docs/kagent.md`; the
 implementation plan, per-version mapping tables, and verification
-matrix live in [`../IMPLEMENTATION.md`](../IMPLEMENTATION.md). The
-adapter wire this package emits is parsed by the `appa-adapter-kagent`
-crate, and the shared fixtures in
-[`../fixtures/`](../fixtures/) hold both sides to one spelling.
+matrix live in [`../IMPLEMENTATION.md`](../IMPLEMENTATION.md). This
+package posts the canonical hook envelope
+(`appa-runtime-api/src/wire.rs`), with every tool under the structured
+spelling its inventory gives it (`inventory.py`), and the shared
+fixtures in [`../fixtures/`](../fixtures/) hold the python and Go
+plugins to one spelling.
 
 One plugin codebase serves both locked ADK majors — google-adk 1.31.1
 (kagent v0.9.12) and 2.8.0 (the v0.10 line). CI runs the tests twice,

@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 use crate::budget::{Exhausted, ForkUnavailable, Limits, RunBudget};
 use crate::provider::{OpenAiCompatible, ProviderError};
 use crate::record::{CallId, Record, Recorded};
-use crate::tools::{CONTROL_TOOL, ToolCatalogue, ToolShim};
+use crate::tools::{ADVERTISED_CONTROL_TOOL, ToolCatalogue, ToolShim, canonical_tool_name};
 use crate::wire::{ChatCompletionRequest, WireMessage, WireToolCall};
 
 /// A void child return is a control result, not an information-bearing value.
@@ -397,7 +397,7 @@ impl Run<'_> {
             ));
         };
         let proposed = ProposedCall {
-            tool: call.function.name.clone(),
+            tool: canonical_tool_name(&call.function.name).to_string(),
             arguments,
         };
         let id = CallId(call.id.clone());
@@ -632,7 +632,7 @@ impl Run<'_> {
             Ok(parsed) => parsed,
             Err(_) => {
                 return Ok(Answered::Reply(format!(
-                    "{CONTROL_TOOL} needs an offer_id, quoted exactly as the feedback surfaced it."
+                    "{ADVERTISED_CONTROL_TOOL} needs an offer_id, quoted exactly as the feedback surfaced it."
                 )));
             }
         };

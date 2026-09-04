@@ -209,7 +209,7 @@ Open a pull request against `archestra-ai/OpenAPPA` `main`. Include:
 The pull request is ready for review when:
 
 1. Repository CI passes.
-2. Every contract uses the exact tool name and arguments from that server version.
+2. Every contract uses the canonical tool id (`mcp/<server>/<tool>`) and the exact arguments from that server version.
 3. Every script passes its tests and refuses invalid input.
 4. The test that loads all batteries passes.
 5. The catalogue card opens the battery documentation page.

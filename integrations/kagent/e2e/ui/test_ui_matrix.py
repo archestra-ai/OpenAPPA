@@ -230,7 +230,7 @@ def test_a_delegation_the_policy_never_names_is_denied(chat, shots_dir):
     assert not chat.confirmation_shown(), "no confirmation card"
     results = chat.tool_results()
     assert "not declared by the policy" in results, "the runtime's denial reaches the parent's tool result"
-    assert UNDECLARED_TOOL in results, "the dashboard shows the attempted call, denied, and no child turn"
+    assert UNDECLARED_TOOL in results, "the denial the dashboard renders names the agent the policy never declared"
 
 
 def test_untrusted_ingress_is_gated_at_the_read(chat, shots_dir):

@@ -400,17 +400,16 @@ written. ADK's session keeps the event, as it does on python
 
 ## Spawn classification
 
-**Deviation from the python twin, forced by the go tree.** Python
-classifies agent-as-tool calls by class name (`AgentTool`,
-`KAgentRemoteA2ATool`). The go runtime has no such type:
-`NewKAgentRemoteA2ATool` returns a generic `functiontool`
-(`kagent go/adk/pkg/tools/remote_a2a_tool.go:199-226`), the same
-concrete type as any function tool. Classification is therefore
-name-based: the runtime main derives the spawn-tool names from
+Both plugins classify a call by the spelling the tool inventory gives
+it (`inventory.go`): the runtime main builds the inventory from
 `AgentConfig.RemoteAgents` — the same source the stock builder wires
 the tools from (`kagent go/adk/pkg/agent/agent.go:53-65`), skipping
-the same no-URL entries — and hands them to the plugin as
-`Config.SpawnTools`. The spawn-return shapes match python's:
+the same no-URL entries — and every remote agent spells
+`agent:<namespace>/<agent>`, the one class that is a spawn. No type
+check is involved: `NewKAgentRemoteA2ATool` returns a generic
+`functiontool` (`kagent go/adk/pkg/tools/remote_a2a_tool.go:199-226`),
+the same concrete type as any function tool. The spawn-return shapes
+match python's:
 `functiontool` converts the tool's `remoteA2AResponse` struct into a
 map with `result` and `subagent_session_id`
 (`adk-go tool/functiontool/function.go:227-246`,
@@ -424,10 +423,9 @@ declares `sub_agents` before the stock decoder runs (`configguard.go`,
 exit 1). The same guard refuses `agent_plugins` and any other top-level
 key outside the rc4 schema. On the decoded config it refuses
 `execute_code` true and a `context_config` that is not null (below).
-No in-process sub-agent runs on this baseline. The plugin classifies
-spawns by the configured remote-agent names only, so a
-`transfer_to_agent` call crosses as an ordinary
-`ToolCall{spawn:false}`. A sub-agent scope that opens in-process sends
+No in-process sub-agent runs on this baseline. The plugin gates only
+what the inventory spells, so a `transfer_to_agent` call is refused at
+the call gate like any undeclared tool. A sub-agent scope that opens in-process sends
 `child_start` with no spawn in flight, and the runtime refuses it
 (`SpawnNotTaken`, `appa-runtime/src/api/session.rs`). No test exercises
 `transfer_to_agent`. `TestARefusedChildScopeFailsClosed`
@@ -577,7 +575,7 @@ as planned; go tooling accepted it unchanged. The root package is
    differently-named scopes open `child_start`.
 5. A deferred (long-running) result crosses as an `indeterminate`
    outcome — a callback moment the python ADK never delivers (caveat 3
-   above). The wire already carries the status; the codec parses it.
+   above). The wire already carries the status; the runtime reads it.
 6. The `/mcp` leg of the return declaration imports
    `github.com/modelcontextprotocol/go-sdk/mcp` directly, where the
    python cell imports the python MCP client inside the function.

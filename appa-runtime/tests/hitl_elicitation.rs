@@ -318,7 +318,7 @@ async fn execute_with<H: ClientHandler>(deployment: &Deployment, reviewer: H, ru
                 child: None,
             },
             call: ProposedCall {
-                tool: "execute_remedy_plan".to_string(),
+                tool: appa_runtime_api::CONTROL_TOOL.to_string(),
                 arguments: raw(serde_json::json!({ "offer_id": deployment.offer })),
             },
             spawn: false,

@@ -18,6 +18,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"sort"
@@ -46,7 +47,17 @@ const (
 	contextCompaction
 	// reservedToolName: a declared tool carries an APPA-owned name.
 	reservedToolName
+	// unfilteredToolset: an MCP entry declares no tool filter, so the
+	// gate cannot name the tools the server would hand the agent.
+	unfilteredToolset
+	// unspellableTool: a declared tool name the wire cannot spell, or
+	// one raw name declared twice.
+	unspellableTool
 )
+
+// skillsFolderEnv is the variable the kagent go runtime reads to attach
+// its skills tools. The inventory switches the skills builtins on it.
+const skillsFolderEnv = "KAGENT_SKILLS_FOLDER"
 
 // configRefusal is the guard's error: which refusal fired and the keys
 // it names. The outsideSchema kind lists its keys sorted. The
@@ -77,6 +88,11 @@ func (r *configRefusal) Error() string {
 	case reservedToolName:
 		return fmt.Sprintf("config.json declares a tool named %s at %s, and OpenAPPA owns that name. Rename the tool.",
 			r.feature, r.keys[0])
+	case unfilteredToolset:
+		return fmt.Sprintf("config.json declares the MCP server at %s with no tool filter, and the gate names only what the "+
+			"config declares. List under tools every tool of this server the agent may call.", r.keys[0])
+	case unspellableTool:
+		return "config.json declares a tool the wire cannot spell: " + r.detail
 	default:
 		return "config.json carries top-level fields outside this image's rc4 schema, and the runtime does not run " +
 			"what it cannot gate: " + strings.Join(r.keys, ", ")
@@ -129,25 +145,83 @@ func topLevelJSONKeys(t reflect.Type) map[string]struct{} {
 // config.json on a top-level key this image cannot represent. It
 // decodes the same bytes through the stock decoder. It then refuses
 // the decoded config on a declared tool that carries an APPA-owned
-// name, and then on a value the Go runtime would ignore. It returns
-// the decoded config for a config it accepts. A refusal is a
-// *configRefusal. A decode failure is the stock decoder's own error,
-// wrapped as the stock loader wraps it.
-func decodeGuarded(raw []byte) (*adk.AgentConfig, error) {
+// name, and then on a value the Go runtime would ignore. Last it
+// builds the tool inventory the gate spells every call by, and refuses
+// a config the inventory cannot spell: an MCP entry with no tool
+// filter, a name outside the wire, a name declared twice. It returns
+// the decoded config and its inventory for a config it accepts. A
+// refusal is a *configRefusal. A decode failure is the stock decoder's
+// own error, wrapped as the stock loader wraps it.
+//
+// skillsFolder is the value of KAGENT_SKILLS_FOLDER: while it names a
+// directory the stock builder attaches its skills tools, and the
+// inventory spells them.
+func decodeGuarded(raw []byte, skillsFolder string) (*adk.AgentConfig, appakagentadk.Inventory, error) {
 	if err := refuseUnsupported(raw); err != nil {
-		return nil, err
+		return nil, appakagentadk.Inventory{}, err
 	}
 	var agentConfig adk.AgentConfig
 	if err := json.Unmarshal(raw, &agentConfig); err != nil {
-		return nil, fmt.Errorf("failed to parse config file: %w", err)
+		return nil, appakagentadk.Inventory{}, fmt.Errorf("failed to parse config file: %w", err)
 	}
 	if err := refuseReservedToolNames(&agentConfig); err != nil {
-		return nil, err
+		return nil, appakagentadk.Inventory{}, err
 	}
 	if err := refuseIgnoredValues(&agentConfig); err != nil {
-		return nil, err
+		return nil, appakagentadk.Inventory{}, err
 	}
-	return &agentConfig, nil
+	inventory, err := appakagentadk.BuildInventory(inventorySpec(&agentConfig, skillsFolder))
+	if err != nil {
+		return nil, appakagentadk.Inventory{}, refuseInventory(err)
+	}
+	return &agentConfig, inventory, nil
+}
+
+// inventorySpec reads off the decoded config what the inventory
+// spells: every MCP entry with its filter, every remote agent the stock
+// builder wires (one with no URL is skipped, as the builder skips it),
+// and the switches of the builtin groups.
+func inventorySpec(agentConfig *adk.AgentConfig, skillsFolder string) appakagentadk.InventorySpec {
+	var spec appakagentadk.InventorySpec
+	for index, server := range agentConfig.HttpTools {
+		spec.MCPServers = append(spec.MCPServers, appakagentadk.MCPServerSpec{
+			Path: fmt.Sprintf("http_tools[%d]", index), URL: server.Params.Url, Tools: server.Tools,
+		})
+	}
+	for index, server := range agentConfig.SseTools {
+		spec.MCPServers = append(spec.MCPServers, appakagentadk.MCPServerSpec{
+			Path: fmt.Sprintf("sse_tools[%d]", index), URL: server.Params.Url, Tools: server.Tools,
+		})
+	}
+	for index, remoteAgent := range agentConfig.RemoteAgents {
+		if remoteAgent.Url == "" {
+			continue
+		}
+		spec.RemoteAgents = append(spec.RemoteAgents, appakagentadk.RemoteAgentSpec{
+			Path: fmt.Sprintf("remote_agents[%d].name", index), Name: remoteAgent.Name,
+		})
+	}
+	spec.Builtins = appakagentadk.BuiltinGroups{
+		Memory:     agentConfig.Memory != nil,
+		Skills:     strings.TrimSpace(skillsFolder) != "",
+		ShareTools: agentConfig.ShareTools != nil && *agentConfig.ShareTools,
+	}
+	return spec
+}
+
+// refuseInventory maps the inventory's refusal onto the guard's. Any
+// other error is the manifest this image ships, and it surfaces as is.
+func refuseInventory(err error) error {
+	var refusal *appakagentadk.InventoryRefusal
+	if !errors.As(err, &refusal) {
+		return err
+	}
+	switch refusal.Kind {
+	case appakagentadk.UnfilteredToolset:
+		return &configRefusal{kind: unfilteredToolset, keys: []string{refusal.Path}}
+	default:
+		return &configRefusal{kind: unspellableTool, keys: []string{refusal.Path}, feature: refusal.Name, detail: refusal.Error()}
+	}
 }
 
 // refuseUnsupported refuses a raw config.json whose top-level keys this

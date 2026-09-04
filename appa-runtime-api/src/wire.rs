@@ -123,9 +123,10 @@ impl WireOutcome {
                 body: OutcomeBody::Available(body),
             } => Self {
                 status: OutcomeStatus::Success,
-                body: Some(RawValue::from_string(body.clone()).map_err(|error| {
-                    malformed(format!("a success outcome whose body is not JSON: {error}"))
-                })?),
+                body: Some(
+                    RawValue::from_string(body.clone())
+                        .map_err(|error| malformed(format!("a success outcome whose body is not JSON: {error}")))?,
+                ),
                 message: None,
             },
             ToolOutcome::Success {
@@ -374,7 +375,11 @@ impl WireEvent {
         };
         let actor = || -> Result<Actor, ParseRefusal> {
             let root = root()?;
-            let child = self.child_id.as_deref().filter(|id| !id.is_empty()).map(|id| child_of(&root, id));
+            let child = self
+                .child_id
+                .as_deref()
+                .filter(|id| !id.is_empty())
+                .map(|id| child_of(&root, id));
             Ok(Actor { root, child })
         };
         let named_child = || -> Result<(TrajectoryId, TrajectoryId), ParseRefusal> {
@@ -407,18 +412,17 @@ impl WireEvent {
         };
         let value = || self.value.clone().filter(|value| !value.is_empty());
 
-        let accepted = |event: HookEvent| Ok(Some(Accepted {
-            event,
-            names_children: Vec::new(),
-        }));
+        let accepted = |event: HookEvent| {
+            Ok(Some(Accepted {
+                event,
+                names_children: Vec::new(),
+            }))
+        };
         match name {
             EventName::Ping => Ok(None),
             EventName::SessionStart => accepted(HookEvent::SessionStart { root: root()? }),
             EventName::Prompt => match self.text.clone() {
-                Some(text) => accepted(HookEvent::Prompt {
-                    actor: actor()?,
-                    text,
-                }),
+                Some(text) => accepted(HookEvent::Prompt { actor: actor()?, text }),
                 None => Err(malformed("prompt without its text")),
             },
             EventName::TurnEnd => accepted(HookEvent::TurnEnd { actor: actor()? }),
@@ -729,7 +733,8 @@ mod tests {
     }
 
     fn derive(actor: &Actor, call: &ProposedCall) -> Result<Derived, ParseRefusal> {
-        let canonical = CanonicalTool::parse(&format!("host/test/{}", call.tool)).map_err(|error| malformed(error.to_string()))?;
+        let canonical =
+            CanonicalTool::parse(&format!("host/test/{}", call.tool)).map_err(|error| malformed(error.to_string()))?;
         Ok(Derived {
             canonical,
             spawn: call.tool == "spawn",
@@ -755,7 +760,12 @@ mod tests {
             .expect("parses")
             .expect("is an event");
         match accepted.event {
-            HookEvent::ToolCall { actor, call, spawn, ruling } => {
+            HookEvent::ToolCall {
+                actor,
+                call,
+                spawn,
+                ruling,
+            } => {
                 assert_eq!(actor.root.0, "kagent:r1");
                 assert_eq!(call.tool, "host/test/spawn");
                 assert_eq!(call.arguments.get(), r#"{"a":1,"a":2}"#, "arguments cross unparsed");
@@ -770,12 +780,19 @@ mod tests {
     #[test]
     fn a_wire_spawn_field_is_ignored_and_names_children_derives() {
         let body = br#"{"protocol":1,"adapter":"kagent","event":"tool_call","root_id":"r1","tool":"read","spawn":true,"arguments":{"path":"tasks/child-1.output"}}"#;
-        let accepted = WireEvent::read(body).expect("reads").into_event(&SERVED).expect("parses").expect("event");
+        let accepted = WireEvent::read(body)
+            .expect("reads")
+            .into_event(&SERVED)
+            .expect("parses")
+            .expect("event");
         match accepted.event {
             HookEvent::ToolCall { spawn, .. } => assert!(!spawn),
             other => panic!("{other:?}"),
         }
-        assert_eq!(accepted.names_children, vec![TrajectoryId("kagent:r1:child-1".to_string())]);
+        assert_eq!(
+            accepted.names_children,
+            vec![TrajectoryId("kagent:r1:child-1".to_string())]
+        );
     }
 
     #[test]
@@ -793,7 +810,10 @@ mod tests {
             .into_event(&SERVED)
             .expect("parses");
         assert!(ping.is_none());
-        assert!(matches!(WireEvent::read(b"not json"), Err(ParseRefusal::Unreadable { .. })));
+        assert!(matches!(
+            WireEvent::read(b"not json"),
+            Err(ParseRefusal::Unreadable { .. })
+        ));
         assert!(matches!(
             WireEvent::read(br#"{"protocol":1,"adapter":"kagent","event":"teleport"}"#),
             Err(ParseRefusal::Malformed { .. })
@@ -828,9 +848,19 @@ mod tests {
             name: AdapterName::ClaudeCode,
             derive,
         };
-        let back = WireEvent::read(&bytes).expect("reads").into_event(&served).expect("parses").expect("event");
+        let back = WireEvent::read(&bytes)
+            .expect("reads")
+            .into_event(&served)
+            .expect("parses")
+            .expect("event");
         match back.event {
-            HookEvent::SpawnResult { actor, child, value, call, .. } => {
+            HookEvent::SpawnResult {
+                actor,
+                child,
+                value,
+                call,
+                ..
+            } => {
                 assert_eq!(actor.child.map(|c| c.0), Some("cc:s1:a1".to_string()));
                 assert_eq!(child.map(|c| c.0), Some("cc:s1:a2".to_string()));
                 assert_eq!(value.as_deref(), Some("done"));
@@ -881,12 +911,8 @@ mod tests {
             HookDecision::ReplaceOutput {
                 output: "o".to_string(),
             },
-            HookDecision::ChildReturn {
-                value: "v".to_string(),
-            },
-            HookDecision::Context {
-                text: "t".to_string(),
-            },
+            HookDecision::ChildReturn { value: "v".to_string() },
+            HookDecision::Context { text: "t".to_string() },
             HookDecision::Refuse {
                 detail: "d".to_string(),
             },
@@ -907,11 +933,9 @@ mod tests {
         }))
         .expect("serializes");
         assert_eq!(offers["offers"][0]["returns"], "as_spoken");
-        let missing: WireDecision =
-            serde_json::from_str(r#"{"protocol":1,"decision":"block"}"#).expect("reads");
+        let missing: WireDecision = serde_json::from_str(r#"{"protocol":1,"decision":"block"}"#).expect("reads");
         assert!(matches!(missing.into_decision(), Err(ParseRefusal::Malformed { .. })));
-        let foreign: WireDecision =
-            serde_json::from_str(r#"{"protocol":9,"decision":"ack"}"#).expect("reads");
+        let foreign: WireDecision = serde_json::from_str(r#"{"protocol":9,"decision":"ack"}"#).expect("reads");
         assert!(matches!(foreign.into_decision(), Err(ParseRefusal::Malformed { .. })));
     }
 }

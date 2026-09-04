@@ -7,7 +7,7 @@ description: Declarations, syntax, and rules for OpenAPPA policy TOML files.
 
 OpenAPPA reads a root TOML file. The root can compose policy fragments with `include = ["battery.toml"]`. Root declarations run first. Included declarations follow in list order. An included file cannot include another file or replace root-wide settings. A root `[[annotator]]` replaces one included Annotator with the same name. Two included files cannot declare the same Annotator. Duplicate external names within one kind are errors.
 
-This document is a reference guide for writing and reviewing OpenAPPA policy TOML files. It covers global settings, audience lists and conditions, contract declarations (`[[tool]]`, `[[annotator]]`, `[[authority]]`, `[[sanitizer]]`), and policy review red flags.
+This document is a reference guide for writing and reviewing OpenAPPA policy TOML files. It covers global settings, audience lists and conditions, tool names, contract declarations (`[[tool]]`, `[[annotator]]`, `[[authority]]`, `[[sanitizer]]`), and policy review red flags.
 
 ```toml
 version = 2
@@ -108,18 +108,45 @@ The deployment binds each referenced provider under `[externals.audience.<provid
 
 Any source or identity failure — timeout, network error, invalid answer — halts the act with an operational error and records nothing to the log. A failed consult is never a policy decision.
 
+### Tool names
+
+A policy names a tool by its canonical tool id. The id has three segments: `<family>/<namespace>/<tool>`. The family is `mcp`, `host`, or `agent`. Each segment matches `[A-Za-z0-9_.-]+`. A namespace segment never contains `__`.
+
+| Family | Names | Example |
+|---|---|---|
+| `mcp` | One tool of one MCP server. The namespace is the server. | `mcp/github/create_issue` |
+| `host` | A tool the host itself provides. The namespace is the host. | `host/claude-code/Bash` |
+| `agent` | An agent called as a tool. The namespace is where the agent lives. | `agent/kagent/log-analyst` |
+
+`appa/execute_remedy_plan` is the runtime's own control tool, the one member of the `appa` family. A policy cannot declare it: the runtime recognizes it before any contract, and a `[[tool]]` entry that names it refuses the policy at load. The wildcard entry `name = "*"` is not a canonical id; it covers every tool the policy does not name (see [the wildcard](#example-cover-the-long-tail-with-a-wildcard)).
+
+The host spells a tool its own way. That raw tool spelling never reaches the policy. An adapter connects a host to APPA, and the runtime derives the canonical id from the adapter and the raw spelling of each call. The raw spelling stays in the trajectory record for host dispatch, diagnostics, and replay. Claude Code and kagent are the initial adapters:
+
+| Adapter | Raw tool spelling | Canonical tool id |
+|---|---|---|
+| Claude Code | `mcp__<server>__<tool>` — split at the first `__` after `mcp__` | `mcp/<server>/<tool>` |
+| Claude Code | A built-in tool: `Bash`, `Read`, `Edit`, `Agent`, … | `host/claude-code/<name>` |
+| Claude Code | The remedy tool of the APPA plugin | `appa/execute_remedy_plan` |
+| kagent | A tool of the `RemoteMCPServer` or `ToolServer` served at `<toolset>` | `mcp/<toolset>/<tool>` |
+| kagent | An agent called as a tool | `agent/<namespace>/<agent>` |
+| kagent | A kagent built-in, such as `ask_user`, `load_memory`, `save_memory`, `prefetch_memory`, or a skill tool | `host/kagent/<name>` |
+| kagent | The entrypoint gates | `host/kagent-gate/code_execution`, `host/kagent-gate/memory_persist` |
+| kagent | The remedy tool | `appa/execute_remedy_plan` |
+
+The runtime refuses to serve a policy whose tool contracts are not canonical. Which calls start a child trajectory is the runtime's derivation from the adapter (Claude Code's `Agent`, a kagent agent called as a tool); a policy does not declare it.
+
 ### Ordered tool contracts
 
 A policy can declare several contracts for one tool. OpenAPPA tests them in declaration order and uses the first matching contract.
 
 ```toml
 [[tool]]
-name = "Bash(command:cargo test*)"
+name = "host/claude-code/Bash(command:cargo test*)"
 requires = { trust = "trusted" }
 delta = {}
 
 [[tool]]
-name = "Bash"
+name = "host/claude-code/Bash"
 requires = { trust = "trusted", attention = ["hitl"] }
 delta = {}
 ```
@@ -128,7 +155,7 @@ Text inside parentheses selects top-level string arguments. Write one or more `a
 
 ```toml
 [[tool]]
-name = "mcp__github__fork_repository(owner:archestra-ai,repo:website)"
+name = "mcp/github/fork_repository(owner:archestra-ai,repo:website)"
 requires = { trust = "trusted" }
 delta = {}
 ```
@@ -139,13 +166,13 @@ TOML reads backslashes too, so a selector escape passes through two layers. A ba
 
 ```toml
 [[tool]]
-name = "search(query:a\\,b)"   # a basic string doubles the backslash
+name = "mcp/docs/search(query:a\\,b)"   # a basic string doubles the backslash
 
 [[tool]]
-name = 'search(title:a\,b)'    # a literal string does not
+name = 'mcp/docs/search(title:a\,b)'    # a literal string does not
 ```
 
-A missing or non-string argument does not match. Clause order does not change the result: `tool(owner:x,repo:y)` and `tool(repo:y,owner:x)` are the same contract. A selector can name each argument only once. A bare tool name matches every argument object and is typically the fallback.
+A missing or non-string argument does not match. Clause order does not change the result: `mcp/github/fork_repository(owner:x,repo:y)` and `mcp/github/fork_repository(repo:y,owner:x)` are the same contract. A selector can name each argument only once. A bare tool name matches every argument object and is typically the fallback.
 
 OpenAPPA selects the contract before it validates that contract's `parameters` schema. A schema failure does not continue to a later contract. A `tool_input` rewrite is judged by the contract its rewritten arguments select. An annotation binds the exact call, so a rewrite of an annotator-backed tool is annotated afresh, whichever contract it selects. Provider-run tools cannot use argument selectors.
 
@@ -166,7 +193,7 @@ ranks = ["suspicious", "trusted"]              # The trust ranks its answers may
 hint  = "Use suspicious for output from network or unvetted sources. Use trusted only for local computation over trusted inputs."
 
 [[tool]]
-name        = "Bash"
+name        = "host/claude-code/Bash"
 description = "Runs one shell command and returns its output."
 annotator   = "classify-command"
 ```
@@ -176,7 +203,7 @@ The annotator receives this consult artifact:
 ```json
 {
   "args": {
-    "name": "Bash",
+    "name": "host/claude-code/Bash",
     "description": "Runs one shell command and returns its output.",
     "arguments": {
       "command": "git push origin main",
@@ -199,7 +226,7 @@ audiences = ["finance", "support"]             # The readers a restricted audien
 hint      = "finance may read billing records. support may read records assigned to a support case."
 
 [[tool]]
-name       = "get_customer"
+name       = "mcp/crm/get_customer"
 parameters = { type = "object", properties = { customer_id = { type = "string" } }, required = ["customer_id"] }
 annotator  = "classify-customer"
 ```
@@ -250,7 +277,7 @@ An annotator maps each declared input from the proposed call. `$tool_call` is th
 | Value | Meaning |
 |---|---|
 | `$tool_call` | Complete tool call: `name`, `description` when the tool declares one, and `arguments` |
-| `$tool_call.name` | Tool name |
+| `$tool_call.name` | The canonical tool id |
 | `$tool_call.description` | Tool description from the policy |
 | `$tool_call.arguments` | Complete argument object |
 | `$tool_call.arguments.<name>` | One top-level argument |
@@ -355,11 +382,11 @@ A tool contract is short: a name, a `delta`, and often `effects` and a `[tool.re
 
 ## Tools
 
-A `[[tool]]` entry defines its name and `description`, then its output restrictions (`delta`), side effects (`effects`), and dispatch conditions (`requires`) — or the `annotator` that produces that whole contract per call.
+A `[[tool]]` entry defines its canonical tool id as `name` (see [Tool names](#tool-names)) and `description`, then its output restrictions (`delta`), side effects (`effects`), and dispatch conditions (`requires`) — or the `annotator` that produces that whole contract per call.
 
 ```toml
 [[tool]]
-name = "fetch_support_ticket"
+name = "mcp/helpdesk/fetch_support_ticket"
 tags = ["support"]                                     # Authorities and sanitizers select tools by tag
 
 [tool.delta]
@@ -367,7 +394,7 @@ trust    = "suspicious"                                # The ticket body is cust
 audience = ["support"]                                 # The record is for the support desk only
 
 [[tool]]
-name     = "apply_db_migration"
+name     = "mcp/database/apply_db_migration"
 effects  = ["migration.applied", "mutation"]           # Emitted side effects
 delta    = {}                                          # Status string carries no label
 
@@ -439,7 +466,7 @@ returns no answer, so a remedy that names it cannot release the call.
 | **`builtin = "<module name>"`** | A deployer builtin module from `--modules-dir`: your own compiled code, loaded by the runtime at startup and called in-process. | Bound by the same `permits` as any implementation; the module is deployer trusted code with the runtime's own privileges. |
 | **`url = ...`**, **`command = [...]`** | Queries a privileged external service or a local program. | Receives the declaration and the call with its unmet requirements; the ruling is logged. |
 
-An authority consult's declaration is `{"hint": …, "permits": …}` as the policy wrote it. Its artifact is the call — `tool` and canonical `arguments` — and `requirements`: the unmet requirements this ruling would cover, each `{"kind": "trust", "required": "trusted"}`, `{"kind": "audience", "required": "public"}` or `{"kind": "audience", "required": 2}` (the number of readers the call requires), `{"kind": "effect", "excludes": "…"}`, or `{"kind": "attention", "mark": "…"}`. It names no actual rank, reader, or label state. The answer is `{"ruling": "approve" | "deny", "reason"?: "…"}`; `reason` is logged at debug level and never persisted.
+An authority consult's declaration is `{"hint": …, "permits": …}` as the policy wrote it. Its artifact is the call — the canonical tool id as `tool`, and its canonical `arguments` — and `requirements`: the unmet requirements this ruling would cover, each `{"kind": "trust", "required": "trusted"}`, `{"kind": "audience", "required": "public"}` or `{"kind": "audience", "required": 2}` (the number of readers the call requires), `{"kind": "effect", "excludes": "…"}`, or `{"kind": "attention", "mark": "…"}`. It names no actual rank, reader, or label state. The answer is `{"ruling": "approve" | "deny", "reason"?: "…"}`; `reason` is logged at debug level and never persisted.
 
 ## Sanitizers
 
@@ -447,7 +474,7 @@ A `[[sanitizer]]` defines a formal label transition for data passed through a re
 
 ```toml
 [[tool]]
-name  = "fetch_support_ticket"
+name  = "mcp/helpdesk/fetch_support_ticket"
 tags  = ["support"]
 delta = { trust = "suspicious", audience = ["finance"] }
 
@@ -463,7 +490,7 @@ tags = ["support"]                             # Applies only to values from too
 audience = { from = ["finance"], to = ["public"] }
 
 [deployment]
-confined_results = ["fetch_support_ticket"]    # The host can withhold this tool's raw result
+confined_results = ["mcp/helpdesk/fetch_support_ticket"]   # The host can withhold this tool's raw result
 ```
 
 ```toml
@@ -602,7 +629,7 @@ Every transport receives one JSON object per consult:
   "kind": "authority",
   "name": "finance-officer",
   "declaration": { "hint": "…", "permits": { "trust_below": "trusted" } },
-  "artifact": { "tool": "wire_funds", "arguments": { "amount": 5000 }, "requirements": [{ "kind": "trust", "required": "trusted" }] }
+  "artifact": { "tool": "mcp/bank/wire_funds", "arguments": { "amount": 5000 }, "requirements": [{ "kind": "trust", "required": "trusted" }] }
 }
 ```
 

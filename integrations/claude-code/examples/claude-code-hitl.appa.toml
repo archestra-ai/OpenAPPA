@@ -2,7 +2,7 @@
 # authority on one tool. Read `claude-code.appa.toml` first: this file
 # is that policy plus the `hitl` wiring.
 #
-# Creating a GitHub issue — `mcp__github__issue_write` — carries an
+# Creating a GitHub issue — `mcp/github/issue_write` — carries an
 # attention mark. An attention mark is a requirement no label can
 # satisfy: only an authority whose `permits.attention` lists it clears
 # it, so every issue write stops and asks the `operator` authority to
@@ -17,7 +17,7 @@
 #
 # To try it: connect the GitHub MCP server, then ask the session to
 # file an issue. The call is blocked, the model calls
-# `execute_remedy_plan` with the offer id from the feedback, and a
+# `appa/execute_remedy_plan` with the offer id from the feedback, and a
 # dialog appears carrying the issue title and body it would post.
 # Accepting rules; declining ends every offer naming `operator` for
 # that exact call; cancelling leaves the offer standing
@@ -46,183 +46,183 @@ version = 2
 # the subagent running, with the reason or the exact text to return, until
 # it stops with one that may.
 [[policy.tool]]
-name = "Agent"
+name = "host/claude-code/Agent"
 delta = {}
 
 [[policy.tool]]
-name = "AskUserQuestion"
+name = "host/claude-code/AskUserQuestion"
 delta = {}
 
 [[policy.tool]]
-name = "Artifact"
+name = "host/claude-code/Artifact"
 delta = {}
 
 [[policy.tool]]
-name = "Bash"
+name = "host/claude-code/Bash"
 delta = {}
 
 [[policy.tool]]
-name = "BashOutput"
+name = "host/claude-code/BashOutput"
 delta = {}
 
 [[policy.tool]]
-name = "CronCreate"
+name = "host/claude-code/CronCreate"
 delta = {}
 
 [[policy.tool]]
-name = "CronDelete"
+name = "host/claude-code/CronDelete"
 delta = {}
 
 [[policy.tool]]
-name = "CronList"
+name = "host/claude-code/CronList"
 delta = {}
 
 [[policy.tool]]
-name = "Edit"
+name = "host/claude-code/Edit"
 delta = {}
 
 [[policy.tool]]
-name = "EnterPlanMode"
+name = "host/claude-code/EnterPlanMode"
 delta = {}
 
 [[policy.tool]]
-name = "EnterWorktree"
+name = "host/claude-code/EnterWorktree"
 delta = {}
 
 [[policy.tool]]
-name = "ExitPlanMode"
+name = "host/claude-code/ExitPlanMode"
 delta = {}
 
 [[policy.tool]]
-name = "ExitWorktree"
+name = "host/claude-code/ExitWorktree"
 delta = {}
 
 [[policy.tool]]
-name = "Glob"
+name = "host/claude-code/Glob"
 delta = {}
 
 [[policy.tool]]
-name = "Grep"
+name = "host/claude-code/Grep"
 delta = {}
 
 [[policy.tool]]
-name = "KillShell"
+name = "host/claude-code/KillShell"
 delta = {}
 
 [[policy.tool]]
-name = "LSP"
+name = "host/claude-code/LSP"
 delta = {}
 
 [[policy.tool]]
-name = "ListAgents"
+name = "host/claude-code/ListAgents"
 delta = {}
 
 [[policy.tool]]
-name = "ListMcpResourcesTool"
+name = "host/claude-code/ListMcpResourcesTool"
 delta = {}
 
 [[policy.tool]]
-name = "Monitor"
+name = "host/claude-code/Monitor"
 delta = {}
 
 [[policy.tool]]
-name = "NotebookEdit"
+name = "host/claude-code/NotebookEdit"
 delta = {}
 
 [[policy.tool]]
-name = "PushNotification"
+name = "host/claude-code/PushNotification"
 delta = {}
 
 [[policy.tool]]
-name = "Read"
+name = "host/claude-code/Read"
 delta = {}
 
 [[policy.tool]]
-name = "ReadMcpResourceDirTool"
+name = "host/claude-code/ReadMcpResourceDirTool"
 delta = {}
 
 [[policy.tool]]
-name = "ReadMcpResourceTool"
+name = "host/claude-code/ReadMcpResourceTool"
 delta = {}
 
 [[policy.tool]]
-name = "ReportFindings"
+name = "host/claude-code/ReportFindings"
 delta = {}
 
 [[policy.tool]]
-name = "ScheduleWakeup"
+name = "host/claude-code/ScheduleWakeup"
 delta = {}
 
 [[policy.tool]]
-name = "SendMessage"
+name = "host/claude-code/SendMessage"
 delta = {}
 
 [[policy.tool]]
-name = "SendUserFile"
+name = "host/claude-code/SendUserFile"
 delta = {}
 
 [[policy.tool]]
-name = "Skill"
+name = "host/claude-code/Skill"
 delta = {}
 
 [[policy.tool]]
-name = "SlashCommand"
+name = "host/claude-code/SlashCommand"
 delta = {}
 
 # `Task` is the earlier name of `Agent`: the same spawn, the same contract.
 [[policy.tool]]
-name = "Task"
+name = "host/claude-code/Task"
 delta = {}
 
 [[policy.tool]]
-name = "TaskCreate"
+name = "host/claude-code/TaskCreate"
 delta = {}
 
 [[policy.tool]]
-name = "TaskGet"
+name = "host/claude-code/TaskGet"
 delta = {}
 
 [[policy.tool]]
-name = "TaskList"
+name = "host/claude-code/TaskList"
 delta = {}
 
 [[policy.tool]]
-name = "TaskOutput"
+name = "host/claude-code/TaskOutput"
 delta = {}
 
 [[policy.tool]]
-name = "TaskStop"
+name = "host/claude-code/TaskStop"
 delta = {}
 
 [[policy.tool]]
-name = "TaskUpdate"
+name = "host/claude-code/TaskUpdate"
 delta = {}
 
 [[policy.tool]]
-name = "TodoWrite"
+name = "host/claude-code/TodoWrite"
 delta = {}
 
 [[policy.tool]]
-name = "ToolSearch"
+name = "host/claude-code/ToolSearch"
 delta = {}
 
 [[policy.tool]]
-name = "Workflow"
+name = "host/claude-code/Workflow"
 delta = {}
 
 [[policy.tool]]
-name = "Write"
+name = "host/claude-code/Write"
 delta = {}
 
 # --- tools that bring outside content into the session ---
 
 # Web pages and search results are authored outside the session.
 [[policy.tool]]
-name = "WebFetch"
+name = "host/claude-code/WebFetch"
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
-name = "WebSearch"
+name = "host/claude-code/WebSearch"
 delta = { trust = "suspicious" }
 
 # --- GitHub, through the GitHub MCP server ---
@@ -232,45 +232,45 @@ delta = { trust = "suspicious" }
 # page does. A GitHub tool this file does not name is blocked.
 
 [[policy.tool]]
-name = "mcp__github__get_me"
+name = "mcp/github/get_me"
 delta = {}
 
 [[policy.tool]]
-name = "mcp__github__search_issues"
+name = "mcp/github/search_issues"
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
-name = "mcp__github__list_issues"
+name = "mcp/github/list_issues"
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
-name = "mcp__github__issue_read"
+name = "mcp/github/issue_read"
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
-name = "mcp__github__list_issue_types"
+name = "mcp/github/list_issue_types"
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
-name = "mcp__github__search_code"
+name = "mcp/github/search_code"
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
-name = "mcp__github__get_file_contents"
+name = "mcp/github/get_file_contents"
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
-name = "mcp__github__list_pull_requests"
+name = "mcp/github/list_pull_requests"
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
-name = "mcp__github__pull_request_read"
+name = "mcp/github/pull_request_read"
 delta = { trust = "suspicious" }
 
 # The sink. Publishing an issue is what the human rules on: the review
 # carries the exact title and body this call would post.
 [[policy.tool]]
-name = "mcp__github__issue_write"
+name = "mcp/github/issue_write"
 delta = { trust = "suspicious" }
 requires = { attention = ["operator-signoff"] }
 
@@ -312,6 +312,6 @@ max_body_bytes = 65536
 
 # `hitl` is the reserved human authority. This runtime
 # serves it over MCP elicitation, inside the still-open
-# `execute_remedy_plan` call that asked for the ruling.
+# `appa/execute_remedy_plan` call that asked for the ruling.
 [externals.authorities.operator]
 builtin = "hitl"

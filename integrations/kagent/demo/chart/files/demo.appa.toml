@@ -7,6 +7,12 @@
 # child, and the human-review authority. Serve it from one
 # `appa-runtime` that every agent pod reaches, so a parent and its
 # delegated child land in one trajectory.
+#
+# Every tool is named by its canonical id: `mcp/<toolset>/<tool>` for a
+# tool of the `RemoteMCPServer` named `<toolset>` (`demo-tools` and the
+# kagent tool server here), `agent/<namespace>/<agent>` for an agent
+# called as a tool, `host/kagent/<tool>` for kagent's own built-in
+# tools, and `host/kagent-gate/<gate>` for the entrypoint's gates.
 
 [policy]
 version = 2
@@ -14,31 +20,31 @@ version = 2
 # --- in-cluster reads that stay inside the session ---
 
 [[policy.tool]]
-name = "list_pods"
+name = "mcp/demo-tools/list_pods"
 delta = {}
 
 [[policy.tool]]
-name = "read_configmap"
+name = "mcp/demo-tools/read_configmap"
 delta = {}
 
 [[policy.tool]]
-name = "read_secret"
+name = "mcp/demo-tools/read_secret"
 delta = { audience = ["ops"] }
 
 # --- ingress authored outside the session ---
 
 [[policy.tool]]
-name = "get_pod_logs"
+name = "mcp/demo-tools/get_pod_logs"
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
-name = "check_status_page"
+name = "mcp/demo-tools/check_status_page"
 delta = { trust = "suspicious" }
 
 # --- the outward sink ---
 
 [[policy.tool]]
-name = "post_status_update"
+name = "mcp/demo-tools/post_status_update"
 delta = {}
 
 [policy.tool.requires]
@@ -48,7 +54,7 @@ audience = { contains = ["public"] }
 # --- an effectful action behind a person ---
 
 [[policy.tool]]
-name = "restart_deployment"
+name = "mcp/demo-tools/restart_deployment"
 delta = {}
 
 [policy.tool.requires]
@@ -68,7 +74,7 @@ marks = []
 effects = []
 
 [[policy.tool]]
-name = "lookup_runbook"
+name = "mcp/demo-tools/lookup_runbook"
 annotator = "runbook-readers"
 
 # --- an effectful action behind a human-less authority ---
@@ -76,7 +82,7 @@ annotator = "runbook-readers"
 # The release-window bot rules per call: approve inside the window
 # (catalog-cache in the demo data), deny outside it.
 [[policy.tool]]
-name = "scale_deployment"
+name = "mcp/demo-tools/scale_deployment"
 delta = {}
 
 [policy.tool.requires]
@@ -97,7 +103,7 @@ attention = ["release-window"]
 # (approve, deny, or nobody within the consult window — then no answer,
 # and the offer stands).
 [[policy.tool]]
-name = "rollback_deployment"
+name = "mcp/demo-tools/rollback_deployment"
 delta = {}
 
 [policy.tool.requires]
@@ -114,7 +120,7 @@ attention = ["change-approval"]
 # --- kagent's own built-in tool ---
 
 [[policy.tool]]
-name = "ask_user"
+name = "host/kagent/ask_user"
 delta = {}
 
 # --- the delegated child ---
@@ -124,47 +130,47 @@ delta = {}
 # The wildcard covers no spawn. So the release-manager agent, which
 # both parents also list and no entry here names, is denied at every
 # delegation. The child's branch narrows independently of the parent.
-# Its return crosses at the parent's gate. kagent dispatches an agent
-# tool as `<namespace>__NS__<agent name>`, hyphens as underscores.
-# Declare that spelling, the one the wire carries. The chart fills the
-# three sentinels when it renders this file (templates/_helpers.tpl).
-# The NAMESPACE sentinel comes from the release namespace, CHILD from
-# `agents.childName`, and CHILD_GO from `agents.go.childName`.
+# Its return crosses at the parent's gate. An agent called as a tool is
+# `agent/<namespace>/<agent name>`. The chart fills both names when it
+# renders this file (templates/_helpers.tpl): the namespace from the
+# release namespace, the agent from `agents.childName` and
+# `agents.go.childName`.
 [[policy.tool]]
-name = "kagent__NS__log_analyst"
+name = "agent/kagent/log-analyst"
 delta = {}
 
-# The go cell's delegated child, under the same spelling rule.
+# The go cell's delegated child, under the same rule.
 [[policy.tool]]
-name = "kagent__NS__log_analyst_go"
+name = "agent/kagent/log-analyst-go"
 delta = {}
 
-# --- the entrypoint's synthetic tools ---
+# --- the entrypoint's gates ---
 
 [[policy.tool]]
-name = "appa_code_execution"
+name = "host/kagent-gate/code_execution"
 delta = {}
 
 [[policy.tool]]
-name = "appa_memory_persist"
+name = "host/kagent-gate/memory_persist"
 delta = {}
 
 # --- the configuring actor: the appa-guide agent ---
 # The guide agent runs the routing skill against these tools. Reads are
 # unrestricted; the policy write sits behind a person (kagent's Approve
 # card is the oncall authority's channel), and exec needs trusted data.
-# The skill's file helpers that it never uses (bash, write_file,
-# edit_file) stay undeclared, so they are refused.
+# The skill's file helpers that it never uses (`host/kagent/bash`,
+# `host/kagent/write_file`, `host/kagent/edit_file`) stay undeclared, so
+# they are refused.
 [[policy.tool]]
-name = "k8s_get_resources"
+name = "mcp/kagent-tool-server/k8s_get_resources"
 delta = {}
 
 [[policy.tool]]
-name = "k8s_get_resource_yaml"
+name = "mcp/kagent-tool-server/k8s_get_resource_yaml"
 delta = {}
 
 [[policy.tool]]
-name = "k8s_apply_manifest"
+name = "mcp/kagent-tool-server/k8s_apply_manifest"
 delta = {}
 
 [policy.tool.requires]
@@ -172,18 +178,20 @@ trust = "trusted"
 attention = ["human-approval"]
 
 [[policy.tool]]
-name = "k8s_execute_command"
+name = "mcp/kagent-tool-server/k8s_execute_command"
 delta = {}
 
 [policy.tool.requires]
 trust = "trusted"
 
+# kagent attaches every skill under the one `skills` tool; the guide runs as
+# `skills({"command": "appa-guide"})`.
 [[policy.tool]]
-name = "appa-guide"
+name = "host/kagent/skills"
 delta = {}
 
 [[policy.tool]]
-name = "read_file"
+name = "host/kagent/read_file"
 delta = {}
 
 # The runtime can withhold these tools' results and deliver a sanitized
@@ -191,7 +199,7 @@ delta = {}
 # the application point the output sanitizers register on.
 [policy.deployment]
 context_control = true
-confined_results = ["read_secret", "get_pod_logs", "check_status_page"]
+confined_results = ["mcp/demo-tools/read_secret", "mcp/demo-tools/get_pod_logs", "mcp/demo-tools/check_status_page"]
 
 # --- the human behind human-approval ---
 

@@ -29,7 +29,7 @@ use std::process::ExitCode;
 use appa_runtime_api::{Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, ToolOutcome, TrajectoryId};
 use serde_json::value::RawValue;
 
-use crate::api::{OfferId, OfferKind, RemedyOutcome, Runtime, is_control_tool};
+use crate::api::{OfferId, OfferKind, RemedyOutcome, Runtime};
 use crate::config::Config;
 use crate::hooks;
 
@@ -170,14 +170,10 @@ impl Parser<'_> {
             return Err(self.error(number, format!("expected a tool call like `Tool {{`, found `{line}`")));
         };
         let tool = name.trim();
+        // The runtime's control tool, `appa/execute_remedy_plan`, is no identifier, so a
+        // trace holds only the calls the model proposes; taking an offer is `expect`'s job.
         if !is_identifier(tool) {
             return Err(self.error(number, format!("`{tool}` is not a tool name")));
-        }
-        if is_control_tool(tool) {
-            return Err(self.error(
-                number,
-                format!("`{tool}` is the remedy tool; a trace holds only the calls the model proposes"),
-            ));
         }
         self.state = match rest.trim() {
             "" => State::InBlock {
@@ -805,7 +801,7 @@ mod tests {
                 1,
                 "each argument goes on its own line",
             ),
-            ("execute_remedy_plan {}\nexpect allow\n", 1, "is the remedy tool"),
+            ("appa/execute_remedy_plan {}\nexpect allow\n", 1, "is not a tool name"),
             ("9Read {}\nexpect allow\n", 1, "is not a tool name"),
         ];
         for (text, line, detail) in cases {

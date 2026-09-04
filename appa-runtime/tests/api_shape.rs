@@ -8,7 +8,7 @@ use appa_runtime::api::{
 use appa_runtime::config::Config;
 use appa_runtime::hooks;
 use appa_runtime_api::{
-    Actor, Codec, HookDecision, HookEvent, OutcomeBody, ParseRefusal, ProposedCall, SpawnBinding, SpawnRef,
+    Actor, Adapter, Codec, HookDecision, HookEvent, OutcomeBody, ParseRefusal, ProposedCall, SpawnBinding, SpawnRef,
     ToolOutcome, TrajectoryId,
 };
 
@@ -36,9 +36,9 @@ fn the_declared_reload(runtime: &Runtime, config: Config) {
     }
 }
 
-async fn the_declared_dispatcher(runtime: &Runtime, codec: &Codec, event: HookEvent, body: &[u8]) {
+async fn the_declared_dispatcher(runtime: &Runtime, adapter: &Adapter, event: HookEvent, body: &[u8]) {
     let _: HookDecision = hooks::handle(runtime, event).await;
-    let _: (u16, serde_json::Value) = hooks::answer(runtime, codec, body).await;
+    let _: (u16, serde_json::Value) = hooks::answer(runtime, adapter, body).await;
 }
 
 fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: ParseRefusal, outcome: ToolOutcome) {
@@ -222,6 +222,10 @@ fn the_declared_codec() {
     let codec: Codec = appa_adapter_claude_code::codec();
     let _: fn(&[u8]) -> Result<Option<HookEvent>, ParseRefusal> = codec.parse;
     let _: fn(&HookEvent, &HookDecision) -> serde_json::Value = codec.render;
+    let served: Adapter = appa_adapter_claude_code::adapter();
+    let _: appa_runtime_api::AdapterName = served.name;
+    let _: appa_runtime_api::DeriveFn = served.derive;
+    let _: Adapter = appa_adapter_kagent::adapter();
 }
 
 #[test]

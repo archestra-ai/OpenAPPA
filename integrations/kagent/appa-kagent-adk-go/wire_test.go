@@ -1,8 +1,9 @@
 // The wire against the shared fixtures and the decision contract.
 //
-// The rust codec's tests parse the same fixture file, so the two
-// language halves cannot drift apart silently: an event this side
-// builds is an event that side parses.
+// The python plugin's tests read the same fixture file, so the two
+// plugins cannot drift apart silently: an event this side builds is
+// the event that side builds, and both are the canonical envelope the
+// runtime parses (appa-runtime-api/src/wire.rs).
 
 package appakagentadk
 
@@ -16,6 +17,11 @@ import (
 )
 
 const fixturesPath = "../fixtures/wire-events.jsonl"
+
+const (
+	fixtureRoot  = "adk-4f6c2f1e"
+	fixtureChild = "adk-9b0d11aa"
+)
 
 func fixtureWires(t *testing.T) map[string]any {
 	t.Helper()
@@ -61,34 +67,33 @@ func canonical(t *testing.T, wire any) string {
 
 func TestEveryBuilderSpellsItsFixtureExactly(t *testing.T) {
 	fixtures := fixtureWires(t)
+	scale := map[string]any{"deployment": "api", "replicas": 3}
 	built := map[string]map[string]any{
-		"session_start": sessionStartEvent("adk-4f6c2f1e"),
-		"prompt":        promptEvent("adk-4f6c2f1e", "scale the api deployment to three replicas", ""),
-		"turn_end_root": turnEndEvent("adk-4f6c2f1e", ""),
-		"turn_end_child": turnEndEvent(
-			"adk-4f6c2f1e", "adk-9b0d11aa"),
-		"tool_call": toolCallEvent(
-			"adk-4f6c2f1e", "k8s_scale", map[string]any{"deployment": "api", "replicas": 3}, false, "", ""),
-		"tool_call_spawn": toolCallEvent(
-			"adk-4f6c2f1e", "billing-agent", map[string]any{"message": "total the invoices"}, true, "", ""),
-		"tool_call_reserved": toolCallEvent(
-			"adk-4f6c2f1e", ReservedTool, map[string]any{"offer_id": "offer-1"}, false, "", ""),
-		"tool_call_reserved_ruled": toolCallEvent(
-			"adk-4f6c2f1e", ReservedTool, map[string]any{"offer_id": "offer-1"}, false, "", "approve"),
+		"session_start":  sessionStartEvent(fixtureRoot),
+		"prompt":         promptEvent(fixtureRoot, "scale the api deployment to three replicas", ""),
+		"turn_end_root":  turnEndEvent(fixtureRoot, ""),
+		"turn_end_child": turnEndEvent(fixtureRoot, fixtureChild),
+		"tool_call_mcp":  toolCallEvent(fixtureRoot, "mcp:demo-tools/k8s_scale", scale, "", ""),
+		"tool_call_agent": toolCallEvent(
+			fixtureRoot, "agent:kagent/billing-agent", map[string]any{"message": "total the invoices"}, "", ""),
+		"tool_call_builtin": toolCallEvent(
+			fixtureRoot, "builtin:ask_user", map[string]any{"questions": []any{map[string]any{"question": "which namespace?"}}}, "", ""),
+		"tool_call_gate":    toolCallEvent(fixtureRoot, "gate:code_execution", map[string]any{"code": "print(1)"}, "", ""),
+		"tool_call_control": toolCallEvent(fixtureRoot, ControlTool, map[string]any{"offer_id": "offer-1"}, "", ""),
+		"tool_call_control_ruled": toolCallEvent(
+			fixtureRoot, ControlTool, map[string]any{"offer_id": "offer-1"}, "", "approve"),
 		"tool_result_success": toolResultEvent(
-			"adk-4f6c2f1e", "k8s_scale", map[string]any{"deployment": "api", "replicas": 3},
-			successOutcome(map[string]any{"scaled": true}), ""),
+			fixtureRoot, "mcp:demo-tools/k8s_scale", scale, successOutcome(map[string]any{"scaled": true}), ""),
 		"tool_result_failure": toolResultEvent(
-			"adk-4f6c2f1e", "k8s_scale", map[string]any{"deployment": "api", "replicas": 3},
-			failureOutcome("connection refused"), ""),
+			fixtureRoot, "mcp:demo-tools/k8s_scale", scale, failureOutcome("connection refused"), ""),
 		"spawn_result": spawnResultEvent(
-			"adk-4f6c2f1e", "billing-agent", map[string]any{"message": "total the invoices"},
+			fixtureRoot, "agent:kagent/billing-agent", map[string]any{"message": "total the invoices"},
 			successOutcome(map[string]any{"result": "the total is 42"}),
-			"adk-9b0d11aa", "the total is 42", ""),
-		"child_start_in_flight": childStartEvent("adk-4f6c2f1e", "adk-9b0d11aa", ""),
-		"child_start_bound":     childStartEvent("adk-4f6c2f1e", "adk-9b0d11aa", "spawn-1"),
-		"child_end_returned":    childEndEvent("adk-4f6c2f1e", "adk-9b0d11aa", "the total is 42"),
-		"child_end_void":        childEndEvent("adk-4f6c2f1e", "adk-9b0d11aa", ""),
+			fixtureChild, "the total is 42", ""),
+		"child_start_in_flight": childStartEvent(fixtureRoot, fixtureChild, ""),
+		"child_start_bound":     childStartEvent(fixtureRoot, fixtureChild, "spawn-1"),
+		"child_end_returned":    childEndEvent(fixtureRoot, fixtureChild, "the total is 42"),
+		"child_end_void":        childEndEvent(fixtureRoot, fixtureChild, ""),
 		"ping":                  pingEvent(),
 	}
 	if len(built) != len(fixtures) {
@@ -102,6 +107,25 @@ func TestEveryBuilderSpellsItsFixtureExactly(t *testing.T) {
 		if got, want := canonical(t, builtWire), canonical(t, expected); got != want {
 			t.Errorf("the %s wire drifted from the shared fixture:\n built %s\n fixture %s", name, got, want)
 		}
+	}
+}
+
+func TestEveryEventCarriesTheEnvelopeAndNoSpawnFlag(t *testing.T) {
+	for name, wire := range fixtureWires(t) {
+		event := wire.(map[string]any)
+		if event["protocol"] != float64(Protocol) || event["adapter"] != Adapter {
+			t.Errorf("the %s event must carry the envelope, got %v", name, event)
+		}
+		if _, present := event["spawn"]; present {
+			t.Errorf("the %s event must assert no spawn, got %v", name, event)
+		}
+	}
+}
+
+func TestIDsCrossUnprefixed(t *testing.T) {
+	wire := toolCallEvent("session-1", "mcp:demo-tools/k8s_scale", map[string]any{}, "child-1", "")
+	if wire["root_id"] != "session-1" || wire["child_id"] != "child-1" {
+		t.Errorf("the ids cross as the harness spells them, got %v", wire)
 	}
 }
 
@@ -120,42 +144,42 @@ func TestEveryDecisionEnvelopeParses(t *testing.T) {
 		body string
 		want Decision
 	}{
-		{"ack", `{"decision": "ack"}`, Decision{Kind: "ack"}},
-		{"allow", `{"decision": "allow_call"}`, Decision{Kind: "allow_call"}},
+		{"ack", `{"protocol": 1, "decision": "ack"}`, Decision{Kind: "ack"}},
+		{"allow", `{"protocol": 1, "decision": "allow_call"}`, Decision{Kind: "allow_call"}},
 		{
 			"allow_bound",
-			`{"decision": "allow_call", "spawn_binding": "b1"}`,
+			`{"protocol": 1, "decision": "allow_call", "spawn_binding": "b1"}`,
 			Decision{Kind: "allow_call", SpawnBinding: "b1"},
 		},
-		{"pass", `{"decision": "pass_control"}`, Decision{Kind: "pass_control"}},
+		{"pass", `{"protocol": 1, "decision": "pass_control"}`, Decision{Kind: "pass_control"}},
 		{
 			"deny",
-			`{"decision": "deny_call", "feedback": "blocked: the recipient cannot read this"}`,
+			`{"protocol": 1, "decision": "deny_call", "feedback": "blocked: the recipient cannot read this"}`,
 			Decision{Kind: "deny_call", Feedback: "blocked: the recipient cannot read this"},
 		},
 		{
 			"block",
-			`{"decision": "block", "reason": "the prompt does not cross"}`,
+			`{"protocol": 1, "decision": "block", "reason": "the prompt does not cross"}`,
 			Decision{Kind: "block", Reason: "the prompt does not cross"},
 		},
 		{
 			"replace",
-			`{"decision": "replace_output", "output": "the output is confined"}`,
+			`{"protocol": 1, "decision": "replace_output", "output": "the output is confined"}`,
 			Decision{Kind: "replace_output", Output: "the output is confined"},
 		},
 		{
 			"child_return",
-			`{"decision": "child_return", "value": "the redacted summary"}`,
+			`{"protocol": 1, "decision": "child_return", "value": "the redacted summary"}`,
 			Decision{Kind: "child_return", Value: "the redacted summary"},
 		},
 		{
 			"context",
-			`{"decision": "context", "text": "your return crosses as you speak it"}`,
+			`{"protocol": 1, "decision": "context", "text": "your return crosses as you speak it"}`,
 			Decision{Kind: "context", Text: "your return crosses as you speak it"},
 		},
 		{
 			"refuse",
-			`{"decision": "refuse", "detail": "storage failure: disk full"}`,
+			`{"protocol": 1, "decision": "refuse", "detail": "storage failure: disk full"}`,
 			Decision{Kind: "refuse", Detail: "storage failure: disk full"},
 		},
 	} {
@@ -178,23 +202,27 @@ func TestAnAnswerOutsideTheContractIsAWireError(t *testing.T) {
 		{"not_json", "not json"},
 		{"not_object", `["decision"]`},
 		{"null", `null`},
-		{"unknown_kind", `{"decision": "approve"}`},
-		{"deny_without_feedback", `{"decision": "deny_call"}`},
-		{"block_without_reason", `{"decision": "block"}`},
-		{"replace_without_output", `{"decision": "replace_output"}`},
-		{"refuse_without_detail", `{"decision": "refuse"}`},
-		{"context_without_text", `{"decision": "context"}`},
-		{"offers_not_a_list", `{"decision": "deny_call", "feedback": "f", "offers": {}}`},
-		{"offer_without_an_id", `{"decision": "deny_call", "feedback": "f", "offers": [{"returns": "as_spoken"}]}`},
+		{"no_protocol", `{"decision": "ack"}`},
+		{"other_protocol", `{"protocol": 2, "decision": "ack"}`},
+		{"protocol_as_bool", `{"protocol": true, "decision": "ack"}`},
+		{"protocol_as_string", `{"protocol": "1", "decision": "ack"}`},
+		{"unknown_kind", `{"protocol": 1, "decision": "approve"}`},
+		{"deny_without_feedback", `{"protocol": 1, "decision": "deny_call"}`},
+		{"block_without_reason", `{"protocol": 1, "decision": "block"}`},
+		{"replace_without_output", `{"protocol": 1, "decision": "replace_output"}`},
+		{"refuse_without_detail", `{"protocol": 1, "decision": "refuse"}`},
+		{"context_without_text", `{"protocol": 1, "decision": "context"}`},
+		{"offers_not_a_list", `{"protocol": 1, "decision": "deny_call", "feedback": "f", "offers": {}}`},
+		{"offer_without_an_id", `{"protocol": 1, "decision": "deny_call", "feedback": "f", "offers": [{"returns": "as_spoken"}]}`},
 		{
 			"offer_route_outside_the_wire",
-			`{"decision": "deny_call", "feedback": "f", "offers": [{"offer_id": "o1", "returns": "shaped"}]}`,
+			`{"protocol": 1, "decision": "deny_call", "feedback": "f", "offers": [{"offer_id": "o1", "returns": "shaped"}]}`,
 		},
 		{
 			"sanitized_route_without_a_sanitizer",
-			`{"decision": "deny_call", "feedback": "f", "offers": [{"offer_id": "o1", "returns": {}}]}`,
+			`{"protocol": 1, "decision": "deny_call", "feedback": "f", "offers": [{"offer_id": "o1", "returns": {}}]}`,
 		},
-		{"binding_not_a_string", `{"decision": "allow_call", "spawn_binding": 7}`},
+		{"binding_not_a_string", `{"protocol": 1, "decision": "allow_call", "spawn_binding": 7}`},
 	} {
 		if _, err := parseDecision([]byte(tc.body)); err == nil {
 			t.Errorf("the %s answer must be a wire error", tc.name)
@@ -208,20 +236,20 @@ func TestAnAnswerOutsideTheContractIsAWireError(t *testing.T) {
 }
 
 func TestADenyCarriesItsReviewsAndRefusesAnUnreadableOne(t *testing.T) {
-	decision, err := parseDecision([]byte(`{"decision":"deny_call","feedback":"f","review":[{"offer_id":"o1","text":"APPA asks you"}]}`))
+	decision, err := parseDecision([]byte(`{"protocol":1,"decision":"deny_call","feedback":"f","review":[{"offer_id":"o1","text":"APPA asks you"}]}`))
 	if err != nil || len(decision.Review) != 1 || decision.Review[0] != (Review{OfferID: "o1", Text: "APPA asks you"}) {
 		t.Fatalf("the review rides the deny: %+v %v", decision, err)
 	}
-	if plain, err := parseDecision([]byte(`{"decision":"deny_call","feedback":"f"}`)); err != nil || plain.Review != nil {
+	if plain, err := parseDecision([]byte(`{"protocol":1,"decision":"deny_call","feedback":"f"}`)); err != nil || plain.Review != nil {
 		t.Fatalf("no review is none: %+v %v", plain, err)
 	}
-	if _, err := parseDecision([]byte(`{"decision":"deny_call","feedback":"f","review":[{"offer_id":"o1"}]}`)); err == nil {
+	if _, err := parseDecision([]byte(`{"protocol":1,"decision":"deny_call","feedback":"f","review":[{"offer_id":"o1"}]}`)); err == nil {
 		t.Fatal("a review entry without its text is malformed")
 	}
 }
 
 func TestADenyCarriesEveryOfferWithItsReturnRoute(t *testing.T) {
-	decision, err := parseDecision([]byte(`{"decision":"deny_call","feedback":"blocked","offers":[` +
+	decision, err := parseDecision([]byte(`{"protocol":1,"decision":"deny_call","feedback":"blocked","offers":[` +
 		`{"offer_id":"o1"},` +
 		`{"offer_id":"o2","returns":"as_spoken"},` +
 		`{"offer_id":"o3","returns":{"sanitizer":"redact-invoices"}}]}`))
@@ -236,9 +264,19 @@ func TestADenyCarriesEveryOfferWithItsReturnRoute(t *testing.T) {
 	if !reflect.DeepEqual(decision.Offers, want) {
 		t.Errorf("the offers drifted: got %+v, want %+v", decision.Offers, want)
 	}
-	plain, err := parseDecision([]byte(`{"decision":"deny_call","feedback":"f"}`))
+	plain, err := parseDecision([]byte(`{"protocol":1,"decision":"deny_call","feedback":"f"}`))
 	if err != nil || plain.Offers != nil {
 		t.Fatalf("no offers is none: %+v %v", plain, err)
+	}
+}
+
+func TestAControlCallCarriesItsRulingOnlyWhenGiven(t *testing.T) {
+	ruled := toolCallEvent("s1", ControlTool, map[string]any{"offer_id": "o1"}, "", "approve")
+	if ruled["ruling"] != "approve" {
+		t.Errorf("the ruling rides the control call, got %v", ruled)
+	}
+	if _, present := toolCallEvent("s1", ControlTool, map[string]any{"offer_id": "o1"}, "", "")["ruling"]; present {
+		t.Error("an absent ruling must stay off the wire")
 	}
 }
 

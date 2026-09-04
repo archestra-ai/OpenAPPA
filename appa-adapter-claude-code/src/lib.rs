@@ -1,14 +1,35 @@
-//! The Claude Code codec: hook JSON to the runtime's vocabulary and
-//! back.
+//! The Claude Code adapter: two pure translations, no policy, no state,
+//! no runtime calls. The compiler enforces the boundary, since this
+//! crate depends only on `appa-runtime-api`.
 //!
-//! A pure codec — no policy, no state, no runtime calls;
-//! the compiler enforces the
-//! boundary, since this crate depends only on `appa-runtime-api`. It
-//! derives trajectory ids from Claude Code's own ids with the `cc:`
-//! prefix, maps each hook onto one `HookEvent`, and renders every
-//! `HookDecision` in the hook wire format Claude Code expects. The
-//! wire shapes come from recorded live hook examples
-//! (`runtime/tests/fixtures/hooks.jsonl`).
+//! 1. [`codec`] runs on the client side of the wire, inside the `appa
+//!    hook` command Claude Code's hooks invoke. It parses Claude Code's
+//!    own hook JSON (recorded live examples in
+//!    `runtime/tests/fixtures/hooks.jsonl`) into at most one `HookEvent`
+//!    whose tool spelling is still Claude Code's raw one, with trajectory
+//!    ids derived from Claude Code's own ids under the `cc:` prefix, and
+//!    renders every `HookDecision` in the hook wire format Claude Code
+//!    expects.
+//! 2. [`adapter`] runs on the server side. From the raw spelling of one
+//!    call the runtime derives the call's canonical identity, whether it
+//!    is the spawn, and which family children its arguments name; the
+//!    wire carries none of these, so nothing a client sends is trusted
+//!    for them.
+//!
+//! Tool identity, a bijection over the raw spellings it accepts:
+//!
+//! | raw spelling | canonical |
+//! |---|---|
+//! | `mcp__plugin_appa-runtime_appa__execute_remedy_plan` | `appa/execute_remedy_plan`, the runtime's control tool |
+//! | `mcp__<server>__<tool>`, split at the first `__` after the prefix | `mcp/<server>/<tool>` |
+//! | any other `[A-Za-z0-9_.-]+` | `host/claude-code/<name>` |
+//!
+//! A raw spelling outside that domain is refused and the call blocks:
+//! `mcp__` with no second `__`, an empty server or tool segment, or a
+//! character outside the segment grammar. The server segment never
+//! contains `__`, because it is what precedes the first one. The spawn
+//! tools `Agent` and `Task` are host tools, `host/claude-code/Agent` and
+//! `host/claude-code/Task`; the `agent` family is not Claude Code's.
 //!
 //! Hook mapping:
 //!
@@ -133,20 +154,25 @@ pub fn adapter() -> Adapter {
 /// lookalike on another server is an ordinary checked call.
 const CONTROL_TOOL_RAW: &str = "mcp__plugin_appa-runtime_appa__execute_remedy_plan";
 
-/// `mcp__<server>__<tool>` → `mcp/<server>/<tool>`, split at the first `__` after the
-/// prefix; anything else → `host/claude-code/<name>`. A spelling outside the canonical
-/// grammar (a server segment containing `__`, a character outside `[A-Za-z0-9_.-]`) is
-/// refused: the map is a bijection over the domain it accepts.
+const MCP_PREFIX: &str = "mcp__";
+
+/// The crate-level mapping table: the control spelling, then `mcp__<server>__<tool>` split
+/// at the first `__` after the prefix, then `host/claude-code/<name>`. `CanonicalTool::of`
+/// refuses an empty segment and a character outside the grammar, so the map is a bijection
+/// over the spellings it accepts.
 fn canonical(raw: &str) -> Result<CanonicalTool, ParseRefusal> {
-    let refused = |error: appa_runtime_api::CanonicalToolError| ParseRefusal::Malformed {
-        detail: format!("tool {raw:?} is outside the Claude Code adapter's domain: {error}"),
+    let refused = |detail: String| ParseRefusal::Malformed {
+        detail: format!("tool {raw:?} is outside the Claude Code adapter's domain: {detail}"),
     };
     if raw == CONTROL_TOOL_RAW {
         return Ok(CanonicalTool::control());
     }
-    match raw.strip_prefix("mcp__").and_then(|rest| rest.split_once("__")) {
-        Some((server, tool)) => CanonicalTool::of("mcp", server, tool).map_err(refused),
-        None => CanonicalTool::of("host", "claude-code", raw).map_err(refused),
+    match raw.strip_prefix(MCP_PREFIX) {
+        Some(rest) => match rest.split_once("__") {
+            Some((server, tool)) => CanonicalTool::of("mcp", server, tool).map_err(|error| refused(error.to_string())),
+            None => Err(refused(format!("{MCP_PREFIX}<server>__<tool> names no tool segment"))),
+        },
+        None => CanonicalTool::of("host", "claude-code", raw).map_err(|error| refused(error.to_string())),
     }
 }
 
@@ -239,7 +265,7 @@ fn is_fixed_value(key: &str, value: &str) -> bool {
 const REDACTED: &str = "[appa] redacted";
 
 fn is_mcp_tool(tool: &str) -> bool {
-    tool.starts_with("mcp__")
+    tool.starts_with(MCP_PREFIX)
 }
 
 fn content_slot(tool: &str) -> Option<&'static str> {
@@ -727,6 +753,170 @@ mod tests {
             "tool_input": {"prompt": "List the files.", "subagent_type": "Explore"},
             "tool_response": response,
         })
+    }
+
+    fn derived(tool: &str, arguments: serde_json::Value) -> Result<Derived, ParseRefusal> {
+        let actor = Actor {
+            root: root(),
+            child: None,
+        };
+        (adapter().derive)(
+            &actor,
+            &ProposedCall {
+                tool: tool.to_string(),
+                arguments: raw(arguments),
+            },
+        )
+    }
+
+    #[test]
+    fn the_adapter_serves_claude_code() {
+        assert_eq!(adapter().name, AdapterName::ClaudeCode);
+    }
+
+    #[test]
+    fn each_raw_spelling_maps_onto_its_canonical_identity() {
+        for (raw, expected) in [
+            ("Bash", "host/claude-code/Bash"),
+            ("Agent", "host/claude-code/Agent"),
+            ("Task", "host/claude-code/Task"),
+            ("mcp__github__create_issue", "mcp/github/create_issue"),
+            ("mcp__github__a__b", "mcp/github/a__b"),
+            (
+                "mcp__plugin_appa-runtime_appa__other",
+                "mcp/plugin_appa-runtime_appa/other",
+            ),
+            ("mcp__appa__execute_remedy_plan", "mcp/appa/execute_remedy_plan"),
+            ("mcp__a.b-c__T.o-o_l", "mcp/a.b-c/T.o-o_l"),
+            ("mcp_x", "host/claude-code/mcp_x"),
+            (CONTROL_TOOL_RAW, appa_runtime_api::CONTROL_TOOL),
+        ] {
+            let canonical = canonical(raw).unwrap_or_else(|refusal| panic!("{raw} maps: {refusal:?}"));
+            assert_eq!(canonical.as_str(), expected, "{raw}");
+            assert_eq!(canonical.is_control(), raw == CONTROL_TOOL_RAW, "{raw}");
+        }
+    }
+
+    #[test]
+    fn a_spelling_outside_the_domain_is_a_named_refusal() {
+        for raw in [
+            "",
+            "mcp__",
+            "mcp__github",
+            "mcp____x",
+            "mcp__github__",
+            "mcp__git hub__x",
+            "mcp__github__x(y)",
+            "Bash(command:ls)",
+            "a/b",
+            "host/claude-code/Bash",
+            "agent/kagent/x",
+            "appa/execute_remedy_plan",
+            "*",
+        ] {
+            match canonical(raw) {
+                Err(ParseRefusal::Malformed { detail }) => {
+                    assert!(
+                        detail.contains(&format!("{raw:?}")),
+                        "the refusal names {raw:?}: {detail}"
+                    );
+                }
+                other => panic!("{raw:?} must be refused, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_derivation_carries_spawn_and_the_named_children() {
+        for tool in ["Agent", "Task"] {
+            let derived = derived(tool, serde_json::json!({"prompt": "list files"})).expect("derives");
+            assert!(derived.spawn, "{tool} is the spawn");
+            assert_eq!(derived.canonical.as_str(), format!("host/claude-code/{tool}"));
+            assert!(derived.names_children.is_empty());
+        }
+        let shell = derived(
+            "Bash",
+            serde_json::json!({"command": "cat tasks/a1.output; grep x subagents/agent-a2.jsonl tasks/a1.output"}),
+        )
+        .expect("derives");
+        assert!(!shell.spawn);
+        assert_eq!(
+            shell.names_children,
+            vec![
+                TrajectoryId("cc:s1:a1".to_string()),
+                TrajectoryId("cc:s1:a2".to_string())
+            ],
+        );
+        let nested = derived(
+            "Read",
+            serde_json::json!({"file_path": "/home/u/.claude/subagents/agent-b7.jsonl", "meta": [{"p": "tasks/x-1.output"}]}),
+        )
+        .expect("derives");
+        assert_eq!(
+            nested.names_children,
+            vec![
+                TrajectoryId("cc:s1:b7".to_string()),
+                TrajectoryId("cc:s1:x-1".to_string())
+            ],
+        );
+        assert!(
+            derived("Read", serde_json::json!({"file_path": "tasks/a1.txt"}))
+                .expect("derives")
+                .names_children
+                .is_empty(),
+            "another suffix names no child"
+        );
+        assert!(matches!(
+            derived("mcp__github", serde_json::json!({})),
+            Err(ParseRefusal::Malformed { .. })
+        ));
+    }
+
+    mod laws {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn segment_chars() -> impl Strategy<Value = String> {
+            "[A-Za-z0-9_.-]{0,10}"
+        }
+
+        fn raw_spelling() -> impl Strategy<Value = String> {
+            prop_oneof![
+                segment_chars(),
+                (segment_chars(), segment_chars()).prop_map(|(server, tool)| format!("mcp__{server}__{tool}")),
+                (segment_chars(), segment_chars(), segment_chars())
+                    .prop_map(|(server, tool, more)| format!("mcp__{server}__{tool}__{more}")),
+                segment_chars().prop_map(|rest| format!("mcp__{rest}")),
+                Just(CONTROL_TOOL_RAW.to_string()),
+            ]
+        }
+
+        proptest! {
+            #[test]
+            fn an_accepted_spelling_parses_back_and_is_control_only_when_registered(raw in raw_spelling()) {
+                if let Ok(canonical) = canonical(&raw) {
+                    prop_assert_eq!(CanonicalTool::parse(canonical.as_str()), Ok(canonical.clone()));
+                    prop_assert_eq!(canonical.is_control(), raw == CONTROL_TOOL_RAW);
+                    prop_assert!(!canonical.as_str().starts_with("agent/"), "{}", canonical);
+                }
+            }
+
+            #[test]
+            fn an_mcp_server_segment_never_contains_a_double_underscore(server in segment_chars(), tool in segment_chars()) {
+                if let Ok(canonical) = canonical(&format!("mcp__{server}__{tool}")) {
+                    let namespace = canonical.as_str().split('/').nth(1).expect("a namespace segment");
+                    prop_assert!(!namespace.contains("__"), "{}", canonical);
+                    prop_assert!(canonical.as_str().starts_with("mcp/"), "{}", canonical);
+                }
+            }
+
+            #[test]
+            fn the_map_is_injective(left in raw_spelling(), right in raw_spelling()) {
+                if let (Ok(a), Ok(b)) = (canonical(&left), canonical(&right)) {
+                    prop_assert_eq!(a == b, left == right, "{} vs {}", left, right);
+                }
+            }
+        }
     }
 
     #[test]

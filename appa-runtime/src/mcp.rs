@@ -341,7 +341,7 @@ mod tests {
         appa_runtime_api::HookEvent::ToolCall {
             actor: actor.clone(),
             call: ProposedCall {
-                tool: "execute_remedy_plan".to_string(),
+                tool: appa_runtime_api::CONTROL_TOOL.to_string(),
                 arguments: raw(serde_json::json!({ "offer_id": quoted.0 })),
             },
             spawn: false,

@@ -5,13 +5,14 @@
 # authority and sanitizer is the demo's, so what this suite proves is
 # what the demo deployment enforces.
 #
-# 1. The two agent-tool contracts name the one child this suite builds,
-#    `kagent__NS__log_analyst`, under the wire spelling kagent
-#    dispatches it by. The demo policy carries a second entry for the
-#    go cell's child; this suite runs the python plugin only, so that
-#    entry is gone. The undeclared agent stays undeclared: the parent
-#    lists `kagent__NS__release_manager` as a tool, no contract names
-#    it, and every delegation to it is denied at the spawn.
+# 1. The agent contract names the one child this suite builds,
+#    `agent/kagent/log-analyst`. The demo policy carries a second entry
+#    for the go cell's child; this suite runs the python plugin only,
+#    so that entry is gone. The undeclared agent stays undeclared: the
+#    parent lists `release-manager` as a tool, no contract names
+#    `agent/kagent/release-manager`, and every delegation to it is
+#    denied at the spawn. The demo tools run on loopback here, so their
+#    toolset is `localhost`, the host label of the server URL.
 # 2. Both sanitizers bind to the mock's `/sanitize` endpoint instead of
 #    `builtin = "llm"`, and `[externals.llm]` is gone. The derivation is
 #    then deterministic and the suite needs no model and no API key.
@@ -26,31 +27,31 @@ version = 2
 # --- in-cluster reads that stay inside the session ---
 
 [[policy.tool]]
-name = "list_pods"
+name = "mcp/localhost/list_pods"
 delta = {}
 
 [[policy.tool]]
-name = "read_configmap"
+name = "mcp/localhost/read_configmap"
 delta = {}
 
 [[policy.tool]]
-name = "read_secret"
+name = "mcp/localhost/read_secret"
 delta = { audience = ["ops"] }
 
 # --- ingress authored outside the session ---
 
 [[policy.tool]]
-name = "get_pod_logs"
+name = "mcp/localhost/get_pod_logs"
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
-name = "check_status_page"
+name = "mcp/localhost/check_status_page"
 delta = { trust = "suspicious" }
 
 # --- the outward sink ---
 
 [[policy.tool]]
-name = "post_status_update"
+name = "mcp/localhost/post_status_update"
 delta = {}
 
 [policy.tool.requires]
@@ -60,7 +61,7 @@ audience = { contains = ["public"] }
 # --- an effectful action behind a person ---
 
 [[policy.tool]]
-name = "restart_deployment"
+name = "mcp/localhost/restart_deployment"
 delta = {}
 
 [policy.tool.requires]
@@ -80,7 +81,7 @@ marks = []
 effects = []
 
 [[policy.tool]]
-name = "lookup_runbook"
+name = "mcp/localhost/lookup_runbook"
 annotator = "runbook-readers"
 
 # --- an effectful action behind a human-less authority ---
@@ -88,7 +89,7 @@ annotator = "runbook-readers"
 # The release-window bot rules per call: approve inside the window
 # (catalog-cache in the demo data), deny outside it.
 [[policy.tool]]
-name = "scale_deployment"
+name = "mcp/localhost/scale_deployment"
 delta = {}
 
 [policy.tool.requires]
@@ -109,7 +110,7 @@ attention = ["release-window"]
 # (approve, deny, or nobody within the consult window — then no answer,
 # and the offer stands).
 [[policy.tool]]
-name = "rollback_deployment"
+name = "mcp/localhost/rollback_deployment"
 delta = {}
 
 [policy.tool.requires]
@@ -126,7 +127,7 @@ attention = ["change-approval"]
 # --- kagent's own built-in tool ---
 
 [[policy.tool]]
-name = "ask_user"
+name = "host/kagent/ask_user"
 delta = {}
 
 # --- the delegated child ---
@@ -138,21 +139,22 @@ delta = {}
 # delegation. The child runs in its own branch under the floor the
 # parent declares at the spawn, and its value crosses at the child's own
 # stop. kagent dispatches an agent tool as
-# `<namespace>__NS__<agent name>`, hyphens as underscores.
-# Declare that spelling, the one the wire carries: the suite builds the
-# child in the `kagent` namespace under the name `log-analyst`.
+# `<namespace>__NS__<agent name>`, and the entrypoint spells it on the
+# wire as `agent:<namespace>/<agent name>`; the policy names the
+# canonical id: the suite builds the child in the `kagent` namespace
+# under the name `log-analyst`.
 [[policy.tool]]
-name = "kagent__NS__log_analyst"
+name = "agent/kagent/log-analyst"
 delta = {}
 
 # --- the entrypoint's synthetic tools ---
 
 [[policy.tool]]
-name = "appa_code_execution"
+name = "host/kagent-gate/code_execution"
 delta = {}
 
 [[policy.tool]]
-name = "appa_memory_persist"
+name = "host/kagent-gate/memory_persist"
 delta = {}
 
 # The runtime can withhold these tools' results and deliver a sanitized
@@ -160,7 +162,7 @@ delta = {}
 # the application point the output sanitizers register on.
 [policy.deployment]
 context_control = true
-confined_results = ["read_secret", "get_pod_logs", "check_status_page"]
+confined_results = ["mcp/localhost/read_secret", "mcp/localhost/get_pod_logs", "mcp/localhost/check_status_page"]
 
 # --- the human behind human-approval ---
 

@@ -45,9 +45,10 @@ version = 2
 [[policy.annotator]]
 name = "gatekeeper"
 
-# The one agent this deployment delegates to, by the name kagent dispatches it under.
+# The one agent this deployment delegates to, by the canonical name the kagent
+# adapter derives from `agent:NS/log_analyst`.
 [[policy.tool]]
-name = "kagent__NS__log_analyst"
+name = "agent/NS/log_analyst"
 delta = {{}}
 
 # Everything else the policy does not write.
@@ -141,7 +142,7 @@ async fn under_declared_coverage_an_agent_the_policy_never_names_cannot_spawn() 
     let (url, consults) = permissive_annotator().await;
     let runtime = open(&dir, &policy(&url), SpawnCoverage::Declared).await;
 
-    match spawn(&runtime, "kagent__NS__release_manager").await {
+    match spawn(&runtime, "agent/NS/release_manager").await {
         HookDecision::DenyCall { feedback, review, .. } => {
             assert!(
                 feedback.contains("not declared by the policy"),
@@ -159,17 +160,17 @@ async fn under_declared_coverage_an_agent_the_policy_never_names_cannot_spawn() 
 
     // The same name as an ordinary call is the wildcard's to cover, as before.
     assert_eq!(
-        propose(&runtime, call("kagent__NS__release_manager")).await,
+        propose(&runtime, call("agent/NS/release_manager")).await,
         HookDecision::AllowCall { spawn: None }
     );
     assert_eq!(*consults.lock().unwrap(), 1, "the wildcard annotated the ordinary call");
-    ran(&runtime, call("kagent__NS__release_manager")).await;
+    ran(&runtime, call("agent/NS/release_manager")).await;
 
     // The agent the policy names spawns once its return is declared, with its fork.
-    let held = spawn(&runtime, "kagent__NS__log_analyst").await;
+    let held = spawn(&runtime, "agent/NS/log_analyst").await;
     assert!(
         matches!(
-            declare_and_release(&runtime, held, "kagent__NS__log_analyst").await,
+            declare_and_release(&runtime, held, "agent/NS/log_analyst").await,
             HookDecision::AllowCall { spawn: Some(_) }
         ),
         "a named agent releases as a spawn"
@@ -187,7 +188,7 @@ async fn under_wildcard_coverage_the_annotator_covers_a_spawn_as_any_call() {
     let (url, consults) = permissive_annotator().await;
     let runtime = open(&dir, &policy(&url), SpawnCoverage::Wildcard).await;
 
-    let held = spawn(&runtime, "kagent__NS__release_manager").await;
+    let held = spawn(&runtime, "agent/NS/release_manager").await;
     assert!(
         matches!(&held, HookDecision::DenyCall { offers, .. } if !offers.is_empty()),
         "the wildcard covers the spawn under the default coverage: it is held on the return menu, got {held:?}"
@@ -195,7 +196,7 @@ async fn under_wildcard_coverage_the_annotator_covers_a_spawn_as_any_call() {
     assert_eq!(*consults.lock().unwrap(), 1);
     assert!(
         matches!(
-            declare_and_release(&runtime, held, "kagent__NS__release_manager").await,
+            declare_and_release(&runtime, held, "agent/NS/release_manager").await,
             HookDecision::AllowCall { spawn: Some(_) }
         ),
         "the declared spawn releases with its fork"

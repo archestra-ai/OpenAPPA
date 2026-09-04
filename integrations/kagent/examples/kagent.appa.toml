@@ -4,15 +4,23 @@
 # for a kagent policy file. It names the demo toolset of a cluster-ops
 # agent: in-cluster reads, two suspicious ingress tools, one outward
 # sink with a requirement, one effectful action behind human approval,
-# and the two synthetic tools the entrypoint gates route out-of-band
-# flows through. A tool the policy does not name is refused at the
-# `ToolCall` hook — add a wildcard annotator before pointing a long
-# tail of CRD toolsets at this file.
+# and the two gates the entrypoint routes out-of-band flows through. A
+# tool the policy does not name is refused at the `ToolCall` hook — add
+# a wildcard annotator before pointing a long tail of CRD toolsets at
+# this file.
+#
+# A tool is named by its canonical id. An MCP tool is
+# `mcp/<toolset>/<tool>`, where `<toolset>` is the name of the
+# `RemoteMCPServer` (or `ToolServer`) object the agent lists it from:
+# this file assumes the demo toolset is served by a `RemoteMCPServer`
+# named `demo-tools`, as the demo chart creates it. kagent's own
+# built-in tools are `host/kagent/<tool>`, and the entrypoint's gates
+# are `host/kagent-gate/<gate>`.
 #
 # It names no agent: on kagent an agent called as a tool runs as a child
 # only under a contract that names it, wildcard or not, so delegation to
-# another Agent is off until a `[[policy.tool]]` entry names that agent by
-# its wire spelling (`<namespace>__NS__<name>`, hyphens as underscores).
+# another Agent is off until a `[[policy.tool]]` entry names that agent
+# as `agent/<namespace>/<name>`.
 #
 # The policy runs without model keys: it declares no sanitizer and no
 # model-builtin annotator, so every decision is structural.
@@ -23,17 +31,17 @@ version = 2
 # --- in-cluster reads that stay inside the session ---
 
 [[policy.tool]]
-name = "list_pods"
+name = "mcp/demo-tools/list_pods"
 delta = {}
 
 [[policy.tool]]
-name = "read_configmap"
+name = "mcp/demo-tools/read_configmap"
 delta = {}
 
 # Secret material stays with operators: results carry the ops audience,
 # and a sink that publishes wider cannot receive them undeclared.
 [[policy.tool]]
-name = "read_secret"
+name = "mcp/demo-tools/read_secret"
 delta = { audience = ["ops"] }
 
 # --- ingress authored outside the session ---
@@ -41,11 +49,11 @@ delta = { audience = ["ops"] }
 # Logs carry whatever the workloads printed — including text written to
 # steer an agent that reads them.
 [[policy.tool]]
-name = "get_pod_logs"
+name = "mcp/demo-tools/get_pod_logs"
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
-name = "check_status_page"
+name = "mcp/demo-tools/check_status_page"
 delta = { trust = "suspicious" }
 
 # --- the outward sink ---
@@ -53,7 +61,7 @@ delta = { trust = "suspicious" }
 # A status update publishes to everyone: the flow must be readable by
 # everyone and must not derive from an untrusted source.
 [[policy.tool]]
-name = "post_status_update"
+name = "mcp/demo-tools/post_status_update"
 delta = {}
 
 [policy.tool.requires]
@@ -63,7 +71,7 @@ audience = { contains = ["public"] }
 # --- an effectful action behind a person ---
 
 [[policy.tool]]
-name = "restart_deployment"
+name = "mcp/demo-tools/restart_deployment"
 delta = {}
 
 [policy.tool.requires]
@@ -76,19 +84,19 @@ attention = ["human-approval"]
 # surfaces a question to the human caller and returns the answer. The
 # question flows to the operator the reply already reaches.
 [[policy.tool]]
-name = "ask_user"
+name = "host/kagent/ask_user"
 delta = {}
 
-# --- the entrypoint's synthetic tools ---
+# --- the entrypoint's gates ---
 
 # Code execution and the memory write-back cross the tool gate under
 # these names (the appa-kagent-adk entrypoint wraps both).
 [[policy.tool]]
-name = "appa_code_execution"
+name = "host/kagent-gate/code_execution"
 delta = {}
 
 [[policy.tool]]
-name = "appa_memory_persist"
+name = "host/kagent-gate/memory_persist"
 delta = {}
 
 # The A2A call to a delegated agent carries exactly the request the

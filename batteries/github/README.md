@@ -6,7 +6,8 @@ requests, and user search. Written for public repositories. Add it to your root 
 
 ## Files
 
-**`appa.toml`** — the rules, in three groups.
+**`appa.toml`** — the rules, in three groups. Each rule names its tool by
+the canonical tool id `mcp/github/<tool>`.
 
 *Who am I* — `get_me`, `get_teams`, `get_team_members`, `search_users`
 return profile data, nothing written by strangers. No restriction.

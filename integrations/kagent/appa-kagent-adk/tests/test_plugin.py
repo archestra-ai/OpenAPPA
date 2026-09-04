@@ -12,7 +12,6 @@ import httpx
 import pytest
 from conftest import (
     DOWN,
-    AgentTool,
     FakeAgent,
     FakeConfirmation,
     FakeContent,
@@ -22,7 +21,6 @@ from conftest import (
     FakeSession,
     FakeTool,
     Hook,
-    KAgentRemoteA2ATool,
     Remedy,
     plugin_over,
 )
@@ -36,9 +34,9 @@ from google.genai import types
 
 from appa_kagent_adk.plugin import RETURN_TOOL, AppaFailClosed, _cause
 
-ACK = {"decision": "ack"}
-ALLOW = {"decision": "allow_call"}
-PASS_CONTROL = {"decision": "pass_control"}
+ACK = {"protocol": 1, "decision": "ack"}
+ALLOW = {"protocol": 1, "decision": "allow_call"}
+PASS_CONTROL = {"protocol": 1, "decision": "pass_control"}
 
 
 def dispatch(session, call_id: str = "fc-1", invocation_id: str = "i1", **fields) -> FakeContext:
@@ -65,8 +63,8 @@ async def test_a_fresh_session_opens_before_its_prompt_crosses():
     )
     assert returned is None
     assert hook.events == [
-        {"event": "session_start", "root_id": "s1"},
-        {"event": "prompt", "root_id": "s1", "text": "deploy the chart"},
+        {"protocol": 1, "adapter": "kagent", "event": "session_start", "root_id": "s1"},
+        {"protocol": 1, "adapter": "kagent", "event": "prompt", "root_id": "s1", "text": "deploy the chart"},
     ]
 
 
@@ -91,7 +89,7 @@ async def test_a_state_only_header_event_does_not_hide_freshness():
 
 
 async def test_a_blocked_prompt_raises_before_the_append():
-    hook = Hook(ACK, {"decision": "block", "reason": "the prompt does not cross"})
+    hook = Hook(ACK, {"protocol": 1, "decision": "block", "reason": "the prompt does not cross"})
     plugin = plugin_over(hook)
     with pytest.raises(AppaFailClosed, match="the prompt does not cross"):
         await plugin.on_user_message_callback(
@@ -111,8 +109,15 @@ async def test_a_delegated_entry_classifies_as_the_childs_start():
         invocation_context=FakeInvocationContext(session), user_message=FakeContent("total the invoices")
     )
     assert hook.events == [
-        {"event": "child_start", "root_id": "root-ctx", "child_id": "child-ctx"},
-        {"event": "prompt", "root_id": "root-ctx", "child_id": "child-ctx", "text": "total the invoices"},
+        {"protocol": 1, "adapter": "kagent", "event": "child_start", "root_id": "root-ctx", "child_id": "child-ctx"},
+        {
+            "protocol": 1,
+            "adapter": "kagent",
+            "event": "prompt",
+            "root_id": "root-ctx",
+            "child_id": "child-ctx",
+            "text": "total the invoices",
+        },
     ]
 
 
@@ -127,8 +132,15 @@ async def test_a_parent_context_header_alone_classifies_as_the_childs_start():
         invocation_context=FakeInvocationContext(session), user_message=FakeContent("total the invoices")
     )
     assert hook.events == [
-        {"event": "child_start", "root_id": "parent-ctx", "child_id": "child-ctx"},
-        {"event": "prompt", "root_id": "parent-ctx", "child_id": "child-ctx", "text": "total the invoices"},
+        {"protocol": 1, "adapter": "kagent", "event": "child_start", "root_id": "parent-ctx", "child_id": "child-ctx"},
+        {
+            "protocol": 1,
+            "adapter": "kagent",
+            "event": "prompt",
+            "root_id": "parent-ctx",
+            "child_id": "child-ctx",
+            "text": "total the invoices",
+        },
     ]
 
 
@@ -169,7 +181,7 @@ async def test_an_opened_invocation_keeps_its_ids_when_the_headers_change_mid_ru
     # the tool calls ran in, not the trajectory the session state names now.
     await plugin.after_run_callback(invocation_context=FakeInvocationContext(session, "i1"))
     ping, *run = hook.events
-    assert ping == {"event": "ping"}
+    assert ping == {"protocol": 1, "adapter": "kagent", "event": "ping"}
     assert [(event["event"], event["root_id"], event.get("child_id")) for event in run] == [
         ("tool_call", "s1", None),
         ("tool_call", "s1", None),
@@ -194,7 +206,13 @@ async def test_a_run_error_ends_the_turn_under_the_pinned_pair_and_releases_it()
     )
     session.state["headers"] = {"x-kagent-root-context-id": "root-2"}
     await plugin.on_run_error_callback(invocation_context=FakeInvocationContext(session, "i1"), error=RuntimeError())
-    assert hook.events[-1] == {"event": "turn_end", "root_id": "root-1", "child_id": "child-ctx"}
+    assert hook.events[-1] == {
+        "protocol": 1,
+        "adapter": "kagent",
+        "event": "turn_end",
+        "root_id": "root-1",
+        "child_id": "child-ctx",
+    }
     await plugin.before_tool_callback(
         tool=FakeTool("read_ledger"), tool_args={}, tool_context=FakeContext(session, "i1")
     )
@@ -237,28 +255,44 @@ async def test_each_parent_opens_the_shared_child_session_under_its_own_root():
     )
     await plugin.after_run_callback(invocation_context=FakeInvocationContext(session, "i2"))
     assert hook.events == [
-        {"event": "child_start", "root_id": "root-1", "child_id": "child-ctx"},
-        {"event": "prompt", "root_id": "root-1", "child_id": "child-ctx", "text": "total the invoices"},
+        {"protocol": 1, "adapter": "kagent", "event": "child_start", "root_id": "root-1", "child_id": "child-ctx"},
         {
+            "protocol": 1,
+            "adapter": "kagent",
+            "event": "prompt",
+            "root_id": "root-1",
+            "child_id": "child-ctx",
+            "text": "total the invoices",
+        },
+        {
+            "protocol": 1,
+            "adapter": "kagent",
             "event": "tool_call",
             "root_id": "root-1",
             "child_id": "child-ctx",
-            "tool": "read_ledger",
+            "tool": "mcp:demo-tools/read_ledger",
             "arguments": {},
-            "spawn": False,
         },
-        {"event": "turn_end", "root_id": "root-1", "child_id": "child-ctx"},
-        {"event": "child_start", "root_id": "root-2", "child_id": "child-ctx"},
-        {"event": "prompt", "root_id": "root-2", "child_id": "child-ctx", "text": "list the pods"},
+        {"protocol": 1, "adapter": "kagent", "event": "turn_end", "root_id": "root-1", "child_id": "child-ctx"},
+        {"protocol": 1, "adapter": "kagent", "event": "child_start", "root_id": "root-2", "child_id": "child-ctx"},
         {
+            "protocol": 1,
+            "adapter": "kagent",
+            "event": "prompt",
+            "root_id": "root-2",
+            "child_id": "child-ctx",
+            "text": "list the pods",
+        },
+        {
+            "protocol": 1,
+            "adapter": "kagent",
             "event": "tool_call",
             "root_id": "root-2",
             "child_id": "child-ctx",
-            "tool": "k8s_get_pods",
+            "tool": "mcp:demo-tools/k8s_get_pods",
             "arguments": {},
-            "spawn": False,
         },
-        {"event": "turn_end", "root_id": "root-2", "child_id": "child-ctx"},
+        {"protocol": 1, "adapter": "kagent", "event": "turn_end", "root_id": "root-2", "child_id": "child-ctx"},
     ], "each parent must open and drive the shared child session under its own root"
 
 
@@ -277,16 +311,30 @@ async def test_the_same_parent_sends_no_second_child_start():
         invocation_context=FakeInvocationContext(session, "i2"), user_message=FakeContent("now the refunds")
     )
     assert hook.events == [
-        {"event": "child_start", "root_id": "root-1", "child_id": "child-ctx"},
-        {"event": "prompt", "root_id": "root-1", "child_id": "child-ctx", "text": "total the invoices"},
-        {"event": "prompt", "root_id": "root-1", "child_id": "child-ctx", "text": "now the refunds"},
+        {"protocol": 1, "adapter": "kagent", "event": "child_start", "root_id": "root-1", "child_id": "child-ctx"},
+        {
+            "protocol": 1,
+            "adapter": "kagent",
+            "event": "prompt",
+            "root_id": "root-1",
+            "child_id": "child-ctx",
+            "text": "total the invoices",
+        },
+        {
+            "protocol": 1,
+            "adapter": "kagent",
+            "event": "prompt",
+            "root_id": "root-1",
+            "child_id": "child-ctx",
+            "text": "now the refunds",
+        },
     ]
 
 
 async def test_a_refused_child_start_leaves_the_pair_unopened():
     """The pair joins the opened set only after the runtime acked, so a
     refused opening is sent again on the next entry."""
-    hook = Hook({"decision": "refuse", "detail": "storage failure"}, ACK, ACK)
+    hook = Hook({"protocol": 1, "decision": "refuse", "detail": "storage failure"}, ACK, ACK)
     plugin = plugin_over(hook)
     session = delegated_child("root-1")
     with pytest.raises(AppaFailClosed, match="appa refused the session: storage failure"):
@@ -361,7 +409,7 @@ async def test_the_run_end_releases_the_scope_it_claimed():
 
 
 async def test_an_allowed_call_passes_and_a_denied_call_answers_the_model():
-    hook = Hook(ALLOW, {"decision": "deny_call", "feedback": "blocked: quotes offer offer-1"})
+    hook = Hook(ALLOW, {"protocol": 1, "decision": "deny_call", "feedback": "blocked: quotes offer offer-1"})
     plugin = plugin_over(hook)
     context = FakeContext(FakeSession("s1"))
     allowed = await plugin.before_tool_callback(
@@ -373,25 +421,75 @@ async def test_an_allowed_call_passes_and_a_denied_call_answers_the_model():
     )
     assert denied == {"result": "blocked: quotes offer offer-1", "appa": "denied"}
     assert hook.events[0] == {
+        "protocol": 1,
+        "adapter": "kagent",
         "event": "tool_call",
         "root_id": "s1",
-        "tool": "k8s_scale",
+        "tool": "mcp:demo-tools/k8s_scale",
         "arguments": {"replicas": 3},
-        "spawn": False,
     }
 
 
-async def test_the_agent_shaped_tools_classify_as_the_spawn():
+async def test_every_tool_crosses_under_its_inventory_spelling_and_asserts_no_spawn():
+    """The wire carries the structured spelling of the inventory and no
+    spawn flag: the runtime derives both the canonical tool and whether
+    the call is a spawn from the spelling."""
     hook = Hook(ALLOW, ALLOW, ALLOW)
     plugin = plugin_over(hook)
     context = FakeContext(FakeSession("s1"))
-    for tool in [AgentTool("billing-agent"), KAgentRemoteA2ATool("billing-agent"), FakeTool("k8s_scale")]:
+    for tool in [FakeTool("kagent__NS__billing_agent"), FakeTool("k8s_scale"), FakeTool("ask_user")]:
         await plugin.before_tool_callback(tool=tool, tool_args={}, tool_context=context)
-    assert [event["spawn"] for event in hook.events] == [True, True, False]
+    assert [event["tool"] for event in hook.events] == [
+        "agent:kagent/billing-agent",
+        "mcp:demo-tools/k8s_scale",
+        "builtin:ask_user",
+    ]
+    assert all("spawn" not in event for event in hook.events)
+    assert all((event["protocol"], event["adapter"]) == (1, "kagent") for event in hook.events)
+
+
+async def test_a_tool_outside_the_inventory_is_refused_at_the_gate_and_never_forwarded():
+    """A name the rendered config never declared has no spelling, so
+    the plugin answers the call itself with a deny and posts nothing.
+    The result gate then reads the settled call and reports nothing."""
+    hook = Hook()
+    plugin = plugin_over(hook)
+    context = dispatch(FakeSession("s1"))
+    unknown = FakeTool("k8s_delete_namespace")
+    denied = await plugin.before_tool_callback(tool=unknown, tool_args={"name": "prod"}, tool_context=context)
+    assert denied["appa"] == "denied"
+    assert "k8s_delete_namespace" in denied["result"]
+    reported = await plugin.after_tool_callback(
+        tool=unknown, tool_args={"name": "prod"}, tool_context=context, result=denied
+    )
+    assert reported is None
+    assert hook.events == [], "nothing crosses for a name the inventory does not carry"
+
+
+async def test_a_result_of_a_tool_outside_the_inventory_fails_closed():
+    plugin = plugin_over(Hook())
+    unknown = FakeTool("k8s_delete_namespace")
+    with pytest.raises(AppaFailClosed, match="k8s_delete_namespace"):
+        await plugin.after_tool_callback(
+            tool=unknown, tool_args={}, tool_context=dispatch(FakeSession("s1")), result={"deleted": True}
+        )
+    with pytest.raises(AppaFailClosed, match="k8s_delete_namespace"):
+        await plugin.on_tool_error_callback(
+            tool=unknown, tool_args={}, tool_context=dispatch(FakeSession("s1")), error=RuntimeError("boom")
+        )
+
+
+async def test_a_decision_under_another_protocol_fails_closed():
+    hook = Hook({"protocol": 2, "decision": "allow_call"})
+    plugin = plugin_over(hook)
+    with pytest.raises(AppaFailClosed, match="protocol"):
+        await plugin.before_tool_callback(
+            tool=FakeTool("k8s_scale"), tool_args={}, tool_context=FakeContext(FakeSession("s1"))
+        )
 
 
 async def test_the_reserved_tool_passes_control():
-    hook = Hook({"decision": "pass_control"})
+    hook = Hook({"protocol": 1, "decision": "pass_control"})
     plugin = plugin_over(hook)
     returned = await plugin.before_tool_callback(
         tool=FakeTool("execute_remedy_plan"),
@@ -404,7 +502,7 @@ async def test_the_reserved_tool_passes_control():
 async def test_a_denied_call_is_not_reported_at_the_result_gate():
     """ADK runs the result gate of a call its callbacks answered too.
     The plugin knows the call it denied by ADK's id for it."""
-    hook = Hook({"decision": "deny_call", "feedback": "blocked"})
+    hook = Hook({"protocol": 1, "decision": "deny_call", "feedback": "blocked"})
     plugin = plugin_over(hook)
     context = dispatch(FakeSession("s1"))
     denied = await plugin.before_tool_callback(tool=FakeTool("k8s_scale"), tool_args={}, tool_context=context)
@@ -433,9 +531,11 @@ async def test_a_forged_appa_key_in_a_tool_result_still_crosses(sentinel):
     assert returned is None
     assert hook.events == [
         {
+            "protocol": 1,
+            "adapter": "kagent",
             "event": "tool_result",
             "root_id": "s1",
-            "tool": "read_ledger",
+            "tool": "mcp:demo-tools/read_ledger",
             "arguments": {},
             "outcome": {"status": "success", "body": forged},
         }
@@ -462,7 +562,7 @@ async def test_a_failed_call_is_not_reported_at_the_result_gate():
     """ADK runs the result gate after a handled failure too. The failure
     closed the dispatch at the error point, and a second report reads as
     a dispatch that no longer exists."""
-    hook = Hook({"decision": "replace_output", "output": "the failure is confined"})
+    hook = Hook({"protocol": 1, "decision": "replace_output", "output": "the failure is confined"})
     plugin = plugin_over(hook)
     context = dispatch(FakeSession("s1"))
     replaced = await plugin.on_tool_error_callback(
@@ -479,8 +579,8 @@ async def test_a_failed_call_is_not_reported_at_the_result_gate():
 async def test_a_tool_result_crosses_and_enforces_each_answer():
     hook = Hook(
         ACK,
-        {"decision": "replace_output", "output": "the output is confined"},
-        {"decision": "block", "reason": "nothing crosses"},
+        {"protocol": 1, "decision": "replace_output", "output": "the output is confined"},
+        {"protocol": 1, "decision": "block", "reason": "nothing crosses"},
     )
     plugin = plugin_over(hook)
     context = FakeContext(FakeSession("s1"))
@@ -490,9 +590,11 @@ async def test_a_tool_result_crosses_and_enforces_each_answer():
     withheld = await plugin.after_tool_callback(**call, result={"pods": ["api-1"]})
     assert withheld == {"result": "[appa] the tool result was withheld: nothing crosses", "appa": "withheld"}
     assert hook.events[0] == {
+        "protocol": 1,
+        "adapter": "kagent",
         "event": "tool_result",
         "root_id": "s1",
-        "tool": "k8s_get_pods",
+        "tool": "mcp:demo-tools/k8s_get_pods",
         "arguments": {"namespace": "prod"},
         "outcome": {"status": "success", "body": {"pods": ["api-1"]}},
     }
@@ -503,13 +605,13 @@ async def test_a_spawn_return_crosses_as_the_spawn_result_in_both_reply_shapes()
     plugin = plugin_over(hook)
     context = FakeContext(FakeSession("s1"))
     await plugin.after_tool_callback(
-        tool=KAgentRemoteA2ATool("billing-agent"),
+        tool=FakeTool("kagent__NS__billing_agent"),
         tool_args={"request": "total the invoices"},
         tool_context=context,
         result={"result": "the total is 42", "subagent_session_id": "child-ctx"},
     )
     await plugin.after_tool_callback(
-        tool=KAgentRemoteA2ATool("billing-agent"),
+        tool=FakeTool("kagent__NS__billing_agent"),
         tool_args={"request": "go"},
         tool_context=context,
         result="Remote agent 'billing-agent' request failed: boom",
@@ -524,10 +626,10 @@ async def test_a_spawn_return_crosses_as_the_spawn_result_in_both_reply_shapes()
 
 
 async def test_a_child_return_substitutes_what_the_parent_receives():
-    hook = Hook({"decision": "child_return", "value": "the redacted summary"})
+    hook = Hook({"protocol": 1, "decision": "child_return", "value": "the redacted summary"})
     plugin = plugin_over(hook)
     returned = await plugin.after_tool_callback(
-        tool=AgentTool("billing-agent"),
+        tool=FakeTool("kagent__NS__billing_agent"),
         tool_args={},
         tool_context=FakeContext(FakeSession("s1")),
         result={"result": "the raw child answer", "subagent_session_id": "child-ctx"},
@@ -578,7 +680,7 @@ async def test_every_liveness_gate_passes_when_the_channel_answers():
     assert await plugin.before_run_callback(invocation_context=invocation) is None
     assert await plugin.before_model_callback(callback_context=context, llm_request=object()) is None
     assert await plugin.on_event_callback(invocation_context=invocation, event=FakeEvent()) is None
-    assert all(event == {"event": "ping"} for event in hook.events)
+    assert all(event == {"protocol": 1, "adapter": "kagent", "event": "ping"} for event in hook.events)
 
 
 # -- fail closed ------------------------------------------------------
@@ -590,7 +692,7 @@ async def test_a_gated_callback_fails_closed_on_transport_status_and_contract():
     call = lambda plugin: plugin.before_tool_callback(  # noqa: E731
         tool=FakeTool("k8s_scale"), tool_args={}, tool_context=context
     )
-    for answer in [DOWN, 409, 500, {"decision": "approve"}, {"decision": "deny_call"}]:
+    for answer in [DOWN, 409, 500, {"protocol": 1, "decision": "approve"}, {"protocol": 1, "decision": "deny_call"}]:
         with pytest.raises(AppaFailClosed):
             await call(plugin_over(Hook(answer)))
 
@@ -602,7 +704,7 @@ async def test_a_turn_end_reports_and_never_blocks():
     hook = Hook(ACK)
     plugin = plugin_over(hook)
     await plugin.after_run_callback(invocation_context=FakeInvocationContext(FakeSession("s1")))
-    assert hook.events == [{"event": "turn_end", "root_id": "s1"}]
+    assert hook.events == [{"protocol": 1, "adapter": "kagent", "event": "turn_end", "root_id": "s1"}]
     downed = plugin_over(Hook(DOWN))
     await downed.after_run_callback(invocation_context=FakeInvocationContext(FakeSession("s1")))
 
@@ -659,6 +761,7 @@ async def test_the_installed_plugin_manager_accepts_every_callback():
 
 REVIEW_TEXT = 'APPA asks you to rule as the authority "oncall".\n\nTool: restart_deployment'
 DENY_WITH_REVIEW = {
+    "protocol": 1,
     "decision": "deny_call",
     "feedback": "[appa] Blocked",
     "review": [{"offer_id": "offer-1", "text": REVIEW_TEXT}],
@@ -688,7 +791,9 @@ async def test_a_reviewed_offer_asks_the_person_before_the_control_call_crosses(
 
 @pytest.mark.parametrize(("confirmed", "ruling"), [(True, "approve"), (False, "deny")])
 async def test_the_resumed_control_call_carries_the_persons_ruling(confirmed, ruling):
-    hook = Hook(DENY_WITH_REVIEW, {"decision": "pass_control"}, {"decision": "pass_control"})
+    hook = Hook(
+        DENY_WITH_REVIEW, {"protocol": 1, "decision": "pass_control"}, {"protocol": 1, "decision": "pass_control"}
+    )
     plugin = plugin_over(hook)
     await plugin.before_tool_callback(
         tool=FakeTool("restart_deployment"),
@@ -701,7 +806,7 @@ async def test_the_resumed_control_call_carries_the_persons_ruling(confirmed, ru
     )
     assert returned is None, "the ruled call passes to /mcp"
     assert context.requested == [], "a resumed call asks nobody again"
-    assert hook.events[-1]["tool"] == "execute_remedy_plan"
+    assert hook.events[-1]["tool"] == "appa:execute_remedy_plan"
     assert hook.events[-1]["ruling"] == ruling, "the answer rides the control call, never through the model"
 
     # The ruling is spent: the same offer quoted again asks nobody and carries nothing.
@@ -713,7 +818,7 @@ async def test_the_resumed_control_call_carries_the_persons_ruling(confirmed, ru
 
 
 async def test_a_control_call_for_an_offer_needing_no_person_never_asks():
-    hook = Hook({"decision": "pass_control"})
+    hook = Hook({"protocol": 1, "decision": "pass_control"})
     plugin = plugin_over(hook)
     context = FakeContext(FakeSession("s1"))
     returned = await plugin.before_tool_callback(
@@ -837,7 +942,14 @@ async def test_the_value_of_a_child_crosses_at_the_gate_and_its_stop_replays_it(
     context = FakeContext(delegated_child("root-1"))
     returned = await plugin.hold_the_return(context, "the total is 42")
     assert gated(hook) == [
-        {"event": "child_end", "root_id": "root-1", "child_id": "child-ctx", "value": "the total is 42"}
+        {
+            "protocol": 1,
+            "adapter": "kagent",
+            "event": "child_end",
+            "root_id": "root-1",
+            "child_id": "child-ctx",
+            "value": "the total is 42",
+        }
     ]
     assert "the total is 42" in returned["result"]
     stop = await plugin.after_model_callback(callback_context=context, llm_response=spoke("I answered the parent."))
@@ -845,7 +957,7 @@ async def test_the_value_of_a_child_crosses_at_the_gate_and_its_stop_replays_it(
 
 
 async def test_a_returned_value_is_echoed_before_the_child_stops_with_it():
-    hook = Hook({"decision": "child_return", "value": "the redacted summary"}, ACK)
+    hook = Hook({"protocol": 1, "decision": "child_return", "value": "the redacted summary"}, ACK)
     plugin = plugin_over(hook)
     context = FakeContext(delegated_child("root-1"))
     returned = await plugin.hold_the_return(context, "the raw summary")
@@ -858,14 +970,17 @@ async def test_a_returned_value_is_echoed_before_the_child_stops_with_it():
 
 
 async def test_a_refused_echo_fails_closed():
-    hook = Hook({"decision": "child_return", "value": "the redacted summary"}, {"decision": "block", "reason": "no"})
+    hook = Hook(
+        {"protocol": 1, "decision": "child_return", "value": "the redacted summary"},
+        {"protocol": 1, "decision": "block", "reason": "no"},
+    )
     plugin = plugin_over(hook)
     with pytest.raises(AppaFailClosed):
         await plugin.hold_the_return(FakeContext(delegated_child("root-1")), "the raw summary")
 
 
 async def test_a_blocked_return_comes_back_as_the_tool_result_and_the_child_stops_again():
-    hook = Hook({"decision": "block", "reason": "this subagent ended without a return"})
+    hook = Hook({"protocol": 1, "decision": "block", "reason": "this subagent ended without a return"})
     plugin = plugin_over(hook)
     context = FakeContext(delegated_child("root-1"))
     returned = await plugin.hold_the_return(context, "one more thing")
@@ -881,7 +996,9 @@ async def test_a_void_return_keeps_its_value_off_the_wire_and_stops_empty():
     plugin = plugin_over(hook)
     context = FakeContext(delegated_child("root-1"))
     returned = await plugin.hold_the_return(context, "")
-    assert gated(hook) == [{"event": "child_end", "root_id": "root-1", "child_id": "child-ctx"}]
+    assert gated(hook) == [
+        {"protocol": 1, "adapter": "kagent", "event": "child_end", "root_id": "root-1", "child_id": "child-ctx"}
+    ]
     assert returned["result"].startswith("[appa] the void return crossed")
     stop = await plugin.after_model_callback(callback_context=context, llm_response=spoke("one more thing"))
     assert stop.content.parts[0].text == ""
@@ -898,25 +1015,23 @@ async def test_the_return_gate_crosses_no_tool_gate():
     assert hook.events == [], "APPA owns the gate object, so its own call feeds no tool event"
 
 
-async def test_a_foreign_tool_of_the_gates_name_crosses_the_gate_at_both_points():
-    """The gate is the object this plugin built. An MCP toolset with no
-    filter loads whatever its server advertises, and a root scope
-    registers no gate of its own to take the name, so a tool that
-    answers to `appa_return` is somebody else's tool."""
-    hook = Hook(ALLOW, ACK)
+async def test_a_foreign_tool_of_the_gates_name_is_refused_like_any_undeclared_tool():
+    """The gate is the object this plugin built. A tool that merely
+    answers to `appa_return` is somebody else's tool, and the config
+    guard refuses a config that declares one, so it is outside the
+    inventory: the call gate refuses it and the child's stop never
+    posts."""
+    hook = Hook()
     plugin = plugin_over(hook)
     foreign = FakeTool(RETURN_TOOL)
     context = dispatch(FakeSession("s1"))
-    passed = await plugin.before_tool_callback(tool=foreign, tool_args={"text": "the ledger"}, tool_context=context)
-    assert passed is None
+    denied = await plugin.before_tool_callback(tool=foreign, tool_args={"text": "the ledger"}, tool_context=context)
+    assert denied["appa"] == "denied"
     reported = await plugin.after_tool_callback(
-        tool=foreign, tool_args={"text": "the ledger"}, tool_context=context, result={"sent": True}
+        tool=foreign, tool_args={"text": "the ledger"}, tool_context=context, result=denied
     )
     assert reported is None
-    assert [(event["event"], event["tool"]) for event in hook.events] == [
-        ("tool_call", RETURN_TOOL),
-        ("tool_result", RETURN_TOOL),
-    ], "a foreign tool of that name is gated like any other"
+    assert hook.events == [], "a foreign tool of that name posts neither a tool event nor a child_end"
 
 
 async def test_the_return_gate_outside_a_child_scope_fails_closed():
@@ -949,6 +1064,7 @@ async def test_the_run_end_drops_what_crossed():
 FLOOR_OFFER = {"offer_id": "offer-1", "returns": "as_spoken"}
 SANITIZED_OFFER = {"offer_id": "offer-2", "returns": {"sanitizer": "strip-instructions"}}
 HELD_SPAWN = {
+    "protocol": 1,
     "decision": "deny_call",
     "feedback": "[appa] Blocked. Declare what this subagent may return.",
     "offers": [FLOOR_OFFER, SANITIZED_OFFER],
@@ -960,7 +1076,7 @@ async def test_the_plugin_declares_the_bare_floor_and_proposes_the_spawn_again()
     remedy = Remedy()
     plugin = plugin_over(hook, remedy)
     released = await plugin.before_tool_callback(
-        tool=KAgentRemoteA2ATool("log-analyst"),
+        tool=FakeTool("kagent__NS__log_analyst"),
         tool_args={"request": "read the crash logs"},
         tool_context=FakeContext(FakeSession("s1")),
     )
@@ -968,35 +1084,39 @@ async def test_the_plugin_declares_the_bare_floor_and_proposes_the_spawn_again()
     assert remedy.calls == [{"offer_id": "offer-1", "label": {}}], "the bare floor takes the label of the parent"
     spawn, control, again = gated(hook)
     assert spawn == again, "the plugin proposes the identical call after the declaration"
-    assert control["tool"] == "execute_remedy_plan"
+    assert control["tool"] == "appa:execute_remedy_plan"
     assert control["arguments"] == {"offer_id": "offer-1", "label": {}}
-    assert control["spawn"] is False
+    assert "spawn" not in control
 
 
 async def test_a_second_deny_after_the_declaration_reaches_the_model():
-    hook = Hook(HELD_SPAWN, PASS_CONTROL, {"decision": "deny_call", "feedback": "[appa] Blocked. No such child."})
+    hook = Hook(
+        HELD_SPAWN, PASS_CONTROL, {"protocol": 1, "decision": "deny_call", "feedback": "[appa] Blocked. No such child."}
+    )
     remedy = Remedy()
     plugin = plugin_over(hook, remedy)
     denied = await plugin.before_tool_callback(
-        tool=KAgentRemoteA2ATool("log-analyst"), tool_args={}, tool_context=FakeContext(FakeSession("s1"))
+        tool=FakeTool("kagent__NS__log_analyst"), tool_args={}, tool_context=FakeContext(FakeSession("s1"))
     )
     assert denied == {"result": "[appa] Blocked. No such child.", "appa": "denied"}
     assert len(remedy.calls) == 1, "the plugin declares once per call"
 
 
 async def test_a_declaration_the_runtime_does_not_vouch_for_reaches_the_model():
-    hook = Hook(HELD_SPAWN, {"decision": "deny_call", "feedback": "[appa] this offer no longer stands"})
+    hook = Hook(HELD_SPAWN, {"protocol": 1, "decision": "deny_call", "feedback": "[appa] this offer no longer stands"})
     remedy = Remedy()
     plugin = plugin_over(hook, remedy)
     denied = await plugin.before_tool_callback(
-        tool=KAgentRemoteA2ATool("log-analyst"), tool_args={}, tool_context=FakeContext(FakeSession("s1"))
+        tool=FakeTool("kagent__NS__log_analyst"), tool_args={}, tool_context=FakeContext(FakeSession("s1"))
     )
     assert denied == {"result": HELD_SPAWN["feedback"], "appa": "denied"}, "the model reads the block with its menu"
     assert remedy.calls == [], "no vouch, no plan"
 
 
 async def test_a_deny_with_no_return_route_goes_straight_to_the_model():
-    hook = Hook({"decision": "deny_call", "feedback": "[appa] Blocked", "offers": [{"offer_id": "offer-9"}]})
+    hook = Hook(
+        {"protocol": 1, "decision": "deny_call", "feedback": "[appa] Blocked", "offers": [{"offer_id": "offer-9"}]}
+    )
     remedy = Remedy()
     plugin = plugin_over(hook, remedy)
     denied = await plugin.before_tool_callback(
@@ -1010,7 +1130,10 @@ async def test_a_deny_with_no_return_route_goes_straight_to_the_model():
 
 
 async def test_the_return_contract_rides_the_first_user_message_of_a_child():
-    hook = Hook({"decision": "context", "text": "[appa] your return may carry nothing but the parent's label."}, ACK)
+    hook = Hook(
+        {"protocol": 1, "decision": "context", "text": "[appa] your return may carry nothing but the parent's label."},
+        ACK,
+    )
     plugin = plugin_over(hook)
     request = types.Content(role="user", parts=[types.Part(text="total the invoices")])
     message = await plugin.on_user_message_callback(
@@ -1021,15 +1144,22 @@ async def test_the_return_contract_rides_the_first_user_message_of_a_child():
         "total the invoices",
     ], "the contract goes in front, and the request the parent sent stands unchanged"
     assert gated(hook) == [
-        {"event": "child_start", "root_id": "root-1", "child_id": "child-ctx"},
-        {"event": "prompt", "root_id": "root-1", "child_id": "child-ctx", "text": "total the invoices"},
+        {"protocol": 1, "adapter": "kagent", "event": "child_start", "root_id": "root-1", "child_id": "child-ctx"},
+        {
+            "protocol": 1,
+            "adapter": "kagent",
+            "event": "prompt",
+            "root_id": "root-1",
+            "child_id": "child-ctx",
+            "text": "total the invoices",
+        },
     ]
 
 
 async def test_a_context_at_a_root_session_start_refuses():
     """Only a fork carries a return contract, so a root that reads one
     is an answer outside the contract of this event."""
-    hook = Hook({"decision": "context", "text": "[appa] a contract"})
+    hook = Hook({"protocol": 1, "decision": "context", "text": "[appa] a contract"})
     plugin = plugin_over(hook)
     with pytest.raises(AppaFailClosed, match="appa refused the session: context"):
         await plugin.on_user_message_callback(
@@ -1086,6 +1216,8 @@ async def test_a_child_scope_stops_through_the_return_gate_in_a_real_runner():
 
     assert [event["event"] for event in gated(hook)] == ["child_start", "prompt", "child_end", "turn_end"]
     assert gated(hook)[2] == {
+        "protocol": 1,
+        "adapter": "kagent",
         "event": "child_end",
         "root_id": "root-1",
         "child_id": session.id,
@@ -1140,7 +1272,7 @@ async def test_a_denied_call_reports_once_in_a_real_runner():
     same id. A second report here would open a dispatch the runtime
     never opened.
     """
-    hook = ByKind(tool_call={"decision": "deny_call", "feedback": "[appa] Blocked"})
+    hook = ByKind(tool_call={"protocol": 1, "decision": "deny_call", "feedback": "[appa] Blocked"})
     plugin = plugin_over(hook)
 
     def read_ledger() -> dict:

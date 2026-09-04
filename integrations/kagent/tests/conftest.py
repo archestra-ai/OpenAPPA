@@ -451,10 +451,17 @@ class Agent:
 
 
 class Board:
-    """A member of the remote change board: rules on the mock's side channel."""
+    """A member of the remote change board: rules on the mock's side channel.
+
+    A consult names its tool by the canonical id the policy carries, so
+    a caller waits on `mcp/localhost/rollback_deployment`, never on the
+    bare name kagent dispatches. `ruled` holds every consult this member
+    answered, so a case can assert the board ruled at all.
+    """
 
     def __init__(self, url: str):
         self.url = url.rstrip("/")
+        self.ruled: list[dict] = []
 
     def pending(self, tool: str) -> list[dict]:
         with urllib.request.urlopen(self.url + "/pending", timeout=5) as response:
@@ -470,6 +477,7 @@ class Board:
                     self.url + "/decide", data=body, headers={"content-type": "application/json"}
                 )
                 with urllib.request.urlopen(request, timeout=5):
+                    self.ruled.append(entry)
                     return entry
             time.sleep(0.2)
         return None
@@ -624,7 +632,10 @@ def demo_tools_url(workdir) -> Iterator[str]:
     command = [sys.executable, str(DEMO_TOOLS), "--host", "127.0.0.1", "--port", str(port)]
     with _process(command, workdir / "demo-tools.log"):
         _wait_tcp("127.0.0.1", port)
-        yield f"http://127.0.0.1:{port}/mcp"
+        # localhost, not the loopback address: the entrypoint names the
+        # toolset by the host label of this URL, and the policy names
+        # the tools `mcp/localhost/<tool>`.
+        yield f"http://localhost:{port}/mcp"
 
 
 @pytest.fixture(scope="session")

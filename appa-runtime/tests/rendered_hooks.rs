@@ -51,11 +51,11 @@ fn recording_runtime() -> (Endpoint, mpsc::Receiver<String>) {
             let request = request.trim_end().to_owned();
             // A healthy answer, so the SessionStart starter finds the runtime up
             // and chains straight through to the hook rather than trying to
-            // start one.
+            // start one; a hook is acknowledged on the wire.
             let (content_type, body) = if request.starts_with("GET /health") {
                 ("text/plain", "ok")
             } else {
-                ("application/json", "{}")
+                ("application/json", r#"{"protocol":1,"decision":"ack"}"#)
             };
             if record.send(request).is_err() {
                 return;
@@ -163,11 +163,11 @@ fn rendered_hooks_run_the_deployed_binary_and_post_to_the_deployment_endpoint() 
             .stderr(Stdio::null())
             .spawn()
             .unwrap_or_else(|error| panic!("the {event} hook spawns: {error}"));
-        let _ = child
-            .stdin
-            .as_mut()
-            .expect("the child has a stdin pipe")
-            .write_all(br#"{"hook_event_name":"PreToolUse","session_id":"rendered-test"}"#);
+        // A gated hook the client translates and posts; a hook it cannot parse
+        // blocks before any request, which would prove nothing about the endpoint.
+        let _ = child.stdin.as_mut().expect("the child has a stdin pipe").write_all(
+            br#"{"hook_event_name":"PreToolUse","session_id":"rendered-test","tool_name":"Bash","tool_input":{"command":"ls"}}"#,
+        );
         let _ = child.wait();
 
         // The bytes have to land somewhere: an endpoint the rendering missed

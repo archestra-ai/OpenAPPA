@@ -58,8 +58,8 @@ from appa_kagent_adk.gates import MEMORY_PERSIST_TOOL, gate_memory_persist  # no
 from appa_kagent_adk.plugin import AppaPluginKagent  # noqa: E402
 from appa_kagent_adk.wire import RESERVED_TOOL  # noqa: E402
 
-ACK = {"decision": "ack"}
-ALLOW = {"decision": "allow_call"}
+ACK = {"protocol": 1, "decision": "ack"}
+ALLOW = {"protocol": 1, "decision": "allow_call"}
 
 CONFIG = {
     "model": {"type": "openai", "model": "gpt-5.2"},
@@ -339,13 +339,13 @@ async def test_a_proposal_of_each_recorded_name_crosses_the_gate_as_spelled(reco
     if recorded["declared"]:
         await run_turn(agent, [plugin_over(hook)])
         call, result = hook.tool_events()
-        assert (call["event"], call["tool"], call["arguments"], call["spawn"]) == (
-            "tool_call",
-            name,
-            PROPOSALS[name],
-            False,
+        assert (call["event"], call["tool"], call["arguments"]) == ("tool_call", f"builtin:{name}", PROPOSALS[name])
+        assert "spawn" not in call
+        assert (result["event"], result["tool"], result["outcome"]["status"]) == (
+            "tool_result",
+            f"builtin:{name}",
+            "success",
         )
-        assert (result["event"], result["tool"], result["outcome"]["status"]) == ("tool_result", name, "success")
         return
 
     # An undeclared tool hands the model no function to call. ADK's
@@ -354,7 +354,11 @@ async def test_a_proposal_of_each_recorded_name_crosses_the_gate_as_spelled(reco
     with pytest.raises(ValueError, match=f"Tool '{name}' not found"):
         await run_turn(agent, [plugin_over(hook)])
     (failure,) = hook.tool_events()
-    assert (failure["event"], failure["tool"], failure["outcome"]["status"]) == ("tool_result", name, "failure")
+    assert (failure["event"], failure["tool"], failure["outcome"]["status"]) == (
+        "tool_result",
+        f"builtin:{name}",
+        "failure",
+    )
 
 
 # -- 3. plugin order ----------------------------------------------------
@@ -421,7 +425,7 @@ def session_after_user_turns(count: int) -> Session:
 
 async def test_a_denied_persist_of_a_real_memory_agent_writes_nothing():
     agent = stock_agent(MEMORY_CONFIG)
-    hook = Hook({"decision": "deny_call", "feedback": "blocked: the session holds confidential values"})
+    hook = Hook({"protocol": 1, "decision": "deny_call", "feedback": "blocked: the session holds confidential values"})
     plugin = plugin_over(hook)
     assert gate_memory_persist(agent, plugin) is True
     assert callback_names(agent) == ["appa_gated_memory_persist"]

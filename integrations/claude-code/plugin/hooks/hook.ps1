@@ -239,10 +239,17 @@ try {
             throw "[appa] this session cannot be protected while a subagent definition declares maxTurns: Claude Code ends that subagent without the return check and hands the parent its partial output unchecked. Remove maxTurns from: $($declaring -join ', ')"
         }
     }
-    $timeout = if ($TurnEnd) { 30 } else { 120 }
-    $response = Invoke-WebRequest -Uri "$runtimeUrl/hook" -Method Post `
-        -ContentType "application/json" -Body $payload -TimeoutSec $timeout -UseBasicParsing
-    [Console]::Out.Write([string]$response.Content)
+    # The installed binary is the hook client: it translates the Claude Code event
+    # onto the runtime's wire, posts it, renders the answer back into Claude Code's
+    # shape, and exits 2 on a refusal or no answer (0 on a turn end, which decides
+    # nothing). Its stdout and exit code are this hook's.
+    $hookArgs = @("hook", "--adapter", "claude-code", "--url", $runtimeUrl)
+    if ($TurnEnd) {
+        $hookArgs += "--turn-end"
+    }
+    $answer = $payload | & $binary @hookArgs
+    [Console]::Out.Write(($answer -join "`n"))
+    exit $LASTEXITCODE
 } catch {
     $failure = $_.Exception.Message
     # A turn end decides nothing, and every blocking outcome on these

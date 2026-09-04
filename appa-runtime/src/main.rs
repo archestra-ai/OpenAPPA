@@ -11,6 +11,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use appa_runtime_api::AdapterName;
 use axum::extract::State;
 use axum::routing::{get, post};
 use clap::Parser;
@@ -53,8 +54,8 @@ struct Args {
     #[arg(long, default_value = "127.0.0.1:8787")]
     listen: SocketAddr,
 
-    #[arg(long, value_enum, default_value_t = Adapter::ClaudeCode, global = true)]
-    adapter: Adapter,
+    #[arg(long, default_value_t = AdapterName::ClaudeCode, global = true)]
+    adapter: AdapterName,
 
     #[arg(short, action = clap::ArgAction::Count)]
     verbose: u8,
@@ -68,30 +69,21 @@ fn require_loopback(addr: &SocketAddr) -> Result<(), String> {
     }
 }
 
-/// The adapter surface this binary can serve. The one place harness
-/// names appear in this crate: each variant maps to one codec crate.
-#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub(crate) enum Adapter {
-    ClaudeCode,
-    Kagent,
+/// kagent's spawns are other agents called as tools: a child runs only under a contract
+/// that names the agent. Claude Code's `Task` keeps the wildcard's cover.
+fn spawn_coverage(adapter: AdapterName) -> crate::api::SpawnCoverage {
+    match adapter {
+        AdapterName::ClaudeCode => crate::api::SpawnCoverage::Wildcard,
+        AdapterName::Kagent => crate::api::SpawnCoverage::Declared,
+    }
 }
 
-impl Adapter {
-    /// kagent's spawns are other agents called as tools: a child runs only under a contract
-    /// that names the agent. Claude Code's `Task` keeps the wildcard's cover.
-    fn spawn_coverage(self) -> crate::api::SpawnCoverage {
-        match self {
-            Adapter::ClaudeCode => crate::api::SpawnCoverage::Wildcard,
-            Adapter::Kagent => crate::api::SpawnCoverage::Declared,
-        }
-    }
-
-    /// The derivation the runtime applies to every call of the host it serves.
-    fn served(self) -> appa_runtime_api::Adapter {
-        match self {
-            Adapter::ClaudeCode => appa_adapter_claude_code::adapter(),
-            Adapter::Kagent => appa_adapter_kagent::adapter(),
-        }
+/// The derivation the runtime applies to every call of the host it serves. The one
+/// place this crate names the adapter crates.
+fn served(adapter: AdapterName) -> appa_runtime_api::Adapter {
+    match adapter {
+        AdapterName::ClaudeCode => appa_adapter_claude_code::adapter(),
+        AdapterName::Kagent => appa_adapter_kagent::adapter(),
     }
 }
 
@@ -221,6 +213,10 @@ fn health_answer(stale: bool, pid: u32) -> String {
 async fn reload(State(state): State<AppState>) -> Result<axum::Json<Reloaded>, (axum::http::StatusCode, String)> {
     let config = Config::load(&state.config)
         .map_err(|error| (axum::http::StatusCode::UNPROCESSABLE_ENTITY, error.to_string()))?;
+    if let Err(refusal) = crate::api::require_canonical_tools(&config) {
+        tracing::warn!(%refusal, "the reload was refused; the running deployment keeps serving");
+        return Err((axum::http::StatusCode::UNPROCESSABLE_ENTITY, refusal.to_string()));
+    }
     match state.runtime.reload(config) {
         Ok(reloaded) => Ok(axum::Json(reloaded)),
         Err(refusal) => {
@@ -293,8 +289,14 @@ async fn serve(args: Args) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // A served deployment names tools canonically: the wire carries each host's raw
+    // spelling, and the adapter derives the canonical identity a contract must name.
+    if let Err(refusal) = crate::api::require_canonical_tools(&config) {
+        eprintln!("appa runtime: {refusal}");
+        return ExitCode::FAILURE;
+    }
     let runtime = match Runtime::open(config, args.db, args.modules_dir) {
-        Ok(runtime) => Arc::new(runtime.with_spawn_coverage(args.adapter.spawn_coverage())),
+        Ok(runtime) => Arc::new(runtime.with_spawn_coverage(spawn_coverage(args.adapter))),
         Err(error) => {
             eprintln!("appa runtime: {error}");
             return ExitCode::FAILURE;
@@ -303,7 +305,7 @@ async fn serve(args: Args) -> ExitCode {
 
     let state = AppState {
         runtime: Arc::clone(&runtime),
-        adapter: args.adapter.served(),
+        adapter: served(args.adapter),
         config: config_path,
         executable: ExecutableAtStart::of_this_process(),
     };

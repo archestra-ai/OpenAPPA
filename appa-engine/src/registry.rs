@@ -156,13 +156,32 @@ fn parse_clause(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<
     Some((argument, parts, closed))
 }
 
-/// Split an authored declaration name into the tool it names and the matcher that selects it:
-/// `Tool` alone, or `Tool(argument:pattern[,argument:pattern...])`.
-fn parse_tool_selector(authored: &str) -> Result<(ToolName, ToolMatcher), LoadError> {
+/// What a `[[tool]]` declaration names once its argument selector is split off: one tool by
+/// its exact name, or the wildcard — the contract covering every tool call the policy does not
+/// name. The wildcard is not a tool name: it never keys the registry, never appears in a
+/// listing, and carries no metadata or selector.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ContractName {
+    Wildcard,
+    Named(ToolName),
+}
+
+impl ContractName {
+    fn parse(tool: &str) -> ContractName {
+        match tool {
+            WILDCARD_SPELLING => ContractName::Wildcard,
+            named => ContractName::Named(ToolName::new(named)),
+        }
+    }
+}
+
+/// Split an authored declaration name into the contract it names and the matcher that selects
+/// it: `Tool` alone, or `Tool(argument:pattern[,argument:pattern...])`.
+fn parse_tool_selector(authored: &str) -> Result<(ContractName, ToolMatcher), LoadError> {
     let malformed = || LoadError::MalformedToolSelector(authored.to_string());
     if !authored.contains(['(', ')']) {
         return (!authored.is_empty())
-            .then(|| (ToolName::new(authored), ToolMatcher::Bare))
+            .then(|| (ContractName::parse(authored), ToolMatcher::Bare))
             .ok_or_else(malformed);
     }
     let open = authored.find('(').ok_or_else(malformed)?;
@@ -178,11 +197,11 @@ fn parse_tool_selector(authored: &str) -> Result<(ToolName, ToolMatcher), LoadEr
         clauses.and(argument, pattern).ok_or_else(malformed)?;
         closed = next;
     }
-    Ok((ToolName::new(tool), ToolMatcher::Arguments(clauses)))
+    Ok((ContractName::parse(tool), ToolMatcher::Arguments(clauses)))
 }
 
 #[cfg(test)]
-pub(crate) fn base_tool_name(authored: &ToolName) -> Result<ToolName, LoadError> {
+pub(crate) fn contract_name(authored: &ToolName) -> Result<ContractName, LoadError> {
     parse_tool_selector(authored.as_str()).map(|(name, _)| name)
 }
 
@@ -704,7 +723,7 @@ fn worst_case_return_options(sanitizers: &[Sanitizer]) -> usize {
 
 /// The wildcard's spelling in a policy: `[[tool]] name = "*"` covers every tool call the policy
 /// does not name exactly, and routes each covered call through its annotator.
-pub const WILDCARD_TOOL_NAME: &str = "*";
+pub(crate) const WILDCARD_SPELLING: &str = "*";
 
 /// How the registry classifies a proposed tool name: declared and checkable, declared as
 /// provider-run (never checked), or covered by the wildcard — annotated per call. A name in
@@ -816,39 +835,18 @@ impl Registry {
         let mut provider_run: BTreeMap<ToolName, ToolAnnotation> = BTreeMap::new();
         let mut wildcard: Option<ToolDeclaration> = None;
         for mut declaration in config.tools {
-            let (base_name, matcher) = parse_tool_selector(declaration.name().as_str())?;
+            let (contract, matcher) = parse_tool_selector(declaration.name().as_str())?;
+            let base_name = match contract {
+                ContractName::Named(name) => name,
+                ContractName::Wildcard => {
+                    Self::admit_wildcard(&declaration, &matcher, &annotator_declarations)?;
+                    if wildcard.replace(declaration).is_some() {
+                        return Err(LoadError::DuplicateWildcard);
+                    }
+                    continue;
+                }
+            };
             declaration.set_name(base_name);
-            if declaration.name().as_str() == WILDCARD_TOOL_NAME {
-                let ToolDeclaration::Annotated {
-                    tags,
-                    description,
-                    parameters,
-                    annotator,
-                    ..
-                } = &declaration
-                else {
-                    return Err(LoadError::WildcardStatic);
-                };
-                if !annotator_declarations.contains_key(annotator) {
-                    return Err(LoadError::UnknownAnnotator {
-                        tool: WILDCARD_TOOL_NAME.to_string(),
-                        annotator: annotator.as_str().to_string(),
-                    });
-                }
-                // The wildcard covers calls this policy knows nothing about: metadata and
-                // argument selectors describe a specific tool, so it carries none.
-                if matcher != ToolMatcher::Bare
-                    || !tags.is_empty()
-                    || description.is_some()
-                    || *parameters != crate::params::ToolParameters::open()
-                {
-                    return Err(LoadError::WildcardMetadata);
-                }
-                if wildcard.replace(declaration).is_some() {
-                    return Err(LoadError::DuplicateWildcard);
-                }
-                continue;
-            }
             match &declaration {
                 ToolDeclaration::Declared(tool) => {
                     check_rank(&config.trust_chain, tool.delta.trust, || {
@@ -1033,6 +1031,40 @@ impl Registry {
             audience_config: config.audience,
             profile,
         })
+    }
+
+    /// The wildcard covers calls this policy knows nothing about, so it is an Annotated
+    /// declaration and nothing more: metadata and an argument selector describe a specific
+    /// tool, so it carries none.
+    fn admit_wildcard(
+        declaration: &ToolDeclaration,
+        matcher: &ToolMatcher,
+        annotators: &BTreeMap<AnnotatorName, AnnotatorDeclaration>,
+    ) -> Result<(), LoadError> {
+        let ToolDeclaration::Annotated {
+            tags,
+            description,
+            parameters,
+            annotator,
+            ..
+        } = declaration
+        else {
+            return Err(LoadError::WildcardStatic);
+        };
+        if !annotators.contains_key(annotator) {
+            return Err(LoadError::UnknownAnnotator {
+                tool: WILDCARD_SPELLING.to_string(),
+                annotator: annotator.as_str().to_string(),
+            });
+        }
+        if *matcher != ToolMatcher::Bare
+            || !tags.is_empty()
+            || description.is_some()
+            || *parameters != crate::params::ToolParameters::open()
+        {
+            return Err(LoadError::WildcardMetadata);
+        }
+        Ok(())
     }
 
     /// The validated audience registry: sources, chain mappings, named audiences, `within`
@@ -2068,7 +2100,7 @@ mod tests {
     fn the_wildcard_covers_every_name_the_policy_does_not_write() {
         let mut cfg = base();
         cfg.tools = declared(vec![tool("read")]);
-        cfg.tools.push(annotated(WILDCARD_TOOL_NAME, "any"));
+        cfg.tools.push(annotated(WILDCARD_SPELLING, "any"));
         cfg.annotators = vec![annotator("any")];
         let registry = Registry::build_covered(cfg).unwrap();
         let read = ToolName::new("read");
@@ -2091,8 +2123,30 @@ mod tests {
                 .keyed_tool(&ghost, ToolDeclarationId::new(1).unwrap())
                 .is_none()
         );
-        assert!(registry.tools().all(|tool| tool.name().as_str() != WILDCARD_TOOL_NAME));
-        assert!(registry.tool_names().all(|name| name.as_str() != WILDCARD_TOOL_NAME));
+        assert!(registry.tools().all(|tool| tool.name().as_str() != WILDCARD_SPELLING));
+        assert!(registry.tool_names().all(|name| name.as_str() != WILDCARD_SPELLING));
+        assert!(
+            !registry.declared(&ToolName::new(WILDCARD_SPELLING)),
+            "the wildcard's spelling names no tool"
+        );
+    }
+
+    #[test]
+    fn the_wildcard_parses_apart_from_every_tool_name() {
+        assert_eq!(
+            parse_tool_selector(WILDCARD_SPELLING).map(|(name, _)| name),
+            Ok(ContractName::Wildcard)
+        );
+        assert!(matches!(
+            parse_tool_selector("*(path:x)"),
+            Ok((ContractName::Wildcard, ToolMatcher::Arguments(_)))
+        ));
+        for named in ["read", "a*", "**", "read(path:*)"] {
+            assert!(
+                matches!(parse_tool_selector(named), Ok((ContractName::Named(_), _))),
+                "{named} names a tool"
+            );
+        }
     }
 
     #[test]
@@ -2111,7 +2165,7 @@ mod tests {
     fn a_wildcard_declares_no_statics_no_metadata_and_registers_once() {
         let statics = {
             let mut cfg = base();
-            cfg.tools = declared(vec![tool(WILDCARD_TOOL_NAME)]);
+            cfg.tools = declared(vec![tool(WILDCARD_SPELLING)]);
             Registry::build_covered(cfg)
         };
         assert!(matches!(statics, Err(LoadError::WildcardStatic)));
@@ -2120,7 +2174,7 @@ mod tests {
             let mut cfg = base();
             cfg.annotators = vec![annotator("any")];
             cfg.tools = vec![ToolDeclaration::Annotated {
-                name: ToolName::new(WILDCARD_TOOL_NAME),
+                name: ToolName::new(WILDCARD_SPELLING),
                 tags: vec![crate::names::TagName::new("web")],
                 description: None,
                 parameters: crate::params::ToolParameters::open(),
@@ -2130,20 +2184,25 @@ mod tests {
         };
         assert!(matches!(tagged, Err(LoadError::WildcardMetadata)));
 
+        let selected = {
+            let mut cfg = base();
+            cfg.annotators = vec![annotator("any")];
+            cfg.tools = vec![annotated("*(path:*)", "any")];
+            Registry::build_covered(cfg)
+        };
+        assert!(matches!(selected, Err(LoadError::WildcardMetadata)));
+
         let doubled = {
             let mut cfg = base();
             cfg.annotators = vec![annotator("any")];
-            cfg.tools = vec![
-                annotated(WILDCARD_TOOL_NAME, "any"),
-                annotated(WILDCARD_TOOL_NAME, "any"),
-            ];
+            cfg.tools = vec![annotated(WILDCARD_SPELLING, "any"), annotated(WILDCARD_SPELLING, "any")];
             Registry::build_covered(cfg)
         };
         assert!(matches!(doubled, Err(LoadError::DuplicateWildcard)));
 
         let unregistered = {
             let mut cfg = base();
-            cfg.tools = vec![annotated(WILDCARD_TOOL_NAME, "ghost")];
+            cfg.tools = vec![annotated(WILDCARD_SPELLING, "ghost")];
             Registry::build_covered(cfg)
         };
         assert!(matches!(unregistered, Err(LoadError::UnknownAnnotator { .. })));

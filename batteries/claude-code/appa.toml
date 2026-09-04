@@ -17,82 +17,82 @@ version = 2
 # is refused before secrets reach the model. In the future, a token sanitizer
 # can permit `token-exposed` by redacting or masking values.
 [[policy.tool]]
-name = "Bash(command:*.env*)"
+name = "host/claude-code/Bash(command:*.env*)"
 requires = { attention = ["token-exposed"] }
 delta = {}
 
 [[policy.tool]]
-name = "Bash(command:*.claude.json*)"
+name = "host/claude-code/Bash(command:*.claude.json*)"
 requires = { attention = ["token-exposed"] }
 delta = {}
 
 [[policy.tool]]
-name = "Bash(command:*.credentials.json*)"
+name = "host/claude-code/Bash(command:*.credentials.json*)"
 requires = { attention = ["token-exposed"] }
 delta = {}
 
 [[policy.tool]]
-name = "Bash(command:*.ssh/*)"
+name = "host/claude-code/Bash(command:*.ssh/*)"
 requires = { attention = ["token-exposed"] }
 delta = {}
 
 [[policy.tool]]
-name = "Bash(command:*.aws/credentials*)"
+name = "host/claude-code/Bash(command:*.aws/credentials*)"
 requires = { attention = ["token-exposed"] }
 delta = {}
 
 [[policy.tool]]
-name = "Bash(command:*.netrc*)"
+name = "host/claude-code/Bash(command:*.netrc*)"
 requires = { attention = ["token-exposed"] }
 delta = {}
 
 [[policy.tool]]
-name = "Bash(command:*.config/gh/hosts.yml*)"
+name = "host/claude-code/Bash(command:*.config/gh/hosts.yml*)"
 requires = { attention = ["token-exposed"] }
 delta = {}
 
 [[policy.tool]]
-name = "Bash(command:*id_rsa*)"
+name = "host/claude-code/Bash(command:*id_rsa*)"
 requires = { attention = ["token-exposed"] }
 delta = {}
 
 [[policy.tool]]
-name = "Bash(command:*id_ed25519*)"
+name = "host/claude-code/Bash(command:*id_ed25519*)"
 requires = { attention = ["token-exposed"] }
 delta = {}
 
 [[policy.tool]]
-name = "Bash(command:*/proc/*environ*)"
+name = "host/claude-code/Bash(command:*/proc/*environ*)"
 requires = { attention = ["token-exposed"] }
 delta = {}
 
 [[policy.tool]]
-name = "Bash(command:*/Library/Keychains/*)"
+name = "host/claude-code/Bash(command:*/Library/Keychains/*)"
 requires = { attention = ["token-exposed"] }
 delta = {}
 
 [[policy.tool]]
-name = "Bash(command:*.docker/config.json*)"
+name = "host/claude-code/Bash(command:*.docker/config.json*)"
 requires = { attention = ["token-exposed"] }
 delta = {}
 
 [[policy.tool]]
-name = "Bash(command:*.git-credentials*)"
+name = "host/claude-code/Bash(command:*.git-credentials*)"
 requires = { attention = ["token-exposed"] }
 delta = {}
 
 [[policy.tool]]
-name = "Bash(command:*.kube/*)"
+name = "host/claude-code/Bash(command:*.kube/*)"
 requires = { attention = ["token-exposed"] }
 delta = {}
 
 [[policy.tool]]
-name = "Bash(command:*.npmrc*)"
+name = "host/claude-code/Bash(command:*.npmrc*)"
 requires = { attention = ["token-exposed"] }
 delta = {}
 
 [[policy.tool]]
-name = "Bash(command:*.pypirc*)"
+name = "host/claude-code/Bash(command:*.pypirc*)"
 requires = { attention = ["token-exposed"] }
 delta = {}
 
@@ -109,7 +109,7 @@ audiences = []
 hint = "Treat network or otherwise unvetted output as suspicious. Classify trust and audience requirements from the command's visible behavior and destination."
 
 [[policy.tool]]
-name = "Bash"
+name = "host/claude-code/Bash"
 description = "Runs one shell command and returns its output."
 annotator = "claude-code.bash-requirements"
 
@@ -123,222 +123,222 @@ annotator = "claude-code.bash-requirements"
 # dot-prefixed path would also match `./src/main.rs`. Every other path keeps
 # the session's label. No rule blocks a read or lowers its trust.
 [[policy.tool]]
-name = "Read(file_path:*/.env*)"
+name = "host/claude-code/Read(file_path:*/.env*)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:.env*)"
+name = "host/claude-code/Read(file_path:.env*)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:*/.ssh/*)"
+name = "host/claude-code/Read(file_path:*/.ssh/*)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:.ssh/*)"
+name = "host/claude-code/Read(file_path:.ssh/*)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:*/.aws/*)"
+name = "host/claude-code/Read(file_path:*/.aws/*)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:.aws/*)"
+name = "host/claude-code/Read(file_path:.aws/*)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:*/.azure/*)"
+name = "host/claude-code/Read(file_path:*/.azure/*)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:.azure/*)"
+name = "host/claude-code/Read(file_path:.azure/*)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:*/.kube/*)"
+name = "host/claude-code/Read(file_path:*/.kube/*)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:.kube/*)"
+name = "host/claude-code/Read(file_path:.kube/*)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:*/.gnupg/*)"
+name = "host/claude-code/Read(file_path:*/.gnupg/*)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:.gnupg/*)"
+name = "host/claude-code/Read(file_path:.gnupg/*)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:*/.docker/config.json)"
+name = "host/claude-code/Read(file_path:*/.docker/config.json)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:.docker/config.json)"
+name = "host/claude-code/Read(file_path:.docker/config.json)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:*/.config/gh/*)"
+name = "host/claude-code/Read(file_path:*/.config/gh/*)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:.config/gh/*)"
+name = "host/claude-code/Read(file_path:.config/gh/*)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:*/.config/gcloud/*)"
+name = "host/claude-code/Read(file_path:*/.config/gcloud/*)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:.config/gcloud/*)"
+name = "host/claude-code/Read(file_path:.config/gcloud/*)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:*/.password-store/*)"
+name = "host/claude-code/Read(file_path:*/.password-store/*)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:.password-store/*)"
+name = "host/claude-code/Read(file_path:.password-store/*)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:*/.netrc)"
+name = "host/claude-code/Read(file_path:*/.netrc)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:.netrc)"
+name = "host/claude-code/Read(file_path:.netrc)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:*/.git-credentials)"
+name = "host/claude-code/Read(file_path:*/.git-credentials)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:.git-credentials)"
+name = "host/claude-code/Read(file_path:.git-credentials)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:*/.npmrc)"
+name = "host/claude-code/Read(file_path:*/.npmrc)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:.npmrc)"
+name = "host/claude-code/Read(file_path:.npmrc)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:*/.pypirc)"
+name = "host/claude-code/Read(file_path:*/.pypirc)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:.pypirc)"
+name = "host/claude-code/Read(file_path:.pypirc)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:*/.vault-token)"
+name = "host/claude-code/Read(file_path:*/.vault-token)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:.vault-token)"
+name = "host/claude-code/Read(file_path:.vault-token)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:*/.claude.json)"
+name = "host/claude-code/Read(file_path:*/.claude.json)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:.claude.json)"
+name = "host/claude-code/Read(file_path:.claude.json)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:*/.claude/settings*)"
+name = "host/claude-code/Read(file_path:*/.claude/settings*)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:.claude/settings*)"
+name = "host/claude-code/Read(file_path:.claude/settings*)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:*_history)"
+name = "host/claude-code/Read(file_path:*_history)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:*credentials*)"
+name = "host/claude-code/Read(file_path:*credentials*)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:*secrets*)"
+name = "host/claude-code/Read(file_path:*secrets*)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:*auth.json)"
+name = "host/claude-code/Read(file_path:*auth.json)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:*token)"
+name = "host/claude-code/Read(file_path:*token)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:*token.json)"
+name = "host/claude-code/Read(file_path:*token.json)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:*service*account.json)"
+name = "host/claude-code/Read(file_path:*service*account.json)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:*shadow)"
+name = "host/claude-code/Read(file_path:*shadow)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:*/id_*)"
+name = "host/claude-code/Read(file_path:*/id_*)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:id_*)"
+name = "host/claude-code/Read(file_path:id_*)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:*.jks)"
+name = "host/claude-code/Read(file_path:*.jks)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:*.key)"
+name = "host/claude-code/Read(file_path:*.key)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:*.keystore)"
+name = "host/claude-code/Read(file_path:*.keystore)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:*.p12)"
+name = "host/claude-code/Read(file_path:*.p12)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:*.pem)"
+name = "host/claude-code/Read(file_path:*.pem)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:*.pfx)"
+name = "host/claude-code/Read(file_path:*.pfx)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:/etc/ssh/*)"
+name = "host/claude-code/Read(file_path:/etc/ssh/*)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:/etc/sudoers*)"
+name = "host/claude-code/Read(file_path:/etc/sudoers*)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:/proc/*/environ)"
+name = "host/claude-code/Read(file_path:/proc/*/environ)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read(file_path:*/Library/Keychains/*)"
+name = "host/claude-code/Read(file_path:*/Library/Keychains/*)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
-name = "Read"
+name = "host/claude-code/Read"
 description = "Reads a file and returns its contents."
 delta = {}

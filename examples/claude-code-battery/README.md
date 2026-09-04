@@ -28,8 +28,10 @@ Authority used by the Slack battery and the local Bash override.
 
 The root demonstrates two customizations. It bypasses the shipped Bash model
 classifier for `cargo test` and requires fresh `hitl` attention. It also
-replaces the shipped `Read` rules with `local.read-sensitivity`, implemented
-by the script in `local/`.
+replaces the shipped `host/claude-code/Read` rules with `local.read-sensitivity`,
+implemented by the script in `local/`. Every rule names its tool by the
+canonical tool id: `host/claude-code/<name>` for a Claude Code built-in,
+`mcp/<server>/<tool>` for an MCP server's tool.
 The local annotator asks a person before any dot-prefixed path other than
 `.env.example` is read, and before anything under `clients/`.
 
@@ -39,7 +41,7 @@ The Claude Code battery sends every Bash command to the Claude Code model
 builtin. The model annotates the command before dispatch: its output label and
 its required trust and audience.
 
-The local `Read` rule invokes `read-sensitivity.py` for one call. OpenAPPA writes
+The local `host/claude-code/Read` rule invokes `read-sensitivity.py` for one call. OpenAPPA writes
 one JSON consult to standard input, reads one JSON answer from standard
 output, and waits for the command to exit. An annotator that maps no `inputs`
 receives the complete tool call in `args` — `name`, `description` when the
@@ -49,9 +51,9 @@ contract: `delta`, `requires`, and `emits`.
 The Bash annotator controls declared information flows. It is not a shell or
 network sandbox. A Claude Code deployment must use an OS sandbox to deny
 network access and protect credentials and OpenAPPA files. Network ingress
-should use `WebFetch` instead of Bash `curl`.
+should use `host/claude-code/WebFetch` instead of Bash `curl`.
 
-The Claude Code battery labels `Read` results with static rules: hidden
+The Claude Code battery labels `host/claude-code/Read` results with static rules: hidden
 paths, credential and private-key names, and system secret locations narrow
 the session to `self`, the requester. Other paths keep its label. The root
 rule here replaces those rules.
@@ -64,7 +66,7 @@ Run the local replacement annotator directly:
 
 ```sh
 cd examples/claude-code-battery
-printf '%s\n' '{"version":1,"kind":"annotation","name":"local.read-sensitivity","declaration":{"inputs":[],"trust_ranks":["suspicious","trusted"],"audiences":[],"attention_marks":["hitl"],"effects":[]},"artifact":{"args":{"name":"Read","description":"Reads a file and returns its contents.","arguments":{"file_path":"clients/acme.txt"}}}}' \
+printf '%s\n' '{"version":1,"kind":"annotation","name":"local.read-sensitivity","declaration":{"inputs":[],"trust_ranks":["suspicious","trusted"],"audiences":[],"attention_marks":["hitl"],"effects":[]},"artifact":{"args":{"name":"host/claude-code/Read","description":"Reads a file and returns its contents.","arguments":{"file_path":"clients/acme.txt"}}}}' \
   | python3 ./local/read-sensitivity.py
 ```
 

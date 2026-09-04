@@ -1,15 +1,21 @@
-//! The hook client: this same binary, invoked as `appa hook`, posting one
-//! hook event read on stdin to the running runtime and printing its answer.
+//! The hook client: this same binary, invoked as `appa hook`, translating one
+//! host hook event read on stdin onto the canonical wire, posting it to the
+//! running runtime, and printing the runtime's answer in the host's own shape.
 //!
 //! The harness spawns a process per hook, so the cost of reaching the runtime is
 //! paid on every tool call. Doing it here rather than through `curl` spends one
 //! process where a shell and a curl spent two, and spends it on the binary the
-//! install already puts on disk, so the install path grows nothing.
+//! install already puts on disk, so the install path grows nothing. The host's
+//! shape translation (the adapter's [`Codec`]) runs here, on the client side;
+//! the wire carries the host's raw tool spelling and the runtime derives the
+//! rest itself, so nothing this client says about a call is trusted.
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
+
+use appa_runtime_api::{AdapterName, Codec, HookDecision, HookEvent, ParseRefusal, WireDecision, WireEvent};
 
 /// Where the runtime answers hooks: an authority to connect to and the prefix the
 /// runtime's routes hang under. Only `http` is spoken: the runtime refuses to
@@ -115,6 +121,12 @@ struct Answer {
     body: Vec<u8>,
 }
 
+impl Answer {
+    fn is_success(&self) -> bool {
+        (200..=299).contains(&self.status)
+    }
+}
+
 fn post(endpoint: &Endpoint, event: &[u8], deadline: &Deadline) -> Result<Answer, String> {
     let address = endpoint.address()?;
     let mut socket = TcpStream::connect_timeout(&address, deadline.left()?)
@@ -170,30 +182,88 @@ fn block(failure: &str) -> ExitCode {
 }
 
 /// Preserve the status while surfacing the runtime's own diagnostic. Claude Code displays
-/// stderr for a blocking hook, not the response body this client forwards on stdout.
+/// stderr for a blocking hook, not the response body this client forwards on stdout. A
+/// refusal arrives either as a wire decision carrying its `detail` or, before any event
+/// exists, as `{"error": …}`.
 fn refusal(answer: &Answer) -> String {
-    let json_error = serde_json::from_slice::<serde_json::Value>(&answer.body)
+    let json_detail = serde_json::from_slice::<serde_json::Value>(&answer.body)
         .ok()
-        .and_then(|body| body.get("error").and_then(serde_json::Value::as_str).map(str::to_owned));
+        .and_then(|body| {
+            ["error", "detail"]
+                .into_iter()
+                .find_map(|field| body.get(field).and_then(serde_json::Value::as_str).map(str::to_owned))
+        });
     let plain_error = std::str::from_utf8(&answer.body)
         .ok()
         .map(str::trim)
         .filter(|body| !body.is_empty())
         .map(str::to_owned);
-    match json_error.or(plain_error) {
+    match json_detail.or(plain_error) {
         Some(detail) => format!("status={} {detail}", answer.status),
         None => format!("status={}", answer.status),
     }
 }
 
-pub fn run(url: &str, turn_end: bool) -> ExitCode {
+/// The host whose hook bytes this client translates. Only Claude Code posts through
+/// `appa hook`: the kagent plugin speaks the canonical wire itself.
+fn codec_for(adapter: AdapterName) -> Result<Codec, String> {
+    match adapter {
+        AdapterName::ClaudeCode => Ok(appa_adapter_claude_code::codec()),
+        AdapterName::Kagent => Err(format!(
+            "`appa hook` translates no {adapter} events: the kagent plugin posts the canonical wire itself"
+        )),
+    }
+}
+
+/// The runtime's answer, read off the wire. A body that is not a wire decision is
+/// not guessed at: the hook fails closed on it.
+fn decision_of(body: &[u8]) -> Result<HookDecision, String> {
+    let wire: WireDecision = serde_json::from_slice(body)
+        .map_err(|error| format!("the runtime's answer is not a wire decision: {error}"))?;
+    wire.into_decision().map_err(|refusal| match refusal {
+        ParseRefusal::Unreadable { detail } | ParseRefusal::Malformed { detail } => detail,
+    })
+}
+
+fn print(answer: &serde_json::Value) {
+    let mut stdout = std::io::stdout();
+    stdout.write_all(answer.to_string().as_bytes()).ok();
+    stdout.flush().ok();
+}
+
+/// The host event translated onto the wire: `None` for a hook the adapter does not
+/// gate, whose answer is the empty opinion without a round trip.
+fn translate(codec: &Codec, adapter: AdapterName, host_event: &[u8]) -> Result<Option<(HookEvent, Vec<u8>)>, String> {
+    let event = match (codec.parse)(host_event) {
+        Ok(Some(event)) => event,
+        Ok(None) => return Ok(None),
+        Err(ParseRefusal::Unreadable { detail } | ParseRefusal::Malformed { detail }) => return Err(detail),
+    };
+    let wire = WireEvent::from_event(adapter, &event).map_err(|refusal| match refusal {
+        ParseRefusal::Unreadable { detail } | ParseRefusal::Malformed { detail } => detail,
+    })?;
+    let body = serde_json::to_vec(&wire).map_err(|error| format!("the wire event does not serialize: {error}"))?;
+    Ok(Some((event, body)))
+}
+
+pub fn run(url: &str, adapter: AdapterName, turn_end: bool) -> ExitCode {
     let decides = Decides::of_a_turn_end(turn_end);
-    let mut event = Vec::new();
-    if let Err(error) = std::io::stdin().read_to_end(&mut event) {
+    let codec = match codec_for(adapter) {
+        Ok(codec) => codec,
+        Err(failure) => return block(&failure),
+    };
+    let mut host_event = Vec::new();
+    if let Err(error) = std::io::stdin().read_to_end(&mut host_event) {
         return block(&format!("the hook event could not be read: {error}"));
     }
-    let answered =
-        Endpoint::parse(url).and_then(|endpoint| post(&endpoint, &event, &Deadline::spanning(decides.budget())));
+    let answered = translate(&codec, adapter, &host_event).and_then(|translated| {
+        let Some((event, body)) = translated else {
+            return Ok(None);
+        };
+        let endpoint = Endpoint::parse(url)?;
+        let answer = post(&endpoint, &body, &Deadline::spanning(decides.budget()))?;
+        Ok(Some((event, answer)))
+    });
     if decides == Decides::Nothing {
         if let Err(failure) = answered {
             eprintln!("OpenAPPA runtime did not answer the turn end: {failure}");
@@ -201,14 +271,24 @@ pub fn run(url: &str, turn_end: bool) -> ExitCode {
         return ExitCode::SUCCESS;
     }
     match answered {
-        Ok(answer) => {
-            std::io::stdout().write_all(&answer.body).ok();
-            std::io::stdout().flush().ok();
-            match answer.status {
-                200..=299 => ExitCode::SUCCESS,
-                _ => block(&refusal(&answer)),
-            }
+        Ok(None) => {
+            print(&serde_json::json!({}));
+            ExitCode::SUCCESS
         }
+        Ok(Some((event, answer))) => match (decision_of(&answer.body), answer.is_success()) {
+            (Ok(decision), true) => {
+                print(&(codec.render)(&event, &decision));
+                ExitCode::SUCCESS
+            }
+            // A refusal is rendered too: Claude Code honours a withheld tool result
+            // on a non-2xx answer, so the refused result is replaced as well as blocked.
+            (Ok(decision), false) => {
+                print(&(codec.render)(&event, &decision));
+                block(&refusal(&answer))
+            }
+            (Err(_), false) => block(&refusal(&answer)),
+            (Err(failure), true) => block(&failure),
+        },
         Err(failure) => block(&failure),
     }
 }
@@ -247,10 +327,12 @@ mod tests {
         let answered = parse(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}").expect("a well formed answer parses");
         assert_eq!(answered.status, 200);
         assert_eq!(answered.body, b"{}");
+        assert!(answered.is_success());
 
         let refused = parse(b"HTTP/1.1 422 Unprocessable Entity\r\n\r\nwhy").expect("a refusal parses");
         assert_eq!(refused.status, 422);
         assert_eq!(refused.body, b"why");
+        assert!(!refused.is_success());
 
         assert!(parse(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n").is_err());
         assert!(parse(b"garbage\r\n\r\n").is_err());
@@ -269,6 +351,15 @@ mod tests {
             refusal(&answer),
             "status=409 annotator=claude-code error=malformed field=delta.audience value=\"secret\" allowed=declaration.audiences"
         );
+
+        let refused = Answer {
+            status: 409,
+            body: serde_json::to_vec(&WireDecision::of(&HookDecision::Refuse {
+                detail: "storage failure: disk full".to_string(),
+            }))
+            .expect("the fixture serializes"),
+        };
+        assert_eq!(refusal(&refused), "status=409 storage failure: disk full");
 
         assert_eq!(
             refusal(&Answer {
@@ -290,5 +381,63 @@ mod tests {
     fn a_spent_deadline_refuses_rather_than_bounding_a_socket_by_zero() {
         assert!(Deadline::spanning(Duration::from_secs(5)).left().expect("time is left") > Duration::ZERO);
         assert!(Deadline::spanning(Duration::ZERO).left().is_err());
+    }
+
+    #[test]
+    fn only_claude_code_translates_through_this_client() {
+        assert!(codec_for(AdapterName::ClaudeCode).is_ok());
+        assert!(codec_for(AdapterName::Kagent).is_err());
+    }
+
+    #[test]
+    fn a_host_event_crosses_as_a_wire_event_with_its_raw_spelling() {
+        let codec = codec_for(AdapterName::ClaudeCode).expect("claude code translates");
+        let host =
+            br#"{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"Agent","tool_input":{"prompt":"go"}}"#;
+        let (event, body) = translate(&codec, AdapterName::ClaudeCode, host)
+            .expect("the event translates")
+            .expect("PreToolUse is gated");
+        assert!(matches!(event, HookEvent::ToolCall { .. }));
+        let wire: serde_json::Value = serde_json::from_slice(&body).expect("the wire is JSON");
+        assert_eq!(wire["protocol"], appa_runtime_api::PROTOCOL);
+        assert_eq!(wire["adapter"], "claude-code");
+        assert_eq!(wire["event"], "tool_call");
+        assert_eq!(wire["root_id"], "s1");
+        assert_eq!(wire["tool"], "Agent", "the wire carries the host's raw spelling");
+        assert_eq!(wire["arguments"], serde_json::json!({"prompt": "go"}));
+        assert!(
+            wire.get("spawn").is_none(),
+            "the client claims nothing the runtime derives: {wire}"
+        );
+
+        let ungated = br#"{"hook_event_name":"Notification","session_id":"s1"}"#;
+        assert!(
+            translate(&codec, AdapterName::ClaudeCode, ungated)
+                .expect("an ungated hook translates")
+                .is_none()
+        );
+        assert!(translate(&codec, AdapterName::ClaudeCode, b"not json").is_err());
+        assert!(
+            translate(
+                &codec,
+                AdapterName::ClaudeCode,
+                br#"{"hook_event_name":"PreToolUse","session_id":"s1"}"#
+            )
+            .is_err(),
+            "a malformed host event blocks before any round trip"
+        );
+    }
+
+    #[test]
+    fn an_answer_is_read_as_a_wire_decision_or_fails_closed() {
+        let allow =
+            serde_json::to_vec(&WireDecision::of(&HookDecision::AllowCall { spawn: None })).expect("serializes");
+        assert_eq!(
+            decision_of(&allow).expect("a wire decision reads"),
+            HookDecision::AllowCall { spawn: None }
+        );
+        assert!(decision_of(b"{}").is_err(), "an empty object is no decision");
+        assert!(decision_of(br#"{"protocol":9,"decision":"ack"}"#).is_err());
+        assert!(decision_of(br#"{"protocol":1,"decision":"block"}"#).is_err());
     }
 }

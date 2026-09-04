@@ -1,16 +1,18 @@
-{"name": "session_start", "parses": "event", "wire": {"event": "session_start", "root_id": "adk-4f6c2f1e"}}
-{"name": "prompt", "parses": "event", "wire": {"event": "prompt", "root_id": "adk-4f6c2f1e", "text": "scale the api deployment to three replicas"}}
-{"name": "turn_end_root", "parses": "event", "wire": {"event": "turn_end", "root_id": "adk-4f6c2f1e"}}
-{"name": "turn_end_child", "parses": "event", "wire": {"event": "turn_end", "root_id": "adk-4f6c2f1e", "child_id": "adk-9b0d11aa"}}
-{"name": "tool_call", "parses": "event", "wire": {"event": "tool_call", "root_id": "adk-4f6c2f1e", "tool": "k8s_scale", "arguments": {"deployment": "api", "replicas": 3}, "spawn": false}}
-{"name": "tool_call_spawn", "parses": "event", "wire": {"event": "tool_call", "root_id": "adk-4f6c2f1e", "tool": "billing-agent", "arguments": {"message": "total the invoices"}, "spawn": true}}
-{"name": "tool_call_reserved", "parses": "event", "wire": {"event": "tool_call", "root_id": "adk-4f6c2f1e", "tool": "execute_remedy_plan", "arguments": {"offer_id": "offer-1"}, "spawn": false}}
-{"name": "tool_call_reserved_ruled", "parses": "event", "wire": {"event": "tool_call", "root_id": "adk-4f6c2f1e", "tool": "execute_remedy_plan", "arguments": {"offer_id": "offer-1"}, "spawn": false, "ruling": "approve"}}
-{"name": "tool_result_success", "parses": "event", "wire": {"event": "tool_result", "root_id": "adk-4f6c2f1e", "tool": "k8s_scale", "arguments": {"deployment": "api", "replicas": 3}, "outcome": {"status": "success", "body": {"scaled": true}}}}
-{"name": "tool_result_failure", "parses": "event", "wire": {"event": "tool_result", "root_id": "adk-4f6c2f1e", "tool": "k8s_scale", "arguments": {"deployment": "api", "replicas": 3}, "outcome": {"status": "failure", "message": "connection refused"}}}
-{"name": "spawn_result", "parses": "event", "wire": {"event": "spawn_result", "root_id": "adk-4f6c2f1e", "tool": "billing-agent", "arguments": {"message": "total the invoices"}, "outcome": {"status": "success", "body": {"result": "the total is 42"}}, "spawned_id": "adk-9b0d11aa", "value": "the total is 42"}}
-{"name": "child_start_in_flight", "parses": "event", "wire": {"event": "child_start", "root_id": "adk-4f6c2f1e", "child_id": "adk-9b0d11aa"}}
-{"name": "child_start_bound", "parses": "event", "wire": {"event": "child_start", "root_id": "adk-4f6c2f1e", "child_id": "adk-9b0d11aa", "spawn_binding": "spawn-1"}}
-{"name": "child_end_returned", "parses": "event", "wire": {"event": "child_end", "root_id": "adk-4f6c2f1e", "child_id": "adk-9b0d11aa", "value": "the total is 42"}}
-{"name": "child_end_void", "parses": "event", "wire": {"event": "child_end", "root_id": "adk-4f6c2f1e", "child_id": "adk-9b0d11aa"}}
-{"name": "ping", "parses": "none", "wire": {"event": "ping"}}
+{"name": "session_start", "wire": {"protocol": 1, "adapter": "kagent", "event": "session_start", "root_id": "adk-4f6c2f1e"}}
+{"name": "prompt", "wire": {"protocol": 1, "adapter": "kagent", "event": "prompt", "root_id": "adk-4f6c2f1e", "text": "scale the api deployment to three replicas"}}
+{"name": "turn_end_root", "wire": {"protocol": 1, "adapter": "kagent", "event": "turn_end", "root_id": "adk-4f6c2f1e"}}
+{"name": "turn_end_child", "wire": {"protocol": 1, "adapter": "kagent", "event": "turn_end", "root_id": "adk-4f6c2f1e", "child_id": "adk-9b0d11aa"}}
+{"name": "tool_call_mcp", "wire": {"protocol": 1, "adapter": "kagent", "event": "tool_call", "root_id": "adk-4f6c2f1e", "tool": "mcp:demo-tools/k8s_scale", "arguments": {"deployment": "api", "replicas": 3}}}
+{"name": "tool_call_agent", "wire": {"protocol": 1, "adapter": "kagent", "event": "tool_call", "root_id": "adk-4f6c2f1e", "tool": "agent:kagent/billing-agent", "arguments": {"message": "total the invoices"}}}
+{"name": "tool_call_builtin", "wire": {"protocol": 1, "adapter": "kagent", "event": "tool_call", "root_id": "adk-4f6c2f1e", "tool": "builtin:ask_user", "arguments": {"questions": [{"question": "which namespace?"}]}}}
+{"name": "tool_call_gate", "wire": {"protocol": 1, "adapter": "kagent", "event": "tool_call", "root_id": "adk-4f6c2f1e", "tool": "gate:code_execution", "arguments": {"code": "print(1)"}}}
+{"name": "tool_call_control", "wire": {"protocol": 1, "adapter": "kagent", "event": "tool_call", "root_id": "adk-4f6c2f1e", "tool": "appa:execute_remedy_plan", "arguments": {"offer_id": "offer-1"}}}
+{"name": "tool_call_control_ruled", "wire": {"protocol": 1, "adapter": "kagent", "event": "tool_call", "root_id": "adk-4f6c2f1e", "tool": "appa:execute_remedy_plan", "arguments": {"offer_id": "offer-1"}, "ruling": "approve"}}
+{"name": "tool_result_success", "wire": {"protocol": 1, "adapter": "kagent", "event": "tool_result", "root_id": "adk-4f6c2f1e", "tool": "mcp:demo-tools/k8s_scale", "arguments": {"deployment": "api", "replicas": 3}, "outcome": {"status": "success", "body": {"scaled": true}}}}
+{"name": "tool_result_failure", "wire": {"protocol": 1, "adapter": "kagent", "event": "tool_result", "root_id": "adk-4f6c2f1e", "tool": "mcp:demo-tools/k8s_scale", "arguments": {"deployment": "api", "replicas": 3}, "outcome": {"status": "failure", "message": "connection refused"}}}
+{"name": "spawn_result", "wire": {"protocol": 1, "adapter": "kagent", "event": "spawn_result", "root_id": "adk-4f6c2f1e", "tool": "agent:kagent/billing-agent", "arguments": {"message": "total the invoices"}, "outcome": {"status": "success", "body": {"result": "the total is 42"}}, "spawned_id": "adk-9b0d11aa", "value": "the total is 42"}}
+{"name": "child_start_in_flight", "wire": {"protocol": 1, "adapter": "kagent", "event": "child_start", "root_id": "adk-4f6c2f1e", "child_id": "adk-9b0d11aa"}}
+{"name": "child_start_bound", "wire": {"protocol": 1, "adapter": "kagent", "event": "child_start", "root_id": "adk-4f6c2f1e", "child_id": "adk-9b0d11aa", "spawn_binding": "spawn-1"}}
+{"name": "child_end_returned", "wire": {"protocol": 1, "adapter": "kagent", "event": "child_end", "root_id": "adk-4f6c2f1e", "child_id": "adk-9b0d11aa", "value": "the total is 42"}}
+{"name": "child_end_void", "wire": {"protocol": 1, "adapter": "kagent", "event": "child_end", "root_id": "adk-4f6c2f1e", "child_id": "adk-9b0d11aa"}}
+{"name": "ping", "wire": {"protocol": 1, "adapter": "kagent", "event": "ping"}}

@@ -65,9 +65,13 @@ The runtime address is
    report the mismatch instead of guessing.
 3. Run `claude mcp list` for configured servers.
 4. Add every MCP server visible in the current session, even when
-   `claude mcp list` omits it. MCP tools use `mcp__<server>__<tool>` names;
-   plugin-provided servers use `mcp__plugin_<plugin>_<server>__<tool>` names.
-   Keep each exact full tool name and description.
+   `claude mcp list` omits it. Claude Code spells an MCP tool
+   `mcp__<server>__<tool>` (a plugin-provided server as
+   `mcp__plugin_<plugin>_<server>__<tool>`); the policy names it by its
+   canonical tool id `mcp/<server>/<tool>`, split at the first `__` after
+   `mcp__`. A Claude Code built-in (`Bash`, `Read`, `Edit`, ...) is
+   `host/claude-code/<name>`. Keep each exact description and the exact
+   canonical id.
 5. Cross-check both sources. Record every configured MCP server whose tools
    could not be detected. Keep it separate from Claude Code's built-in tools.
    Do not invent its tool list.
@@ -164,8 +168,8 @@ do not ask about each tool separately.
 Wait for the answer before showing the proposal. This answer does not replace
 the approval required below. If nothing is unclear, do not ask.
 
-For Gmail, match only exact tools visible in this session whose names start
-with `mcp__claude_ai_Gmail__`; do not assume a fixed connector tool list. Mail
+For Gmail, match only exact tools visible in this session whose canonical ids
+start with `mcp/claude_ai_Gmail/`; do not assume a fixed connector tool list. Mail
 the requester reads is `self` data. Checking a named recipient against `self`
 or `internal` requires an audience source. An email domain is not an audience
 source: `internal` needs a directory-backed source that can enumerate its
@@ -259,12 +263,13 @@ argument-specific rule before its general fallback. Do not reorder unrelated
 rules.
 
 For an exact Bash command pattern, add a narrow, ordered
-`Bash(command:...)` root contract before its fallback. For semantic command
-interpretation, copy the complete `claude-code.bash-requirements` Annotator
-declaration into the root config and modify its `hint`. Preserve its
-implementation, inputs, and mandate unless the approved behavior requires a
-change. Do not add a broad root `Bash` contract that bypasses the battery's
-credential-path protections.
+`host/claude-code/Bash(command:...)` root contract before its fallback. For
+semantic command interpretation, copy the complete
+`claude-code.bash-requirements` Annotator declaration into the root config and
+modify its `hint`. Preserve its implementation, inputs, and mandate unless the
+approved behavior requires a change. Do not add a broad root
+`host/claude-code/Bash` contract that bypasses the battery's credential-path
+protections.
 
 To make an audience mismatch reviewable, permit the intended Authority to
 review that audience expansion. Do not add attention only to route the review.

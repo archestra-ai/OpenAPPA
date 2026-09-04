@@ -58,32 +58,34 @@ The Slack battery asks a person before any message is sent. A root rule placed a
 ```toml
 # root config: trusted messages go to the engineering channel without a question
 [[policy.tool]]
-name = "mcp__claude_ai_Slack__slack_send_message(channel_id:C0ABC*)"
+name = "mcp/claude_ai_Slack/slack_send_message(channel_id:C0ABC*)"
 requires = { trust = "trusted" }
 delta = {}
 
 # shipped battery: everything else needs fresh human approval
 [[policy.tool]]
-name = "mcp__claude_ai_Slack__slack_send_message"
+name = "mcp/claude_ai_Slack/slack_send_message"
 requires = { trust = "trusted", attention = ["hitl"] }
 delta = {}
 ```
 
+A rule names a tool by its canonical tool id: `mcp/<server>/<tool>` for an MCP server's tool, `host/claude-code/<name>` for a Claude Code built-in such as `host/claude-code/Read`. See [Tool names](/contracts#tool-names) for the grammar and the mapping from each host's own spelling.
+
 Text inside parentheses matches arguments. Write one or more `argument:pattern` clauses and separate them with commas; every clause must match. `*` matches any text.
 
-A bare tool name is the default. It matches when no earlier rule did.
+A bare canonical tool id is the default. It matches when no earlier rule did.
 
 Slack history uses the same first-match rule. The battery labels all history `internal`, the built-in audience of the organization's members. A root rule can mark one channel as untrusted, for example a channel shared with people outside your company:
 
 ```toml
 # root config: a shared channel may contain outsiders' words
 [[policy.tool]]
-name = "mcp__claude_ai_Slack__slack_read_channel(channel_id:C0SHARED*)"
+name = "mcp/claude_ai_Slack/slack_read_channel(channel_id:C0SHARED*)"
 delta = { trust = "suspicious", audience = ["internal"] }
 
 # shipped battery: every other channel is internal and keeps its trust
 [[policy.tool]]
-name = "mcp__claude_ai_Slack__slack_read_channel"
+name = "mcp/claude_ai_Slack/slack_read_channel"
 delta = { audience = ["internal"] }
 ```
 
@@ -100,7 +102,7 @@ audiences = []
 marks = ["hitl"]
 
 [[policy.tool]]
-name = "Read"
+name = "host/claude-code/Read"
 annotator = "local.read-attention"
 
 [externals.annotators."local.read-attention"]
@@ -116,7 +118,7 @@ Other platforms reject script commands when the config loads.
 Consult:
 
 ```json
-{"version":1,"kind":"annotation","name":"local.read-attention","declaration":{"inputs":[],"trust_ranks":["suspicious","trusted"],"audiences":[],"attention_marks":["hitl"],"effects":[]},"artifact":{"args":{"name":"Read","arguments":{"file_path":".env"}}}}
+{"version":1,"kind":"annotation","name":"local.read-attention","declaration":{"inputs":[],"trust_ranks":["suspicious","trusted"],"audiences":[],"attention_marks":["hitl"],"effects":[]},"artifact":{"args":{"name":"host/claude-code/Read","arguments":{"file_path":".env"}}}}
 ```
 
 Answer:
@@ -149,7 +151,7 @@ json.dump(
 )
 ```
 
-`artifact.args` contains the tool's `name`, `arguments`, and declared `description`. The `Read` rule above has no description, so the consult omits it.
+`artifact.args` contains the tool's canonical tool id as `name`, its `arguments`, and its declared `description`. The `host/claude-code/Read` rule above has no description, so the consult omits it.
 
 When an annotator maps `inputs`, the consult includes one Value for each input. `declaration` carries the optional `hint`, input names, and mandate vocabulary.
 
@@ -167,7 +169,7 @@ A rule written above the rule that names an annotator wins without running it. H
 
 ```toml
 [[policy.tool]]
-name = "Read(file_path:README.md)"
+name = "host/claude-code/Read(file_path:README.md)"
 delta = {}
 
 [[policy.annotator]]
@@ -176,7 +178,7 @@ audiences = []
 marks = ["hitl"]
 
 [[policy.tool]]
-name = "Read"
+name = "host/claude-code/Read"
 annotator = "local.read-attention"
 
 [externals.annotators."local.read-attention"]
@@ -185,11 +187,11 @@ command = ["python3", "./read-attention.py"]
 
 `README.md` matches the first rule, so `read-attention.py` does not run.
 
-The Claude Code battery labels `Read` with static rules of the same shape:
+The Claude Code battery labels `host/claude-code/Read` with static rules of the same shape:
 hidden paths, credential and private-key names, and system secret locations
 narrow the session to `self`, the requester; other paths keep its label.
 
-The Claude Code battery also sends each Bash call to its built-in model
+The Claude Code battery also sends each `host/claude-code/Bash` call to its built-in model
 annotator. The annotator produces the command's complete contract: the
 output's trust and the call's trust and attention requirements. Its mandate
 names no reader, so the audience of a command's output is the session's.
@@ -212,12 +214,12 @@ include = [
 version = 2
 
 [[policy.tool]]
-name = "Bash(command:kubectl)"
+name = "host/claude-code/Bash(command:kubectl)"
 requires = { attention = ["blocked"] }
 delta = { trust = "suspicious", audience = ["internal"] }
 
 [[policy.tool]]
-name = "Bash(command:kubectl *)"
+name = "host/claude-code/Bash(command:kubectl *)"
 requires = { attention = ["blocked"] }
 delta = { trust = "suspicious", audience = ["internal"] }
 
@@ -227,7 +229,7 @@ audiences = []
 marks = ["hitl"]
 
 [[policy.tool]]
-name = "Read"
+name = "host/claude-code/Read"
 annotator = "local.read-sensitivity"
 
 [externals.annotators."local.read-sensitivity"]
@@ -236,7 +238,7 @@ command = ["python3", "./local/read-sensitivity.py"]
 
 No authority permits `blocked`, so both `kubectl` contracts have no remedy.
 Every other Bash call reaches the battery's model annotator. The root also
-replaces the battery's `Read` rules with a local script.
+replaces the battery's `host/claude-code/Read` rules with a local script.
 
 The battery files stay unchanged.
 

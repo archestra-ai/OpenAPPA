@@ -128,6 +128,12 @@ def test_compiled_sub_agents_refuse_with_the_runtime_mismatch(config_dir):
         entrypoint.build_server(config_dir({**CONFIG, "sub_agents": []}), RUNTIME_URL)
 
 
+def test_an_mcp_entry_without_a_tool_filter_refuses_the_start(config_dir):
+    unfiltered = {**CONFIG, "http_tools": [{"params": {"url": "http://demo-tools:3000/mcp"}}]}
+    with pytest.raises(ConfigRefused, match="tool filter"):
+        entrypoint.build_server(config_dir(unfiltered), RUNTIME_URL)
+
+
 def test_a_divergent_summarizer_refuses_the_start(config_dir):
     divergent = {
         **CONFIG,
@@ -378,6 +384,9 @@ def test_the_stock_mode_leaves_the_code_executor_unwrapped(config_dir, monkeypat
     [
         pytest.param({**CONFIG, "surprise": True}, id="unknown-key"),
         pytest.param({**CONFIG, "sub_agents": []}, id="sub-agents"),
+        pytest.param(
+            {**CONFIG, "http_tools": [{"params": {"url": "http://demo-tools:3000/mcp"}}]}, id="unfiltered-mcp"
+        ),
     ],
 )
 def test_the_stock_mode_runs_a_config_the_gated_mode_refuses(config_dir, monkeypatch, served, config):
