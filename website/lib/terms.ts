@@ -72,7 +72,7 @@ const TERMS = {
   "verified-email":
     "The shipped identity implementation: a member with a verified email becomes that address under conservative normalization (domain case only); a member without one keeps its provider-qualified ID. The address is the principal, so a reader written as an address is the same reader the verified claim resolves to. Deterministic and network-free.",
   inputs:
-    "The values an annotator reads, each mapped from $tool_call on its declaration. Without an explicit mapping, the annotator reads the complete tool call: name, description when declared, and arguments.",
+    "The call values an annotator's args carries, each mapped from $tool_call on its declaration. Without an explicit mapping, args is the complete tool call: name, description when declared, and arguments. cwd sits beside args whichever inputs are mapped.",
   ranks:
     "In an annotator's mandate: the trust ranks its answers may write in delta.trust and requires.trust. Omitted, every rank in the trust chain.",
   audiences:

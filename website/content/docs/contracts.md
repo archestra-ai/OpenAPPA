@@ -207,7 +207,7 @@ parameters = { type = "object", properties = { customer_id = { type = "string" }
 annotator  = "classify-customer"
 ```
 
-The annotator receives only `customer_id`, under the name `subject`. Its answer is still the complete contract for the call.
+The annotator's `args` carries only `customer_id`, under the name `subject`; `cwd` sits beside `args` as it always does. Its answer is still the complete contract for the call.
 
 #### Example: cover the long tail with a wildcard
 

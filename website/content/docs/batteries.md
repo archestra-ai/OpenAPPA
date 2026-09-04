@@ -193,7 +193,7 @@ The battery files stay unchanged.
 
 ### Check where a push goes
 
-A root rule runs before every battery rule, so this rule takes `git push` before the battery's model annotator sees it. The annotator's answer is the complete contract for the call. Nothing in the policy names `cwd`.
+A root rule runs before every battery rule, so this rule takes a command that contains `git push` before the battery's model annotator sees it. A push spelled without that text, such as `git -C /elsewhere push`, does not match the selector and reaches the battery's model annotator as every other Bash call does. The annotator's answer is the complete contract for the call. Nothing in the policy names `cwd`.
 
 ```toml
 [[policy.annotator]]
@@ -230,4 +230,4 @@ The script receives this consult on stdin:
 }
 ```
 
-The script decides by shape. It inspects a command only when the command is exactly `git push`, followed at most by one remote name and refspecs. Every other form requires `hitl`: an environment assignment such as `GIT_DIR=`, a Git option before `push` such as `-C`, `--git-dir`, or `--work-tree`, a URL in place of a remote, a shell operator, or a `cd`. For the plain form the script runs `git -C "$cwd" remote get-url --push <remote>`. When the URL names the private repository, the answer has no requirement. Otherwise the answer requires `hitl`. `--push` matters: a `pushurl` in the repository config overrides the fetch URL. When `cwd` is `null`, the script exits with an error, and the call is not judged: nothing is appended, and the agent can propose it again.
+The script decides by shape. It inspects a command only when the command is exactly `git push`, followed at most by one remote name and refspecs. Every other form requires `hitl`: an environment assignment such as `GIT_DIR=`, a Git option before `push` such as `-C`, `--git-dir`, or `--work-tree`, a URL in place of a remote, a shell operator, or a `cd`. For the plain form the script runs `git -C "$cwd" remote get-url --push --all <remote>`. When every URL names the private repository, the answer has no requirement. Otherwise the answer requires `hitl`. `--push --all` matters: a `pushurl` in the repository config overrides the fetch URL, and a remote with several push URLs pushes to all of them. When `cwd` is `null`, the script exits with an error, and the call is not judged: nothing is appended, and the agent can propose it again.
