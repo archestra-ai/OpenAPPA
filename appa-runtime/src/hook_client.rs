@@ -256,62 +256,87 @@ pub fn run(url: &str, adapter: AdapterName, turn_end: bool) -> ExitCode {
     if let Err(error) = std::io::stdin().read_to_end(&mut host_event) {
         return block(&format!("the hook event could not be read: {error}"));
     }
-    // The event outlives the round trip: a hook the runtime never answers still
-    // needs the withholding rendered for the result its event reports.
-    let (event, answered) = match translate(&codec, adapter, &host_event) {
-        Err(failure) => (None, Err(failure)),
-        Ok(None) => (None, Ok(None)),
-        Ok(Some((event, body))) => {
-            let posted =
-                Endpoint::parse(url).and_then(|endpoint| post(&endpoint, &body, &Deadline::spanning(decides.budget())));
-            (Some(event), posted.map(Some))
+    let (event, body) = match translate(&codec, adapter, &host_event) {
+        // A hook the adapter does not gate is the empty opinion, with no round trip.
+        Ok(None) => {
+            if decides == Decides::Authorization {
+                print(&serde_json::json!({}));
+            }
+            return ExitCode::SUCCESS;
         }
+        Ok(Some(translated)) => translated,
+        Err(failure) => return unanswered(&codec, None, &failure, decides),
+    };
+    let answered =
+        Endpoint::parse(url).and_then(|endpoint| post(&endpoint, &body, &Deadline::spanning(decides.budget())));
+    let answer = match answered {
+        Ok(answer) => answer,
+        Err(failure) => return unanswered(&codec, Some(&event), &failure, decides),
     };
     if decides == Decides::Nothing {
-        if let Err(failure) = answered {
-            eprintln!("OpenAPPA runtime did not answer the turn end: {failure}");
-        }
         return ExitCode::SUCCESS;
     }
-    match (answered, event) {
-        (Ok(None), _) => {
-            print(&serde_json::json!({}));
+    match (decision_of(&answer.body), answer.is_success()) {
+        (Ok(decision), true) => {
+            print(&(codec.render)(&event, &decision));
             ExitCode::SUCCESS
         }
-        (Ok(Some(answer)), Some(event)) => match (decision_of(&answer.body), answer.is_success()) {
-            (Ok(decision), true) => {
-                print(&(codec.render)(&event, &decision));
-                ExitCode::SUCCESS
+        // A refusal is rendered too, and for a result that already ran the rendering
+        // is the whole answer: the harness reads it only from a hook that exits zero,
+        // so a replacement carried out on a blocking exit would be discarded and the
+        // withheld output would stay in front of the model. Every other refusal is
+        // what the exit code stops, and the rendering only reports it.
+        (Ok(decision), false) => {
+            eprintln!("OpenAPPA hook blocked: {}", refusal(&answer));
+            print(&(codec.render)(&event, &decision));
+            match replaces_a_result(&event, &decision) {
+                true => ExitCode::SUCCESS,
+                false => ExitCode::from(2),
             }
-            // A refusal is rendered too: Claude Code honours a withheld tool result
-            // on a non-2xx answer, so the refused result is replaced as well as blocked.
-            (Ok(decision), false) => {
-                print(&(codec.render)(&event, &decision));
-                block(&refusal(&answer))
-            }
-            (Err(_), false) => block(&refusal(&answer)),
-            (Err(failure), true) => withhold(&codec, Some(&event), &failure),
-        },
-        // An answer arrives only for an event, so this pairing never occurs.
-        (Ok(Some(_)), None) => block("the runtime answered a hook that named no event"),
-        (Err(failure), event) => withhold(&codec, event.as_ref(), &failure),
+        }
+        (Err(_), false) => block(&refusal(&answer)),
+        (Err(failure), true) => unanswered(&codec, Some(&event), &failure, decides),
     }
 }
 
-/// Fail closed on an unanswered hook. Exiting non-zero stops a call the harness
-/// has not run yet, but a result the tool already produced stays in front of the
-/// model unless the withholding is rendered for it, so an event that reports one
-/// gets the blocking replacement before the client exits.
-fn withhold(codec: &Codec, event: Option<&HookEvent>, failure: &str) -> ExitCode {
+/// Fail closed on a hook the runtime did not answer. A turn end decides nothing and
+/// never blocks. Otherwise the exit code stops a call the harness has not run yet,
+/// but a result the tool already produced stays in front of the model unless the
+/// withholding is rendered for it — and the harness reads a rendered answer only
+/// from a hook that exits zero, so an event reporting a result is withheld by the
+/// rendering and exits zero, while everything else blocks by the exit code alone.
+fn unanswered(codec: &Codec, event: Option<&HookEvent>, failure: &str, decides: Decides) -> ExitCode {
+    if decides == Decides::Nothing {
+        eprintln!("OpenAPPA runtime did not answer the turn end: {failure}");
+        return ExitCode::SUCCESS;
+    }
+    let withholding = HookDecision::Block {
+        reason: format!("the runtime did not answer this hook: {failure}"),
+    };
+    match event.filter(|event| replaces_a_result(event, &withholding)) {
+        Some(event) => {
+            eprintln!("OpenAPPA hook withheld the result: {failure}");
+            print(&(codec.render)(event, &withholding));
+            ExitCode::SUCCESS
+        }
+        None => block(failure),
+    }
+}
+
+/// Whether this answer takes effect through what the client prints rather than
+/// through its exit code. A result the tool already produced is only ever taken
+/// out of the model's attention by the replacement that stands in for it, and the
+/// harness reads that replacement from a hook that exits zero.
+fn replaces_a_result(event: &HookEvent, decision: &HookDecision) -> bool {
     let reports_a_result = matches!(
         event,
-        Some(HookEvent::ToolResult { .. } | HookEvent::SpawnResult { .. } | HookEvent::ChildEnd { .. })
+        HookEvent::ToolResult { .. } | HookEvent::SpawnResult { .. } | HookEvent::ChildEnd { .. }
     );
-    if let (true, Some(event)) = (reports_a_result, event) {
-        let reason = format!("the runtime did not answer this hook: {failure}");
-        print(&(codec.render)(event, &HookDecision::Block { reason }));
-    }
-    block(failure)
+    let stands_in_for_it = matches!(
+        decision,
+        HookDecision::Block { .. } | HookDecision::ReplaceOutput { .. } | HookDecision::ChildReturn { .. }
+    );
+    reports_a_result && stands_in_for_it
 }
 
 #[cfg(test)]

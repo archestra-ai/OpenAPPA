@@ -2,7 +2,7 @@
 
 import httpx
 import pytest
-from conftest import FakeInvocationContext, FakeSession, Hook, plugin_over
+from conftest import INVENTORY, FakeInvocationContext, FakeSession, Hook, plugin_over
 
 from appa_kagent_adk.gates import (
     CODE_EXECUTION_TOOL,
@@ -41,7 +41,7 @@ class FakeCodeInput:
 
 def gate_over(hook: Hook) -> SyncHookGate:
     client = httpx.Client(transport=hook.transport())
-    return SyncHookGate("http://127.0.0.1:8787", SessionIdentity(), client=client)
+    return SyncHookGate("http://127.0.0.1:8787", SessionIdentity(), INVENTORY, client=client)
 
 
 def test_allowed_code_runs_and_its_output_crosses_as_a_tool_result():
@@ -72,6 +72,17 @@ def test_denied_code_never_reaches_the_subprocess():
     assert inner.ran == [], "a denied call skips execution"
     assert result.stderr == "blocked: code egress is not permitted"
     assert result.stdout == ""
+
+
+def test_a_denied_code_run_names_the_tool_the_model_dispatches():
+    """The stderr of a refused run is what the model reads, so the
+    redispatch line of the block names the tool ADK dispatches, not the
+    spelling the gate sent."""
+    block = "[appa] Blocked.\n  - Run mcp:demo-tools/k8s_get_pods first; it clears: the source is untrusted."
+    hook = Hook({"protocol": 1, "decision": "deny_call", "feedback": block})
+    executor = GatedCodeExecutor(FakeExecutor(), gate_over(hook))
+    result = executor.execute_code(FakeInvocationContext(FakeSession("s1")), FakeCodeInput("import socket"))
+    assert result.stderr == "[appa] Blocked.\n  - Run k8s_get_pods first; it clears: the source is untrusted."
 
 
 def test_a_blocked_code_output_is_withheld_from_the_model():

@@ -79,12 +79,16 @@ impl RemedyService {
         let arguments = RemedyArguments::from(args);
         // Requires the vouched trajectory from the preceding hook.
         let Some((acting, ruling)) = self.runtime.take_vouched(&quoted) else {
-            return render(RemedyOutcome::Refused {
-                detail: "no live offer with this id exists".to_string(),
-            });
+            return render(
+                &self.runtime,
+                RemedyOutcome::Refused {
+                    detail: "no live offer with this id exists".to_string(),
+                },
+            );
         };
         let elicitation = Elicitation::new(request, self.runtime.review_timeout());
         render(
+            &self.runtime,
             self.runtime
                 .remedy(&acting, quoted, arguments, Some(&elicitation), ruling)
                 .await,
@@ -92,17 +96,20 @@ impl RemedyService {
     }
 }
 
-fn render(outcome: RemedyOutcome) -> CallToolResult {
+/// The runtime keys the released call on its canonical identity, which is not a name any
+/// host advertises. What the model is told to call is that identity spelled the way its own
+/// harness dispatches it ([`Runtime::model_spelling`]).
+fn render(runtime: &Runtime, outcome: RemedyOutcome) -> CallToolResult {
     match outcome {
         RemedyOutcome::Authorized { call } => CallToolResult::success(vec![ContentBlock::text(format!(
             "[appa] Authorized. Call the {} tool again with exactly these arguments: {}",
-            call.tool,
+            runtime.model_spelling(&call.tool),
             call.arguments.get(),
         ))]),
         RemedyOutcome::Substituted { call } => CallToolResult::success(vec![ContentBlock::text(format!(
             "[appa] Substituted. The sanitizer replaced the arguments and the call is released. \
              Call the {} tool with exactly these arguments to run it: {}",
-            call.tool,
+            runtime.model_spelling(&call.tool),
             call.arguments.get(),
         ))]),
         RemedyOutcome::Returned { value } => CallToolResult::success(vec![ContentBlock::text(value)]),
@@ -196,7 +203,7 @@ mod tests {
                 detail: "no live offer with this id exists".to_string(),
             },
         );
-        assert_eq!(render(outcome).is_error, Some(true));
+        assert_eq!(render(&runtime, outcome).is_error, Some(true));
     }
 
     #[tokio::test]
@@ -216,6 +223,111 @@ mod tests {
             runtime.claim_offer(&offer).is_some(),
             "the offer is claimable again once its execution ended"
         );
+    }
+
+    /// The one served-deployment fixture: a policy that narrows on the tool it names, so
+    /// the first proposal blocks with an acceptance the model can execute unaided.
+    async fn authorized_under(adapter: appa_runtime_api::Adapter, root: &str, tool: &str) -> String {
+        let policy = format!(
+            r#"
+            [policy]
+            version = 2
+
+            [[policy.tool]]
+            name = "{tool}"
+            delta = {{ audience = ["hr"] }}
+
+            [externals]
+            timeout_ms = 1000
+            max_body_bytes = 4096
+            "#
+        );
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let path = dir.path().join("appa.toml");
+        std::fs::write(&path, policy).expect("the fixture writes");
+        let config = Config::load(&path).expect("the fixture validates");
+        let runtime = Runtime::open_served(config, dir.path().join("appa.db"), None, adapter)
+            .expect("the served deployment opens");
+
+        let root = crate::api::TrajectoryId(root.to_string());
+        let session = runtime.create_session(root.clone()).expect("a fresh id opens");
+        let denied = session
+            .on_tool_call(
+                ProposedCall {
+                    tool: tool.to_string(),
+                    arguments: raw(serde_json::json!({})),
+                },
+                false,
+            )
+            .await
+            .expect("the block is delivered");
+        assert!(matches!(denied, ToolCallDecision::Deny { .. }));
+        let offer = runtime
+            .minted_offers(&root, &root)
+            .into_iter()
+            .next()
+            .expect("the block surfaced an offer");
+        let outcome = runtime.execute_remedy(&acting(root.0.as_str()), offer).await;
+        assert!(
+            matches!(outcome, RemedyOutcome::Authorized { .. }),
+            "accepting the narrowing releases the call: {outcome:?}"
+        );
+        let rendered = render(&runtime, outcome);
+        rendered
+            .content
+            .first()
+            .and_then(|block| block.as_text())
+            .map(|text| text.text.clone())
+            .expect("the answer is one text block")
+    }
+
+    /// The canonical identity keys the released call, and no host advertises it. What the
+    /// model is told to call again is its own harness's spelling.
+    #[tokio::test]
+    async fn an_authorized_remedy_names_the_tool_the_host_dispatches() {
+        for (adapter, root, tool, dispatched) in [
+            (
+                appa_adapter_claude_code::adapter(),
+                "cc:mcp-served",
+                "host/claude-code/Read",
+                "Read",
+            ),
+            (
+                appa_adapter_claude_code::adapter(),
+                "cc:mcp-served-mcp",
+                "mcp/github/create_issue",
+                "mcp__github__create_issue",
+            ),
+            (
+                appa_adapter_kagent::adapter(),
+                "kagent:mcp-served",
+                "mcp/k8s/get_pods",
+                "mcp:k8s/get_pods",
+            ),
+            (
+                appa_adapter_kagent::adapter(),
+                "kagent:mcp-served-builtin",
+                "host/kagent/memory_persist",
+                "builtin:memory_persist",
+            ),
+        ] {
+            let text = authorized_under(adapter, root, tool).await;
+            assert!(
+                text.contains(dispatched) && !text.contains(tool),
+                "the model is told to call {dispatched}, not {tool}: {text}"
+            );
+        }
+    }
+
+    /// An embedded host names its own tools, so what the runtime recorded is already what
+    /// its model calls and nothing is spelled away.
+    #[test]
+    fn an_embedded_deployment_addresses_the_model_by_the_recorded_name() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config(), dir.path().join("appa.db"), None).expect("the deployment opens");
+        for recorded in ["wire", "host/claude-code/Read", "mcp/k8s/get_pods"] {
+            assert_eq!(runtime.model_spelling(recorded), recorded);
+        }
     }
 
     fn acting(trajectory: &str) -> crate::api::Actor {

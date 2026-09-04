@@ -836,6 +836,134 @@ func TestAToolFailureCrossesAsAFailureOutcome(t *testing.T) {
 	}
 }
 
+// -- the tool the model reads, in the name it dispatches -------------
+//
+// A tool crosses under its wire spelling, and the runtime names it back
+// the same way. The model dispatches the raw ADK name, so runtime text
+// on its way to the model is spelled back through the inventory.
+
+// blockText is one block as the runtime writes it, with the tool it
+// names left open.
+const blockText = "[appa] Blocked.\n  - Run %s first; it clears: the source is untrusted."
+
+func TestADenyNamesTheToolTheModelDispatches(t *testing.T) {
+	for _, one := range []struct {
+		name       string
+		spelled    string
+		dispatched string
+	}{
+		{"mcp", "mcp:demo-tools/k8s_get_pods", "k8s_get_pods"},
+		{"agent", "agent:kagent/log-analyst", "kagent__NS__log_analyst"},
+		{"builtin", "builtin:ask_user", "ask_user"},
+		{"reserved", "appa:execute_remedy_plan", "execute_remedy_plan"},
+	} {
+		t.Run(one.name, func(t *testing.T) {
+			h := newHook(t, map[string]any{
+				"protocol": 1, "decision": "deny_call", "feedback": fmt.Sprintf(blockText, one.spelled),
+			})
+			p := pluginOver(t, h)
+			blocked, err := p.beforeTool(newFakeContext(newFakeSession("s1")), &fakeTool{"k8s_scale"}, map[string]any{"replicas": 3})
+			if err != nil {
+				t.Fatalf("the call must be denied, not fail: %v", err)
+			}
+			want := map[string]any{"result": fmt.Sprintf(blockText, one.dispatched), denyKey: denied}
+			if !reflect.DeepEqual(blocked, want) {
+				t.Errorf("the deny must name the tool the model dispatches: got %v, want %v", blocked, want)
+			}
+		})
+	}
+}
+
+func TestADenyLeavesWhatTheInventoryNeverSpelled(t *testing.T) {
+	for _, one := range []struct {
+		name string
+		text string
+	}{
+		{"a-gate-the-model-cannot-dispatch", fmt.Sprintf(blockText, "gate:code_execution")},
+		{"another-toolset", fmt.Sprintf(blockText, "mcp:other-server/k8s_get_pods")},
+		{"a-longer-name", fmt.Sprintf(blockText, "mcp:demo-tools/k8s_get_pods_v2")},
+		{"a-longer-agent", fmt.Sprintf(blockText, "agent:kagent/log-analyst-standby")},
+		{"no-spelling-at-all", "[appa] Blocked. The trajectory reads ops-only material."},
+	} {
+		t.Run(one.name, func(t *testing.T) {
+			h := newHook(t, map[string]any{"protocol": 1, "decision": "deny_call", "feedback": one.text})
+			p := pluginOver(t, h)
+			blocked, err := p.beforeTool(newFakeContext(newFakeSession("s1")), &fakeTool{"k8s_scale"}, map[string]any{"replicas": 3})
+			if err != nil {
+				t.Fatalf("the call must be denied, not fail: %v", err)
+			}
+			if blocked["result"] != one.text {
+				t.Errorf("a spelling the inventory never gave out stands: got %v, want %q", blocked["result"], one.text)
+			}
+		})
+	}
+}
+
+// TestTheRemedyAnswerNamesTheToolTheModelDispatches: the runtime writes
+// the reserved tool's answer itself and names the released tool in it.
+// The model calls that tool next, so the answer must carry the name ADK
+// dispatches.
+func TestTheRemedyAnswerNamesTheToolTheModelDispatches(t *testing.T) {
+	h := newHook(t, ack)
+	p := pluginOver(t, h)
+	authorized := "[appa] Authorized. Call the %s tool again with exactly these arguments: {}"
+	answer := map[string]any{"content": []any{map[string]any{
+		"type": "text", "text": fmt.Sprintf(authorized, "mcp:demo-tools/k8s_get_pods"),
+	}}}
+	returned, err := p.afterTool(
+		newFakeContext(newFakeSession("s1")), &fakeTool{ReservedTool},
+		map[string]any{"offer_id": "offer-1"}, answer, nil)
+	if err != nil {
+		t.Fatalf("the remedy answer must cross: %v", err)
+	}
+	want := map[string]any{"content": []any{map[string]any{
+		"type": "text", "text": fmt.Sprintf(authorized, "k8s_get_pods"),
+	}}}
+	if !reflect.DeepEqual(returned, want) {
+		t.Errorf("the remedy answer must name the tool the model dispatches: got %v, want %v", returned, want)
+	}
+	outcome := h.recorded()[0]["outcome"].(map[string]any)
+	if !reflect.DeepEqual(outcome["body"], answer) {
+		t.Errorf("the runtime sees the answer it wrote, got %v", outcome["body"])
+	}
+}
+
+func TestAWithheldResultNamesTheToolTheModelDispatches(t *testing.T) {
+	h := newHook(t, map[string]any{
+		"protocol": 1, "decision": "block", "reason": "run mcp:demo-tools/read_ledger first",
+	})
+	p := pluginOver(t, h)
+	returned, err := p.afterTool(
+		newFakeContext(newFakeSession("s1")), &fakeTool{"k8s_get_pods"},
+		map[string]any{}, map[string]any{"pods": []any{"api-1"}}, nil)
+	if err != nil {
+		t.Fatalf("the block must withhold, not fail: %v", err)
+	}
+	want := map[string]any{"result": "[appa] the tool result was withheld: run read_ledger first", denyKey: withheld}
+	if !reflect.DeepEqual(returned, want) {
+		t.Errorf("the withheld notice must name the tool the model dispatches: got %v, want %v", returned, want)
+	}
+}
+
+// TestTheBytesOfAChildReturnCrossAsTheRuntimeCrossedThem: the value is
+// what the runtime crossed for the parent, not text addressed to the
+// model, so it is replayed byte for byte.
+func TestTheBytesOfAChildReturnCrossAsTheRuntimeCrossedThem(t *testing.T) {
+	value := "the analyst read mcp:demo-tools/read_ledger"
+	h := newHook(t, map[string]any{"protocol": 1, "decision": "child_return", "value": value})
+	p := pluginOver(t, h)
+	returned, err := p.afterTool(
+		newFakeContext(newFakeSession("s1")), &fakeTool{"kagent__NS__log_analyst"},
+		map[string]any{"task": "summarize"},
+		map[string]any{"result": "the analyst answer", "subagent_session_id": "child-ctx"}, nil)
+	if err != nil {
+		t.Fatalf("the child return must substitute, not fail: %v", err)
+	}
+	if !reflect.DeepEqual(returned, map[string]any{"result": value}) {
+		t.Errorf("the crossed bytes must reach the parent as they stand, got %v", returned)
+	}
+}
+
 func TestThePluginsOwnGateErrorIsNotReportedAsAToolFailure(t *testing.T) {
 	h := newHook(t)
 	p := pluginOver(t, h)

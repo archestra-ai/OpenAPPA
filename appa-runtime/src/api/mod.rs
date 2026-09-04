@@ -24,6 +24,7 @@ use crate::elicit::Elicitation;
 use crate::engine::{EngineRefusal, Liveness, PolicyEngine, RuntimeEngine};
 use crate::external::{ConsultGates, ExternalServices};
 use appa_eventlog::{Backend, Log, LogStore};
+use appa_runtime_api::SpellFn;
 
 /// One remedy offer as it is quoted and carried.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -316,13 +317,33 @@ pub(crate) struct Deployment {
     externals: ExternalServices,
 }
 
-/// How the deployment reading this policy names tools. A served deployment reads a wire
-/// event, whose adapter derives a canonical identity, so its policy names tools that way;
-/// a host that embeds the runtime, and `appa replay`, name tools their own way.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// How the deployment reading this policy names tools, and — the same question read from
+/// the model's side — how it spells a recorded name back when it addresses the model.
+///
+/// A served deployment reads a wire event, whose adapter derives a canonical identity, so
+/// its policy names tools that way and the served adapter's inverse gives the host spelling
+/// the model can dispatch. A host that embeds the runtime, and `appa replay`, name tools
+/// their own way: what the runtime records is already the name their model calls.
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum ToolNaming {
-    Canonical,
+    Canonical { host: SpellFn },
     AsAuthored,
+}
+
+impl ToolNaming {
+    /// The spelling of one recorded or authored tool name the model can act on. A
+    /// contract's `(selector)` is the policy's own discriminator and no part of what the
+    /// model calls, so the host spells the bare name. A canonical id outside the served
+    /// adapter's range — one no call under this host can name — stays as recorded.
+    pub(crate) fn model_spelling(self, recorded: &str) -> String {
+        match self {
+            ToolNaming::AsAuthored => recorded.to_string(),
+            ToolNaming::Canonical { host } => appa_runtime_api::CanonicalTool::parse(bare_tool_name(recorded))
+                .ok()
+                .and_then(|tool| host(&tool))
+                .unwrap_or_else(|| recorded.to_string()),
+        }
+    }
 }
 
 impl Deployment {
@@ -334,7 +355,7 @@ impl Deployment {
     ) -> Result<Deployment, OpenError> {
         let policy = compile_policy(&config)?;
         match naming {
-            ToolNaming::Canonical => require_canonical_tools(&policy)?,
+            ToolNaming::Canonical { .. } => require_canonical_tools(&policy)?,
             ToolNaming::AsAuthored => {}
         }
         validate_deployment(&policy, &config.externals)?;
@@ -346,7 +367,7 @@ impl Deployment {
             .map_err(|error| OpenError::Modules(error.to_string()))?;
         Ok(Deployment {
             config,
-            resident: RuntimeEngine::from_policy(&policy),
+            resident: RuntimeEngine::from_policy(&policy, naming),
             externals,
         })
     }
@@ -411,6 +432,7 @@ struct Prepared {
     modules: crate::builtins::ModuleRegistry,
     gates: ConsultGates,
     deployment: Deployment,
+    naming: ToolNaming,
 }
 
 impl Prepared {
@@ -424,6 +446,7 @@ impl Prepared {
             modules,
             gates,
             deployment,
+            naming,
         })
     }
 
@@ -443,6 +466,7 @@ impl Prepared {
                 permits: std::sync::Mutex::new(std::collections::BTreeMap::new()),
                 prompted: std::sync::Mutex::new(std::collections::BTreeSet::new()),
                 gates: self.gates,
+                naming: self.naming,
                 named_spawns: std::sync::atomic::AtomicBool::new(false),
             }),
         })
@@ -463,6 +487,10 @@ struct Inner {
     /// The gates every process-costing consult of this runtime passes; deployment reloads
     /// clone them, so old and new snapshots contend on the same permits.
     gates: ConsultGates,
+    /// How this deployment's policy names tools, and with it the spelling the model can
+    /// dispatch. Settled at open and unchanged by a reload: it is the deployment kind,
+    /// not the policy.
+    naming: ToolNaming,
     /// `true` under [`SpawnCoverage::Declared`]: set once, before the runtime is shared.
     named_spawns: std::sync::atomic::AtomicBool,
 }
@@ -548,7 +576,7 @@ impl Inner {
             return Ok(Arc::clone(engine));
         }
         let compiled = compile_stored_policy(bytes).map_err(EventError::PolicyUnavailable)?;
-        let engine = Arc::new(RuntimeEngine::from_policy(&compiled));
+        let engine = Arc::new(RuntimeEngine::from_policy(&compiled, self.naming));
         Ok(Arc::clone(
             self.retired
                 .lock()
@@ -584,10 +612,25 @@ impl Runtime {
     }
 
     /// The deployment `appa runtime` serves: [`Runtime::open`], plus the served-deployment
-    /// rule that the policy names every tool canonically. One compile answers both.
-    pub(crate) fn open_served(config: Config, db: PathBuf, modules: Option<PathBuf>) -> Result<Runtime, OpenError> {
-        let prepared = Prepared::new(config, modules, ToolNaming::Canonical)?;
+    /// rule that the policy names every tool canonically. One compile answers both. The
+    /// served adapter comes in because a served deployment answers exactly one host, whose
+    /// spelling of a tool is what the runtime says where it addresses that host's model.
+    pub(crate) fn open_served(
+        config: Config,
+        db: PathBuf,
+        modules: Option<PathBuf>,
+        adapter: appa_runtime_api::Adapter,
+    ) -> Result<Runtime, OpenError> {
+        let prepared = Prepared::new(config, modules, ToolNaming::Canonical { host: adapter.spell })?;
         prepared.assemble(Backend::Sqlite { path: db })
+    }
+
+    /// The spelling of a recorded tool name this deployment's model can dispatch: the
+    /// served host's own, or — where the host embeds the runtime and names its own tools —
+    /// the recorded name itself. Every text the runtime addresses to the model names a
+    /// tool this way.
+    pub(crate) fn model_spelling(&self, recorded: &str) -> String {
+        self.inner.naming.model_spelling(recorded)
     }
 
     /// The deployment `appa replay` runs: the same session and engine over a log that lives
@@ -622,11 +665,13 @@ impl Runtime {
         self.reload_named(config, ToolNaming::AsAuthored)
     }
 
-    /// The reload `appa runtime` serves: [`Runtime::reload`], plus the served-deployment
-    /// rule that the policy names every tool canonically. A refused reload changes
-    /// nothing — the deployment that was serving keeps serving.
+    /// The reload `appa runtime` serves: [`Runtime::reload`] under the naming this
+    /// deployment opened with, so the served-deployment rule that the policy names every
+    /// tool canonically holds across a reload and the served adapter stays the one this
+    /// process was started for. A refused reload changes nothing — the deployment that
+    /// was serving keeps serving.
     pub(crate) fn reload_served(&self, config: Config) -> Result<Reloaded, OpenError> {
-        self.reload_named(config, ToolNaming::Canonical)
+        self.reload_named(config, self.inner.naming)
     }
 
     fn reload_named(&self, config: Config, naming: ToolNaming) -> Result<Reloaded, OpenError> {
@@ -1357,6 +1402,39 @@ mod deployment_tests {
 
         let exact = EventError::annotation_refused("bash-classifier".to_string(), "timeout".to_string()).to_string();
         assert!(!exact.contains("/appa-guide init"), "{exact}");
+    }
+
+    /// The served adapter's inverse is what the runtime says where it addresses that
+    /// host's model. A contract's `(selector)` is the policy's own discriminator and no
+    /// part of the name the model calls; a canonical id the served host cannot name — and
+    /// the wildcard, which is no tool — stays as it is.
+    #[test]
+    fn a_served_deployment_spells_a_recorded_name_the_way_its_host_dispatches_it() {
+        let claude_code = ToolNaming::Canonical {
+            host: appa_adapter_claude_code::adapter().spell,
+        };
+        let kagent = ToolNaming::Canonical {
+            host: appa_adapter_kagent::adapter().spell,
+        };
+        for (naming, recorded, expected) in [
+            (claude_code, "host/claude-code/Read", "Read"),
+            (claude_code, "host/claude-code/Bash(command:git)", "Bash"),
+            (claude_code, "mcp/github/create_issue", "mcp__github__create_issue"),
+            (
+                claude_code,
+                appa_runtime_api::CONTROL_TOOL,
+                "mcp__plugin_appa-runtime_appa__execute_remedy_plan",
+            ),
+            (claude_code, "agent/kagent/log-analyst", "agent/kagent/log-analyst"),
+            (claude_code, "*", "*"),
+            (kagent, "mcp/k8s/get_pods", "mcp:k8s/get_pods"),
+            (kagent, "agent/kagent/log-analyst", "agent:kagent/log-analyst"),
+            (kagent, "host/kagent-gate/outer", "gate:outer"),
+            (kagent, appa_runtime_api::CONTROL_TOOL, "appa:execute_remedy_plan"),
+            (kagent, "host/claude-code/Read", "host/claude-code/Read"),
+        ] {
+            assert_eq!(naming.model_spelling(recorded), expected, "{recorded}");
+        }
     }
 
     /// A deployment with no `[externals.annotators]` bindings: the policy under test names

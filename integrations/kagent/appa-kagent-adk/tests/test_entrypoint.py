@@ -27,6 +27,7 @@ from kagent.adk import cli as stock_cli  # noqa: E402
 from appa_kagent_adk import entrypoint  # noqa: E402
 from appa_kagent_adk.config_guard import ConfigRefused  # noqa: E402
 from appa_kagent_adk.gates import GatedCodeExecutor  # noqa: E402
+from appa_kagent_adk.inventory import ToolInventory  # noqa: E402
 from appa_kagent_adk.plugin import AppaPluginKagent  # noqa: E402
 from appa_kagent_adk.wire import RESERVED_TOOL  # noqa: E402
 
@@ -166,7 +167,10 @@ def test_the_factory_wraps_code_execution_and_appends_the_reserved_toolset(confi
     agent = agent_config.to_agent(app_cfg.name, None, False)
     assert agent.code_executor is not None, "execute_code installs the sandboxed executor"
     identity = SessionIdentity()
-    agent.code_executor = gates.GatedCodeExecutor(agent.code_executor, gates.SyncHookGate(RUNTIME_URL, identity))
+    inventory = ToolInventory.from_config(config, environ={})
+    agent.code_executor = gates.GatedCodeExecutor(
+        agent.code_executor, gates.SyncHookGate(RUNTIME_URL, identity, inventory)
+    )
     assert isinstance(agent.code_executor, GatedCodeExecutor)
     before = len(agent.tools)
     agent.tools.append(entrypoint._reserved_toolset(RUNTIME_URL))

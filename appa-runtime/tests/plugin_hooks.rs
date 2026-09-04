@@ -222,6 +222,23 @@ fn run_hook(command: &str, url: &str) -> (i32, String) {
     run_gated(command, url, true)
 }
 
+/// The shipped POSIX command run over one host event of the caller's choosing.
+fn run_hook_on(command: &str, url: &str, host_event: &str) -> (i32, String) {
+    let child = Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .env("APPA_RUNTIME_URL", url)
+        .env("CLAUDE_PLUGIN_ROOT", plugin_root())
+        .env("APPA_BIN", built_binary())
+        .env("APPA_GATE", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the hook command spawns");
+    finish(child, host_event)
+}
+
 fn run_gated(command: &str, url: &str, gated: bool) -> (i32, String) {
     let child = Command::new("sh")
         .arg("-c")
@@ -432,6 +449,26 @@ async fn an_unreachable_runtime_exits_2() {
     assert_eq!(code, 2, "no answer from the runtime must block the action");
 }
 
+/// The shipped POSIX wrapper carries the withholding out the way the harness reads
+/// it. The wrapper adds its own exit handling around the client, so the platform a
+/// deployment actually runs is checked here rather than only the client under it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_posix_hook_exits_zero_when_it_withholds_a_result() {
+    let url = refused_url().await;
+    let command = shipped_command();
+    let ran = r#"{"hook_event_name":"PostToolUse","session_id":"plugin-test","tool_name":"Bash","tool_input":{"command":"ls"},"tool_response":{"stdout":"readme.txt"}}"#;
+    let (code, stdout) = tokio::task::spawn_blocking(move || run_hook_on(&command, &url, ran))
+        .await
+        .expect("the blocking task joins");
+    assert_eq!(code, 0, "a discarded replacement leaves the output in place: {stdout}");
+    let answer: serde_json::Value = serde_json::from_str(&stdout).expect("the wrapper prints the withholding");
+    assert!(
+        !answer["hookSpecificOutput"]["updatedToolOutput"].is_null(),
+        "the wrapper carries the replacement through: {answer}"
+    );
+    assert!(!answer.to_string().contains("readme.txt"), "{answer}");
+}
+
 /// A tool whose result already ran needs more than an exit code: the harness
 /// keeps output it was not told to replace, so an unanswered post-use hook
 /// renders the withholding for the result it reports.
@@ -442,7 +479,10 @@ async fn an_unanswered_post_use_hook_withholds_the_result_it_reports() {
     let (code, stdout) = tokio::task::spawn_blocking(move || run_client(&["--adapter", "claude-code"], &url, ran))
         .await
         .expect("the blocking task joins");
-    assert_eq!(code, 2, "no answer from the runtime must block the action");
+    assert_eq!(
+        code, 0,
+        "the harness applies the replacement only from a hook that exits zero: {stdout}"
+    );
     let answer: serde_json::Value = serde_json::from_str(&stdout).expect("the withholding renders as JSON: {stdout}");
     assert_eq!(answer["hookSpecificOutput"]["hookEventName"], "PostToolUse", "{answer}");
     assert!(

@@ -19,6 +19,11 @@ Each flow crosses under its ``gate:`` spelling, ``gate:code_execution``
 and ``gate:memory_persist``; the runtime names them
 ``host/kagent-gate/code_execution`` and ``host/kagent-gate/memory_persist``,
 the ids a policy's ``[[tool]]`` entries and mandates address.
+
+The code gate answers the model, in the stderr of the run it refused or
+withheld, so what it hands back is spelled for the model like every
+other decision the plugin relays: the inventory turns a wire spelling
+in the runtime's words back into the name ADK dispatches.
 """
 
 from __future__ import annotations
@@ -30,7 +35,7 @@ import httpx
 
 from . import wire
 from .identity import SessionIdentity
-from .inventory import gate_spelling
+from .inventory import ToolInventory, gate_spelling
 from .plugin import AppaFailClosed, AppaPluginKagent
 
 logger = logging.getLogger("appa_kagent_adk.gates")
@@ -48,9 +53,16 @@ class SyncHookGate:
     await. Same wire, same fail-closed contract, one shared identity.
     """
 
-    def __init__(self, runtime_url: str, identity: SessionIdentity, client: httpx.Client | None = None):
+    def __init__(
+        self,
+        runtime_url: str,
+        identity: SessionIdentity,
+        inventory: ToolInventory,
+        client: httpx.Client | None = None,
+    ):
         self._hook_url = runtime_url.rstrip("/") + "/hook"
         self._identity = identity
+        self._inventory = inventory
         self._client = client or httpx.Client(timeout=120.0)
 
     def post(self, event: dict[str, Any]) -> wire.Decision:
@@ -67,6 +79,10 @@ class SyncHookGate:
 
     def ids(self, session: Any) -> tuple[str, str | None]:
         return self._identity.ids(session)
+
+    def for_model(self, text: str | None) -> str:
+        """Runtime text as the model must read it, as the plugin spells it."""
+        return self._inventory.despell(text or "")
 
 
 class GatedCodeExecutor:
@@ -92,7 +108,7 @@ class GatedCodeExecutor:
         arguments = {"code": code_execution_input.code}
         decision = self._gate.post(wire.tool_call(root_id, CODE_EXECUTION_TOOL, arguments, child_id))
         if decision.kind == "deny_call":
-            return CodeExecutionResult(stdout="", stderr=decision.feedback or "")
+            return CodeExecutionResult(stdout="", stderr=self._gate.for_model(decision.feedback))
         if decision.kind not in ("allow_call", "pass_control"):
             raise AppaFailClosed(f"appa answered the code execution with {decision.detail or decision.kind}")
         result = self._inner.execute_code(invocation_context, code_execution_input)
@@ -101,9 +117,9 @@ class GatedCodeExecutor:
         if answer.kind == "ack":
             return result
         if answer.kind == "replace_output":
-            return CodeExecutionResult(stdout=answer.output or "", stderr="")
+            return CodeExecutionResult(stdout=self._gate.for_model(answer.output), stderr="")
         if answer.kind == "block":
-            withheld = f"[appa] the tool result was withheld: {answer.reason}"
+            withheld = f"[appa] the tool result was withheld: {self._gate.for_model(answer.reason)}"
             return CodeExecutionResult(stdout="", stderr=withheld)
         raise AppaFailClosed(f"appa answered the code output with {answer.detail or answer.kind}")
 

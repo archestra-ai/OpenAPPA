@@ -52,13 +52,25 @@ pub struct Derived {
 /// runtime access — for the same reason [`Codec`](crate::Codec) is.
 pub type DeriveFn = fn(&Actor, &ProposedCall) -> Result<Derived, ParseRefusal>;
 
+/// The inverse of [`DeriveFn`]: the host's own spelling of one canonical
+/// identity — the name this host's model can dispatch. Both identities
+/// are kept, the canonical one to key every fact and this one to address
+/// the model and the host.
+///
+/// Total over the canonical ids the adapter's [`DeriveFn`] produces, and
+/// that derivation's inverse there. Any other canonical id — one no raw
+/// spelling of this host maps onto — has no host spelling and answers
+/// `None`. A plain `fn` pointer for the same reason [`DeriveFn`] is.
+pub type SpellFn = fn(&CanonicalTool) -> Option<String>;
+
 /// One adapter as the runtime serves it: its name, which fixes the
 /// trajectory prefix, the spawn coverage rule and the review channel,
-/// and its derivation.
+/// and the two directions of its tool identity map.
 #[derive(Clone, Copy)]
 pub struct Adapter {
     pub name: AdapterName,
     pub derive: DeriveFn,
+    pub spell: SpellFn,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -789,9 +801,14 @@ mod tests {
         })
     }
 
+    fn spell(canonical: &CanonicalTool) -> Option<String> {
+        canonical.as_str().strip_prefix("host/test/").map(|raw| raw.to_string())
+    }
+
     const SERVED: Adapter = Adapter {
         name: AdapterName::Kagent,
         derive,
+        spell,
     };
 
     #[test]
@@ -916,6 +933,7 @@ mod tests {
     const CLAUDE_CODE: Adapter = Adapter {
         name: AdapterName::ClaudeCode,
         derive,
+        spell,
     };
 
     /// A control call carrying `ruling` is a person's answer the host

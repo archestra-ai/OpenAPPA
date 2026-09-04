@@ -51,6 +51,15 @@
 // that offers a return route never reaches the model: the plugin takes
 // the bare floor, runs that plan on the /mcp endpoint of the runtime,
 // and proposes the same call again.
+//
+// A tool crosses under the spelling its inventory gives it, and the
+// inverse runs on the way back. The runtime names a tool to the model
+// by that same spelling — in the redispatch line of a block, in the
+// tool a remedy releases — and the model dispatches the raw ADK name,
+// so every runtime string the plugin hands the model is spelled back
+// through the inventory first (forModel). The bytes a child's return
+// crossed with are the exception: they reach the parent as the runtime
+// crossed them.
 package appakagentadk
 
 import (
@@ -598,6 +607,56 @@ func (p *AppaPluginKagent) spelling(t tool.Tool) (string, bool) {
 	return p.inventory.Spelling(t.Name())
 }
 
+// forModel is runtime text as the model must read it.
+//
+// A tool crosses the wire under its spelling, and the runtime names it
+// back the same way — in the redispatch line of a block, in the tool
+// the remedy releases. The model dispatches the raw ADK name, so every
+// runtime string this plugin hands the model goes through the
+// inventory first.
+func (p *AppaPluginKagent) forModel(text string) string {
+	return p.inventory.Despell(text)
+}
+
+// remedyRendering is the reserved tool's own answer, spelled for the
+// model, or nil to leave a result alone.
+//
+// The runtime writes that answer itself and names the released tool in
+// it, by the spelling this plugin sent. Every other tool spells its own
+// result, and the plugin hands it on untouched.
+func (p *AppaPluginKagent) remedyRendering(t tool.Tool, result map[string]any) map[string]any {
+	if t.Name() != ReservedTool || result == nil {
+		return nil
+	}
+	spelled, _ := despelled(result, p.inventory.Despell).(map[string]any)
+	return spelled
+}
+
+// despelled is a copy of one tool result with every string spelled for
+// the model. A tool result is a JSON value of any shape — the MCP
+// content blocks of the reserved tool among them — so the walk reaches
+// every string it carries.
+func despelled(value any, despell func(string) string) any {
+	switch typed := value.(type) {
+	case string:
+		return despell(typed)
+	case map[string]any:
+		spelled := make(map[string]any, len(typed))
+		for key, item := range typed {
+			spelled[key] = despelled(item, despell)
+		}
+		return spelled
+	case []any:
+		spelled := make([]any, len(typed))
+		for index, item := range typed {
+			spelled[index] = despelled(item, despell)
+		}
+		return spelled
+	default:
+		return value
+	}
+}
+
 // claimScope reports whether the named agent scope is the invocation's
 // own: the first scope an invocation opens, or a re-entry of it.
 func (p *AppaPluginKagent) claimScope(invocationID, agentName string) bool {
@@ -678,7 +737,7 @@ func (p *AppaPluginKagent) openScope(ctx context.Context, sess session.Session, 
 		// The return policy of the fork needs words. The child reads
 		// them in front of the request its parent sent, and that
 		// request stands unchanged.
-		contract = decision.Text
+		contract = p.forModel(decision.Text)
 	case decision.Kind != "ack":
 		return "", failClosed("appa refused the session: %s", decision.describe())
 	}
@@ -1051,7 +1110,7 @@ func (p *AppaPluginKagent) beforeTool(ctx agent.Context, t tool.Tool, args map[s
 	case "deny_call":
 		p.rememberReviews(decision.Review)
 		p.answerOwn(ctx.FunctionCallID())
-		return map[string]any{"result": decision.Feedback, denyKey: denied}, nil
+		return map[string]any{"result": p.forModel(decision.Feedback), denyKey: denied}, nil
 	default:
 		return nil, failClosed("appa answered the tool call with %s", decision.describe())
 	}
@@ -1105,11 +1164,13 @@ func (p *AppaPluginKagent) afterTool(ctx agent.Context, t tool.Tool, args, resul
 		case "ack":
 			return nil, nil
 		case "child_return":
+			// The bytes the return crossed with, never spelled over:
+			// the parent receives what the runtime crossed.
 			return map[string]any{"result": decision.Value}, nil
 		case "replace_output":
-			return map[string]any{"result": decision.Output}, nil
+			return map[string]any{"result": p.forModel(decision.Output)}, nil
 		case "block":
-			return withheldResult(decision.Reason), nil
+			return withheldResult(p.forModel(decision.Reason)), nil
 		default:
 			return nil, failClosed("appa answered the spawn result with %s", decision.describe())
 		}
@@ -1120,11 +1181,11 @@ func (p *AppaPluginKagent) afterTool(ctx agent.Context, t tool.Tool, args, resul
 	}
 	switch decision.Kind {
 	case "ack":
-		return nil, nil
+		return p.remedyRendering(t, result), nil
 	case "replace_output":
-		return map[string]any{"result": decision.Output}, nil
+		return map[string]any{"result": p.forModel(decision.Output)}, nil
 	case "block":
-		return withheldResult(decision.Reason), nil
+		return withheldResult(p.forModel(decision.Reason)), nil
 	default:
 		return nil, failClosed("appa answered the tool result with %s", decision.describe())
 	}
@@ -1154,9 +1215,9 @@ func (p *AppaPluginKagent) onToolError(ctx agent.Context, t tool.Tool, args map[
 	case "ack":
 		return nil, nil // the original error propagates
 	case "replace_output":
-		return map[string]any{"result": decision.Output}, nil
+		return map[string]any{"result": p.forModel(decision.Output)}, nil
 	case "block":
-		return withheldResult(decision.Reason), nil
+		return withheldResult(p.forModel(decision.Reason)), nil
 	default:
 		return nil, failClosed("appa answered the tool failure with %s", decision.describe())
 	}
@@ -1235,7 +1296,7 @@ func (p *AppaPluginKagent) holdTheReturn(ctx agent.Context, text string) (map[st
 		}
 		return p.crossing(ctx.InvocationID(), decision.Value), nil
 	case "block":
-		return map[string]any{"result": fmt.Sprintf(returnBlocked, decision.Reason)}, nil
+		return map[string]any{"result": fmt.Sprintf(returnBlocked, p.forModel(decision.Reason))}, nil
 	default:
 		return nil, failClosed("appa answered the child end with %s", decision.describe())
 	}

@@ -14,6 +14,10 @@
 // runs. A call of a name outside it is refused at the gate, never
 // forwarded.
 //
+// The inverse travels with it. The runtime names a tool back to the
+// model by the spelling it received, which is not a name the model can
+// call, so Despell spells it into the name ADK dispatches.
+//
 //   - An MCP entry names its tools in its tool filter, and a gated agent
 //     must carry one: without it the server decides the tool list at
 //     runtime, and the gate cannot name what it did not see. The toolset
@@ -52,6 +56,18 @@ const namespaceMark = "__NS__"
 // segment is one segment of a canonical tool id, as the runtime admits it.
 var segment = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
+// spelledCandidate matches a wire spelling as it stands in a runtime
+// string: two or three segments, class:name or class:namespace/name.
+// Each run of segment characters is maximal, so a spelling inside a
+// longer run is no candidate here, and the inventory alone decides
+// which candidate is a spelling it gave out.
+var spelledCandidate = regexp.MustCompile(`[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?`)
+
+// spellingEdge holds the characters that continue a wire spelling. A
+// candidate that follows one is the tail of a longer run, not a whole
+// spelling, and it stands.
+const spellingEdge = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.:/-"
+
 func MCPSpelling(toolset, tool string) string      { return "mcp:" + toolset + "/" + tool }
 func AgentSpelling(namespace, agent string) string { return "agent:" + namespace + "/" + agent }
 func BuiltinSpelling(name string) string           { return "builtin:" + name }
@@ -66,6 +82,11 @@ func BuiltinManifest() []byte { return builtinsManifest }
 // spellings. The zero value spells nothing, so every call is refused.
 type Inventory struct {
 	spellings map[string]string
+	// names is the inverse: each wire spelling, back to the name ADK
+	// dispatches. It is built with the inventory and from nothing else.
+	// A raw name is declared once, so no two names share a spelling and
+	// the inverse loses nothing.
+	names map[string]string
 }
 
 // Spelling is the wire spelling of a raw name; false for a name outside
@@ -76,6 +97,37 @@ func (i Inventory) Spelling(name string) (string, bool) {
 }
 
 func (i Inventory) Len() int { return len(i.spellings) }
+
+// Despell is text with every wire spelling of this inventory replaced
+// by the name ADK dispatches.
+//
+// The runtime names a tool by the spelling it was given, and the model
+// dispatches another name, so runtime text that reaches the model
+// passes through here first. The substitution is closed: a whole
+// spelling this inventory carries is replaced, and every other byte
+// stands — a spelling it never gave out included.
+func (i Inventory) Despell(text string) string {
+	var spelled strings.Builder
+	written := 0
+	for _, span := range spelledCandidate.FindAllStringIndex(text, -1) {
+		start, end := span[0], span[1]
+		if start > 0 && strings.IndexByte(spellingEdge, text[start-1]) >= 0 {
+			continue
+		}
+		name, gaveOut := i.names[text[start:end]]
+		if !gaveOut {
+			continue
+		}
+		spelled.WriteString(text[written:start])
+		spelled.WriteString(name)
+		written = end
+	}
+	if written == 0 {
+		return text
+	}
+	spelled.WriteString(text[written:])
+	return spelled.String()
+}
 
 // InventoryRefusalKind names why a rendered config yields no inventory.
 type InventoryRefusalKind int
@@ -181,7 +233,11 @@ func BuildInventory(spec InventorySpec) (Inventory, error) {
 			}
 		}
 	}
-	return Inventory{spellings: b.spellings}, nil
+	names := make(map[string]string, len(b.spellings))
+	for name, spelling := range b.spellings {
+		names[spelling] = name
+	}
+	return Inventory{spellings: b.spellings, names: names}, nil
 }
 
 func laneGroups() (map[string][]string, error) {

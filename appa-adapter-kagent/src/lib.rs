@@ -13,7 +13,9 @@
 //!
 //! The plugin spells a tool from the inventory its entrypoint computes,
 //! `<prefix>:<rest>`, and this is the bijection onto canonical identity
-//! over the spellings it accepts:
+//! over the spellings it accepts; the adapter's inverse reads it right
+//! to left, so the runtime can name a tool to this host without keeping
+//! the spelling the call arrived under:
 //!
 //! | raw spelling | canonical | spawn |
 //! |---|---|---|
@@ -42,11 +44,33 @@ pub fn adapter() -> Adapter {
     Adapter {
         name: AdapterName::Kagent,
         derive,
+        spell,
     }
 }
 
 /// The one tool the `appa:` prefix names.
 const CONTROL_TOOL_NAME: &str = "execute_remedy_plan";
+
+/// The control tool as the plugin's inventory spells it.
+const CONTROL_TOOL_RAW: &str = "appa:execute_remedy_plan";
+
+/// The inverse of [`derive`]'s mapping table over its range: the wire spelling the plugin's
+/// inventory gives one canonical identity, which is what the runtime says where it names a
+/// tool to this host. `None` for a canonical id no kagent spelling maps onto — another
+/// host's namespace under the `host` family.
+fn spell(canonical: &CanonicalTool) -> Option<String> {
+    if canonical.is_control() {
+        return Some(CONTROL_TOOL_RAW.to_string());
+    }
+    let mut segments = canonical.as_str().split('/');
+    match (segments.next()?, segments.next()?, segments.next()?) {
+        ("mcp", toolset, tool) => Some(format!("mcp:{toolset}/{tool}")),
+        ("agent", namespace, agent) => Some(format!("agent:{namespace}/{agent}")),
+        ("host", "kagent", name) => Some(format!("builtin:{name}")),
+        ("host", "kagent-gate", name) => Some(format!("gate:{name}")),
+        _ => None,
+    }
+}
 
 /// The crate-level mapping table. `CanonicalTool::of` refuses an empty segment, a
 /// character outside the grammar, and a namespace containing `__`.
@@ -95,8 +119,6 @@ mod tests {
     use super::*;
     use appa_runtime_api::TrajectoryId;
 
-    const CONTROL_TOOL_RAW: &str = "appa:execute_remedy_plan";
-
     fn derived(tool: &str) -> Result<Derived, ParseRefusal> {
         let actor = Actor {
             root: TrajectoryId("kagent:s1".to_string()),
@@ -133,6 +155,20 @@ mod tests {
             assert_eq!(derived.spawn, spawn, "{raw}");
             assert_eq!(derived.canonical.is_control(), raw == CONTROL_TOOL_RAW, "{raw}");
             assert!(derived.names_children.is_empty(), "{raw}: no kagent call names a child");
+            assert_eq!(
+                (adapter().spell)(&derived.canonical).as_deref(),
+                Some(raw),
+                "the inverse spells {expected} back as the spelling the plugin sent"
+            );
+        }
+    }
+
+    /// A canonical id no kagent spelling derives to has no kagent spelling.
+    #[test]
+    fn a_canonical_id_outside_the_range_has_no_host_spelling() {
+        for name in ["host/claude-code/Bash", "host/other/x"] {
+            let canonical = CanonicalTool::parse(name).expect("the fixture is canonical");
+            assert_eq!((adapter().spell)(&canonical), None, "{name}");
         }
     }
 
@@ -221,6 +257,16 @@ mod tests {
                     if let Some(namespace) = canonical.as_str().split('/').nth(1) {
                         prop_assert!(!namespace.contains("__"), "{}", canonical);
                     }
+                }
+            }
+
+            /// The inverse is total over the derivation's range and returns the exact
+            /// spelling the plugin sent, so the runtime never has to keep one.
+            #[test]
+            fn the_inverse_spells_every_derived_identity_back(raw in raw_spelling()) {
+                if let Ok(derived) = derived(&raw) {
+                    let spelled = (adapter().spell)(&derived.canonical);
+                    prop_assert_eq!(spelled.as_deref(), Some(raw.as_str()));
                 }
             }
 

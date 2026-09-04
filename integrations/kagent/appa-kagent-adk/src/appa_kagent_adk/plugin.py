@@ -43,6 +43,14 @@ config at startup, and a name outside it is refused at the call gate
 with a deny the model reads, never forwarded. A spelled ``agent:``
 tool is a spawn, and its result crosses as ``spawn_result``.
 
+The inverse runs on the way back. The runtime names a tool to the model
+by that same spelling — in the redispatch line of a block, in the tool
+a remedy releases — and the model dispatches the raw ADK name, so every
+runtime string the plugin hands the model is spelled back through the
+inventory first (``_for_model``). The bytes a child's return crossed
+with are the exception: they reach the parent as the runtime crossed
+them.
+
 The plugin also declares the return of a spawn itself. A ``deny_call``
 that offers a return route never reaches the model: the plugin takes
 the bare floor, runs that plan on the ``/mcp`` endpoint of the runtime,
@@ -249,6 +257,17 @@ class AppaPluginKagent(BasePlugin):
         """The wire spelling of a dispatched tool, or None outside the inventory."""
         return self._inventory.spelling(tool.name)
 
+    def _for_model(self, text: str | None) -> str:
+        """Runtime text as the model must read it.
+
+        A tool crosses the wire under its spelling, and the runtime
+        names it back the same way — in the redispatch line of a block,
+        in the tool the remedy releases. The model dispatches the raw
+        ADK name, so every runtime string this plugin hands the model
+        goes through the inventory first.
+        """
+        return self._inventory.despell(text or "")
+
     def _claim_scope(self, invocation_id: str, agent_name: str) -> bool:
         """Whether this agent scope is the invocation's own: the first scope it opened, or a re-entry of it.
 
@@ -336,7 +355,7 @@ class AppaPluginKagent(BasePlugin):
                 # The return policy of the fork needs words. The child
                 # reads them in front of the request its parent sent, and
                 # that request stands unchanged.
-                contract = decision.text
+                contract = self._for_model(decision.text)
             elif decision.kind != "ack":
                 raise AppaFailClosed(f"appa refused the session: {decision.detail or decision.kind}")
             if child_id is not None:
@@ -488,7 +507,7 @@ class AppaPluginKagent(BasePlugin):
             # a "content" or "result" key, and any other shape reaches the
             # model as an EMPTY tool message — the model then cannot see
             # why the call was blocked, or the remedy offer it quotes.
-            return {"result": decision.feedback, _DENY_KEY: _DENIED}
+            return {"result": self._for_model(decision.feedback), _DENY_KEY: _DENIED}
         raise AppaFailClosed(f"appa answered the tool call with {decision.detail or decision.kind}")
 
     async def after_tool_callback(self, *, tool, tool_args, tool_context, result):
@@ -522,20 +541,33 @@ class AppaPluginKagent(BasePlugin):
             if decision.kind == "ack":
                 return None
             if decision.kind == "child_return":
+                # The bytes the return crossed with, never spelled over:
+                # the parent receives what the runtime crossed.
                 return {"result": decision.value}
             if decision.kind == "replace_output":
-                return {"result": decision.output}
+                return {"result": self._for_model(decision.output)}
             if decision.kind == "block":
-                return _withheld(decision.reason or "")
+                return _withheld(self._for_model(decision.reason))
             raise AppaFailClosed(f"appa answered the spawn result with {decision.detail or decision.kind}")
         decision = await self._post(wire.tool_result(root_id, spelled, arguments, outcome, child_id))
         if decision.kind == "ack":
-            return None
+            return self._remedy_rendering(tool, result)
         if decision.kind == "replace_output":
-            return {"result": decision.output}
+            return {"result": self._for_model(decision.output)}
         if decision.kind == "block":
-            return _withheld(decision.reason or "")
+            return _withheld(self._for_model(decision.reason))
         raise AppaFailClosed(f"appa answered the tool result with {decision.detail or decision.kind}")
+
+    def _remedy_rendering(self, tool: Any, result: Any) -> Any:
+        """The reserved tool's own answer, spelled for the model, or None to leave a result alone.
+
+        The runtime writes that answer itself and names the released
+        tool in it, by the spelling this plugin sent. Every other tool
+        spells its own result, and the plugin hands it on untouched.
+        """
+        if tool.name != wire.RESERVED_TOOL or result is None:
+            return None
+        return _despelled(result, self._inventory.despell)
 
     async def on_tool_error_callback(self, *, tool, tool_args, tool_context, error):
         # The failure closes the dispatch here. ADK runs the result gate
@@ -552,9 +584,9 @@ class AppaPluginKagent(BasePlugin):
         if decision.kind == "ack":
             return None  # the original error propagates
         if decision.kind == "replace_output":
-            return {"result": decision.output}
+            return {"result": self._for_model(decision.output)}
         if decision.kind == "block":
-            return _withheld(decision.reason or "")
+            return _withheld(self._for_model(decision.reason))
         raise AppaFailClosed(f"appa answered the tool failure with {decision.detail or decision.kind}")
 
     # -- the return gate ----------------------------------------------
@@ -608,7 +640,7 @@ class AppaPluginKagent(BasePlugin):
         if decision.kind == "ack":
             return self._crossing(tool_context.invocation_id, text)
         if decision.kind == "block":
-            return {"result": _RETURN_BLOCKED.format(reason=decision.reason or "")}
+            return {"result": _RETURN_BLOCKED.format(reason=self._for_model(decision.reason))}
         raise AppaFailClosed(f"appa answered the child end with {decision.detail or decision.kind}")
 
     def _crossing(self, invocation_id: str, value: str) -> dict[str, Any]:
@@ -780,6 +812,24 @@ def _content_text(content: Any) -> str:
     if callable(dump):
         return json.dumps(dump(exclude_none=True), default=str)
     return str(content)
+
+
+def _despelled(value: Any, despell: Callable[[str], str]) -> Any:
+    """A copy of one tool result with every string spelled for the model.
+
+    A tool result is a JSON value of any shape — the MCP content blocks
+    of the reserved tool among them — so the walk reaches every string
+    it carries.
+    """
+    match value:
+        case str():
+            return despell(value)
+        case dict():
+            return {key: _despelled(item, despell) for key, item in value.items()}
+        case list():
+            return [_despelled(item, despell) for item in value]
+        case _:
+            return value
 
 
 def _plain_json(value: Any) -> Any:

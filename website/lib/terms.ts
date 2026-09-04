@@ -49,7 +49,7 @@ const TERMS = {
   adapter:
     "What connects a host to APPA: it translates the host's events into the hook protocol's wire envelope and the decision back. The runtime derives the canonical tool id, spawn-ness, and child names from the adapter and the raw tool spelling. Claude Code and kagent are the initial adapters.",
   "raw tool spelling":
-    "The host's own name for a tool, such as mcp__github__create_issue in Claude Code. It crosses the wire and stays in the trajectory record for dispatch, diagnostics, and replay; the policy sees only the canonical tool id.",
+    "The host's own name for a tool, such as mcp__github__create_issue in Claude Code. It crosses the wire, and the adapter spells it back from the canonical id wherever the runtime tells the model to run a tool; the policy and the record see only the canonical tool id.",
 
   /* Tool contracts */
   "Tool(argument:pattern)":

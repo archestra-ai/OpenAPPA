@@ -286,8 +286,10 @@ async fn serve(args: Args) -> ExitCode {
         }
     };
     // A served deployment names tools canonically: the wire carries each host's raw
-    // spelling, and the adapter derives the canonical identity the policy must name.
-    let runtime = match Runtime::open_served(config, args.db, args.modules_dir) {
+    // spelling, and the adapter derives the canonical identity the policy must name. The
+    // adapter's inverse comes with it, for the texts the runtime addresses to the model.
+    let adapter = served(args.adapter);
+    let runtime = match Runtime::open_served(config, args.db, args.modules_dir, adapter) {
         Ok(runtime) => Arc::new(runtime.with_spawn_coverage(spawn_coverage(args.adapter))),
         Err(error) => {
             eprintln!("appa runtime: {error}");
@@ -297,7 +299,7 @@ async fn serve(args: Args) -> ExitCode {
 
     let state = AppState {
         runtime: Arc::clone(&runtime),
-        adapter: served(args.adapter),
+        adapter,
         config: config_path,
         executable: ExecutableAtStart::of_this_process(),
     };

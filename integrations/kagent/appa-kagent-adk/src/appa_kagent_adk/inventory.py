@@ -12,6 +12,10 @@ The entrypoint builds the inventory once at startup from the rendered
 config, so what the wire can name is fixed before the model runs.
 A call of a name outside it is refused at the gate, never forwarded.
 
+The inverse travels with it. The runtime names a tool back to the model
+by the spelling it received, which is not a name the model can call, so
+``despell`` spells it into the name ADK dispatches.
+
 - An MCP entry (``http_tools``, ``sse_tools``) names its tools in its
   ``tools`` filter, and a gated agent must carry one: without it the
   server decides the tool list at runtime, and the gate cannot name
@@ -33,7 +37,7 @@ import json
 import os
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib import resources
 from typing import Any
 from urllib.parse import urlsplit
@@ -51,6 +55,12 @@ _MCP_KEYS = ("http_tools", "sse_tools")
 _NAMESPACE_MARK = "__NS__"
 # One segment of a canonical tool id, as the runtime admits it.
 _SEGMENT = re.compile(r"^[A-Za-z0-9_.-]+$")
+# A wire spelling as it stands in a runtime string: two or three
+# segments, ``class:name`` or ``class:namespace/name``. Each run of
+# segment characters is maximal, so a spelling inside a longer run is
+# no candidate here, and the inventory alone decides which candidate is
+# a spelling it gave out.
+_SPELLED = re.compile(r"(?<![A-Za-z0-9_.:/-])[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?")
 
 
 def mcp_spelling(toolset: str, tool: str) -> str:
@@ -84,10 +94,29 @@ class ToolInventory:
     """The raw ADK tool names of one agent, each with its wire spelling."""
 
     spellings: Mapping[str, str]
+    names: Mapping[str, str] = field(init=False)
+    """The inverse: each wire spelling, back to the name ADK dispatches."""
+
+    def __post_init__(self) -> None:
+        # The inverse is built with the inventory and from nothing else.
+        # A raw name is declared once, so no two names share a spelling
+        # and the inverse loses nothing.
+        object.__setattr__(self, "names", {spelling: name for name, spelling in self.spellings.items()})
 
     def spelling(self, name: str) -> str | None:
         """The wire spelling of a raw name, or None for a name outside the inventory."""
         return self.spellings.get(name)
+
+    def despell(self, text: str) -> str:
+        """``text`` with every wire spelling of this inventory replaced by the name ADK dispatches.
+
+        The runtime names a tool by the spelling it was given, and the
+        model dispatches another name, so runtime text that reaches the
+        model passes through here first. The substitution is closed: a
+        whole spelling this inventory carries is replaced, and every
+        other byte stands — a spelling it never gave out included.
+        """
+        return _SPELLED.sub(lambda match: self.names.get(match.group(), match.group()), text)
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], environ: Mapping[str, str] = os.environ) -> ToolInventory:

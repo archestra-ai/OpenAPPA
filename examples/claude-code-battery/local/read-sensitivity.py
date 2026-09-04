@@ -1,6 +1,10 @@
 import json
 import sys
 
+# The runtime names the call by its canonical tool id: a Claude Code
+# built-in is `host/claude-code/<name>`.
+READ_TOOL = "host/claude-code/Read"
+
 
 def main():
     request = json.load(sys.stdin)
@@ -14,8 +18,8 @@ def main():
 
     artifact = request.get("artifact")
     args = artifact.get("args") if isinstance(artifact, dict) else None
-    if not isinstance(args, dict) or args.get("name") != "Read":
-        raise ValueError("args.name must be Read")
+    if not isinstance(args, dict) or args.get("name") != READ_TOOL:
+        raise ValueError(f"args.name must be {READ_TOOL}")
     arguments = args.get("arguments")
     file_path = arguments.get("file_path") if isinstance(arguments, dict) else None
     if not isinstance(file_path, str) or not file_path:

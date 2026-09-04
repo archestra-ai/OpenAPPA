@@ -650,6 +650,102 @@ async def test_a_tool_failure_crosses_as_a_failure_outcome():
     assert hook.events[0]["outcome"] == {"status": "failure", "message": "connection refused"}
 
 
+# -- the tool the model reads, in the name it dispatches ---------------
+#
+# A tool crosses under its wire spelling, and the runtime names it back
+# the same way. The model dispatches the raw ADK name, so runtime text
+# on its way to the model is spelled back through the inventory.
+
+BLOCK = "[appa] Blocked.\n  - Run {tool} first; it clears: the source is untrusted."
+
+
+@pytest.mark.parametrize(
+    ("spelled", "dispatched"),
+    [
+        pytest.param("mcp:demo-tools/k8s_get_pods", "k8s_get_pods", id="mcp"),
+        pytest.param("agent:kagent/log-analyst", "kagent__NS__log_analyst", id="agent"),
+        pytest.param("builtin:ask_user", "ask_user", id="builtin"),
+        pytest.param("appa:execute_remedy_plan", "execute_remedy_plan", id="reserved"),
+    ],
+)
+async def test_a_deny_names_the_tool_the_model_dispatches(spelled, dispatched):
+    hook = Hook({"protocol": 1, "decision": "deny_call", "feedback": BLOCK.format(tool=spelled)})
+    plugin = plugin_over(hook)
+    denied = await plugin.before_tool_callback(
+        tool=FakeTool("k8s_scale"), tool_args={"replicas": 3}, tool_context=dispatch(FakeSession("s1"))
+    )
+    assert denied == {"result": BLOCK.format(tool=dispatched), "appa": "denied"}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(BLOCK.format(tool="gate:code_execution"), id="a-gate-the-model-cannot-dispatch"),
+        pytest.param(BLOCK.format(tool="mcp:other-server/k8s_get_pods"), id="another-toolset"),
+        pytest.param(BLOCK.format(tool="mcp:demo-tools/k8s_get_pods_v2"), id="a-longer-name"),
+        pytest.param(BLOCK.format(tool="agent:kagent/log-analyst-standby"), id="a-longer-agent"),
+        pytest.param("[appa] Blocked. The trajectory reads ops-only material.", id="no-spelling-at-all"),
+    ],
+)
+async def test_a_deny_leaves_what_the_inventory_never_spelled(text):
+    hook = Hook({"protocol": 1, "decision": "deny_call", "feedback": text})
+    plugin = plugin_over(hook)
+    denied = await plugin.before_tool_callback(
+        tool=FakeTool("k8s_scale"), tool_args={"replicas": 3}, tool_context=dispatch(FakeSession("s1"))
+    )
+    assert denied == {"result": text, "appa": "denied"}
+
+
+async def test_the_remedy_answer_names_the_tool_the_model_dispatches():
+    """The runtime writes the reserved tool's answer itself and names
+    the released tool in it. The model calls that tool next, so the
+    answer must carry the name ADK dispatches."""
+    hook = Hook(ACK)
+    plugin = plugin_over(hook)
+    authorized = "[appa] Authorized. Call the {tool} tool again with exactly these arguments: {{}}"
+    answer = {"content": [{"type": "text", "text": authorized.format(tool="mcp:demo-tools/k8s_get_pods")}]}
+    returned = await plugin.after_tool_callback(
+        tool=FakeTool("execute_remedy_plan"),
+        tool_args={"offer_id": "offer-1"},
+        tool_context=dispatch(FakeSession("s1")),
+        result=answer,
+    )
+    assert returned == {"content": [{"type": "text", "text": authorized.format(tool="k8s_get_pods")}]}
+    assert hook.events[0]["outcome"] == {"status": "success", "body": answer}, (
+        "the runtime sees the answer it wrote, and the spelling is undone on the way to the model"
+    )
+
+
+async def test_a_withheld_result_names_the_tool_the_model_dispatches():
+    hook = Hook({"protocol": 1, "decision": "block", "reason": "run mcp:demo-tools/read_ledger first"})
+    plugin = plugin_over(hook)
+    withheld = await plugin.after_tool_callback(
+        tool=FakeTool("k8s_get_pods"),
+        tool_args={},
+        tool_context=dispatch(FakeSession("s1")),
+        result={"pods": ["api-1"]},
+    )
+    assert withheld == {
+        "result": "[appa] the tool result was withheld: run read_ledger first",
+        "appa": "withheld",
+    }
+
+
+async def test_the_bytes_of_a_child_return_cross_as_the_runtime_crossed_them():
+    """The value is what the runtime crossed for the parent, not text
+    addressed to the model, so it is replayed byte for byte."""
+    value = "the analyst read mcp:demo-tools/read_ledger"
+    hook = Hook({"protocol": 1, "decision": "child_return", "value": value})
+    plugin = plugin_over(hook)
+    returned = await plugin.after_tool_callback(
+        tool=FakeTool("kagent__NS__log_analyst"),
+        tool_args={"task": "summarize"},
+        tool_context=dispatch(FakeSession("s1")),
+        result={"result": "the analyst answer", "subagent_session_id": "child-ctx"},
+    )
+    assert returned == {"result": value}
+
+
 # -- liveness gates ---------------------------------------------------
 
 

@@ -269,7 +269,7 @@ def build_server(filepath: str, runtime_url: str):
         stock_cli.maybe_add_skills_with_config(root_agent, agent_config)
         if root_agent.code_executor is not None:
             root_agent.code_executor = gates.GatedCodeExecutor(
-                root_agent.code_executor, gates.SyncHookGate(runtime_url, identity)
+                root_agent.code_executor, gates.SyncHookGate(runtime_url, identity, inventory)
             )
         if gates.gate_memory_persist(root_agent, plugin):
             logger.info("the memory persist callback crosses the tool gate")

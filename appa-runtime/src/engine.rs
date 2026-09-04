@@ -74,8 +74,8 @@ use appa_engine::value::{
 use appa_eventlog::Log;
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::api::OutcomeBody;
 pub(crate) use crate::api::{OfferId, ProposedCall, SpawnBinding, ToolOutcome, TrajectoryId};
+use crate::api::{OutcomeBody, ToolNaming};
 use crate::consult::{
     AnnotationAnswer, AnnotationDeclaration, AuthorityAnswer, AuthorityArtifact, AuthorityDeclaration, HistoryEntry,
     Requirement, Ruling, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint, WireAudience,
@@ -541,6 +541,10 @@ pub struct RuntimeEngine {
     /// The trusted hint, builtin, and consult input mapping per registered `[[annotator]]`,
     /// policy-compiled and runtime-owned. The engine sees only the enforced mandate.
     annotators: BTreeMap<String, appa_policy::AnnotatorBinding>,
+    /// How the deployment this engine decides for names tools, so feedback that tells the
+    /// model to run one names it the way that model's harness dispatches it. A property of
+    /// the deployment, not of the policy: a retired engine decides under the same one.
+    naming: ToolNaming,
 }
 
 impl RuntimeEngine {
@@ -554,14 +558,16 @@ impl RuntimeEngine {
 
     /// The one constructor: both halves — the decision core and the consult input
     /// mapping — come from the same compiled policy, so an engine can never carry
-    /// another policy's mapping.
-    pub fn from_policy(policy: &appa_policy::Config) -> RuntimeEngine {
+    /// another policy's mapping. The naming is the deployment's, and every engine of one
+    /// deployment carries the same one.
+    pub(crate) fn from_policy(policy: &appa_policy::Config, naming: ToolNaming) -> RuntimeEngine {
         RuntimeEngine {
             engine: policy.engine().clone(),
             annotators: policy
                 .annotators()
                 .map(|(name, binding)| (name.as_str().to_string(), binding.clone()))
                 .collect(),
+            naming,
         }
     }
 
@@ -977,7 +983,7 @@ impl RuntimeEngine {
             // A tool no declaration and no wildcard covers is refused before anything is
             // judged: a typed refusal, never model feedback, and nothing is appended.
             Err(EngineError::UnknownTool(tool)) => return Err(EngineRefusal::UndeclaredTool { tool }),
-            Err(error) => return Ok(deny(malformed_feedback(&error))),
+            Err(error) => return Ok(deny(malformed_feedback(&error, self.naming))),
         };
         let owner = engine_id(trajectory);
         let Some(views) = view.views(&owner) else {
@@ -1058,7 +1064,7 @@ impl RuntimeEngine {
                     detail: "a non-empty proposal produced no release, block, or repeat answer".to_string(),
                 })
             }
-            FollowUp::Malformed { error, .. } => Ok(deny_next(malformed_feedback(&error))),
+            FollowUp::Malformed { error, .. } => Ok(deny_next(malformed_feedback(&error, self.naming))),
             other => Err(EngineRefusal::Invariant {
                 detail: format!("a proposal produced a non-proposal follow-up: {other:?}"),
             }),
@@ -1100,7 +1106,7 @@ impl RuntimeEngine {
             .map(|(offer, plan)| (offer_id(offer), *plan))
             .collect();
         let registry = self.engine.registry();
-        let text = block_feedback(&block.block, &offers, registry, bounds);
+        let text = block_feedback(&block.block, &offers, registry, bounds, self.naming);
         let review = self.pending_reviews(block, &offers);
         (text, offers.into_iter().map(|(offer, _)| offer).collect(), review)
     }
@@ -1640,7 +1646,7 @@ impl RuntimeEngine {
                 return blocked(shape_feedback(&mismatch, policy.as_ref()));
             }
             AudienceRound::Failed(TransitionError::SanitizerUnapplicable) => {
-                return Ok(withheld.present("the return sanitizer's derivation was not usable"));
+                return Ok(withheld.present("the return sanitizer's derivation was not usable", self.naming));
             }
             AudienceRound::Failed(error) => return Err(child_refusal(error)),
         };
@@ -1948,7 +1954,9 @@ impl RuntimeEngine {
                     Next::ResolveExternal(requests),
                 )));
             }
-            Err(AudienceFailure::Refused(detail)) => return Ok(AudienceRound::Presented(unresolved.present(&detail))),
+            Err(AudienceFailure::Refused(detail)) => {
+                return Ok(AudienceRound::Presented(unresolved.present(&detail, self.naming)));
+            }
         };
         match judge(&act.payload) {
             Ok(judged) => Ok(AudienceRound::Judged(judged)),
@@ -1956,7 +1964,9 @@ impl RuntimeEngine {
                 AudienceConsult::Requests(requests) => Ok(AudienceRound::Presented(EngineDecision::deliver(
                     Next::ResolveExternal(requests),
                 ))),
-                AudienceConsult::Unresolved(detail) => Ok(AudienceRound::Presented(unresolved.present(&detail))),
+                AudienceConsult::Unresolved(detail) => {
+                    Ok(AudienceRound::Presented(unresolved.present(&detail, self.naming)))
+                }
             },
             Err(error) => Ok(AudienceRound::Failed(error)),
         }
@@ -2316,9 +2326,9 @@ enum UnresolvedAudience<'a> {
 }
 
 impl UnresolvedAudience<'_> {
-    fn present(self, detail: &str) -> EngineDecision {
+    fn present(self, detail: &str, naming: ToolNaming) -> EngineDecision {
         match self {
-            UnresolvedAudience::Denied { tool } => deny(unresolved_audience(tool, detail)),
+            UnresolvedAudience::Denied { tool } => deny(unresolved_audience(&naming.model_spelling(tool), detail)),
             UnresolvedAudience::Withheld { subject } => {
                 EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
                     feedback: format!("[appa] {detail}; the {subject} is withheld and may be retried"),
@@ -2567,11 +2577,17 @@ fn authority_verdict(evidence: &[ExternalEvidence], name: &str) -> Option<(Autho
     })
 }
 
-fn malformed_feedback(error: &EngineError) -> String {
+/// A refused call read back to the model, which knows the call it made by its own
+/// spelling and not by the identity the runtime keys it on.
+fn malformed_feedback(error: &EngineError, naming: ToolNaming) -> String {
+    let spelled = |tool: &str| naming.model_spelling(tool);
     match error {
-        EngineError::UnknownTool(tool) => format!("[appa] unknown tool {tool}: not in this deployment's policy"),
+        EngineError::UnknownTool(tool) => {
+            format!("[appa] unknown tool {}: not in this deployment's policy", spelled(tool))
+        }
         EngineError::ProviderRunTool(tool) => format!(
-            "[appa] tool {tool} is provider-run: it executes inside the inference call and cannot be proposed as a tool call"
+            "[appa] tool {} is provider-run: it executes inside the inference call and cannot be proposed as a tool call",
+            spelled(tool)
         ),
         error => format!("[appa] invalid call: {error}"),
     }
@@ -2944,6 +2960,7 @@ fn remedy_lines(
     offers: &[(OfferId, PlanId)],
     spelling: &ReturnSpelling,
     chain: &TrustChain,
+    naming: ToolNaming,
 ) -> Vec<String> {
     planned
         .plans
@@ -2953,9 +2970,11 @@ fn remedy_lines(
                 .iter()
                 .find(|(_, offered)| *offered == plan.id)
                 .map(|(id, _)| remedy_instruction(plan, id, spelling)),
+            // The model runs this one itself, so it is named the way its own harness
+            // dispatches it and not by the identity the runtime keys the contract on.
             RemedyPlan::Redispatch(redispatch) => Some(format!(
                 "  - Run {} first; it clears: {}.",
-                terminal_safe(redispatch.tool().as_str()),
+                terminal_safe(&naming.model_spelling(redispatch.tool().as_str())),
                 terminal_safe(
                     &redispatch
                         .clears()
@@ -2974,6 +2993,7 @@ fn block_feedback(
     offers: &[(OfferId, PlanId)],
     registry: &Registry,
     bounds: &ReturnBounds,
+    naming: ToolNaming,
 ) -> String {
     let chain = registry.trust_chain();
     let mut reasons = Vec::new();
@@ -3028,7 +3048,7 @@ fn block_feedback(
     ];
     lines.extend(reasons.into_iter().map(|reason| format!("  - {reason}")));
 
-    let remedies = remedy_lines(planned, offers, &ReturnSpelling::of(chain, bounds), chain);
+    let remedies = remedy_lines(planned, offers, &ReturnSpelling::of(chain, bounds), chain, naming);
     if !remedies.is_empty() {
         lines.push(String::new());
         lines.push("Continue:".to_string());
@@ -3126,6 +3146,7 @@ mod tests {
         Resolution, ReturnBounds, RuntimeEngine, SanitizerSubject, TrajectoryId, audience_wire, block_feedback,
         engine_id, remedy_instruction, remedy_lines, terminal_safe,
     };
+    use crate::api::ToolNaming;
     use crate::consult::{AnnotationAnswer, HistoryEntry, RequiredAudienceAnswer, SanitizerPoint, WireAudience};
     use appa_engine::check::{Gap, RawBlock};
     use appa_engine::contract::{AudienceRequirement, HistoryRequirement, RecipientSpec};
@@ -3153,7 +3174,7 @@ mod tests {
             "#,
         )
         .expect("the sanitizer policy compiles");
-        let engine = RuntimeEngine::from_policy(&policy);
+        let engine = RuntimeEngine::from_policy(&policy, ToolNaming::AsAuthored);
         let scrub = appa_engine::names::SanitizerName::new("scrub");
         let request = |subject: SanitizerSubject<'_>| match engine.sanitizer_request(
             &scrub,
@@ -3217,7 +3238,7 @@ mod tests {
     }
 
     fn annotator_engine(policy: &appa_policy::Config) -> RuntimeEngine {
-        RuntimeEngine::from_policy(policy)
+        RuntimeEngine::from_policy(policy, ToolNaming::AsAuthored)
     }
 
     #[test]
@@ -3496,12 +3517,50 @@ mod tests {
             ranks: String::new(),
         };
         assert_eq!(
-            remedy_lines(&planned, &offers, &spelling, &TrustChain::new(Vec::new())),
+            remedy_lines(
+                &planned,
+                &offers,
+                &spelling,
+                &TrustChain::new(Vec::new()),
+                ToolNaming::AsAuthored
+            ),
             vec![
                 remedy_instruction(&plan(3), &offers[1].0, &spelling),
                 remedy_instruction(&plan(8), &offers[0].0, &spelling),
             ],
             "the plan with no offer is not shown; the rest carry their own offer"
+        );
+    }
+
+    /// A redispatch line tells the model to run a tool itself, so a served deployment
+    /// names it the way that model's harness dispatches it and not by the canonical
+    /// identity the contract is keyed on.
+    #[test]
+    fn a_redispatch_line_names_the_tool_the_host_dispatches() {
+        let redispatch = appa_engine::plan::RedispatchPlan::new(
+            appa_engine::value::ToolName::new("host/claude-code/Bash"),
+            vec![Gap::Prior(EffectKind::new("reviewed"))],
+        )
+        .expect("a prior gap is one of the redispatch shapes");
+        let planned = PlannedBlock {
+            raw: RawBlock {
+                requirement_gaps: vec![],
+                narrowing: None,
+            },
+            plans: vec![RemedyPlan::Redispatch(redispatch)],
+            fork_advice: None,
+        };
+        let spelling = super::ReturnSpelling {
+            floor: "{}".to_string(),
+            ranks: String::new(),
+        };
+        let lines = |naming| remedy_lines(&planned, &[], &spelling, &TrustChain::new(Vec::new()), naming).join("\n");
+        assert_eq!(
+            lines(ToolNaming::Canonical {
+                host: appa_adapter_claude_code::adapter().spell
+            }),
+            lines(ToolNaming::AsAuthored).replace("host/claude-code/Bash", "Bash"),
+            "the served line differs from the recorded one only in the tool's spelling",
         );
     }
 
@@ -3545,6 +3604,7 @@ mod tests {
                     label: appa_engine::label::Label::top(),
                     lowest: Trust::new(0),
                 },
+                ToolNaming::AsAuthored,
             )
         };
         let diagnostic = "Fresh review is configured for this call, but no authority can review the required expansion to the public audience.";

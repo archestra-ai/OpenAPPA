@@ -38,6 +38,18 @@ fn canonical_tool_name(advertised: &str) -> &str {
     }
 }
 
+/// The advertised control name belongs to the runtime. A host tool spelled the
+/// same way would be indistinguishable from the control tool at check time, so
+/// the session refuses the inventory instead of rerouting the host's tool.
+fn refuse_reserved_tool_name(name: &str) -> Result<(), String> {
+    match name {
+        ADVERTISED_CONTROL_TOOL => Err(format!(
+            "{ADVERTISED_CONTROL_TOOL} is the reserved control tool name; rename the host tool"
+        )),
+        _ => Ok(()),
+    }
+}
+
 create_exception!(appa_agent_python, AppaError, PyRuntimeError);
 
 #[derive(Serialize)]
@@ -192,6 +204,9 @@ impl SessionInner {
         let bridge_url = bridge_url.map(validate_bridge_url).transpose()?;
         let tools: Vec<ToolInput> =
             serde_json::from_str(tools_json).map_err(|error| format!("invalid tools JSON: {error}"))?;
+        for name in tools.iter().map(ToolInput::name).chain(spawn_tool) {
+            refuse_reserved_tool_name(name)?;
+        }
         let policy = toml::to_string(&compose_policy(policy_toml, &tools, bridge_url.is_some(), spawn_tool)?)
             .map_err(|error| format!("the composed policy does not render: {error}"))?;
 
@@ -1279,6 +1294,37 @@ delta    = {}
             "control"
         );
         assert!(session.pending.is_none(), "no outcome is owed");
+    }
+
+    #[test]
+    fn a_host_tool_spelled_like_the_control_tool_opens_no_session() {
+        let opened = SessionInner::open(
+            POLICY,
+            &format!(r#"["publish","{ADVERTISED_CONTROL_TOOL}"]"#),
+            "do the thing",
+            None,
+            None,
+            None,
+        );
+        let error = opened.err().expect("the reserved name is refused");
+        assert!(error.contains(ADVERTISED_CONTROL_TOOL), "got: {error}");
+
+        let spawn = SessionInner::open(
+            POLICY,
+            r#"["publish"]"#,
+            "do the thing",
+            None,
+            None,
+            Some(ADVERTISED_CONTROL_TOOL),
+        );
+        assert!(spawn.is_err(), "a spawn tool cannot claim the reserved name either");
+
+        // The refusal is the collision, not the name: the control tool still answers.
+        let mut session = session(None);
+        assert_eq!(
+            kind(&session.root_check(ADVERTISED_CONTROL_TOOL, "{}").unwrap()),
+            "control"
+        );
     }
 
     #[test]

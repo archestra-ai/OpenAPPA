@@ -120,7 +120,7 @@ A policy names a tool by its canonical tool id. The id has three segments: `<fam
 
 `appa/execute_remedy_plan` is the runtime's own control tool, the one member of the `appa` family. A policy cannot declare it: the runtime recognizes it before any contract, and a `[[tool]]` entry that names it refuses the policy at load. The wildcard entry `name = "*"` is not a canonical id; it covers every tool the policy does not name (see [the wildcard](#example-cover-the-long-tail-with-a-wildcard)).
 
-The host spells a tool its own way. That raw tool spelling never reaches the policy. An adapter connects a host to APPA, and the runtime derives the canonical id from the adapter and the raw spelling of each call. The raw spelling stays in the trajectory record for host dispatch, diagnostics, and replay. Claude Code and kagent are the initial adapters:
+The host spells a tool its own way. That raw tool spelling never reaches the policy. An adapter connects a host to APPA, and the runtime derives the canonical id from the adapter and the raw spelling of each call. The mapping runs both ways: where the runtime tells the model to run a tool, it names the raw spelling that host dispatches. Claude Code and kagent are the initial adapters:
 
 | Adapter | Raw tool spelling | Canonical tool id |
 |---|---|---|

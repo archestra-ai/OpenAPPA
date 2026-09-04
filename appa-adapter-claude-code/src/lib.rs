@@ -14,9 +14,12 @@
 //!    call the runtime derives the call's canonical identity, whether it
 //!    is the spawn, and which family children its arguments name; the
 //!    wire carries none of these, so nothing a client sends is trusted
-//!    for them.
+//!    for them. It also carries the derivation's inverse, so the runtime
+//!    can say a tool's Claude Code spelling — the name this model can
+//!    dispatch — where it addresses the model.
 //!
-//! Tool identity, a bijection over the raw spellings it accepts:
+//! Tool identity, a bijection over the raw spellings it accepts; the
+//! adapter's inverse reads the table right to left:
 //!
 //! | raw spelling | canonical |
 //! |---|---|
@@ -146,6 +149,7 @@ pub fn adapter() -> Adapter {
     Adapter {
         name: AdapterName::ClaudeCode,
         derive,
+        spell,
     }
 }
 
@@ -173,6 +177,23 @@ fn canonical(raw: &str) -> Result<CanonicalTool, ParseRefusal> {
             None => Err(refused(format!("{MCP_PREFIX}<server>__<tool> names no tool segment"))),
         },
         None => CanonicalTool::of("host", "claude-code", raw).map_err(|error| refused(error.to_string())),
+    }
+}
+
+/// The inverse of [`canonical`] over its range: what Claude Code calls the tool one
+/// canonical identity names, which is the name the runtime says whenever it tells this
+/// model to run something. `None` for a canonical id no raw spelling maps onto — the
+/// `agent` family, another host's namespace, and a `host/claude-code/<name>` whose name
+/// is itself an `mcp__` spelling, which derives to the `mcp` family instead.
+fn spell(canonical: &CanonicalTool) -> Option<String> {
+    if canonical.is_control() {
+        return Some(CONTROL_TOOL_RAW.to_string());
+    }
+    let mut segments = canonical.as_str().split('/');
+    match (segments.next()?, segments.next()?, segments.next()?) {
+        ("mcp", server, tool) => Some(format!("{MCP_PREFIX}{server}__{tool}")),
+        ("host", "claude-code", name) if !name.starts_with(MCP_PREFIX) => Some(name.to_string()),
+        _ => None,
     }
 }
 
@@ -794,6 +815,25 @@ mod tests {
             let canonical = canonical(raw).unwrap_or_else(|refusal| panic!("{raw} maps: {refusal:?}"));
             assert_eq!(canonical.as_str(), expected, "{raw}");
             assert_eq!(canonical.is_control(), raw == CONTROL_TOOL_RAW, "{raw}");
+            assert_eq!(
+                (adapter().spell)(&canonical).as_deref(),
+                Some(raw),
+                "the inverse spells {expected} back as the name Claude Code dispatches"
+            );
+        }
+    }
+
+    /// A canonical id no Claude Code spelling derives to has no Claude Code spelling.
+    #[test]
+    fn a_canonical_id_outside_the_range_has_no_host_spelling() {
+        for name in [
+            "agent/kagent/log-analyst",
+            "host/kagent/memory_persist",
+            "host/kagent-gate/outer",
+            "host/claude-code/mcp__github__x",
+        ] {
+            let canonical = CanonicalTool::parse(name).expect("the fixture is canonical");
+            assert_eq!((adapter().spell)(&canonical), None, "{name}");
         }
     }
 
@@ -898,6 +938,16 @@ mod tests {
                     prop_assert_eq!(CanonicalTool::parse(canonical.as_str()), Ok(canonical.clone()));
                     prop_assert_eq!(canonical.is_control(), raw == CONTROL_TOOL_RAW);
                     prop_assert!(!canonical.as_str().starts_with("agent/"), "{}", canonical);
+                }
+            }
+
+            /// The inverse is total over the derivation's range and returns the exact
+            /// spelling Claude Code dispatches, so the runtime never has to keep one.
+            #[test]
+            fn the_inverse_spells_every_derived_identity_back(raw in raw_spelling()) {
+                if let Ok(canonical) = canonical(&raw) {
+                    let spelled = (adapter().spell)(&canonical);
+                    prop_assert_eq!(spelled.as_deref(), Some(raw.as_str()));
                 }
             }
 
