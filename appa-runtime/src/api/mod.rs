@@ -902,19 +902,14 @@ impl Runtime {
         // the policy this deployment serves now. A report with no facts is still a report about
         // a policy, and "the runtime would not give me my session" is a thing worth yelling.
         let serving = || policy_section(deployment.config.policy_file().bytes());
-        let (root, yelling) = match selection {
-            yell::Selection::Root { root, yelling } => {
-                let yelling = yelling.unwrap_or_else(|| root.clone());
-                (root, Some(yelling))
-            }
-            yell::Selection::Recent => match yell::resolve(self.inner.recent_root(yell::RECENT_WINDOW)) {
-                Ok(root) => {
-                    let yelling = root.clone();
-                    (root, Some(yelling))
-                }
+        let root = match selection {
+            Some(root) => root,
+            None => match yell::resolve(self.inner.recent_root(yell::RECENT_WINDOW)) {
+                Ok(root) => root,
                 Err(omitted_reason) => return yell::Projection::rules_only(serving(), mode, omitted_reason),
             },
         };
+        let yelling = Some(root.clone());
         let Ok(log) = self.inner.log(&root) else {
             // The store error is already recorded as a runtime event by `Inner::log`.
             return yell::Projection::rules_only(serving(), mode, yell::OmittedReason::LogUnavailable);

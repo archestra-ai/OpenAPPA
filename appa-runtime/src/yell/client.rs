@@ -24,6 +24,51 @@ const ENDPOINT: &str = match option_env!("APPA_YELL_ENDPOINT") {
     None => "",
 };
 
+/// One place a report may be sent, resolved before the person is asked to approve sending.
+///
+/// A newtype rather than a string because the consent question has to name it: "share this
+/// with the OpenAPPA team" is a lie if an environment variable has quietly pointed the sender
+/// somewhere else, so the prompt prints what this holds and nothing sends without it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Receiver(String);
+
+impl Receiver {
+    /// The receiver this run will use, or `None` when there is none to use.
+    ///
+    /// `APPA_YELL_ENDPOINT` overrides the compiled destination, which is how the tests point at
+    /// a local receiver. It is not a hole in consent: the person is shown whatever it resolves
+    /// to before answering. Plaintext is refused unless it is loopback, so an override cannot
+    /// downgrade a real send to `http://`.
+    pub(crate) fn resolve() -> Option<Self> {
+        let named = std::env::var("APPA_YELL_ENDPOINT").unwrap_or_else(|_| ENDPOINT.to_owned());
+        match named.is_empty() || !Self::is_addressable(&named) {
+            true => None,
+            false => Some(Self(named)),
+        }
+    }
+
+    /// HTTPS anywhere, or plain HTTP only to this machine.
+    fn is_addressable(url: &str) -> bool {
+        if url.starts_with("https://") {
+            return true;
+        }
+        let Some(rest) = url.strip_prefix("http://") else {
+            return false;
+        };
+        let authority = rest.split('/').next().unwrap_or_default();
+        match authority.parse::<std::net::SocketAddr>() {
+            Ok(address) => address.ip().is_loopback(),
+            Err(_) => authority
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback()),
+        }
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// The shared secret that is not a secret. See the module documentation.
 const SALT: &str = include_str!("../../../receiver/appa-yell/salt.txt");
 
@@ -60,21 +105,19 @@ pub(crate) enum SendFailure {
 ///
 /// The same bytes go up every time, so a receiver that took the report and lost the answer
 /// recognizes the retry as the duplicate it is.
-pub(crate) async fn send(finished: &Finished) -> Result<Receipt, SendFailure> {
-    let endpoint = endpoint();
-    if endpoint.is_empty() {
-        return Err(SendFailure::NoReceiver);
-    }
+pub(crate) async fn send(finished: &Finished, receiver: &Receiver) -> Result<Receipt, SendFailure> {
     let signature = signature(&finished.plain);
     let client = reqwest::Client::builder()
         .timeout(ATTEMPT_TIMEOUT)
+        // A redirect is another destination, and the person approved this one.
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|_| SendFailure::Unreachable { attempts: 0 })?;
 
     let mut attempt = 0;
     loop {
         let answer = client
-            .post(&endpoint)
+            .post(receiver.as_str())
             .header("Content-Type", "application/json")
             .header("Content-Encoding", "gzip")
             .header("X-Appa-Signature", &signature)
@@ -109,27 +152,27 @@ enum Attempt {
 async fn read(response: reqwest::Response) -> Result<Receipt, Attempt> {
     let status = response.status();
     if status.is_success() {
-        return response
-            .json::<Receipt>()
-            .await
-            .map_err(|_| Attempt::Give(SendFailure::UnreadableReceipt));
+        // The report is already stored by the time the receipt is written, so losing the body
+        // in transit is exactly the case the idempotency id exists for: the same bytes go up
+        // again and come back marked as the duplicate they are. A body that arrives whole and
+        // does not parse is a different thing, and retrying it changes nothing.
+        return match response.bytes().await {
+            Err(_) => Err(Attempt::Retry(SendFailure::UnreadableReceipt)),
+            Ok(body) => {
+                serde_json::from_slice::<Receipt>(&body).map_err(|_| Attempt::Give(SendFailure::UnreadableReceipt))
+            }
+        };
     }
     let failure = SendFailure::Refused {
         status: status.as_u16(),
     };
-    // Too many requests and a server fault are the receiver's own transient states. Every
-    // other refusal is about these bytes, which do not change between attempts.
-    match status.as_u16() == 429 || status.is_server_error() {
+    // Too many requests, a timed-out request, and a server fault are the receiver's own
+    // transient states. Every other refusal is about these bytes, which do not change between
+    // attempts.
+    match matches!(status.as_u16(), 408 | 429) || status.is_server_error() {
         true => Err(Attempt::Retry(failure)),
         false => Err(Attempt::Give(failure)),
     }
-}
-
-/// The compiled-in receiver, or the one a person named for this run. Overriding it is how the
-/// tests point at a local receiver; an agent never reaches this, because the tool takes no
-/// endpoint.
-fn endpoint() -> String {
-    std::env::var("APPA_YELL_ENDPOINT").unwrap_or_else(|_| ENDPOINT.to_owned())
 }
 
 /// `v1=<hex HMAC-SHA256(salt, plain bytes)>` over the document, not the gzip: the receiver
@@ -163,5 +206,28 @@ mod tests {
     #[test]
     fn the_salt_is_present() {
         assert!(!SALT.trim().is_empty());
+    }
+
+    /// A report leaves this machine in the clear only to this machine. The override exists so
+    /// a test can point at a local receiver, and it cannot downgrade a real send to plaintext.
+    #[test]
+    fn a_receiver_is_https_or_it_is_this_machine() {
+        for reachable in [
+            "https://yell.example.run.app",
+            "https://yell.example.run.app/report",
+            "http://127.0.0.1:9099/report",
+            "http://[::1]:9099",
+        ] {
+            assert!(Receiver::is_addressable(reachable), "{reachable}");
+        }
+        for refused in [
+            "http://yell.example.run.app",
+            "http://localhost:9099",
+            "ftp://yell.example.run.app",
+            "yell.example.run.app",
+            "",
+        ] {
+            assert!(!Receiver::is_addressable(refused), "{refused}");
+        }
     }
 }

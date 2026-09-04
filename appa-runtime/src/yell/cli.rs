@@ -63,11 +63,23 @@ async fn yell(url: &str, yes: bool, message: YellMessage, mode: Mode) -> ExitCod
     };
     let path = written.path.display();
     println!("The report is at {path}");
-    if !yes && !ask_sharing(&written.path.display().to_string()) {
-        println!("Not sent. The report is kept at {path}.");
-        return ExitCode::SUCCESS;
+    let Some(receiver) = client::Receiver::resolve() else {
+        eprintln!("appa yell: {}", client::SendFailure::NoReceiver);
+        eprintln!("The report is kept at {path}.");
+        return ExitCode::FAILURE;
+    };
+    // Named, not described. "The OpenAPPA team" is a claim about a URL, and the person is
+    // owed the URL — under `-y` too, where they are told where it went rather than asked.
+    match yes {
+        true => println!("Sending to {}.", receiver.as_str()),
+        false => {
+            if !ask_sharing(&written.path.display().to_string(), receiver.as_str()) {
+                println!("Not sent. The report is kept at {path}.");
+                return ExitCode::SUCCESS;
+            }
+        }
     }
-    match client::send(&written.finished).await {
+    match client::send(&written.finished, &receiver).await {
         Ok(receipt) => {
             let already = match receipt.duplicate {
                 true => " (already had this one)",
@@ -85,9 +97,20 @@ async fn yell(url: &str, yes: bool, message: YellMessage, mode: Mode) -> ExitCod
 }
 
 /// Ask the runtime for the whole document.
+///
+/// This request carries the message the person has just typed and has not yet agreed to send
+/// anywhere, so it must reach the runtime on this machine or nothing at all. The endpoint is a
+/// loopback literal, checked here rather than resolved; no proxy is consulted, whatever the
+/// environment says; and a redirect is not followed, because a redirect is another
+/// destination.
 async fn build(url: &str, message: &YellMessage, mode: Mode) -> Result<Finished, UnreachableClass> {
+    if !is_loopback(url) {
+        return Err(UnreachableClass::NotLoopback);
+    }
     let client = reqwest::Client::builder()
         .timeout(BUILD_TIMEOUT)
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|_| UnreachableClass::NotListening)?;
     let answer = client
@@ -109,9 +132,36 @@ async fn build(url: &str, message: &YellMessage, mode: Mode) -> Result<Finished,
         });
     }
     let plain = answer.bytes().await.map_err(|_| UnreachableClass::Timeout)?;
-    Finished::of(plain.to_vec()).map_err(|_| UnreachableClass::Refused {
-        status: status.as_u16(),
-    })
+    // Something answered on the runtime's port. Whether it *is* the runtime is a different
+    // question, and these bytes are about to be written to disk and offered for sending.
+    Finished::of(plain.to_vec())
+        .ok()
+        .filter(|finished| is_a_report(&finished.plain))
+        .ok_or(UnreachableClass::NotARuntime)
+}
+
+/// Whether the answer is the document this build knows how to send.
+fn is_a_report(plain: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(plain).is_ok_and(|document| document["schema"] == super::report::SCHEMA)
+}
+
+/// `http://<loopback literal>[:port]`, with no path, credentials or host name.
+///
+/// A name is refused rather than resolved: `localhost` is whatever the resolver says today, and
+/// what this posts is a person's unreviewed words.
+fn is_loopback(url: &str) -> bool {
+    let Some(authority) = url.trim_end_matches('/').strip_prefix("http://") else {
+        return false;
+    };
+    if authority.contains('/') || authority.contains('@') {
+        return false;
+    }
+    match authority.parse::<std::net::SocketAddr>() {
+        Ok(address) => address.ip().is_loopback(),
+        Err(_) => authority
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback()),
+    }
 }
 
 /// The report a person gets when no runtime answers. "It is not running" is a common thing to
@@ -144,7 +194,8 @@ fn ask_pseudonymization() -> Mode {
     println!(
         "Additional pseudonymization replaces the names your policy chose — tools, effects, \n\
          authorities, sanitizers, trust ranks and audiences — with report-local tokens like \n\
-         `tool-1`. It never changes what kinds of things the report carries."
+         `tool-1`. It never changes what kinds of things the report carries, and it does not \n\
+         touch your message, which is sent exactly as you write it."
     );
     match confirm("Apply additional pseudonymization?", true) {
         true => Mode::Pseudonymized,
@@ -152,9 +203,10 @@ fn ask_pseudonymization() -> Mode {
     }
 }
 
-/// The second question, asked only once the file exists, so the person can read it first.
-fn ask_sharing(path: &str) -> bool {
-    confirm(&format!("Share {path} with the OpenAPPA team?"), false)
+/// The second question, asked only once the file exists, so the person can read it first, and
+/// naming the destination it will actually go to.
+fn ask_sharing(path: &str, receiver: &str) -> bool {
+    confirm(&format!("Share {path} with the OpenAPPA team at {receiver}?"), false)
 }
 
 /// A yes/no question. Anything but an explicit answer takes the default, including a closed
@@ -201,5 +253,41 @@ mod tests {
     #[test]
     fn an_empty_command_line_message_is_refused() {
         assert!(message_from(&["   ".into()]).is_err());
+    }
+
+    /// The message goes to the runtime before anyone has agreed to send it anywhere, so the
+    /// runtime has to be on this machine and named as an address rather than as a name someone
+    /// else's resolver answers.
+    #[test]
+    fn only_a_loopback_literal_is_a_runtime() {
+        for reachable in [
+            "http://127.0.0.1:8787",
+            "http://127.0.0.1:8787/",
+            "http://[::1]:8787",
+            "http://127.0.0.1",
+        ] {
+            assert!(is_loopback(reachable), "{reachable} is this machine");
+        }
+        for refused in [
+            "http://localhost:8787",
+            "https://127.0.0.1:8787",
+            "http://10.0.0.1:8787",
+            "http://127.0.0.1@evil.example/",
+            "http://evil.example/127.0.0.1",
+            "127.0.0.1:8787",
+            "",
+        ] {
+            assert!(!is_loopback(refused), "{refused} is not this machine");
+        }
+    }
+
+    /// Something answering on the runtime's port is not the runtime. What it says is written to
+    /// disk and offered for sending, so it is checked for being the document this build sends.
+    #[test]
+    fn only_this_schema_is_a_report() {
+        assert!(is_a_report(br#"{"schema":"openappa.yell.v1","message":"x"}"#));
+        assert!(!is_a_report(br#"{"schema":"openappa.yell.v2"}"#));
+        assert!(!is_a_report(b"{}"));
+        assert!(!is_a_report(b"<html>not a runtime</html>"));
     }
 }

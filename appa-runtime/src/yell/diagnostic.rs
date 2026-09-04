@@ -43,19 +43,10 @@ const MAX_FACT_BYTES: usize = 24 * 1024 * 1024;
 /// against something close to the emitted document rather than the facts alone.
 const ENTRY_OVERHEAD: usize = 32;
 
-/// Which trajectory an export is about.
-#[derive(Debug, Clone)]
-pub(crate) enum Selection {
-    /// A caller with a vouched session: the root whose log is read, and the trajectory within
-    /// it that is doing the yelling, which is the root itself for a CLI caller.
-    Root {
-        root: TrajectoryId,
-        yelling: Option<TrajectoryId>,
-    },
-    /// A caller with no session of its own. The runtime picks the one trajectory that was
-    /// active recently, and refuses to guess between several.
-    Recent,
-}
+/// Which trajectory an export is about: the root a vouched caller names, or — for a caller
+/// with no session of its own — whichever one was recently active. The runtime refuses to
+/// guess between several.
+pub(crate) type Selection = Option<TrajectoryId>;
 
 /// How much of a trajectory an export may carry, when the caller has to fit it inside
 /// something this process cannot measure.
@@ -529,14 +520,7 @@ mod tests {
     }
 
     fn project(runtime: &Runtime, root: &TrajectoryId, mode: Mode, budget: Budget) -> Projection {
-        runtime.projection(
-            Selection::Root {
-                root: root.clone(),
-                yelling: None,
-            },
-            mode,
-            budget,
-        )
+        runtime.projection(Some(root.clone()), mode, budget)
     }
 
     fn export(runtime: &Runtime, root: &TrajectoryId, mode: Mode) -> Export {
@@ -701,6 +685,45 @@ mod tests {
             serde_json::to_value(&whole.branches).ok()
         );
         assert_eq!(budgeted.trust_chain, whole.trust_chain);
+    }
+
+    /// The whole way through: a recorded session becomes the document a yell puts on the wire.
+    ///
+    /// This is the assembly the CLI depends on and cannot do itself — the runtime measures the
+    /// finished, gzipped document, so nothing downstream has to know how to shrink one.
+    #[tokio::test]
+    async fn a_recorded_session_becomes_a_finished_report() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let (runtime, root) = recorded_session(&dir).await;
+        let finished = runtime
+            .report(crate::yell::ReportRequest {
+                message: crate::yell::YellMessage::new("the hook blocked a read of my own file")
+                    .expect("the message is valid"),
+                author: crate::yell::Author::Cli,
+                mode: Mode::Pseudonymized,
+                selection: Some(root),
+                harness: crate::runtime_cli::Adapter::ClaudeCode,
+            })
+            .expect("a recorded session fits a report");
+
+        let document: serde_json::Value =
+            serde_json::from_slice(&finished.plain).expect("the report is one JSON document");
+        assert_eq!(document["schema"], "openappa.yell.v1");
+        assert_eq!(document["origin"]["pseudonymized"], true);
+        assert_eq!(document["runtime"]["serving"]["harness"], "claude-code");
+        assert!(
+            document["runtime"]["serving"]["policy"]["document"]["tool"]
+                .as_array()
+                .is_some_and(|tools| !tools.is_empty()),
+            "the rules the decisions were made under are in the report"
+        );
+        assert!(
+            document["trajectory"]["facts"]
+                .as_array()
+                .is_some_and(|facts| !facts.is_empty()),
+            "so are the decisions"
+        );
+        assert_eq!(document["unclassified"], serde_json::json!([]));
     }
 
     /// The variant name each `Fact` serializes under.

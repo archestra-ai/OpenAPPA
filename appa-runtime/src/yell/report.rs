@@ -22,7 +22,8 @@ use super::tokens::Mode;
 use super::{Diagnostic, OmittedReason, Projection};
 use crate::runtime_cli::Adapter;
 
-/// The one schema this client writes. A receiver that does not know it refuses the document.
+/// The one schema this client writes. A receiver that does not know it refuses the document,
+/// and a caller that reads a document back checks this before believing any of it.
 pub(crate) const SCHEMA: &str = "openappa.yell.v1";
 
 /// The largest body this client puts on the wire, gzipped, and the largest document behind it.
@@ -145,7 +146,7 @@ impl Build {
 pub(crate) enum RuntimeSection {
     Serving {
         /// The harness whose hooks this runtime serves.
-        harness: Adapter,
+        harness: Harness,
         /// The rules in force, stripped against [`super::policy`]. `None` when the runtime
         /// could not resolve one, which is itself the interesting case.
         policy: Option<Policy>,
@@ -153,6 +154,28 @@ pub(crate) enum RuntimeSection {
     Unreachable {
         class: UnreachableClass,
     },
+}
+
+/// The harness a report is about, in the schema's own vocabulary.
+///
+/// Deliberately not [`Adapter`] itself, though the two agree today: `Adapter` also picks a
+/// codec and a spawn coverage, and a rename there is a refactor, while a rename here is a new
+/// schema version. The conversion is exhaustive, so a new adapter has to decide what it is
+/// called on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum Harness {
+    ClaudeCode,
+    Kagent,
+}
+
+impl From<Adapter> for Harness {
+    fn from(adapter: Adapter) -> Self {
+        match adapter {
+            Adapter::ClaudeCode => Harness::ClaudeCode,
+            Adapter::Kagent => Harness::Kagent,
+        }
+    }
 }
 
 /// Why the CLI has nothing to say about a runtime. Each is a state a reader can act on.
@@ -166,6 +189,12 @@ pub(crate) enum UnreachableClass {
     /// It answered and would not build a report: an older build that does not serve one, or a
     /// trajectory too large to send even trimmed.
     Refused { status: u16 },
+    /// It answered with something that is not this schema, so it is not a runtime of this
+    /// build and nothing it said was used.
+    NotARuntime,
+    /// The runtime was named somewhere other than this machine. Nothing was sent there: the
+    /// message had not yet been approved for leaving at all.
+    NotLoopback,
 }
 
 /// What a caller asks the runtime to build. Everything the document does not derive from the
@@ -208,7 +237,7 @@ impl Report {
             origin,
             message,
             RuntimeSection::Serving {
-                harness,
+                harness: harness.into(),
                 policy: projection.policy,
             },
             projection.trajectory,
@@ -329,7 +358,12 @@ pub(crate) struct WriteError {
 /// The document holds no bodies and no arguments, but it does hold a deployment's tool and
 /// authority names, so it is not world-readable while it sits in a shared temporary directory:
 /// a fresh directory at 0700 with the file at 0600, created exclusively so a name that already
-/// exists is never followed.
+/// exists is never followed. On Unix that is the whole guarantee. On Windows the protection is
+/// the per-user temporary directory this writes into, and nothing here adds to it.
+///
+/// The directory is only made permanent once the file is written and flushed. A failure part
+/// way through takes the directory and the partial file with it, rather than leaving a person
+/// a half-document that reads like a whole one.
 pub(crate) fn write(finished: Finished, directory: &Path) -> Result<Written, WriteError> {
     let refuse = |source| WriteError {
         directory: directory.to_path_buf(),
@@ -340,14 +374,18 @@ pub(crate) fn write(finished: Finished, directory: &Path) -> Result<Written, Wri
         .permissions(directory_permissions())
         .tempdir_in(directory)
         .map_err(refuse)?;
-    let path = held.keep().join("report.json");
+    let path = held.path().join("report.json");
     let mut file = std::fs::OpenOptions::new();
     file.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut file, 0o600);
     let mut handle = file.open(&path).map_err(refuse)?;
     std::io::Write::write_all(&mut handle, &finished.plain).map_err(refuse)?;
-    Ok(Written { path, finished })
+    handle.sync_all().map_err(refuse)?;
+    Ok(Written {
+        path: held.keep().join("report.json"),
+        finished,
+    })
 }
 
 fn directory_permissions() -> std::fs::Permissions {

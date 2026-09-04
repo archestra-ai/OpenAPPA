@@ -71,8 +71,7 @@ fn require_loopback(addr: &SocketAddr) -> Result<(), String> {
 
 /// The adapter surface this binary can serve. The one place harness
 /// names appear in this crate: each variant maps to one codec crate.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum, serde::Serialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum Adapter {
     ClaudeCode,
     Kagent,
@@ -258,11 +257,10 @@ struct ReportRequestBody {
     message: String,
     /// Replace the names the deployment chose with report-local tokens. The classification is
     /// the same either way; only the naming differs.
-    #[serde(default)]
+    ///
+    /// Required, with no default: this is the question a person was asked, and a request that
+    /// does not carry their answer has no business getting either kind of report.
     pseudonymize: bool,
-    /// The root to export. Omitted by a caller with no session of its own, which asks the
-    /// runtime for the one trajectory that was recently active.
-    trajectory: Option<String>,
 }
 
 /// One finished `openappa.yell.v1` document.
@@ -286,13 +284,9 @@ async fn report(
             true => crate::yell::Mode::Pseudonymized,
             false => crate::yell::Mode::Baseline,
         },
-        selection: match body.trajectory {
-            Some(trajectory) => crate::yell::Selection::Root {
-                root: crate::api::TrajectoryId(trajectory),
-                yelling: None,
-            },
-            None => crate::yell::Selection::Recent,
-        },
+        // A caller here names no trajectory. It gets the one that was recently active, or
+        // nothing — so a process on this machine cannot ask for a session it was not part of.
+        selection: None,
         harness: state.adapter,
     };
     state
