@@ -32,11 +32,7 @@ fn the_router_routes_by_host_and_carries_the_shared_rules() {
         router.contains("Do not call `Read`"),
         "Claude bootstraps without a gated tool call"
     );
-    assert!(
-        router.contains("`quickstart`")
-            && router.contains("`init`")
-            && router.contains("`adjust`")
-    );
+    assert!(router.contains("`quickstart`") && router.contains("`init`") && router.contains("`adjust`"));
     for shared in [
         "Never edit a battery",
         "OpenAPPA pieces",
