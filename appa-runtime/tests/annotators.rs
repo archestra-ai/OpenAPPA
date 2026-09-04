@@ -899,12 +899,11 @@ async fn the_wildcard_annotates_an_unwritten_tool_and_an_exact_declaration_never
 }
 
 /// A produced restricting delta blocks a wildcard-covered call before release, and
-/// proposing it again holds the block.
-/// The pin is keyed on the call's digest alone. A blocked call re-proposed from another
-/// directory finds its pinned annotation standing and is not annotated again: the
-/// directory is consult input, not part of the annotation's identity.
+/// proposing it again holds the block. The pin is keyed on the call's digest alone: the
+/// re-proposal from another directory finds its pinned annotation standing and is not
+/// annotated again — the directory is consult input, not part of the annotation's identity.
 #[tokio::test]
-async fn a_pinned_annotation_stands_across_a_working_directory_change() {
+async fn a_wildcard_calls_produced_narrowing_blocks_and_holds() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let (url, annotator) = serve_annotator().await;
     annotator.set("gatekeeper", Answer::Wire(produced("suspicious")));
@@ -915,33 +914,23 @@ async fn a_pinned_annotation_stands_across_a_working_directory_change() {
         ..call("ghost_tool", serde_json::json!({}))
     };
     let decision = propose(&runtime, from("/home/me/project")).await;
-    assert!(matches!(decision, HookDecision::DenyCall { .. }), "{decision:?}");
+    assert!(
+        matches!(decision, HookDecision::DenyCall { .. }),
+        "the produced narrowing blocks the call: {decision:?}"
+    );
     assert_eq!(annotator.requests().len(), 1);
     assert_eq!(annotator.requests()[0]["artifact"]["cwd"], "/home/me/project");
 
     let decision = propose(&runtime, from("/home/me/elsewhere")).await;
-    assert!(matches!(decision, HookDecision::DenyCall { .. }), "{decision:?}");
+    assert!(
+        matches!(decision, HookDecision::DenyCall { .. }),
+        "proposing it again holds the block: {decision:?}"
+    );
     assert_eq!(
         annotator.requests().len(),
         1,
         "the pin for this digest stands whichever directory the re-proposal reports"
     );
-}
-
-#[tokio::test]
-async fn a_wildcard_calls_produced_narrowing_blocks_and_holds() {
-    let dir = tempfile::tempdir().expect("a temp dir is creatable");
-    let (url, annotator) = serve_annotator().await;
-    annotator.set("gatekeeper", Answer::Wire(produced("suspicious")));
-    let runtime = open_runtime(&dir, &wildcard_policy(&url)).await;
-
-    for _ in 0..2 {
-        let decision = propose(&runtime, call("ghost_tool", serde_json::json!({}))).await;
-        assert!(
-            matches!(decision, HookDecision::DenyCall { .. }),
-            "the produced narrowing blocks the call: {decision:?}"
-        );
-    }
 }
 
 /// Without a wildcard, a tool the policy does not write has no contract at all: the hook

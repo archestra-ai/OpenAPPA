@@ -235,7 +235,8 @@ pub(crate) enum EventError {
     #[error("storage failure: {0}")]
     Storage(String),
     /// The harness reported a working directory the consult wire cannot spell: not
-    /// UTF-8. An adapter fault, refused before the call is judged; nothing is appended.
+    /// UTF-8. An adapter fault, refused before the call is judged: no consult runs and no
+    /// dispatch is appended.
     #[error("the reported working directory is not UTF-8; the call is refused before it is judged")]
     UnrepresentableCwd,
 }

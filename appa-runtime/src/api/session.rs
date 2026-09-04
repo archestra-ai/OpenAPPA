@@ -1500,7 +1500,7 @@ name = "execute_remedy_plan"
         ));
         assert!(
             runtime.open_dispatches(&root(), &root()).is_empty(),
-            "nothing is appended for a call refused at the entry"
+            "no dispatch is appended for a call refused at the entry"
         );
     }
 
