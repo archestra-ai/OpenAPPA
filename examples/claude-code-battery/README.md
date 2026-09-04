@@ -70,3 +70,27 @@ printf '%s\n' '{"version":1,"kind":"annotation","name":"local.read-sensitivity",
 
 The result requires fresh `hitl` attention for `clients/acme.txt`.
 `.env.example` is the explicit local exception and requires nothing.
+
+## Check where a push goes
+
+The root also takes every Bash command containing `git push` with
+`local.push-target`, implemented by `local/push-target.py`. Claude Code
+reports the working directory of each tool call, and every annotation consult
+carries it as `artifact.cwd`. The script asks Git in that directory for every
+push URL of the remote the command names, or of the remote Git would pick for
+a bare `git push`. A push whose every URL is
+`github.com/archestra-ai/openappa-sink` needs nothing. Any other destination,
+and any command that is not a plain `git push [<remote>] [<refspec>...]` — an
+environment assignment, a Git option before `push`, a URL in place of a
+remote, a shell operator — requires fresh `hitl` attention. A consult without
+a directory is an error, not an answer: the call is not judged and can be
+proposed again.
+
+Run it against a repository of your own:
+
+```sh
+cd examples/claude-code-battery
+printf '%s\n' '{"version":1,"kind":"annotation","name":"local.push-target","declaration":{"inputs":[],"trust_ranks":["suspicious","trusted"],"audiences":[],"attention_marks":["hitl"],"effects":[]},"artifact":{"args":{"name":"Bash","arguments":{"command":"git push origin main"}},"cwd":"'"$PWD"'"}}' \
+  | python3 ./local/push-target.py
+python3 -m unittest discover -s local -p 'test_*.py'
+```

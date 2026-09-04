@@ -70,3 +70,20 @@ annotator = "local.read-sensitivity"
 
 [externals.annotators."local.read-sensitivity"]
 command = ["python3", "./local/read-sensitivity.py"]
+
+# A root rule takes `git push` before the battery's Bash classifier sees it.
+# The local annotator reads the working directory Claude Code reported for the
+# call (`artifact.cwd`) and asks Git where the push goes: the one allowed
+# repository needs nothing, every other destination asks a person. A push
+# spelled without `git push` in it reaches the battery's classifier instead.
+[[policy.annotator]]
+name = "local.push-target"
+audiences = []
+marks = ["hitl"]
+
+[[policy.tool]]
+name = "Bash(command:*git push*)"
+annotator = "local.push-target"
+
+[externals.annotators."local.push-target"]
+command = ["python3", "./local/push-target.py"]

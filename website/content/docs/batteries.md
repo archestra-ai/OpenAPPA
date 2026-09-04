@@ -206,10 +206,10 @@ name      = "Bash(command:*git push*)"
 annotator = "local.push-target"
 
 [externals.annotators."local.push-target"]
-command = ["python3", "./push-target.py"]
+command = ["python3", "./local/push-target.py"]
 ```
 
-The script receives this consult on stdin:
+The script ships in the repository under `examples/claude-code-battery/local/`, with its tests. It receives this consult on stdin:
 
 ```json
 {
