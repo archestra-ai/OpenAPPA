@@ -6,6 +6,7 @@ import rehypeHighlight from "rehype-highlight";
 import rehypeSlug from "rehype-slug";
 import remarkGfm from "remark-gfm";
 import type { LanguageFn } from "highlight.js";
+import { common } from "lowlight";
 
 import { AdvisorySignup } from "@/components/AdvisorySignup";
 import { BatteryCatalog } from "@/components/BatteryCatalog";
@@ -191,7 +192,7 @@ function Markdown({ content, terms = true }: { content: string; terms?: boolean 
       remarkPlugins={[remarkGfm]}
       rehypePlugins={[
         rehypeSlug,
-        [rehypeHighlight, { languages: { appa: appaTraceLanguage } }],
+        [rehypeHighlight, { languages: { ...common, appa: appaTraceLanguage } }],
       ]}
       components={{
         pre: (props) => <CodeBlock {...props} />,
