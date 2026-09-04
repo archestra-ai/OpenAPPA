@@ -76,6 +76,8 @@ helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
 # An empty reasoningEffort leaves reasoning_effort out of every
 # request. The fill answers gpt-5.6 on chat completions, and other
 # models refuse the field.
+# The matrix proves that an unanswered consult expires. Two seconds keeps
+# that behavior while avoiding the chart's 25-second operator window in CI.
 echo "== helm install appa-kagent-demo, model $model at $base_url"
 helm upgrade --install appa-kagent-demo "$chart" -n "$namespace" \
   --set agents.go.enabled=false \
@@ -86,6 +88,7 @@ helm upgrade --install appa-kagent-demo "$chart" -n "$namespace" \
   --set-string openai.baseUrl="$base_url" \
   --set-string llm.model="$model" \
   --set-string llm.url="$base_url" \
+  --set mocks.approvalWindowSeconds=2 \
   --set runtime.image.repository=docker.io/library/appa-kagent-quickstart \
   --set-string runtime.image.tag="$tag" \
   --set runtime.image.pullPolicy=Never \

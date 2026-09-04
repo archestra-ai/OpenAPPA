@@ -220,6 +220,10 @@ jobs:
     name: Rust Tests
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # init_cli copies and hashes the test binary many times. Debug metadata
+    # adds no signal in CI and makes each of those full-file operations larger.
+    env:
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - name: Checkout project
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -234,6 +238,7 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: rust-tests
+          env-vars: CARGO_PROFILE_TEST_DEBUG
 
       - name: Rust tests
         run: cargo test --workspace --locked
