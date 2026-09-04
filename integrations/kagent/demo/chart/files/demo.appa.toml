@@ -256,6 +256,5 @@ builtin = "llm"
 # An empty `llm.url` removes the URL and uses the provider's default.
 [externals.llm]
 provider = "openai"
-model = "openai/gpt-5.6-luna"
-url = "https://openrouter.ai/api/v1"
+model = "gpt-4.1-mini"
 token_env = "APPA_LLM_API_KEY"

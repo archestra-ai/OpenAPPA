@@ -76,8 +76,10 @@ starts. The prior layer remains on the PVC throughout the transaction.
 
 ## Policy
 
-The chart mounts a fail-closed policy. The appa-guide skill on kagent
-adds batteries and root rules through the ConfigMap. Set
+The chart mounts a bootstrap policy that lets appa-guide inspect the
+cluster and requires human approval for its first policy write. Every
+unrelated tool remains fail-closed. The appa-guide skill then adds
+batteries and root rules through the ConfigMap. Set
 `config.existingConfigMap` to manage that ConfigMap yourself.
 
 When `config.contents` stays empty, an upgrade preserves the live policy
