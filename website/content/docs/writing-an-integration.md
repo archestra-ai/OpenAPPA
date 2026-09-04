@@ -5,17 +5,17 @@ order: 7
 description: Connect an agent harness to OpenAPPA, map its lifecycle to the runtime API, and add optional capabilities such as subagents.
 ---
 
-An **integration** connects an agent harness (such as Claude Code, Hermes, or a custom agent loop) to OpenAPPA. It intercepts the agent at key lifecycle points, submits proposed actions to OpenAPPA, and enforces the engine's policy decision before execution proceeds.
+An **integration** connects an agent harness (such as Claude Code, kagent, or a custom agent loop) to OpenAPPA. It intercepts the agent at key lifecycle points, submits proposed actions to OpenAPPA, and enforces the engine's policy decision before execution proceeds.
 
-Follow [Add an Integration](#add-an-integration) to wire your harness hooks, or see [Appa Overview](#appa-overview) for runtime architecture details.
+Follow [Add an Integration](#add-an-integration) to wire your harness hooks, or see [Runtime Overview](#runtime-overview) for architecture details.
 
-## Appa Overview
+## Runtime Overview
 
 `appa-runtime` is an HTTP service that runs alongside your agent as a local process, sidecar container, or centralized deployment.
 
 :::fig-runtime-overview:::
 
-### Endpoints OpenAPPA Exposes
+### Endpoints
 
 By default, `appa-runtime` listens on `http://127.0.0.1:8787` (`--listen`) and exposes HTTP and MCP endpoints:
 
@@ -28,13 +28,13 @@ By default, `appa-runtime` listens on `http://127.0.0.1:8787` (`--listen`) and e
 
 ### Event Log
 
-OpenAPPA reconstructs each trajectory from an append-only event log. The log preserves state across turns: tool dispatches, child branches, authority decisions, and the initial policy.
+To keep track of agent actions and enforce policies, OpenAPPA reconstructs each trajectory from an append-only event log. The log preserves state across turns: tool dispatches, child branches, authority decisions, and the initial policy.
 
 `appa-runtime` persists this log to a local SQLite database (`--db ./appa.db`). Use durable storage when trajectories must resume across runtime restarts.
 
-#### Deployment Model
+### Deployment Models
 
-`appa-runtime` is a web server that works with any agent able to send the lifecycle events described below over HTTP and wait for a decision before continuing. This includes scheduled background agents and interactive agents in a chat. It can run anywhere those agents can reach it, and the integration contract remains identical across deployment models:
+`appa-runtime` works with any agent able to send lifecycle events over HTTP and wait for a decision before continuing—including background running agents or interactive chat agents. The integration contract remains identical across deployment models:
 
 | Placement | Typical use |
 |---|---|
@@ -46,13 +46,20 @@ OpenAPPA reconstructs each trajectory from an append-only event log. The log pre
 
 ### Benefits for a SaaS Product
 
-OpenAPPA enforces policy independently of the LLM. If your SaaS lets users connect custom MCP servers, you can expose OpenAPPA configuration so they can control where their data may flow. If your product performs agentic work behind the scenes, OpenAPPA prevents the agent from sending that data to destinations the policy does not allow.
+OpenAPPA enforces policy independently of the LLM. If your product lets users connect custom MCP servers, you can let them control where their data may flow. If your product performs agentic work behind the scenes, OpenAPPA prevents the agent from sending that data to destinations the policy does not allow.
 
 ### Benefits for an Enterprise Agent
 
-OpenAPPA lets an enterprise apply centralized security policies across all of its agents. A policy defines where data may go, how it must be cleaned before it is sent, and who must approve sensitive actions.
+OpenAPPA lets an enterprise apply centralized security policies across its fleet of agents. A policy defines where data may go, how it must be cleaned before it is sent, and who must approve sensitive actions.
 
 ## Add an Integration
+
+OpenAPPA's integration surface centers on the [`POST /hook`](#endpoints) endpoint. The runtime handles five core lifecycle events for single-agent workflows, plus three optional events for child agents (subagents).
+
+Connecting an agent harness requires two steps:
+
+1. Configure your [agent harness](#connect-the-agent-hooks) to intercept execution at these lifecycle events.
+2. Implement or select an [Appa adapter](#implement-the-appa-adapter) that converts your harness's wire payloads into OpenAPPA events.
 
 > **Ask your coding agent**
 >
@@ -74,12 +81,6 @@ OpenAPPA lets an enterprise apply centralized security policies across all of it
 > what you verified, and any required hook the harness cannot expose.
 > ```
 
-OpenAPPA's integration surface centers on the [`POST /hook`](#endpoints-openappa-exposes) endpoint. The runtime handles five core lifecycle events for single-agent workflows, plus three optional events for child agents (subagents).
-
-Connecting an agent harness requires two steps:
-1. Configure your [agent harness](#connect-the-agent-hooks) to intercept execution at these lifecycle events.
-2. Implement or select an [Appa adapter](#implement-the-appa-adapter) that converts your harness's wire payloads into OpenAPPA events.
-
 ### Lifecycle Events
 
 Every integration maps harness lifecycle hooks to OpenAPPA's typed events. The agent harness does not need to send OpenAPPA's schema directly: the [Appa adapter](#implement-the-appa-adapter) accepts the harness's native payload, translates it into an OpenAPPA `HookEvent`, and renders the returned `HookDecision` into the format your harness expects.
@@ -96,7 +97,7 @@ Every payload must supply a stable session identifier to represent the root traj
 
 `Prompt` does not evaluate policy or filter text. The runtime uses it only to mark the turn boundary. OpenAPPA does not inspect prompt text or record it in trajectory history, and always responds with `Ack`. Policy enforcement begins at `ToolCall`.
 
-`execute_remedy_plan` is a reserved tool provided by OpenAPPA. When the model selects a remedy plan, send `ToolCall` like any other tool call. The runtime validates the selected plan and responds with `PassControl`. Forward the call unmodified to the [`/mcp`](#endpoints-openappa-exposes) endpoint.
+`execute_remedy_plan` is a reserved tool provided by OpenAPPA. When the model selects a remedy plan, send `ToolCall` like any other tool call. The runtime validates the selected plan and responds with `PassControl`. Forward the call unmodified to the [`/mcp`](#endpoints) endpoint.
 
 The `/mcp` endpoint executes the remedy. It rejects any remedy call that did not pass through `ToolCall` first, or that references an expired or invalid plan (returning `DenyCall`). Never give a harness tool this name—shadowing `execute_remedy_plan` bypasses policy enforcement.
 
@@ -120,21 +121,21 @@ Integration hooks can live directly inside your agent or run as an external exte
 At each hook point, the harness must:
 
 1. **Pause** the pending action.
-2. **Send** the event payload to the OpenAPPA [`POST /hook`](#endpoints-openappa-exposes) endpoint.
+2. **Send** the event payload to the OpenAPPA [`POST /hook`](#endpoints) endpoint.
 3. **Enforce** the returned `HookDecision` before resuming the agent.
 
 **Fail closed on errors:** If `appa-runtime` is unreachable, times out, or returns an HTTP error, the harness must treat the response as `Block` and refuse the action. Never fail open.
 
 ### Implement the Appa Adapter
 
-The adapter is the component inside `appa-runtime` that receives incoming requests at [`POST /hook`](#endpoints-openappa-exposes), translates the payload into an OpenAPPA `HookEvent`, and hands it to the core policy engine.
+The adapter is the component inside `appa-runtime` that receives incoming requests at [`POST /hook`](#endpoints), translates the payload into an OpenAPPA `HookEvent`, and hands it to the core policy engine.
 
 An adapter implements a two-function codec:
 
 - **`parse(bytes)`**: Extracts session and call context from the incoming JSON payload and maps it to a typed `HookEvent` (or returns a `ParseRefusal` on unreadable or malformed input).
 - **`render(decision)`**: Serializes the engine's `HookDecision` into the response format expected by the harness (such as process exit codes, JSON hook outputs, or substituted tool arguments).
 
-If your agent harness sends OpenAPPA's typed `HookEvent` JSON natively, no custom translation is needed. When integrating an agent with its own wire schema, compile an adapter codec into `appa-runtime`. The shipped Claude Code and kagent codecs sit beside it. Select it at startup with `--adapter claude-code|kagent`. The default is `claude-code`. The adapter is a build-time choice and a startup flag, never configuration: `appa-runtime` loads no codec at runtime.
+If your agent harness sends OpenAPPA's typed `HookEvent` JSON natively, no custom translation is needed. When integrating an agent with its own wire schema, compile an adapter codec into `appa-runtime`. Shipped adapters include Claude Code and kagent. Select the adapter at startup with `--adapter claude-code|kagent` (default: `claude-code`). Adapters are compiled into the binary, never loaded dynamically at runtime.
 
 ### Reference Implementations
 
@@ -152,5 +153,5 @@ Verify your integration against these core behaviors:
 - [ ] **Remedy calls pass through**: When OpenAPPA returns `PassControl`, the harness forwards `execute_remedy_plan` unmodified to `/mcp` without intercepting or re-evaluating it.
 - [ ] **Replaced outputs take effect**: When OpenAPPA returns `ReplaceOutput`, model context and trajectory history receive substituted content, never the raw tool output.
 - [ ] **Blocked outputs are withheld**: A blocked result is completely dropped from model attention and trajectory history.
-- [ ] **Fails closed on connection failure**: Stopping [`appa-runtime`](#appa-overview) causes subsequent prompts and tool calls to fail safely instead of running unprotected.
+- [ ] **Fails closed on connection failure**: Stopping [`appa-runtime`](#runtime-overview) causes subsequent prompts and tool calls to fail safely instead of running unprotected.
 - [ ] **Subagents are bounded (if supported)**: Child trajectories inherit parent security labels, and unverified child returns are blocked at `ChildEnd`.
