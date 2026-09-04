@@ -104,7 +104,7 @@ command = ["python3", "repository-visibility.py"]
 token_env = "APPA_PROVIDER_GITHUB_TOKEN"
 ```
 
-The documentation omits the implementation of `repository-visibility.py`. The complete implementation is in the [`examples/test-github-battery`](https://github.com/archestra-ai/OpenAPPA/tree/main/examples/test-github-battery) example.
+The battery implementation and the complete replay example are available in [`examples/test-github-battery`](https://github.com/archestra-ai/OpenAPPA/tree/main/examples/test-github-battery).
 
 The complete `github-battery-test.toml` config includes the battery and adds two tools that are not part of it. These tools make the trust and audience changes observable.
 
