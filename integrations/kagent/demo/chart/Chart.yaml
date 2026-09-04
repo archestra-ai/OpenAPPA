@@ -5,7 +5,7 @@ type: application
 version: 0.1.0
 # The released version. The release workflow publishes every image at that
 # version, and release-please bumps this line to it.
-appVersion: "0.7.1" # x-release-please-version
+appVersion: "0.8.0" # x-release-please-version
 kubeVersion: ">=1.28.0-0"
 keywords: [openappa, kagent, agents, policy]
 sources:
