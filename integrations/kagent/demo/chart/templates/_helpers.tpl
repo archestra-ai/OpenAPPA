@@ -70,5 +70,5 @@ which leaves the runtime on the OpenAI default endpoint.
        CI opens it (appa-runtime/tests/examples_load.rs). Substitute the
        defaults, longest agent name first so the plain one cannot match
        inside the go one. */ -}}
-{{- .Files.Get "files/demo.appa.toml" | replace "kagent__NS__log_analyst_go" (printf "%s__NS__%s" $ns $childGo) | replace "kagent__NS__log_analyst" (printf "%s__NS__%s" $ns $child) | replace "model = \"gpt-4.1-mini\"\n" $llm -}}
+{{- .Files.Get "files/demo.appa.toml" | replace "kagent__NS__log_analyst_go" (printf "%s__NS__%s" $ns $childGo) | replace "kagent__NS__log_analyst" (printf "%s__NS__%s" $ns $child) | replace "model = \"openai/gpt-5.6-luna\"\nurl = \"https://openrouter.ai/api/v1\"\n" $llm -}}
 {{- end -}}

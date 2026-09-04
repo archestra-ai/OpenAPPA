@@ -1,10 +1,10 @@
 # The live subset on kind
 
 Three scripts stand the demo stack up on a kind cluster and run five of
-the A2A matrix cases against a real model. CI runs them as an
-informational job, and the same three commands run on a laptop or a dev
-VM. The other suites in [../](../) need a stack that already runs, or
-no cluster at all. This directory is the one place that creates one.
+the A2A matrix cases against a real model. CI gates on them after three
+attempts per case, and the same three commands run on a laptop or a dev
+VM. The other suites in [../](../) need a stack that already runs, or no
+cluster at all. This directory is the one place that creates one.
 
 The five cases are the ones that need no dashboard and cover each kind
 of decision: the allowed read (`ordinary_read`), the refused
@@ -41,7 +41,7 @@ the ten sample agents and the two bundled tool charts, and installs the
 demo chart without the go cell and without the seed Job. It waits for
 `appa-runtime`, `demo-tools` and the three agent Deployments the kagent
 controller compiles. `run-subset.sh` port-forwards the parent agent and
-the mocks, runs the cases with one rerun each, and exits with pytest's
+the mocks, runs every case with two reruns, and exits with pytest's
 status.
 
 Each script reads its settings from the environment
@@ -57,8 +57,8 @@ One key and one endpoint serve both models the stack calls: the agents'
 model, through the ModelConfig, and the model the policy's sanitizers
 consult, through `[externals.llm]`. `install.sh` sets
 `openai.model`/`openai.baseUrl` and `llm.model`/`llm.url` to the same
-pair, so any OpenAI-compatible endpoint works. The default is a free
-OpenRouter model.
+pair, so any OpenAI-compatible endpoint works. The default matches the
+public playground: `openai/gpt-5.6-luna` through OpenRouter.
 
 Two properties decide whether a model can run the subset. The agents
 call tools, so the model must support function calling. The runtime
@@ -67,18 +67,13 @@ must support structured outputs, or `configured_default` fails on a
 clean no-answer. The default model id advertises both on OpenRouter,
 and the first live run is what confirms it.
 
-OpenRouter's free tier allows 20 requests a minute and 50 a day without
-credits. One subset run spends more than a handful of requests across
-five cases, a child agent, remedy loops and reruns, so a creditless key
-runs out inside a day.
-
 ## In CI
 
 The workflow job builds the three images, then runs these same three
-scripts. It is informational: it carries `continue-on-error`, and it
-runs only when a maintainer adds the `run-e2e` label to the pull
+scripts. It runs only when a maintainer adds the `run-e2e` label to the pull
 request and the changed paths touch the stack. Fork pull requests never
 run it, because it needs `OPENROUTER_API_KEY`. Remove the label and add
-it again to re-run it after new commits. `run-subset.sh` appends the
+it again to re-run it after new commits. Every test gets three total
+attempts; a test that exhausts them fails the job. `run-subset.sh` appends the
 model, the endpoint, the case selection and the wall time to the job
 summary.

@@ -37,12 +37,14 @@ helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
 
 ```sh
 helm upgrade --install appa-kagent-demo ./integrations/kagent/demo/chart \
-  -n kagent --set openai.apiKey="$OPENAI_API_KEY" --wait
+  -n kagent --set openai.apiKey="$OPENROUTER_API_KEY" --wait
 ```
 
 Leave `openai.apiKey` unset to paste the key in the dashboard instead
 (Models → appa-demo-model → Edit); the pods start once the Secret exists.
 `helm upgrade` re-runs the seed Job, which is idempotent.
+The defaults match the public playground: `openai/gpt-5.6-luna` through
+`https://openrouter.ai/api/v1`.
 
 The policy names the delegated children by their wire spelling,
 `<namespace>__NS__<child>` with hyphens as underscores
@@ -77,15 +79,15 @@ structured outputs.
 
 | Value | Default | Meaning |
 |---|---|---|
-| `openai.apiKey` | `""` | The provider key; lands in the Secret named after the ModelConfig. |
-| `openai.model` | `gpt-5.6-luna` | The agents' model. |
+| `openai.apiKey` | `""` | The OpenRouter key; lands in the Secret named after the ModelConfig. |
+| `openai.model` | `openai/gpt-5.6-luna` | The agents' model. |
 | `openai.existingSecret` | `""` | Use an existing Secret with `OPENAI_API_KEY` instead. |
-| `openai.baseUrl` | `""` | An OpenAI-compatible endpoint for the agents' model. Empty means `api.openai.com`. |
+| `openai.baseUrl` | `https://openrouter.ai/api/v1` | The OpenAI-compatible endpoint for the agents' model. |
 | `runtime.image.*` | `ghcr.io/archestra-ai/appa-kagent-quickstart:<appVersion>` | The runtime image (also the agents' image, via kagent). Published at each release version. |
 | `runtime.reasoningEffort` | `none` | Fills `reasoning_effort` for the OpenAI model when the CRD cannot. |
 | `runtime.persistence.enabled` | `false` | Keep trajectories on a PersistentVolume. |
-| `llm.model` | `gpt-4.1-mini` | The model the policy's sanitizers consult (`[externals.llm]`). |
-| `llm.url` | `""` | An OpenAI-compatible endpoint for that model. Empty means `api.openai.com`. |
+| `llm.model` | `openai/gpt-5.6-luna` | The model the policy's sanitizers consult (`[externals.llm]`). |
+| `llm.url` | `https://openrouter.ai/api/v1` | The OpenAI-compatible endpoint for that model. |
 | `mocks.approvalWindowSeconds` | `25` | How long the change board waits for a ruling, inside the policy's `externals.timeout_ms` (30 s). |
 | `seed.enabled` | `true` | Replay the showcase chats into `cluster-ops` after install. The go twin gets none. |
 | `seed.controllerUrl` | `""` | The kagent controller the seed Job posts to. Empty means `kagent-controller` in the release namespace. |

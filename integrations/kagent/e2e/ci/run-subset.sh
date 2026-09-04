@@ -25,7 +25,7 @@ namespace=${APPA_E2E_NAMESPACE:-kagent}
 agent=${APPA_E2E_AGENT:-cluster-ops}
 agent_port=${APPA_E2E_AGENT_PORT:-18089}
 mock_port=${APPA_E2E_MOCK_PORT:-8081}
-model=${APPA_E2E_MODEL:-nvidia/nemotron-3-super-120b-a12b:free}
+model=${APPA_E2E_MODEL:-openai/gpt-5.6-luna}
 base_url=${APPA_E2E_BASE_URL:-https://openrouter.ai/api/v1}
 # One case each: the allowed read, the exfiltration ask, the agent's
 # configured remedy, the approved human review, and the delegated child.
