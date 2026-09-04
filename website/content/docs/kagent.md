@@ -293,7 +293,8 @@ spec:
       complete result. On init, finish
       all read-only inspection and present the proposal without asking whether to
       continue. Inventory Agents across all namespaces. This Agent runs in kagent;
-      derive each runtime namespace from APPA_RUNTIME_URL.
+      derive each runtime namespace from APPA_RUNTIME_URL. Resolve runtime pods
+      through the Service selector; never infer pod names from Helm release names.
     modelConfig: "default-model-config"
     tools:
       - type: McpServer

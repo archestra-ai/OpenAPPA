@@ -94,6 +94,7 @@ fn the_kagent_reference_carries_the_full_flow() {
         "appa-guide-inspect",
         "appa-guide-reload",
         "Required init checklist",
+        "Never infer a pod name",
     ] {
         assert!(reference.contains(marker), "the kagent flow names {marker:?}");
     }

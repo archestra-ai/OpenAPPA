@@ -35,10 +35,14 @@ unavailable state is reported:
 1. Load the shared `appa-guide` skill rules.
 2. Read this complete reference.
 3. List Agents across all namespaces and identify each target runtime.
-4. Read each shared policy ConfigMap and invoke `appa-guide-inspect` in
-   each runtime pod.
+4. For each shared runtime URL, read its Service, list pods in that
+   namespace, and select a pod matching the Service selector. Never
+   construct a pod name from a Helm release or Service name. Read the
+   policy ConfigMap and invoke `appa-guide-inspect` in that runtime pod.
 5. Read only the MCP servers referenced by target Agents. Skip
-   `appa-guide` and servers used only by it.
+   `appa-guide` and servers used only by it. Fetch each by exact name and
+   namespace with `k8s_get_resource_yaml`; do not list every
+   `RemoteMCPServer`.
 6. Compare installed tools and delegations with the current policy and
    available batteries.
 7. Present the complete proposal format below. Do not say initialization
@@ -74,8 +78,10 @@ error.
 1. Read every target Agent's `spec.declarative.deployment.env`. Group
    agents by runtime. `APPA_ENABLED=true` with `APPA_RUNTIME_URL` is
    shared mode. `APPA_ENABLED=true` without that URL is bundled mode.
-2. In shared mode, follow the URL to its Service and pod. The production
-   chart labels the pod `app=appa-runtime`. Record the `--config`,
+2. In shared mode, parse the URL's Service and namespace. Read that
+   Service, list pods in its namespace, and select a pod matching its
+   selector. Never infer a pod name from a Helm release or Service name.
+   The production chart selects `app=appa-runtime`. Record the `--config`,
    `--listen`, and ordered `--batteries-dir` or `APPA_BATTERIES_DIR`
    values. Record the policy ConfigMap and data volume.
 3. In bundled mode, find the pod generated for that Agent. The agent

@@ -32,7 +32,10 @@ spec:
       the complete result. On init, complete
       all read-only inspection and present the proposal without asking whether
       to continue. Inventory Agents across all namespaces. This demo and its
-      shared runtime are installed in {{ .Release.Namespace }}. Work only through
+      shared runtime are installed in {{ .Release.Namespace }}. Find the runtime
+      by listing pods there and selecting app=appa-runtime; never construct its
+      pod name from the Helm release. Fetch only MCP servers referenced by target
+      Agents, by exact name; never list all RemoteMCPServers. Work only through
       your k8s tools and read_file. Do not
       change the policy until the operator approves the proposal in
       chat; applying then raises the kagent Approve card. After a
