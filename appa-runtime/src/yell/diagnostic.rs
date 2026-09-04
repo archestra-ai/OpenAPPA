@@ -57,6 +57,34 @@ pub(crate) enum Selection {
     Recent,
 }
 
+/// How much of a trajectory an export may carry, when the caller has to fit it inside
+/// something this process cannot measure.
+///
+/// A report is measured gzipped, and its size depends on the message and the envelope around
+/// this export — neither of which the runtime has. So the caller measures what it built and
+/// asks again for less, and this builder rebuilds from the source rather than the caller
+/// deleting entries from a finished document. The difference matters: a token is numbered by
+/// first appearance, so dropping the oldest facts from a built export leaves the survivors
+/// starting at `tool-7` and referring to names that are no longer anywhere in it.
+///
+/// Only the counts shrink, never the classification: a trimmed export is byte-identical to an
+/// untrimmed export of the same range. The default budget is the whole trajectory.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Budget {
+    pub(crate) facts: Option<usize>,
+    pub(crate) events: Option<usize>,
+}
+
+impl Budget {
+    /// The oldest fact index this budget admits, out of `total`.
+    fn first_fact(&self, total: usize) -> usize {
+        match self.facts {
+            Some(cap) => total.saturating_sub(cap),
+            None => 0,
+        }
+    }
+}
+
 /// How long after its last event a trajectory is still "the current one".
 pub(crate) const RECENT_WINDOW: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
@@ -204,10 +232,12 @@ pub(crate) fn resolve(recent: crate::events::Recent) -> Result<TrajectoryId, Omi
     }
 }
 
-pub(crate) fn build(source: Source<'_>, mode: Mode) -> Export {
+pub(crate) fn build(source: Source<'_>, mode: Mode, budget: Budget) -> Export {
     let mut tokens = Tokens::default();
     let mut unclassified: Vec<Drift> = Vec::new();
-    let from = budget_start(source.facts, mode, &source.vouched);
+    // The newest facts are the ones a yell is about, so a budget cuts from the old end, and
+    // this builder's own byte bound cuts from the same end. Whichever bites harder wins.
+    let from = budget_start(source.facts, mode, &source.vouched).max(budget.first_fact(source.facts.len()));
 
     // The policy is numbered first, so a reader meets a name where it is declared rather than
     // where it happened to be used.
@@ -273,6 +303,10 @@ pub(crate) fn build(source: Source<'_>, mode: Mode) -> Export {
         });
     }
     runtime_events.sort_by_key(|entry| entry.seq);
+    if let Some(cap) = budget.events {
+        let drop = runtime_events.len().saturating_sub(cap);
+        runtime_events.drain(..drop);
+    }
 
     Export {
         branches,
@@ -451,6 +485,7 @@ mod tests {
                 yelling: None,
             },
             mode,
+            Budget::default(),
         ) {
             Diagnostic::Present(export) => *export,
             Diagnostic::Omitted { omitted_reason } => panic!("the recorded session exports, got {omitted_reason:?}"),
@@ -560,6 +595,57 @@ mod tests {
         for spelled in [invented, "id_rsa", "alice"] {
             assert!(!rendered.contains(spelled), "{spelled} survived baseline: {rendered}");
         }
+    }
+
+    /// A caller that cannot fit an export asks for less of it, and the runtime rebuilds under
+    /// the smaller bound. The newest facts are the ones a yell is about, so the cut is at the
+    /// old end and the export says where it is.
+    #[tokio::test]
+    async fn a_budget_cuts_the_oldest_and_says_where() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let (runtime, root) = recorded_session(&dir).await;
+        let whole = export(&runtime, &root, Mode::Pseudonymized);
+        let keep = whole.facts.len() / 2;
+        assert!(keep > 1, "the recorded session is long enough to halve");
+
+        let budgeted = match runtime.diagnostic(
+            Selection::Root {
+                root: root.clone(),
+                yelling: None,
+            },
+            Mode::Pseudonymized,
+            Budget {
+                facts: Some(keep),
+                events: Some(1),
+            },
+        ) {
+            Diagnostic::Present(export) => *export,
+            Diagnostic::Omitted { omitted_reason } => panic!("the session exports, got {omitted_reason:?}"),
+        };
+
+        assert_eq!(budgeted.facts.len(), keep);
+        assert_eq!(budgeted.runtime_events.len(), 1);
+        assert_eq!(
+            budgeted.truncated_before_seq,
+            budgeted.facts.first().map(|entry| entry.seq)
+        );
+        assert!(budgeted.facts[0].seq > whole.facts[0].seq, "the cut is at the old end");
+        assert_eq!(
+            budgeted.facts.last().map(|entry| entry.seq),
+            whole.facts.last().map(|entry| entry.seq),
+            "the newest fact survives"
+        );
+        assert_eq!(
+            budgeted.runtime_events.last().map(|entry| entry.seq),
+            whole.runtime_events.last().map(|entry| entry.seq),
+            "so does the newest event"
+        );
+        // The budget only shortens: what the export says about the deployment is unchanged.
+        assert_eq!(
+            serde_json::to_value(&budgeted.branches).ok(),
+            serde_json::to_value(&whole.branches).ok()
+        );
+        assert_eq!(budgeted.trust_chain, whole.trust_chain);
     }
 
     /// The variant name each `Fact` serializes under.

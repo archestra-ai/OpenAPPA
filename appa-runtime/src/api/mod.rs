@@ -855,7 +855,12 @@ impl Runtime {
     /// it survives a log the engine refuses — a refused log is the very thing worth reporting
     /// — and carries the refusal as a closed class instead of the facts a view would have
     /// given. What may leave is decided in [`crate::yell::tables`], never here.
-    pub(crate) fn diagnostic(&self, selection: yell::Selection, mode: yell::Mode) -> yell::Diagnostic {
+    pub(crate) fn diagnostic(
+        &self,
+        selection: yell::Selection,
+        mode: yell::Mode,
+        budget: yell::Budget,
+    ) -> yell::Diagnostic {
         let (root, yelling) = match selection {
             yell::Selection::Root { root, yelling } => {
                 let yelling = yelling.unwrap_or_else(|| root.clone());
@@ -923,7 +928,7 @@ impl Runtime {
             replay_refused,
             yelling,
         };
-        yell::Diagnostic::Present(Box::new(yell::build(source, mode)))
+        yell::Diagnostic::Present(Box::new(yell::build(source, mode, budget)))
     }
 
     /// Execute one surfaced remedy offer by its id.

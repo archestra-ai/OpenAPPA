@@ -256,6 +256,13 @@ struct DiagnosticQuery {
     /// The root to export. Omitted by a caller with no session of its own, which asks the
     /// runtime for the one trajectory that was recently active.
     trajectory: Option<String>,
+    /// The newest N facts and the newest N runtime events. A caller that has to fit the export
+    /// inside a limit this process cannot measure — a gzipped report, whose size depends on the
+    /// message and the envelope — measures what it built and asks again for less. The runtime
+    /// then rebuilds, rather than the caller deleting entries out of a finished document and
+    /// leaving its token numbering full of holes.
+    max_facts: Option<usize>,
+    max_events: Option<usize>,
 }
 
 /// One trajectory's decisions, stripped for a report.
@@ -278,7 +285,11 @@ async fn diagnostic(
         true => crate::yell::Mode::Pseudonymized,
         false => crate::yell::Mode::Baseline,
     };
-    Ok(axum::Json(state.runtime.diagnostic(selection, mode)))
+    let budget = crate::yell::Budget {
+        facts: query.max_facts,
+        events: query.max_events,
+    };
+    Ok(axum::Json(state.runtime.diagnostic(selection, mode, budget)))
 }
 
 /// Run the internal daemon command from arguments supplied by the public CLI.

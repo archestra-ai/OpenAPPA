@@ -13,5 +13,7 @@ pub(crate) mod strip;
 pub(crate) mod tables;
 pub(crate) mod tokens;
 
-pub(crate) use diagnostic::{Diagnostic, OmittedReason, RECENT_WINDOW, Selection, Source, branches, build, resolve};
+pub(crate) use diagnostic::{
+    Budget, Diagnostic, OmittedReason, RECENT_WINDOW, Selection, Source, branches, build, resolve,
+};
 pub(crate) use tokens::Mode;
