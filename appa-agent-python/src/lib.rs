@@ -340,6 +340,7 @@ impl SessionInner {
         let call = ProposedCall {
             tool: tool.to_string(),
             arguments,
+            cwd: None,
         };
 
         match self.event(HookEvent::ToolCall {

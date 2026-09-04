@@ -148,6 +148,7 @@ mod tests {
         ProposedCall {
             tool: tool.to_string(),
             arguments: serde_json::value::RawValue::from_string(arguments.to_string()).expect("valid JSON"),
+            cwd: None,
         }
     }
 

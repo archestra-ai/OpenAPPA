@@ -36,6 +36,8 @@
 //! the plan from the live views and matches it by value, so an offer whose
 //! basis has moved declines instead of executing.
 
+use std::path::Path;
+
 use appa_engine::audience::{AudienceEvidence, IdentityImplementation, IdentityMapping, MemberClaims, SelectorSpec};
 use appa_engine::contract::{
     AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, PinnedAnnotation, ProducedAnnotation,
@@ -77,8 +79,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::api::OutcomeBody;
 pub(crate) use crate::api::{OfferId, ProposedCall, SpawnBinding, ToolOutcome, TrajectoryId};
 use crate::consult::{
-    AnnotationAnswer, AnnotationDeclaration, AuthorityAnswer, AuthorityArtifact, AuthorityDeclaration, HistoryEntry,
-    Requirement, Ruling, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint, WireAudience,
+    AnnotationAnswer, AnnotationArtifact, AnnotationDeclaration, AuthorityAnswer, AuthorityArtifact,
+    AuthorityDeclaration, HistoryEntry, Requirement, Ruling, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint,
+    WireAudience,
 };
 use appa_runtime_api::{OfferedRemedy, OfferedReturn};
 
@@ -140,8 +143,10 @@ pub enum ExternalRequest {
         annotator: String,
         call: appa_engine::value::CanonicalDigest,
         declaration: AnnotationDeclaration,
-        /// The consult artifact: the complete call, or one value per declared input.
-        args: serde_json::Value,
+        /// The consult artifact: the complete call or one value per declared input, and
+        /// the working directory the harness reported. Consult input only: no part of the
+        /// digest.
+        artifact: AnnotationArtifact,
     },
     /// One audience source read: the members of one selector's collection at the
     /// registered source of `provider`.
@@ -985,7 +990,7 @@ impl RuntimeEngine {
                 detail: "deciding a proposal for a trajectory the log has not opened".to_string(),
             });
         };
-        let CallAnswers { annotation } = match self.answers_for(&views, &resolved, evidence) {
+        let CallAnswers { annotation } = match self.answers_for(&views, &resolved, evidence, call.cwd.as_deref()) {
             Ok(answers) => answers,
             Err(Resolution(requests)) => return Ok(EngineDecision::deliver(Next::ResolveExternal(requests))),
         };
@@ -1256,7 +1261,9 @@ impl RuntimeEngine {
                 {
                     Ok(rewritten) => match self.engine.registry().declaration(&rewritten) {
                         Some(declaration @ ToolDeclaration::Annotated { .. }) => {
-                            match self.annotation_for(&views, declaration, &rewritten, evidence) {
+                            // The rewritten call is the runtime's, not yet the harness's: no
+                            // working directory was reported for it.
+                            match self.annotation_for(&views, declaration, &rewritten, evidence, None) {
                                 Ok(annotation) => Some(annotation),
                                 Err(Resolution(requests)) => {
                                     return Ok(EngineDecision::deliver(Next::ResolveExternal(requests)));
@@ -1679,6 +1686,7 @@ impl RuntimeEngine {
         views: &Views,
         resolved: &ResolvedCall,
         evidence: &[ExternalEvidence],
+        cwd: Option<&Path>,
     ) -> Result<CallAnswers, Resolution> {
         let declaration = self
             .engine
@@ -1687,7 +1695,9 @@ impl RuntimeEngine {
             .expect("a resolved call names its registered declaration");
         let annotation = match declaration {
             ToolDeclaration::Declared(_) => None,
-            ToolDeclaration::Annotated { .. } => Some(self.annotation_for(views, declaration, resolved, evidence)?),
+            ToolDeclaration::Annotated { .. } => {
+                Some(self.annotation_for(views, declaration, resolved, evidence, cwd)?)
+            }
         };
         Ok(CallAnswers { annotation })
     }
@@ -1695,12 +1705,15 @@ impl RuntimeEngine {
     /// The pinned annotation an Annotated declaration owes: a pin standing on an open offer
     /// or unspent approval for this exact digest, the evidence the Annotator gave for it, or
     /// the one consult still owed. The digest is the key: any rewrite is annotated afresh.
+    /// `cwd` rides the consult as artifact input and is no part of the key: a pin for the
+    /// same digest stands whichever directory the re-proposal reports.
     fn annotation_for(
         &self,
         views: &Views,
         declaration: &ToolDeclaration,
         resolved: &ResolvedCall,
         evidence: &[ExternalEvidence],
+        cwd: Option<&Path>,
     ) -> Result<PinnedAnnotation, Resolution> {
         let annotator = declaration
             .annotator()
@@ -1730,7 +1743,10 @@ impl RuntimeEngine {
                 annotator: annotator.as_str().to_string(),
                 call: digest,
                 declaration: self.annotation_declaration(annotator, binding),
-                args: annotation_args(&binding.inputs, declaration, resolved),
+                artifact: AnnotationArtifact {
+                    args: annotation_args(&binding.inputs, declaration, resolved),
+                    cwd: cwd.map(Path::to_path_buf),
+                },
             }]));
         };
         Ok(PinnedAnnotation::new(
@@ -3234,6 +3250,7 @@ mod tests {
         let call = ProposedCall {
             tool: "lookup".to_string(),
             arguments: serde_json::value::RawValue::from_string(r#"{"id": 7}"#.to_string()).expect("valid JSON"),
+            cwd: None,
         };
         let propose = |view: &EngineView, evidence: Vec<ExternalEvidence>| {
             engine
@@ -3306,7 +3323,7 @@ mod tests {
             .declaration(&resolved)
             .expect("the call names its declaration");
         let pin = engine
-            .annotation_for(&views, declaration, &resolved, &[])
+            .annotation_for(&views, declaration, &resolved, &[], None)
             .expect("the recorded annotation pins without evidence");
         assert_eq!(pin.produced().requires.attention, vec![MarkName::new("privacy-review")]);
 
@@ -3326,7 +3343,7 @@ mod tests {
             },
         };
         let pinned = engine
-            .annotation_for(&views, declaration, &resolved, &[contradicting])
+            .annotation_for(&views, declaration, &resolved, &[contradicting], None)
             .expect("the recorded annotation pins over contradicting evidence");
         assert_eq!(pinned, pin);
     }
@@ -3353,26 +3370,27 @@ mod tests {
         let view = opened_view(&engine, &trajectory);
         let owner = engine_id(&trajectory);
         let views = view.views(&owner).expect("the root is opened");
-        let asked = match engine.annotation_for(&views, declaration, &call, &[]) {
+        let asked = match engine.annotation_for(&views, declaration, &call, &[], None) {
             Err(Resolution(requests)) => match requests.as_slice() {
                 [
                     ExternalRequest::Annotation {
                         annotator,
                         call: digest,
                         declaration,
-                        args,
+                        artifact,
                     },
                 ] => {
                     assert_eq!(annotator, "classifier");
                     // The annotator maps no inputs, so `args` is the complete call.
                     assert_eq!(
-                        args,
-                        &serde_json::json!({
+                        artifact.args,
+                        serde_json::json!({
                             "name": "lookup",
                             "description": "Looks one record up.",
                             "arguments": {"nested": {"id": 7}, "deep": true},
                         })
                     );
+                    assert_eq!(artifact.cwd, None, "no directory was reported for this call");
                     // The declaration carries the mandate's complete vocabulary and nothing of
                     // the trajectory: no current label and no call-specific requirements.
                     assert!(declaration.inputs.is_empty());
@@ -3413,6 +3431,7 @@ mod tests {
                     call: asked,
                     answer: answer(),
                 }],
+                None,
             )
             .expect("a complete answer pins");
         assert_eq!(pin.annotator(), &AnnotatorName::new("classifier"));
@@ -3461,6 +3480,7 @@ mod tests {
                     call: asked,
                     answer: answer(),
                 }],
+                None,
             ),
             Err(Resolution(_))
         ));

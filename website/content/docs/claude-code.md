@@ -91,6 +91,10 @@ Installing the plugin does not force every Claude Code session through OpenAPPA.
 
 :::claude-session-choice:::
 
+## The working directory of a call
+
+Claude Code reports `cwd` on every tool-call hook: the directory a Bash command starts in. A `cd` that persists in one Bash call moves it. A `cd` to a directory outside the project does not persist: Claude Code resets the shell to the project root for the next call. A failed call leaves it unchanged. One command can still change directory before it acts, so an annotator that decides by directory also reads the command text for `cd`, `pushd`, and `-C`. Every annotation consult carries the reported directory as `artifact.cwd`, as written, or `null` when none was reported. See [Annotators](/contracts#annotators).
+
 ## Use Claude Code as an annotator
 
 OpenAPPA can also call the installed Claude Code CLI as a model builtin: an authority or a sanitizer binds `builtin = "claude-code"` under `[externals]`, and an annotator names it on its own declaration; `builtin = "llm"` serves the same three kinds through an API-key profile in `[externals.llm]`. This example declares an annotator. A tool that names an annotator carries no static semantics: the annotator produces the call's complete contract — its `delta`, `requires`, and `emits` — fresh for every released call.
@@ -126,7 +130,7 @@ timeout_ms = 60000                  # the consult's own budget — a model call 
 builtin = "hitl"
 ```
 
-The runtime uses the current user's Claude Code authentication. It starts one fresh safe-mode process per consult with no tools, hooks, project settings, or persisted session, in a temporary working directory, with every `APPA_*` environment variable removed. The system prompt carries the annotator's trusted `hint` and mandate vocabulary: the trust ranks, literal readers, attention marks, and effect kinds an answer may use. The only user turn is the artifact selected by the annotator's `inputs` mapping: the complete call (`name`, declared `description`, and `arguments`) when it maps no inputs, or one value per mapped input. Nothing about the trajectory is sent: no current label, no history. The annotator answers one complete annotation, so it establishes the output label, the call's requirements, and its emitted effects in one consult. At most four Claude consults run at once.
+The runtime uses the current user's Claude Code authentication. It starts one fresh safe-mode process per consult with no tools, hooks, project settings, or persisted session, in a temporary working directory, with every `APPA_*` environment variable removed. The system prompt carries the annotator's trusted `hint` and mandate vocabulary: the trust ranks, literal readers, attention marks, and effect kinds an answer may use. The only user turn is the artifact selected by the annotator's `inputs` mapping: the complete call (`name`, declared `description`, and `arguments`) when it maps no inputs, or one value per mapped input, beside `cwd`, the working directory Claude Code reported for the call. Nothing about the trajectory is sent: no current label, no history. The annotator answers one complete annotation, so it establishes the output label, the call's requirements, and its emitted effects in one consult. At most four Claude consults run at once.
 
 A model annotator is a trusted classifier rather than a sandboxed policy authority: it rules the whole contract of every call it covers, bounded only by its declared mandate, and argument-level prompt-injection resistance is best-effort. Bound as an authority or sanitizer, the same model rules only within that component's `permits`, like any other implementation. Process errors, timeouts, invalid fields, and values outside the mandate produce no answer: the call is not judged, nothing is recorded, and the failure surfaces operationally — never as a policy denial.
 

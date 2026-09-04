@@ -72,7 +72,7 @@ const TERMS = {
   "verified-email":
     "The shipped identity implementation: a member with a verified email becomes that address under conservative normalization (domain case only); a member without one keeps its provider-qualified ID. The address is the principal, so a reader written as an address is the same reader the verified claim resolves to. Deterministic and network-free.",
   inputs:
-    "The values an annotator reads, each mapped from $tool_call on its declaration. Without an explicit mapping, the annotator reads the complete tool call: name, description when declared, and arguments.",
+    "The call values an annotator's args carries, each mapped from $tool_call on its declaration. Without an explicit mapping, args is the complete tool call: name, description when declared, and arguments. cwd sits beside args whichever inputs are mapped.",
   ranks:
     "In an annotator's mandate: the trust ranks its answers may write in delta.trust and requires.trust. Omitted, every rank in the trust chain.",
   audiences:
@@ -81,6 +81,7 @@ const TERMS = {
     "In an annotator's mandate: the attention marks its answers may require. Omitted, every mark an authority names under permits.attention.",
   "$tool_call":
     "The only source an annotator input reads. Its five forms are the complete call (name, description when declared, arguments), its name, its description, its arguments, and one top-level argument. Only $tool_call.description requires a declared description.",
+  cwd: "The working directory the harness reported for a proposed call, carried on every annotation consult as artifact.cwd: the absolute path as written, or null when the harness reported none. Consult input only — never part of a label, a digest, or the annotation's identity.",
   "[externals.annotators.<name>]":
     "The deployment binding for one annotator that does not carry a builtin on its declaration: an HTTP endpoint or a local command. Every implementation receives the same consult and answers under the same mandate validation. Unsupported platforms reject command bindings when loading the configuration.",
   "[externals.<kind>.<name>]":
@@ -88,7 +89,7 @@ const TERMS = {
   declaration:
     "The registered half of a consult: the component's hint and permits, an annotator's hint, input names, and mandate vocabulary, or an audience source's selector templates. The agent never writes it.",
   artifact:
-    "The judged half of a consult: the call and its unmet requirements, the body to rewrite, an annotator's args, a selector or member to read, or the member claims to canonicalize. Never the trajectory.",
+    "The judged half of a consult: the call and its unmet requirements, the body to rewrite, an annotator's args and cwd, a selector or member to read, or the member claims to canonicalize. Never the trajectory.",
   internal:
     "The built-in organization audience, between self and public in the shipped chain. Symbolic in labels and the log; extensionally the union of the configured internal sources, the members of self, and every group declared within either. Reading internal data closes off public destinations.",
   "{public, trusted}":

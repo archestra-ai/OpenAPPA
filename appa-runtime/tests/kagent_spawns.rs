@@ -85,6 +85,7 @@ fn call(tool: &str) -> ProposedCall {
     ProposedCall {
         tool: tool.to_string(),
         arguments: raw(serde_json::json!({ "request": "summarize the crash logs" })),
+        cwd: None,
     }
 }
 

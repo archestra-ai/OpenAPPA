@@ -145,6 +145,7 @@ async fn deployment_with(review_timeout_ms: u64) -> Deployment {
             call: ProposedCall {
                 tool: "publish".to_string(),
                 arguments: raw(serde_json::json!({"body": "the quarterly figures"})),
+                cwd: None,
             },
             spawn: false,
             ruling: None,
@@ -255,6 +256,7 @@ builtin = "hitl"
             call: ProposedCall {
                 tool: "Bash".to_string(),
                 arguments: raw(serde_json::json!({"command": "cat .env"})),
+                cwd: None,
             },
             spawn: false,
             ruling: None,
@@ -320,6 +322,7 @@ async fn execute_with<H: ClientHandler>(deployment: &Deployment, reviewer: H, ru
             call: ProposedCall {
                 tool: "execute_remedy_plan".to_string(),
                 arguments: raw(serde_json::json!({ "offer_id": deployment.offer })),
+                cwd: None,
             },
             spawn: false,
             ruling,
@@ -477,6 +480,7 @@ async fn the_block_carries_the_review_for_the_hitl_authority() {
             call: ProposedCall {
                 tool: "publish".to_string(),
                 arguments: raw(serde_json::json!({"body": "the quarterly figures"})),
+                cwd: None,
             },
             spawn: false,
             ruling: None,

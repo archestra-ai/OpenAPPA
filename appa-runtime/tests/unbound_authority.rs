@@ -34,6 +34,7 @@ fn publish() -> ProposedCall {
     ProposedCall {
         tool: "publish".to_string(),
         arguments: raw(serde_json::json!({})),
+        cwd: None,
     }
 }
 

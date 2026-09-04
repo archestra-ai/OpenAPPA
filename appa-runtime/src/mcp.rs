@@ -267,6 +267,7 @@ mod tests {
                 ProposedCall {
                     tool: "wire".to_string(),
                     arguments: raw(serde_json::json!({"amount": 500})),
+                    cwd: None,
                 },
                 false,
             )
@@ -343,6 +344,7 @@ mod tests {
             call: ProposedCall {
                 tool: "execute_remedy_plan".to_string(),
                 arguments: raw(serde_json::json!({ "offer_id": quoted.0 })),
+                cwd: None,
             },
             spawn: false,
             ruling: None,

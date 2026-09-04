@@ -176,7 +176,11 @@ impl WireEvent {
 
     fn call(&self) -> Result<ProposedCall, ParseRefusal> {
         match (self.tool.clone(), self.arguments.clone()) {
-            (Some(tool), Some(arguments)) => Ok(ProposedCall { tool, arguments }),
+            (Some(tool), Some(arguments)) => Ok(ProposedCall {
+                tool,
+                arguments,
+                cwd: None,
+            }),
             _ => Err(malformed(&format!("{} without its tool call", self.event))),
         }
     }
@@ -425,6 +429,7 @@ mod tests {
                     call: ProposedCall {
                         tool: "k8s_get_pods".to_string(),
                         arguments: raw(serde_json::json!({"namespace": "prod"})),
+                        cwd: None,
                     },
                     spawn,
                     ruling: None,
@@ -497,6 +502,7 @@ mod tests {
                 call: ProposedCall {
                     tool: "billing-agent".to_string(),
                     arguments: raw(serde_json::json!({"message": "total the invoices"})),
+                    cwd: None,
                 },
                 outcome: ToolOutcome::Success {
                     body: OutcomeBody::Available(r#"{"result":"the total is 42"}"#.to_string()),
@@ -641,6 +647,7 @@ mod tests {
             call: ProposedCall {
                 tool: "k8s_get_pods".to_string(),
                 arguments: raw(serde_json::json!({"namespace": "prod"})),
+                cwd: None,
             },
             spawn: false,
             ruling: None,

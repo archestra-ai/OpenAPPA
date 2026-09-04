@@ -148,7 +148,7 @@ Every released tool call carries one complete annotation — its `delta`, its `r
 - **Static declaration**: The `[[tool]]` entry writes the whole contract, and every call to the tool carries it.
 - **Annotator**: Where the right contract depends on the call itself (a document path, a recipient, a command line), the `[[tool]]` entry names a registered **annotator** instead. The annotator reads the proposed call and answers the complete contract for that one call, inside the vocabulary its declaration bounds — its **mandate**.
 
-An Annotator declaration can include a trusted policy `hint`. The hint defines policy-specific values and their selection criteria, but cannot expand the mandate. An input mapping can restrict which call values cross the consult boundary.
+An Annotator declaration can include a trusted policy `hint`. The hint defines policy-specific values and their selection criteria, but cannot expand the mandate. An input mapping can restrict which call values cross the consult boundary. Every annotation consult also carries the working directory the harness reported for the call, or `null` when it reported none.
 
 An annotation is pinned to the exact call it was produced for. A sanitizer rewrite that changes the arguments is annotated afresh, so no call ever runs under another call's annotation, and replay reconstructs every decision without consulting an annotator again.
 
