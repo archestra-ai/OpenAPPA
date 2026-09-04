@@ -196,6 +196,28 @@ def _mandate_bound(declaration: dict, key: str) -> frozenset[str] | None:
     return None if values is None else frozenset(values)
 
 
+def _audience_bound(declaration: dict) -> frozenset[str] | None:
+    """The written `audiences` bound in the spellings the runtime's declaration exposes: a
+    literal reader canonical, a chain word or `@` mention as written."""
+    values = declaration.get("audiences")
+    return None if values is None else frozenset(_canonical_reader(value) for value in values)
+
+
+def _canonical_reader(entry: str) -> str:
+    """The engine's one spelling per reader: an address keeps its local part and lowercases
+    its domain; every other spelling — a chain word, an `@` mention, an opaque id — is
+    untouched."""
+    local, at, domain = entry.partition("@")
+    malformed = (
+        not at
+        or not local
+        or not domain
+        or "@" in domain
+        or any(char.isspace() or not char.isprintable() for char in entry)
+    )
+    return entry if malformed else f"{local}@{domain.lower()}"
+
+
 def _declared_annotators(name: str, policy: Path) -> dict[str, DeclaredAnnotator]:
     """Each annotator this scenario's APPA policy declares.
 
@@ -224,7 +246,7 @@ def _declared_annotators(name: str, policy: Path) -> dict[str, DeclaredAnnotator
             inputs=frozenset(inputs),
             # An unbounded rank mandate still stays inside the policy's trust chain.
             ranks=ranks if declared_ranks is None else declared_ranks,
-            audiences=_mandate_bound(declaration, "audiences"),
+            audiences=_audience_bound(declaration),
             marks=_mandate_bound(declaration, "marks"),
             effects=_mandate_bound(declaration, "effects"),
         )
@@ -251,14 +273,15 @@ def _spelled_audience(entry: str) -> bool:
 
 def audience_entries(value: object, location: str, field: str, name: str) -> list[str]:
     """One audience value off the wire, in the engine's written-list grammar: `"public"`
-    alone (naming no entry), or a non-empty array of distinct spellings — at most one of
-    `self`/`internal`, never `public` inside the array, no argument placeholder."""
+    alone (naming no entry), or a non-empty array of distinct entries — at most one of
+    `self`/`internal`, never `public` inside the array, no argument placeholder — each
+    literal reader returned in its canonical spelling."""
     where = f"{name}: {location}.{field}"
     match value:
         case "public":
             return []
-        case list() as entries if entries and all(isinstance(entry, str) for entry in entries):
-            pass
+        case list() as written if written and all(isinstance(entry, str) for entry in written):
+            entries = [_canonical_reader(entry) for entry in written]
         case _:
             raise ScenarioError(f"{where} is not a wire audience shape: `public` or a non-empty array")
     if "public" in entries:

@@ -11,8 +11,7 @@ use crate::contract::{
 };
 use crate::fact::EffectKind;
 use crate::label::{
-    Audience, Clause, DeclaredAudience, Evaluation, Label, MembershipContext, MembershipNeeded, ReaderId, SymbolicAtom,
-    Trust,
+    Clause, DeclaredAudience, Evaluation, Label, MembershipContext, MembershipNeeded, ReaderId, SymbolicAtom, Trust,
 };
 use crate::names::{AnnotatorName, AudienceArgument, MarkName};
 use crate::projection::Views;
@@ -332,22 +331,9 @@ pub(crate) fn validate_annotation(
     }
     let annotation = pinned.produced();
     let outside = |what: &str| AnnotationRefusal::OutsidePolicy(what.to_string());
-    // A produced annotation never reads a call argument: a placeholder belongs to a static
-    // declaration, which resolves it per call; an annotation already is the judgment of one
-    // exact call.
-    let placeholder = annotation.requires.audience_requirements().iter().any(|requirement| {
-        matches!(
-            requirement,
-            AudienceRequirement::Includes(RecipientSpec::Placeholder(_))
-        )
-    });
-    if placeholder {
-        return Err(outside("a produced annotation reads a placeholder"));
-    }
     let mandate = registry
         .annotator_mandate(annotator)
         .expect("declarations name only registered annotators");
-    let permits_audience = |audience: &Audience| audience.clauses().all(|clause| mandate.permits_clause(clause));
     let permits_declared = |declared: &DeclaredAudience| match declared {
         DeclaredAudience::Public => true,
         DeclaredAudience::Union(clause) => mandate.permits_clause(clause),
@@ -357,7 +343,12 @@ pub(crate) fn validate_annotation(
     {
         return Err(outside("the produced delta trust is outside the mandate"));
     }
-    if !permits_audience(&annotation.delta.output_label().audience) {
+    if annotation
+        .delta
+        .audience
+        .as_ref()
+        .is_some_and(|audience| !permits_declared(audience))
+    {
         return Err(outside("the produced delta audience is outside the mandate"));
     }
     if annotation
@@ -367,17 +358,20 @@ pub(crate) fn validate_annotation(
     {
         return Err(outside("the produced trust floor is outside the mandate"));
     }
-    let audience_within = annotation
-        .requires
-        .audience_requirements()
-        .iter()
-        .all(|requirement| match requirement {
+    for requirement in annotation.requires.audience_requirements() {
+        let permitted = match requirement {
             AudienceRequirement::Includes(RecipientSpec::Static(recipients)) => permits_declared(recipients),
             AudienceRequirement::Cap(cap) => permits_declared(cap),
-            AudienceRequirement::Includes(RecipientSpec::Placeholder(_)) => false,
-        });
-    if !audience_within {
-        return Err(outside("a produced audience requirement is outside the mandate"));
+            // A produced annotation never reads a call argument: a placeholder belongs to a
+            // static declaration, which resolves it per call; an annotation already is the
+            // judgment of one exact call.
+            AudienceRequirement::Includes(RecipientSpec::Placeholder(_)) => {
+                return Err(outside("a produced annotation reads a placeholder"));
+            }
+        };
+        if !permitted {
+            return Err(outside("a produced audience requirement is outside the mandate"));
+        }
     }
     if annotation
         .requires

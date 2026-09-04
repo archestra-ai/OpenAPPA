@@ -230,6 +230,33 @@ audiences = ["alice@northwind.example"]
         load_scenario(root)
 
 
+def test_a_mandate_and_an_answer_meet_in_the_readers_canonical_spelling(tmp_path: Path) -> None:
+    manifest = (
+        _with_policy_profile(_MINIMAL)
+        + """
+[[annotator_answer]]
+annotator = "document-acl"
+args = { subject = "alice.md" }
+annotation = { delta = { audience = ["alice@northwind.example"] }, requires = { history = [], attention = [] }, emits = [] }
+"""
+    )
+    root = _write_scenario(tmp_path / "canonical-mandate", manifest)
+    profile_root = root / "policy"
+    profile_root.mkdir()
+    (profile_root / "appa.toml").write_text(
+        """version = 1
+
+[[policy.annotator]]
+name = "document-acl"
+inputs = { subject = "$tool_call.arguments.file" }
+audiences = ["alice@NORTHWIND.EXAMPLE"]
+"""
+    )
+    (profile_root / "fides.json").write_text("{}\n")
+
+    load_scenario(root)
+
+
 def _with_policy_profile(toml: str, declaration: str = '"policy"') -> str:
     return toml.replace(
         'systems = ["hr", "email"]\n',
@@ -362,11 +389,18 @@ def test_email_dir_in_data_refused(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "value",
-    ["public", ["alice@northwind.example"], ["internal", "@finance", "alice@northwind.example"], ["self"]],
+    ("value", "expected"),
+    [
+        ("public", []),
+        (["alice@northwind.example"], ["alice@northwind.example"]),
+        (["internal", "@finance", "alice@northwind.example"], ["internal", "@finance", "alice@northwind.example"]),
+        (["self"], ["self"]),
+        # A reader is one spelling: the domain lowercases, the local part and every other
+        # entry stay as written.
+        (["Alice@NORTHWIND.Example", "@Finance", "opaque-ID"], ["Alice@northwind.example", "@Finance", "opaque-ID"]),
+    ],
 )
-def test_an_annotation_audience_in_the_written_grammar_is_admitted(value: object) -> None:
-    expected = [] if value == "public" else value
+def test_an_annotation_audience_in_the_written_grammar_is_admitted(value: object, expected: list[str]) -> None:
     assert audience_entries(value, "answer", "delta.audience", "s") == expected
 
 
@@ -378,6 +412,7 @@ def test_an_annotation_audience_in_the_written_grammar_is_admitted(value: object
         (["public"], "`public` inside"),
         (["public", "alice@northwind.example"], "`public` inside"),
         (["alice@northwind.example", "alice@northwind.example"], "repeats"),
+        (["alice@NORTHWIND.example", "alice@northwind.example"], "repeats"),
         (["self", "internal"], "both `self` and `internal`"),
         (["$to"], "names no audience"),
         ([""], "names no audience"),
