@@ -399,16 +399,22 @@ func (b *builder) remoteAgent(remote RemoteAgentSpec) error {
 	return b.add(remote.Name, AgentSpelling(namespace, agent), remote.Path)
 }
 
-// hostOf is the lowercased host of a server URL; false where it carries
-// none. DNS is case-insensitive, so the same service written in another
-// case must reach the same policy identity, and lowercasing here is the
-// one place that settles it — as urlsplit does for the python lane.
+// hostOf is the lowercased host of a server URL, without its trailing
+// root dot; false where the URL carries no host.
+//
+// DNS is case-insensitive, so the same service written in another case
+// must reach the same policy identity, and lowercasing here is the one
+// place that settles it — as urlsplit does for the python lane. A
+// trailing dot is the absolute form of the same name, naming the root
+// of the DNS tree rather than a search domain, so it is dropped for the
+// same reason.
 func hostOf(raw string) (string, bool) {
 	parsed, err := url.Parse(raw)
 	if err != nil {
 		return "", false
 	}
 	host := strings.ToLower(parsed.Hostname())
+	host = strings.TrimSuffix(host, ".")
 	if host == "" {
 		return "", false
 	}

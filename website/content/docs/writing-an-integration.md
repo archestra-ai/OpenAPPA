@@ -76,7 +76,7 @@ At each hook point, the harness must:
 
 An adapter connects one host to APPA. On the wire it is a name: the `adapter` field of every envelope. In the runtime it is a crate that provides `adapter()`, the name plus one derivation: from a host's raw tool spelling, the canonical tool id (`<family>/<namespace>/<tool>`, or `appa/execute_remedy_plan`), whether the call starts a child trajectory, and the family children the arguments name. The runtime keys every fact on the canonical id; the raw spelling stays in the trajectory record for host dispatch, diagnostics, and replay. The [Policy reference](/contracts#tool-names) has the mapping tables of the initial adapters.
 
-The runtime serves one adapter, selected at startup with `--adapter claude-code|kagent`; the default is `claude-code`. The adapter is a build-time choice and a startup flag, never configuration. An envelope that names another adapter, or a protocol other than `1`, is refused with `409` and blocks the action.
+The runtime serves one adapter, selected at startup with `--adapter claude-code|kagent`; the default is `claude-code`. The adapter is a build-time choice and a startup flag, never configuration. An envelope that names another adapter, or a protocol other than `1`, is refused with `409` and blocks the action. So is an envelope carrying a field its own event does not read: the envelope is flat, one event makes one claim, and a result reported under another event's name would settle nothing.
 
 The two initial adapters reach the wire differently:
 

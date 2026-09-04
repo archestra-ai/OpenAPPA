@@ -116,6 +116,89 @@ pub enum EventName {
     ChildEnd,
 }
 
+/// One optional field of the flat envelope, as a value the reading
+/// rule below can name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Field {
+    RootId,
+    ChildId,
+    Text,
+    Tool,
+    Arguments,
+    Ruling,
+    Outcome,
+    SpawnedId,
+    Value,
+    SpawnBinding,
+}
+
+impl Field {
+    const ALL: [Field; 10] = [
+        Field::RootId,
+        Field::ChildId,
+        Field::Text,
+        Field::Tool,
+        Field::Arguments,
+        Field::Ruling,
+        Field::Outcome,
+        Field::SpawnedId,
+        Field::Value,
+        Field::SpawnBinding,
+    ];
+
+    fn spelling(self) -> &'static str {
+        match self {
+            Field::RootId => "root_id",
+            Field::ChildId => "child_id",
+            Field::Text => "text",
+            Field::Tool => "tool",
+            Field::Arguments => "arguments",
+            Field::Ruling => "ruling",
+            Field::Outcome => "outcome",
+            Field::SpawnedId => "spawned_id",
+            Field::Value => "value",
+            Field::SpawnBinding => "spawn_binding",
+        }
+    }
+}
+
+/// The fields one event reads. The envelope is flat, so a field the
+/// named event never reads would cross to no reader and be dropped
+/// unread — a `turn_end` carrying a result closes as unsettled the
+/// dispatch that result reports, and a ruling on an event that spends
+/// none is a person's answer lost. What an event does not read, it
+/// refuses.
+fn fields_read(name: EventName) -> &'static [Field] {
+    match name {
+        // A probe reads nothing, but a client that builds every
+        // envelope the same way carries its actor into one; that costs
+        // no reader and is admitted. What a probe may not carry is a
+        // dispatch — no call, no result, no ruling.
+        EventName::Ping => &[Field::RootId, Field::ChildId],
+        EventName::SessionStart => &[Field::RootId],
+        EventName::Prompt => &[Field::RootId, Field::ChildId, Field::Text],
+        EventName::TurnEnd => &[Field::RootId, Field::ChildId],
+        EventName::ToolCall => &[
+            Field::RootId,
+            Field::ChildId,
+            Field::Tool,
+            Field::Arguments,
+            Field::Ruling,
+        ],
+        EventName::ToolResult | EventName::SpawnResult => &[
+            Field::RootId,
+            Field::ChildId,
+            Field::Tool,
+            Field::Arguments,
+            Field::Outcome,
+            Field::SpawnedId,
+            Field::Value,
+        ],
+        EventName::ChildStart => &[Field::RootId, Field::ChildId, Field::SpawnBinding],
+        EventName::ChildEnd => &[Field::RootId, Field::ChildId, Field::Value],
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WireRuling {
@@ -358,6 +441,23 @@ impl WireEvent {
         }
     }
 
+    /// Whether this envelope carries `field` at all. An empty string is
+    /// carried: only the reading arms decide what an empty value means.
+    fn carries(&self, field: Field) -> bool {
+        match field {
+            Field::RootId => self.root_id.is_some(),
+            Field::ChildId => self.child_id.is_some(),
+            Field::Text => self.text.is_some(),
+            Field::Tool => self.tool.is_some(),
+            Field::Arguments => self.arguments.is_some(),
+            Field::Ruling => self.ruling.is_some(),
+            Field::Outcome => self.outcome.is_some(),
+            Field::SpawnedId => self.spawned_id.is_some(),
+            Field::Value => self.value.is_some(),
+            Field::SpawnBinding => self.spawn_binding.is_some(),
+        }
+    }
+
     /// Read one wire body. Not JSON is `Unreadable`; JSON that is not a
     /// wire event, or names another protocol or adapter, is `Malformed`.
     /// Both block the action.
@@ -500,23 +600,23 @@ impl WireEvent {
                 self.adapter, served.name
             )));
         }
+        let name = self.event;
+        // A field the named event does not read crosses to no reader.
+        // Refusing it here keeps one claim per envelope: a result is
+        // reported by a result event, a ruling is spent by the call
+        // that quotes its offer, and neither is dropped in silence.
+        let read = fields_read(name);
+        for field in Field::ALL {
+            if self.carries(field) && !read.contains(&field) {
+                return Err(malformed(format!(
+                    "{name:?} carrying {}, which that event reads nowhere",
+                    field.spelling()
+                )));
+            }
+        }
         // Whether this host can assert a person's ruling at all is
         // settled here, on the envelope, before any event exists.
         let ruling = checked_ruling(served.name, self.ruling)?;
-        let name = self.event;
-        // A ruling answers the review of an offer a call quotes, so a
-        // tool call is the only event that reads one. Every other event
-        // would carry it past the last reader and drop it, so an
-        // asserted ruling there is refused rather than silently lost.
-        let ruling = match (ruling, name) {
-            (None, _) => None,
-            (Some(ruling), EventName::ToolCall) => Some(ruling),
-            (Some(_), other) => {
-                return Err(malformed(format!(
-                    "a ruling on {other:?}, which is not a tool call and spends no ruling"
-                )));
-            }
-        };
         let root = || -> Result<TrajectoryId, ParseRefusal> {
             match self.root_id.as_deref() {
                 Some(root_id) if !root_id.is_empty() => Ok(served.name.root(root_id)),
@@ -1124,6 +1224,54 @@ mod tests {
         names_children,
         spell,
     };
+
+    /// A field the named event does not read reaches no reader, so the
+    /// envelope carrying it is refused rather than read with that field
+    /// dropped. The turn end is the costly one: it closes every call
+    /// still open, so a result mislabelled as one would settle as
+    /// unreported the dispatch it was reporting.
+    #[test]
+    fn an_event_carrying_a_field_it_never_reads_is_refused() {
+        let carried = |event: &str, field: &str| {
+            format!(r#"{{"protocol":1,"adapter":"kagent","event":"{event}","root_id":"r1","child_id":"c1",{field}}}"#)
+        };
+        let result_fields = r#""tool":"builtin_read_file","arguments":{},"outcome":{"status":"success","body":1}"#;
+        let refused = [
+            // The reported result of a call the turn end would close.
+            ("turn_end", result_fields),
+            ("session_start", result_fields),
+            ("child_start", result_fields),
+            ("child_end", result_fields),
+            ("prompt", r#""outcome":{"status":"indeterminate"}"#),
+            ("turn_end", r#""text":"a prompt no turn end reads""#),
+            (
+                "tool_call",
+                r#""tool":"builtin_read_file","arguments":{},"spawned_id":"s1""#,
+            ),
+            ("ping", r#""tool":"builtin_read_file""#),
+            ("child_start", r#""value":"a return no start carries""#),
+            ("child_end", r#""spawn_binding":"b1""#),
+        ];
+        for (event, field) in refused {
+            let row = carried(event, field);
+            let read = WireEvent::read(row.as_bytes()).expect("reads").into_event(&SERVED);
+            assert!(
+                matches!(read, Err(ParseRefusal::Malformed { .. })),
+                "{row} must be refused, got {read:?}"
+            );
+        }
+
+        // The same fields on the event that does read them still cross.
+        let result = carried("tool_result", result_fields);
+        assert!(
+            WireEvent::read(result.as_bytes())
+                .expect("reads")
+                .into_event(&SERVED)
+                .expect("a result event reads a result")
+                .is_some(),
+            "{result} is the event those fields belong to"
+        );
+    }
 
     /// A ruling is a person's answer the host obtained itself for the
     /// offer one control call quotes, so it crosses on exactly that

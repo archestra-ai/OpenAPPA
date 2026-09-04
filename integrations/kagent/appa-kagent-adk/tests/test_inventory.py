@@ -93,6 +93,7 @@ def test_a_name_the_wire_cannot_spell_is_refused(server):
         pytest.param("demo-tools.kagent", id="the-service-and-namespace"),
         pytest.param("demo-tools.kagent.svc", id="the-svc-form"),
         pytest.param("demo-tools.kagent.svc.cluster.local", id="the-fully-qualified-form"),
+        pytest.param("demo-tools.kagent.svc.cluster.local.", id="the-absolute-form"),
         pytest.param("localhost", id="loopback-by-name"),
         pytest.param("127.0.0.1", id="loopback-by-address"),
     ],

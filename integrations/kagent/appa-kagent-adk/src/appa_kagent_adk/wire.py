@@ -35,8 +35,6 @@ PROTOCOL = 1
 ADAPTER = "kagent"
 """The adapter name every event carries."""
 
-_OUTCOME_STATUSES = ("success", "success_without_body", "failure", "indeterminate")
-
 
 def _envelope(kind: str) -> dict[str, Any]:
     return {"protocol": PROTOCOL, "adapter": ADAPTER, "event": kind}

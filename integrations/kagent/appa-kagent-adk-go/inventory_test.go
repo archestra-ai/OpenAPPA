@@ -119,6 +119,7 @@ func TestAnInClusterEndpointNamesItsToolset(t *testing.T) {
 		"demo-tools.kagent",
 		"demo-tools.kagent.svc",
 		"demo-tools.kagent.svc.cluster.local",
+		"demo-tools.kagent.svc.cluster.local.",
 		"localhost",
 		"127.0.0.1",
 	} {

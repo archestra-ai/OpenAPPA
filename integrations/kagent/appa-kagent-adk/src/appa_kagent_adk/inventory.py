@@ -327,12 +327,20 @@ class _Builder:
 
 
 def _host_of(url: str) -> str | None:
-    """The lowercased host of a server URL, or None where it carries none."""
+    """The lowercased host of a server URL, or None where it carries none.
+
+    A trailing dot is the absolute form of the same name — it names the
+    root of the DNS tree rather than a search domain — so it is dropped
+    and the two forms reach one policy identity.
+    """
     try:
         host = urlsplit(url).hostname
     except ValueError:
         return None
-    return host or None
+    if not host:
+        return None
+    relative = host[:-1] if host.endswith(".") else host
+    return relative or None
 
 
 def _toolset_of(host: str) -> str | None:
