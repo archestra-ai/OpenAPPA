@@ -99,11 +99,11 @@ To build images from source, see [`integrations/kagent/README.md`](https://githu
 
 ### 2. Deploy the demo stack
 
-Install the demo chart to deploy sample agents (`cluster-ops`, `log-analyst`, `appa-guide`) and 16 demonstration scenarios:
+Install the demo chart with your OpenRouter API key. It deploys sample agents (`cluster-ops`, `log-analyst`, `appa-guide`) and 16 demonstration scenarios:
 
 ```sh
 helm upgrade --install appa-kagent-demo ./integrations/kagent/demo/chart \
-  -n kagent --set openai.apiKey="$OPENAI_API_KEY" --wait
+  -n kagent --set openai.apiKey="$OPENROUTER_API_KEY" --wait
 ```
 
 The demo chart sets `APPA_ENABLED=true` on all demo agents.

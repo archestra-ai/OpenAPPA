@@ -135,10 +135,13 @@ expect 1 '^    name = "123__NS__123"$'
 expect 1 '^    name = "123__NS__null"$'
 
 # The model profile the policy's sanitizers consult. The defaults name
-# the demo model and bind no endpoint. One base url reaches both the
-# agents' ModelConfig and that profile.
+# the playground model and endpoint. One override reaches both the agents'
+# ModelConfig and that profile.
 must_render kagent
-expect 1 '^    model = "gpt-4.1-mini"$'
+expect 1 '^    model = "openai/gpt-5.6-luna"$'
+expect 1 '^    url = "https://openrouter.ai/api/v1"$'
+expect 1 '^    baseUrl: "https://openrouter.ai/api/v1"$'
+must_render kagent --set-string openai.baseUrl= --set-string llm.url=
 expect 0 '^    url = "https://openrouter.ai/api/v1"$'
 expect 0 '^    baseUrl: '
 must_render kagent --set-string openai.baseUrl=https://openrouter.ai/api/v1 \

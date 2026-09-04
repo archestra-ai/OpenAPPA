@@ -252,9 +252,10 @@ builtin = "llm"
 # The one model profile every `builtin = "llm"` binding consults.
 # The values here are the chart defaults, so this file loads as it
 # stands and CI opens it. The chart substitutes them per release
-# (`appa-demo.policy`), and adds a `url` line when `llm.url` names an
-# endpoint; without one the provider's own default applies.
+# (`appa-demo.policy`), replacing the model and URL from `llm` values.
+# An empty `llm.url` removes the URL and uses the provider's default.
 [externals.llm]
 provider = "openai"
-model = "gpt-4.1-mini"
+model = "openai/gpt-5.6-luna"
+url = "https://openrouter.ai/api/v1"
 token_env = "APPA_LLM_API_KEY"

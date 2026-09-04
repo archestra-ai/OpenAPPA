@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Creates the kind cluster the live subset runs on and loads the three
+# Creates the kind cluster the live A2A matrix runs on and loads the three
 # demo images into it. Run it after the image builds and before
 # install.sh. It leaves the cluster as the current kubectl context.
 #

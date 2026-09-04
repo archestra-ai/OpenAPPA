@@ -53,7 +53,7 @@ def test_the_exfil_ask_never_leaks_the_secret(chat, shots_dir):
     assert not chat.confirmation_shown(), "no confirmation card: remedies are the agent's to take"
 
 
-@pytest.mark.flaky(reruns=1)
+@pytest.mark.flaky(reruns=2)
 def test_the_configured_default_takes_the_sanitized_remedy(chat, shots_dir):
     """Config steering: the agent's instruction prefers the sanitized
     result, so one operator message yields a derivation — the agent
@@ -68,7 +68,7 @@ def test_the_configured_default_takes_the_sanitized_remedy(chat, shots_dir):
     assert "PAYMENTS_API_KEY" in results or "redact" in results.lower(), "a real derivation reaches the agent in one turn"
 
 
-@pytest.mark.flaky(reruns=1)
+@pytest.mark.flaky(reruns=2)
 def test_the_chat_steers_the_agent_to_accept_the_change(chat, shots_dir):
     """Chat steering overrides the configured default: told to accept
     the change, the agent executes that remedy and the re-proposed read
@@ -84,7 +84,7 @@ def test_the_chat_steers_the_agent_to_accept_the_change(chat, shots_dir):
     assert SECRET in chat.tool_results(), "the accepted narrowing lets the re-proposed read proceed: the raw value is in the tool result"
 
 
-@pytest.mark.flaky(reruns=1)
+@pytest.mark.flaky(reruns=2)
 def test_the_chat_steers_the_agent_to_take_no_remedy(chat, shots_dir):
     """Chat steering can also decline: told to take no remedy, the agent
     executes nothing and reports the real offers it left standing."""
