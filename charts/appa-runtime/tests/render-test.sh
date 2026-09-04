@@ -66,6 +66,8 @@ must_contain 'runAsUser: 101'
 must_contain 'checksum/policy:'
 must_contain 'name: APPA_CONFIG'
 must_contain 'value: "/etc/appa/appa.toml"'
+must_contain 'name: APPA_GUIDE_POD_NAME'
+must_contain 'name: APPA_GUIDE_POD_NAMESPACE'
 expect 2 '^          readinessProbe:$'
 expect 1 '^          livenessProbe:$'
 expect 1 '^          startupProbe:$'
@@ -118,8 +120,12 @@ if render --set env.APPA_CONFIG=/tmp/other; then
   echo "render accepted reserved APPA_CONFIG" >&2
   exit 1
 fi
-if ! grep -F -q 'env.APPA_BATTERIES_DIR and env.APPA_CONFIG are reserved' "$work/err"; then
+if ! grep -F -q 'APPA_GUIDE_POD_NAME' "$work/err"; then
   echo "reserved env refusal did not name the contract" >&2
+  exit 1
+fi
+if render --set env.APPA_GUIDE_POD_NAME=other; then
+  echo "render accepted reserved APPA_GUIDE_POD_NAME" >&2
   exit 1
 fi
 

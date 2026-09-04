@@ -44,21 +44,29 @@ class GuideRuntimeTests(unittest.TestCase):
             self.assertIn(b'{"supported": false}', output.getvalue())
 
     def test_command_annotation_separates_inspection_from_mutation(self) -> None:
-        def consult(command: str) -> dict:
+        def consult(command: str, pod_name: str = "appa-runtime-abc", namespace: str = "appa") -> dict:
             return {
                 "version": 1,
                 "kind": "annotation",
                 "name": "appa-guide-command",
-                "artifact": {"args": {"arguments": {"command": command}}},
+                "artifact": {
+                    "args": {
+                        "arguments": {"command": command, "pod_name": pod_name, "namespace": namespace}
+                    }
+                },
             }
 
-        inspected = guide.annotate_command(consult("appa-guide-inspect"))
-        self.assertEqual(inspected["answer"]["requires"]["attention"], [])
-        for command in guide.MUTATING_COMMANDS:
-            annotated = guide.annotate_command(consult(command))
-            self.assertEqual(annotated["answer"]["requires"]["attention"], ["human-approval"])
-        with self.assertRaisesRegex(ValueError, "not an appa-guide runtime operation"):
-            guide.annotate_command(consult("curl -s http://127.0.0.1/reload"))
+        identity = {"APPA_GUIDE_POD_NAME": "appa-runtime-abc", "APPA_GUIDE_POD_NAMESPACE": "appa"}
+        with mock.patch.dict(guide.os.environ, identity):
+            inspected = guide.annotate_command(consult("appa-guide-inspect"))
+            self.assertEqual(inspected["answer"]["requires"]["attention"], [])
+            for command in guide.MUTATING_COMMANDS:
+                annotated = guide.annotate_command(consult(command))
+                self.assertEqual(annotated["answer"]["requires"]["attention"], ["human-approval"])
+            with self.assertRaisesRegex(ValueError, "not this appa-runtime pod"):
+                guide.annotate_command(consult("appa-guide-inspect", pod_name="lookalike-pod"))
+            with self.assertRaisesRegex(ValueError, "not an appa-guide runtime operation"):
+                guide.annotate_command(consult("curl -s http://127.0.0.1/reload"))
 
     def test_inspection_reports_the_current_and_pending_release_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

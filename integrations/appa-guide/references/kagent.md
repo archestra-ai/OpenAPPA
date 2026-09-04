@@ -114,7 +114,9 @@ error.
    Otherwise, read the packaged `APPA_CONFIG` file through exec.
 4. In shared mode, read the policy ConfigMap. It is the source of truth.
    Never use its mounted file as source because kubelet syncs it later.
-5. If exec is available, invoke `appa-guide-inspect` in the runtime pod.
+5. In shared mode, invoke `appa-guide-inspect` only in the exact runtime
+   pod whose Service and labels you verified. The policy annotator binds
+   the command to that pod and namespace; another target fails closed.
    In a multi-container pod, the runtime container must be first because
    kagent 0.9.12 ignores the tool's `container` field. The command returns
    the mounted root config, `appa describe`, `GET /batteries`, and battery
@@ -124,7 +126,9 @@ error.
    disagree after the kubelet sync window, stop and report the mismatch.
    If the command is unavailable or no route answers, say the description
    and battery inventory are unavailable. Never treat them as empty and
-   never infer batteries from an image or release name.
+   never infer batteries from an image or release name. In bundled mode,
+   use the Agent's `APPA_CONFIG_CONTENTS`; do not exec the helper into the
+   Agent pod. Report its available battery inventory as unavailable.
    For this and every later `appa-guide-*` call, copy `pod_name` and
    `namespace` from the same fetched Pod YAML. Never combine a pod name
    with a namespace from an example, Helm release, or another runtime.

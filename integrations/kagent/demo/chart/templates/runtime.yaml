@@ -59,6 +59,14 @@ spec:
               {{- end }}
             - name: APPA_GUIDE_RUNTIME_URL
               value: http://127.0.0.1:18787
+            - name: APPA_GUIDE_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: APPA_GUIDE_POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
             - name: APPA_LLM_API_KEY
               valueFrom:
                 secretKeyRef:

@@ -83,6 +83,14 @@ def annotate_command(request: dict) -> dict:
     args = artifact.get("args") if isinstance(artifact, dict) else None
     arguments = args.get("arguments") if isinstance(args, dict) else None
     command = arguments.get("command") if isinstance(arguments, dict) else None
+    pod_name = arguments.get("pod_name") if isinstance(arguments, dict) else None
+    namespace = arguments.get("namespace") if isinstance(arguments, dict) else None
+    expected_pod = os.environ.get("APPA_GUIDE_POD_NAME")
+    expected_namespace = os.environ.get("APPA_GUIDE_POD_NAMESPACE")
+    if not expected_pod or not expected_namespace:
+        raise ValueError("runtime pod identity is not configured")
+    if pod_name != expected_pod or namespace != expected_namespace:
+        raise ValueError("command target is not this appa-runtime pod")
     if command == "appa-guide-inspect":
         attention = []
     elif command in MUTATING_COMMANDS:

@@ -159,8 +159,11 @@ fn only_the_shared_runtime_image_carries_battery_refresh_helpers() {
         );
     }
     assert!(shared.contains("refresh-check"));
+    assert!(shared.contains("command-annotator"));
     assert!(
-        !bundled.contains("refresh-check") && !bundled.contains("appa-refresh-batteries"),
+        !bundled.contains("refresh-check")
+            && !bundled.contains("appa-refresh-batteries")
+            && !bundled.contains("command-annotator"),
         "bundled batteries change only with the image"
     );
 }
