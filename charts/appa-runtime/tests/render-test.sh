@@ -1,0 +1,117 @@
+#!/bin/sh
+# Renders the shared runtime chart under the values its templates guard.
+# Needs helm on PATH and no cluster.
+set -eu
+
+chart=$(cd "$(dirname "$0")/.." && pwd)
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+render() {
+  helm template appa-runtime "$chart" --namespace appa "$@" >"$work/out" 2>"$work/err"
+}
+
+must_render() {
+  if ! render "$@"; then
+    echo "render failed: $*" >&2
+    cat "$work/err" >&2
+    exit 1
+  fi
+}
+
+count() {
+  grep -c -E -- "$1" "$work/out" || true
+}
+
+expect() {
+  found=$(count "$2")
+  if [ "$found" -ne "$1" ]; then
+    echo "expected $1 lines matching '$2', found $found" >&2
+    exit 1
+  fi
+}
+
+must_contain() {
+  if ! grep -F -q -- "$1" "$work/out"; then
+    echo "render missing '$1'" >&2
+    exit 1
+  fi
+}
+
+must_not_contain() {
+  if grep -F -q -- "$1" "$work/out"; then
+    echo "render has unexpected '$1'" >&2
+    exit 1
+  fi
+}
+
+must_render
+expect 1 '^kind: Deployment$'
+expect 1 '^kind: Service$'
+expect 1 '^kind: ServiceAccount$'
+must_contain 'image: ghcr.io/archestra-ai/appa-runtime:'
+must_contain 'nginx-unprivileged:1.27-alpine@sha256:65e3e85dbaed8ba248841d9d58a899b6197106c23cb0ff1a132b7bfe0547e4c0'
+must_contain '--batteries-dir'
+must_contain '/opt/appa/batteries'
+must_not_contain '/var/lib/appa/batteries'
+must_not_contain '/var/lib/appa/release-batteries'
+must_not_contain 'kind: PersistentVolumeClaim'
+must_not_contain 'kind: NetworkPolicy'
+must_contain 'emptyDir: {}'
+must_contain 'runAsNonRoot: true'
+must_contain 'runAsUser: 65532'
+must_contain 'readOnlyRootFilesystem: true'
+must_contain 'runAsUser: 101'
+must_contain 'checksum/policy:'
+must_contain 'name: APPA_CONFIG'
+must_contain 'value: "/etc/appa/appa.toml"'
+expect 2 '^          readinessProbe:$'
+expect 1 '^          livenessProbe:$'
+expect 1 '^          startupProbe:$'
+
+must_render --set persistence.enabled=true --set persistence.size=10Gi
+must_contain 'kind: PersistentVolumeClaim'
+must_contain '/var/lib/appa/batteries'
+must_contain '/var/lib/appa/release-batteries'
+must_contain 'name: recover-battery-refresh'
+must_contain '.release-batteries.previous'
+must_contain 'storage: "10Gi"'
+must_contain 'helm.sh/resource-policy: keep'
+must_contain 'claimName:'
+
+must_render --set persistence.enabled=true --set persistence.existingClaim=team-appa
+must_contain 'claimName: team-appa'
+must_not_contain 'kind: PersistentVolumeClaim'
+
+must_render --set config.existingConfigMap=my-policy --set config.key=policy.toml
+must_contain 'name: my-policy'
+must_contain '/etc/appa/policy.toml'
+must_not_contain 'name: appa-runtime-policy'
+must_not_contain 'checksum/policy:'
+
+printf '%s\n' 'include = ["batteries/slack/appa.toml"]' >"$work/policy.toml"
+must_render --set-file config.contents="$work/policy.toml"
+must_contain 'include = ["batteries/slack/appa.toml"]'
+
+must_contain 'busybox:1.37@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0'
+
+if render --set env.APPA_CONFIG=/tmp/other; then
+  echo "render accepted reserved APPA_CONFIG" >&2
+  exit 1
+fi
+if ! grep -F -q 'env.APPA_BATTERIES_DIR and env.APPA_CONFIG are reserved' "$work/err"; then
+  echo "reserved env refusal did not name the contract" >&2
+  exit 1
+fi
+
+if render --set networkPolicy.enabled=true; then
+  echo "render accepted an enabled NetworkPolicy without peers" >&2
+  exit 1
+fi
+must_render --set networkPolicy.enabled=true \
+  --set 'networkPolicy.ingress[0].podSelector.matchLabels.app=kagent-agent'
+must_contain 'kind: NetworkPolicy'
+must_contain 'app: kagent-agent'
+must_contain 'port: relay'
+
+echo "render-test: every case passed"

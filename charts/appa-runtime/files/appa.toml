@@ -1,0 +1,10 @@
+# Fail-closed shared runtime policy. A tool the policy does not name is
+# refused. The appa-guide skill adds batteries and root rules after
+# approval.
+
+[policy]
+version = 2
+
+[externals]
+timeout_ms = 5000
+max_body_bytes = 65536

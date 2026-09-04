@@ -61,6 +61,7 @@ jobs:
               - '.github/workflows/ci.yml'
             chart:
               - 'integrations/kagent/demo/chart/**'
+              - 'charts/appa-runtime/**'
               - '.github/workflows/ci.yml'
             integration: &integration
               - *python
@@ -95,6 +96,7 @@ jobs:
               # appa-runtime/src/plugin_layout.rs maps.
               - 'integrations/claude-code/**'
               - 'integrations/appa-guide/**'
+              - 'scripts/appa-refresh-batteries.py'
               # The root ignore file shapes the quickstart build context.
               - '.dockerignore'
 
@@ -161,6 +163,9 @@ jobs:
           for dir in $(dirname batteries/test_*.py batteries/*/test_*.py | sort -u); do
             python3 -m unittest discover -s "$dir" -p 'test_*.py'
           done
+
+      - name: Test release battery refresh
+        run: python3 -m unittest scripts/test_appa_refresh_batteries.py
 
       - name: Check release versions
         uses: ./.github/actions/check-release-versions
@@ -474,16 +479,22 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
-      - name: Lint the chart render script
-        run: shellcheck -s sh integrations/kagent/demo/chart/tests/render-test.sh
+      - name: Lint the chart render scripts
+        run: |
+          shellcheck -s sh integrations/kagent/demo/chart/tests/render-test.sh \
+            charts/appa-runtime/tests/render-test.sh
 
-      - name: Lint the demo chart
-        run: helm lint integrations/kagent/demo/chart
+      - name: Lint the charts
+        run: |
+          helm lint integrations/kagent/demo/chart
+          helm lint charts/appa-runtime
 
       # The name-collision refusal and the quoting of scalar-looking names
       # run only where something renders the chart, so this job does.
-      - name: Render the demo chart
-        run: sh integrations/kagent/demo/chart/tests/render-test.sh
+      - name: Render the charts
+        run: |
+          sh integrations/kagent/demo/chart/tests/render-test.sh
+          sh charts/appa-runtime/tests/render-test.sh
 
   # The deterministic A2A matrix: the real runtime, the real plugin, the real
   # kagent executor, mock externals and a scripted model. No cluster, no key.
@@ -602,6 +613,12 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
+      - name: Test the quickstart entrypoint
+        run: |
+          shellcheck -s bash integrations/kagent/appa-kagent-quickstart/entrypoint.sh
+          shellcheck -s sh integrations/kagent/appa-kagent-quickstart/test-entrypoint.sh
+          sh integrations/kagent/appa-kagent-quickstart/test-entrypoint.sh
+
       # These three builds read the cache the images job writes. They never
       # write it: two jobs writing one scope in one run overwrite each other.
       - name: Build the quickstart image
@@ -683,8 +700,8 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  # The five published images build here on every change that can break
-  # them. Publishing itself happens in release.yml.
+  # All six published images get an amd64 build here on every change
+  # that can break them. Publishing itself happens in release.yml.
   #
   # The quickstart image compiles the runtime in release mode with no cargo
   # cache inside the build, so the timeout allows a cold four-core build.
@@ -709,6 +726,43 @@ jobs:
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Build the shared runtime image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: appa-runtime/Dockerfile
+          tags: appa-runtime:ci
+          push: false
+          load: true
+          cache-from: type=gha,scope=appa-runtime
+          cache-to: type=gha,mode=min,scope=appa-runtime
+
+      - name: Smoke-test the shared runtime image
+        run: |
+          docker run --detach --name appa-runtime-ci \
+            --volume "$PWD/charts/appa-runtime/files/appa.toml:/etc/appa/appa.toml:ro" \
+            appa-runtime:ci
+          trap 'docker rm --force appa-runtime-ci >/dev/null 2>&1 || true' EXIT
+          healthy=false
+          for _ in $(seq 1 60); do
+            if docker exec appa-runtime-ci python3 -c \
+              'import urllib.request; urllib.request.urlopen("http://127.0.0.1:18787/health", timeout=2).read()'; then
+              healthy=true
+              break
+            fi
+            if [ "$(docker inspect --format '{{.State.Running}}' appa-runtime-ci)" != true ]; then
+              docker logs appa-runtime-ci
+              exit 1
+            fi
+            sleep 1
+          done
+          if [ "$healthy" != true ]; then
+            docker logs appa-runtime-ci
+            exit 1
+          fi
+          docker exec appa-runtime-ci python3 -c \
+            'import json, urllib.request; body=json.load(urllib.request.urlopen("http://127.0.0.1:18787/batteries", timeout=2)); assert any(item["name"] == "slack" for item in body["batteries"])'
 
       # One cache scope per image: a shared scope keeps only the last build.
       # The quickstart exports the final stage alone. Its builder stage
@@ -759,3 +813,50 @@ jobs:
           push: false
           cache-from: type=gha,scope=appa-demo-mocks
           cache-to: type=gha,mode=max,scope=appa-demo-mocks
+
+  # The two multi-platform release images also build on the same native
+  # arm64 runner type the release workflow uses. No first arm build waits
+  # until after a release tag exists.
+  shared-images-arm-build:
+    name: Shared Images Build (arm64)
+    needs: changes
+    if: needs.changes.outputs.e2e == 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+          sudo docker image prune --all --force
+          df -h /
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Build the shared runtime image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: appa-runtime/Dockerfile
+          platforms: linux/arm64
+          tags: appa-runtime:ci-arm64
+          push: false
+          cache-from: type=gha,scope=appa-runtime-arm64
+          cache-to: type=gha,mode=min,scope=appa-runtime-arm64
+
+      - name: Build the quickstart image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: integrations/kagent/appa-kagent-quickstart/Dockerfile
+          platforms: linux/arm64
+          tags: appa-kagent-quickstart:ci-arm64
+          push: false
+          cache-from: type=gha,scope=appa-kagent-quickstart-arm64
+          cache-to: type=gha,mode=min,scope=appa-kagent-quickstart-arm64

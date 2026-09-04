@@ -85,6 +85,14 @@
         },
         {
           "type": "generic",
+          "path": "charts/appa-runtime/Chart.yaml"
+        },
+        {
+          "type": "generic",
+          "path": "charts/appa-runtime/README.md"
+        },
+        {
+          "type": "generic",
           "path": "integrations/kagent/demo/chart/Chart.yaml"
         },
         {
