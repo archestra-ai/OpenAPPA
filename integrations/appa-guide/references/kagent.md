@@ -39,15 +39,20 @@ unavailable state is reported:
    namespace, and select a pod matching the Service selector. Never
    construct a pod name from a Helm release or Service name. Read the
    policy ConfigMap and invoke `appa-guide-inspect` in that runtime pod.
-5. Read only the MCP servers referenced by target Agents. Skip
-   `appa-guide` and servers used only by it. Fetch each by exact name and
-   namespace with `k8s_get_resource_yaml`; do not list every
-   `RemoteMCPServer`.
+5. List every `RemoteMCPServer` across all namespaces. Fetch each by
+   exact name and namespace with `k8s_get_resource_yaml`, then record its
+   discovered tools or unavailable state.
 6. Compare installed tools and delegations with the current policy and
    available batteries.
 7. Present the complete proposal format below. Do not say initialization
    is complete before an approved change is applied. If no change is
    needed, say so and do not offer a write or reload.
+
+Continue tool calls until this checklist is complete. Do not emit an
+intermediate response that promises the next inspection step. Never call
+an Agent ungated when its observed `APPA_ENABLED` is `true`. Distinguish
+batteries available from `/batteries` from batteries included by the
+current config.
 
 ### Read-only fallback
 
@@ -114,11 +119,10 @@ error.
    refuses the start. A gated agent reaches this policy only when its
    `APPA_RUNTIME_URL` names the runtime you found. One that names
    another runtime runs on that runtime's policy.
-3. Fetch only the `RemoteMCPServer` resources referenced by target
-   Agents. Do not load unrelated servers or the servers used only by
-   `appa-guide`. Each `status.discoveredTools` entry is one tool: its
-   exact wire name and description. A server with no discovered tools
-   is uninspected — never invent its tool list.
+3. List every `RemoteMCPServer` across all namespaces, then fetch each
+   resource by exact name and namespace. Each `status.discoveredTools`
+   entry is one tool: its exact wire name and description. A server with
+   no discovered tools is uninspected — never invent its tool list.
 4. Cross-check. A `toolNames` entry no server discovered has a name but
    no description; if its boundary is unclear, it belongs in the one
    ambiguity question below.
@@ -133,9 +137,11 @@ error.
 
 ## Find useful batteries
 
-Match a battery to installed tools by the `tools` list from
-`GET /batteries`, not by directory name. A match is an exact listed tool
-name or its last `__` segment before any `(` argument suffix. That value
+Match a battery to tools discovered from every MCP server, including a
+server not yet attached to an Agent. Also match Agent tools and
+delegations. Use the battery `tools` list from `GET /batteries`, not its
+directory name. A match is an exact listed tool name or its last `__`
+segment before any `(` argument suffix. That value
 must equal the installed name. Propose the intersection only. Do not
 propose a battery with no match.
 

@@ -295,6 +295,7 @@ spec:
       continue. Inventory Agents across all namespaces. This Agent runs in kagent;
       derive each runtime namespace from APPA_RUNTIME_URL. Resolve runtime pods
       through the Service selector; never infer pod names from Helm release names.
+      Do not respond until the full init checklist and comparison are complete.
     modelConfig: "default-model-config"
     tools:
       - type: McpServer

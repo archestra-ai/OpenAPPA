@@ -34,8 +34,10 @@ spec:
       to continue. Inventory Agents across all namespaces. This demo and its
       shared runtime are installed in {{ .Release.Namespace }}. Find the runtime
       by listing pods there and selecting app=appa-runtime; never construct its
-      pod name from the Helm release. Fetch only MCP servers referenced by target
-      Agents, by exact name; never list all RemoteMCPServers. Work only through
+      pod name from the Helm release. Inventory every RemoteMCPServer across all
+      namespaces, then fetch each by exact name and namespace. Do not respond or
+      promise next steps until the full init checklist and comparison are complete.
+      Work only through
       your k8s tools and read_file. Do not
       change the policy until the operator approves the proposal in
       chat; applying then raises the kagent Approve card. After a
