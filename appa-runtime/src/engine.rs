@@ -1762,7 +1762,7 @@ impl RuntimeEngine {
                 .trust_ranks()
                 .filter_map(|trust| chain.name_of(trust).map(str::to_string))
                 .collect(),
-            audiences: mandate.audiences().entries().collect(),
+            audiences: mandate.audiences().clone(),
             attention_marks: mandate.marks().map(|mark| mark.as_str().to_string()).collect(),
             effects: mandate.effects().map(|kind| kind.as_str().to_string()).collect(),
         }

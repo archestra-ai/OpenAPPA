@@ -1012,11 +1012,11 @@ mod tests {
                     hint: Some("Classify customer records for the declared audiences.".to_string()),
                     inputs: vec![],
                     trust_ranks: vec!["suspicious".to_string(), "trusted".to_string()],
-                    audiences: vec![
-                        "public".to_string(),
+                    audiences: appa_engine::registry::AudienceVocabulary::parse_entries(&[
                         "bob@example.com".to_string(),
                         "ops@example.com".to_string(),
-                    ],
+                    ])
+                    .expect("a fixture vocabulary parses"),
                     attention_marks: vec!["privacy-review".to_string(), "review".to_string()],
                     effects: vec!["email".to_string()],
                 },

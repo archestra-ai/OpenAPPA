@@ -230,6 +230,26 @@ audiences = ["alice@northwind.example"]
         load_scenario(root)
 
 
+@pytest.mark.parametrize("audiences", ['[1]', '"alice@northwind.example"'])
+def test_a_malformed_audience_mandate_is_a_scenario_error(tmp_path: Path, audiences: str) -> None:
+    root = _write_scenario(tmp_path / "malformed-mandate", _with_policy_profile(_MINIMAL))
+    profile_root = root / "policy"
+    profile_root.mkdir()
+    (profile_root / "appa.toml").write_text(
+        f"""version = 1
+
+[[policy.annotator]]
+name = "document-acl"
+inputs = {{ subject = "$tool_call.arguments.file" }}
+audiences = {audiences}
+"""
+    )
+    (profile_root / "fides.json").write_text("{}\n")
+
+    with pytest.raises(ScenarioError, match="array of strings"):
+        load_scenario(root)
+
+
 def test_a_mandate_and_an_answer_meet_in_the_readers_canonical_spelling(tmp_path: Path) -> None:
     manifest = (
         _with_policy_profile(_MINIMAL)

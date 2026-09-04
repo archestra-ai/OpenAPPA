@@ -196,11 +196,18 @@ def _mandate_bound(declaration: dict, key: str) -> frozenset[str] | None:
     return None if values is None else frozenset(values)
 
 
-def _audience_bound(declaration: dict) -> frozenset[str] | None:
+def _audience_bound(declaration: dict, name: str) -> frozenset[str] | None:
     """The written `audiences` bound in the spellings the runtime's declaration exposes: a
     literal reader canonical, a chain word or `@` mention as written."""
-    values = declaration.get("audiences")
-    return None if values is None else frozenset(_canonical_reader(value) for value in values)
+    match declaration.get("audiences"):
+        case None:
+            return None
+        case list() as entries if all(isinstance(entry, str) for entry in entries):
+            return frozenset(_canonical_reader(entry) for entry in entries)
+        case _:
+            raise ScenarioError(
+                f"{name}: annotator {declaration.get('name')!r} audiences must be an array of strings"
+            )
 
 
 def _canonical_reader(entry: str) -> str:
@@ -246,7 +253,7 @@ def _declared_annotators(name: str, policy: Path) -> dict[str, DeclaredAnnotator
             inputs=frozenset(inputs),
             # An unbounded rank mandate still stays inside the policy's trust chain.
             ranks=ranks if declared_ranks is None else declared_ranks,
-            audiences=_audience_bound(declaration),
+            audiences=_audience_bound(declaration, name),
             marks=_mandate_bound(declaration, "marks"),
             effects=_mandate_bound(declaration, "effects"),
         )

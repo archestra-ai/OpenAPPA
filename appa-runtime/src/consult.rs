@@ -407,7 +407,8 @@ pub struct AnnotationDeclaration {
     pub hint: Option<String>,
     pub inputs: Vec<String>,
     pub trust_ranks: Vec<String>,
-    pub audiences: Vec<String>,
+    /// The mandate's audience vocabulary; its entry list on the wire.
+    pub audiences: AudienceVocabulary,
     pub attention_marks: Vec<String>,
     pub effects: Vec<String>,
 }
@@ -448,15 +449,13 @@ struct RequiredAudienceWire {
 fn declared_audience(audience: &WireAudience, declaration: &AnnotationDeclaration) -> Option<DeclaredAudience> {
     match audience {
         WireAudience::Public => Some(DeclaredAudience::Public),
-        WireAudience::Entries(entries) => {
-            let mandate = AudienceVocabulary::parse_entries(&declaration.audiences).ok()?;
-            match DeclaredAudience::parse_entries(entries).ok()? {
-                DeclaredAudience::Public => None,
-                DeclaredAudience::Union(clause) => mandate
-                    .permits_clause(&clause)
-                    .then_some(DeclaredAudience::Union(clause)),
-            }
-        }
+        WireAudience::Entries(entries) => match DeclaredAudience::parse_entries(entries).ok()? {
+            DeclaredAudience::Public => None,
+            DeclaredAudience::Union(clause) => declaration
+                .audiences
+                .permits_clause(&clause)
+                .then_some(DeclaredAudience::Union(clause)),
+        },
     }
 }
 
@@ -799,7 +798,7 @@ fn dynamic_audience_schema(audiences: &[String]) -> serde_json::Value {
 /// it as written. A shape that needs a rank is offered only when the mandate names one.
 fn annotation_schema(declaration: &AnnotationDeclaration) -> serde_json::Value {
     let trust = closed_enum(&declaration.trust_ranks);
-    let audience = dynamic_audience_schema(&declaration.audiences);
+    let audience = dynamic_audience_schema(&declaration.audiences.entries().collect::<Vec<_>>());
     let effect = array_items(&declaration.effects);
     let object = |pairs: &[(&str, &serde_json::Value)]| {
         serde_json::json!({
@@ -864,6 +863,11 @@ mod tests {
 
     fn chain() -> TrustChain {
         TrustChain::new(vec!["suspicious".to_string(), "trusted".to_string()])
+    }
+
+    fn vocabulary(entries: &[&str]) -> AudienceVocabulary {
+        AudienceVocabulary::parse_entries(&entries.iter().map(|entry| entry.to_string()).collect::<Vec<_>>())
+            .expect("a fixture vocabulary parses")
     }
 
     #[test]
@@ -1057,12 +1061,7 @@ mod tests {
             hint: Some("Treat audit as reviewed internal data.".to_string()),
             inputs: vec![],
             trust_ranks: vec!["suspicious".to_string(), "trusted".to_string()],
-            audiences: vec![
-                "internal".to_string(),
-                "@eng".to_string(),
-                "audit".to_string(),
-                "support".to_string(),
-            ],
+            audiences: vocabulary(&["internal", "@eng", "audit", "support"]),
             attention_marks: vec!["review".to_string()],
             effects: vec!["network".to_string(), "disclosure".to_string()],
         }
@@ -1288,7 +1287,7 @@ mod tests {
         );
 
         let with_reader = AnnotationDeclaration {
-            audiences: vec!["alice@corp.example".to_string()],
+            audiences: vocabulary(&["alice@corp.example"]),
             ..annotation_declaration()
         };
         assert_eq!(
@@ -1304,7 +1303,7 @@ mod tests {
         );
 
         let both_chain_words = AnnotationDeclaration {
-            audiences: vec!["self".to_string(), "internal".to_string()],
+            audiences: vocabulary(&["self", "internal"]),
             ..annotation_declaration()
         };
         assert_eq!(
@@ -1357,7 +1356,7 @@ mod tests {
         // A closed mandate offers `public` and no array at all: nothing the schema admits is
         // a value the decoder refuses.
         let closed = annotation_schema(&AnnotationDeclaration {
-            audiences: vec![],
+            audiences: AudienceVocabulary::default(),
             ..annotation_declaration()
         });
         assert!(jsonschema::is_valid(
@@ -1505,7 +1504,7 @@ mod tests {
             hint: None,
             inputs: vec![],
             trust_ranks: vec![],
-            audiences: vec![],
+            audiences: AudienceVocabulary::default(),
             attention_marks: vec![],
             effects: vec![],
         };
@@ -1571,7 +1570,7 @@ mod tests {
     fn full_vocabulary(declaration: &AnnotationDeclaration) -> Vec<String> {
         ["public".to_string()]
             .into_iter()
-            .chain(declaration.audiences.iter().cloned())
+            .chain(declaration.audiences.entries())
             .chain(declaration.attention_marks.iter().cloned())
             .chain(declaration.effects.iter().cloned())
             .collect()
