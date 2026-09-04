@@ -265,8 +265,11 @@ struct ReportRequestBody {
 
 /// One finished `openappa.yell.v1` document.
 ///
-/// The listener is loopback-only, which is the whole of this endpoint's access control: what
-/// it answers still leaves the machine only when a person chooses to send it.
+/// The listener is loopback-only, and that is the whole of this endpoint's access control —
+/// the same boundary `/reload` and `/mcp` already stand behind. Be exact about what it is
+/// worth: it separates this machine from the network, not one local process from another. A
+/// process that can reach this port can read the recently active trajectory. What it answers
+/// still leaves the machine only when a person chooses to send it.
 async fn report(
     State(state): State<AppState>,
     body: Result<axum::Json<ReportRequestBody>, axum::extract::rejection::JsonRejection>,
@@ -284,8 +287,10 @@ async fn report(
             true => crate::yell::Mode::Pseudonymized,
             false => crate::yell::Mode::Baseline,
         },
-        // A caller here names no trajectory. It gets the one that was recently active, or
-        // nothing — so a process on this machine cannot ask for a session it was not part of.
+        // A caller here names no trajectory: it gets whichever one was recently active, or
+        // nothing. That narrows the endpoint — no session can be asked for by name — without
+        // making it a per-caller boundary. The recently active trajectory may well belong to
+        // someone else's session on this machine, and loopback is the only thing between them.
         selection: None,
         harness: state.adapter,
     };

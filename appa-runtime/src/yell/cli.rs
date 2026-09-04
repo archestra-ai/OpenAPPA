@@ -104,9 +104,7 @@ async fn yell(url: &str, yes: bool, message: YellMessage, mode: Mode) -> ExitCod
 /// environment says; and a redirect is not followed, because a redirect is another
 /// destination.
 async fn build(url: &str, message: &YellMessage, mode: Mode) -> Result<Finished, UnreachableClass> {
-    if !is_loopback(url) {
-        return Err(UnreachableClass::NotLoopback);
-    }
+    let endpoint = runtime_report_url(url).ok_or(UnreachableClass::NotLoopback)?;
     let client = reqwest::Client::builder()
         .timeout(BUILD_TIMEOUT)
         .no_proxy()
@@ -114,7 +112,7 @@ async fn build(url: &str, message: &YellMessage, mode: Mode) -> Result<Finished,
         .build()
         .map_err(|_| UnreachableClass::NotListening)?;
     let answer = client
-        .post(format!("{}/report", url.trim_end_matches('/')))
+        .post(endpoint)
         .json(&serde_json::json!({
             "message": message,
             "pseudonymize": mode == Mode::Pseudonymized,
@@ -140,27 +138,31 @@ async fn build(url: &str, message: &YellMessage, mode: Mode) -> Result<Finished,
         .ok_or(UnreachableClass::NotARuntime)
 }
 
-/// Whether the answer is the document this build knows how to send.
+/// Whether the answer claims to be the document this build knows how to send.
+///
+/// A discriminator, not an identity check: it separates the runtime from whatever else may be
+/// listening on that port, and nothing here proves the answer came from a runtime.
 fn is_a_report(plain: &[u8]) -> bool {
     serde_json::from_slice::<serde_json::Value>(plain).is_ok_and(|document| document["schema"] == super::report::SCHEMA)
 }
 
-/// `http://<loopback literal>[:port]`, with no path, credentials or host name.
+/// `<url>/report`, when `url` is `http://<loopback literal>[:port]` and nothing else.
 ///
-/// A name is refused rather than resolved: `localhost` is whatever the resolver says today, and
-/// what this posts is a person's unreviewed words.
-fn is_loopback(url: &str) -> bool {
-    let Some(authority) = url.trim_end_matches('/').strip_prefix("http://") else {
-        return false;
-    };
-    if authority.contains('/') || authority.contains('@') {
-        return false;
-    }
-    match authority.parse::<std::net::SocketAddr>() {
-        Ok(address) => address.ip().is_loopback(),
-        Err(_) => authority
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|address| address.is_loopback()),
+/// A host *name* is refused rather than resolved: `localhost` is whatever the resolver says
+/// today, and what this posts is a person's unreviewed words. Credentials, a path, a query and
+/// a fragment are all refused too — the runtime's own flag has none of them, so a URL carrying
+/// one was written by something other than this deployment.
+fn runtime_report_url(url: &str) -> Option<reqwest::Url> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    let plain_loopback = parsed.scheme() == "http" && client::is_loopback(&parsed);
+    let bare = parsed.username().is_empty()
+        && parsed.password().is_none()
+        && parsed.query().is_none()
+        && parsed.fragment().is_none()
+        && matches!(parsed.path(), "" | "/");
+    match plain_loopback && bare {
+        true => parsed.join("report").ok(),
+        false => None,
     }
 }
 
@@ -266,18 +268,22 @@ mod tests {
             "http://[::1]:8787",
             "http://127.0.0.1",
         ] {
-            assert!(is_loopback(reachable), "{reachable} is this machine");
+            let endpoint = runtime_report_url(reachable).unwrap_or_else(|| panic!("{reachable} is this machine"));
+            assert_eq!(endpoint.path(), "/report");
+            assert!(client::is_loopback(&endpoint));
         }
         for refused in [
             "http://localhost:8787",
             "https://127.0.0.1:8787",
             "http://10.0.0.1:8787",
+            "http://user@127.0.0.1:8787/",
             "http://127.0.0.1@evil.example/",
             "http://evil.example/127.0.0.1",
+            "http://127.0.0.1:8787/somewhere",
             "127.0.0.1:8787",
             "",
         ] {
-            assert!(!is_loopback(refused), "{refused} is not this machine");
+            assert!(runtime_report_url(refused).is_none(), "{refused} is not this machine");
         }
     }
 

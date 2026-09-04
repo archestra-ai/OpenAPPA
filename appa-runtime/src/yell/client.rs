@@ -26,46 +26,64 @@ const ENDPOINT: &str = match option_env!("APPA_YELL_ENDPOINT") {
 
 /// One place a report may be sent, resolved before the person is asked to approve sending.
 ///
-/// A newtype rather than a string because the consent question has to name it: "share this
-/// with the OpenAPPA team" is a lie if an environment variable has quietly pointed the sender
-/// somewhere else, so the prompt prints what this holds and nothing sends without it.
+/// Parsed rather than kept as a string, because the consent question has to name it and the
+/// name has to be the destination: `https://approved.example@evil.example/` displays as one
+/// host and connects to another. A URL that carries credentials is refused outright — a
+/// receiver needs none — so what the prompt prints is what the request reaches.
+///
+/// The two variants are not decoration. A proxy between here and a real receiver is a normal
+/// way to reach the internet and is honoured; a proxy between here and this same machine is
+/// never right, and would relay a report that was only ever meant to cross a socket.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Receiver(String);
+pub(crate) enum Receiver {
+    /// A real receiver, always over TLS.
+    Secure(reqwest::Url),
+    /// A receiver on this machine, in the clear. This is how a test points at a local one.
+    Loopback(reqwest::Url),
+}
 
 impl Receiver {
     /// The receiver this run will use, or `None` when there is none to use.
     ///
-    /// `APPA_YELL_ENDPOINT` overrides the compiled destination, which is how the tests point at
-    /// a local receiver. It is not a hole in consent: the person is shown whatever it resolves
-    /// to before answering. Plaintext is refused unless it is loopback, so an override cannot
-    /// downgrade a real send to `http://`.
+    /// `APPA_YELL_ENDPOINT` overrides the compiled destination. It is not a hole in consent:
+    /// the person is shown whatever it resolves to before answering. Plaintext is refused
+    /// unless it is this machine, so an override cannot downgrade a real send to `http://`.
     pub(crate) fn resolve() -> Option<Self> {
         let named = std::env::var("APPA_YELL_ENDPOINT").unwrap_or_else(|_| ENDPOINT.to_owned());
-        match named.is_empty() || !Self::is_addressable(&named) {
-            true => None,
-            false => Some(Self(named)),
+        Self::parse(&named)
+    }
+
+    /// HTTPS anywhere, or plain HTTP only to this machine, and credentials nowhere.
+    fn parse(url: &str) -> Option<Self> {
+        let parsed = reqwest::Url::parse(url).ok()?;
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            return None;
+        }
+        match parsed.scheme() {
+            "https" => Some(Self::Secure(parsed)),
+            "http" if is_loopback(&parsed) => Some(Self::Loopback(parsed)),
+            _ => None,
         }
     }
 
-    /// HTTPS anywhere, or plain HTTP only to this machine.
-    fn is_addressable(url: &str) -> bool {
-        if url.starts_with("https://") {
-            return true;
-        }
-        let Some(rest) = url.strip_prefix("http://") else {
-            return false;
-        };
-        let authority = rest.split('/').next().unwrap_or_default();
-        match authority.parse::<std::net::SocketAddr>() {
-            Ok(address) => address.ip().is_loopback(),
-            Err(_) => authority
-                .parse::<std::net::IpAddr>()
-                .is_ok_and(|address| address.is_loopback()),
+    fn url(&self) -> &reqwest::Url {
+        match self {
+            Self::Secure(url) | Self::Loopback(url) => url,
         }
     }
 
     pub(crate) fn as_str(&self) -> &str {
-        &self.0
+        self.url().as_str()
+    }
+}
+
+/// Whether a parsed URL names this machine by address. A host *name* is not loopback here,
+/// whatever a resolver would say about it today.
+pub(crate) fn is_loopback(url: &reqwest::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        _ => false,
     }
 }
 
@@ -110,14 +128,20 @@ pub(crate) async fn send(finished: &Finished, receiver: &Receiver) -> Result<Rec
     let client = reqwest::Client::builder()
         .timeout(ATTEMPT_TIMEOUT)
         // A redirect is another destination, and the person approved this one.
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|_| SendFailure::Unreachable { attempts: 0 })?;
+        .redirect(reqwest::redirect::Policy::none());
+    let client = match receiver {
+        // Reaching a real receiver through a proxy is how many machines reach anything.
+        Receiver::Secure(_) => client,
+        // Reaching *this machine* through a proxy is never right, and would relay a report
+        // that was only ever meant to cross a socket.
+        Receiver::Loopback(_) => client.no_proxy(),
+    };
+    let client = client.build().map_err(|_| SendFailure::Unreachable { attempts: 0 })?;
 
     let mut attempt = 0;
     loop {
         let answer = client
-            .post(receiver.as_str())
+            .post(receiver.url().clone())
             .header("Content-Type", "application/json")
             .header("Content-Encoding", "gzip")
             .header("X-Appa-Signature", &signature)
@@ -212,14 +236,18 @@ mod tests {
     /// a test can point at a local receiver, and it cannot downgrade a real send to plaintext.
     #[test]
     fn a_receiver_is_https_or_it_is_this_machine() {
-        for reachable in [
-            "https://yell.example.run.app",
-            "https://yell.example.run.app/report",
-            "http://127.0.0.1:9099/report",
-            "http://[::1]:9099",
-        ] {
-            assert!(Receiver::is_addressable(reachable), "{reachable}");
-        }
+        assert!(matches!(
+            Receiver::parse("https://yell.example.run.app/report"),
+            Some(Receiver::Secure(_))
+        ));
+        assert!(matches!(
+            Receiver::parse("http://127.0.0.1:9099/report"),
+            Some(Receiver::Loopback(_))
+        ));
+        assert!(matches!(
+            Receiver::parse("http://[::1]:9099"),
+            Some(Receiver::Loopback(_))
+        ));
         for refused in [
             "http://yell.example.run.app",
             "http://localhost:9099",
@@ -227,7 +255,20 @@ mod tests {
             "yell.example.run.app",
             "",
         ] {
-            assert!(!Receiver::is_addressable(refused), "{refused}");
+            assert_eq!(Receiver::parse(refused), None, "{refused}");
+        }
+    }
+
+    /// A URL that displays as one host and connects to another is not a destination anyone can
+    /// consent to, so it is not a receiver at all.
+    #[test]
+    fn a_receiver_carries_no_credentials() {
+        for refused in [
+            "https://approved.example@evil.example/report",
+            "https://user:secret@yell.example.run.app/report",
+            "http://user@127.0.0.1:9099/report",
+        ] {
+            assert_eq!(Receiver::parse(refused), None, "{refused}");
         }
     }
 }
