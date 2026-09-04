@@ -184,6 +184,12 @@ class AppaPluginKagent(BasePlugin):
         self._return_tool = _return_gate_tool(self)
 
     async def close(self) -> None:
+        # ADK 1.x has no run-error callback. A failed runner can close
+        # after an admitted call without reaching either result gate or
+        # after_run, so its abandoned local leases end here. The next
+        # prompt lets the runtime close the abandoned dispatch.
+        for invocation_id in {lease[0] for lease in self._dispatch_leases}:
+            self._close_run(invocation_id)
         await self._client.aclose()
 
     # -- transport ----------------------------------------------------

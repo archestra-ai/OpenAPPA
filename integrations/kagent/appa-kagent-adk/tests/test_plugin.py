@@ -711,6 +711,24 @@ async def test_the_plugin_survives_a_runner_closing_it_between_requests():
     assert len(hook.events) == 2, "both requests crossed the gate"
 
 
+async def test_runner_close_releases_an_abandoned_stable_adk_dispatch():
+    hook = Hook(ALLOW, ALLOW, ACK)
+    plugin = plugin_over(hook)
+    session = FakeSession("s1")
+    abandoned = dispatch(session, "fc-1", invocation_id="i1")
+    later = dispatch(session, "fc-2", invocation_id="i2")
+
+    await plugin.before_tool_callback(tool=FakeTool("first"), tool_args={}, tool_context=abandoned)
+    await plugin.close()
+    assert await plugin.before_tool_callback(tool=FakeTool("second"), tool_args={}, tool_context=later) is None
+    await plugin.after_tool_callback(tool=FakeTool("second"), tool_args={}, tool_context=later, result={})
+    assert [(event["event"], event.get("tool")) for event in hook.events] == [
+        ("tool_call", "first"),
+        ("tool_call", "second"),
+        ("tool_result", "second"),
+    ]
+
+
 # -- the installed ADK ------------------------------------------------
 
 
