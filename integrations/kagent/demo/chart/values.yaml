@@ -108,7 +108,7 @@ agents:
   # last path segment becomes `golang-adk` — so it needs that image
   # beside appa-kagent-quickstart (the chart README shows the build).
   go:
-    enabled: true
+    enabled: false
     name: cluster-ops-go
     # Its delegated child on the go runtime too, so the fork's child side
     # is exercised on the go plugin as well.

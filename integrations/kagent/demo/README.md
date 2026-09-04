@@ -3,11 +3,13 @@
 The demo is a Helm chart, [chart/](chart/). It installs a gated
 `cluster-ops` fleet with a delegated `log-analyst` and a
 `release-manager` the policy never names, so every delegation to it is
-denied. It also installs the go twins of all three (`cluster-ops-go`,
-`log-analyst-go`, `release-manager-go`). The shared `appa-runtime` runs
+denied. Optional Go twins (`cluster-ops-go`, `log-analyst-go`, and
+`release-manager-go`) are disabled by default. The shared `appa-runtime` runs
 in one pod with its relay and mock externals. The chart adds the demo
 tools and pre-seeds every demo case as a real chat in the kagent
 dashboard.
+
+The commands below require Helm 4 because upgrades reclaim chart-owned fields with server-side apply.
 
 Install it into any cluster that runs kagent 0.9.12 on the OpenAPPA
 runtime image. Two inputs are yours: the images ([chart/README.md](chart/README.md)) and the model key. Install
@@ -35,6 +37,7 @@ helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --set cilium-policy-agent.enabled=false \
   --set cilium-manager-agent.enabled=false \
   --set cilium-debug-agent.enabled=false \
+  --force-conflicts \
   --wait --timeout 10m \
   --set controller.agentImage.tag=0.9.0 # x-release-please-version
 
@@ -44,6 +47,8 @@ helm upgrade --install appa-kagent-demo \
   "https://github.com/archestra-ai/OpenAPPA/releases/download/v${APPA_VERSION}/appa-kagent-demo-${APPA_VERSION}.tgz" \
   -n kagent \
   --set-string openai.apiKey="$OPENAI_API_KEY" \
+  --set agents.go.enabled=false \
+  --force-conflicts \
   --wait --timeout 10m
 kubectl -n kagent port-forward svc/kagent-ui 8901:8080
 ```

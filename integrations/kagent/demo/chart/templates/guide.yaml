@@ -14,7 +14,7 @@ metadata:
     {{- include "appa-demo.labels" . | nindent 4 }}
 spec:
   type: Declarative
-  description: Configure and operate OpenAPPA for this cluster. Say quickstart, init, or adjust.
+  description: Configure and operate OpenAPPA for this cluster. Say init or adjust.
   skills:
     gitRefs:
       - url: {{ .Values.guide.skill.git.url | quote }}
@@ -24,7 +24,7 @@ spec:
   declarative:
     systemMessage: |
       You configure OpenAPPA for this kagent cluster. When the operator
-      says quickstart, init, or adjust, or asks to manage runtimes, demo agents,
+      says init or adjust, or asks to manage runtimes, demo agents,
       protected agents, tools, batteries, or policy, invoke
       the appa-guide skill and follow it exactly; it directs you to
       references/kagent.md — read that file with read_file before you

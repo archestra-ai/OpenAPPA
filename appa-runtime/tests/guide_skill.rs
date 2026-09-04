@@ -32,7 +32,7 @@ fn the_router_routes_by_host_and_carries_the_shared_rules() {
         router.contains("Do not call `Read`"),
         "Claude bootstraps without a gated tool call"
     );
-    assert!(router.contains("`quickstart`") && router.contains("`init`") && router.contains("`adjust`"));
+    assert!(router.contains("`init`") && router.contains("`adjust`"));
     for shared in [
         "Never edit a battery",
         "OpenAPPA pieces",
@@ -86,8 +86,6 @@ fn the_kagent_reference_carries_the_full_flow() {
         "kubelet syncs",
         "Read-only fallback",
         "Approve, or tell me what to change.",
-        "## Quickstart",
-        "one concrete next action",
         "## Cluster operations",
         "helm_upgrade",
         "Protect all Agents",
@@ -127,7 +125,7 @@ fn the_kagent_chart_consumes_this_skill_package() {
     let policy = fs::read_to_string(chart.join("files/demo.appa.toml")).expect("the demo policy exists");
     assert!(policy.contains("name = \"k8s_apply_manifest\""));
     assert!(policy.contains("attention = [\"human-approval\"]"));
-    assert!(policy.contains("name = \"appa-guide\""));
+    assert!(policy.contains("name = \"skills\""));
     assert!(
         !policy.contains("name = \"bash\""),
         "the unused skill helpers stay undeclared"
