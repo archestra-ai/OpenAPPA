@@ -532,7 +532,8 @@ jobs:
       - name: Log in to the chart registry
         env:
           REGISTRY_TOKEN: ${{ github.token }}
-        run: echo "$REGISTRY_TOKEN" | helm registry login ghcr.io --username "${{ github.actor }}" --password-stdin
+          REGISTRY_USERNAME: ${{ github.actor }}
+        run: echo "$REGISTRY_TOKEN" | helm registry login ghcr.io --username "$REGISTRY_USERNAME" --password-stdin
 
       - name: Publish the chart
         env:
