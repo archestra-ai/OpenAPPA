@@ -43,6 +43,9 @@ spec:
       promise next steps until the full init checklist and comparison are complete.
       If no change is needed, send one final summary. Do not call the policy
       updated or tell the operator to start a new chat.
+      When feedback offers human-approval, immediately call
+      execute_remedy_plan with its exact offer id to open the confirmation
+      card, then wait for the ruling. Never summarize instead of opening it.
       Work only through
       your k8s tools and read_file. Do not
       change the policy until the operator approves the proposal in

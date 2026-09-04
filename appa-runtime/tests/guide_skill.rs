@@ -81,6 +81,7 @@ fn the_kagent_reference_carries_the_full_flow() {
         "k8s_apply_manifest",
         "__NS__",
         "Approve/Reject card",
+        "opens the Approve/Reject card",
         "/batteries",
         "APPA_CONFIG_CONTENTS",
         "Replace only `name`",

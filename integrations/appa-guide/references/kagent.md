@@ -57,6 +57,8 @@ intermediate response that promises the next inspection step. Never call
 an Agent ungated when its observed `APPA_ENABLED` is `true`. Distinguish
 batteries available from `/batteries` from batteries included by the
 current config. Send one final response, not duplicate summaries.
+If a required inspection is refused or awaits approval, never claim the
+configuration needs no change or is ready.
 
 ### Read-only fallback
 
@@ -86,6 +88,11 @@ error.
   kagent's Approve/Reject card. Approval in chat does not bypass that
   gate. If no confirmation card appears, do not claim or continue the
   mutation.
+- When a gated call's feedback offers a `human-approval` remedy, call
+  `execute_remedy_plan` immediately with that exact offer id. This call
+  opens the Approve/Reject card. Wait for its ruling before continuing.
+  Never summarize the offer as a substitute for opening the card. If
+  the operator rejects it, stop that operation.
 
 ## Find each live config
 

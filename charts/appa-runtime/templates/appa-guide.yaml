@@ -33,7 +33,9 @@ spec:
       a time. Do not respond until the full init checklist and comparison are
       complete. If no change is needed, send one final summary; do not call the
       policy updated or tell the operator to start a new chat. Work only through
-      your k8s tools and read_file. Do not change
+      your k8s tools and read_file. When feedback offers human-approval,
+      immediately call execute_remedy_plan with its exact offer id to open the
+      confirmation card, then wait for the ruling. Do not change
       policy until the operator approves the proposal in chat. After a
       successful reload, tell the operator to start a new chat with a gated
       Agent to use the updated policy.
