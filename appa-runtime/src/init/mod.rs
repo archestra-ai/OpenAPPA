@@ -24,7 +24,8 @@ use self::claude::{
     prepare_plugin_recovery, replace_plugin, run_claude, start_runtime, undo_plugin_switch,
 };
 use self::config::{
-    ComposedPolicy, ConfigOutcome, create_default_config, discard_file, offer_config_rewrite, verify_config,
+    ComposedPolicy, ConfigOutcome, create_default_config, discard_file, offer_agent_yell, offer_config_rewrite,
+    verify_config,
 };
 use self::endpoint::{
     RuntimeOutcome, clear_foreign_endpoint, clear_stale_endpoint, endpoint_health, reconcile_policy,
@@ -132,6 +133,9 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
         ConfigOutcome::Kept => offer_config_rewrite(&config)?,
         created => created,
     };
+    if config_outcome != ConfigOutcome::Kept {
+        offer_agent_yell(&config)?;
+    }
     let composed_policy = verify_config(&config)?;
 
     // 3. Materialize the deployment, or validate and reuse an existing one.

@@ -43,10 +43,20 @@ const MAX_FACT_BYTES: usize = 24 * 1024 * 1024;
 /// against something close to the emitted document rather than the facts alone.
 const ENTRY_OVERHEAD: usize = 32;
 
-/// Which trajectory an export is about: the root a vouched caller names, or — for a caller
-/// with no session of its own — whichever one was recently active. The runtime refuses to
-/// guess between several.
-pub(crate) type Selection = Option<TrajectoryId>;
+/// Which trajectory an export is about.
+///
+/// A caller never names one: `Vouched` carries the root the hook before the call attested,
+/// and `Recent` is for a caller with no session of its own, where the runtime takes whichever
+/// trajectory was recently active and refuses to guess between several.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Selection {
+    /// Whichever trajectory was recently active on this machine. What `appa yell` gets.
+    Recent,
+    /// The trajectory a hook vouched for, which is the one that made the call.
+    Vouched(TrajectoryId),
+    /// No trajectory at all: the agent asked for the rules alone.
+    RulesOnly,
+}
 
 /// How much of a trajectory an export may carry, when the caller has to fit it inside
 /// something this process cannot measure.
@@ -99,6 +109,9 @@ pub(crate) enum OmittedReason {
     LogUnavailable,
     /// The author could not reach a runtime at all, so there was nothing to ask.
     RuntimeUnavailable,
+    /// The author asked for the rules alone. An agent says whether its complaint is about a
+    /// session or about the policy, and this is the second answer.
+    NotRequested,
 }
 
 /// The rules, and the decisions made under them.
@@ -520,7 +533,7 @@ mod tests {
     }
 
     fn project(runtime: &Runtime, root: &TrajectoryId, mode: Mode, budget: Budget) -> Projection {
-        runtime.projection(Some(root.clone()), mode, budget)
+        runtime.projection(Selection::Vouched(root.clone()), mode, budget)
     }
 
     fn export(runtime: &Runtime, root: &TrajectoryId, mode: Mode) -> Export {
@@ -701,7 +714,7 @@ mod tests {
                     .expect("the message is valid"),
                 author: crate::yell::Author::Cli,
                 mode: Mode::Pseudonymized,
-                selection: Some(root),
+                selection: Selection::Vouched(root),
                 harness: crate::runtime_cli::Adapter::ClaudeCode,
             })
             .expect("a recorded session fits a report");
@@ -854,6 +867,38 @@ mod tests {
         assert_eq!(
             resolve(crate::events::Recent::None),
             Err(OmittedReason::NoRecentTrajectory)
+        );
+    }
+
+    /// An agent that reports on the policy alone gets the policy alone — not the session it
+    /// happens to be running in, and not whichever session this machine ran most recently.
+    #[tokio::test]
+    async fn the_rules_alone_carry_the_policy_and_no_session() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let (runtime, root) = recorded_session(&dir).await;
+        assert!(
+            matches!(
+                project(&runtime, &root, Mode::Baseline, Budget::default()).trajectory,
+                Diagnostic::Present(_)
+            ),
+            "the session this one declines to export does export when asked for"
+        );
+
+        let projection = runtime.projection(Selection::RulesOnly, Mode::Baseline, Budget::default());
+        assert_eq!(
+            projection.counts(),
+            (0, 0),
+            "no fact and no event of a session nobody asked about"
+        );
+        assert!(matches!(
+            projection.trajectory,
+            Diagnostic::Omitted {
+                omitted_reason: OmittedReason::NotRequested
+            }
+        ));
+        assert!(
+            projection.policy.is_some(),
+            "the rules are the whole of what was asked for"
         );
     }
 }

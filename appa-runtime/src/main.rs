@@ -82,8 +82,11 @@ fn require_loopback(addr: &SocketAddr) -> Result<(), String> {
 
 /// The adapter surface this binary can serve. The one place harness
 /// names appear in this crate: each variant maps to one codec crate.
+///
+/// Public because the MCP service is: the tools it serves name the harness in what they
+/// build, so a caller that mounts the service chooses one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
-pub(crate) enum Adapter {
+pub enum Adapter {
     ClaudeCode,
     Kagent,
 }
@@ -322,7 +325,7 @@ async fn report(
         // nothing. That narrows the endpoint — no session can be asked for by name — without
         // making it a per-caller boundary. The recently active trajectory may well belong to
         // someone else's session on this machine, and loopback is the only thing between them.
-        selection: None,
+        selection: crate::yell::Selection::Recent,
         harness: state.adapter,
     };
     state
@@ -412,7 +415,7 @@ async fn serve(args: Args) -> ExitCode {
         .route("/report", post(report))
         .route("/hook", post(hook))
         .route("/reload", post(reload))
-        .nest_service("/mcp", mcp::service(runtime))
+        .nest_service("/mcp", mcp::service(runtime, args.adapter))
         .with_state(state);
 
     let listener = match tokio::net::TcpListener::bind(args.listen).await {

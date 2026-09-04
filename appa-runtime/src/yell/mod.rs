@@ -8,6 +8,7 @@
 //! trajectory's export from them, and [`report`] puts that export in the envelope a receiver
 //! accepts.
 
+pub(crate) mod agent;
 pub mod cli;
 pub(crate) mod client;
 pub(crate) mod diagnostic;
@@ -17,6 +18,7 @@ pub(crate) mod strip;
 pub(crate) mod tables;
 pub(crate) mod tokens;
 
+pub(crate) use agent::YellArgs;
 pub(crate) use diagnostic::{
     Budget, Diagnostic, OmittedReason, Projection, RECENT_WINDOW, Selection, Source, branches, build, resolve,
 };
