@@ -22,3 +22,4 @@ mod events;
 mod external;
 mod llm;
 mod plugin_layout;
+mod yell;

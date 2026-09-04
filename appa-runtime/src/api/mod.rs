@@ -23,6 +23,7 @@ use crate::config::Config;
 use crate::elicit::Elicitation;
 use crate::engine::{EngineRefusal, Liveness, PolicyEngine, RuntimeEngine};
 use crate::external::{ConsultGates, ExternalServices};
+use crate::yell;
 use appa_eventlog::{Backend, Log, LogStore};
 
 /// One remedy offer as it is quoted and carried.
@@ -292,8 +293,10 @@ impl EventError {
 impl From<EngineRefusal> for EventError {
     fn from(refusal: EngineRefusal) -> EventError {
         match refusal {
-            EngineRefusal::UntrustedLog { detail } => EventError::UntrustedLog(detail),
-            EngineRefusal::OpeningMismatch { detail } => EventError::PolicyUnavailable(detail),
+            // The class is for a report; this conversion is the local error path, which
+            // keeps the operator-facing detail.
+            EngineRefusal::UntrustedLog { detail, .. } => EventError::UntrustedLog(detail),
+            EngineRefusal::OpeningMismatch { detail, .. } => EventError::PolicyUnavailable(detail),
             EngineRefusal::Invariant { detail } => EventError::EngineInvariant(detail),
             EngineRefusal::Ended => EventError::TrajectoryEnded,
             EngineRefusal::DispatchClosed => EventError::UnknownDispatch,
@@ -516,6 +519,22 @@ impl Inner {
             .lock()
             .expect("the event mutex is never poisoned: no panic runs while it is held")
             .record(root, event);
+    }
+
+    /// See [`crate::events::EventLog::events`].
+    pub(crate) fn events(&self, root: &TrajectoryId) -> crate::events::Events {
+        self.events
+            .lock()
+            .expect("the event mutex is never poisoned: no panic runs while it is held")
+            .events(root)
+    }
+
+    /// See [`crate::events::EventLog::recent_root`].
+    pub(crate) fn recent_root(&self, window: std::time::Duration) -> crate::events::Recent {
+        self.events
+            .lock()
+            .expect("the event mutex is never poisoned: no panic runs while it is held")
+            .recent_root(window)
     }
 
     fn deployment(&self) -> Arc<Deployment> {
@@ -822,6 +841,66 @@ impl Runtime {
                 None
             }
         }
+    }
+
+    /// One trajectory's decisions, stripped for a report that leaves this machine.
+    ///
+    /// A read like [`Runtime::audit`]: it gates nothing and appends nothing. Unlike an audit
+    /// it survives a log the engine refuses — a refused log is the very thing worth reporting
+    /// — and carries the refusal as a closed class instead of the facts a view would have
+    /// given. What may leave is decided in [`crate::yell::tables`], never here.
+    pub(crate) fn diagnostic(&self, selection: yell::Selection, mode: yell::Mode) -> yell::Diagnostic {
+        let (root, yelling) = match selection {
+            yell::Selection::Root { root, yelling } => {
+                let yelling = yelling.unwrap_or_else(|| root.clone());
+                (root, Some(yelling))
+            }
+            yell::Selection::Recent => match yell::resolve(self.inner.recent_root(yell::RECENT_WINDOW)) {
+                Ok(root) => {
+                    let yelling = root.clone();
+                    (root, Some(yelling))
+                }
+                Err(omitted_reason) => return yell::Diagnostic::Omitted { omitted_reason },
+            },
+        };
+        let deployment = self.inner.deployment();
+        let Ok(log) = self.inner.log(&root) else {
+            // The store error is already recorded as a runtime event by `Inner::log`.
+            return yell::Diagnostic::Omitted {
+                omitted_reason: yell::OmittedReason::LogUnavailable,
+            };
+        };
+        // The policy is what names the trust ranks, and the view is what names the parents.
+        // Neither is required: without them the facts still export, with the fields a reader
+        // cannot be given left empty and the refusal said out loud.
+        let policy = self.inner.resolve_policy(&deployment, &log).ok();
+        let rebuilt = policy.as_ref().map(|policy| policy.engine().rebuild_view(&log));
+        let replay_refused = match &rebuilt {
+            Some(Err(refusal)) => Some(refusal.class()),
+            _ => None,
+        };
+        let view = rebuilt.and_then(Result::ok);
+        let trust_chain = policy
+            .as_ref()
+            .map(|policy| {
+                policy
+                    .engine()
+                    .registry()
+                    .trust_chain()
+                    .names()
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let source = yell::Source {
+            facts: log.facts(),
+            events: self.inner.events(&root),
+            trust_chain,
+            parents: yell::branches(log.facts(), view.as_ref(), policy.as_ref()),
+            replay_refused,
+            yelling,
+        };
+        yell::Diagnostic::Present(Box::new(yell::build(source, mode)))
     }
 
     /// Execute one surfaced remedy offer by its id.

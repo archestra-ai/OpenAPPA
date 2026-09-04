@@ -348,15 +348,190 @@ impl EngineDecision {
     }
 }
 
+/// Why a replay was refused, with nothing of the refusal in it.
+///
+/// `TransitionRefusal` formats raw tool, authority, sanitizer and selector names into its
+/// `Display`, and the `EvidenceRefusal` under it formats provider selectors, member ids and
+/// verified email addresses. A diagnostic that carried the message would walk straight past
+/// everything the report's own classification guarantees, so it carries this instead.
+///
+/// A `&'static str` rather than a 94-variant enum, but with the same three properties: the
+/// field is private so a caller cannot fabricate one, every value is a literal so no
+/// refusal's own text can reach it, and the matches below are exhaustive so a new engine
+/// variant fails to compile rather than silently becoming a wildcard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(transparent)]
+pub struct ReplayRefusalClass(&'static str);
+
+impl From<&TransitionRefusal> for ReplayRefusalClass {
+    fn from(refusal: &TransitionRefusal) -> Self {
+        match refusal {
+            TransitionRefusal::Unopened => ReplayRefusalClass("unopened"),
+            TransitionRefusal::UnrequestedEvidence { .. } => ReplayRefusalClass("unrequested_evidence"),
+            TransitionRefusal::Opening(opening) => opening.into(),
+            TransitionRefusal::ForeignTrajectory => ReplayRefusalClass("foreign_trajectory"),
+            TransitionRefusal::UnknownTool(..) => ReplayRefusalClass("unknown_tool"),
+            TransitionRefusal::InvalidPayload(..) => ReplayRefusalClass("invalid_payload"),
+            TransitionRefusal::DigestMismatch => ReplayRefusalClass("digest_mismatch"),
+            TransitionRefusal::DispatchReopened => ReplayRefusalClass("dispatch_reopened"),
+            TransitionRefusal::WrongOccurrence => ReplayRefusalClass("wrong_occurrence"),
+            TransitionRefusal::UnreleasedDispatch => ReplayRefusalClass("unreleased_dispatch"),
+            TransitionRefusal::DispatchNotOpen => ReplayRefusalClass("dispatch_not_open"),
+            TransitionRefusal::RepeatCheckpoint => ReplayRefusalClass("repeat_checkpoint"),
+            TransitionRefusal::ContradictedSuccess => ReplayRefusalClass("contradicted_success"),
+            TransitionRefusal::EffectsMismatch => ReplayRefusalClass("effects_mismatch"),
+            TransitionRefusal::NotProviderRun(..) => ReplayRefusalClass("not_provider_run"),
+            TransitionRefusal::AdmissionAfterDecision => ReplayRefusalClass("admission_after_decision"),
+            TransitionRefusal::WrongAdmissionPosition => ReplayRefusalClass("wrong_admission_position"),
+            TransitionRefusal::ForeignAdmission => ReplayRefusalClass("foreign_admission"),
+            TransitionRefusal::UndeclaredAdmission => ReplayRefusalClass("undeclared_admission"),
+            TransitionRefusal::SplitAdmission => ReplayRefusalClass("split_admission"),
+            TransitionRefusal::ForgedLabel => ReplayRefusalClass("forged_label"),
+            TransitionRefusal::ForgedEvidence => ReplayRefusalClass("forged_evidence"),
+            TransitionRefusal::ForeignEvidence(evidence) => evidence.into(),
+            TransitionRefusal::UnansweredDecision { .. } => ReplayRefusalClass("unanswered_decision"),
+            TransitionRefusal::RepeatAdmission => ReplayRefusalClass("repeat_admission"),
+            TransitionRefusal::UnknownDispatch => ReplayRefusalClass("unknown_dispatch"),
+            TransitionRefusal::ForeignDispatch => ReplayRefusalClass("foreign_dispatch"),
+            TransitionRefusal::ForkBasisMismatch => ReplayRefusalClass("fork_basis_mismatch"),
+            TransitionRefusal::ChildActiveBeforeFork => ReplayRefusalClass("child_active_before_fork"),
+            TransitionRefusal::ContextUncontrolled => ReplayRefusalClass("context_uncontrolled"),
+            TransitionRefusal::SpawnMarkOutOfRange => ReplayRefusalClass("spawn_mark_out_of_range"),
+            TransitionRefusal::ForkReprepared => ReplayRefusalClass("fork_reprepared"),
+            TransitionRefusal::UnknownFork => ReplayRefusalClass("unknown_fork"),
+            TransitionRefusal::ForkAlreadyBound => ReplayRefusalClass("fork_already_bound"),
+            TransitionRefusal::SpawnFailed => ReplayRefusalClass("spawn_failed"),
+            TransitionRefusal::BatchIdentityConflict => ReplayRefusalClass("batch_identity_conflict"),
+            TransitionRefusal::UnbackedDecision => ReplayRefusalClass("unbacked_decision"),
+            TransitionRefusal::MisdecidedBatch => ReplayRefusalClass("misdecided_batch"),
+            TransitionRefusal::UnbackedReturnPolicy => ReplayRefusalClass("unbacked_return_policy"),
+            TransitionRefusal::ReturnShapeViolation => ReplayRefusalClass("return_shape_violation"),
+            TransitionRefusal::ReturnBelowFloor => ReplayRefusalClass("return_below_floor"),
+            TransitionRefusal::BranchEnded => ReplayRefusalClass("branch_ended"),
+            TransitionRefusal::NotForked => ReplayRefusalClass("not_forked"),
+            TransitionRefusal::WrongReturnIdentity => ReplayRefusalClass("wrong_return_identity"),
+            TransitionRefusal::ReturnRecordMismatch => ReplayRefusalClass("return_record_mismatch"),
+            TransitionRefusal::AcceptanceMismatch => ReplayRefusalClass("acceptance_mismatch"),
+            TransitionRefusal::UnmergedCrossing => ReplayRefusalClass("unmerged_crossing"),
+            TransitionRefusal::ObservationMismatch => ReplayRefusalClass("observation_mismatch"),
+            TransitionRefusal::UnknownReturn => ReplayRefusalClass("unknown_return"),
+            TransitionRefusal::UnknownAuthority(..) => ReplayRefusalClass("unknown_authority"),
+            TransitionRefusal::UnknownSanitizer(..) => ReplayRefusalClass("unknown_sanitizer"),
+            TransitionRefusal::SanitizerUnapplicable => ReplayRefusalClass("sanitizer_unapplicable"),
+            TransitionRefusal::DanglingRemedy => ReplayRefusalClass("dangling_remedy"),
+            TransitionRefusal::UnadmittedDerivation => ReplayRefusalClass("unadmitted_derivation"),
+            TransitionRefusal::StagedClose => ReplayRefusalClass("staged_close"),
+            TransitionRefusal::UndeclaredAdvance => ReplayRefusalClass("undeclared_advance"),
+            TransitionRefusal::OfferReopened => ReplayRefusalClass("offer_reopened"),
+            TransitionRefusal::ForeignOffer => ReplayRefusalClass("foreign_offer"),
+            TransitionRefusal::UnbackedOffer => ReplayRefusalClass("unbacked_offer"),
+            TransitionRefusal::ForgedBasis => ReplayRefusalClass("forged_basis"),
+            TransitionRefusal::IncompleteMenu => ReplayRefusalClass("incomplete_menu"),
+            TransitionRefusal::PlanReoffered => ReplayRefusalClass("plan_reoffered"),
+            TransitionRefusal::SplitBlock => ReplayRefusalClass("split_block"),
+            TransitionRefusal::BlockReused => ReplayRefusalClass("block_reused"),
+            TransitionRefusal::UnbackedAdvance => ReplayRefusalClass("unbacked_advance"),
+            TransitionRefusal::UnknownOffer => ReplayRefusalClass("unknown_offer"),
+            TransitionRefusal::OfferEnded => ReplayRefusalClass("offer_ended"),
+            TransitionRefusal::UnbackedApproval => ReplayRefusalClass("unbacked_approval"),
+            TransitionRefusal::ApprovalRepeated => ReplayRefusalClass("approval_repeated"),
+            TransitionRefusal::UndischargedAcceptance => ReplayRefusalClass("undischarged_acceptance"),
+            TransitionRefusal::UnbackedDenial => ReplayRefusalClass("unbacked_denial"),
+            TransitionRefusal::UnknownApproval => ReplayRefusalClass("unknown_approval"),
+            TransitionRefusal::StaleSpend => ReplayRefusalClass("stale_spend"),
+        }
+    }
+}
+
+impl From<&appa_engine::transition::OpeningTransitionRefusal> for ReplayRefusalClass {
+    fn from(refusal: &appa_engine::transition::OpeningTransitionRefusal) -> Self {
+        match refusal {
+            appa_engine::transition::OpeningTransitionRefusal::Duplicate => ReplayRefusalClass("opening_duplicate"),
+            appa_engine::transition::OpeningTransitionRefusal::WrongTrajectory { .. } => {
+                ReplayRefusalClass("opening_wrong_trajectory")
+            }
+            appa_engine::transition::OpeningTransitionRefusal::UnsupportedDialect { .. } => {
+                ReplayRefusalClass("opening_unsupported_dialect")
+            }
+            appa_engine::transition::OpeningTransitionRefusal::DigestMismatch => {
+                ReplayRefusalClass("opening_digest_mismatch")
+            }
+            appa_engine::transition::OpeningTransitionRefusal::ProfileMismatch => {
+                ReplayRefusalClass("opening_profile_mismatch")
+            }
+            appa_engine::transition::OpeningTransitionRefusal::VectorMismatch => {
+                ReplayRefusalClass("opening_vector_mismatch")
+            }
+        }
+    }
+}
+
+impl From<&appa_engine::audience::EvidenceRefusal> for ReplayRefusalClass {
+    fn from(refusal: &appa_engine::audience::EvidenceRefusal) -> Self {
+        match refusal {
+            appa_engine::audience::EvidenceRefusal::DuplicateSelector { .. } => {
+                ReplayRefusalClass("evidence_duplicate_selector")
+            }
+            appa_engine::audience::EvidenceRefusal::DuplicateLookup { .. } => {
+                ReplayRefusalClass("evidence_duplicate_lookup")
+            }
+            appa_engine::audience::EvidenceRefusal::DuplicateIdentity { .. } => {
+                ReplayRefusalClass("evidence_duplicate_identity")
+            }
+            appa_engine::audience::EvidenceRefusal::ForeignMember { .. } => {
+                ReplayRefusalClass("evidence_foreign_member")
+            }
+            appa_engine::audience::EvidenceRefusal::ForeignLookup { .. } => {
+                ReplayRefusalClass("evidence_foreign_lookup")
+            }
+            appa_engine::audience::EvidenceRefusal::ForeignLookupClaims { .. } => {
+                ReplayRefusalClass("evidence_foreign_lookup_claims")
+            }
+            appa_engine::audience::EvidenceRefusal::DuplicateMember { .. } => {
+                ReplayRefusalClass("evidence_duplicate_member")
+            }
+            appa_engine::audience::EvidenceRefusal::ConflictingClaims { .. } => {
+                ReplayRefusalClass("evidence_conflicting_claims")
+            }
+            appa_engine::audience::EvidenceRefusal::ReservedPrincipal { .. } => {
+                ReplayRefusalClass("evidence_reserved_principal")
+            }
+            appa_engine::audience::EvidenceRefusal::MalformedEmail { .. } => {
+                ReplayRefusalClass("evidence_malformed_email")
+            }
+            appa_engine::audience::EvidenceRefusal::UnmappedIdentity { .. } => {
+                ReplayRefusalClass("evidence_unmapped_identity")
+            }
+            appa_engine::audience::EvidenceRefusal::UnroutableSelector { .. } => {
+                ReplayRefusalClass("evidence_unroutable_selector")
+            }
+            appa_engine::audience::EvidenceRefusal::UnroutableLookup { .. } => {
+                ReplayRefusalClass("evidence_unroutable_lookup")
+            }
+            appa_engine::audience::EvidenceRefusal::UnrequestedEvidence { .. } => {
+                ReplayRefusalClass("evidence_unrequested_evidence")
+            }
+            appa_engine::audience::EvidenceRefusal::ContradictedPin { .. } => {
+                ReplayRefusalClass("evidence_contradicted_pin")
+            }
+        }
+    }
+}
+
 /// Why the engine boundary refused an event outright. Model-visible outcomes (a deny, a
 /// declined offer) are decisions, not refusals; a refusal means the event
 /// cannot be processed as it stands.
 #[derive(Debug, thiserror::Error)]
 pub enum EngineRefusal {
     #[error("the persisted log is refused: {detail}")]
-    UntrustedLog { detail: String },
+    UntrustedLog {
+        detail: String,
+        /// The same refusal as a data-free label. `detail` is for this machine's logs and
+        /// its local caller; this is the only form that may leave it.
+        class: ReplayRefusalClass,
+    },
     #[error("the opening does not match the deciding policy: {detail}")]
-    OpeningMismatch { detail: String },
+    OpeningMismatch { detail: String, class: ReplayRefusalClass },
     #[error("engine invariant breach: {detail}")]
     Invariant { detail: String },
     #[error("the trajectory has ended")]
@@ -373,6 +548,26 @@ pub enum EngineRefusal {
     /// policy cannot read. Nothing is appended; the offer stands.
     #[error("{detail}")]
     Arguments { detail: String },
+}
+
+impl EngineRefusal {
+    /// This refusal as a data-free label.
+    ///
+    /// Every `detail` here is a `Display` from the engine, and those messages format raw tool,
+    /// authority, sanitizer and selector names, member ids and verified email addresses. A
+    /// diagnostic that leaves this machine reads the class and never the message.
+    pub(crate) fn class(&self) -> ReplayRefusalClass {
+        match self {
+            EngineRefusal::UntrustedLog { class, .. } | EngineRefusal::OpeningMismatch { class, .. } => *class,
+            EngineRefusal::Invariant { .. } => ReplayRefusalClass("invariant"),
+            EngineRefusal::Ended => ReplayRefusalClass("ended"),
+            EngineRefusal::DispatchClosed => ReplayRefusalClass("dispatch_closed"),
+            EngineRefusal::UnknownOffer => ReplayRefusalClass("unknown_offer"),
+            EngineRefusal::Unbindable => ReplayRefusalClass("unbindable"),
+            EngineRefusal::UndeclaredTool { .. } => ReplayRefusalClass("undeclared_tool"),
+            EngineRefusal::Arguments { .. } => ReplayRefusalClass("arguments"),
+        }
+    }
 }
 
 /// One trajectory's current label rendered for a display surface — the
@@ -746,16 +941,21 @@ impl RuntimeEngine {
     }
 
     fn validated(&self, facts: Vec<Fact>, family: &TrajectoryId, revision: u64) -> Result<EngineView, EngineRefusal> {
-        self.engine
-            .view(&engine_id(family), facts, revision)
-            .map_err(|error| match error {
+        self.engine.view(&engine_id(family), facts, revision).map_err(|error| {
+            // The class is taken from the variant, not from the message: by the next
+            // line the discriminant is gone and only prose is left.
+            let class = ReplayRefusalClass::from(&error);
+            match error {
                 TransitionRefusal::Unopened | TransitionRefusal::Opening(_) => EngineRefusal::OpeningMismatch {
                     detail: error.to_string(),
+                    class,
                 },
                 error => EngineRefusal::UntrustedLog {
                     detail: error.to_string(),
+                    class,
                 },
-            })
+            }
+        })
     }
 
     /// The canonical bytes of one proposed call, for the byte-exact dispatch

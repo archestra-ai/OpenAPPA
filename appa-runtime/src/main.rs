@@ -247,6 +247,40 @@ async fn status(
     }
 }
 
+#[derive(serde::Deserialize)]
+struct DiagnosticQuery {
+    /// Replace the names the deployment chose with report-local tokens. The classification is
+    /// the same either way; only the naming differs.
+    #[serde(default)]
+    pseudonymize: bool,
+    /// The root to export. Omitted by a caller with no session of its own, which asks the
+    /// runtime for the one trajectory that was recently active.
+    trajectory: Option<String>,
+}
+
+/// One trajectory's decisions, stripped for a report.
+///
+/// The listener is loopback-only, which is the whole of this endpoint's access control: what
+/// it answers still leaves the machine only when a person or an agent chooses to send it.
+async fn diagnostic(
+    State(state): State<AppState>,
+    query: Result<axum::extract::Query<DiagnosticQuery>, axum::extract::rejection::QueryRejection>,
+) -> Result<axum::Json<crate::yell::Diagnostic>, axum::http::StatusCode> {
+    let query = query.map_err(|_| axum::http::StatusCode::BAD_REQUEST)?.0;
+    let selection = match query.trajectory {
+        Some(trajectory) => crate::yell::Selection::Root {
+            root: crate::api::TrajectoryId(trajectory),
+            yelling: None,
+        },
+        None => crate::yell::Selection::Recent,
+    };
+    let mode = match query.pseudonymize {
+        true => crate::yell::Mode::Pseudonymized,
+        false => crate::yell::Mode::Baseline,
+    };
+    Ok(axum::Json(state.runtime.diagnostic(selection, mode)))
+}
+
 /// Run the internal daemon command from arguments supplied by the public CLI.
 pub fn run_from<I, T>(args: I) -> ExitCode
 where
@@ -312,6 +346,7 @@ async fn serve(args: Args) -> ExitCode {
         .route("/binary-fingerprint", get(binary_fingerprint))
         .route("/policy-key", get(policy_key))
         .route("/status", get(status))
+        .route("/diagnostic", get(diagnostic))
         .route("/hook", post(hook))
         .route("/reload", post(reload))
         .nest_service("/mcp", mcp::service(runtime))

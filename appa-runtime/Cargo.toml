@@ -24,6 +24,9 @@ appa-policy = { workspace = true }
 appa-runtime-api = { path = "../appa-runtime-api" }
 # `query` decodes the statusline's one GET parameter (`/status`).
 axum = { workspace = true, features = ["query"] }
+# One job: rendering a runtime event's wall time as RFC 3339 in a diagnostic export.
+# Already in the tree through rmcp and schemars, so this adds nothing to the build.
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 clap = { version = "4", features = ["derive", "env"] }
 # `join_all` runs one evidence batch's independent consults concurrently.
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }

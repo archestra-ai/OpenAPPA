@@ -86,6 +86,12 @@ fn bare_hook(
 
 /// The trajectory an entry belongs to. A child's events are kept under its own id, as the
 /// engine's facts are: a report about a subagent should not have to be found under its parent.
+/// The root this event's diagnostic entry is filed under.
+///
+/// The *root*, never the acting trajectory: the event log is keyed by family, because that is
+/// the unit a report is about and the unit its per-list bound must apply to. Filing a
+/// subagent's hooks under the subagent would put them outside the family's own account and
+/// leave `recent_root` naming something no log can be read for.
 fn hook_root(event: &HookEvent) -> &TrajectoryId {
     match event {
         HookEvent::SessionStart { root } => root,
@@ -94,7 +100,7 @@ fn hook_root(event: &HookEvent) -> &TrajectoryId {
         | HookEvent::TurnEnd { actor }
         | HookEvent::ToolCall { actor, .. }
         | HookEvent::ToolResult { actor, .. }
-        | HookEvent::SpawnResult { actor, .. } => crate::api::acting_trajectory(actor),
+        | HookEvent::SpawnResult { actor, .. } => &actor.root,
     }
 }
 

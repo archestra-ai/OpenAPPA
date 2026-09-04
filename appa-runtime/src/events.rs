@@ -20,6 +20,7 @@
 //! being quietly handed a partial history.
 
 use std::collections::BTreeMap;
+use std::time::SystemTime;
 
 use appa_engine::value::DispatchId;
 use appa_runtime_api::TrajectoryId;
@@ -252,13 +253,15 @@ pub(crate) enum StoreOperation {
     Append,
 }
 
-/// One entry as it is kept: the event and its place in the runtime's order.
+/// One entry as it is kept and reported.
 ///
-/// Ordering is the runtime's own counter, not wall time. Two entries a millisecond apart
-/// must still be comparable, and a clock that steps backwards must not reorder them.
+/// Ordering is `seq`, the runtime's own counter, never `at`: two entries a millisecond
+/// apart must still be comparable, and a clock that steps backwards must not reorder them.
+/// `at` is for a reader to look at, and nothing more.
 #[derive(Debug, Clone)]
 pub(crate) struct RecordedEvent {
     pub(crate) seq: u64,
+    pub(crate) at: SystemTime,
     pub(crate) event: RuntimeEvent,
 }
 
@@ -339,6 +342,7 @@ impl EventLog {
         self.next_seq += 1;
         let entry = RecordedEvent {
             seq,
+            at: SystemTime::now(),
             event: clamp(event),
         };
         match root {
@@ -398,6 +402,78 @@ impl EventLog {
             }
             self.roots
                 .retain(|_, events| !events.entries.is_empty() || events.dropped > 0);
+        }
+    }
+}
+
+/// What a reader gets: one trajectory's entries, the deployment-wide ones that fall in the
+/// same span, and what the bounds took from each.
+///
+/// The two lists are reported separately because their truncation is separate: a reader must
+/// be able to tell "this trajectory's early hooks were evicted" from "a reload was evicted".
+#[derive(Debug, Default)]
+pub(crate) struct Events {
+    pub(crate) entries: Vec<RecordedEvent>,
+    pub(crate) dropped: u64,
+    pub(crate) dropped_through_seq: Option<u64>,
+    pub(crate) deployment: Vec<RecordedEvent>,
+    pub(crate) deployment_dropped: u64,
+    pub(crate) deployment_dropped_through_seq: Option<u64>,
+}
+
+/// Which trajectory a caller who named none meant.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Recent {
+    One {
+        root: String,
+        age: std::time::Duration,
+    },
+    /// More than one trajectory was active in the window. Guessing between them would put
+    /// one session's diagnostic in another session's report.
+    Ambiguous,
+    None,
+}
+
+impl EventLog {
+    /// One trajectory's account, plus every deployment-wide entry from that trajectory's
+    /// first retained sequence *through the log's current position* — not through the
+    /// trajectory's own last entry. A reload that lands after a trajectory's final hook is
+    /// exactly the kind of thing its report needs to show.
+    pub(crate) fn events(&self, root: &TrajectoryId) -> Events {
+        let Some(events) = self.roots.get(&root.0) else {
+            return Events::default();
+        };
+        let from = events.entries.front().map_or(u64::MAX, |entry| entry.seq);
+        let deployment: Vec<RecordedEvent> = self
+            .deployment
+            .entries
+            .iter()
+            .filter(|entry| entry.seq >= from)
+            .cloned()
+            .collect();
+        Events {
+            entries: events.entries.iter().cloned().collect(),
+            dropped: events.dropped,
+            dropped_through_seq: events.dropped_through_seq,
+            deployment,
+            deployment_dropped: self.deployment.dropped,
+            deployment_dropped_through_seq: self.deployment.dropped_through_seq,
+        }
+    }
+
+    /// The trajectory a caller who named none most likely means: the one that was active in
+    /// the window, when there is exactly one.
+    pub(crate) fn recent_root(&self, window: std::time::Duration) -> Recent {
+        let now = SystemTime::now();
+        let mut inside = self.roots.iter().filter_map(|(root, events)| {
+            let last = events.entries.back()?;
+            let age = now.duration_since(last.at).ok()?;
+            (age <= window).then(|| (root.clone(), age))
+        });
+        match (inside.next(), inside.next()) {
+            (Some((root, age)), None) => Recent::One { root, age },
+            (Some(_), Some(_)) => Recent::Ambiguous,
+            (None, _) => Recent::None,
         }
     }
 }
