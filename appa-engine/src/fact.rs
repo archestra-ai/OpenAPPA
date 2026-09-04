@@ -347,7 +347,7 @@ pub enum Fact {
     /// records here. It stays pending while that basis still equals its subject's, and the moment
     /// one component differs it is stale — permanently, because a counter only moves forward.
     ///
-    /// The plan travels with the record. Without it the runtime would have to hold the offered
+    /// The plan is stored directly on the record. Without it the runtime would have to hold the offered
     /// plan in memory to execute it later, which is exactly the process-lifetime cache this record
     /// removes; with it, an offer survives a restart the way every other engine fact does.
     OfferOpened {

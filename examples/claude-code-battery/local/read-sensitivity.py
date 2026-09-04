@@ -24,10 +24,9 @@ def main():
     sensitive = file_path != ".env.example" and (
         file_path.startswith(".") or file_path.startswith("clients/")
     )
-    audience = ["private"] if sensitive else "public"
     annotation = {
-        "delta": {"trust": "suspicious", "audience": audience},
-        "requires": {"history": [], "attention": []},
+        "delta": {"trust": "suspicious"},
+        "requires": {"history": [], "attention": ["hitl"] if sensitive else []},
         "emits": [],
     }
     json.dump({"version": 1, "answer": annotation}, sys.stdout)

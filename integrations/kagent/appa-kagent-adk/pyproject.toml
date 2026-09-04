@@ -11,10 +11,13 @@ readme = "README.md"
 # release-candidate line floors it at 3.11. The package keeps the lower
 # floor so one wheel serves both lanes.
 requires-python = ">=3.10"
-# One plugin codebase serves both locked ADK majors — google-adk 1.31.1
+# One plugin codebase serves both locked ADK majors: google-adk 1.31.1
 # on the stable lane and 2.8.0 on the release-candidate line. The image
-# build pins the exact version through its kagent base image; CI runs
-# the tests once per pinned major.
+# build pins its kagent base image by tag (the Dockerfile's
+# KAGENT_APP_IMAGE), and that base venv fixes the google-adk version.
+# CI runs the tests twice (.github/workflows/ci.yml). The locked lane
+# resolves google-adk 2.8.0 from uv.lock. The kagent v0.9.12 lane pins
+# kagent-adk at the v0.9.12 tag with google-adk 1.31.1.
 dependencies = [
   "google-adk>=1.28.1,<3",
   "httpx>=0.25.0",

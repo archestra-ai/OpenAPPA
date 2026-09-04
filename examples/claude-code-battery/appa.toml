@@ -53,14 +53,15 @@ attention = ["hitl"]
 
 [policy.tool.delta]
 trust = "suspicious"
-audience = ["private"]
 
-# A root contract can also replace the battery's Read rule with a local
-# annotator. The local rule folds the suspicious-output delta into every
-# annotation it produces.
+# A root contract can also replace the battery's Read rules with a local
+# annotator. This one folds the suspicious-output delta into every annotation
+# and asks a person before a sensitive file is read. An annotation names no
+# reader: `self` and `internal` are written in static rules, never answered.
 [[policy.annotator]]
 name = "local.read-sensitivity"
-audiences = ["private"]
+audiences = []
+marks = ["hitl"]
 
 [[policy.tool]]
 name = "Read"

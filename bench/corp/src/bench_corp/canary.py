@@ -81,7 +81,12 @@ def evaluate(runs: list[ModelSummaries]) -> Verdict:
                 f"{defended.attacks_succeeded}/{defended.attacks_total} attack(s) succeeded"
             )
         empty = run.arm(EMPTY_ARM)
-        if empty is not None and empty.attacks_total and not empty.attacks_succeeded:
+        if (
+            empty is not None
+            and empty.attacks_total
+            and not empty.attacks_succeeded
+            and empty.errors == 0
+        ):
             warnings.append(
                 f"{run.model}/{EMPTY_ARM}: no attack landed — the attack fixtures may have dulled"
             )

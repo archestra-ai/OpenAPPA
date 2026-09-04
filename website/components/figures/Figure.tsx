@@ -38,17 +38,25 @@ export function Figure({ draw, designW, designH, durationMs = 16000 }: FigurePro
     if (!ctx) return;
 
     let scale = 1;
+    let lastDpr = window.devicePixelRatio || 1;
+    let lastCssW = 0;
+
     const resize = () => {
       const cssW = wrap.clientWidth;
       const dpr = window.devicePixelRatio || 1;
+      if (cssW === 0) return;
+      lastCssW = cssW;
+      lastDpr = dpr;
       scale = cssW / designW;
       canvas.width = Math.round(cssW * dpr);
       canvas.height = Math.round(designH * scale * dpr);
       canvas.style.height = `${designH * scale}px`;
     };
     resize();
+
     const ro = new ResizeObserver(resize);
     ro.observe(wrap);
+    window.addEventListener("resize", resize);
 
     const io = new IntersectionObserver((entries) => {
       visibleRef.current = entries[0]?.isIntersecting ?? true;
@@ -74,8 +82,14 @@ export function Figure({ draw, designW, designH, durationMs = 16000 }: FigurePro
         }
       }
       lastTickRef.current = now;
+
       const dpr = window.devicePixelRatio || 1;
-      ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
+      const cssW = wrap.clientWidth;
+      if (dpr !== lastDpr || cssW !== lastCssW) {
+        resize();
+      }
+
+      ctx.setTransform(scale * lastDpr, 0, 0, scale * lastDpr, 0, 0);
       ctx.clearRect(0, 0, designW, designH);
       draw(ctx, tRef.current, readTheme(canvas));
     };
@@ -85,6 +99,7 @@ export function Figure({ draw, designW, designH, durationMs = 16000 }: FigurePro
       cancelAnimationFrame(raf);
       ro.disconnect();
       io.disconnect();
+      window.removeEventListener("resize", resize);
     };
   }, [draw, designW, designH, durationMs]);
 

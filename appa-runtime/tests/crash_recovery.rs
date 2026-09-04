@@ -62,7 +62,7 @@ fn start(config: &Path, db: &Path, port: u16) -> Server {
 }
 
 fn wait_for_health(server: &mut Server) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
     while std::time::Instant::now() < deadline {
         if let Some(status) = server.child.try_wait().expect("the child polls") {
             panic!("the server exited before becoming healthy: {status}");

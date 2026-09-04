@@ -32,20 +32,26 @@ Every payload must supply a stable session identifier to represent the root traj
 | # | OpenAPPA Event | When to Call OpenAPPA | Adapter Must Create | Agent Must Apply |
 |---|---|---|---|---|
 | 1 | **`SessionStart`** | When a root conversation or agent task initializes. | `SessionStart { root }` with a stable root trajectory ID from the harness session ID. | `Ack`: Continue session startup.<br>`Refuse`: Abort session startup and display the returned `detail` message. |
-| 2 | **`Prompt`** | When user or system input initiates an agent turn. | `Prompt { actor, text }` with the actor reference and exact input text. | `Ack`: Forward the prompt to the model.<br>`Block`: Withhold the prompt and abort the turn. |
-| 3 | **`ToolCall`** | When the model proposes a tool call, before the tool executes. | `ToolCall { actor, call, ... }` with the `Actor` and a `ProposedCall` parsed from the tool name and raw arguments. | `AllowCall`: Execute the tool call.<br>`DenyCall`: Refuse tool execution. Feed the policy `feedback` and remedy offers back to the model. |
+| 2 | **`Prompt`** | When user or system input initiates an agent turn. | `Prompt { actor, text }` with the actor reference and exact input text. | `Ack`: Forward the prompt to the model. |
+| 3 | **`ToolCall`** | When the model proposes a tool call, before the tool executes. | `ToolCall { actor, call, spawn, ruling }` with the `Actor` and a `ProposedCall` parsed from the tool name and raw arguments. Set `spawn: true` when the proposed call delegates to a child agent, `false` otherwise. A harness that reviews a remedy through its own channel sets `ruling` on the control call that quotes the reviewed offer. Every other call carries `ruling: None`. | `AllowCall`: Execute the tool call. A released spawn also returns a `spawn` binding. Keep that binding for the `ChildStart` of the child it releases.<br>`PassControl`: The call names the control tool OpenAPPA owns (`execute_remedy_plan`). Execute it untouched. The runtime runs the remedy the call quotes, and the harness must not gate it.<br>`DenyCall`: Refuse tool execution. Feed the policy `feedback` and remedy offers back to the model. |
 | 4 | **`ToolResult`** | After tool execution finishes, before output enters model context or trajectory history. | `ToolResult { actor, call, outcome }` with the matching `ProposedCall` and `ToolOutcome` (`Success`, `Failure`, or `Indeterminate`). | `Ack`: Supply output to the model.<br>`ReplaceOutput`: Supply the substituted output instead.<br>`Block`: Withhold output completely from model context and trajectory history. |
 | 5 | **`TurnEnd`** | When an agent turn completes. | `TurnEnd { actor }` for the completed turn. | `Ack`: Finalize the turn. Settles any unexecuted tool dispatches. |
+
+The `Prompt` event gates nothing. The runtime notes it as the boundary that ends the previous turn. The prompt text reaches no engine check and enters no trajectory record, and the answer is always `Ack`. Enforcement starts at `ToolCall`.
+
+`execute_remedy_plan` is a name OpenAPPA owns. When the model takes a remedy offer, send the `ToolCall` for it like any other call. The runtime records the offer the call quotes and answers `PassControl`. The call must then reach the [`/mcp`](#endpoints-openappa-exposes) endpoint unmodified.
+
+That endpoint refuses a remedy call that no `ToolCall` preceded. A call that quotes an offer this trajectory no longer pursues comes back as `DenyCall`. Never let a harness tool take the name. OpenAPPA recognizes the control tool by name, so a tool that shadows it runs ungated.
 
 If the agent framework supports child agents (subagents), send these three events:
 
 | # | OpenAPPA Event | When to Call OpenAPPA | Adapter Must Create | Agent Must Apply |
 |---|---|---|---|---|
-| 6 | **`ChildStart`** | When a child agent initializes. | `ChildStart { root, child, spawn }` linking the child trajectory to the parent root. | `Ack`: Start child with inherited parent boundaries.<br>`Context`: Pass the returned contract text to the child agent.<br>`Refuse`: Abort child launch. |
+| 6 | **`ChildStart`** | When a child agent initializes. | `ChildStart { root, child, spawn }` linking the child trajectory to the parent root. The `spawn` field carries the binding that the delegating `AllowCall` returned. A harness whose start signal names no such call sends the in-flight form instead. The runtime then binds the single outstanding spawn of that family. | `Ack`: Start child with inherited parent boundaries.<br>`Context`: Pass the returned contract text to the child agent.<br>`Refuse`: Abort child launch. |
 | 7 | **`ChildEnd`** | When a child agent finishes its task, before returning data to the parent. | `ChildEnd { root, child, value }` with the child's proposed return value. | `Ack`: Return original value to parent.<br>`ChildReturn`: Forward the canonical or sanitized replacement `value` to parent.<br>`Block`: Withhold child output. |
-| 8 | **`SpawnResult`** | When the parent agent receives the result from a child agent. | `SpawnResult { actor, call, outcome, child, value }` in parent trajectory context. | `Ack`: Deliver child result into parent model context.<br>`Block`: Withhold child result from parent context. |
+| 8 | **`SpawnResult`** | When the parent agent receives the result from a child agent. | `SpawnResult { actor, call, outcome, child, value }` in parent trajectory context. | `Ack`: Deliver child result into parent model context.<br>`ReplaceOutput`: Deliver the substituted output instead of what the child returned.<br>`Block`: Withhold child result from parent context. |
 
-If your agent framework does not support child agents, skip these three events.
+The spawn flag prepares the fork. A delegating call sent with `spawn: false` releases no fork. The runtime then answers `Refuse` to that `ChildStart`, and blocks the `ChildEnd` that follows. If your agent framework does not support child agents, skip these three events.
 
 ### Connect the Agent Hooks
 
@@ -71,7 +77,7 @@ An adapter implements a two-function codec:
 - **`parse(bytes)`**: Extracts session and call context from the incoming JSON payload and maps it to a typed `HookEvent` (or returns a `ParseRefusal` on unreadable or malformed input).
 - **`render(decision)`**: Serializes the engine's `HookDecision` into the response format expected by the harness (such as process exit codes, JSON hook outputs, or substituted tool arguments).
 
-If your agent harness sends OpenAPPA's typed `HookEvent` JSON natively, no custom translation is needed. When integrating an agent with its own wire schema, compile or register an adapter codec with `appa-runtime` (like the shipped Claude Code and kAgent adapters). For a complete reference, see [`appa-adapter-claude-code`](https://github.com/archestra-ai/OpenAPPA/tree/main/appa-adapter-claude-code).
+If your agent harness sends OpenAPPA's typed `HookEvent` JSON natively, no custom translation is needed. When integrating an agent with its own wire schema, compile an adapter codec into `appa-runtime`. The shipped Claude Code and kagent codecs sit beside it. Select it at startup with `--adapter claude-code|kagent`. The default is `claude-code`. The adapter is a build-time choice and a startup flag, never configuration: `appa-runtime` loads no codec at runtime. For a complete reference, see [`appa-adapter-claude-code`](https://github.com/archestra-ai/OpenAPPA/tree/main/appa-adapter-claude-code).
 
 ### Reference Implementation
 
@@ -86,6 +92,7 @@ Verify your integration against these core behaviors:
 
 - [ ] **Allowed tool calls execute**: When OpenAPPA returns `AllowCall`, the tool runs once with unmodified arguments.
 - [ ] **Denied tool calls never execute**: When OpenAPPA returns `DenyCall`, the harness prevents execution and feeds policy `feedback` and remedy offers back to the model.
+- [ ] **Remedy calls pass through**: When OpenAPPA returns `PassControl`, the harness runs `execute_remedy_plan` unmodified and does not re-gate it.
 - [ ] **Replaced outputs take effect**: When OpenAPPA returns `ReplaceOutput`, model context and trajectory history receive substituted content, never the raw tool output.
 - [ ] **Blocked outputs are withheld**: A blocked result is completely dropped from model attention and trajectory history.
 - [ ] **Fails closed on connection failure**: Stopping [`appa-runtime`](#appa-overview) causes subsequent prompts and tool calls to fail safely instead of running unprotected.
@@ -124,4 +131,4 @@ OpenAPPA records an append-only log of every trajectory, tool dispatch, authorit
 Explore working integrations in this repository:
 
 - **[Claude Code](/claude-code)**: Anthropic's terminal agent gated via client-side shell hooks and an Appa adapter.
-- **[kAgent](/kagent)**: Kubernetes agents gated using the Kubernetes Agent Development Kit (ADK) in Go and Python.
+- **[kAgent](/kagent)**: Kubernetes agents gated in-pod through the Google Agent Development Kit (ADK) plugin API, in both the Python and Go runtimes.

@@ -101,6 +101,7 @@ version = 2
 [[policy.annotator]]
 name = "classifier"
 audiences = ["insider"]
+hint = "Use insider for data restricted to company readers."
 
 [[policy.tool]]
 name = "fetch"
@@ -189,6 +190,7 @@ async fn an_http_annotator_annotates_the_complete_call_and_a_fresh_proposal_cons
     assert_eq!(
         request["declaration"],
         serde_json::json!({
+            "hint": "Use insider for data restricted to company readers.",
             "inputs": [],
             "trust_ranks": ["suspicious", "trusted"],
             "audiences": ["insider"],
@@ -454,6 +456,7 @@ version = 2
 [[policy.annotator]]
 name = "classifier"
 builtin = "claude-code"
+hint = "Treat company-only destinations as audience internal."
 
 [[policy.tool]]
 name = "fetch"
@@ -481,11 +484,13 @@ const NEUTRAL_STRUCTURED: &str = r#"printf '%s' '{"structured_output":{"delta":{
 async fn the_claude_builtin_runs_the_configured_command_and_model() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let args_path = dir.path().join("args.txt");
+    let system_path = dir.path().join("system.txt");
     let command = fake_claude(
         dir.path(),
         &format!(
-            "printf '%s\\n' \"$@\" > {args}\ncat > /dev/null\n{NEUTRAL_STRUCTURED}",
+            "printf '%s\\n' \"$@\" > {args}\nprevious=\nfor argument in \"$@\"; do\n  if [ \"$previous\" = '--system-prompt' ]; then printf '%s' \"$argument\" > {system}; fi\n  previous=$argument\ndone\ncat > /dev/null\n{NEUTRAL_STRUCTURED}",
             args = args_path.display(),
+            system = system_path.display(),
         ),
     );
     let runtime = open_runtime(&dir, &builtin_policy(&command, "model = \"pinned-model\"")).await;
@@ -514,6 +519,18 @@ async fn the_claude_builtin_runs_the_configured_command_and_model() {
     ] {
         assert!(args.contains(&expected), "missing claude argument {expected}");
     }
+    let system = std::fs::read_to_string(system_path).expect("the fake captured the system prompt");
+    let declaration: serde_json::Value = serde_json::from_str(
+        system
+            .lines()
+            .last()
+            .expect("the system prompt ends with the declaration"),
+    )
+    .expect("the declaration is JSON");
+    assert_eq!(
+        declaration["hint"],
+        "Treat company-only destinations as audience internal."
+    );
 }
 
 #[cfg(unix)]

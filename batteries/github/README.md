@@ -84,7 +84,7 @@ payloads, no network. Run with `python3 test_audience_source.py`.
 
 The default assumes public repositories. For a private repository, add
 root rules that name it (`repo:`), or its whole organisation (`owner:`),
-so its reads come out private and its writes accept private data; the
+so its reads come out `internal` and its writes accept `internal` data; the
 comment at the top of `appa.toml` shows both.
 To make a write ask a person first, add a root rule for that tool with
 `attention = ["hitl"]` in its `requires`. Root rules run first. Nothing

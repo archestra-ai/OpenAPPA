@@ -9,11 +9,11 @@ use crate::label::{
 };
 use crate::names::{AuthorityName, MarkName, SanitizerName, TagName};
 
-/// Operator prose on a registered authority or sanitizer: why this entry exists, in the
-/// deployer's own words. It travels with every remedy plan naming the entity, so an agent chooses
-/// among plans on stated purpose rather than on a bare name, and a reviewer reads the intent beside
-/// the mandate. Advisory only: a hint NEVER enters a check, an enumeration, or an ordering, and it
-/// widens no mandate. The load lint bounds its length ([`crate::registry::MAX_HINT_CHARS`]).
+/// Trusted deployer prose for a registered component. OpenAPPA includes an Authority or
+/// Sanitizer hint in remedy plans that reference the component. For model-backed components,
+/// the hint is included in the consult's system prompt declaration to guide model evaluation.
+/// Advisory only: a hint NEVER enters a check, enumeration, or ordering, and it cannot expand
+/// a mandate. The load lint bounds its length ([`crate::registry::MAX_HINT_CHARS`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hint(String);
 

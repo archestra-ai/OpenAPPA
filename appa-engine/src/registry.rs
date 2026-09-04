@@ -374,7 +374,11 @@ pub enum LoadError {
         "tool {tool}: {count} worst-case alternative remedy plans exceed the planner cap of {max} — reduce the requirement entries, the competent authorities, or the clearing tools, or raise `[limits] planner_cap`"
     )]
     TooManyPlanAlternatives { tool: String, count: u128, max: u128 },
-    #[error("{context}: hint is {len} characters, over the {max} a plan offer carries")]
+    #[error(
+        "confined-return stage: {count} worst-case sanitizer alternatives exceed the planner cap of {max} — reduce the registered output sanitizers or raise `[limits] planner_cap`"
+    )]
+    TooManyReturnPlanAlternatives { count: u128, max: u128 },
+    #[error("{context}: hint is {len} characters, over the maximum {max}")]
     HintTooLong { context: String, len: usize, max: usize },
     #[error(
         "{context}: {reader:?} is not a literal reader ID — `public`, `self`, and `internal` are audience states, and the `@` mark is reserved for group references"
@@ -442,8 +446,11 @@ pub enum LoadError {
 /// tool, the grouped-assignment product times its release paths plus its direct-redispatch
 /// candidates; per catalogue, the confined child-return menu. The bound keeps enumeration total
 /// (no runtime truncation: "every sound alternative" is literal). Deployment configuration
-/// sets it via `[limits] planner_cap`; omitted, the cap is 64. Zero is unrepresentable: every
-/// stage's worst case is at least one, so a zero cap would refuse every registry.
+/// sets it via `[limits] planner_cap`; omitted, the cap is 4096. The bound is a sum as much as
+/// a product: for an annotated tool every audience-narrowing tool in the catalogue counts as a
+/// redispatch candidate, so the default admits a catalogue of a few thousand tools before a
+/// deployment has to raise it. Zero is unrepresentable: every stage's worst case is at least
+/// one, so a zero cap would refuse every registry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlannerCap(u128);
 
@@ -457,13 +464,14 @@ impl PlannerCap {
 
 impl Default for PlannerCap {
     fn default() -> Self {
-        PlannerCap(64)
+        PlannerCap(4096)
     }
 }
 
-/// The longest hint a registration may carry. Every offer of every block repeats the
-/// hints of the entities it names, so an unbounded one is a way to flood the agent's context from
-/// configuration. A sentence or two is the intended shape.
+/// The longest hint a registration may carry. OpenAPPA includes Authority and Sanitizer hints in
+/// remedy offers and embeds component hints in model consult system prompts. Bounding the hint
+/// length prevents trusted configuration from flooding either context. A sentence or two is the
+/// intended shape.
 pub const MAX_HINT_CHARS: usize = 512;
 
 fn worst_case_plan_alternatives(
@@ -2296,11 +2304,15 @@ mod tests {
     }
 
     #[test]
-    fn the_default_planner_cap_refuses_an_over_wide_registry_at_sixty_four() {
-        assert!(Registry::build_covered(n_squared_config(8)).is_ok());
+    fn the_default_planner_cap_refuses_an_over_wide_registry_at_four_thousand_ninety_six() {
+        assert!(Registry::build_covered(n_squared_config(64)).is_ok());
         assert!(matches!(
-            Registry::build_covered(n_squared_config(9)),
-            Err(LoadError::TooManyPlanAlternatives { count: 81, max: 64, .. })
+            Registry::build_covered(n_squared_config(65)),
+            Err(LoadError::TooManyPlanAlternatives {
+                count: 4225,
+                max: 4096,
+                ..
+            })
         ));
     }
 
@@ -2349,9 +2361,9 @@ mod tests {
             cfg.authorities = (0..n).map(|i| officer(format!("a{i}"))).collect();
             cfg
         };
-        assert!(Registry::build_covered(wide(3)).is_ok());
+        assert!(Registry::build_covered_with_cap(wide(3), PlannerCap::new(64).expect("nonzero")).is_ok());
         assert!(matches!(
-            Registry::build_covered(wide(4)),
+            Registry::build_covered_with_cap(wide(4), PlannerCap::new(64).expect("nonzero")),
             Err(LoadError::TooManyPlanAlternatives { count: 65, max: 64, ref tool }) if tool == "wire"
         ));
     }
@@ -2387,7 +2399,7 @@ mod tests {
             })
             .collect();
         assert!(
-            Registry::build_covered(cfg.clone()).is_ok(),
+            Registry::build_covered_with_cap(cfg.clone(), PlannerCap::new(64).expect("nonzero")).is_ok(),
             "authorities that cannot cover the recipient are not alternatives"
         );
 
@@ -2397,7 +2409,7 @@ mod tests {
             (0..65).map(|index| capped_at(&format!("r{index}"), DeclaredAudience::restricted([recipient.clone()]))),
         );
         assert!(matches!(
-            Registry::build_covered(reaching),
+            Registry::build_covered_with_cap(reaching, PlannerCap::new(64).expect("nonzero")),
             Err(LoadError::TooManyPlanAlternatives { count: 65, max: 64, .. })
         ));
 
@@ -2435,7 +2447,7 @@ mod tests {
             ..crate::audience::AudienceConfig::default()
         };
         assert!(matches!(
-            Registry::build_covered(grouped),
+            Registry::build_covered_with_cap(grouped, PlannerCap::new(64).expect("nonzero")),
             Err(LoadError::TooManyPlanAlternatives { count: 80, max: 64, .. })
         ));
     }
