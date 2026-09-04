@@ -72,6 +72,7 @@ appa-eventlog = { workspace = true, features = ["fault-injection"] }
 # `start_paused`: a test that must exhaust a retry table should not spend the
 # table's backoff in real seconds.
 tokio = { workspace = true, features = ["test-util"] }
+jsonschema = { version = "0.53.0", default-features = false }
 # The elicitation round trip is only real with a real client on the
 # other end: these features exist for `tests/hitl_elicitation.rs` and
 # never ship in the binary.

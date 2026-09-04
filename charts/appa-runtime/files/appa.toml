@@ -1,0 +1,99 @@
+# Bootstrap policy for the shared kagent runtime. It permits appa-guide to
+# inspect the cluster and requires human approval before its first policy
+# write. Every unrelated tool remains refused until the guide configures it.
+
+[policy]
+version = 2
+
+[[policy.tool]]
+name = "k8s_get_resources"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_get_resource_yaml"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_get_events"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_get_pod_logs"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_apply_manifest"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["human-approval"]
+
+[[policy.tool]]
+name = "k8s_patch_resource"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["human-approval"]
+
+[[policy.tool]]
+name = "k8s_delete_resource"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["human-approval"]
+
+[[policy.tool]]
+name = "k8s_execute_command"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+
+[[policy.tool]]
+name = "helm_list_releases"
+delta = {}
+
+[[policy.tool]]
+name = "helm_get_release"
+delta = {}
+
+[[policy.tool]]
+name = "helm_upgrade"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["human-approval"]
+
+[[policy.tool]]
+name = "helm_uninstall"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["human-approval"]
+
+[[policy.tool]]
+name = "appa-guide"
+delta = {}
+
+[[policy.tool]]
+name = "read_file"
+delta = {}
+
+[[policy.authority]]
+name = "oncall"
+hint = "Ask the operator through the kagent approval flow."
+
+[policy.authority.permits]
+attention = ["human-approval"]
+
+[externals]
+timeout_ms = 5000
+max_body_bytes = 65536
+
+[externals.authorities.oncall]
+builtin = "hitl"

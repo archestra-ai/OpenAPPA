@@ -33,6 +33,11 @@
 #                 unset, so the gate is off by default.
 #   APPA_CONFIG   the appa.toml the bundled runtime loads
 #                 (default: the packaged example policy)
+#   APPA_CONFIG_CONTENTS
+#                 complete TOML written to the pod-local appa.toml before
+#                 the bundled runtime starts; intended for Agent env config
+#   APPA_DATA_DIR writable directory for that generated file
+#                 (default: /.kagent)
 #   APPA_DB       the trajectory log path (default: pod-local, dies with
 #                 the pod — the quickstart's documented limit)
 #
@@ -57,9 +62,10 @@ COPY appa-builtin appa-builtin
 COPY appa-eventlog appa-eventlog
 COPY bench bench
 COPY website-chat-playground website-chat-playground
-# appa's build.rs stages the Claude Code plugin source into the binary's
-# build identity, so a release build needs these paths in-context.
-COPY integrations integrations
+# appa's build.rs stages these two plugin trees into the binary's build
+# identity. Kagent harness and chart changes must not invalidate this compile.
+COPY integrations/claude-code integrations/claude-code
+COPY integrations/appa-guide integrations/appa-guide
 COPY batteries batteries
 COPY website/content/docs/contracts.md website/content/docs/contracts.md
 RUN cargo build --release --locked --package appa
@@ -74,12 +80,16 @@ FROM ${KAGENT_APP_IMAGE}
 COPY --from=builder /build/target/release/appa /usr/local/bin/appa
 COPY --from=wheel --chown=python:pythongroup /dist/ /tmp/appa-dist/
 COPY --chown=python:pythongroup integrations/kagent/examples/kagent.appa.toml /opt/appa/kagent.appa.toml
+COPY --chown=python:pythongroup batteries /opt/appa/batteries
+COPY --chown=python:pythongroup scripts/appa-refresh-batteries.py /usr/local/bin/appa-refresh-batteries
 COPY --chown=python:pythongroup integrations/kagent/appa-kagent-quickstart/entrypoint.sh /opt/appa/entrypoint.sh
 
 RUN uv pip install --python /.kagent/.venv/bin/python --no-deps --offline /tmp/appa-dist/*.whl \
-    && chmod +x /opt/appa/entrypoint.sh
+    && chmod 0755 /usr/local/bin/appa-refresh-batteries /opt/appa/entrypoint.sh
 
 ENV APPA_CONFIG=/opt/appa/kagent.appa.toml
 ENV APPA_DB=/.kagent/appa.db
+ENV APPA_BATTERIES_DIR=/opt/appa/batteries
+ENV APPA_DATA_DIR=/.kagent
 
 ENTRYPOINT ["/opt/appa/entrypoint.sh"]

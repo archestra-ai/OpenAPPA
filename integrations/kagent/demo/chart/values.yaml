@@ -7,16 +7,13 @@ openai:
   # (Models → appa-demo-model → Edit → API Key): the dashboard writes the
   # same Secret, and the agent and runtime pods start once it exists.
   apiKey: ""
-  # The agents' model. Every gpt-5.6 variant needs reasoning_effort "none"
-  # for function tools on chat completions; the image fills that in
-  # (runtime.reasoningEffort). Pick a gpt-4.1 model to drop the need.
-  model: gpt-5.6-luna
+  # The agents' model.
+  model: gpt-4.1-mini
   # An existing Secret carrying OPENAI_API_KEY, instead of apiKey. Name it
   # like the ModelConfig for the dashboard's Edit flow to find it.
   existingSecret: ""
-  # An OpenAI-compatible endpoint for the agents' model, such as
-  # https://openrouter.ai/api/v1. Empty means api.openai.com. The chart
-  # renders spec.openAI.baseUrl only when you set it.
+  # The OpenAI-compatible endpoint for the agents' model. The chart renders
+  # spec.openAI.baseUrl only when this value is non-empty.
   baseUrl: ""
 
 modelConfig:
@@ -33,14 +30,16 @@ runtime:
     pullPolicy: IfNotPresent
   # Fills the OpenAI model's reasoning_effort when the ModelConfig leaves
   # it unset (APPA_KAGENT_OPENAI_REASONING_EFFORT on every agent).
-  reasoningEffort: "none"
+  reasoningEffort: ""
   # -v for the decision path at debug, -vv for the algebra at trace.
   verbosity: ""
   persistence:
-    # Keep trajectories across runtime pod restarts on a PersistentVolume.
+    # Keep trajectories and a writable batteries overlay across restarts.
+    # The appa-guide skill refreshes bundled batteries only when this is on.
     enabled: false
     size: 1Gi
     storageClass: ""
+    existingClaim: ""
 
 # The one model profile the policy's `builtin = "llm"` sanitizers
 # consult, the [externals.llm] block of files/demo.appa.toml. The
@@ -49,8 +48,8 @@ llm:
   # The sanitizers' model. It answers a json_schema request, so pick a
   # model that supports structured outputs.
   model: gpt-4.1-mini
-  # An OpenAI-compatible endpoint for that model. Empty means
-  # api.openai.com. https anywhere, cleartext http on loopback only.
+  # The OpenAI-compatible endpoint for that model. HTTPS works anywhere;
+  # cleartext HTTP works on loopback only.
   url: ""
 
 relay:

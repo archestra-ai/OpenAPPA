@@ -2,10 +2,10 @@ apiVersion: v2
 name: appa-kagent-demo
 description: OpenAPPA on kagent, as a demo you can install in any cluster — a gated cluster-ops fleet, the shared appa-runtime with its externals in one pod, the demo tools, and seeded showcase chats.
 type: application
-version: 0.1.0
+version: 0.9.0 # x-release-please-version
 # The released version. The release workflow publishes every image at that
 # version, and release-please bumps this line to it.
-appVersion: "0.7.1" # x-release-please-version
+appVersion: "0.9.0" # x-release-please-version
 kubeVersion: ">=1.28.0-0"
 keywords: [openappa, kagent, agents, policy]
 sources:

@@ -254,7 +254,8 @@ pub struct PolicyFileKey(String);
 impl PolicyFileKey {
     pub fn of(bytes: &[u8]) -> PolicyFileKey {
         use sha2::Digest as _;
-        PolicyFileKey(format!("{:x}", sha2::Sha256::digest(bytes)))
+        let digest = sha2::Sha256::digest(bytes).into();
+        PolicyFileKey(crate::hex32::encode(&digest))
     }
 
     pub fn as_str(&self) -> &str {
@@ -338,7 +339,7 @@ fn identity_document_from_registry(registry: &Registry) -> serde_json::Value {
             serde_json::json!({
                 "name": name,
                 "trust": mandate.trust_ranks().collect::<Vec<_>>(),
-                "audiences": mandate.audiences().collect::<Vec<_>>(),
+                "audiences": mandate.audiences().entries().collect::<Vec<_>>(),
                 "marks": mandate.marks().collect::<Vec<_>>(),
                 "effects": mandate.effects().collect::<Vec<_>>(),
             })
@@ -1178,6 +1179,79 @@ mod tests {
         let mut rerouted = cfg.clone();
         rerouted.authorities.reverse();
         assert_ne!(identity(&rerouted, &profile), base);
+    }
+
+    /// The identity document renders each mandate's audience vocabulary as its canonical
+    /// spellings: what a produced annotation may say is part of the policy, whether the bound
+    /// was written or resolved from the policy's own names.
+    #[test]
+    fn an_annotator_mandate_renders_its_audience_vocabulary_in_the_identity_document() {
+        let rendered = |cfg: &RegistryConfig| -> Vec<String> {
+            let engine = open(cfg.clone(), covering_declaration(cfg)).expect("the fixture opens");
+            let document = identity_document_from_registry(engine.registry());
+            document["annotators"][0]["audiences"]
+                .as_array()
+                .expect("a mandate renders its audiences as an array")
+                .iter()
+                .map(|entry| entry.as_str().expect("a spelling").to_string())
+                .collect()
+        };
+        let routed = |audiences: Option<crate::registry::AudienceVocabulary>| {
+            let mut cfg = config(vec![]);
+            cfg.annotators = vec![crate::registry::AnnotatorDeclaration {
+                audiences,
+                ..classifier()
+            }];
+            cfg.tools = vec![annotated("fetch")];
+            cfg
+        };
+        let vocabulary = |entries: &[&str]| {
+            crate::registry::AudienceVocabulary::parse_entries(
+                &entries.iter().map(|entry| entry.to_string()).collect::<Vec<_>>(),
+            )
+            .expect("a fixture vocabulary parses")
+        };
+
+        let omitted = routed(None);
+        assert_eq!(rendered(&omitted), ["self", "internal"]);
+
+        let mut with_reader = omitted.clone();
+        with_reader.tools.push(ToolDeclaration::Declared({
+            let mut t = tool("read");
+            t.delta.audience = Some(DeclaredAudience::restricted([ReaderId::new("alice")]));
+            t
+        }));
+        assert_eq!(rendered(&with_reader), ["self", "internal", "alice"]);
+
+        let mut with_group = with_reader.clone();
+        with_group.audience = crate::audience::AudienceConfig {
+            sources: vec![crate::audience::SourceRegistration {
+                provider: "slack".to_string(),
+                templates: vec![crate::audience::SelectorTemplate::new("user-group/<handle>")],
+            }],
+            groups: vec![crate::audience::NamedAudience {
+                name: crate::names::GroupName::new("team"),
+                within: None,
+                from: vec![crate::audience::SelectorSpec {
+                    provider: "slack".to_string(),
+                    selector: "user-group/team".to_string(),
+                }],
+            }],
+            ..crate::audience::AudienceConfig::default()
+        };
+        assert_eq!(rendered(&with_group), ["self", "internal", "@team", "alice"]);
+
+        let mut explicit = with_group.clone();
+        explicit.annotators[0].audiences = Some(vocabulary(&["alice", "@team", "internal", "self"]));
+        assert_eq!(
+            rendered(&explicit),
+            rendered(&with_group),
+            "a written bound equal to the resolved default renders the same spellings"
+        );
+        assert_eq!(
+            identity(&explicit, &covering_profile(&explicit)),
+            identity(&with_group, &covering_profile(&with_group))
+        );
     }
 
     #[test]

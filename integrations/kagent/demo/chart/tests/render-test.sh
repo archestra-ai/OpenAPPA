@@ -73,10 +73,22 @@ expect_env() {
 # The defaults render both cells and the guide agent, and the policy
 # declares both children by their wire spelling.
 must_render kagent
+expect 2 '/opt/appa/batteries'
+expect 0 '/var/lib/appa/batteries'
 expect 7 '^kind: Agent$'
+expect_env 1 APPA_CONFIG /etc/appa/demo.appa.toml
 expect 1 '^  name: appa-guide$'
 expect 1 '^    name = "kagent__NS__log_analyst"$'
 expect 1 '^    name = "kagent__NS__log_analyst_go"$'
+
+# Persistence adds the writable lookup path. An existing claim is used
+# without rendering a second claim.
+must_render kagent --set runtime.persistence.enabled=true \
+  --set runtime.persistence.existingClaim=team-appa
+expect 2 '/var/lib/appa/batteries'
+expect 2 '/var/lib/appa/release-batteries'
+expect 1 'claimName: "team-appa"'
+expect 0 '^kind: PersistentVolumeClaim$'
 
 # Every rendered agent carries the gate knob beside the runtime URL.
 # The runtime image is a drop-in replacement for the stock kagent image
@@ -134,9 +146,8 @@ expect 1 '^  apiKeySecret: "123"$'
 expect 1 '^    name = "123__NS__123"$'
 expect 1 '^    name = "123__NS__null"$'
 
-# The model profile the policy's sanitizers consult. The defaults name
-# the demo model and bind no endpoint. One base url reaches both the
-# agents' ModelConfig and that profile.
+# The model profile the policy's sanitizers consult. Defaults use OpenAI's
+# endpoint. One override reaches both the agents' ModelConfig and that profile.
 must_render kagent
 expect 1 '^    model = "gpt-4.1-mini"$'
 expect 0 '^    url = "https://openrouter.ai/api/v1"$'

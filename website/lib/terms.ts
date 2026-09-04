@@ -76,7 +76,7 @@ const TERMS = {
   ranks:
     "In an annotator's mandate: the trust ranks its answers may write in delta.trust and requires.trust. Omitted, every rank in the trust chain.",
   audiences:
-    "In an annotator's mandate: the literal readers a restricted audience answer may name. public is always admissible and is never listed as a reader; a symbolic audience is never admissible. Omitted, every reader the policy writes.",
+    "In an annotator's mandate: the audiences a restricted answer may name — self, internal, @ mentions, and literal readers, each spelled as a declaration spells it. public is always admissible and is never listed. Omitted, every audience the policy writes.",
   marks:
     "In an annotator's mandate: the attention marks its answers may require. Omitted, every mark an authority names under permits.attention.",
   "$tool_call":

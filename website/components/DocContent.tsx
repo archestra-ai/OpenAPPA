@@ -5,6 +5,8 @@ import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import rehypeSlug from "rehype-slug";
 import remarkGfm from "remark-gfm";
+import type { LanguageFn } from "highlight.js";
+import { common } from "lowlight";
 
 import { AdvisorySignup } from "@/components/AdvisorySignup";
 import { BatteryCatalog } from "@/components/BatteryCatalog";
@@ -32,6 +34,37 @@ import { ProposalBlock } from "@/components/ProposalBlock";
 import { Term } from "@/components/Term";
 import { parseProposal, PROPOSAL_SPLIT } from "@/lib/proposals";
 import { termDefinition } from "@/lib/terms";
+
+const appaTraceLanguage: LanguageFn = (hljs) => ({
+  name: "OpenAPPA replay trace",
+  aliases: ["appa"],
+  contains: [
+    hljs.COMMENT("#", "$"),
+    {
+      scope: "title.function",
+      begin: /^[A-Za-z_][A-Za-z0-9_.-]*(?=\s*\{)/m,
+    },
+    {
+      scope: "attr",
+      begin: /[A-Za-z_][A-Za-z0-9_-]*(?=\s*:)/,
+    },
+    {
+      scope: "keyword",
+      begin: /\bexpect\b/,
+    },
+    {
+      scope: "literal",
+      begin: /\b(?:allow|deny|offer)\b/,
+    },
+    {
+      scope: "string",
+      begin: /"/,
+      end: /"/,
+      contains: [hljs.BACKSLASH_ESCAPE],
+    },
+    hljs.NUMBER_MODE,
+  ],
+});
 
 /* Block directives: a line of the form :::name::: in the markdown renders
    the mapped component in place. */
@@ -157,7 +190,10 @@ function Markdown({ content, terms = true }: { content: string; terms?: boolean 
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
-      rehypePlugins={[rehypeSlug, rehypeHighlight]}
+      rehypePlugins={[
+        rehypeSlug,
+        [rehypeHighlight, { languages: { ...common, appa: appaTraceLanguage } }],
+      ]}
       components={{
         pre: (props) => <CodeBlock {...props} />,
         code: terms ? MarkdownCode : PlainCode,

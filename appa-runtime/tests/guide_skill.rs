@@ -32,7 +32,7 @@ fn the_router_routes_by_host_and_carries_the_shared_rules() {
         router.contains("Do not call `Read`"),
         "Claude bootstraps without a gated tool call"
     );
-    assert!(router.contains("`init`") && router.contains("`adjust`"));
+    assert!(router.contains("`quickstart`") && router.contains("`init`") && router.contains("`adjust`"));
     for shared in [
         "Never edit a battery",
         "OpenAPPA pieces",
@@ -78,9 +78,19 @@ fn the_kagent_reference_carries_the_full_flow() {
         "__NS__",
         "Approve/Reject card",
         "/reload",
+        "/batteries",
+        "APPA_CONFIG_CONTENTS",
+        "appa-refresh-batteries --check",
+        "Replace only `name`",
+        "PersistentVolumeClaim",
         "kubelet syncs",
         "Read-only fallback",
         "Approve, or tell me what to change.",
+        "## Quickstart",
+        "one concrete next action",
+        "## Cluster operations",
+        "helm_upgrade",
+        "Protect all Agents",
     ] {
         assert!(reference.contains(marker), "the kagent flow names {marker:?}");
     }
@@ -100,7 +110,13 @@ fn the_kagent_chart_consumes_this_skill_package() {
         guide.contains("gitRefs"),
         "the agent attaches the skill through git refs"
     );
-    for tool in ["k8s_get_resources", "k8s_apply_manifest", "k8s_execute_command"] {
+    for tool in [
+        "k8s_get_resources",
+        "k8s_apply_manifest",
+        "k8s_patch_resource",
+        "k8s_execute_command",
+        "helm_upgrade",
+    ] {
         assert!(guide.contains(tool), "the guide agent carries {tool}");
     }
     assert!(guide.contains("APPA_RUNTIME_URL"));

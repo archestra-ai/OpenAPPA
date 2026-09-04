@@ -679,6 +679,22 @@ samp {
   font-size: 14px;
 }
 
+.toc-doc-tools {
+  padding-top: 4px;
+}
+
+.toc-doc-tools .mcp-panel-card {
+  margin-top: 12px;
+}
+
+.toc-doc-tools .mcp-panel-card:first-child {
+  margin-top: 0;
+}
+
+.toc-doc-tools + .toc-title {
+  margin-top: 24px;
+}
+
 .toc a {
   display: block;
   padding: 4px 24px;

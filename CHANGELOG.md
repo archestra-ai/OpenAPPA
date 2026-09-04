@@ -1,5 +1,79 @@
 # Changelog
 
+## [0.9.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.8.0...v0.9.0) (2026-09-04)
+
+
+### Features
+
+* **k8s:** ship shared appa-runtime Helm deployment ([#199](https://github.com/archestra-ai/OpenAPPA/issues/199)) ([8026fc9](https://github.com/archestra-ai/OpenAPPA/commit/8026fc925ded33254cc2f64ebb343faddb9b6022))
+
+
+### Bug Fixes
+
+* **ci:** align and gate live kagent e2e ([#191](https://github.com/archestra-ai/OpenAPPA/issues/191)) ([2e3c3d2](https://github.com/archestra-ai/OpenAPPA/commit/2e3c3d291493bcac47c63ed8ced2231739fc4855))
+* **engine:** encode policy digests explicitly ([#194](https://github.com/archestra-ai/OpenAPPA/issues/194)) ([4c10285](https://github.com/archestra-ai/OpenAPPA/commit/4c10285c1e4986af46b0b271b20c5efd9534d82b))
+
+
+### Performance Improvements
+
+* **ci:** speed Rust tests and A2A checks ([#192](https://github.com/archestra-ai/OpenAPPA/issues/192)) ([765b48a](https://github.com/archestra-ai/OpenAPPA/commit/765b48aeedf3b93b62dc83b84f7630a604235cc7))
+
+
+### Documentation
+
+* add GitHub battery replay example ([#195](https://github.com/archestra-ai/OpenAPPA/issues/195)) ([a4e28e8](https://github.com/archestra-ai/OpenAPPA/commit/a4e28e8f67211f4b79df98af9a5ff29f7cef2957))
+* clarify battery example link ([#196](https://github.com/archestra-ai/OpenAPPA/issues/196)) ([9fe3889](https://github.com/archestra-ai/OpenAPPA/commit/9fe38892c0c96ad47f1104b17da2b274d9307bf7))
+* link complete battery replay example ([9fe3889](https://github.com/archestra-ai/OpenAPPA/commit/9fe38892c0c96ad47f1104b17da2b274d9307bf7))
+* streamline battery composition guide ([#198](https://github.com/archestra-ai/OpenAPPA/issues/198)) ([9afbcbf](https://github.com/archestra-ai/OpenAPPA/commit/9afbcbffd979da6a31c7fe58f8a08e7825ebb7f4))
+
+## [0.8.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.7.1...v0.8.0) (2026-09-03)
+
+
+### Features
+
+* **kagent:** add the appa-guide routing skill on the stock tool server ([#184](https://github.com/archestra-ai/OpenAPPA/issues/184)) ([12c0a7f](https://github.com/archestra-ai/OpenAPPA/commit/12c0a7fb69d8dfb0176c996408663c0fff523eba))
+* **kagent:** an APPA_ENABLED knob, the subagent return gate, and a gated-path suite ([#170](https://github.com/archestra-ai/OpenAPPA/issues/170)) ([2de7716](https://github.com/archestra-ai/OpenAPPA/commit/2de7716904150c69a91e1576d99fc60d0ed3f3e2))
+* **kagent:** gate kagent declarative agents with OpenAPPA ([#154](https://github.com/archestra-ai/OpenAPPA/issues/154)) ([d0c7c3d](https://github.com/archestra-ai/OpenAPPA/commit/d0c7c3d55e1695e823f69bc0e063cda6ed0f5e34))
+* **policy:** default audiences and a leaner Claude Code config ([#181](https://github.com/archestra-ai/OpenAPPA/issues/181)) ([b141c89](https://github.com/archestra-ai/OpenAPPA/commit/b141c89c88ae65ae1078911ff58f44a9ca9ff6f8))
+* **replay:** add appa replay for trace-file policy tests ([#162](https://github.com/archestra-ai/OpenAPPA/issues/162)) ([27e8246](https://github.com/archestra-ai/OpenAPPA/commit/27e82463c290d8fc594b4118e85cfc2f47529108))
+* **runtime:** declare the subagent's return at the spawn, return at SubagentStop ([#169](https://github.com/archestra-ai/OpenAPPA/issues/169)) ([769d16d](https://github.com/archestra-ai/OpenAPPA/commit/769d16da2651a0cde692fe245d0e24aaad242c23))
+* **website:** pronunciation button on the landing hero ([#163](https://github.com/archestra-ai/OpenAPPA/issues/163)) ([73ab516](https://github.com/archestra-ai/OpenAPPA/commit/73ab51644dc2cb3e66ac6683293f58b2fc811f4d))
+
+
+### Bug Fixes
+
+* **bench:** harden canary against provider timeouts and rejections ([#177](https://github.com/archestra-ai/OpenAPPA/issues/177)) ([7c4ffd1](https://github.com/archestra-ai/OpenAPPA/commit/7c4ffd1317ccc3c454d382d9536bfdde00c1df38))
+* **ci:** stabilize release checks ([#188](https://github.com/archestra-ai/OpenAPPA/issues/188)) ([0759b92](https://github.com/archestra-ai/OpenAPPA/commit/0759b92291a71c83d9233f9eaaf2acf9c5b49cf6))
+* **engine:** floor-aware fork advice and a return-floor hint that does not spell the current label ([#178](https://github.com/archestra-ai/OpenAPPA/issues/178)) ([56346ec](https://github.com/archestra-ai/OpenAPPA/commit/56346ec779d5284d10b614bf103657e9aa4d1eb8))
+* **install:** validate the archive before unpacking it ([#173](https://github.com/archestra-ai/OpenAPPA/issues/173)) ([e8a250a](https://github.com/archestra-ai/OpenAPPA/commit/e8a250ab48508d97e2a849cebc770f62bebd4f63))
+* **install:** validate the archive before unpacking it, and refuse in one voice ([e8a250a](https://github.com/archestra-ai/OpenAPPA/commit/e8a250ab48508d97e2a849cebc770f62bebd4f63))
+* **release:** build recovery artifacts from draft tag ([#159](https://github.com/archestra-ai/OpenAPPA/issues/159)) ([29a815d](https://github.com/archestra-ai/OpenAPPA/commit/29a815d8ce70edca6a766ceef8921965e2748734))
+* **release:** make the release gate assert something, and give its checks one definition each ([#172](https://github.com/archestra-ai/OpenAPPA/issues/172)) ([11d2a6a](https://github.com/archestra-ai/OpenAPPA/commit/11d2a6afb78c9f5645ea3c9c54bd054104a08819))
+* **release:** tolerate expected Windows init failure ([#157](https://github.com/archestra-ai/OpenAPPA/issues/157)) ([b38aec9](https://github.com/archestra-ai/OpenAPPA/commit/b38aec916e32e6416a9404db99550d7e9773bf76))
+* **runtime:** clarify agent-facing policy block and remedy feedback ([#183](https://github.com/archestra-ai/OpenAPPA/issues/183)) ([fce9a16](https://github.com/archestra-ai/OpenAPPA/commit/fce9a1611a3a5c9117b6241ada48bd5a581b3800))
+* **runtime:** clarify init compatibility messages ([#161](https://github.com/archestra-ai/OpenAPPA/issues/161)) ([49c59bc](https://github.com/archestra-ai/OpenAPPA/commit/49c59bccde3f1d9dc3a90aefa46b1d877533621e))
+* **runtime:** disable the classifier CLI's background traffic ([#160](https://github.com/archestra-ai/OpenAPPA/issues/160)) ([0989ec1](https://github.com/archestra-ai/OpenAPPA/commit/0989ec1f4304160bc1c92f73654f4dd88d454d08))
+* **test:** allow runtime startup under load ([#189](https://github.com/archestra-ai/OpenAPPA/issues/189)) ([716c5c6](https://github.com/archestra-ai/OpenAPPA/commit/716c5c6d9861977972621b63f3ba65b34fe1076f))
+* **website:** drop the custom cursor on the pronunciation button ([#174](https://github.com/archestra-ai/OpenAPPA/issues/174)) ([b9117a9](https://github.com/archestra-ai/OpenAPPA/commit/b9117a9a9fbdd65bf286ecea826ef1dbd0bd8a4a))
+* **website:** raise docs text contrast ([#165](https://github.com/archestra-ai/OpenAPPA/issues/165)) ([68961ed](https://github.com/archestra-ai/OpenAPPA/commit/68961edfc31742379638eeb910f799d01fcd071a))
+* **website:** set prose back to 15px ([#166](https://github.com/archestra-ai/OpenAPPA/issues/166)) ([b24cabd](https://github.com/archestra-ai/OpenAPPA/commit/b24cabd1136a3f08e5ca2436f83f33cd1a033c3d))
+
+
+### Documentation
+
+* add batteries catalog and author guide ([#179](https://github.com/archestra-ai/OpenAPPA/issues/179)) ([9ac2ae0](https://github.com/archestra-ai/OpenAPPA/commit/9ac2ae0e34216687bd09e9fea2b35460a67a2797))
+* **kagent:** add operator guide, existing cluster setup, and interactive figure ([#185](https://github.com/archestra-ai/OpenAPPA/issues/185)) ([9ad3fee](https://github.com/archestra-ai/OpenAPPA/commit/9ad3fee62c53c61d803b4c9425fad164d5483024))
+* **kagent:** streamline operator guide and strip release markers from rendered code ([#187](https://github.com/archestra-ai/OpenAPPA/issues/187)) ([19fc101](https://github.com/archestra-ai/OpenAPPA/commit/19fc101312f8437c40b124e2e68c1962cb1ce50f))
+* **replay:** add validation guide ([#164](https://github.com/archestra-ai/OpenAPPA/issues/164)) ([b17aeb1](https://github.com/archestra-ai/OpenAPPA/commit/b17aeb1611d927d7ac5ed9c1ad4b74b5faef99d6))
+* **replay:** shorten the validation guide ([#167](https://github.com/archestra-ai/OpenAPPA/issues/167)) ([201c782](https://github.com/archestra-ai/OpenAPPA/commit/201c7822207dcef236818e88176aef1aab9bf02f))
+* **website:** add agent integration guide and architecture diagram ([#186](https://github.com/archestra-ai/OpenAPPA/issues/186)) ([d5ebd49](https://github.com/archestra-ai/OpenAPPA/commit/d5ebd49576c225b2f146a124b44a9d1525e84ca3))
+
+
+### Code Refactoring
+
+* **init:** give the endpoint protocol, the fingerprint and the receipt one definition each ([#175](https://github.com/archestra-ai/OpenAPPA/issues/175)) ([23b834e](https://github.com/archestra-ai/OpenAPPA/commit/23b834ed24098313cdc25758be1911edd551f391))
+* **init:** split init.rs into the five things it does ([#176](https://github.com/archestra-ai/OpenAPPA/issues/176)) ([3e9474a](https://github.com/archestra-ai/OpenAPPA/commit/3e9474a0afad77123f33b35589d01bd2d821c3b3))
+
 ## [0.7.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.7.0...v0.7.1) (2026-09-02)
 
 

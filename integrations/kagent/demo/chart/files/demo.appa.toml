@@ -151,8 +151,8 @@ delta = {}
 
 # --- the configuring actor: the appa-guide agent ---
 # The guide agent runs the routing skill against these tools. Reads are
-# unrestricted; the policy write sits behind a person (kagent's Approve
-# card is the oncall authority's channel), and exec needs trusted data.
+# unrestricted; cluster and Helm writes sit behind a person (kagent's
+# Approve card is the oncall authority's channel), and exec needs trusted data.
 # The skill's file helpers that it never uses (bash, write_file,
 # edit_file) stay undeclared, so they are refused.
 [[policy.tool]]
@@ -164,7 +164,31 @@ name = "k8s_get_resource_yaml"
 delta = {}
 
 [[policy.tool]]
+name = "k8s_get_events"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_get_pod_logs"
+delta = {}
+
+[[policy.tool]]
 name = "k8s_apply_manifest"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["human-approval"]
+
+[[policy.tool]]
+name = "k8s_patch_resource"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["human-approval"]
+
+[[policy.tool]]
+name = "k8s_delete_resource"
 delta = {}
 
 [policy.tool.requires]
@@ -177,6 +201,30 @@ delta = {}
 
 [policy.tool.requires]
 trust = "trusted"
+
+[[policy.tool]]
+name = "helm_list_releases"
+delta = {}
+
+[[policy.tool]]
+name = "helm_get_release"
+delta = {}
+
+[[policy.tool]]
+name = "helm_upgrade"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["human-approval"]
+
+[[policy.tool]]
+name = "helm_uninstall"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["human-approval"]
 
 [[policy.tool]]
 name = "appa-guide"
@@ -252,8 +300,8 @@ builtin = "llm"
 # The one model profile every `builtin = "llm"` binding consults.
 # The values here are the chart defaults, so this file loads as it
 # stands and CI opens it. The chart substitutes them per release
-# (`appa-demo.policy`), and adds a `url` line when `llm.url` names an
-# endpoint; without one the provider's own default applies.
+# (`appa-demo.policy`), replacing the model and URL from `llm` values.
+# An empty `llm.url` removes the URL and uses the provider's default.
 [externals.llm]
 provider = "openai"
 model = "gpt-4.1-mini"

@@ -630,6 +630,12 @@ fn default_review_timeout_ms() -> u64 {
 
 impl Config {
     pub fn load(path: &Path) -> Result<Config, ConfigError> {
+        Config::load_from(path, &[])
+    }
+
+    /// Load `path`, resolving `batteries/<name>/appa.toml` includes against
+    /// `battery_dirs` in the given order before the root config directory.
+    pub fn load_from(path: &Path, battery_dirs: &[PathBuf]) -> Result<Config, ConfigError> {
         let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Unreadable {
             path: path.display().to_string(),
             source,
@@ -678,7 +684,7 @@ impl Config {
             if include.is_absolute() {
                 return Err(ConfigError::AbsoluteInclude { path: authored.clone() });
             }
-            let include_path = source_dir.join(include);
+            let include_path = crate::batteries::resolve_include(authored, &source_dir, battery_dirs);
             let include_path = std::fs::canonicalize(&include_path).map_err(|source| ConfigError::Unreadable {
                 path: include_path.display().to_string(),
                 source,
@@ -1894,6 +1900,53 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(names, ["root", "first", "second"]);
         assert!(!String::from_utf8_lossy(config.policy_file().bytes()).contains("include"));
+    }
+
+    #[test]
+    fn a_battery_include_resolves_from_the_search_path_before_the_config_directory() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        let image = dir.path().join("image");
+        std::fs::create_dir_all(image.join("slack")).expect("image battery");
+        std::fs::write(
+            image.join("slack/appa.toml"),
+            r#"
+                [policy]
+                version = 2
+
+                [[policy.tool]]
+                name = "from-image"
+                delta = {}
+            "#,
+        )
+        .expect("image battery config");
+        std::fs::write(
+            dir.path().join("appa.toml"),
+            r#"
+                include = ["batteries/slack/appa.toml"]
+
+                [policy]
+                version = 2
+
+                [[policy.tool]]
+                name = "root"
+                delta = {}
+
+                [externals]
+                timeout_ms = 5000
+                max_body_bytes = 65536
+            "#,
+        )
+        .expect("write root config");
+
+        let config =
+            Config::load_from(&dir.path().join("appa.toml"), &[image]).expect("the search path supplies the battery");
+        let names = config.policy_file().value()["tool"]
+            .as_array()
+            .expect("tool declarations")
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("tool name"))
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["root", "from-image"]);
     }
 
     #[test]
