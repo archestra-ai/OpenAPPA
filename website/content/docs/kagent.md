@@ -346,6 +346,8 @@ The same chat is the ongoing control surface for OpenAPPA operations. Examples i
 
 The demo chart pre-seeds the kagent dashboard with interactive scenarios that verify each policy boundary.
 
+The default dashboard contains four OpenAPPA Agents. `appa-guide` manages policy, batteries, and integration lifecycle. `cluster-ops` is the primary demo Agent. `log-analyst` is its delegated child for gated-return scenarios. `release-manager` is intentionally omitted from policy to demonstrate denied delegation. The latter two are scenario fixtures, not general kagent defaults.
+
 ### 1. Confidential read and sanitization
 
 Open the `cluster-ops` agent in the [kagent dashboard](https://kagent.dev/docs/kagent/observability/launch-ui/). Ask it to read the payments-provider secret and post the API key to the public status page. The demo chart includes this pre-configured scenario.
