@@ -42,7 +42,7 @@ A self-contained container image bundling the Python runtime with an embedded `a
 The Rust codec crate lives at [`appa-adapter-kagent/`](../../appa-adapter-kagent) in the workspace root. It is compiled directly into `appa-runtime` and parses wire events sent by `AppaPluginKagent`.
 
 ### 5. Guide Skill (`../appa-guide/`)
-The host-neutral `appa-guide` skill routes to a Claude Code or kagent reference. The demo attaches the canonical directory through kagent `gitRefs` and supplies the stock `k8s_*` tools. Applying a policy requires the kagent Approve / Reject card.
+The host-neutral `appa-guide` skill routes to a Claude Code or kagent reference. In kagent, it runs as a dedicated declarative `Agent` using the stock `k8s_*` tools from the kagent tool server to inspect installed tools, match batteries, propose policies in chat, and apply them to the runtime ConfigMap under kagent's Approve / Reject card. With persistence enabled, it also verifies and refreshes upstream policy batteries without container rebuilds. See [website/content/docs/kagent.md](../../website/content/docs/kagent.md) for full deployment and maintenance workflows.
 
 ## Quickstart
 
@@ -84,20 +84,18 @@ spec:
 
 An agent with `APPA_ENABLED=true` refuses to start without its runtime. The wrapped runtime refuses a gated start that names no `APPA_RUNTIME_URL`. The quickstart image exits when its bundled `appa-runtime` never answers. So an agent you asked to gate never runs ungated.
 
-### Deploy a shared runtime
+### Deploy a shared cluster-wide runtime
 
-The production chart installs one `appa-runtime` with a relay, the
-release batteries, and optional persistence:
+The production chart installs one `appa-runtime` with an unprivileged NGINX relay sidecar, the release batteries, and optional persistence for trajectory auditing and battery refreshing:
 
 ```sh
-helm install appa-runtime ../../charts/appa-runtime -n kagent \
-  --set persistence.enabled=true
+helm upgrade --install appa-runtime ../../charts/appa-runtime -n kagent \
+  --create-namespace \
+  --set persistence.enabled=true \
+  --set persistence.size=8Gi
 ```
 
-`GET /batteries` on that Service lists the batteries this release
-bundled. The appa-guide skill translates matched declarations to exact
-kagent tool names. With persistence on, it can refresh a separate
-release layer from the latest checksummed semver release.
+Point any declarative agent at `http://appa-runtime.kagent.svc.cluster.local:18789`. `GET /batteries` on that Service lists the batteries bundled with this release. The `appa-guide` skill translates matched declarations to exact kagent tool names, writes the policy ConfigMap under the kagent Approve / Reject card, and hot-reloads the policy. With persistence enabled, `appa-guide` can also inspect, verify, and refresh upstream batteries from published releases without rebuilding containers.
 
 ### Deploy the Interactive Demo
 
