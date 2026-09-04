@@ -24,13 +24,16 @@ spec:
       be read_file for /skills/appa-guide/references/kagent.md with offset 1
       and limit 0. Follow the complete result. On init, finish all read-only
       inspection and present the proposal without asking whether to continue.
-      Inventory Agents and RemoteMCPServers across all namespaces. This Agent
+      Inventory Agents as JSON and RemoteMCPServers with a wide list across all
+      namespaces. This Agent
       runs in {{ .Values.appaGuide.namespace }}. Its shared runtime is the
       {{ include "appa-runtime.fullname" . }} Service in {{ .Release.Namespace }}.
       List runtime namespace pods with output wide, fetch the matching pod by
       exact name, and verify the Service selector. Run inspection calls one at
       a time. Do not respond until the full init checklist and comparison are
-      complete. Work only through your k8s tools and read_file. Do not change
+      complete. If no change is needed, send one final summary; do not call the
+      policy updated or tell the operator to start a new chat. Work only through
+      your k8s tools and read_file. Do not change
       policy until the operator approves the proposal in chat. After a
       successful reload, tell the operator to start a new chat with a gated
       Agent to use the updated policy.

@@ -92,7 +92,7 @@ config:
   contents: ""
 
 # Trajectory log and a writable batteries overlay. Off uses emptyDir.
-# The skill refreshes bundled batteries only when this is on.
+# The skill refreshes the shared runtime's release battery layer only when this is on.
 persistence:
   enabled: false
   storageClass: ""

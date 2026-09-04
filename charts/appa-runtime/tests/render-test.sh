@@ -78,6 +78,7 @@ must_contain 'ref: "v0.10.0"'
 must_contain 'http://appa-runtime.appa.svc.cluster.local:18789'
 must_contain 'name: "kagent-tool-server"'
 must_contain 'your first tool call must be skills with command appa-guide'
+must_contain 'Inventory Agents as JSON and RemoteMCPServers with a wide list'
 
 must_render --set appaGuide.enabled=true --set appaGuide.namespace=platform \
   --set appaGuide.skill.ref=main --set appaGuide.modelConfig=platform-model

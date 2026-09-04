@@ -41,6 +41,7 @@ fn the_router_routes_by_host_and_carries_the_shared_rules() {
         "smallest change",
         "wait for approval",
         "reload an unchanged config",
+        "start a new chat when nothing changed",
     ] {
         assert!(
             router.contains(shared),
@@ -160,6 +161,25 @@ fn only_the_shared_runtime_image_carries_battery_refresh_helpers() {
         !bundled.contains("refresh-check") && !bundled.contains("appa-refresh-batteries"),
         "bundled batteries change only with the image"
     );
+}
+
+#[test]
+fn every_kagent_exec_requires_human_approval() {
+    let root = repo_root();
+    for path in [
+        "charts/appa-runtime/files/appa.toml",
+        "integrations/kagent/demo/chart/files/demo.appa.toml",
+    ] {
+        let policy = fs::read_to_string(root.join(path)).expect("read kagent policy");
+        let command = policy
+            .split("[[policy.tool]]")
+            .find(|entry| entry.contains("name = \"k8s_execute_command\""))
+            .expect("kagent policy declares command execution");
+        assert!(
+            command.contains("attention = [\"human-approval\"]"),
+            "{path} gates reload and command execution behind a person"
+        );
+    }
 }
 
 #[test]

@@ -34,7 +34,8 @@ unavailable state is reported:
 
 1. Load the shared `appa-guide` skill rules.
 2. Read this complete reference.
-3. List Agents across all namespaces and identify each target runtime.
+3. List Agents across all namespaces with `output: json`. Record their
+   environments, attached tools, delegations, and target runtimes.
 4. For each shared runtime URL, read its Service. List pods once with
    `resource_type: pod`, the exact namespace, and `output: wide`. Choose
    the runtime candidate, fetch that exact pod with
@@ -55,7 +56,7 @@ Continue until this checklist is complete. Do not emit an
 intermediate response that promises the next inspection step. Never call
 an Agent ungated when its observed `APPA_ENABLED` is `true`. Distinguish
 batteries available from `/batteries` from batteries included by the
-current config.
+current config. Send one final response, not duplicate summaries.
 
 ### Read-only fallback
 
@@ -80,6 +81,11 @@ error.
   or `openappa`. If cross-namespace Agent discovery is unavailable, use
   the namespace named by the host system message. If neither is
   available, ask for the Agent namespace and stop.
+- Every Kubernetes resource write, restart or rollout, Helm mutation,
+  and runtime reload must cross the `human-approval` authority and show
+  kagent's Approve/Reject card. Approval in chat does not bypass that
+  gate. If no confirmation card appears, do not claim or continue the
+  mutation.
 
 ## Find each live config
 
@@ -113,7 +119,7 @@ error.
 
 ## Inventory
 
-1. List every `Agent` across all namespaces. From
+1. List every `Agent` across all namespaces with `output: json`. From
    `spec.declarative.tools` record each
    `McpServer` reference and its `toolNames`, and each `type: Agent`
    delegation. Note agents with skills or `executeCodeBlocks`: they add
@@ -262,7 +268,8 @@ do not ask.
 Group the proposal by server and list the agents each group affects.
 Show:
 
-- batteries to add, each with its one-sentence explanation;
+- batteries to add, each with its one-sentence explanation; distinguish
+  available battery matches from batteries the current config includes;
 - existing behavior that stays unchanged, but only when it affects the
   result;
 - how the remaining installed tools will behave;
@@ -284,7 +291,8 @@ Show:
 In read-only fallback, put the complete TOML in chat instead. If the
 proposal changes behavior, end with: **Approve, or tell me what to change.**
 Wait for the reply. If it changes nothing, report that no
-change is needed and do not ask for approval.
+change is needed and do not ask for approval. Do not describe the policy
+as updated or tell the operator to start a new chat.
 
 After approval:
 

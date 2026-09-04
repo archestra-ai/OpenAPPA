@@ -51,6 +51,7 @@ delta = {}
 
 [policy.tool.requires]
 trust = "trusted"
+attention = ["human-approval"]
 
 [[policy.tool]]
 name = "helm_list_releases"

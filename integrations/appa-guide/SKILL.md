@@ -64,7 +64,8 @@ the `appa-guide` skill name; never invent a mode-specific skill name.
   runtime. Ask for approval again if a correction changes that behavior.
 - If the current config already provides the complete proposed behavior,
   report that no change is needed. Do not ask for approval, write, or
-  reload an unchanged config.
+  reload an unchanged config. Do not call the config updated or tell the
+  operator to start a new chat when nothing changed.
 - Make the smallest change that achieves the request. Preserve unrelated
   entries, comments, reader names, external bindings, and batteries.
 - Use short sentences. Explain what data stays private, what can leave
