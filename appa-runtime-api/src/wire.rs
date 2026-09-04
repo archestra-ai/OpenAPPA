@@ -619,20 +619,14 @@ impl WireEvent {
                 _ => Err(malformed(format!("{name:?} without its tool call"))),
             }
         };
-        // The same call under the identity the adapter derives for it,
-        // with that derivation's spawn answer. An outcome needs nothing
-        // else the adapter derives: it names no child, so it never pays
-        // the scan over its arguments.
-        let derived_call = || -> Result<(ProposedCall, bool), ParseRefusal> {
+        // The call as the host spelled it, beside the identity the
+        // adapter derives for it. Every event that carries a call reads
+        // both: the raw spelling is what a child scan and a diagnostic
+        // need, and the canonical id is what the runtime keys on.
+        let derived_call = || -> Result<(ProposedCall, Derived), ParseRefusal> {
             let raw = raw_call()?;
             let derived = (served.derive)(&raw.tool)?;
-            Ok((
-                ProposedCall {
-                    tool: derived.canonical.into_string(),
-                    arguments: raw.arguments,
-                },
-                derived.spawn,
-            ))
+            Ok((raw, derived))
         };
         let outcome = || -> Result<ToolOutcome, ParseRefusal> {
             match self.outcome.clone() {
@@ -658,8 +652,7 @@ impl WireEvent {
             EventName::TurnEnd => accepted(HookEvent::TurnEnd { actor: actor()? }),
             EventName::ToolCall => {
                 let actor = actor()?;
-                let raw = raw_call()?;
-                let derived = (served.derive)(&raw.tool)?;
+                let (raw, derived) = derived_call()?;
                 // A ruling answers the review of the offer a control
                 // call quotes, and only the control call spends one.
                 // On any other call the runtime would judge the flow
@@ -676,6 +669,7 @@ impl WireEvent {
                     }
                 };
                 let names_children = (served.names_children)(&actor, &raw);
+                let spawn = derived.spawn;
                 Ok(Some(Accepted {
                     event: HookEvent::ToolCall {
                         actor,
@@ -683,7 +677,7 @@ impl WireEvent {
                             tool: derived.canonical.into_string(),
                             arguments: raw.arguments,
                         },
-                        spawn: derived.spawn,
+                        spawn,
                         ruling,
                     },
                     names_children,
@@ -698,7 +692,12 @@ impl WireEvent {
             // where the derivation gives no spawn to spend them on.
             EventName::ToolResult | EventName::SpawnResult => {
                 let actor = actor()?;
-                let (call, spawn) = derived_call()?;
+                let (raw, derived) = derived_call()?;
+                let spawn = derived.spawn;
+                let call = ProposedCall {
+                    tool: derived.canonical.into_string(),
+                    arguments: raw.arguments,
+                };
                 let outcome = outcome()?;
                 let child = self
                     .spawned_id
