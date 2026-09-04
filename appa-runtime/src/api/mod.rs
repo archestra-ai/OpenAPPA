@@ -849,18 +849,59 @@ impl Runtime {
         }
     }
 
+    /// One finished `openappa.yell.v1` document, ready to write and to send.
+    ///
+    /// Assembling here rather than in the CLI is what keeps the size loop honest: only a
+    /// finished, gzipped document can be measured against the receiver's limits, and only this
+    /// process can rebuild a smaller export. So an oversized report is built again from the
+    /// source under half the counts — never trimmed as a document, which would leave its token
+    /// numbering full of holes — until it fits.
+    pub(crate) fn report(&self, request: yell::ReportRequest) -> Result<yell::Finished, yell::Oversize> {
+        let report_id = yell::ReportId::generate();
+        let origin = yell::Origin::new(request.author, request.mode);
+        let mut budget = yell::Budget::default();
+        loop {
+            let projection = self.projection(request.selection.clone(), request.mode, budget);
+            let (facts, events) = projection.counts();
+            let report = yell::Report::serving(
+                report_id.clone(),
+                origin,
+                request.message.clone(),
+                request.harness,
+                projection,
+            );
+            match report.finalize() {
+                Ok(finished) => return Ok(finished),
+                // Nothing left to drop: the message, the build and the policy are the whole
+                // document, and they are over the limit on their own.
+                Err(oversize) if facts + events == 0 => return Err(oversize),
+                Err(_) => {
+                    budget = yell::Budget {
+                        facts: Some(facts / 2),
+                        events: Some(events / 2),
+                    }
+                }
+            }
+        }
+    }
+
     /// One trajectory's decisions, stripped for a report that leaves this machine.
     ///
     /// A read like [`Runtime::audit`]: it gates nothing and appends nothing. Unlike an audit
     /// it survives a log the engine refuses — a refused log is the very thing worth reporting
     /// — and carries the refusal as a closed class instead of the facts a view would have
     /// given. What may leave is decided in [`crate::yell::tables`], never here.
-    pub(crate) fn diagnostic(
+    pub(crate) fn projection(
         &self,
         selection: yell::Selection,
         mode: yell::Mode,
         budget: yell::Budget,
-    ) -> yell::Diagnostic {
+    ) -> yell::Projection {
+        let deployment = self.inner.deployment();
+        // Every path below that has no trajectory to show still says what the rules are, from
+        // the policy this deployment serves now. A report with no facts is still a report about
+        // a policy, and "the runtime would not give me my session" is a thing worth yelling.
+        let serving = || policy_section(deployment.config.policy_file().bytes());
         let (root, yelling) = match selection {
             yell::Selection::Root { root, yelling } => {
                 let yelling = yelling.unwrap_or_else(|| root.clone());
@@ -871,15 +912,12 @@ impl Runtime {
                     let yelling = root.clone();
                     (root, Some(yelling))
                 }
-                Err(omitted_reason) => return yell::Diagnostic::Omitted { omitted_reason },
+                Err(omitted_reason) => return yell::Projection::rules_only(serving(), mode, omitted_reason),
             },
         };
-        let deployment = self.inner.deployment();
         let Ok(log) = self.inner.log(&root) else {
             // The store error is already recorded as a runtime event by `Inner::log`.
-            return yell::Diagnostic::Omitted {
-                omitted_reason: yell::OmittedReason::LogUnavailable,
-            };
+            return yell::Projection::rules_only(serving(), mode, yell::OmittedReason::LogUnavailable);
         };
         // The policy is what names the trust ranks, and the view is what names the parents.
         // Neither is required: without them the facts still export, with the fields a reader
@@ -909,26 +947,17 @@ impl Runtime {
             .as_ref()
             .map(|policy| policy.engine().vouched_tools())
             .unwrap_or_default();
-        // The rules as *this trajectory* ran under them, never as the deployment holds them
-        // now: the log pins its own policy file, so a reload since the session opened does not
-        // rewrite the rules a report explains. Its key comes from the same bytes, so the
-        // document and its fingerprint are one snapshot.
-        let pinned = String::from_utf8_lossy(log.policy_file()).into_owned();
-        let policy_section = toml::from_str::<toml::Value>(&pinned)
-            .ok()
-            .and_then(|composed| composed.get("policy").cloned())
-            .map(|document| (document, crate::engine::policy_file_key(log.policy_file())));
         let source = yell::Source {
             facts: log.facts(),
             events: self.inner.events(&root),
             trust_chain,
-            policy: policy_section,
+            policy: policy_section(log.policy_file()),
             vouched,
             parents: yell::branches(log.facts(), view.as_ref(), policy.as_ref()),
             replay_refused,
             yelling,
         };
-        yell::Diagnostic::Present(Box::new(yell::build(source, mode, budget)))
+        yell::build(source, mode, budget)
     }
 
     /// Execute one surfaced remedy offer by its id.
@@ -1385,6 +1414,19 @@ fn compile_policy(config: &Config) -> Result<appa_policy::Config, OpenError> {
     let text = toml::to_string(config.policy_file().value())
         .map_err(|error| OpenError::UnsupportedPolicy(format!("the policy table does not serialize: {error}")))?;
     appa_policy::Config::from_toml_str(&text).map_err(|error| OpenError::Policy(Box::new(error)))
+}
+
+/// The `[policy]` table of a stored policy file, with the key of the bytes it came from.
+///
+/// A trajectory's own bytes rather than the deployment's current ones wherever there is a
+/// trajectory: the log pins its policy file, so a reload since the session opened does not
+/// rewrite the rules a report explains. The key comes from the same bytes, so the document and
+/// its fingerprint are one snapshot.
+fn policy_section(bytes: &[u8]) -> Option<(toml::Value, String)> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let composed: toml::Value = toml::from_str(text).ok()?;
+    let document = composed.get("policy")?.clone();
+    Some((document, crate::engine::policy_file_key(bytes)))
 }
 
 fn compile_stored_policy(bytes: &[u8]) -> Result<appa_policy::Config, String> {

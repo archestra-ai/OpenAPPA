@@ -113,6 +113,12 @@ pub(crate) enum Rule {
     /// so a policy's commonest clause stays readable without a literal address riding along
     /// beside it.
     AudienceToken,
+    /// `provider:selector`, as a policy writes an audience source. The provider is a stock
+    /// name the engine defines. The selector is not: a source template offers
+    /// `group/<group-address>`, and the loader accepts the instantiated
+    /// `group/finance@corp.example` in its place, so the selector half is an address as often
+    /// as it is a word — and the rule cannot tell which. It is a token in either mode.
+    AudienceSource,
     /// A return contract, which serializes as a JSON Schema document. Authored text hides in
     /// its property names at every depth, its `required` array, its `const`/`enum` literals,
     /// and its `description` prose.
@@ -296,6 +302,10 @@ impl Walk<'_> {
                 },
                 None => self.unclassify(path),
             },
+            Rule::AudienceSource => match value.as_str() {
+                Some(spelled) => self.source(spelled, path),
+                None => self.unclassify(path),
+            },
             Rule::ReturnSchema => self.return_schema(value, path),
             Rule::Table(table) => self.table(table, value, path),
         }
@@ -349,19 +359,32 @@ impl Walk<'_> {
         let Some(after_at) = spelled.strip_prefix('@') else {
             return self.unclassify(path);
         };
-        match after_at.split_once(':') {
-            None if after_at.is_empty() => self.unclassify(path),
-            None => {
+        match after_at.contains(':') {
+            false if after_at.is_empty() => self.unclassify(path),
+            false => {
                 let group = self.tokens.token(self.mode, Class::Group, after_at);
                 Value::String(format!("@{group}"))
             }
+            true => match self.source(after_at, path) {
+                Value::String(source) => Value::String(format!("@{source}")),
+                refused => refused,
+            },
+        }
+    }
+
+    /// `provider:selector`, split at the *first* colon since a selector may itself contain a
+    /// colon, an `@` or a dot. The provider half is a stock name; the selector half is a token
+    /// in either mode, because the loader accepts a concrete `group/finance@corp.example`
+    /// wherever it accepts the template that address instantiates.
+    fn source(&mut self, spelled: &str, path: &str) -> Value {
+        match spelled.split_once(':') {
             // An empty half either side is malformed: the rule cannot know what it holds.
-            Some((provider, selector)) if provider.is_empty() || selector.is_empty() => self.unclassify(path),
-            Some((provider, selector)) => {
+            Some((provider, selector)) if !provider.is_empty() && !selector.is_empty() => {
                 let provider = self.tokens.token(self.mode, Class::Source, provider);
                 let selector = self.tokens.token(self.mode, Class::Selector, selector);
-                Value::String(format!("@{provider}:{selector}"))
+                Value::String(format!("{provider}:{selector}"))
             }
+            _ => self.unclassify(path),
         }
     }
 
@@ -461,8 +484,11 @@ impl Walk<'_> {
                         out.insert(key.clone(), placeholder);
                     }
                 },
-                // The numeric bounds, which the author also chose. Same reasoning as `const`.
-                "minimum" | "maximum" | "multipleOf" | "minItems" | "maxItems" => {
+                // The bounds, which the author also chose. Same reasoning as `const`: a length
+                // or a pattern is a channel as much as a string is, and a regex is authored
+                // text with nothing bounding what it can spell.
+                "minimum" | "maximum" | "multipleOf" | "minItems" | "maxItems" | "minLength" | "maxLength"
+                | "pattern" => {
                     let token = self.literal(entry);
                     out.insert(key.clone(), token);
                 }
@@ -471,11 +497,20 @@ impl Walk<'_> {
                     let nested = self.return_schema(entry, &child);
                     out.insert(key.clone(), nested);
                 }
+                // A closed schema is written `false`, which is the dialect's own word. An
+                // object there is another schema, full of authored names, and is walked as one.
+                "additionalProperties" => match entry.is_boolean() {
+                    true => {
+                        out.insert(key.clone(), entry.clone());
+                    }
+                    false => {
+                        let child = format!("{path}.additionalProperties");
+                        let nested = self.return_schema(entry, &child);
+                        out.insert(key.clone(), nested);
+                    }
+                },
                 // `type` and `format` are closed sets the dialect defines, so they are engine
-                // vocabulary rather than the author's. `additionalProperties` is deliberately
-                // absent — the shape dialect refuses the keyword, so one appearing here is
-                // drift, and in JSON Schema its value may itself be a schema full of authored
-                // names.
+                // vocabulary rather than the author's.
                 "type" | "format" => {
                     out.insert(key.clone(), entry.clone());
                 }

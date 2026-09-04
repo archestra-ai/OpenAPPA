@@ -56,12 +56,14 @@ pub(crate) enum Class {
     Group,
     Surface,
     Source,
-    /// A selector as a source *answered* it, never as the policy templates it.
+    /// The selector half of an audience source, wherever it appears.
     ///
-    /// A template like `group/<group-address>` is the deployment's; the instantiated
-    /// `group/finance@corp.example` that reaches a fact is not. `includes($argument)` fills
-    /// the placeholder from a tool call's argument, so the spelling is the model's, and no
-    /// template ever reaches a fact for Baseline to spell instead.
+    /// In a fact it is what a source *answered*: `includes($argument)` fills the placeholder
+    /// from a tool call's argument, so the spelling is the model's. In a policy it is what the
+    /// deployer wrote — but the loader accepts the instantiated
+    /// `group/finance@corp.example` wherever it accepts the template `group/<group-address>`,
+    /// so a selector is an address as often as it is a word, and nothing in the spelling says
+    /// which. One class, tokenized in both modes, rather than a rule that guesses.
     Selector,
     /// A trust rank's policy-given name. Ranks are numeric in a fact; only the chain names them.
     Trust,
@@ -72,10 +74,6 @@ pub(crate) enum Class {
     Field,
     /// A `const` or `enum` literal in that same agent-authored schema.
     Literal,
-    /// An endpoint a binding points at. Not the deployment's vocabulary but its address: no
-    /// mode spells one. The token still carries the one thing a reader needs — that two
-    /// bindings reach the same service, or that they do not.
-    Url,
 }
 
 impl Class {
@@ -92,8 +90,7 @@ impl Class {
             | Class::Digest
             | Class::Field
             | Class::Literal
-            | Class::Selector
-            | Class::Url => true,
+            | Class::Selector => true,
             Class::Authority
             | Class::Tool
             | Class::Effect
@@ -110,7 +107,7 @@ impl Class {
     }
 
     /// Every class, so that one can be checked against all of them.
-    const ALL: [Class; 20] = [
+    const ALL: [Class; 19] = [
         Class::Trajectory,
         Class::Reader,
         Class::Argument,
@@ -130,7 +127,6 @@ impl Class {
         Class::Identity,
         Class::Field,
         Class::Literal,
-        Class::Url,
     ];
 
     /// Whether a name is spelled the way this report spells its own tokens.
@@ -171,7 +167,6 @@ impl Class {
             Class::Identity => "identity",
             Class::Field => "field",
             Class::Literal => "literal",
-            Class::Url => "url",
         }
     }
 }

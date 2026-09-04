@@ -106,6 +106,67 @@ pub(crate) enum OmittedReason {
     /// session's decisions in another session's report.
     Ambiguous,
     LogUnavailable,
+    /// The author could not reach a runtime at all, so there was nothing to ask.
+    RuntimeUnavailable,
+}
+
+/// The rules, and the decisions made under them.
+///
+/// The two are built together and numbered from one token map, so a name the policy declares
+/// and the same name in a fact are the same token. They are separate fields because a report
+/// with no trajectory still says what the rules were — a runtime that refuses everything is
+/// worth reporting, and the policy is the whole of the explanation.
+#[derive(Debug, Serialize)]
+pub(crate) struct Projection {
+    pub(crate) policy: Option<Policy>,
+    pub(crate) trajectory: Diagnostic,
+    /// Where the classification inventory has drifted from the engine, across everything this
+    /// projection carries. A reader learns that an unclassified field exists, which aggregate
+    /// it belongs to, and where it sits — and no part of what sat there is carried.
+    pub(crate) unclassified: Vec<Drift>,
+}
+
+impl Projection {
+    /// The rules alone, for an author with no trajectory to show.
+    pub(crate) fn rules_only(policy: Option<(toml::Value, String)>, mode: Mode, omitted_reason: OmittedReason) -> Self {
+        let mut tokens = Tokens::default();
+        let mut unclassified = Vec::new();
+        Self {
+            policy: policy
+                .as_ref()
+                .map(|(document, digest)| classify_policy(document, digest, &mut tokens, mode, &mut unclassified)),
+            trajectory: Diagnostic::Omitted { omitted_reason },
+            unclassified,
+        }
+    }
+
+    /// How many facts and events this projection actually carries. What a caller halves when
+    /// the finished report came out too large.
+    pub(crate) fn counts(&self) -> (usize, usize) {
+        match &self.trajectory {
+            Diagnostic::Omitted { .. } => (0, 0),
+            Diagnostic::Present(export) => (export.facts.len(), export.runtime_events.len()),
+        }
+    }
+}
+
+/// The policy document, stripped, with its fingerprint where the mode carries one.
+fn classify_policy(
+    document: &toml::Value,
+    digest: &str,
+    tokens: &mut Tokens,
+    mode: Mode,
+    unclassified: &mut Vec<Drift>,
+) -> Policy {
+    let stripped = super::policy::strip_policy(document, tokens, mode);
+    record_drift(unclassified, &stripped, "policy");
+    Policy {
+        document: stripped.value,
+        digest: match mode {
+            Mode::Baseline => Some(digest.to_owned()),
+            Mode::Pseudonymized => None,
+        },
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -118,9 +179,6 @@ pub(crate) struct Export {
     /// The policy's trust ranks, lowest first, so a reader can read the numeric ranks the
     /// facts carry.
     pub(crate) trust_chain: Vec<String>,
-    /// The rules these decisions were made under, stripped against [`super::policy`]. `None`
-    /// when the policy did not resolve, which `replay_refused` already says out loud.
-    pub(crate) policy: Option<Policy>,
     pub(crate) facts: Vec<FactEntry>,
     pub(crate) runtime_events: Vec<EventEntry>,
     /// Facts older than this were left out to stay inside the byte budget. `None` when the
@@ -134,10 +192,6 @@ pub(crate) struct Export {
     pub(crate) events_dropped_through_seq: Option<u64>,
     pub(crate) deployment_events_dropped: u64,
     pub(crate) deployment_events_dropped_through_seq: Option<u64>,
-    /// Where the classification inventory has drifted from the engine. A reader learns that an
-    /// unclassified field exists, which aggregate it belongs to, and where it sits — and no
-    /// part of what sat there is carried.
-    pub(crate) unclassified: Vec<Drift>,
 }
 
 /// The deployment's rules, as far as a report may carry them.
@@ -232,7 +286,7 @@ pub(crate) fn resolve(recent: crate::events::Recent) -> Result<TrajectoryId, Omi
     }
 }
 
-pub(crate) fn build(source: Source<'_>, mode: Mode, budget: Budget) -> Export {
+pub(crate) fn build(source: Source<'_>, mode: Mode, budget: Budget) -> Projection {
     let mut tokens = Tokens::default();
     let mut unclassified: Vec<Drift> = Vec::new();
     // The newest facts are the ones a yell is about, so a budget cuts from the old end, and
@@ -241,17 +295,10 @@ pub(crate) fn build(source: Source<'_>, mode: Mode, budget: Budget) -> Export {
 
     // The policy is numbered first, so a reader meets a name where it is declared rather than
     // where it happened to be used.
-    let policy = source.policy.as_ref().map(|(document, digest)| {
-        let stripped = super::policy::strip_policy(document, &mut tokens, mode);
-        record_drift(&mut unclassified, &stripped, "policy");
-        Policy {
-            document: stripped.value,
-            digest: match mode {
-                Mode::Baseline => Some(digest.clone()),
-                Mode::Pseudonymized => None,
-            },
-        }
-    });
+    let policy = source
+        .policy
+        .as_ref()
+        .map(|(document, digest)| classify_policy(document, digest, &mut tokens, mode, &mut unclassified));
 
     let trust_chain = source
         .trust_chain
@@ -308,11 +355,10 @@ pub(crate) fn build(source: Source<'_>, mode: Mode, budget: Budget) -> Export {
         runtime_events.drain(..drop);
     }
 
-    Export {
+    let export = Export {
         branches,
         replay_refused: source.replay_refused,
         trust_chain,
-        policy,
         facts,
         runtime_events,
         truncated_before_seq: (from > 0).then_some(from),
@@ -320,6 +366,10 @@ pub(crate) fn build(source: Source<'_>, mode: Mode, budget: Budget) -> Export {
         events_dropped_through_seq: source.events.dropped_through_seq,
         deployment_events_dropped: source.events.deployment_dropped,
         deployment_events_dropped_through_seq: source.events.deployment_dropped_through_seq,
+    };
+    Projection {
+        policy,
+        trajectory: Diagnostic::Present(Box::new(export)),
         unclassified,
     }
 }
@@ -370,7 +420,7 @@ fn record_drift(into: &mut Vec<Drift>, stripped: &Stripped, section: &str) {
     }
 }
 
-fn rfc3339(at: std::time::SystemTime) -> String {
+pub(crate) fn rfc3339(at: std::time::SystemTime) -> String {
     chrono::DateTime::<chrono::Utc>::from(at).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
@@ -478,15 +528,19 @@ mod tests {
         (runtime, root.expect("a recorded session opened a root"))
     }
 
-    fn export(runtime: &Runtime, root: &TrajectoryId, mode: Mode) -> Export {
-        match runtime.diagnostic(
+    fn project(runtime: &Runtime, root: &TrajectoryId, mode: Mode, budget: Budget) -> Projection {
+        runtime.projection(
             Selection::Root {
                 root: root.clone(),
                 yelling: None,
             },
             mode,
-            Budget::default(),
-        ) {
+            budget,
+        )
+    }
+
+    fn export(runtime: &Runtime, root: &TrajectoryId, mode: Mode) -> Export {
+        match project(runtime, root, mode, Budget::default()).trajectory {
             Diagnostic::Present(export) => *export,
             Diagnostic::Omitted { omitted_reason } => panic!("the recorded session exports, got {omitted_reason:?}"),
         }
@@ -499,17 +553,19 @@ mod tests {
     async fn a_recorded_session_is_classified_end_to_end() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let (runtime, root) = recorded_session(&dir).await;
-        let export = export(&runtime, &root, Mode::Pseudonymized);
+        let projection = project(&runtime, &root, Mode::Pseudonymized, Budget::default());
         assert!(
-            export.unclassified.is_empty(),
+            projection.unclassified.is_empty(),
             "the inventory does not cover {:?}",
-            export.unclassified
+            projection.unclassified
         );
+        let policy = projection.policy.expect("the pinned policy is carried");
+        let export = match projection.trajectory {
+            Diagnostic::Present(export) => *export,
+            Diagnostic::Omitted { omitted_reason } => panic!("the recorded session exports, got {omitted_reason:?}"),
+        };
         assert!(!export.facts.is_empty(), "the replay produced facts");
         assert!(!export.runtime_events.is_empty(), "the replay produced runtime events");
-        // The rules are carried too — a denial means nothing without the clause behind it —
-        // and the assertion above covers their inventory only if they are actually here.
-        let policy = export.policy.expect("the pinned policy is carried");
         assert!(
             policy.document["tool"]
                 .as_array()
@@ -539,7 +595,7 @@ mod tests {
     /// Baseline carries the deployment's own names and hides exactly the same everything else,
     /// so the two modes differ in naming alone and cannot drift into two classifications.
     ///
-    /// The second half is the one that matters: `/diagnostic` defaults to Baseline, so this is
+    /// The second half is the one that matters: `/report` defaults to Baseline, so this is
     /// what the endpoint hands out when nobody asked for anything.
     #[tokio::test]
     async fn baseline_carries_the_deployment_s_names_and_nothing_of_the_session() {
@@ -550,7 +606,6 @@ mod tests {
 
         assert_eq!(baseline.facts.len(), pseudonymized.facts.len());
         assert_eq!(baseline.runtime_events.len(), pseudonymized.runtime_events.len());
-        assert_eq!(baseline.unclassified, pseudonymized.unclassified);
         let rendered = serde_json::to_string(&baseline).expect("the export serializes");
         assert!(rendered.contains("Bash"), "baseline carries the names as spelled");
         let session = root.0.trim_start_matches("cc:").to_string();
@@ -608,17 +663,17 @@ mod tests {
         let keep = whole.facts.len() / 2;
         assert!(keep > 1, "the recorded session is long enough to halve");
 
-        let budgeted = match runtime.diagnostic(
-            Selection::Root {
-                root: root.clone(),
-                yelling: None,
-            },
+        let budgeted = match project(
+            &runtime,
+            &root,
             Mode::Pseudonymized,
             Budget {
                 facts: Some(keep),
                 events: Some(1),
             },
-        ) {
+        )
+        .trajectory
+        {
             Diagnostic::Present(export) => *export,
             Diagnostic::Omitted { omitted_reason } => panic!("the session exports, got {omitted_reason:?}"),
         };

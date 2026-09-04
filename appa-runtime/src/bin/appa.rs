@@ -45,6 +45,19 @@ enum Command {
         paths: Vec<PathBuf>,
     },
 
+    /// Tell the OpenAPPA team that this deployment is broken, confusing, or in the way.
+    Yell {
+        #[arg(long, env = "APPA_RUNTIME_URL", default_value = "http://127.0.0.1:8787")]
+        url: String,
+
+        /// Answer both questions with yes: pseudonymize the report, and send it.
+        #[arg(short = 'y', long = "yes")]
+        yes: bool,
+
+        /// What went wrong. Read from stdin when absent.
+        message: Vec<String>,
+    },
+
     /// Post one harness hook event to the running runtime.
     #[command(hide = true)]
     Hook {
@@ -90,6 +103,7 @@ fn main() -> ExitCode {
 
     match Args::parse().command {
         Command::Hook { url, turn_end } => appa_runtime::hook_client::run(&url, turn_end),
+        Command::Yell { url, yes, message } => appa_runtime::yell::cli::run(&url, yes, message),
         Command::Replay {
             config,
             modules_dir,

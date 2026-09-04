@@ -163,13 +163,17 @@ static ANNOTATOR: Table = Table {
 
 // ---------------------------------------------------------------- audiences and identity
 
-/// A selector as the policy *templates* it — `group/<group-address>` — which is the
-/// deployment's own text, unlike the instantiated selector that reaches a fact. Carried as a
-/// source token so the two halves of `provider:selector` stay legible.
+/// Where a built-in audience level gets its members. Each entry is `provider:selector`, and
+/// the selector is never carried: the loader accepts an instantiated
+/// `google-workspace:group/finance@corp.example` wherever it accepts the template
+/// `group/<group-address>`, so an address is exactly as likely there as a word.
 static AUDIENCE_LEVEL: Table = Table {
     name: "policy.audience.level",
-    entries: &[("from", Rule::Elements(Class::Source))],
+    entries: &[("from", Rule::Each(&SOURCE))],
 };
+
+/// One `provider:selector` audience source, wherever a policy writes one.
+static SOURCE: Rule = Rule::AudienceSource;
 
 static AUDIENCE_GROUP: Table = Table {
     name: "policy.audience.group",
@@ -178,7 +182,7 @@ static AUDIENCE_GROUP: Table = Table {
         // `within` asserts containment in a built-in audience, so its only values are `self`
         // and `internal` — the engine's words, not a group the deployment named.
         ("within", Rule::Keep),
-        ("from", Rule::Elements(Class::Source)),
+        ("from", Rule::Each(&SOURCE)),
     ],
 };
 
@@ -349,7 +353,7 @@ mod tests {
         [[audience.group]]
         name = "finance"
         within = "internal"
-        from = ["google-workspace:group/<group-address>"]
+        from = ["google-workspace:group/finance@corp.example"]
 
         [identity]
         implementation = "verified-email"
@@ -358,6 +362,48 @@ mod tests {
         context_control = true
         confined_results = ["Bash"]
     "#;
+
+    /// Every policy this repository ships, composed by the real loader and walked.
+    ///
+    /// The fixture above proves the rules a fixture happens to use. This proves the rules real
+    /// policies use, and it is the part that actually couples the inventory to `appa_policy`:
+    /// a schema that grows a field, or a shipped policy that starts writing one, fails here
+    /// with the path that needs a line.
+    #[test]
+    fn every_shipped_policy_is_classified() {
+        let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("the crate sits in the repository");
+        for relative in DEPLOYMENTS {
+            let path = repository.join(relative);
+            let config = crate::config::Config::load(&path)
+                .unwrap_or_else(|error| panic!("{} does not load: {error}", path.display()));
+            classified(config.policy_file().value(), &path);
+        }
+    }
+
+    fn classified(document: &toml::Value, path: &std::path::Path) {
+        for mode in [Mode::Baseline, Mode::Pseudonymized] {
+            let mut tokens = Tokens::default();
+            let stripped = strip_policy(document, &mut tokens, mode);
+            assert!(
+                stripped.unclassified.is_empty(),
+                "{} in {mode:?}: the inventory does not cover {:?}",
+                path.display(),
+                stripped.unclassified
+            );
+        }
+    }
+
+    /// Deployment configurations, each composing (through its includes) to a policy a
+    /// deployment could run.
+    const DEPLOYMENTS: &[&str] = &[
+        "integrations/claude-code/examples/claude-code.appa.toml",
+        "integrations/claude-code/examples/claude-code-hitl.appa.toml",
+        "examples/claude-code-battery/appa.toml",
+        "bench/corp/policies/appa.toml",
+        "bench/corp/policies/open.toml",
+    ];
 
     /// The acceptance criterion for this inventory: a policy exercising every section is
     /// classified end to end, so a schema that grows past it fails here.
@@ -371,6 +417,27 @@ mod tests {
                 stripped.unclassified
             );
         }
+    }
+
+    /// The loader accepts an instantiated selector wherever it accepts the template that
+    /// address fills, so `from` carries an address as readily as a provider's own word and
+    /// nothing in the spelling says which. The provider half is the deployment's vocabulary
+    /// and stays; the selector half goes in both modes.
+    #[test]
+    fn an_audience_source_never_spells_its_selector() {
+        for mode in [Mode::Baseline, Mode::Pseudonymized] {
+            let stripped = stripped(FIXTURE, mode);
+            let rendered = serde_json::to_string(&stripped.value).expect("serializes");
+            for spelled in ["finance@corp.example", "group/", "full-members"] {
+                assert!(!rendered.contains(spelled), "{spelled} survived {mode:?}: {rendered}");
+            }
+        }
+        let baseline = stripped(FIXTURE, Mode::Baseline);
+        let rendered = serde_json::to_string(&baseline.value).expect("serializes");
+        assert!(
+            rendered.contains("google-workspace:selector-"),
+            "the provider a policy names is still readable: {rendered}"
+        );
     }
 
     /// Baseline is the deployment reading its own rules back, so its own names and its own

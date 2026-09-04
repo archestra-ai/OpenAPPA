@@ -71,7 +71,8 @@ fn require_loopback(addr: &SocketAddr) -> Result<(), String> {
 
 /// The adapter surface this binary can serve. The one place harness
 /// names appear in this crate: each variant maps to one codec crate.
-#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub(crate) enum Adapter {
     ClaudeCode,
     Kagent,
@@ -167,6 +168,9 @@ pub(crate) fn binary_digest(path: &Path) -> io::Result<String> {
 struct AppState {
     runtime: Arc<Runtime>,
     codec: Codec,
+    /// Which harness this process serves. A report names it, because the same policy behaves
+    /// differently under a harness that declares its spawns and one that does not.
+    adapter: Adapter,
     config: PathBuf,
     executable: Option<ExecutableAtStart>,
 }
@@ -247,8 +251,11 @@ async fn status(
     }
 }
 
+/// What `appa yell` asks this process to build. The runtime assembles and measures the whole
+/// document, so the CLI never holds an unclassified byte of a session.
 #[derive(serde::Deserialize)]
-struct DiagnosticQuery {
+struct ReportRequestBody {
+    message: String,
     /// Replace the names the deployment chose with report-local tokens. The classification is
     /// the same either way; only the naming differs.
     #[serde(default)]
@@ -256,40 +263,43 @@ struct DiagnosticQuery {
     /// The root to export. Omitted by a caller with no session of its own, which asks the
     /// runtime for the one trajectory that was recently active.
     trajectory: Option<String>,
-    /// The newest N facts and the newest N runtime events. A caller that has to fit the export
-    /// inside a limit this process cannot measure — a gzipped report, whose size depends on the
-    /// message and the envelope — measures what it built and asks again for less. The runtime
-    /// then rebuilds, rather than the caller deleting entries out of a finished document and
-    /// leaving its token numbering full of holes.
-    max_facts: Option<usize>,
-    max_events: Option<usize>,
 }
 
-/// One trajectory's decisions, stripped for a report.
+/// One finished `openappa.yell.v1` document.
 ///
 /// The listener is loopback-only, which is the whole of this endpoint's access control: what
-/// it answers still leaves the machine only when a person or an agent chooses to send it.
-async fn diagnostic(
+/// it answers still leaves the machine only when a person chooses to send it.
+async fn report(
     State(state): State<AppState>,
-    query: Result<axum::extract::Query<DiagnosticQuery>, axum::extract::rejection::QueryRejection>,
-) -> Result<axum::Json<crate::yell::Diagnostic>, axum::http::StatusCode> {
-    let query = query.map_err(|_| axum::http::StatusCode::BAD_REQUEST)?.0;
-    let selection = match query.trajectory {
-        Some(trajectory) => crate::yell::Selection::Root {
-            root: crate::api::TrajectoryId(trajectory),
-            yelling: None,
+    body: Result<axum::Json<ReportRequestBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Vec<u8>, (axum::http::StatusCode, String)> {
+    let refuse = |status, message: String| (status, message);
+    let body = body
+        .map_err(|error| refuse(axum::http::StatusCode::BAD_REQUEST, error.body_text()))?
+        .0;
+    let message = crate::yell::YellMessage::new(&body.message)
+        .map_err(|refusal| refuse(axum::http::StatusCode::BAD_REQUEST, refusal.to_string()))?;
+    let request = crate::yell::ReportRequest {
+        message,
+        author: crate::yell::Author::Cli,
+        mode: match body.pseudonymize {
+            true => crate::yell::Mode::Pseudonymized,
+            false => crate::yell::Mode::Baseline,
         },
-        None => crate::yell::Selection::Recent,
+        selection: match body.trajectory {
+            Some(trajectory) => crate::yell::Selection::Root {
+                root: crate::api::TrajectoryId(trajectory),
+                yelling: None,
+            },
+            None => crate::yell::Selection::Recent,
+        },
+        harness: state.adapter,
     };
-    let mode = match query.pseudonymize {
-        true => crate::yell::Mode::Pseudonymized,
-        false => crate::yell::Mode::Baseline,
-    };
-    let budget = crate::yell::Budget {
-        facts: query.max_facts,
-        events: query.max_events,
-    };
-    Ok(axum::Json(state.runtime.diagnostic(selection, mode, budget)))
+    state
+        .runtime
+        .report(request)
+        .map(|finished| finished.plain)
+        .map_err(|oversize| refuse(axum::http::StatusCode::PAYLOAD_TOO_LARGE, oversize.to_string()))
 }
 
 /// Run the internal daemon command from arguments supplied by the public CLI.
@@ -349,6 +359,7 @@ async fn serve(args: Args) -> ExitCode {
     let state = AppState {
         runtime: Arc::clone(&runtime),
         codec: args.adapter.codec(),
+        adapter: args.adapter,
         config: config_path,
         executable: ExecutableAtStart::of_this_process(),
     };
@@ -357,7 +368,7 @@ async fn serve(args: Args) -> ExitCode {
         .route("/binary-fingerprint", get(binary_fingerprint))
         .route("/policy-key", get(policy_key))
         .route("/status", get(status))
-        .route("/diagnostic", get(diagnostic))
+        .route("/report", post(report))
         .route("/hook", post(hook))
         .route("/reload", post(reload))
         .nest_service("/mcp", mcp::service(runtime))
