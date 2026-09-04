@@ -33,6 +33,11 @@
 #                 unset, so the gate is off by default.
 #   APPA_CONFIG   the appa.toml the bundled runtime loads
 #                 (default: the packaged example policy)
+#   APPA_CONFIG_CONTENTS
+#                 complete TOML written to the pod-local appa.toml before
+#                 the bundled runtime starts; intended for Agent env config
+#   APPA_DATA_DIR writable directory for that generated file
+#                 (default: /.kagent)
 #   APPA_DB       the trajectory log path (default: pod-local, dies with
 #                 the pod — the quickstart's documented limit)
 #
@@ -75,12 +80,16 @@ FROM ${KAGENT_APP_IMAGE}
 COPY --from=builder /build/target/release/appa /usr/local/bin/appa
 COPY --from=wheel --chown=python:pythongroup /dist/ /tmp/appa-dist/
 COPY --chown=python:pythongroup integrations/kagent/examples/kagent.appa.toml /opt/appa/kagent.appa.toml
+COPY --chown=python:pythongroup batteries /opt/appa/batteries
+COPY --chown=python:pythongroup scripts/appa-refresh-batteries.py /usr/local/bin/appa-refresh-batteries
 COPY --chown=python:pythongroup integrations/kagent/appa-kagent-quickstart/entrypoint.sh /opt/appa/entrypoint.sh
 
 RUN uv pip install --python /.kagent/.venv/bin/python --no-deps --offline /tmp/appa-dist/*.whl \
-    && chmod +x /opt/appa/entrypoint.sh
+    && chmod 0755 /usr/local/bin/appa-refresh-batteries /opt/appa/entrypoint.sh
 
 ENV APPA_CONFIG=/opt/appa/kagent.appa.toml
 ENV APPA_DB=/.kagent/appa.db
+ENV APPA_BATTERIES_DIR=/opt/appa/batteries
+ENV APPA_DATA_DIR=/.kagent
 
 ENTRYPOINT ["/opt/appa/entrypoint.sh"]

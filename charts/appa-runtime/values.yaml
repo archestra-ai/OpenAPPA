@@ -1,0 +1,114 @@
+# Shared OpenAPPA runtime. One replica: the trajectory log is SQLite.
+
+image:
+  repository: ghcr.io/archestra-ai/appa-runtime
+  # Empty uses the chart appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+  digest: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# -v for the decision path at debug, -vv for the algebra at trace.
+verbosity: ""
+
+serviceAccount:
+  create: true
+  automount: false
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  fsGroup: 65532
+  fsGroupChangePolicy: OnRootMismatch
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  type: ClusterIP
+  port: 18789
+
+# The relay accepts /hook, /mcp, /health, and /batteries. Enable this
+# policy with at least one NetworkPolicyPeer to restrict which pods can
+# reach those routes.
+networkPolicy:
+  enabled: false
+  ingress: []
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 512Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# The runtime binds loopback. The relay is the cluster address.
+relay:
+  image:
+    repository: nginxinc/nginx-unprivileged
+    tag: 1.27-alpine
+    digest: sha256:65e3e85dbaed8ba248841d9d58a899b6197106c23cb0ff1a132b7bfe0547e4c0
+    pullPolicy: IfNotPresent
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 101
+    runAsGroup: 101
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      memory: 64Mi
+
+# Policy ConfigMap mounted at /etc/appa. Empty contents use the packaged
+# fail-closed file. Set existingConfigMap to use a ConfigMap you manage.
+config:
+  existingConfigMap: ""
+  key: appa.toml
+  contents: ""
+
+# Trajectory log and a writable batteries overlay. Off uses emptyDir.
+# The skill refreshes bundled batteries only when this is on.
+persistence:
+  enabled: false
+  storageClass: ""
+  size: 8Gi
+  accessMode: ReadWriteOnce
+  existingClaim: ""
+  # Keep the claim when the release is uninstalled.
+  keep: true
+
+# Extra environment for battery audience sources (APPA_PROVIDER_*).
+env: {}
+envFrom: []
+
+test:
+  image:
+    repository: busybox
+    tag: "1.37"
+    digest: sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0
+    pullPolicy: IfNotPresent
