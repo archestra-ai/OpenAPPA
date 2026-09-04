@@ -54,7 +54,7 @@ OpenAPPA runs inside the agent pod through the official Google ADK plugin API. E
 
 Policy scope follows the runtime. A gated [Agent](https://kagent.dev/docs/kagent/concepts/agents/) enforces the policy of the `appa-runtime` named by its `APPA_RUNTIME_URL`.
 
-Agents connecting to the same runtime share one `appa.toml` policy file and decision log. To enforce different policies for different agent groups, run separate `appa-runtime` deployments.
+Agents connecting to the same runtime share one `appa.toml` policy file and decision log. The current integration applies a single policy union across all connected agents in the cluster. Override rules per agent are not supported in this version. To enforce different policies for different agent groups, run separate `appa-runtime` deployments.
 
 Cross-workload delegation requires a shared runtime deployment so parent and child pods reach the same policy engine.
 
@@ -118,52 +118,61 @@ kubectl port-forward -n kagent svc/kagent-ui 8901:8080
 
 Open [http://localhost:8901](http://localhost:8901) in your browser.
 
-## Protect an existing cluster
+## Install cluster-wide runtime and protect existing agents
 
-If you already run kagent in your cluster, you do not need to recreate your agents.
+If you already run kagent in your cluster, you do not need to rebuild your agents or fork your code. You deploy one shared `appa-runtime` and point your agents to it.
 
 ### 1. Update the kagent controller image
 
-Update your existing Helm release to use the OpenAPPA runtime image:
+Update your existing kagent Helm release to use the OpenAPPA runtime image:
 
 ```sh
 helm upgrade kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   -n kagent --reuse-values \
   --set controller.agentImage.registry=ghcr.io \
   --set controller.agentImage.repository=archestra-ai/appa-kagent-quickstart \
-  --set controller.agentImage.tag=0.9.0 # x-release-please-version
-```
-
-If you run Go agents, also set `controller.goAgentImage`:
-
-```sh
+  --set controller.agentImage.tag=0.9.0 \
   --set controller.goAgentImage.registry=ghcr.io \
   --set controller.goAgentImage.repository=archestra-ai/appa-kagent-adk-go \
   --set controller.goAgentImage.tag=0.9.0 # x-release-please-version
 ```
 
-### 2. Write a policy that names your tools
+This image replaces the base container image for declarative agent pods. It stays inert until an agent enables `APPA_ENABLED: "true"`. Existing agents remain unaffected.
 
-The policy governs only declared tools. Unlisted tool calls stop fail-closed before execution.
+### 2. Deploy the shared OpenAPPA runtime
 
-Deploy a shared `appa-runtime` with the production chart in `charts/appa-runtime`. The image of this version bundles the batteries of the release. `GET /batteries` lists them.
+Deploy a single `appa-runtime` for the cluster. It serves the policy engine, evaluates tool flows, and logs audit events:
 
 ```sh
-helm install appa-runtime charts/appa-runtime -n kagent --create-namespace
+helm upgrade --install appa-runtime oci://ghcr.io/archestra-ai/charts/appa-runtime \
+  --version 0.9.0 \
+  --namespace appa --create-namespace \
+  --set persistence.enabled=true \
+  --set persistence.size=8Gi # x-release-please-version
 ```
 
-Set `persistence.enabled=true` to keep the trajectory log and to let the appa-guide skill refresh batteries.
-Tagged releases also publish this chart at `oci://ghcr.io/archestra-ai/charts/appa-runtime`.
+From a repository clone, use `charts/appa-runtime` as the chart path instead.
 
-A wildcard entry (`name = "*"`) covers unlisted tools through an annotator.
+Key runtime architecture details:
 
-Agent delegation requires explicit tool entries under the wire name `<namespace>__NS__<agent>` (hyphens as underscores). Wildcards do not cover delegation spawns. See [Policy contracts](/contracts) for syntax.
+- **Single replica with SQLite**: OpenAPPA evaluates algebraic monoids deterministically without distributed consensus overhead. SQLite stores the append-only trajectory audit log.
+- **Relay sidecar and Service address**: The runtime process binds loopback at `127.0.0.1:18788`. An unprivileged NGINX sidecar exposes the cluster Service on port `18789`. Agents connect via cluster DNS:
+  ```text
+  http://appa-runtime.appa.svc.cluster.local:18789
+  ```
+- **Persistence (`persistence.enabled=true`)**: Mounts a PersistentVolumeClaim at `/var/lib/appa`. It retains the trajectory log and provides writable storage for the `appa-guide` skill to download, verify, and refresh batteries.
+- **Policy ConfigMap**: Mounts the `appa-policy` ConfigMap (key `appa.toml`) at `/etc/appa/appa.toml`. The runtime boots fail-closed until policy rules are configured.
 
-### 3. Gate the agents you choose
+### 3. Wire existing agents to the runtime
 
-Add `APPA_ENABLED` and the runtime address to an agent's environment:
+To protect an existing [Agent](https://kagent.dev/docs/kagent/concepts/agents/), add `APPA_ENABLED` and `APPA_RUNTIME_URL` to `spec.declarative.deployment.env`:
 
 ```yaml
+apiVersion: kagent.dev/v1alpha2
+kind: Agent
+metadata:
+  name: sre-agent
+  namespace: default
 spec:
   declarative:
     deployment:
@@ -171,45 +180,188 @@ spec:
         - name: APPA_ENABLED
           value: "true"
         - name: APPA_RUNTIME_URL
-          value: http://appa-runtime.kagent.svc.cluster.local:18789
+          value: "http://appa-runtime.appa.svc.cluster.local:18789"
+```
+
+Or patch an active agent resource directly with `kubectl`:
+
+```sh
+kubectl patch agent sre-agent -n default --type=merge -p '{
+  "spec": {
+    "declarative": {
+      "deployment": {
+        "env": [
+          {"name": "APPA_ENABLED", "value": "true"},
+          {"name": "APPA_RUNTIME_URL", "value": "http://appa-runtime.appa.svc.cluster.local:18789"}
+        ]
+      }
+    }
+  }
+}'
 ```
 
 | Mode | `APPA_ENABLED` | `APPA_RUNTIME_URL` | Gating Behavior |
 |---|---|---|---|
-| **Disabled (Default)** | Unset or `"false"` | Any | Ungated. Runs without policy enforcement. |
-| **Bundled appa-runtime** | `"true"` | Unset | Gated. Starts an embedded `appa-runtime` process on `127.0.0.1` inside the pod. |
-| **Shared appa-runtime** | `"true"` | `http://...` | Gated. Connects to the `appa-runtime` Kubernetes Service at `APPA_RUNTIME_URL`. |
+| **Disabled (Default)** | Unset or `"false"` | Any | Ungated. Runs stock kagent behavior without policy checks. |
+| **Shared appa-runtime** | `"true"` | `http://...` | Gated. Connects to the cluster `appa-runtime` Service at `APPA_RUNTIME_URL`. |
+| **Bundled appa-runtime** | `"true"` | Unset | Gated. Starts an embedded `appa-runtime` inside the pod reading `APPA_CONFIG_CONTENTS`. |
 
-Apply this configuration with `kubectl edit agent <name> -n kagent` or update your GitOps manifests. Invalid values for `APPA_ENABLED` fail container startup immediately to prevent accidental ungated execution.
+Invalid values for `APPA_ENABLED` fail container startup immediately. Gated agents refuse to run without a valid runtime connection.
 
 ### 4. Confirm the gate
 
-The kagent controller automatically rolls the agent deployment. Check pod startup logs to verify status:
+The kagent controller automatically rolls the agent deployment when the manifest changes. Check the rollout status and startup logs:
 
 ```sh
-kubectl logs -n kagent deployment/cluster-ops | head -n 5
+kubectl rollout status deployment/sre-agent -n default
+kubectl logs -n default deployment/sre-agent | head -n 5
 ```
 
-A gated agent logs: `APPA_ENABLED is true. This agent runs gated by the OpenAPPA runtime at ...`.
+A gated agent logs confirmation during initialization:
 
-## Configure policy with appa-guide
+```text
+APPA_ENABLED is true. This agent runs gated by the OpenAPPA runtime at http://appa-runtime.appa.svc.cluster.local:18789
+```
 
-The demo chart installs an `appa-guide` agent that automates policy authoring.
+If the runtime is unreachable, tool calls stop fail-closed before execution.
 
-1. Open the [kagent dashboard](https://kagent.dev/docs/kagent/observability/launch-ui/) at [http://localhost:8901](http://localhost:8901).
-2. Navigate to **Agents → appa-guide → Chat**.
-3. Send `init` to start policy discovery.
+## Manage integration with appa-guide
 
-The guide agent reads the cluster's `RemoteMCPServer` toolsets and `Agent` declarations. It drafts policy contracts in plain English and submits them in chat:
+The `appa-guide` skill automates policy authoring, battery installation, and ongoing maintenance for your kagent cluster.
+
+You interact with `appa-guide` through a dedicated declarative kagent agent. It uses Kubernetes tools from the kagent tool server to inspect your cluster, draft policies, and apply updates.
+
+The `appa-guide` agent is itself gated by OpenAPPA. Manifest write operations (`k8s_apply_manifest`) require `attention = ["human-approval"]`. Every policy write raises kagent's native **Approve / Reject** card in the dashboard. No policy modification applies without explicit human approval.
+
+### 1. Deploy the appa-guide agent
+
+Apply this declarative manifest to create the `appa-guide` agent in your cluster:
+
+```yaml
+apiVersion: kagent.dev/v1alpha2
+kind: Agent
+metadata:
+  name: appa-guide
+  namespace: kagent
+spec:
+  type: Declarative
+  description: "Configure and maintain OpenAPPA policies, batteries, and runtime settings."
+  skills:
+    gitRefs:
+      - url: "https://github.com/archestra-ai/OpenAPPA"
+        ref: "main"
+        path: "integrations/appa-guide"
+        name: "appa-guide"
+  declarative:
+    systemMessage: |
+      You configure OpenAPPA for this kagent cluster. When the operator says init or adjust,
+      or asks to configure tools, batteries, or runtime policy, invoke the appa-guide skill
+      and follow references/kagent.md. Work only through your k8s tools and read_file.
+      Never modify policy without explicit operator approval in chat and through the kagent
+      Approve card.
+    modelConfig: "default-model"
+    tools:
+      - type: McpServer
+        mcpServer:
+          name: kagent-tools
+          kind: RemoteMCPServer
+          toolNames:
+            - k8s_get_resources
+            - k8s_get_resource_yaml
+            - k8s_apply_manifest
+            - k8s_execute_command
+    deployment:
+      env:
+        - name: APPA_ENABLED
+          value: "true"
+        - name: APPA_RUNTIME_URL
+          value: "http://appa-runtime.appa.svc.cluster.local:18789"
+```
+
+Save this file as `appa-guide.yaml` and apply it:
+
+```sh
+kubectl apply -f appa-guide.yaml -n kagent
+```
+
+### 2. Discover tools and author initial policy (`init`)
+
+Open the [kagent dashboard](https://kagent.dev/docs/kagent/observability/launch-ui/) at [http://localhost:8901](http://localhost:8901). Navigate to **Agents → appa-guide → Chat**, and type:
+
+```text
+init
+```
+
+The skill executes the following procedure:
+
+1. **Cluster inventory**: Scans all `RemoteMCPServer` resources for discovered tools (`status.discoveredTools`). Scans all `Agent` resources for declared tools, memory tools, and delegations.
+2. **Battery matching**: Calls `GET /batteries` on the runtime to identify pre-packaged battery matches.
+3. **Wire translation**: Translates matched battery tool signatures to exact kagent wire names while keeping Annotators and Authorities intact.
+4. **Root rule generation**: Generates root rules for tools not covered by batteries:
+   - Confidential reads carry appropriate audience deltas.
+   - External sinks require public audience.
+   - State-changing actions require human approval (`attention = ["human-approval"]`).
+   - Untrusted inputs mark data suspicious (`delta = { trust = "suspicious" }`).
+5. **Plain English proposal**: Presents the proposed policy in chat with a clear summary:
 
 ```text
 Operator: init
-appa-guide: Discovered 6 tools and 2 subagents in namespace 'kagent'.
-            Drafted policy in appa.toml.
+appa-guide: Discovered 8 tools and 3 agents in namespace 'kagent'.
+            - Slack battery: Keeps Slack messages private and requires approval to post.
+            - GitHub battery: Prevents private data leakage to public repositories.
+            - Custom root rules: Added human approval for restart_deployment.
+            - Ungated agents: 'analytics-worker' runs ungated.
             Writing policy to ConfigMap 'appa-policy' requires operator sign-off.
+            Approve, or tell me what to change.
 ```
 
-When you agree, the agent calls `k8s_apply_manifest` to write the policy ConfigMap. The fleet policy requires `attention = ["human-approval"]` for manifest writes, displaying an **Approve / Reject** confirmation card in the dashboard. Click **Approve** to commit the policy. The runtime reloads the new contracts automatically.
+When you approve in chat, `appa-guide` executes `k8s_apply_manifest` to update the `appa-policy` ConfigMap. This action triggers the native kagent **Approve / Reject** confirmation card in the dashboard. Click **Approve**.
+
+The agent confirms the ConfigMap sync and sends `POST /reload` to the runtime. The new policy activates immediately across the cluster without restarting agent pods.
+
+### 3. Setup and refresh policy batteries
+
+Batteries are maintained, composable policy bundles that supply contracts, annotators, and authority wiring for external systems.
+
+During `init` or `adjust`, `appa-guide` matches your installed tools to available batteries and adds `include = ["batteries/<name>/appa.toml"]` to the policy.
+
+When upstream batteries receive updates, you do not need to rebuild or restart the runtime container. Refresh batteries directly through `appa-guide`:
+
+1. In chat with `appa-guide`, send:
+   ```text
+   refresh batteries
+   ```
+2. The skill confirms that persistence is enabled on the runtime PVC.
+3. It runs `appa-refresh-batteries --check` via `k8s_execute_command` to discover the latest published semver release.
+4. It displays the current and available version tags in chat and requests confirmation.
+5. On your approval, `appa-guide` runs:
+   ```sh
+   appa-refresh-batteries --tag <version> ...
+   ```
+6. The command verifies the official release archive against its cryptographic `SHA256SUMS`, stages the release, tests the serving root configuration, and calls `POST /reload`.
+7. If reload succeeds, it commits the release directory. If reload fails, it rolls back automatically to the previous layer.
+
+The operator overlay (`/var/lib/appa/batteries`) remains untouched throughout the refresh.
+
+### 4. Adjust policy rules (`adjust`)
+
+When you add new MCP tools, connect new services, or want to alter existing permissions, open chat with `appa-guide` and state your goal:
+
+```text
+adjust require human approval before calling delete_namespace
+```
+
+The skill reads the current ConfigMap, verifies the existing rules with `appa describe`, drafts the minimal required change, and explains the outcome in plain language.
+
+Once you confirm the proposal, `appa-guide` applies the update through `k8s_apply_manifest`, prompts for your confirmation card click, and reloads the runtime.
+
+### 5. Audit and maintain integration health
+
+The `appa-guide` skill continuously verifies cluster compliance during every interaction:
+
+- **Detects ungated agents**: Reports any `Agent` where `APPA_ENABLED` is not `"true"` or where `APPA_RUNTIME_URL` does not match the shared runtime.
+- **Identifies uninspected tools**: Warns when a `RemoteMCPServer` exists but has not completed tool discovery.
+- **Read-only fallback**: If Kubernetes manifest write permissions are unavailable, `appa-guide` automatically falls back to read-only mode. It drafts the complete valid `appa.toml` directly into the chat for you to apply manually.
 
 ## 1. Confidential read and sanitization
 
