@@ -583,7 +583,7 @@ jobs:
       # One endpoint serves the agents and the policy's sanitizers. This
       # free model advertises the tools, response_format and structured
       # outputs that the sanitizer consult needs.
-      APPA_E2E_MODEL: z-ai/glm-5.2:free
+      APPA_E2E_MODEL: dots-studio/dots-3-note-preview:free
       APPA_E2E_BASE_URL: https://openrouter.ai/api/v1
     steps:
       - name: Checkout project
