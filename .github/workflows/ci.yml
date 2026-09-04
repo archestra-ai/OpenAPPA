@@ -636,16 +636,22 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # These four cases account for about half the measured test time.
-          - name: long
+          # Spread the four slowest cases across two measured ~85s/~82s sets.
+          - name: balanced-a
             cases: >-
-              the_exfil_ask or configured_default or
-              delegated_child_is_gated or untrusted_ingress
+              ordinary_read or the_exfil_ask or
+              chat_steers_the_agent_to_accept or
+              hitl_authority_asks_the_person_and_a_rejection or
+              release_window_authority_approves or
+              delegated_child_is_gated or remote_change_board_denies
           # New cases default to this shard instead of silently disappearing.
-          - name: rest
+          - name: balanced-b
             cases: >-
-              not (the_exfil_ask or configured_default or
-              delegated_child_is_gated or untrusted_ingress)
+              not (ordinary_read or the_exfil_ask or
+              chat_steers_the_agent_to_accept or
+              hitl_authority_asks_the_person_and_a_rejection or
+              release_window_authority_approves or
+              delegated_child_is_gated or remote_change_board_denies)
     env:
       KIND_CLUSTER: appa-e2e
       KAGENT_VERSION: "0.9.12"
