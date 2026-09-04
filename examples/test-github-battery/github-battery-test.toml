@@ -1,0 +1,26 @@
+include = ["github-battery.toml"]
+
+[policy]
+version = 2
+trust_chain = ["suspicious", "trusted"]
+
+[[policy.tool]]
+name = "RunCommand"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "Send"
+requires = { trust = "suspicious", audience = { contains = ["$to"] } }
+delta = {}
+
+[policy.tool.parameters]
+type = "object"
+required = ["to"]
+
+[policy.tool.parameters.properties.to]
+type = "string"
+
+[externals]
+timeout_ms = 30000
+max_body_bytes = 65536

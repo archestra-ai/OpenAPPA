@@ -1,0 +1,36 @@
+# Replace these names with one public repository and one private repository
+# that APPA_PROVIDER_GITHUB_TOKEN can read.
+
+mcp__github__get_file_contents {
+  owner: "your-org"
+  repo: "your-public-repo"
+  path: "README.md"
+}
+expect allow
+
+RunCommand {
+  command: "deploy"
+}
+expect deny
+
+Send {
+  to: "public"
+}
+expect allow
+
+mcp__github__get_file_contents {
+  owner: "your-org"
+  repo: "your-private-repo"
+  path: "README.md"
+}
+expect allow
+
+Send {
+  to: "public"
+}
+expect deny
+
+Send {
+  to: "github:internal"
+}
+expect allow

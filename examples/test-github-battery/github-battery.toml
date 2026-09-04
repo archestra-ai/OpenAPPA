@@ -1,0 +1,18 @@
+# Example battery for one GitHub MCP read tool. The Annotator asks the
+# GitHub API whether the repository is public or private.
+
+[policy]
+version = 2
+
+[[policy.annotator]]
+name = "github.repository-visibility"
+ranks = ["suspicious"]
+audiences = ["github:internal"]
+
+[[policy.tool]]
+name = "mcp__github__get_file_contents"
+annotator = "github.repository-visibility"
+
+[externals.annotators."github.repository-visibility"]
+command = ["python3", "repository-visibility.py"]
+token_env = "APPA_PROVIDER_GITHUB_TOKEN"

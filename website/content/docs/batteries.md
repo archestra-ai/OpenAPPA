@@ -5,9 +5,9 @@ order: 6.5
 description: How batteries are structured, combined, and run.
 ---
 
-A battery is an OpenAPPA config for a set of tools, such as Claude Code or Slack. It may include small scripts that make decisions for each tool call.
+A battery is a reusable OpenAPPA policy configuration for a set of tools, such as Slack MCP or built-in Claude Code tools. It can also include [annotators](/contracts#annotators), [sanitizers](/contracts#sanitizers), and [authorities](/contracts#authorities), with implementations that can be any executable program.
 
-Most batteries are for MCP servers. A battery needs no extra format or server.
+Most batteries are for MCP servers.
 
 ## Battery structure
 
@@ -21,7 +21,7 @@ batteries/
     `-- appa.toml
 ```
 
-List batteries in the root `appa.toml`:
+To include batteries in your config, list them in `appa.toml`:
 
 ```toml
 include = [
