@@ -72,11 +72,15 @@ Make sure you have installed:
 
 ### 1. Install kagent with OpenAPPA
 
-Install the kagent [CRDs and Helm chart](https://kagent.dev/docs/kagent/resources/helm/) configured with your OpenAI API key and the OpenAPPA runtime image:
+Set your OpenAI API key in your terminal:
 
 ```sh
 export OPENAI_API_KEY="<your-api-key>"
+```
 
+Then install the kagent [CRDs and Helm chart](https://kagent.dev/docs/kagent/resources/helm/) with the OpenAPPA runtime image:
+
+```sh
 # Install kagent CRDs
 helm upgrade --install kagent-crds oci://ghcr.io/kagent-dev/kagent/helm/kagent-crds \
   --version 0.9.12 -n kagent --create-namespace
@@ -141,7 +145,8 @@ kubectl get events -n kagent --sort-by='.lastTimestamp'
 
 Deploy a declarative agent configured with `APPA_ENABLED: "true"` pointing to the shared runtime:
 
-```yaml
+```sh
+kubectl apply -f - <<'EOF'
 apiVersion: kagent.dev/v1alpha2
 kind: Agent
 metadata:
@@ -151,6 +156,7 @@ spec:
   type: Declarative
   description: "Site reliability agent protected by OpenAPPA."
   declarative:
+    systemMessage: "You are a helpful site reliability assistant protected by OpenAPPA."
     modelConfig: "default-model-config"
     deployment:
       env:
@@ -158,12 +164,7 @@ spec:
           value: "true"
         - name: APPA_RUNTIME_URL
           value: "http://appa-runtime.appa.svc.cluster.local:18789"
-```
-
-Save as `sre-agent.yaml` and apply:
-
-```sh
-kubectl apply -f sre-agent.yaml
+EOF
 ```
 
 The `modelConfig` field references the cluster's active `ModelConfig` resource (`default-model-config` by default). You can point this to any provider and model configured in your cluster per the [kagent Supported Providers documentation](https://kagent.dev/docs/kagent/supported-providers/).
@@ -203,28 +204,10 @@ This image replaces the base container image for declarative agent pods. It stay
 
 ### 2. Wire existing agents to the runtime
 
-To protect an existing [Agent](https://kagent.dev/docs/kagent/concepts/agents/), add `APPA_ENABLED` and `APPA_RUNTIME_URL` to `spec.declarative.deployment.env`:
-
-```yaml
-apiVersion: kagent.dev/v1alpha2
-kind: Agent
-metadata:
-  name: sre-agent
-  namespace: default
-spec:
-  declarative:
-    deployment:
-      env:
-        - name: APPA_ENABLED
-          value: "true"
-        - name: APPA_RUNTIME_URL
-          value: "http://appa-runtime.appa.svc.cluster.local:18789"
-```
-
-Or patch an active agent resource directly with `kubectl`:
+Patch any active agent with `kubectl` to enable the gate and connect it to `appa-runtime`:
 
 ```sh
-kubectl patch agent sre-agent -n default --type=merge -p '{
+kubectl patch agent sre-agent -n kagent --type=merge -p '{
   "spec": {
     "declarative": {
       "deployment": {
@@ -251,8 +234,8 @@ Invalid values for `APPA_ENABLED` fail container startup immediately. Gated agen
 The kagent controller automatically rolls the agent deployment when the manifest changes. Check the rollout status and startup logs:
 
 ```sh
-kubectl rollout status deployment/sre-agent -n default
-kubectl logs -n default deployment/sre-agent | head -n 5
+kubectl rollout status deployment/sre-agent -n kagent
+kubectl logs -n kagent deployment/sre-agent | head -n 5
 ```
 
 A gated agent logs confirmation during initialization:
@@ -273,9 +256,10 @@ The `appa-guide` agent is itself gated by OpenAPPA. Manifest write operations (`
 
 ### 1. Deploy the appa-guide agent
 
-Apply this declarative manifest to create the `appa-guide` agent in your cluster:
+Deploy the `appa-guide` agent to your cluster:
 
-```yaml
+```sh
+kubectl apply -f - <<'EOF'
 apiVersion: kagent.dev/v1alpha2
 kind: Agent
 metadata:
@@ -301,7 +285,7 @@ spec:
     tools:
       - type: McpServer
         mcpServer:
-          name: kagent-tools
+          name: kagent-tool-server
           kind: RemoteMCPServer
           toolNames:
             - k8s_get_resources
@@ -314,12 +298,7 @@ spec:
           value: "true"
         - name: APPA_RUNTIME_URL
           value: "http://appa-runtime.appa.svc.cluster.local:18789"
-```
-
-Save this file as `appa-guide.yaml` and apply it:
-
-```sh
-kubectl apply -f appa-guide.yaml -n kagent
+EOF
 ```
 
 ### 2. Discover tools and author initial policy (`init`)
