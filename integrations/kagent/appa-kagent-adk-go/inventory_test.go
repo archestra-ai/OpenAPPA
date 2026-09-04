@@ -172,7 +172,7 @@ func TestTheEmbeddedManifestIsTheSharedOneAndThePythonCopy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the python copy must be readable: %v", err)
 	}
-	if !bytes.Equal(BuiltinManifest(), shared) {
+	if !bytes.Equal(builtinsManifest, shared) {
 		t.Error("the embedded manifest drifted from the shared fixture")
 	}
 	if !bytes.Equal(python, shared) {
@@ -182,7 +182,7 @@ func TestTheEmbeddedManifestIsTheSharedOneAndThePythonCopy(t *testing.T) {
 	if err := json.Unmarshal(shared, &lanes); err != nil {
 		t.Fatalf("the manifest must parse: %v", err)
 	}
-	if _, present := lanes[ManifestLane]; !present || len(lanes) != 2 {
+	if _, present := lanes[manifestLane]; !present || len(lanes) != 2 {
 		t.Errorf("the manifest carries the python and go lanes, got %v", lanes)
 	}
 }

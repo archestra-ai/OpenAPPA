@@ -284,19 +284,66 @@ pub fn run(url: &str, adapter: AdapterName, turn_end: bool) -> ExitCode {
         // A refusal is rendered too, and for a result that already ran the rendering
         // is the whole answer: the harness reads it only from a hook that exits zero,
         // so a replacement carried out on a blocking exit would be discarded and the
-        // withheld output would stay in front of the model. Every other refusal is
-        // what the exit code stops, and the rendering only reports it.
-        (Ok(decision), false) => {
-            eprintln!("OpenAPPA hook blocked: {}", refusal(&answer));
-            print(&(codec.render)(&event, &decision));
-            match replaces_a_result(&event, &decision) {
-                true => ExitCode::SUCCESS,
-                false => ExitCode::from(2),
-            }
+        // withheld output would stay in front of the model. That holds whatever the
+        // refusal carries — a decision, a refusal that decides nothing, or a body that
+        // is no wire decision at all. Every other refusal is what the exit code stops,
+        // and the rendering only reports it.
+        (answered, false) => {
+            let failure = refusal(&answer);
+            carry_out(&codec, &event, refused(&event, answered.ok(), &failure), &failure)
         }
-        (Err(_), false) => block(&refusal(&answer)),
         (Err(failure), true) => unanswered(&codec, Some(&event), &failure, decides),
     }
+}
+
+/// What one non-2xx answer leaves this client to do.
+///
+/// `Withheld` carries the replacement that stands in for a result the tool already
+/// produced: printing it is the whole answer, because the harness applies a replacement
+/// only from a hook that exits zero. `Stopped` carries the answer's own rendering, where
+/// it has one, for a call that has not run and that the non-zero exit stops.
+#[derive(Debug, PartialEq)]
+enum Refused {
+    Withheld(HookDecision),
+    Stopped(Option<HookDecision>),
+}
+
+/// Read a refusal as what it does to this event. An event reporting a result is answered
+/// by the replacement the runtime sent, or — where the refusal carries none, because it
+/// decided nothing (an operational [`HookDecision::Refuse`]) or was no wire decision at
+/// all — by a withholding synthesized from the refusal itself. Nothing has run yet at any
+/// other hook, so there the exit code is what stops the call.
+fn refused(event: &HookEvent, answered: Option<HookDecision>, failure: &str) -> Refused {
+    match reports_a_result(event) {
+        false => Refused::Stopped(answered),
+        true => Refused::Withheld(match answered {
+            Some(decision) if stands_in_for_a_result(&decision) => decision,
+            _ => HookDecision::Block {
+                reason: format!("the runtime refused this hook: {failure}"),
+            },
+        }),
+    }
+}
+
+fn carry_out(codec: &Codec, event: &HookEvent, refused: Refused, failure: &str) -> ExitCode {
+    match refused {
+        Refused::Withheld(withholding) => withhold(codec, event, &withholding, failure),
+        Refused::Stopped(answered) => {
+            if let Some(decision) = answered {
+                print(&(codec.render)(event, &decision));
+            }
+            block(failure)
+        }
+    }
+}
+
+/// Take a result the tool already produced out of the model's attention, by printing the
+/// replacement that stands in for it and exiting zero — the exit code the harness reads a
+/// replacement from.
+fn withhold(codec: &Codec, event: &HookEvent, withholding: &HookDecision, failure: &str) -> ExitCode {
+    eprintln!("OpenAPPA hook withheld the result: {failure}");
+    print(&(codec.render)(event, withholding));
+    ExitCode::SUCCESS
 }
 
 /// Fail closed on a hook the runtime did not answer. A turn end decides nothing and
@@ -310,33 +357,36 @@ fn unanswered(codec: &Codec, event: Option<&HookEvent>, failure: &str, decides: 
         eprintln!("OpenAPPA runtime did not answer the turn end: {failure}");
         return ExitCode::SUCCESS;
     }
-    let withholding = HookDecision::Block {
-        reason: format!("the runtime did not answer this hook: {failure}"),
-    };
-    match event.filter(|event| replaces_a_result(event, &withholding)) {
-        Some(event) => {
-            eprintln!("OpenAPPA hook withheld the result: {failure}");
-            print(&(codec.render)(event, &withholding));
-            ExitCode::SUCCESS
-        }
+    match event.filter(|event| reports_a_result(event)) {
+        Some(event) => withhold(
+            codec,
+            event,
+            &HookDecision::Block {
+                reason: format!("the runtime did not answer this hook: {failure}"),
+            },
+            failure,
+        ),
         None => block(failure),
     }
 }
 
-/// Whether this answer takes effect through what the client prints rather than
-/// through its exit code. A result the tool already produced is only ever taken
-/// out of the model's attention by the replacement that stands in for it, and the
-/// harness reads that replacement from a hook that exits zero.
-fn replaces_a_result(event: &HookEvent, decision: &HookDecision) -> bool {
-    let reports_a_result = matches!(
+/// Whether this event reports a result the tool already produced. Such a result is only
+/// ever taken out of the model's attention by the replacement that stands in for it, and
+/// the harness reads that replacement from a hook that exits zero — so an answer to one of
+/// these events takes effect through what the client prints, not through its exit code.
+fn reports_a_result(event: &HookEvent) -> bool {
+    matches!(
         event,
         HookEvent::ToolResult { .. } | HookEvent::SpawnResult { .. } | HookEvent::ChildEnd { .. }
-    );
-    let stands_in_for_it = matches!(
+    )
+}
+
+/// Whether this decision is one the harness can put in a result's place.
+fn stands_in_for_a_result(decision: &HookDecision) -> bool {
+    matches!(
         decision,
         HookDecision::Block { .. } | HookDecision::ReplaceOutput { .. } | HookDecision::ChildReturn { .. }
-    );
-    reports_a_result && stands_in_for_it
+    )
 }
 
 #[cfg(test)]
@@ -472,6 +522,61 @@ mod tests {
             .is_err(),
             "a malformed host event blocks before any round trip"
         );
+    }
+
+    /// Every non-2xx answer to an event that reports a result ends in a rendered
+    /// withholding and a zero exit, whatever the refusal carries: the tool has already run,
+    /// and the harness applies a replacement only from a hook that exits zero. A refusal
+    /// that decides nothing (the 409 `refuse` an operational failure answers with) and a
+    /// body that is no wire decision at all both carry none, so the withholding is
+    /// synthesized — and neither rendering carries the output that was withheld.
+    #[test]
+    fn a_refusal_to_a_result_that_already_ran_withholds_it_rather_than_blocking() {
+        let codec = codec_for(AdapterName::ClaudeCode).expect("claude code translates");
+        let host = br#"{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"Bash",
+            "tool_input":{"command":"cat /etc/passwd"},"tool_response":{"stdout":"root:x:0:0"},"tool_use_id":"t1"}"#;
+        let (event, _) = translate(&codec, AdapterName::ClaudeCode, host)
+            .expect("the event translates")
+            .expect("PostToolUse is gated");
+        assert!(matches!(event, HookEvent::ToolResult { .. }));
+
+        let operational = HookDecision::Refuse {
+            detail: "storage failure: disk full".to_string(),
+        };
+        for answered in [Some(operational), None] {
+            let Refused::Withheld(withholding) = refused(&event, answered.clone(), "status=409 storage failure") else {
+                panic!("a result that already ran is withheld, not blocked: {answered:?}");
+            };
+            assert!(
+                matches!(withholding, HookDecision::Block { .. }),
+                "a refusal carrying no replacement synthesizes one: {withholding:?}"
+            );
+            let rendered = (codec.render)(&event, &withholding).to_string();
+            assert!(
+                !rendered.contains("root:x:0:0"),
+                "the withheld output does not reach the model: {rendered}"
+            );
+        }
+    }
+
+    /// A refusal before the call runs is stopped by the exit code, and the answer's own
+    /// rendering only reports it.
+    #[test]
+    fn a_refusal_before_a_call_runs_stays_a_block() {
+        let codec = codec_for(AdapterName::ClaudeCode).expect("claude code translates");
+        let host =
+            br#"{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"Bash","tool_input":{"command":"ls"}}"#;
+        let (event, _) = translate(&codec, AdapterName::ClaudeCode, host)
+            .expect("the event translates")
+            .expect("PreToolUse is gated");
+        let refuse = HookDecision::Refuse {
+            detail: "storage failure: disk full".to_string(),
+        };
+        assert_eq!(
+            refused(&event, Some(refuse.clone()), "status=409"),
+            Refused::Stopped(Some(refuse))
+        );
+        assert_eq!(refused(&event, None, "status=500"), Refused::Stopped(None));
     }
 
     #[test]

@@ -495,6 +495,41 @@ async fn an_unanswered_post_use_hook_withholds_the_result_it_reports() {
     );
 }
 
+/// The same guarantee where the runtime answers and refuses. Neither answer carries a
+/// replacement — a `refuse` decides nothing the harness can put in a result's place, and an
+/// error body is no wire decision at all — so the client synthesizes the withholding: a
+/// replacement carried out on a blocking exit is discarded, and the output the tool already
+/// produced would stay in front of the model.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_post_use_hook_withholds_the_result_it_reports() {
+    let ran = r#"{"hook_event_name":"PostToolUse","session_id":"plugin-test","tool_name":"Bash","tool_input":{"command":"ls"},"tool_response":{"stdout":"readme.txt"}}"#;
+    for answer in [
+        (
+            axum::http::StatusCode::CONFLICT,
+            r#"{"protocol":1,"decision":"refuse","detail":"storage failure: disk full"}"#,
+        ),
+        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom"),
+    ] {
+        let url = serve(Router::new().route("/hook", post(move || async move { answer }))).await;
+        let (code, stdout) = tokio::task::spawn_blocking(move || run_client(&["--adapter", "claude-code"], &url, ran))
+            .await
+            .expect("the blocking task joins");
+        assert_eq!(
+            code, 0,
+            "the harness applies the replacement only from a hook that exits zero: {answer:?} {stdout}"
+        );
+        let rendered: serde_json::Value = serde_json::from_str(&stdout).expect("the withholding renders as JSON");
+        assert!(
+            !rendered["hookSpecificOutput"]["updatedToolOutput"].is_null(),
+            "the produced output is replaced, not left in front of the model: {rendered}"
+        );
+        assert!(
+            !rendered.to_string().contains("readme.txt"),
+            "the withheld body never reaches the model: {rendered}"
+        );
+    }
+}
+
 /// A call the harness has not run yet needs no replacement: exiting non-zero is
 /// what stops it, and nothing was produced to withhold.
 #[tokio::test(flavor = "multi_thread")]

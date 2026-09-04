@@ -396,7 +396,8 @@ impl WireEvent {
     /// The spawn's result when the parent's `Agent` response names the
     /// subagent (`agentId`) or carries its message (`content`): a launch
     /// acknowledgement names the child and carries no message. A response
-    /// with neither is a plain tool result.
+    /// with neither fills no spawn field; which lifecycle the runtime runs
+    /// is its own derivation from the tool, never this shape.
     fn spawn_return(&self) -> Option<(Option<TrajectoryId>, Option<String>)> {
         let response = self.tool_response.as_ref()?;
         let child = response

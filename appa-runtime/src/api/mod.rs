@@ -566,6 +566,11 @@ impl Inner {
     /// compile stays outside the lock — it is the expensive step, and the mutex's
     /// "no panic runs while it is held" reading must keep holding — so a race can
     /// still compile twice, but only one result is ever cached and handed out.
+    ///
+    /// A retired policy decides under the identities this deployment derives now, so it
+    /// meets the naming rule this deployment serves under or the trajectory does not
+    /// reopen: a stored policy naming a tool the served host's raw way confines and
+    /// excepts nothing, while a wildcard contract still permits the call.
     fn retired_engine(&self, key: &str, bytes: &[u8]) -> Result<Arc<RuntimeEngine>, EventError> {
         if let Some(engine) = self
             .retired
@@ -576,6 +581,11 @@ impl Inner {
             return Ok(Arc::clone(engine));
         }
         let compiled = compile_stored_policy(bytes).map_err(EventError::PolicyUnavailable)?;
+        match self.naming {
+            ToolNaming::Canonical { .. } => require_canonical_tools(&compiled)
+                .map_err(|refusal| EventError::PolicyUnavailable(refusal.to_string()))?,
+            ToolNaming::AsAuthored => {}
+        }
         let engine = Arc::new(RuntimeEngine::from_policy(&compiled, self.naming));
         Ok(Arc::clone(
             self.retired
@@ -1792,6 +1802,95 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             0,
             "the cache does not carry compiled engines across a reload"
         );
+    }
+
+    /// Two stored policies that differ only in how their `[deployment]` field spells the
+    /// tool it confines. The wildcard contract covers every name, so either spelling passes
+    /// coverage at load; the contract permits the call, and only the confinement reads the
+    /// name exactly.
+    fn confining_policy(confined: &str) -> Config {
+        claude_config(&format!(
+            r#"
+            version = 2
+            [[annotator]]
+            name = "any"
+            builtin = "claude-code"
+            [[tool]]
+            name = "host/claude-code/Bash"
+            [[tool]]
+            name = "*"
+            annotator = "any"
+            [deployment]
+            confined_results = ["{confined}"]
+            "#
+        ))
+    }
+
+    /// The canonical policy the served deployment serves now: different bytes from either
+    /// stored one, so a trajectory recorded under those reopens through the retired branch.
+    fn served_policy() -> Config {
+        claude_config(
+            r#"
+            version = 2
+            [[tool]]
+            name = "host/claude-code/Bash"
+            [[tool]]
+            name = "host/claude-code/Read"
+            [deployment]
+            confined_results = ["host/claude-code/Bash"]
+            "#,
+        )
+    }
+
+    /// A trajectory recorded before the upgrade carries its own policy bytes, and reopening
+    /// it compiles them. A served deployment derives a canonical identity for every call, so
+    /// a stored policy naming a tool the host's raw way in a `[deployment]` field confines
+    /// nothing while its contract still permits the call: the served runtime refuses that
+    /// trajectory rather than deciding under it, and reopens a stored canonical policy.
+    #[tokio::test]
+    async fn a_served_deployment_refuses_a_stored_policy_its_naming_rule_rejects() {
+        for (confined, refuses) in [("Bash", true), ("host/claude-code/Bash", false)] {
+            let dir = tempfile::tempdir().expect("a temp dir is creatable");
+            let db = dir.path().join("appa.db");
+            let root = TrajectoryId("upgraded".to_string());
+
+            // Recorded under a deployment that embeds the runtime and names tools its own way.
+            let recorded = Runtime::open(confining_policy(confined), db.clone(), None).expect("the deployment opens");
+            assert_eq!(
+                crate::hooks::handle(
+                    &recorded,
+                    appa_runtime_api::HookEvent::SessionStart { root: root.clone() }
+                )
+                .await,
+                appa_runtime_api::HookDecision::Ack
+            );
+            drop(recorded);
+
+            // The upgrade: the same log, served under the canonical naming rule.
+            let served = Runtime::open_served(served_policy(), db, None, appa_adapter_claude_code::adapter())
+                .expect("the served deployment opens");
+            let decision = crate::hooks::handle(
+                &served,
+                appa_runtime_api::HookEvent::ToolCall {
+                    actor: Actor {
+                        root: root.clone(),
+                        child: None,
+                    },
+                    call: ProposedCall {
+                        tool: "host/claude-code/Bash".to_string(),
+                        arguments: raw(serde_json::json!({"command": "ls"})),
+                    },
+                    spawn: false,
+                    ruling: None,
+                },
+            )
+            .await;
+            assert_eq!(
+                matches!(decision, appa_runtime_api::HookDecision::Refuse { .. }),
+                refuses,
+                "the stored policy confines {confined}: {decision:?}"
+            );
+        }
     }
 
     #[test]

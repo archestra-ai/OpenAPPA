@@ -8,7 +8,10 @@
 //! whether a call is a spawn, which canonical tool it names, and whether
 //! it is the runtime's own control tool are all derived on the server
 //! from the configured adapter and the raw spelling
-//! ([`Adapter::derive`]); whether a proposed call's arguments name a
+//! ([`Adapter::derive`]). A result's lifecycle follows that same
+//! derivation and not the event name it arrived under, so `tool_result`
+//! and `spawn_result` differ only in the fields they may carry;
+//! whether a proposed call's arguments name a
 //! child's transcript is the same adapter's separate answer
 //! ([`Adapter::names_children`]), asked at the call, where it is used.
 //! Ids cross unprefixed and the server applies the configured adapter's
@@ -151,9 +154,23 @@ pub enum OutcomeStatus {
     Indeterminate,
 }
 
-/// A dispatched tool's outcome as the host observed it. `success`
-/// carries `body` and nothing else does; `failure` carries `message`;
-/// `success_without_body` and `indeterminate` carry neither.
+/// A status as the wire spells it, so a refusal names what was posted.
+fn status_name(status: OutcomeStatus) -> &'static str {
+    match status {
+        OutcomeStatus::Success => "success",
+        OutcomeStatus::SuccessWithoutBody => "success_without_body",
+        OutcomeStatus::Failure => "failure",
+        OutcomeStatus::Indeterminate => "indeterminate",
+    }
+}
+
+/// A dispatched tool's outcome as the host observed it. Each status has
+/// exactly one shape: `success` carries `body` and no `message`,
+/// `failure` carries `message` and no `body`, and
+/// `success_without_body` and `indeterminate` carry neither. Any other
+/// combination is malformed — a field the status has no place for is an
+/// observation the host made, and dropping it would lose it from the
+/// trajectory.
 ///
 /// `body` is the JSON value as spelled, so a present `null` is a body
 /// that is `null` and not an absent one. `success` without the field is
@@ -209,18 +226,32 @@ impl WireOutcome {
         })
     }
 
+    /// The one shape each status has, and a refusal naming the status
+    /// and the offending field for everything else. A field the status
+    /// has no place for is refused rather than dropped: the host
+    /// observed it, and an envelope that fails closed keeps it out of
+    /// the trajectory without losing that it was there.
     fn into_outcome(self) -> Result<ToolOutcome, ParseRefusal> {
+        let status = status_name(self.status);
+        let without = |field: &str| malformed(format!("a {status} outcome without its {field}"));
+        let carrying = |field: &str| malformed(format!("a {status} outcome carrying a {field}"));
         match (self.status, self.body, self.message) {
-            (OutcomeStatus::Success, Some(body), _) => Ok(ToolOutcome::Success {
+            (OutcomeStatus::Success, Some(body), None) => Ok(ToolOutcome::Success {
                 body: OutcomeBody::Available(body.get().to_string()),
             }),
-            (OutcomeStatus::Success, None, _) => Err(malformed("a success outcome without its body")),
-            (OutcomeStatus::SuccessWithoutBody, _, _) => Ok(ToolOutcome::Success {
+            (OutcomeStatus::Success, Some(_), Some(_)) => Err(carrying("message")),
+            (OutcomeStatus::Success, None, _) => Err(without("body")),
+            (OutcomeStatus::SuccessWithoutBody, None, None) => Ok(ToolOutcome::Success {
                 body: OutcomeBody::Unavailable,
             }),
-            (OutcomeStatus::Failure, _, Some(message)) => Ok(ToolOutcome::Failure { message }),
-            (OutcomeStatus::Failure, _, None) => Err(malformed("a failure outcome without its message")),
-            (OutcomeStatus::Indeterminate, _, _) => Ok(ToolOutcome::Indeterminate),
+            (OutcomeStatus::SuccessWithoutBody, Some(_), _) => Err(carrying("body")),
+            (OutcomeStatus::SuccessWithoutBody, None, Some(_)) => Err(carrying("message")),
+            (OutcomeStatus::Failure, None, Some(message)) => Ok(ToolOutcome::Failure { message }),
+            (OutcomeStatus::Failure, Some(_), _) => Err(carrying("body")),
+            (OutcomeStatus::Failure, None, None) => Err(without("message")),
+            (OutcomeStatus::Indeterminate, None, None) => Ok(ToolOutcome::Indeterminate),
+            (OutcomeStatus::Indeterminate, Some(_), _) => Err(carrying("body")),
+            (OutcomeStatus::Indeterminate, None, Some(_)) => Err(carrying("message")),
         }
     }
 }
@@ -462,16 +493,20 @@ impl WireEvent {
                 _ => Err(malformed(format!("{name:?} without its tool call"))),
             }
         };
-        // The same call under the identity the adapter derives for it.
-        // An outcome needs nothing else the adapter derives: it names no
-        // child, so it never pays the scan over its arguments.
-        let canonical_call = |actor: &Actor| -> Result<ProposedCall, ParseRefusal> {
+        // The same call under the identity the adapter derives for it,
+        // with that derivation's spawn answer. An outcome needs nothing
+        // else the adapter derives: it names no child, so it never pays
+        // the scan over its arguments.
+        let derived_call = |actor: &Actor| -> Result<(ProposedCall, bool), ParseRefusal> {
             let raw = raw_call()?;
             let derived = (served.derive)(actor, &raw)?;
-            Ok(ProposedCall {
-                tool: derived.canonical.into_string(),
-                arguments: raw.arguments,
-            })
+            Ok((
+                ProposedCall {
+                    tool: derived.canonical.into_string(),
+                    arguments: raw.arguments,
+                },
+                derived.spawn,
+            ))
         };
         let outcome = || -> Result<ToolOutcome, ParseRefusal> {
             match self.outcome.clone() {
@@ -513,30 +548,42 @@ impl WireEvent {
                     names_children,
                 }))
             }
-            EventName::ToolResult => {
+            // One result event, and the derivation alone says which
+            // lifecycle it is. The two names differ only in the fields
+            // they may carry: an event name is a caller's claim, and a
+            // caller that could pick the lifecycle could skip a child's
+            // settlement or spend a spawn's metadata on an ordinary
+            // call. The spawn-only fields are refused, not dropped,
+            // where the derivation gives no spawn to spend them on.
+            EventName::ToolResult | EventName::SpawnResult => {
                 let actor = actor()?;
-                let call = canonical_call(&actor)?;
-                accepted(HookEvent::ToolResult {
-                    actor,
-                    call,
-                    outcome: outcome()?,
-                })
-            }
-            EventName::SpawnResult => {
-                let actor = actor()?;
-                let call = canonical_call(&actor)?;
+                let (call, spawn) = derived_call(&actor)?;
+                let outcome = outcome()?;
                 let child = self
                     .spawned_id
                     .as_deref()
                     .filter(|id| !id.is_empty())
                     .map(|id| child_of(&actor.root, id));
-                accepted(HookEvent::SpawnResult {
-                    actor,
-                    call,
-                    outcome: outcome()?,
-                    child,
-                    value: value(),
-                })
+                match spawn {
+                    true => accepted(HookEvent::SpawnResult {
+                        actor,
+                        call,
+                        outcome,
+                        child,
+                        value: value(),
+                    }),
+                    false => match (child, value()) {
+                        (Some(_), _) => Err(malformed(format!(
+                            "a result carrying spawned_id for {}, which this adapter derives as an ordinary call",
+                            call.tool
+                        ))),
+                        (None, Some(_)) => Err(malformed(format!(
+                            "a result carrying value for {}, which this adapter derives as an ordinary call",
+                            call.tool
+                        ))),
+                        (None, None) => accepted(HookEvent::ToolResult { actor, call, outcome }),
+                    },
+                }
             }
             EventName::ChildStart => {
                 let (root, child) = named_child()?;
@@ -811,7 +858,7 @@ mod tests {
             CanonicalTool::parse(&format!("host/test/{}", call.tool)).map_err(|error| malformed(error.to_string()))?;
         Ok(Derived {
             canonical,
-            spawn: call.tool == "spawn",
+            spawn: matches!(call.tool.as_str(), "spawn" | "Agent"),
         })
     }
 
@@ -1087,20 +1134,20 @@ mod tests {
             root: TrajectoryId("kagent:r1".to_string()),
             child: None,
         };
-        let call = || ProposedCall {
-            tool: "read".to_string(),
+        let call = |tool: &str| ProposedCall {
+            tool: tool.to_string(),
             arguments: raw(r#"{"path":"notes.txt"}"#),
         };
         for outcome in outcomes {
             let events = [
                 HookEvent::ToolResult {
                     actor: actor(),
-                    call: call(),
+                    call: call("read"),
                     outcome: outcome.clone(),
                 },
                 HookEvent::SpawnResult {
                     actor: actor(),
-                    call: call(),
+                    call: call("spawn"),
                     outcome: outcome.clone(),
                     child: Some(TrajectoryId("kagent:r1:c1".to_string())),
                     value: Some("done".to_string()),
@@ -1128,42 +1175,182 @@ mod tests {
         }
     }
 
-    /// A success says whether it carries a body; the wire never guesses
-    /// one for it.
+    /// Every status crossed with every presence of `body` and
+    /// `message`. Each status admits exactly one shape and crosses as
+    /// itself there; every other combination is refused rather than
+    /// read with the field the status has no place for dropped. A
+    /// success says whether it carries a body; the wire never guesses
+    /// one for it, and a body that is `null` stays one.
     #[test]
-    fn a_success_without_its_body_is_malformed() {
+    fn an_outcome_is_admitted_only_in_the_one_shape_its_status_has() {
         let posted = |outcome: &str| {
             format!(
                 r#"{{"protocol":1,"adapter":"kagent","event":"tool_result","root_id":"r1","tool":"read","arguments":{{}},"outcome":{outcome}}}"#
             )
         };
-        let refused = WireEvent::read(posted(r#"{"status":"success"}"#).as_bytes())
-            .expect("reads")
-            .into_event(&SERVED);
-        assert!(matches!(refused, Err(ParseRefusal::Malformed { .. })), "{refused:?}");
+        for status in ["success", "success_without_body", "failure", "indeterminate"] {
+            for body in [None, Some("null"), Some(r#"{"content":"done"}"#)] {
+                for message in [None, Some("connection refused")] {
+                    let mut outcome = format!(r#"{{"status":"{status}""#);
+                    if let Some(body) = body {
+                        outcome.push_str(&format!(r#","body":{body}"#));
+                    }
+                    if let Some(message) = message {
+                        outcome.push_str(&format!(r#","message":"{message}""#));
+                    }
+                    outcome.push('}');
+                    let expected = match (status, body, message) {
+                        ("success", Some(body), None) => Some(ToolOutcome::Success {
+                            body: OutcomeBody::Available(body.to_string()),
+                        }),
+                        ("success_without_body", None, None) => Some(ToolOutcome::Success {
+                            body: OutcomeBody::Unavailable,
+                        }),
+                        ("failure", None, Some(message)) => Some(ToolOutcome::Failure {
+                            message: message.to_string(),
+                        }),
+                        ("indeterminate", None, None) => Some(ToolOutcome::Indeterminate),
+                        _ => None,
+                    };
+                    let read = WireEvent::read(posted(&outcome).as_bytes())
+                        .expect("reads")
+                        .into_event(&SERVED);
+                    match (expected, read) {
+                        (Some(expected), Ok(Some(accepted))) => match accepted.event {
+                            HookEvent::ToolResult { outcome: crossed, .. } => {
+                                assert_eq!(crossed, expected, "{outcome}")
+                            }
+                            other => panic!("{outcome} crossed as {other:?}"),
+                        },
+                        (Some(_), other) => panic!("{outcome} is admitted, got {other:?}"),
+                        (None, Err(ParseRefusal::Malformed { .. })) => {}
+                        (None, other) => panic!("{outcome} is refused, got {other:?}"),
+                    }
+                }
+            }
+        }
+    }
 
-        for (outcome, expected) in [
+    /// The derivation alone says which lifecycle a result runs: the
+    /// event name it arrived under selects nothing, so no caller can
+    /// skip a child's settlement by naming the ordinary result, or
+    /// spend a spawn's metadata on a tool the adapter derives as an
+    /// ordinary call. Where the derivation gives no spawn, `spawned_id`
+    /// and `value` are refused rather than dropped.
+    #[test]
+    fn a_results_lifecycle_follows_the_derivation_and_never_the_event_name() {
+        #[derive(Debug)]
+        enum Expected {
+            Ordinary,
+            Spawn {
+                child: Option<&'static str>,
+                value: Option<&'static str>,
+            },
+            Refused,
+        }
+        let posted = |event: &str, tool: &str, spawn_fields: &str| {
+            format!(
+                r#"{{"protocol":1,"adapter":"kagent","event":"{event}","root_id":"r1","tool":"{tool}","arguments":{{}},"outcome":{{"status":"success","body":1}}{spawn_fields}}}"#
+            )
+        };
+        let named = r#","spawned_id":"c1","value":"done""#;
+        let table = [
+            ("tool_result", "read", "", Expected::Ordinary),
+            // The name claims a spawn the derivation does not give.
+            ("spawn_result", "read", "", Expected::Ordinary),
+            // The name claims an ordinary call for the derived spawn:
+            // the child's settlement still runs.
             (
-                r#"{"status":"success","body":null}"#,
-                ToolOutcome::Success {
-                    body: OutcomeBody::Available("null".to_string()),
+                "tool_result",
+                "spawn",
+                "",
+                Expected::Spawn {
+                    child: None,
+                    value: None,
                 },
             ),
             (
-                r#"{"status":"success_without_body"}"#,
-                ToolOutcome::Success {
-                    body: OutcomeBody::Unavailable,
+                "spawn_result",
+                "spawn",
+                "",
+                Expected::Spawn {
+                    child: None,
+                    value: None,
                 },
             ),
-        ] {
-            let accepted = WireEvent::read(posted(outcome).as_bytes())
-                .expect("reads")
-                .into_event(&SERVED)
-                .unwrap_or_else(|refusal| panic!("{outcome} is admitted: {refusal:?}"))
-                .expect("is an event");
-            match accepted.event {
-                HookEvent::ToolResult { outcome, .. } => assert_eq!(outcome, expected),
-                other => panic!("{other:?}"),
+            (
+                "spawn_result",
+                "spawn",
+                named,
+                Expected::Spawn {
+                    child: Some("kagent:r1:c1"),
+                    value: Some("done"),
+                },
+            ),
+            (
+                "tool_result",
+                "spawn",
+                named,
+                Expected::Spawn {
+                    child: Some("kagent:r1:c1"),
+                    value: Some("done"),
+                },
+            ),
+            (
+                "spawn_result",
+                "spawn",
+                r#","spawned_id":"c1""#,
+                Expected::Spawn {
+                    child: Some("kagent:r1:c1"),
+                    value: None,
+                },
+            ),
+            (
+                "spawn_result",
+                "spawn",
+                r#","value":"done""#,
+                Expected::Spawn {
+                    child: None,
+                    value: Some("done"),
+                },
+            ),
+            // An empty id or value is the absent one, under either name.
+            (
+                "spawn_result",
+                "read",
+                r#","spawned_id":"","value":"""#,
+                Expected::Ordinary,
+            ),
+            // Spawn metadata for a tool that is not the spawn.
+            ("spawn_result", "read", named, Expected::Refused),
+            ("tool_result", "read", named, Expected::Refused),
+            ("spawn_result", "read", r#","spawned_id":"c1""#, Expected::Refused),
+            ("spawn_result", "read", r#","value":"done""#, Expected::Refused),
+            ("tool_result", "read", r#","value":"done""#, Expected::Refused),
+        ];
+        for (event, tool, spawn_fields, expected) in table {
+            let row = posted(event, tool, spawn_fields);
+            let read = WireEvent::read(row.as_bytes()).expect("reads").into_event(&SERVED);
+            match (&expected, read) {
+                (Expected::Ordinary, Ok(Some(accepted))) => match accepted.event {
+                    HookEvent::ToolResult { call, .. } => assert_eq!(call.tool, format!("host/test/{tool}")),
+                    other => panic!("{row} crossed as {other:?}"),
+                },
+                (Expected::Spawn { child, value }, Ok(Some(accepted))) => match accepted.event {
+                    HookEvent::SpawnResult {
+                        call,
+                        child: crossed,
+                        value: said,
+                        ..
+                    } => {
+                        assert_eq!(call.tool, format!("host/test/{tool}"));
+                        assert_eq!(crossed.map(|id| id.0), child.map(str::to_string), "{row}");
+                        assert_eq!(said.as_deref(), *value, "{row}");
+                    }
+                    other => panic!("{row} crossed as {other:?}"),
+                },
+                (Expected::Refused, Err(ParseRefusal::Malformed { .. })) => {}
+                (expected, other) => panic!("{row} is {expected:?}, got {other:?}"),
             }
         }
     }

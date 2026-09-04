@@ -312,9 +312,9 @@ def test_the_remote_change_board_approves_and_the_rollback_runs(stack, board):
             {"text": "The board approved, so the previous revision is live."},
         ],
     )
-    member.join(5)
+    ruled = member.entry()
     assert task.state == "completed"
-    assert board.ruled, "the member ruled on the parked consult"
+    assert ruled is not None, "this case's member ruled on the parked consult"
     assert task.confirmation() is None, "the board rules out of band, so the caller is never asked"
     rollbacks = task.responses("rollback_deployment")
     assert len(rollbacks) == 2, f"the call was denied, then proposed again: {rollbacks}"
@@ -342,9 +342,11 @@ def test_the_remote_change_board_denies_and_the_rollback_stays_blocked(stack, bo
             {"text": "The board refused, so I made no change."},
         ],
     )
-    member.join(5)
+    ruled = member.entry()
     assert task.state == "completed"
-    assert board.ruled, "the member ruled on the parked consult, so the denial is the board's and not a silence"
+    assert ruled is not None, (
+        "this case's member ruled on the parked consult, so the denial is the board's and not a silence"
+    )
     assert task.confirmation() is None, "the board rules out of band, so the caller is never asked"
     remedies = task.responses("execute_remedy_plan")
     assert remedies, "the reserved call answered the model"

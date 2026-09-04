@@ -50,8 +50,8 @@ import (
 //go:embed builtins.json
 var builtinsManifest []byte
 
-// ManifestLane is this image's key in the shared builtin manifest.
-const ManifestLane = "go"
+// manifestLane is this image's key in the shared builtin manifest.
+const manifestLane = "go"
 
 // ControlTool is the reserved tool's spelling on the wire.
 const ControlTool = "appa:execute_remedy_plan"
@@ -79,9 +79,6 @@ func BuiltinSpelling(name string) string           { return "builtin:" + name }
 
 // IsSpawn reports whether a spelled tool runs another agent: the agent: class.
 func IsSpawn(spelling string) bool { return strings.HasPrefix(spelling, "agent:") }
-
-// BuiltinManifest is the packaged builtin manifest, every lane included.
-func BuiltinManifest() []byte { return builtinsManifest }
 
 // Inventory maps the raw ADK tool names of one agent to their wire
 // spellings. The zero value spells nothing, so every call is refused.
@@ -253,9 +250,9 @@ func laneGroups() (map[string][]string, error) {
 	if err := json.Unmarshal(builtinsManifest, &manifest); err != nil {
 		return nil, fmt.Errorf("the builtin manifest does not parse: %w", err)
 	}
-	lane, present := manifest[ManifestLane]
+	lane, present := manifest[manifestLane]
 	if !present {
-		return nil, fmt.Errorf("the builtin manifest carries no %s lane", ManifestLane)
+		return nil, fmt.Errorf("the builtin manifest carries no %s lane", manifestLane)
 	}
 	return lane.Groups, nil
 }

@@ -450,18 +450,40 @@ class Agent:
         return self._send({"message": message})
 
 
+class Ruling:
+    """One background ruling, joined by the case that started it.
+
+    The board is one session-wide member, so a case must not read a
+    cumulative list: an earlier case's ruling would answer for it, and a
+    thread that timed out without ruling would look the same as a real
+    one. `entry` is this invocation's own consult, or None when this
+    thread ruled on nothing.
+    """
+
+    def __init__(self, board: Board, tool: str, ruling: str):
+        self._entry: dict | None = None
+        self._thread = threading.Thread(target=self._run, args=(board, tool, ruling), daemon=True)
+        self._thread.start()
+
+    def _run(self, board: Board, tool: str, ruling: str) -> None:
+        self._entry = board.rule(tool, ruling)
+
+    def entry(self, timeout_s: float = 5.0) -> dict | None:
+        """The consult this ruling answered; None if it ruled on none."""
+        self._thread.join(timeout_s)
+        return self._entry
+
+
 class Board:
     """A member of the remote change board: rules on the mock's side channel.
 
     A consult names its tool by the canonical id the policy carries, so
     a caller waits on `mcp/localhost/rollback_deployment`, never on the
-    bare name kagent dispatches. `ruled` holds every consult this member
-    answered, so a case can assert the board ruled at all.
+    bare name kagent dispatches.
     """
 
     def __init__(self, url: str):
         self.url = url.rstrip("/")
-        self.ruled: list[dict] = []
 
     def pending(self, tool: str) -> list[dict]:
         with urllib.request.urlopen(self.url + "/pending", timeout=5) as response:
@@ -477,15 +499,12 @@ class Board:
                     self.url + "/decide", data=body, headers={"content-type": "application/json"}
                 )
                 with urllib.request.urlopen(request, timeout=5):
-                    self.ruled.append(entry)
                     return entry
             time.sleep(0.2)
         return None
 
-    def rule_in_background(self, tool: str, ruling: str) -> threading.Thread:
-        thread = threading.Thread(target=self.rule, args=(tool, ruling), daemon=True)
-        thread.start()
-        return thread
+    def rule_in_background(self, tool: str, ruling: str) -> Ruling:
+        return Ruling(self, tool, ruling)
 
 
 # -------------------------------------------------------- the processes
