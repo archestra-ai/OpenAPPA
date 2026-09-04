@@ -69,10 +69,11 @@ status=0
 (
   cd "$a2a"
   # Every case gets three total attempts. Per-test flaky markers use the
-  # same floor when the matrix runs outside CI.
+  # same floor when the matrix runs outside CI. Two workers overlap
+  # independent conversations; loadgroup keeps shared-state cases together.
   APPA_A2A_E2E=1 APPA_A2A_URL="$agent_url" APPA_MOCK_URL="$mock_url" \
-    uv run --with "pytest>=8" --with pytest-rerunfailures \
-    pytest -v -rA --durations=0 --reruns 2 .
+    uv run --with "pytest>=8" --with pytest-rerunfailures --with pytest-xdist \
+    pytest -v -rA --durations=0 --reruns 2 -n 2 --dist=loadgroup .
 ) 2>&1 | tee "$log" || status=$?
 seconds=$(( $(date +%s) - started ))
 echo "== pytest exited $status after ${seconds}s"

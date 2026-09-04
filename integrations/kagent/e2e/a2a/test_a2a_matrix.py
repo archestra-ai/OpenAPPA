@@ -220,6 +220,7 @@ def test_untrusted_ingress_is_gated_at_the_read(agent):
 ROLLBACK = "roll back the checkout-api deployment; if it is blocked, execute the offered remedy plan"
 
 
+@pytest.mark.xdist_group("change-board")
 def test_the_remote_change_board_approves_and_the_rollback_runs(agent, board):
     """A URL authority backed by people out of band: the consult parks at
     the change board while the task runs, a member rules on the board's
@@ -232,6 +233,7 @@ def test_the_remote_change_board_approves_and_the_rollback_runs(agent, board):
     assert "rolled back" in task.text().lower() or "rollback" in task.text().lower()
 
 
+@pytest.mark.xdist_group("change-board")
 def test_the_remote_change_board_denies_and_the_rollback_stays_blocked(agent, board):
     member = board.rule_in_background("rollback_deployment", "deny")
     task = agent.say(ROLLBACK)
@@ -240,6 +242,7 @@ def test_the_remote_change_board_denies_and_the_rollback_stays_blocked(agent, bo
     assert "rolled back the" not in lowered and "rollback undone" not in lowered
 
 
+@pytest.mark.xdist_group("change-board")
 def test_an_unanswered_change_board_grants_nothing(agent):
     task = agent.say(ROLLBACK)
     lowered = task.text().lower()
