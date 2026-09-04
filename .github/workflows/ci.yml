@@ -190,8 +190,14 @@ jobs:
       - name: Installer cases
         run: sh scripts/appa-install-test.sh
 
-  rust-checks:
-    name: Rust Checks
+  # Rust toolchain checks, split so cargo clippy and cargo test run in
+  # parallel instead of serializing ~11 min on one runner. `cargo check`
+  # is omitted: clippy --all-targets is a superset. Each rust-cache key is
+  # per job: clippy and test write different target/ trees, so they must
+  # not share one entry. A job that runs on main seeds the key later PRs
+  # restore.
+  rust-lint:
+    name: Rust Lint
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -204,17 +210,65 @@ jobs:
       - name: Setup Rust
         run: rustup show
 
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: rust-lint
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
       - name: Rust formatting
         run: cargo fmt --all --check
-
-      - name: Rust check
-        run: cargo check --workspace --locked
 
       - name: Rust lint
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+  rust-tests:
+    name: Rust Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # init_cli copies and hashes the test binary many times. Debug metadata
+    # adds no signal in CI and makes each of those full-file operations larger.
+    env:
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Setup Rust
+        run: rustup show
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: rust-tests
+          env-vars: CARGO_PROFILE_TEST_DEBUG
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
       - name: Rust tests
         run: cargo test --workspace --locked
+
+  # Stable-named gate so a required check named "Rust Checks" still
+  # covers the split jobs.
+  rust-checks:
+    name: Rust Checks
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [rust-lint, rust-tests]
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Check rust job results
+        env:
+          LINT_RESULT: ${{ needs.rust-lint.result }}
+          TESTS_RESULT: ${{ needs.rust-tests.result }}
+        run: |
+          if [ "$LINT_RESULT" != "success" ] || [ "$TESTS_RESULT" != "success" ]; then
+            echo "::error::Rust lint or tests failed (lint: $LINT_RESULT, tests: $TESTS_RESULT)."
+            exit 1
+          fi
 
   replay-examples:
     name: Replay Examples
@@ -229,6 +283,11 @@ jobs:
 
       - name: Setup Rust
         run: rustup show
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Every directory under examples/tests is one policy and one trace file.
       # The test suite pins them too; this runs the command line end to end,
@@ -255,6 +314,11 @@ jobs:
       - name: Setup Rust
         run: rustup show
 
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
       # Only what is platform-specific here: the config and data directory
       # rules, the process ownership check init stops a runtime with, and the
       # hooks a materialized deployment renders. Not a second full workspace
@@ -280,6 +344,11 @@ jobs:
 
       - name: Setup Rust
         run: rustup show
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build runtime
         run: cargo build --locked --package appa
@@ -344,6 +413,11 @@ jobs:
 
       - name: Setup Rust
         run: rustup show
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Setup uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
@@ -515,9 +589,12 @@ jobs:
         run: rustup show
 
       # The suite drives a real appa runtime, so this job builds the binary
-      # and caches the build. The other Rust jobs build without a cache.
+      # and caches the build under the default job key. Lint, tests, replay,
+      # and the Python bindings each have their own rust-cache entry.
       - name: Cache the Rust build
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build the runtime binary
         run: cargo build --package appa --locked
@@ -765,9 +842,8 @@ jobs:
             'import json, urllib.request; body=json.load(urllib.request.urlopen("http://127.0.0.1:18787/batteries", timeout=2)); assert any(item["name"] == "slack" for item in body["batteries"])'
 
       # One cache scope per image: a shared scope keeps only the last build.
-      # The quickstart exports the final stage alone. Its builder stage
-      # recompiles on any change under integrations, so a full export of it
-      # would spend the repository cache quota for nothing.
+      # The quickstart exports the final stage alone to limit cache use. Its
+      # Rust builder now changes only when an actual build input changes.
       - name: Build the quickstart image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
