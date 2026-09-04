@@ -184,12 +184,6 @@ class AppaPluginKagent(BasePlugin):
         self._return_tool = _return_gate_tool(self)
 
     async def close(self) -> None:
-        # ADK 1.x has no run-error callback. A failed runner can close
-        # after an admitted call without reaching either result gate or
-        # after_run, so its abandoned local leases end here. The next
-        # prompt lets the runtime close the abandoned dispatch.
-        for invocation_id in {lease[0] for lease in self._dispatch_leases}:
-            self._close_run(invocation_id)
         await self._client.aclose()
 
     # -- transport ----------------------------------------------------
@@ -368,6 +362,11 @@ class AppaPluginKagent(BasePlugin):
             raise AppaFailClosed(f"appa blocked the prompt: {decision.reason}")
         if decision.kind != "ack":
             raise AppaFailClosed(f"appa answered the prompt with {decision.detail or decision.kind}")
+        # ADK 1.x has no run-error callback. A failed runner can abandon
+        # an admitted call and its local lease. The runtime closes that
+        # dispatch when this next prompt arrives; only then release local
+        # leases for this same branch. Concurrent branches stay intact.
+        self._release_branch_dispatches(root_id, child_id)
         if contract is None:
             return None
         return _with_contract(contract, user_message)
@@ -459,6 +458,12 @@ class AppaPluginKagent(BasePlugin):
         call_id = _call_id(tool_context)
         if call_id is not None:
             self._release_dispatch((tool_context.invocation_id, call_id))
+
+    def _release_branch_dispatches(self, root_id: str, child_id: str | None) -> None:
+        key = (root_id, child_id)
+        for lease, held in list(self._dispatch_leases.items()):
+            if held[0] == key:
+                self._release_dispatch(lease)
 
     def _drop_dispatch_user(self, key: tuple[str, str | None], lock: asyncio.Lock) -> None:
         users = self._dispatch_users[key] - 1

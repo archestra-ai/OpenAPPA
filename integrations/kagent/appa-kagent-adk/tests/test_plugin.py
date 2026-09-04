@@ -711,22 +711,51 @@ async def test_the_plugin_survives_a_runner_closing_it_between_requests():
     assert len(hook.events) == 2, "both requests crossed the gate"
 
 
-async def test_runner_close_releases_an_abandoned_stable_adk_dispatch():
-    hook = Hook(ALLOW, ALLOW, ACK)
+async def test_the_next_prompt_releases_an_abandoned_stable_adk_dispatch():
+    hook = Hook(ALLOW, ACK, ALLOW, ACK)
     plugin = plugin_over(hook)
-    session = FakeSession("s1")
+    session = FakeSession("s1", events=[FakeEvent(content=FakeContent("earlier"))])
     abandoned = dispatch(session, "fc-1", invocation_id="i1")
     later = dispatch(session, "fc-2", invocation_id="i2")
 
     await plugin.before_tool_callback(tool=FakeTool("first"), tool_args={}, tool_context=abandoned)
     await plugin.close()
-    assert await plugin.before_tool_callback(tool=FakeTool("second"), tool_args={}, tool_context=later) is None
+    waiting = asyncio.create_task(
+        plugin.before_tool_callback(tool=FakeTool("second"), tool_args={}, tool_context=later)
+    )
+    await asyncio.sleep(0)
+    assert not waiting.done()
+    await plugin.on_user_message_callback(
+        invocation_context=FakeInvocationContext(session, "i2"), user_message=FakeContent("continue")
+    )
+    assert await waiting is None
     await plugin.after_tool_callback(tool=FakeTool("second"), tool_args={}, tool_context=later, result={})
     assert [(event["event"], event.get("tool")) for event in hook.events] == [
         ("tool_call", "first"),
+        ("prompt", None),
         ("tool_call", "second"),
         ("tool_result", "second"),
     ]
+
+
+async def test_unrelated_runner_close_does_not_release_an_active_branch():
+    hook = Hook(ALLOW, ACK, ALLOW, ACK)
+    plugin = plugin_over(hook)
+    session = FakeSession("s1")
+    first = dispatch(session, "fc-1")
+    second = dispatch(session, "fc-2")
+
+    await plugin.before_tool_callback(tool=FakeTool("first"), tool_args={}, tool_context=first)
+    waiting = asyncio.create_task(
+        plugin.before_tool_callback(tool=FakeTool("second"), tool_args={}, tool_context=second)
+    )
+    await asyncio.sleep(0)
+    await plugin.close()
+    await asyncio.sleep(0)
+    assert not waiting.done()
+    await plugin.after_tool_callback(tool=FakeTool("first"), tool_args={}, tool_context=first, result={})
+    assert await waiting is None
+    await plugin.after_tool_callback(tool=FakeTool("second"), tool_args={}, tool_context=second, result={})
 
 
 # -- the installed ADK ------------------------------------------------
