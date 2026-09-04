@@ -126,6 +126,8 @@ helm upgrade --install appa-kagent-demo \
 
 The chart installs a gated cluster-operations fleet, `appa-guide`, the demo tools, the OpenAPPA runtime, and 16 seeded showcase chats. It uses OpenAI's `gpt-4.1-mini` by default. You can select any compatible provider and model through the chart's `openai.*` and `llm.*` values.
 
+After `appa-guide` is installed, you can install or upgrade the demo without returning to Helm. Send it: `install or upgrade the OpenAPPA demo agents using the existing kagent model credentials`.
+
 If the install times out, inspect the resource that did not become ready:
 
 ```sh
@@ -188,6 +190,8 @@ helm upgrade kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
 
 This image replaces the base container image for declarative agent pods. It stays inert until an agent enables `APPA_ENABLED: "true"`. Existing agents remain unaffected.
 
+With `appa-guide` already available, send: `update the kagent controller to the current OpenAPPA agent images`.
+
 ### 2. Deploy the shared OpenAPPA runtime
 
 Deploy one policy runtime for the agents you want to protect:
@@ -202,6 +206,8 @@ helm upgrade --install appa-runtime oci://ghcr.io/archestra-ai/charts/appa-runti
 ```
 
 Agents reach this runtime at `http://appa-runtime.appa.svc.cluster.local:18789`. The runtime stores its trajectory log on the persistent volume and reads policy from the `appa-policy` ConfigMap.
+
+With `appa-guide` already available, send: `install or upgrade the shared OpenAPPA runtime with persistent battery storage`.
 
 ### 3. Wire existing agents to the runtime
 
@@ -221,6 +227,10 @@ kubectl patch agent sre-agent -n kagent --type=merge -p '{
   }
 }'
 ```
+
+Alternatively, send `appa-guide`: `protect sre-agent with the shared OpenAPPA runtime and verify its rollout`.
+
+To protect every eligible declarative Agent, send: `enable OpenAPPA for all agents using the shared runtime; show me the affected agents before applying`.
 
 | Mode | `APPA_ENABLED` | `APPA_RUNTIME_URL` | Gating Behavior |
 |---|---|---|---|
@@ -280,8 +290,16 @@ spec:
           toolNames:
             - k8s_get_resources
             - k8s_get_resource_yaml
+            - k8s_get_events
+            - k8s_get_pod_logs
             - k8s_apply_manifest
+            - k8s_patch_resource
+            - k8s_delete_resource
             - k8s_execute_command
+            - helm_list_releases
+            - helm_get_release
+            - helm_upgrade
+            - helm_uninstall
     deployment:
       env:
         - name: APPA_ENABLED
@@ -320,6 +338,8 @@ That one command guides the complete setup. `appa-guide`:
 - identifies one concrete protected action to run and tells you where to observe its decision.
 
 No policy write occurs without explicit approval. After setup, tell `appa-guide` what should change in ordinary language, for example: `adjust require human approval before calling delete_namespace`.
+
+The same chat is the ongoing control surface for OpenAPPA operations. Examples include `protect payments-agent`, `enable OpenAPPA for all agents`, `install the demo agents`, `upgrade the shared runtime`, `diagnose the cluster integration`, and `remove the demo deployment`. The guide inspects current state and presents the exact affected resources before requesting approval.
 
 ## Demonstration scenarios
 

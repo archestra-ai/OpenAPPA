@@ -151,8 +151,8 @@ delta = {}
 
 # --- the configuring actor: the appa-guide agent ---
 # The guide agent runs the routing skill against these tools. Reads are
-# unrestricted; the policy write sits behind a person (kagent's Approve
-# card is the oncall authority's channel), and exec needs trusted data.
+# unrestricted; cluster and Helm writes sit behind a person (kagent's
+# Approve card is the oncall authority's channel), and exec needs trusted data.
 # The skill's file helpers that it never uses (bash, write_file,
 # edit_file) stay undeclared, so they are refused.
 [[policy.tool]]
@@ -164,7 +164,31 @@ name = "k8s_get_resource_yaml"
 delta = {}
 
 [[policy.tool]]
+name = "k8s_get_events"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_get_pod_logs"
+delta = {}
+
+[[policy.tool]]
 name = "k8s_apply_manifest"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["human-approval"]
+
+[[policy.tool]]
+name = "k8s_patch_resource"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["human-approval"]
+
+[[policy.tool]]
+name = "k8s_delete_resource"
 delta = {}
 
 [policy.tool.requires]
@@ -177,6 +201,30 @@ delta = {}
 
 [policy.tool.requires]
 trust = "trusted"
+
+[[policy.tool]]
+name = "helm_list_releases"
+delta = {}
+
+[[policy.tool]]
+name = "helm_get_release"
+delta = {}
+
+[[policy.tool]]
+name = "helm_upgrade"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["human-approval"]
+
+[[policy.tool]]
+name = "helm_uninstall"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["human-approval"]
 
 [[policy.tool]]
 name = "appa-guide"
