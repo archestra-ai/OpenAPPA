@@ -6,20 +6,20 @@ version = 2
 trust_chain = ["untrusted", "vendor", "internal"]
 
 [[policy.tool]]
-name = "ReadVendorDoc"
+name = "mcp/docs/read_vendor_doc"
 delta = { trust = "vendor" }
 
 [[policy.tool]]
-name = "ReadInboundEmail"
+name = "mcp/mail/read_inbound"
 delta = { trust = "untrusted" }
 
 [[policy.tool]]
-name = "RunCommand"
+name = "mcp/shell/run_command"
 requires = { trust = "internal" }
 delta = {}
 
 [[policy.tool]]
-name = "PostToSlack"
+name = "mcp/slack/post_message"
 requires = { trust = "vendor" }
 delta = {}
 

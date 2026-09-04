@@ -35,7 +35,7 @@ PROTOCOL = 1
 ADAPTER = "kagent"
 """The adapter name every event carries."""
 
-_OUTCOME_STATUSES = ("success", "failure", "indeterminate")
+_OUTCOME_STATUSES = ("success", "success_without_body", "failure", "indeterminate")
 
 
 def _envelope(kind: str) -> dict[str, Any]:
@@ -140,8 +140,20 @@ def child_end(root_id: str, child_id: str, value: str | None = None) -> dict[str
 
 
 def success(body: Any) -> dict[str, Any]:
-    """A success outcome carrying the tool response as spelled."""
+    """A success outcome carrying the tool response as spelled.
+
+    The body is exactly the ``body`` field, ``None`` (JSON ``null``)
+    included; a success that carries no body at all is
+    `success_without_body`, never this with the field left off."""
     return {"status": "success", "body": body}
+
+
+def success_without_body() -> dict[str, Any]:
+    """A success whose body the wire does not carry.
+
+    Distinct from a body that is ``null``: the tool succeeded and the
+    runtime holds no value from it."""
+    return {"status": "success_without_body"}
 
 
 def failure(message: str) -> dict[str, Any]:

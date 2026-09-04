@@ -86,6 +86,10 @@ func TestEveryBuilderSpellsItsFixtureExactly(t *testing.T) {
 			fixtureRoot, "mcp:demo-tools/k8s_scale", scale, successOutcome(map[string]any{"scaled": true}), ""),
 		"tool_result_failure": toolResultEvent(
 			fixtureRoot, "mcp:demo-tools/k8s_scale", scale, failureOutcome("connection refused"), ""),
+		"tool_result_null_body": toolResultEvent(
+			fixtureRoot, "mcp:demo-tools/k8s_scale", scale, successOutcome(nil), ""),
+		"tool_result_without_body": toolResultEvent(
+			fixtureRoot, "mcp:demo-tools/k8s_scale", scale, successWithoutBodyOutcome(), ""),
 		"spawn_result": spawnResultEvent(
 			fixtureRoot, "agent:kagent/billing-agent", map[string]any{"message": "total the invoices"},
 			successOutcome(map[string]any{"result": "the total is 42"}),
@@ -119,6 +123,24 @@ func TestEveryEventCarriesTheEnvelopeAndNoSpawnFlag(t *testing.T) {
 		if _, present := event["spawn"]; present {
 			t.Errorf("the %s event must assert no spawn, got %v", name, event)
 		}
+	}
+}
+
+// TestASuccessSaysWhetherItCarriesABody pins the three answers a
+// success can give: a body that is JSON null, a body the wire does not
+// carry, and an ordinary body.
+func TestASuccessSaysWhetherItCarriesABody(t *testing.T) {
+	withNull := successOutcome(nil)
+	body, present := withNull["body"]
+	if !present || body != nil {
+		t.Errorf("a null body must ride the body field, got %v", withNull)
+	}
+	without := successWithoutBodyOutcome()
+	if without["status"] != "success_without_body" {
+		t.Errorf("a success carrying no body must name that status, got %v", without)
+	}
+	if _, present := without["body"]; present {
+		t.Errorf("a success without a body must carry no body field, got %v", without)
 	}
 }
 

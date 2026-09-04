@@ -11,7 +11,8 @@ pub use wire::{
 
 /// The hosts this runtime can serve. The one place harness names appear
 /// as a closed set: each variant fixes a trajectory prefix, a raw tool
-/// domain, and a spawn coverage rule.
+/// domain, a spawn coverage rule, and the channel a review reaches a
+/// person through ([`AdapterName::review_channel`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AdapterName {
@@ -40,6 +41,29 @@ impl AdapterName {
     pub fn root(self, host_id: &str) -> TrajectoryId {
         TrajectoryId(format!("{}:{host_id}", self.prefix()))
     }
+
+    /// The channel a [`Review`] reaches a person through under this
+    /// host, and with it the right to assert a [`Ruling`].
+    pub fn review_channel(self) -> ReviewChannel {
+        match self {
+            AdapterName::ClaudeCode => ReviewChannel::Runtime,
+            AdapterName::Kagent => ReviewChannel::Host,
+        }
+    }
+}
+
+/// Where the person who rules on a remedy sits, per host.
+///
+/// `Host` is a harness that reviews through its own channel: it shows
+/// the [`Review`] text and returns the answer as a [`Ruling`] on the
+/// control call. `Runtime` is a harness with no such channel, where the
+/// runtime's own elicitation is the only route to a person — so a
+/// ruling on that host's wire asserts an answer no person gave, and the
+/// envelope carrying it is refused rather than spent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewChannel {
+    Host,
+    Runtime,
 }
 
 impl std::fmt::Display for AdapterName {

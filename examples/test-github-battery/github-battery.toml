@@ -10,7 +10,7 @@ ranks = ["suspicious"]
 audiences = ["github:internal"]
 
 [[policy.tool]]
-name = "mcp__github__get_file_contents"
+name = "mcp/github/get_file_contents"
 annotator = "github.repository-visibility"
 
 [externals.annotators."github.repository-visibility"]

@@ -55,7 +55,6 @@ var segment = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 func MCPSpelling(toolset, tool string) string      { return "mcp:" + toolset + "/" + tool }
 func AgentSpelling(namespace, agent string) string { return "agent:" + namespace + "/" + agent }
 func BuiltinSpelling(name string) string           { return "builtin:" + name }
-func GateSpelling(name string) string              { return "gate:" + name }
 
 // IsSpawn reports whether a spelled tool runs another agent: the agent: class.
 func IsSpawn(spelling string) bool { return strings.HasPrefix(spelling, "agent:") }

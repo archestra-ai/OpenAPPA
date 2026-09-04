@@ -407,6 +407,64 @@ fn a_policy_naming_a_non_canonical_tool_refuses_to_serve_and_to_install() {
     assert!(installed.contains("\"changed\":true"), "{installed}");
 }
 
+/// A wildcard contract covers every name, so a `[deployment]` field naming a tool the
+/// host's way passes coverage: only the served rule refuses it. Every field here names a
+/// tool the served adapter derives.
+const DEPLOYMENT_CONFIG: &str = r#"
+[policy]
+version = 2
+
+[[policy.annotator]]
+name = "any"
+builtin = "claude-code"
+
+[[policy.tool]]
+name = "*"
+annotator = "any"
+
+[policy.deployment]
+assumed_tools = ["host/claude-code/Read"]
+provider_run_tools = ["host/claude-code/WebSearch"]
+confined_results = ["host/claude-code/Bash"]
+
+[externals]
+timeout_ms = 5000
+max_body_bytes = 65536
+"#;
+
+/// A `[deployment]` field names a tool the way a contract does: the identity the served
+/// adapter derives, matched exactly. A raw spelling there confines or excepts nothing, so
+/// each field refuses to serve at startup and to install on reload, naming the field it
+/// refused.
+#[test]
+fn a_deployment_field_naming_a_non_canonical_tool_refuses_to_serve_and_to_install() {
+    let _scenario = serialize_server_scenarios();
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let db = dir.path().join("appa.db");
+    let config = write_config(dir.path(), DEPLOYMENT_CONFIG);
+    let port = free_port();
+    let mut server = start(&config, &db, port);
+    wait_for_health(&mut server);
+    let reload = format!("{}/reload", server.url);
+
+    for (field, canonical, raw_name) in [
+        ("assumed_tools", "host/claude-code/Read", "Read"),
+        ("provider_run_tools", "host/claude-code/WebSearch", "WebSearch"),
+        ("confined_results", "host/claude-code/Bash", "Bash"),
+    ] {
+        let raw = DEPLOYMENT_CONFIG.replace(canonical, raw_name);
+        write_config(dir.path(), &raw);
+        assert!(
+            http(&reload, "POST", None).is_none(),
+            "a raw name in {field} must not install",
+        );
+        expect_startup_refusal(&config, &dir.path().join("refused.db"), field);
+    }
+
+    write_config(dir.path(), DEPLOYMENT_CONFIG);
+    assert!(http(&reload, "POST", None).is_some(), "the canonical policy installs",);
+}
+
 #[test]
 fn a_damaged_database_refuses_to_serve() {
     let _scenario = serialize_server_scenarios();

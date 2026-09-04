@@ -213,11 +213,7 @@ fn health_answer(stale: bool, pid: u32) -> String {
 async fn reload(State(state): State<AppState>) -> Result<axum::Json<Reloaded>, (axum::http::StatusCode, String)> {
     let config = Config::load(&state.config)
         .map_err(|error| (axum::http::StatusCode::UNPROCESSABLE_ENTITY, error.to_string()))?;
-    if let Err(refusal) = crate::api::require_canonical_tools(&config) {
-        tracing::warn!(%refusal, "the reload was refused; the running deployment keeps serving");
-        return Err((axum::http::StatusCode::UNPROCESSABLE_ENTITY, refusal.to_string()));
-    }
-    match state.runtime.reload(config) {
+    match state.runtime.reload_served(config) {
         Ok(reloaded) => Ok(axum::Json(reloaded)),
         Err(refusal) => {
             tracing::warn!(%refusal, "the reload was refused; the running deployment keeps serving");
@@ -290,12 +286,8 @@ async fn serve(args: Args) -> ExitCode {
         }
     };
     // A served deployment names tools canonically: the wire carries each host's raw
-    // spelling, and the adapter derives the canonical identity a contract must name.
-    if let Err(refusal) = crate::api::require_canonical_tools(&config) {
-        eprintln!("appa runtime: {refusal}");
-        return ExitCode::FAILURE;
-    }
-    let runtime = match Runtime::open(config, args.db, args.modules_dir) {
+    // spelling, and the adapter derives the canonical identity the policy must name.
+    let runtime = match Runtime::open_served(config, args.db, args.modules_dir) {
         Ok(runtime) => Arc::new(runtime.with_spawn_coverage(spawn_coverage(args.adapter))),
         Err(error) => {
             eprintln!("appa runtime: {error}");

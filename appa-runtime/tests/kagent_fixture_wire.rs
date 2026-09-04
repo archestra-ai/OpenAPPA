@@ -6,7 +6,7 @@
 //! `WireEvent::read` and the served kagent adapter, so a plugin that changes the
 //! bytes it posts fails here as well as in its own lane.
 
-use appa_runtime_api::{AdapterName, CanonicalTool, HookEvent, WireEvent};
+use appa_runtime_api::{AdapterName, CanonicalTool, HookEvent, OutcomeBody, ToolOutcome, WireEvent};
 
 const FIXTURES: &str = include_str!("../../integrations/kagent/fixtures/wire-events.jsonl");
 
@@ -94,6 +94,46 @@ fn each_raw_spelling_arrives_as_the_canonical_tool_the_policy_names() {
         derived += 1;
     }
     assert!(derived >= 5, "the fixture exercises every raw class");
+}
+
+/// The three successes the fixture spells arrive as three different
+/// outcomes: a body that is JSON `null`, a body the plugin did not carry,
+/// and an ordinary body.
+#[test]
+fn each_success_encoding_arrives_as_its_own_outcome() {
+    let adapter = appa_adapter_kagent::adapter();
+    let outcome = |case: &str| {
+        let Posted { name, body } = posted()
+            .into_iter()
+            .find(|posted| posted.name == case)
+            .unwrap_or_else(|| panic!("the fixture carries `{case}`"));
+        let accepted = WireEvent::read(&body)
+            .and_then(|wire| wire.into_event(&adapter))
+            .unwrap_or_else(|refusal| panic!("`{name}` is admitted: {refusal:?}"))
+            .expect("a tool result is never a ping");
+        match accepted.event {
+            HookEvent::ToolResult { outcome, .. } => outcome,
+            other => panic!("`{name}` is a tool result, got {other:?}"),
+        }
+    };
+    assert_eq!(
+        outcome("tool_result_null_body"),
+        ToolOutcome::Success {
+            body: OutcomeBody::Available("null".to_string())
+        },
+    );
+    assert_eq!(
+        outcome("tool_result_without_body"),
+        ToolOutcome::Success {
+            body: OutcomeBody::Unavailable
+        },
+    );
+    assert_eq!(
+        outcome("tool_result_success"),
+        ToolOutcome::Success {
+            body: OutcomeBody::Available(r#"{"scaled":true}"#.to_string())
+        },
+    );
 }
 
 #[test]

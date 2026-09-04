@@ -124,9 +124,19 @@ func childEndEvent(rootID, childID, value string) map[string]any {
 	return wire
 }
 
-// successOutcome carries the tool response as spelled.
+// successOutcome carries the tool response as spelled. The body is
+// exactly the body field, nil (JSON null) included; a success that
+// carries no body at all is successWithoutBodyOutcome, never this with
+// the field left off.
 func successOutcome(body any) map[string]any {
 	return map[string]any{"status": "success", "body": body}
+}
+
+// successWithoutBodyOutcome is a success whose body the wire does not
+// carry. Distinct from a body that is null: the tool succeeded and the
+// runtime holds no value from it.
+func successWithoutBodyOutcome() map[string]any {
+	return map[string]any{"status": "success_without_body"}
 }
 
 func failureOutcome(message string) map[string]any {

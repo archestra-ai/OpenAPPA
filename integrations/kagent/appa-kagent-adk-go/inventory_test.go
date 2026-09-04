@@ -62,9 +62,6 @@ func TestEachClassSpellsItsTools(t *testing.T) {
 	if _, known := inventory.Spelling("k8s_delete_namespace"); known {
 		t.Error("a name the config never declared is outside the inventory")
 	}
-	if GateSpelling("code_execution") != "gate:code_execution" {
-		t.Errorf("the gate class drifted: %s", GateSpelling("code_execution"))
-	}
 }
 
 func TestOnlyTheAgentClassIsASpawn(t *testing.T) {

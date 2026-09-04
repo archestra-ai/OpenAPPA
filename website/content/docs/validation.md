@@ -99,10 +99,10 @@ expect allow
 
 ### Tool calls
 
-- **Tool name:** Start with the canonical tool id and `{`. If a tool takes no arguments, write `{}`.
+- **Tool name:** Start with the canonical tool id and `{`. If a tool takes no arguments, write `{}`. A name that is not a canonical tool id is refused, and so is the runtime's own control tool `appa/execute_remedy_plan`: a trace holds the calls the model proposes, and `expect` takes the offers.
 - **Arguments:** Put one `key: <JSON value>` per line. Values must be valid JSON (quotes around strings, raw numbers or booleans, JSON objects or arrays).
 - **Comments:** Empty lines and lines starting with `#` are ignored.
-- **Errors:** Replay reports the file and line number if an argument repeats, a JSON value is invalid, or a call lacks an `expect` line.
+- **Errors:** Replay reports the file and line number if the tool name is not a canonical tool id, an argument repeats, a JSON value is invalid, or a call lacks an `expect` line.
 
 ### Expectations
 

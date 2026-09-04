@@ -46,6 +46,10 @@ def test_every_builder_spells_its_fixture_exactly():
         "tool_result_failure": wire.tool_result(
             ROOT, "mcp:demo-tools/k8s_scale", scale, wire.failure("connection refused")
         ),
+        "tool_result_null_body": wire.tool_result(ROOT, "mcp:demo-tools/k8s_scale", scale, wire.success(None)),
+        "tool_result_without_body": wire.tool_result(
+            ROOT, "mcp:demo-tools/k8s_scale", scale, wire.success_without_body()
+        ),
         "spawn_result": wire.spawn_result(
             ROOT,
             "agent:kagent/billing-agent",
@@ -69,6 +73,15 @@ def test_every_event_carries_the_envelope_and_no_spawn_flag():
     for event in fixture_wires().values():
         assert (event["protocol"], event["adapter"]) == (wire.PROTOCOL, wire.ADAPTER)
         assert "spawn" not in event
+
+
+def test_a_success_says_whether_it_carries_a_body():
+    """Three answers, three encodings: a body that is JSON ``null``, a
+    body the wire does not carry, and an ordinary body."""
+    assert wire.success(None) == {"status": "success", "body": None}
+    assert wire.success_without_body() == {"status": "success_without_body"}
+    assert "body" not in wire.success_without_body()
+    assert wire.success({"scaled": True}) == {"status": "success", "body": {"scaled": True}}
 
 
 def test_ids_cross_unprefixed():

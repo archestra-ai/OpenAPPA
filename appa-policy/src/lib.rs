@@ -260,6 +260,8 @@ pub struct Config {
     boundary_label: Label,
     /// Every registered `[[annotator]]`, with its runtime-owned hint, builtin, and input mapping.
     annotators: BTreeMap<AnnotatorName, AnnotatorBinding>,
+    /// Every tool a `[deployment]` field names, as authored, with the field it was named in.
+    deployment_tools: Vec<(&'static str, String)>,
 }
 
 impl Config {
@@ -413,9 +415,12 @@ impl Config {
             Some(cap) => PlannerCap::new(cap).ok_or(ConfigError::ZeroPlannerCap)?,
         };
 
-        let profile = match raw.deployment {
-            Some(deployment) => deployment.convert(&trust_chain)?,
-            None => ProfileDeclaration::no_coverage(&trust_chain),
+        let (profile, deployment_tools) = match raw.deployment {
+            Some(deployment) => {
+                let named = deployment.tool_names();
+                (deployment.convert(&trust_chain)?, named)
+            }
+            None => (ProfileDeclaration::no_coverage(&trust_chain), Vec::new()),
         };
 
         let registry_config = RegistryConfig {
@@ -448,6 +453,7 @@ impl Config {
             registry_config,
             boundary_label,
             annotators,
+            deployment_tools,
         })
     }
 
@@ -467,6 +473,15 @@ impl Config {
 
     pub fn registry_config(&self) -> &RegistryConfig {
         &self.registry_config
+    }
+
+    /// Every tool a `[deployment]` field names, as authored, paired with the field's
+    /// spelling. Each name is matched against a tool identity exactly, so a deployment
+    /// that requires a naming convention checks these beside the contracts.
+    pub fn deployment_tool_names(&self) -> impl Iterator<Item = (&'static str, &str)> {
+        self.deployment_tools
+            .iter()
+            .map(|(field, name)| (*field, name.as_str()))
     }
 
     /// Every `[[annotator]]` the policy registers — the validated superset of every annotator
@@ -536,6 +551,20 @@ enum RawStartingAudience {
 }
 
 impl RawDeployment {
+    /// Every field of this table that names a tool, with the field's spelling. The list
+    /// lives beside the fields themselves, so a field added here reaches every reader
+    /// that checks how a deployment names tools.
+    fn tool_names(&self) -> Vec<(&'static str, String)> {
+        [
+            ("[deployment] assumed_tools", &self.assumed_tools),
+            ("[deployment] provider_run_tools", &self.provider_run_tools),
+            ("[deployment] confined_results", &self.confined_results),
+        ]
+        .into_iter()
+        .flat_map(|(field, names)| names.iter().map(move |name| (field, name.clone())))
+        .collect()
+    }
+
     fn convert(self, chain: &TrustChain) -> Result<ProfileDeclaration, ConfigError> {
         let neutral = neutral_starting_label(chain);
         let starting_label = match self.starting_label {

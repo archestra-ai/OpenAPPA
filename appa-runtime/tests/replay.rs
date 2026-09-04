@@ -50,12 +50,12 @@ fn taken(kind: OfferKind) -> StepOutcome {
 /// An email leaves the company; a deploy needs a backup that never comes.
 const ALLOW_AND_DENY_POLICY: &str = r#"
 [[policy.tool]]
-name = "Email"
+name = "mcp/mail/send"
 requires = { audience = { contains = ["public"] } }
 delta = {}
 
 [[policy.tool]]
-name = "Deploy"
+name = "mcp/ops/deploy"
 requires = { effects = { contains = ["backup.completed"] } }
 delta = {}
 "#;
@@ -65,8 +65,11 @@ async fn one_allow_and_one_deny_pass() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let runtime = runtime(&dir, ALLOW_AND_DENY_POLICY, "");
     let traces = [
-        trace("allow.appa", "Email {\n  to: \"x@other.com\"\n}\nexpect allow\n"),
-        trace("deny.appa", "Deploy {}\nexpect deny\n"),
+        trace(
+            "allow.appa",
+            "mcp/mail/send {\n  to: \"x@other.com\"\n}\nexpect allow\n",
+        ),
+        trace("deny.appa", "mcp/ops/deploy {}\nexpect deny\n"),
     ];
     let reports = run(&runtime, &traces).await;
     assert_eq!(outcomes(&reports[0]), vec![(1, &PASSED)]);
@@ -83,20 +86,20 @@ async fn one_allow_and_one_deny_pass() {
 /// the company; a post reaches HR.
 const NARROWING_POLICY: &str = r#"
 [[policy.tool]]
-name = "Read(path:/hr/*)"
+name = "mcp/files/read(path:/hr/*)"
 delta = { audience = ["hr"] }
 
 [[policy.tool]]
-name = "Read"
+name = "mcp/files/read"
 delta = {}
 
 [[policy.tool]]
-name = "Email"
+name = "mcp/mail/send"
 requires = { audience = { contains = ["public"] } }
 delta = {}
 
 [[policy.tool]]
-name = "Post"
+name = "mcp/slack/post_message"
 requires = { audience = { contains = ["hr"] } }
 delta = {}
 "#;
@@ -111,9 +114,12 @@ async fn a_narrowing_read_denies_the_later_email() {
     let traces = [
         trace(
             "leak.appa",
-            "Read {\n  path: \"/hr/salaries.csv\"\n}\nexpect allow\n\nEmail {\n  to: \"x@other.com\"\n}\nexpect deny\n\nPost {\n  text: \"reviewed\"\n}\nexpect allow\n",
+            "mcp/files/read {\n  path: \"/hr/salaries.csv\"\n}\nexpect allow\n\nmcp/mail/send {\n  to: \"x@other.com\"\n}\nexpect deny\n\nmcp/slack/post_message {\n  text: \"reviewed\"\n}\nexpect allow\n",
         ),
-        trace("no-read.appa", "Email {\n  to: \"x@other.com\"\n}\nexpect allow\n"),
+        trace(
+            "no-read.appa",
+            "mcp/mail/send {\n  to: \"x@other.com\"\n}\nexpect allow\n",
+        ),
     ];
     let reports = run(&runtime, &traces).await;
     assert_eq!(
@@ -126,12 +132,12 @@ async fn a_narrowing_read_denies_the_later_email() {
 /// A wipe needs a person's sign-off; a deploy needs a backup that never comes.
 const ATTENTION_POLICY: &str = r#"
 [[policy.tool]]
-name = "Wipe"
+name = "mcp/ops/wipe"
 requires = { attention = ["signoff"] }
 delta = {}
 
 [[policy.tool]]
-name = "Deploy"
+name = "mcp/ops/deploy"
 requires = { effects = { contains = ["backup.completed"] } }
 delta = {}
 
@@ -156,10 +162,13 @@ async fn an_authority_offer_is_taken_as_approved() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let runtime = runtime(&dir, ATTENTION_POLICY, "");
     let traces = [
-        trace("wipe.appa", "Wipe {}\nexpect authority\n\nDeploy {}\nexpect deny\n"),
-        trace("wipe-named.appa", "Wipe {}\nexpect authority approver\n"),
-        trace("wipe-denied.appa", "Wipe {}\nexpect deny\n"),
-        trace("wipe-other.appa", "Wipe {}\nexpect authority cto\n"),
+        trace(
+            "wipe.appa",
+            "mcp/ops/wipe {}\nexpect authority\n\nmcp/ops/deploy {}\nexpect deny\n",
+        ),
+        trace("wipe-named.appa", "mcp/ops/wipe {}\nexpect authority approver\n"),
+        trace("wipe-denied.appa", "mcp/ops/wipe {}\nexpect deny\n"),
+        trace("wipe-other.appa", "mcp/ops/wipe {}\nexpect authority cto\n"),
     ];
     let reports = run(&runtime, &traces).await;
     assert_eq!(outcomes(&reports[0]), vec![(1, &taken(approver())), (4, &PASSED)]);
@@ -171,11 +180,11 @@ async fn an_authority_offer_is_taken_as_approved() {
     ));
     let (text, _) = rendered(&reports);
     assert!(
-        text.contains("wipe-denied.appa:1: Wipe: got authority approver, want deny\n"),
+        text.contains("wipe-denied.appa:1: mcp/ops/wipe: got authority approver, want deny\n"),
         "{text}"
     );
     assert!(
-        text.contains("wipe-other.appa:1: Wipe: got authority approver, want authority cto\n"),
+        text.contains("wipe-other.appa:1: mcp/ops/wipe: got authority approver, want authority cto\n"),
         "{text}"
     );
 }
@@ -184,11 +193,11 @@ async fn an_authority_offer_is_taken_as_approved() {
 /// way from `hr` to `public`.
 const REDACTION_POLICY: &str = r#"
 [[policy.tool]]
-name = "Read(path:/hr/*)"
+name = "mcp/files/read(path:/hr/*)"
 delta = { audience = ["hr"] }
 
 [[policy.tool]]
-name = "Export"
+name = "mcp/reports/export"
 requires = { audience = { contains = ["public"] } }
 delta = {}
 
@@ -210,7 +219,7 @@ async fn a_sanitizer_offer_is_taken_with_the_value_unchanged() {
     let runtime = runtime(&dir, REDACTION_POLICY, REDACTOR_BINDING);
     let traces = [trace(
         "export.appa",
-        "Read {\n  path: \"/hr/salaries.csv\"\n}\nexpect allow\n\nExport {\n  body: \"salaries\"\n}\nexpect sanitizer\n\nExport {\n  body: \"again\"\n}\nexpect sanitizer redactor\n",
+        "mcp/files/read {\n  path: \"/hr/salaries.csv\"\n}\nexpect allow\n\nmcp/reports/export {\n  body: \"salaries\"\n}\nexpect sanitizer\n\nmcp/reports/export {\n  body: \"again\"\n}\nexpect sanitizer redactor\n",
     )];
     let reports = run(&runtime, &traces).await;
     let redactor = OfferKind::Sanitizer {
@@ -230,16 +239,16 @@ async fn a_sanitizer_offer_is_taken_with_the_value_unchanged() {
 /// that never comes.
 const MISMATCH_POLICY: &str = r#"
 [[policy.tool]]
-name = "Read"
+name = "mcp/files/read"
 delta = {}
 
 [[policy.tool]]
-name = "Email"
+name = "mcp/mail/send"
 requires = { audience = { contains = ["public"] } }
 delta = {}
 
 [[policy.tool]]
-name = "Deploy"
+name = "mcp/ops/deploy"
 requires = { effects = { contains = ["backup.completed"] } }
 delta = {}
 "#;
@@ -251,9 +260,9 @@ async fn a_mismatch_stops_its_file_and_the_other_files_still_run() {
     let traces = [
         trace(
             "wrong.appa",
-            "Read {\n  path: \"/docs/readme.md\"\n}\nexpect allow\n\nEmail {\n  to: \"x@other.com\"\n}\nexpect deny\n\nDeploy {}\nexpect deny\n",
+            "mcp/files/read {\n  path: \"/docs/readme.md\"\n}\nexpect allow\n\nmcp/mail/send {\n  to: \"x@other.com\"\n}\nexpect deny\n\nmcp/ops/deploy {}\nexpect deny\n",
         ),
-        trace("right.appa", "Deploy {}\nexpect deny\n"),
+        trace("right.appa", "mcp/ops/deploy {}\nexpect deny\n"),
     ];
     let reports = run(&runtime, &traces).await;
     assert_eq!(reports[0].steps.len(), 2, "the file stopped at the mismatch");
@@ -269,7 +278,7 @@ async fn a_mismatch_stops_its_file_and_the_other_files_still_run() {
     let (text, summary) = rendered(&reports);
     assert_eq!(
         text,
-        "wrong.appa:6: Email: got allow, want deny\nFAIL  wrong.appa\nok    right.appa\n2 files: 1 ok, 1 failed, 0 could not run\n"
+        "wrong.appa:6: mcp/mail/send: got allow, want deny\nFAIL  wrong.appa\nok    right.appa\n2 files: 1 ok, 1 failed, 0 could not run\n"
     );
     assert_eq!(summary.exit_code(), std::process::ExitCode::from(1));
 }
@@ -277,7 +286,7 @@ async fn a_mismatch_stops_its_file_and_the_other_files_still_run() {
 /// A deploy needs a backup that never comes.
 const DEPLOY_POLICY: &str = r#"
 [[policy.tool]]
-name = "Deploy"
+name = "mcp/ops/deploy"
 requires = { effects = { contains = ["backup.completed"] } }
 delta = {}
 "#;
@@ -286,11 +295,11 @@ delta = {}
 async fn a_deny_mismatch_prints_the_feedback() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let runtime = runtime(&dir, DEPLOY_POLICY, "");
-    let traces = [trace("deploy.appa", "Deploy {}\nexpect allow\n")];
+    let traces = [trace("deploy.appa", "mcp/ops/deploy {}\nexpect allow\n")];
     let reports = run(&runtime, &traces).await;
     let (text, _) = rendered(&reports);
     assert!(
-        text.starts_with("deploy.appa:1: Deploy: got deny, want allow\n    [appa] Blocked"),
+        text.starts_with("deploy.appa:1: mcp/ops/deploy: got deny, want allow\n    [appa] Blocked"),
         "{text}"
     );
 }
@@ -299,12 +308,12 @@ async fn a_deny_mismatch_prints_the_feedback() {
 async fn an_undeclared_tool_cannot_run_and_is_never_a_deny() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let runtime = runtime(&dir, DEPLOY_POLICY, "");
-    let traces = [trace("ghost.appa", "Ghost {}\nexpect deny\n")];
+    let traces = [trace("ghost.appa", "mcp/ops/ghost {}\nexpect deny\n")];
     let reports = run(&runtime, &traces).await;
     assert!(matches!(&reports[0].steps[0].outcome, StepOutcome::CannotRun(_)));
     assert_eq!(reports[0].verdict(), Verdict::CannotRun);
     let (text, summary) = rendered(&reports);
-    assert!(text.starts_with("ghost.appa:1: Ghost: cannot run: "), "{text}");
+    assert!(text.starts_with("ghost.appa:1: mcp/ops/ghost: cannot run: "), "{text}");
     assert_eq!(summary.exit_code(), std::process::ExitCode::from(2));
 }
 
@@ -314,9 +323,8 @@ async fn an_undeclared_tool_cannot_run_and_is_never_a_deny() {
 async fn files_do_not_share_trajectory_state() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let runtime = runtime(&dir, NARROWING_POLICY, "");
-    let narrowing =
-        "Read {\n  path: \"/hr/salaries.csv\"\n}\nexpect allow\n\nEmail {\n  to: \"x@other.com\"\n}\nexpect deny\n";
-    let fresh = "Email {\n  to: \"x@other.com\"\n}\nexpect allow\n";
+    let narrowing = "mcp/files/read {\n  path: \"/hr/salaries.csv\"\n}\nexpect allow\n\nmcp/mail/send {\n  to: \"x@other.com\"\n}\nexpect deny\n";
+    let fresh = "mcp/mail/send {\n  to: \"x@other.com\"\n}\nexpect allow\n";
     let mut traces = Vec::new();
     for index in 0..8 {
         traces.push(trace(&format!("narrowing-{index}.appa"), narrowing));
@@ -334,11 +342,11 @@ const ANNOTATED_POLICY: &str = r#"
 name = "classifier"
 
 [[policy.tool]]
-name = "fetch"
+name = "mcp/web/fetch"
 annotator = "classifier"
 
 [[policy.tool]]
-name = "send"
+name = "mcp/mail/send"
 requires = { trust = "trusted" }
 delta = {}
 "#;
@@ -377,7 +385,7 @@ async fn a_bound_annotator_decides_the_step() {
     let binding = format!("\n[externals.annotators.classifier]\nurl = \"{url}\"\n");
     let dir = tempfile::tempdir().expect("a temp dir");
     let runtime = runtime(&dir, ANNOTATED_POLICY, &binding);
-    let text = "fetch {\n  url: \"https://example.com\"\n}\nexpect allow\n\nsend {}\nexpect deny\n";
+    let text = "mcp/web/fetch {\n  url: \"https://example.com\"\n}\nexpect allow\n\nmcp/mail/send {}\nexpect deny\n";
 
     let reports = run(&runtime, &[trace("annotated.appa", text)]).await;
     assert_eq!(
@@ -459,7 +467,7 @@ fn the_command_exits_0_1_and_2() {
 
     let dir = tempfile::tempdir().expect("a temp dir");
     let wrong = dir.path().join("wrong.appa");
-    std::fs::write(&wrong, "Deploy {}\nexpect allow\n").expect("the trace writes");
+    std::fs::write(&wrong, "mcp/ops/deploy {}\nexpect allow\n").expect("the trace writes");
     let regression = Command::new(appa)
         .args(["replay", "--config"])
         .arg(&config)
@@ -469,12 +477,12 @@ fn the_command_exits_0_1_and_2() {
     assert_eq!(regression.status.code(), Some(1));
     let stdout = String::from_utf8_lossy(&regression.stdout);
     assert!(
-        stdout.contains("wrong.appa:1: Deploy: got deny, want allow"),
+        stdout.contains("wrong.appa:1: mcp/ops/deploy: got deny, want allow"),
         "{stdout}"
     );
 
     let broken = dir.path().join("broken.appa");
-    std::fs::write(&broken, "Deploy {\n  when: soon\n}\nexpect allow\n").expect("the trace writes");
+    std::fs::write(&broken, "mcp/ops/deploy {\n  when: soon\n}\nexpect allow\n").expect("the trace writes");
     let refused = Command::new(appa)
         .args(["replay", "--config"])
         .arg(&config)

@@ -10,7 +10,10 @@
 //! own control tool are all derived on the server from the configured
 //! adapter and the raw spelling ([`Adapter::derive`]). Ids cross
 //! unprefixed and the server applies the configured adapter's prefix,
-//! so no caller can speak for another adapter's trajectories.
+//! so no caller can speak for another adapter's trajectories. A person's
+//! [`Ruling`] crosses only under a host that reviews through its own
+//! channel ([`AdapterName::review_channel`]); under any other host the
+//! envelope asserting one is refused.
 //!
 //! The event and decision structs are flat with optional fields rather
 //! than tagged enums because `arguments` is a `RawValue`, which serde's
@@ -21,7 +24,7 @@ use serde_json::value::RawValue;
 
 use crate::{
     Actor, AdapterName, CanonicalTool, HookDecision, HookEvent, OfferedRemedy, OfferedReturn, OutcomeBody,
-    ParseRefusal, ProposedCall, Review, Ruling, SpawnBinding, SpawnRef, ToolOutcome, TrajectoryId,
+    ParseRefusal, ProposedCall, Review, ReviewChannel, Ruling, SpawnBinding, SpawnRef, ToolOutcome, TrajectoryId,
 };
 
 /// The protocol this crate speaks. A wire event or decision carrying
@@ -50,7 +53,8 @@ pub struct Derived {
 pub type DeriveFn = fn(&Actor, &ProposedCall) -> Result<Derived, ParseRefusal>;
 
 /// One adapter as the runtime serves it: its name, which fixes the
-/// trajectory prefix and the spawn coverage rule, and its derivation.
+/// trajectory prefix, the spawn coverage rule and the review channel,
+/// and its derivation.
 #[derive(Clone, Copy)]
 pub struct Adapter {
     pub name: AdapterName,
@@ -96,24 +100,57 @@ impl From<Ruling> for WireRuling {
     }
 }
 
+/// A ruling is a person's answer the host obtained through its own
+/// review channel, and the runtime spends it as the human authority's.
+/// Under a host that has no such channel ([`ReviewChannel::Runtime`])
+/// nothing on the wire could have carried a person's answer, so the
+/// envelope is refused — a local process that reaches `/hook` cannot
+/// spell an approval that host never asked for.
+fn checked_ruling(adapter: AdapterName, ruling: Option<WireRuling>) -> Result<Option<WireRuling>, ParseRefusal> {
+    match (ruling, adapter.review_channel()) {
+        (None, _) => Ok(None),
+        (Some(ruling), ReviewChannel::Host) => Ok(Some(ruling)),
+        (Some(_), ReviewChannel::Runtime) => Err(malformed(format!(
+            "a ruling under adapter {adapter}, whose host reviews through no channel of its own"
+        ))),
+    }
+}
+
+/// The status a wire outcome carries. `success_without_body` is the
+/// success whose body the wire does not carry, so that an available
+/// body is exactly the `body` field — JSON `null` included.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutcomeStatus {
     Success,
+    SuccessWithoutBody,
     Failure,
     Indeterminate,
 }
 
 /// A dispatched tool's outcome as the host observed it. `success`
-/// carries `body`, `failure` carries `message`, `indeterminate` carries
-/// neither.
+/// carries `body` and nothing else does; `failure` carries `message`;
+/// `success_without_body` and `indeterminate` carry neither.
+///
+/// `body` is the JSON value as spelled, so a present `null` is a body
+/// that is `null` and not an absent one. `success` without the field is
+/// malformed, never a guess: the host that carries no body says so with
+/// `success_without_body`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireOutcome {
     pub status: OutcomeStatus,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "present_body", skip_serializing_if = "Option::is_none")]
     pub body: Option<Box<RawValue>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+}
+
+/// `Option`'s own deserializer reads a present `null` as absent, which
+/// would lose the difference this encoding exists to keep. Serde calls
+/// this only for a field that is there, so `default` is the absent case
+/// and everything else — `null` included — is the value as spelled.
+fn present_body<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Box<RawValue>>, D::Error> {
+    Box::<RawValue>::deserialize(deserializer).map(Some)
 }
 
 impl WireOutcome {
@@ -132,8 +169,8 @@ impl WireOutcome {
             ToolOutcome::Success {
                 body: OutcomeBody::Unavailable,
             } => Self {
-                status: OutcomeStatus::Success,
-                body: Some(RawValue::from_string("null".to_string()).expect("null is JSON")),
+                status: OutcomeStatus::SuccessWithoutBody,
+                body: None,
                 message: None,
             },
             ToolOutcome::Failure { message } => Self {
@@ -155,6 +192,9 @@ impl WireOutcome {
                 body: OutcomeBody::Available(body.get().to_string()),
             }),
             (OutcomeStatus::Success, None, _) => Err(malformed("a success outcome without its body")),
+            (OutcomeStatus::SuccessWithoutBody, _, _) => Ok(ToolOutcome::Success {
+                body: OutcomeBody::Unavailable,
+            }),
             (OutcomeStatus::Failure, _, Some(message)) => Ok(ToolOutcome::Failure { message }),
             (OutcomeStatus::Failure, _, None) => Err(malformed("a failure outcome without its message")),
             (OutcomeStatus::Indeterminate, _, _) => Ok(ToolOutcome::Indeterminate),
@@ -281,7 +321,7 @@ impl WireEvent {
                     child_id,
                     tool: Some(call.tool.clone()),
                     arguments: Some(call.arguments.clone()),
-                    ruling: ruling.map(WireRuling::from),
+                    ruling: checked_ruling(adapter, ruling.map(WireRuling::from))?,
                     ..Self::bare(adapter, EventName::ToolCall)
                 }
             }
@@ -366,6 +406,9 @@ impl WireEvent {
                 self.adapter, served.name
             )));
         }
+        // Whether this host can assert a person's ruling at all is
+        // settled here, on the envelope, before any event exists.
+        let ruling = checked_ruling(served.name, self.ruling)?;
         let name = self.event;
         let root = || -> Result<TrajectoryId, ParseRefusal> {
             match self.root_id.as_deref() {
@@ -434,7 +477,7 @@ impl WireEvent {
                         actor,
                         call,
                         spawn: derived.spawn,
-                        ruling: self.ruling.map(Ruling::from),
+                        ruling: ruling.map(Ruling::from),
                     },
                     names_children: derived.names_children,
                 }))
@@ -844,13 +887,9 @@ mod tests {
         let bytes = serde_json::to_vec(&wire).expect("serializes");
         let text = std::str::from_utf8(&bytes).expect("utf8");
         assert!(!text.contains("spawn\""), "the wire carries no spawn claim: {text}");
-        let served = Adapter {
-            name: AdapterName::ClaudeCode,
-            derive,
-        };
         let back = WireEvent::read(&bytes)
             .expect("reads")
-            .into_event(&served)
+            .into_event(&CLAUDE_CODE)
             .expect("parses")
             .expect("event");
         match back.event {
@@ -872,6 +911,186 @@ mod tests {
             root: TrajectoryId("kagent:r1".to_string()),
         };
         assert!(WireEvent::from_event(AdapterName::ClaudeCode, &foreign).is_err());
+    }
+
+    const CLAUDE_CODE: Adapter = Adapter {
+        name: AdapterName::ClaudeCode,
+        derive,
+    };
+
+    /// A control call carrying `ruling` is a person's answer the host
+    /// obtained itself. Claude Code obtains none, so the envelope is
+    /// refused there and admitted under kagent.
+    #[test]
+    fn a_ruling_crosses_only_under_a_host_with_its_own_review_channel() {
+        let posted = |adapter: &str, ruling: &str| {
+            format!(
+                r#"{{"protocol":1,"adapter":"{adapter}","event":"tool_call","root_id":"r1","tool":"execute_remedy_plan","arguments":{{"offer_id":"o1"}}{ruling}}}"#
+            )
+        };
+        let approve = r#","ruling":"approve""#;
+        let accepted = WireEvent::read(posted("kagent", approve).as_bytes())
+            .expect("reads")
+            .into_event(&SERVED)
+            .expect("kagent reviews through its own channel")
+            .expect("is an event");
+        match accepted.event {
+            HookEvent::ToolCall { ruling, .. } => assert_eq!(ruling, Some(Ruling::Approve)),
+            other => panic!("{other:?}"),
+        }
+
+        for ruling in [approve, r#","ruling":"deny""#] {
+            let refused = WireEvent::read(posted("claude-code", ruling).as_bytes())
+                .expect("reads")
+                .into_event(&CLAUDE_CODE);
+            assert!(
+                matches!(refused, Err(ParseRefusal::Malformed { .. })),
+                "a ruling under claude-code must be refused, got {refused:?}"
+            );
+        }
+
+        let plain = WireEvent::read(posted("claude-code", "").as_bytes())
+            .expect("reads")
+            .into_event(&CLAUDE_CODE)
+            .expect("an unruled call is ordinary")
+            .expect("is an event");
+        match plain.event {
+            HookEvent::ToolCall { ruling, .. } => assert_eq!(ruling, None),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// The client side of the same rule: a ruling never reaches the wire
+    /// under a host that could not have obtained one.
+    #[test]
+    fn the_client_asserts_no_ruling_under_a_host_without_a_review_channel() {
+        let call = |ruling: Option<Ruling>| HookEvent::ToolCall {
+            actor: Actor {
+                root: TrajectoryId("kagent:r1".to_string()),
+                child: None,
+            },
+            call: ProposedCall {
+                tool: "appa:execute_remedy_plan".to_string(),
+                arguments: raw(r#"{"offer_id":"o1"}"#),
+            },
+            spawn: false,
+            ruling,
+        };
+        let wire = WireEvent::from_event(AdapterName::Kagent, &call(Some(Ruling::Deny))).expect("translates");
+        assert_eq!(wire.ruling, Some(WireRuling::Deny));
+        let refused = WireEvent::from_event(AdapterName::ClaudeCode, &call(Some(Ruling::Approve)));
+        assert!(matches!(refused, Err(ParseRefusal::Malformed { .. })), "{refused:?}");
+    }
+
+    /// Every outcome the runtime can hold survives the crossing as
+    /// itself: a body that is JSON `null`, a body the host did not
+    /// carry, and an absent body are three different answers.
+    #[test]
+    fn every_outcome_round_trips_through_the_wire_bytes() {
+        let outcomes = [
+            ToolOutcome::Success {
+                body: OutcomeBody::Available("null".to_string()),
+            },
+            ToolOutcome::Success {
+                body: OutcomeBody::Available(r#"{"content":"done"}"#.to_string()),
+            },
+            ToolOutcome::Success {
+                body: OutcomeBody::Available(r#""plain text""#.to_string()),
+            },
+            ToolOutcome::Success {
+                body: OutcomeBody::Available("false".to_string()),
+            },
+            ToolOutcome::Success {
+                body: OutcomeBody::Unavailable,
+            },
+            ToolOutcome::Failure {
+                message: "connection refused".to_string(),
+            },
+            ToolOutcome::Indeterminate,
+        ];
+        let actor = || Actor {
+            root: TrajectoryId("kagent:r1".to_string()),
+            child: None,
+        };
+        let call = || ProposedCall {
+            tool: "read".to_string(),
+            arguments: raw(r#"{"path":"notes.txt"}"#),
+        };
+        for outcome in outcomes {
+            let events = [
+                HookEvent::ToolResult {
+                    actor: actor(),
+                    call: call(),
+                    outcome: outcome.clone(),
+                },
+                HookEvent::SpawnResult {
+                    actor: actor(),
+                    call: call(),
+                    outcome: outcome.clone(),
+                    child: Some(TrajectoryId("kagent:r1:c1".to_string())),
+                    value: Some("done".to_string()),
+                },
+            ];
+            for event in events {
+                let wire = WireEvent::from_event(AdapterName::Kagent, &event).expect("translates");
+                let bytes = serde_json::to_vec(&wire).expect("serializes");
+                let back = WireEvent::read(&bytes)
+                    .expect("reads")
+                    .into_event(&SERVED)
+                    .unwrap_or_else(|refusal| panic!("{outcome:?} is admitted: {refusal:?}"))
+                    .expect("is an event");
+                let crossed = match &back.event {
+                    HookEvent::ToolResult { outcome, .. } | HookEvent::SpawnResult { outcome, .. } => outcome.clone(),
+                    other => panic!("{other:?}"),
+                };
+                assert_eq!(
+                    crossed,
+                    outcome,
+                    "{outcome:?} crossed as {crossed:?}: {}",
+                    String::from_utf8_lossy(&bytes)
+                );
+            }
+        }
+    }
+
+    /// A success says whether it carries a body; the wire never guesses
+    /// one for it.
+    #[test]
+    fn a_success_without_its_body_is_malformed() {
+        let posted = |outcome: &str| {
+            format!(
+                r#"{{"protocol":1,"adapter":"kagent","event":"tool_result","root_id":"r1","tool":"read","arguments":{{}},"outcome":{outcome}}}"#
+            )
+        };
+        let refused = WireEvent::read(posted(r#"{"status":"success"}"#).as_bytes())
+            .expect("reads")
+            .into_event(&SERVED);
+        assert!(matches!(refused, Err(ParseRefusal::Malformed { .. })), "{refused:?}");
+
+        for (outcome, expected) in [
+            (
+                r#"{"status":"success","body":null}"#,
+                ToolOutcome::Success {
+                    body: OutcomeBody::Available("null".to_string()),
+                },
+            ),
+            (
+                r#"{"status":"success_without_body"}"#,
+                ToolOutcome::Success {
+                    body: OutcomeBody::Unavailable,
+                },
+            ),
+        ] {
+            let accepted = WireEvent::read(posted(outcome).as_bytes())
+                .expect("reads")
+                .into_event(&SERVED)
+                .unwrap_or_else(|refusal| panic!("{outcome} is admitted: {refusal:?}"))
+                .expect("is an event");
+            match accepted.event {
+                HookEvent::ToolResult { outcome, .. } => assert_eq!(outcome, expected),
+                other => panic!("{other:?}"),
+            }
+        }
     }
 
     #[test]

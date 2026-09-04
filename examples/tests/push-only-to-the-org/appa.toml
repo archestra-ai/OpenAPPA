@@ -5,11 +5,11 @@
 version = 2
 
 [[policy.tool]]
-name = "Bash(command:git push https://github.com/archestra-ai/*)"
+name = "mcp/shell/bash(command:git push https://github.com/archestra-ai/*)"
 delta = {}
 
 [[policy.tool]]
-name = "Bash(command:git push *)"
+name = "mcp/shell/bash(command:git push *)"
 requires = { attention = ["hitl"] }
 delta = {}
 

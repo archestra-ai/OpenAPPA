@@ -26,7 +26,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use appa_runtime_api::{Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, ToolOutcome, TrajectoryId};
+use appa_runtime_api::{
+    Actor, CanonicalTool, HookDecision, HookEvent, OutcomeBody, ProposedCall, ToolOutcome, TrajectoryId,
+};
 use serde_json::value::RawValue;
 
 use crate::api::{OfferId, OfferKind, RemedyOutcome, Runtime};
@@ -76,7 +78,7 @@ impl Expect {
 #[derive(Debug, Clone)]
 pub struct Step {
     pub line: usize,
-    pub tool: String,
+    pub tool: CanonicalTool,
     pub arguments: Box<RawValue>,
     pub expect: Expect,
 }
@@ -102,8 +104,8 @@ pub struct SyntaxError {
     pub detail: String,
 }
 
-/// Parse one trace file. The grammar is strict and line-oriented: a step is `Tool {`, one
-/// `key: <JSON value>` per line, `}`, then `expect allow`, `expect deny`,
+/// Parse one trace file. The grammar is strict and line-oriented: a step is a canonical tool id
+/// and `{`, one `key: <JSON value>` per line, `}`, then `expect allow`, `expect deny`,
 /// `expect authority [name]`, or `expect sanitizer [name]`. Blank lines and lines whose first
 /// character is `#` are skipped anywhere.
 pub fn parse(path: &Path, text: &str) -> Result<Trace, SyntaxError> {
@@ -128,12 +130,12 @@ enum State {
     Outside,
     InBlock {
         line: usize,
-        tool: String,
+        tool: CanonicalTool,
         fields: Vec<(String, String)>,
     },
     AfterBlock {
         line: usize,
-        tool: String,
+        tool: CanonicalTool,
         arguments: Box<RawValue>,
     },
 }
@@ -167,23 +169,33 @@ impl Parser<'_> {
 
     fn open(&mut self, number: usize, line: &str) -> Result<(), SyntaxError> {
         let Some((name, rest)) = line.split_once('{') else {
-            return Err(self.error(number, format!("expected a tool call like `Tool {{`, found `{line}`")));
+            return Err(self.error(
+                number,
+                format!("expected a tool call like `mcp/files/read {{`, found `{line}`"),
+            ));
         };
-        let tool = name.trim();
-        // The runtime's control tool, `appa/execute_remedy_plan`, is no identifier, so a
-        // trace holds only the calls the model proposes; taking an offer is `expect`'s job.
-        if !is_identifier(tool) {
-            return Err(self.error(number, format!("`{tool}` is not a tool name")));
-        }
+        let name = name.trim();
+        let tool = match CanonicalTool::parse(name) {
+            // A trace holds only the calls the model proposes. The runtime's control tool is
+            // how the model takes an offer, which is `expect`'s job here.
+            Ok(tool) if tool.is_control() => {
+                return Err(self.error(
+                    number,
+                    format!("`{name}` is the runtime's control tool; taking an offer is what `expect` does"),
+                ));
+            }
+            Ok(tool) => tool,
+            Err(error) => return Err(self.error(number, error.to_string())),
+        };
         self.state = match rest.trim() {
             "" => State::InBlock {
                 line: number,
-                tool: tool.to_string(),
+                tool,
                 fields: Vec::new(),
             },
             "}" => State::AfterBlock {
                 line: number,
-                tool: tool.to_string(),
+                tool,
                 arguments: arguments_of(&[]),
             },
             _ => return Err(self.error(number, "each argument goes on its own line after `{`")),
@@ -196,7 +208,7 @@ impl Parser<'_> {
         number: usize,
         line: &str,
         at: usize,
-        tool: String,
+        tool: CanonicalTool,
         mut fields: Vec<(String, String)>,
     ) -> Result<(), SyntaxError> {
         if line == "}" {
@@ -231,7 +243,7 @@ impl Parser<'_> {
         number: usize,
         line: &str,
         at: usize,
-        tool: String,
+        tool: CanonicalTool,
         arguments: Box<RawValue>,
     ) -> Result<(), SyntaxError> {
         let expect = match line.split_whitespace().collect::<Vec<_>>().as_slice() {
@@ -344,7 +356,7 @@ impl StepOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StepReport {
     pub line: usize,
-    pub tool: String,
+    pub tool: CanonicalTool,
     pub expect: Expect,
     pub outcome: StepOutcome,
 }
@@ -423,7 +435,7 @@ async fn run_trace(runtime: &Runtime, trace: &Trace) -> TraceReport {
 
 async fn run_step(runtime: &Runtime, actor: &Actor, step: &Step) -> StepOutcome {
     let call = ProposedCall {
-        tool: step.tool.clone(),
+        tool: step.tool.to_string(),
         arguments: step.arguments.clone(),
     };
     let (got, feedback) = match propose(runtime, actor, call).await {
@@ -744,23 +756,27 @@ mod tests {
         parse(Path::new("t.appa"), text)
     }
 
+    fn canonical(name: &str) -> CanonicalTool {
+        CanonicalTool::parse(name).expect("a canonical tool id")
+    }
+
     #[test]
     fn a_trace_parses_into_steps_with_verbatim_arguments() {
         let trace = parsed(
-            "# a comment\n\nRead {\n  path: \"/etc/secrets\"\n}\nexpect allow\n\nEmail {\n  to: \"x@other.com\"\n  count: 2\n  tags: [\"a\", \"b\"]\n}\nexpect sanitizer redactor\n\nList {}\nexpect authority\n\nDrop {}\nexpect deny\n\nWipe {}\nexpect authority hitl\n",
+            "# a comment\n\nmcp/files/read {\n  path: \"/etc/secrets\"\n}\nexpect allow\n\nmcp/mail/send {\n  to: \"x@other.com\"\n  count: 2\n  tags: [\"a\", \"b\"]\n}\nexpect sanitizer redactor\n\nmcp/files/list {}\nexpect authority\n\nhost/shell/drop {}\nexpect deny\n\nagent/kagent/wipe {}\nexpect authority hitl\n",
         )
         .expect("the trace parses");
         assert_eq!(trace.steps.len(), 5);
         let read = &trace.steps[0];
         assert_eq!(
             (read.line, read.tool.as_str(), &read.expect),
-            (3, "Read", &Expect::Allow)
+            (3, "mcp/files/read", &Expect::Allow)
         );
         assert_eq!(read.arguments.get(), r#"{"path":"/etc/secrets"}"#);
         let email = &trace.steps[1];
         assert_eq!(
             (email.line, email.tool.as_str(), &email.expect),
-            (8, "Email", &Expect::Sanitizer(Some("redactor".into())))
+            (8, "mcp/mail/send", &Expect::Sanitizer(Some("redactor".into())))
         );
         assert_eq!(
             email.arguments.get(),
@@ -778,31 +794,60 @@ mod tests {
     fn every_syntax_error_names_its_line() {
         let cases = [
             (
-                "Read {\n  path: \"a\"\n  path: \"b\"\n}\nexpect allow\n",
+                "mcp/files/read {\n  path: \"a\"\n  path: \"b\"\n}\nexpect allow\n",
                 3,
                 "argument `path` is repeated",
             ),
             (
-                "Read {\n  path: secret\n}\nexpect allow\n",
+                "mcp/files/read {\n  path: secret\n}\nexpect allow\n",
                 2,
                 "argument `path` is not one JSON value",
             ),
-            ("Read {\n  path: \"a\"\n}\n", 1, "has no `expect allow`"),
-            ("Read {\n  path: \"a\"\n}\nexpect maybe\n", 4, "expected `expect allow`"),
-            ("Read {\n  path: \"a\"\n", 1, "is not closed with `}`"),
-            ("expect allow\n", 1, "expected a tool call like `Tool {`"),
+            ("mcp/files/read {\n  path: \"a\"\n}\n", 1, "has no `expect allow`"),
             (
-                "Read {\n  path: \"a\"\n}\nexpect allow\nresult \"x\"\n",
+                "mcp/files/read {\n  path: \"a\"\n}\nexpect maybe\n",
+                4,
+                "expected `expect allow`",
+            ),
+            ("mcp/files/read {\n  path: \"a\"\n", 1, "is not closed with `}`"),
+            ("expect allow\n", 1, "expected a tool call like `mcp/files/read {`"),
+            (
+                "mcp/files/read {\n  path: \"a\"\n}\nexpect allow\nresult \"x\"\n",
                 5,
-                "expected a tool call like `Tool {`",
+                "expected a tool call like `mcp/files/read {`",
             ),
             (
-                "Read { path: \"a\" }\nexpect allow\n",
+                "mcp/files/read { path: \"a\" }\nexpect allow\n",
                 1,
                 "each argument goes on its own line",
             ),
-            ("appa/execute_remedy_plan {}\nexpect allow\n", 1, "is not a tool name"),
-            ("9Read {}\nexpect allow\n", 1, "is not a tool name"),
+            (
+                "appa/execute_remedy_plan {}\nexpect allow\n",
+                1,
+                "is the runtime's control tool",
+            ),
+            ("appa/other {}\nexpect allow\n", 1, "the appa family has one member"),
+            (
+                "Read {}\nexpect allow\n",
+                1,
+                "Read: a canonical tool starts with mcp/, host/, agent/, or appa/",
+            ),
+            (
+                "9Read {}\nexpect allow\n",
+                1,
+                "9Read: a canonical tool starts with mcp/, host/, agent/, or appa/",
+            ),
+            ("mcp//read {}\nexpect allow\n", 1, "segment \"\" is not [A-Za-z0-9_.-]+"),
+            (
+                "mcp/a__b/read {}\nexpect allow\n",
+                1,
+                "a namespace segment cannot contain __",
+            ),
+            (
+                "mcp/files {}\nexpect allow\n",
+                1,
+                "a canonical tool is <family>/<namespace>/<tool>",
+            ),
         ];
         for (text, line, detail) in cases {
             let error = parsed(text).expect_err(text);
@@ -863,7 +908,7 @@ mod tests {
                 steps: vec![
                     StepReport {
                         line: 3,
-                        tool: "Read".into(),
+                        tool: canonical("mcp/files/read"),
                         expect: Expect::Allow,
                         outcome: StepOutcome::Passed {
                             taken: Some(OfferKind::Accept),
@@ -871,7 +916,7 @@ mod tests {
                     },
                     StepReport {
                         line: 8,
-                        tool: "Email".into(),
+                        tool: canonical("mcp/mail/send"),
                         expect: Expect::Deny,
                         outcome: StepOutcome::Mismatch {
                             got: Got::Blocked(BTreeSet::from([OfferKind::Sanitizer {
@@ -888,7 +933,7 @@ mod tests {
                 unopened: None,
                 steps: vec![StepReport {
                     line: 1,
-                    tool: "Bash".into(),
+                    tool: canonical("host/shell/bash"),
                     expect: Expect::Authority(Some("hitl".into())),
                     outcome: StepOutcome::Passed {
                         taken: Some(OfferKind::Authority {
@@ -902,14 +947,14 @@ mod tests {
         let summary = render(&reports, false, &mut out).expect("renders");
         assert_eq!(
             String::from_utf8(out).expect("utf-8"),
-            "leak.appa:8: Email: got sanitizer redactor, want deny\nFAIL  leak.appa\nok    push.appa\n2 files: 1 ok, 1 failed, 0 could not run\n"
+            "leak.appa:8: mcp/mail/send: got sanitizer redactor, want deny\nFAIL  leak.appa\nok    push.appa\n2 files: 1 ok, 1 failed, 0 could not run\n"
         );
         assert_eq!(summary.exit_code(), ExitCode::from(1));
 
         let mut out = Vec::new();
         render(&reports, true, &mut out).expect("renders");
         let text = String::from_utf8(out).expect("utf-8");
-        assert!(text.starts_with("ok    leak.appa:3 Read allow (after accepting the narrowing)\n"));
-        assert!(text.contains("ok    push.appa:1 Bash authority hitl (after hitl approved)\n"));
+        assert!(text.starts_with("ok    leak.appa:3 mcp/files/read allow (after accepting the narrowing)\n"));
+        assert!(text.contains("ok    push.appa:1 host/shell/bash authority hitl (after hitl approved)\n"));
     }
 }

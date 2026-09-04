@@ -151,8 +151,12 @@ pub enum OpenError {
     UnsupportedPolicy(String),
     #[error("policy declares reserved tool name {0}")]
     ReservedTool(String),
-    #[error("policy declares tool {name}, which a served deployment cannot name: {detail}")]
-    NonCanonicalTool { name: String, detail: String },
+    #[error("the policy names tool {name} in {field}, which a served deployment cannot name: {detail}")]
+    NonCanonicalTool {
+        field: &'static str,
+        name: String,
+        detail: String,
+    },
     #[error("policy names {kind} {name}, which has no [externals] binding")]
     UnboundExternal { kind: &'static str, name: String },
     #[error("[externals] binds {kind} {name}, which the policy does not declare")]
@@ -312,13 +316,27 @@ pub(crate) struct Deployment {
     externals: ExternalServices,
 }
 
+/// How the deployment reading this policy names tools. A served deployment reads a wire
+/// event, whose adapter derives a canonical identity, so its policy names tools that way;
+/// a host that embeds the runtime, and `appa replay`, name tools their own way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ToolNaming {
+    Canonical,
+    AsAuthored,
+}
+
 impl Deployment {
     fn load(
         config: Config,
         modules: &crate::builtins::ModuleRegistry,
         gates: ConsultGates,
+        naming: ToolNaming,
     ) -> Result<Deployment, OpenError> {
         let policy = compile_policy(&config)?;
+        match naming {
+            ToolNaming::Canonical => require_canonical_tools(&policy)?,
+            ToolNaming::AsAuthored => {}
+        }
         validate_deployment(&policy, &config.externals)?;
         let annotator_builtins = policy
             .annotators()
@@ -396,11 +414,11 @@ struct Prepared {
 }
 
 impl Prepared {
-    fn new(config: Config, modules: Option<PathBuf>) -> Result<Prepared, OpenError> {
+    fn new(config: Config, modules: Option<PathBuf>, naming: ToolNaming) -> Result<Prepared, OpenError> {
         let modules =
             crate::builtins::load(modules.as_deref()).map_err(|error| OpenError::Modules(error.to_string()))?;
         let gates = ConsultGates::per_runtime();
-        let deployment = Deployment::load(config, &modules, gates.clone())?;
+        let deployment = Deployment::load(config, &modules, gates.clone(), naming)?;
         gates.serve_llm(deployment.config.externals.llm_bound());
         Ok(Prepared {
             modules,
@@ -561,7 +579,14 @@ impl Runtime {
     /// a policy this deployment cannot honor is refused before
     /// anything opens.
     pub fn open(config: Config, db: PathBuf, modules: Option<PathBuf>) -> Result<Runtime, OpenError> {
-        let prepared = Prepared::new(config, modules)?;
+        let prepared = Prepared::new(config, modules, ToolNaming::AsAuthored)?;
+        prepared.assemble(Backend::Sqlite { path: db })
+    }
+
+    /// The deployment `appa runtime` serves: [`Runtime::open`], plus the served-deployment
+    /// rule that the policy names every tool canonically. One compile answers both.
+    pub(crate) fn open_served(config: Config, db: PathBuf, modules: Option<PathBuf>) -> Result<Runtime, OpenError> {
+        let prepared = Prepared::new(config, modules, ToolNaming::Canonical)?;
         prepared.assemble(Backend::Sqlite { path: db })
     }
 
@@ -570,7 +595,7 @@ impl Runtime {
     /// approve, and the body unchanged — as if the bound party had. Annotators, audience
     /// sources, and identity stay bound as configured. Nothing of the run survives the process.
     pub fn open_in_memory(config: Config, modules: Option<PathBuf>) -> Result<Runtime, OpenError> {
-        let mut prepared = Prepared::new(config, modules)?;
+        let mut prepared = Prepared::new(config, modules, ToolNaming::AsAuthored)?;
         prepared.deployment.stand_in_for_remedies();
         prepared.assemble(Backend::Memory)
     }
@@ -594,7 +619,18 @@ impl Runtime {
     /// learns where a configuration came from, so an embedding host
     /// reloads a composed policy the same way.
     pub fn reload(&self, config: Config) -> Result<Reloaded, OpenError> {
-        let deployment = Deployment::load(config, &self.inner.modules, self.inner.gates.clone())?;
+        self.reload_named(config, ToolNaming::AsAuthored)
+    }
+
+    /// The reload `appa runtime` serves: [`Runtime::reload`], plus the served-deployment
+    /// rule that the policy names every tool canonically. A refused reload changes
+    /// nothing — the deployment that was serving keeps serving.
+    pub(crate) fn reload_served(&self, config: Config) -> Result<Reloaded, OpenError> {
+        self.reload_named(config, ToolNaming::Canonical)
+    }
+
+    fn reload_named(&self, config: Config, naming: ToolNaming) -> Result<Reloaded, OpenError> {
+        let deployment = Deployment::load(config, &self.inner.modules, self.inner.gates.clone(), naming)?;
         let identity = deployment.resident().identity_hex();
         let deployment = Arc::new(deployment);
         // The gate's bound and the serving snapshot change as one transition under the
@@ -1218,27 +1254,40 @@ fn bare_tool_name(authored: &str) -> &str {
     authored.split('(').next().unwrap_or(authored)
 }
 
-/// The served-deployment rule: every contract names a canonical tool
-/// (`<family>/<namespace>/<tool>`, or the wildcard `*`), because the wire carries a
-/// host's raw spelling and the served adapter derives the canonical identity a
-/// contract must match. `appa runtime` applies it at startup and on every reload;
-/// a host that embeds the runtime, and `appa replay`, name tools their own way.
-pub(crate) fn require_canonical_tools(config: &Config) -> Result<(), OpenError> {
-    let policy = compile_policy(config)?;
+/// The served-deployment rule: every tool the policy names is canonical
+/// (`<family>/<namespace>/<tool>`), because the wire carries a host's raw spelling and the
+/// served adapter derives the canonical identity that name must match. A contract may name
+/// the wildcard `*`, which covers every call the policy does not name. A `[deployment]`
+/// field has no wildcard — each entry is matched against one derived identity exactly — so
+/// a name no adapter can derive, `*` and a selector included, confines and excepts nothing
+/// and is refused. `appa runtime` applies the rule at startup and on every reload; a host
+/// that embeds the runtime, and `appa replay`, name tools their own way.
+fn require_canonical_tools(policy: &appa_policy::Config) -> Result<(), OpenError> {
     for tool in &policy.registry_config().tools {
         let name = tool.name().as_str();
         let bare = bare_tool_name(name);
         if bare == "*" {
             continue;
         }
-        if let Err(error) = appa_runtime_api::CanonicalTool::parse(bare) {
-            return Err(OpenError::NonCanonicalTool {
-                name: name.to_string(),
-                detail: error.to_string(),
-            });
-        }
+        canonical_or_refuse("[[tool]] name", name, bare)?;
+    }
+    for (field, name) in policy.deployment_tool_names() {
+        canonical_or_refuse(field, name, name)?;
     }
     Ok(())
+}
+
+/// `named` is what the operator wrote and reads in the refusal; `identity` is the part of it
+/// that must be a canonical tool.
+fn canonical_or_refuse(field: &'static str, named: &str, identity: &str) -> Result<(), OpenError> {
+    match appa_runtime_api::CanonicalTool::parse(identity) {
+        Ok(_) => Ok(()),
+        Err(error) => Err(OpenError::NonCanonicalTool {
+            field,
+            name: named.to_string(),
+            detail: error.to_string(),
+        }),
+    }
 }
 
 fn compile_policy(config: &Config) -> Result<appa_policy::Config, OpenError> {
@@ -1322,7 +1371,12 @@ mod deployment_tests {
     }
 
     fn load(config: Config) -> Result<Deployment, OpenError> {
-        Deployment::load(config, &crate::builtins::ModuleRegistry::empty(), test_permits())
+        Deployment::load(
+            config,
+            &crate::builtins::ModuleRegistry::empty(),
+            test_permits(),
+            ToolNaming::AsAuthored,
+        )
     }
 
     #[test]
@@ -1339,7 +1393,15 @@ mod deployment_tests {
                 annotator = "classifier"
             "#,
         );
-        assert!(Deployment::load(tool_level, &crate::builtins::ModuleRegistry::empty(), test_permits()).is_ok());
+        assert!(
+            Deployment::load(
+                tool_level,
+                &crate::builtins::ModuleRegistry::empty(),
+                test_permits(),
+                ToolNaming::AsAuthored
+            )
+            .is_ok()
+        );
     }
 
     #[test]

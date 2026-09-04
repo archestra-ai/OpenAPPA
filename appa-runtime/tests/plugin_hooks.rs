@@ -431,3 +431,100 @@ async fn an_unreachable_runtime_exits_2() {
         .expect("the blocking task joins");
     assert_eq!(code, 2, "no answer from the runtime must block the action");
 }
+
+/// A tool whose result already ran needs more than an exit code: the harness
+/// keeps output it was not told to replace, so an unanswered post-use hook
+/// renders the withholding for the result it reports.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unanswered_post_use_hook_withholds_the_result_it_reports() {
+    let url = refused_url().await;
+    let ran = r#"{"hook_event_name":"PostToolUse","session_id":"plugin-test","tool_name":"Bash","tool_input":{"command":"ls"},"tool_response":{"stdout":"readme.txt"}}"#;
+    let (code, stdout) = tokio::task::spawn_blocking(move || run_client(&["--adapter", "claude-code"], &url, ran))
+        .await
+        .expect("the blocking task joins");
+    assert_eq!(code, 2, "no answer from the runtime must block the action");
+    let answer: serde_json::Value = serde_json::from_str(&stdout).expect("the withholding renders as JSON: {stdout}");
+    assert_eq!(answer["hookSpecificOutput"]["hookEventName"], "PostToolUse", "{answer}");
+    assert!(
+        !answer["hookSpecificOutput"]["updatedToolOutput"].is_null(),
+        "the produced output is replaced, not left in front of the model: {answer}"
+    );
+    assert!(
+        !answer.to_string().contains("readme.txt"),
+        "the withheld body never reaches the model: {answer}"
+    );
+}
+
+/// A call the harness has not run yet needs no replacement: exiting non-zero is
+/// what stops it, and nothing was produced to withhold.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unanswered_pre_use_hook_prints_no_replacement() {
+    let url = refused_url().await;
+    let proposed = r#"{"hook_event_name":"PreToolUse","session_id":"plugin-test","tool_name":"Bash","tool_input":{"command":"ls"}}"#;
+    let (code, stdout) = tokio::task::spawn_blocking(move || run_client(&["--adapter", "claude-code"], &url, proposed))
+        .await
+        .expect("the blocking task joins");
+    assert_eq!(code, 2, "no answer from the runtime must block the call");
+    assert_eq!(stdout, "", "a call that never ran has no output to replace");
+}
+
+/// Run the shipped Windows hook under whatever PowerShell this machine has, and
+/// answer `None` where it has none: the script is shipped for Windows, and the
+/// developer machines that build this crate mostly cannot run it. The paths a
+/// deployment renders into appa-paths.ps1 are passed as the environment the
+/// checkout's development copy reads instead.
+fn run_windows_hook(url: &str, event: &str) -> Option<(i32, String)> {
+    let data = tempfile::tempdir().expect("a temp dir is creatable");
+    let spawned = Command::new("pwsh")
+        .arg("-NoProfile")
+        .arg("-File")
+        .arg(plugin_file("hooks/hook.ps1"))
+        .env("APPA_RUNTIME_URL", url)
+        .env("APPA_BIN", built_binary())
+        .env("APPA_GATE", "1")
+        .env("APPA_DATA_DIR", data.path())
+        .env("APPA_CONFIG", data.path().join("appa.toml"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn();
+    match spawned {
+        Ok(child) => Some(finish(child, event)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => panic!("the Windows hook script spawns: {error}"),
+    }
+}
+
+/// A native command that exits non-zero raises nothing in PowerShell, so the
+/// Windows hook reads the client's exit code itself. An unanswered PostToolUse
+/// replaces the result the harness has already produced -- the exit code alone
+/// leaves the tool's own output in front of the model -- and an unanswered
+/// PreToolUse blocks the call.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_windows_hook_fails_closed_when_its_client_cannot_answer() {
+    let url = refused_url().await;
+    let ran = tokio::task::spawn_blocking(move || {
+        let post = r#"{"hook_event_name":"PostToolUse","session_id":"plugin-test","tool_name":"Bash","tool_input":{"command":"ls"},"tool_response":{"stdout":"readme.txt"}}"#;
+        (run_windows_hook(&url, post), run_windows_hook(&url, PRE_TOOL_USE))
+    })
+    .await
+    .expect("the blocking task joins");
+    let (Some((post_code, post_stdout)), Some((pre_code, pre_stdout))) = ran else {
+        return;
+    };
+
+    assert_eq!(
+        post_code, 0,
+        "a replaced result reaches the model only on exit 0: {post_stdout}"
+    );
+    let answer: serde_json::Value = serde_json::from_str(post_stdout.trim()).expect("the fail-closed answer is JSON");
+    assert_eq!(answer["decision"], "block", "{answer}");
+    assert_eq!(answer["hookSpecificOutput"]["hookEventName"], "PostToolUse", "{answer}");
+    assert!(
+        answer["hookSpecificOutput"]["updatedToolOutput"].is_string(),
+        "the tool's own output must be replaced, not left in front of the model: {answer}"
+    );
+
+    assert_eq!(pre_code, 2, "an unanswered pre-use hook must block the call");
+    assert_eq!(pre_stdout, "", "a blocked call carries no answer");
+}

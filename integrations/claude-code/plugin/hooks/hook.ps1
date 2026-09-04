@@ -248,8 +248,20 @@ try {
         $hookArgs += "--turn-end"
     }
     $answer = $payload | & $binary @hookArgs
-    [Console]::Out.Write(($answer -join "`n"))
-    exit $LASTEXITCODE
+    # A native command that exits non-zero throws nothing, so the catch below
+    # never sees a client that failed: the code is read here, before anything
+    # else can move it. A failure that rendered nothing is handed to that catch,
+    # because on a PostToolUse the exit code alone leaves the tool's own output
+    # in front of the model, which is the fail-open this hook exists to prevent.
+    # A failure that did render keeps its answer: that is the runtime's own
+    # refusal, whose replacement is shaped for the result it withholds.
+    $clientExit = $LASTEXITCODE
+    $rendered = ($answer -join "`n")
+    [Console]::Out.Write($rendered)
+    if ($clientExit -ne 0 -and [string]::IsNullOrEmpty($rendered)) {
+        throw "the hook client exited $clientExit without an answer"
+    }
+    exit $clientExit
 } catch {
     $failure = $_.Exception.Message
     # A turn end decides nothing, and every blocking outcome on these

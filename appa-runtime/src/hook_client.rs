@@ -256,26 +256,29 @@ pub fn run(url: &str, adapter: AdapterName, turn_end: bool) -> ExitCode {
     if let Err(error) = std::io::stdin().read_to_end(&mut host_event) {
         return block(&format!("the hook event could not be read: {error}"));
     }
-    let answered = translate(&codec, adapter, &host_event).and_then(|translated| {
-        let Some((event, body)) = translated else {
-            return Ok(None);
-        };
-        let endpoint = Endpoint::parse(url)?;
-        let answer = post(&endpoint, &body, &Deadline::spanning(decides.budget()))?;
-        Ok(Some((event, answer)))
-    });
+    // The event outlives the round trip: a hook the runtime never answers still
+    // needs the withholding rendered for the result its event reports.
+    let (event, answered) = match translate(&codec, adapter, &host_event) {
+        Err(failure) => (None, Err(failure)),
+        Ok(None) => (None, Ok(None)),
+        Ok(Some((event, body))) => {
+            let posted =
+                Endpoint::parse(url).and_then(|endpoint| post(&endpoint, &body, &Deadline::spanning(decides.budget())));
+            (Some(event), posted.map(Some))
+        }
+    };
     if decides == Decides::Nothing {
         if let Err(failure) = answered {
             eprintln!("OpenAPPA runtime did not answer the turn end: {failure}");
         }
         return ExitCode::SUCCESS;
     }
-    match answered {
-        Ok(None) => {
+    match (answered, event) {
+        (Ok(None), _) => {
             print(&serde_json::json!({}));
             ExitCode::SUCCESS
         }
-        Ok(Some((event, answer))) => match (decision_of(&answer.body), answer.is_success()) {
+        (Ok(Some(answer)), Some(event)) => match (decision_of(&answer.body), answer.is_success()) {
             (Ok(decision), true) => {
                 print(&(codec.render)(&event, &decision));
                 ExitCode::SUCCESS
@@ -287,10 +290,28 @@ pub fn run(url: &str, adapter: AdapterName, turn_end: bool) -> ExitCode {
                 block(&refusal(&answer))
             }
             (Err(_), false) => block(&refusal(&answer)),
-            (Err(failure), true) => block(&failure),
+            (Err(failure), true) => withhold(&codec, Some(&event), &failure),
         },
-        Err(failure) => block(&failure),
+        // An answer arrives only for an event, so this pairing never occurs.
+        (Ok(Some(_)), None) => block("the runtime answered a hook that named no event"),
+        (Err(failure), event) => withhold(&codec, event.as_ref(), &failure),
     }
+}
+
+/// Fail closed on an unanswered hook. Exiting non-zero stops a call the harness
+/// has not run yet, but a result the tool already produced stays in front of the
+/// model unless the withholding is rendered for it, so an event that reports one
+/// gets the blocking replacement before the client exits.
+fn withhold(codec: &Codec, event: Option<&HookEvent>, failure: &str) -> ExitCode {
+    let reports_a_result = matches!(
+        event,
+        Some(HookEvent::ToolResult { .. } | HookEvent::SpawnResult { .. } | HookEvent::ChildEnd { .. })
+    );
+    if let (true, Some(event)) = (reports_a_result, event) {
+        let reason = format!("the runtime did not answer this hook: {failure}");
+        print(&(codec.render)(event, &HookDecision::Block { reason }));
+    }
+    block(failure)
 }
 
 #[cfg(test)]

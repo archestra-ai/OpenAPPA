@@ -1,39 +1,39 @@
 # The trust level starts at internal, then drops to vendor and untrusted.
-RunCommand {
+mcp/shell/run_command {
   command: "make test"
 }
 expect allow
 
-PostToSlack {
+mcp/slack/post_message {
   channel: "#eng"
   text: "tests green"
 }
 expect allow
 
-ReadVendorDoc {}
+mcp/docs/read_vendor_doc {}
 expect allow
 
-RunCommand {
+mcp/shell/run_command {
   command: "make release"
 }
 expect deny
 
-PostToSlack {
+mcp/slack/post_message {
   channel: "#eng"
   text: "vendor notes attached"
 }
 expect allow
 
-ReadInboundEmail {}
+mcp/mail/read_inbound {}
 expect allow
 
-PostToSlack {
+mcp/slack/post_message {
   channel: "#eng"
   text: "forwarding"
 }
 expect deny
 
-RunCommand {
+mcp/shell/run_command {
   command: "make release"
 }
 expect deny
