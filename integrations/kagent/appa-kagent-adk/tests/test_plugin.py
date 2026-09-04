@@ -711,51 +711,64 @@ async def test_the_plugin_survives_a_runner_closing_it_between_requests():
     assert len(hook.events) == 2, "both requests crossed the gate"
 
 
-async def test_the_next_prompt_releases_an_abandoned_stable_adk_dispatch():
-    hook = Hook(ALLOW, ACK, ALLOW, ACK)
+async def test_runner_close_cancels_its_held_and_queued_stable_adk_calls():
+    hook = Hook(ACK, ALLOW, ACK, ALLOW, ACK)
     plugin = plugin_over(hook)
-    session = FakeSession("s1", events=[FakeEvent(content=FakeContent("earlier"))])
+    session = FakeSession("s1")
     abandoned = dispatch(session, "fc-1", invocation_id="i1")
-    later = dispatch(session, "fc-2", invocation_id="i2")
+    queued = dispatch(session, "fc-2", invocation_id="i1")
 
+    await plugin.before_run_callback(invocation_context=FakeInvocationContext(session, "i1"))
     await plugin.before_tool_callback(tool=FakeTool("first"), tool_args={}, tool_context=abandoned)
-    await plugin.close()
     waiting = asyncio.create_task(
-        plugin.before_tool_callback(tool=FakeTool("second"), tool_args={}, tool_context=later)
+        plugin.before_tool_callback(tool=FakeTool("stale"), tool_args={}, tool_context=queued)
     )
     await asyncio.sleep(0)
     assert not waiting.done()
-    await plugin.on_user_message_callback(
-        invocation_context=FakeInvocationContext(session, "i2"), user_message=FakeContent("continue")
-    )
-    assert await waiting is None
+    await plugin.close()
+    with pytest.raises(AppaFailClosed, match="runner ended"):
+        await waiting
+    assert plugin._dispatch_leases == plugin._dispatch_waiters == {}
+    assert plugin._dispatch_locks == plugin._dispatch_users == {}
+
+    later = dispatch(session, "fc-3", invocation_id="i2")
+    await plugin.before_run_callback(invocation_context=FakeInvocationContext(session, "i2"))
+    assert await plugin.before_tool_callback(tool=FakeTool("second"), tool_args={}, tool_context=later) is None
     await plugin.after_tool_callback(tool=FakeTool("second"), tool_args={}, tool_context=later, result={})
-    assert [(event["event"], event.get("tool")) for event in hook.events] == [
-        ("tool_call", "first"),
-        ("prompt", None),
-        ("tool_call", "second"),
-        ("tool_result", "second"),
-    ]
+    assert [event.get("tool") for event in hook.events if event["event"] == "tool_call"] == ["first", "second"]
 
 
 async def test_unrelated_runner_close_does_not_release_an_active_branch():
-    hook = Hook(ALLOW, ACK, ALLOW, ACK)
+    hook = Hook(ACK, ACK, ALLOW, ACK, ALLOW, ACK)
     plugin = plugin_over(hook)
     session = FakeSession("s1")
-    first = dispatch(session, "fc-1")
-    second = dispatch(session, "fc-2")
+    close_runner = asyncio.Event()
+    runner_closed = asyncio.Event()
+
+    async def unrelated_runner() -> None:
+        await plugin.before_run_callback(invocation_context=FakeInvocationContext(FakeSession("other"), "other-run"))
+        await close_runner.wait()
+        await plugin.close()
+        runner_closed.set()
+
+    unrelated = asyncio.create_task(unrelated_runner())
+    await asyncio.sleep(0)
+    await plugin.before_run_callback(invocation_context=FakeInvocationContext(session, "active-run"))
+    first = dispatch(session, "fc-1", invocation_id="active-run")
+    second = dispatch(session, "fc-2", invocation_id="active-run")
 
     await plugin.before_tool_callback(tool=FakeTool("first"), tool_args={}, tool_context=first)
     waiting = asyncio.create_task(
         plugin.before_tool_callback(tool=FakeTool("second"), tool_args={}, tool_context=second)
     )
     await asyncio.sleep(0)
-    await plugin.close()
-    await asyncio.sleep(0)
+    close_runner.set()
+    await runner_closed.wait()
     assert not waiting.done()
     await plugin.after_tool_callback(tool=FakeTool("first"), tool_args={}, tool_context=first, result={})
     assert await waiting is None
     await plugin.after_tool_callback(tool=FakeTool("second"), tool_args={}, tool_context=second, result={})
+    await unrelated
 
 
 # -- the installed ADK ------------------------------------------------

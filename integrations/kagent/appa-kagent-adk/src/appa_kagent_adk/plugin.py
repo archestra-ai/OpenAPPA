@@ -172,6 +172,9 @@ class AppaPluginKagent(BasePlugin):
         self._dispatch_locks: dict[tuple[str, str | None], asyncio.Lock] = {}
         self._dispatch_users: dict[tuple[str, str | None], int] = {}
         self._dispatch_leases: dict[tuple[str, str], tuple[tuple[str, str | None], asyncio.Lock]] = {}
+        self._dispatch_waiters: dict[tuple[str, str], tuple[tuple[str, str | None], asyncio.Lock]] = {}
+        self._abandoned_invocations: set[str] = set()
+        self._runner_invocations: dict[asyncio.Task, set[str]] = {}
         # The agent scope each invocation opened first. Every later
         # scope of that invocation is an in-process child.
         self._scopes: dict[str, str] = {}
@@ -184,6 +187,9 @@ class AppaPluginKagent(BasePlugin):
         self._return_tool = _return_gate_tool(self)
 
     async def close(self) -> None:
+        task = asyncio.current_task()
+        for invocation_id in self._runner_invocations.pop(task, set()) if task is not None else ():
+            self._abandon_invocation(invocation_id)
         await self._client.aclose()
 
     # -- transport ----------------------------------------------------
@@ -274,8 +280,11 @@ class AppaPluginKagent(BasePlugin):
 
     def _close_run(self, invocation_id: str) -> None:
         """Drop everything this run pinned. The next run reads afresh."""
-        for lease in [lease for lease in self._dispatch_leases if lease[0] == invocation_id]:
-            self._release_dispatch(lease)
+        self._abandon_invocation(invocation_id)
+        for task, invocations in list(self._runner_invocations.items()):
+            invocations.discard(invocation_id)
+            if not invocations:
+                self._runner_invocations.pop(task)
         self._identity.close_invocation(invocation_id)
         self._crossed.pop(invocation_id, None)
         self._scopes.pop(invocation_id, None)
@@ -340,6 +349,7 @@ class AppaPluginKagent(BasePlugin):
         return None
 
     async def on_user_message_callback(self, *, invocation_context, user_message):
+        self._own_invocation(invocation_context.invocation_id)
         root_id, child_id = self._identity.open_invocation(invocation_context)
         contract = None
         opening = self._opening(invocation_context.session, root_id, child_id)
@@ -362,11 +372,6 @@ class AppaPluginKagent(BasePlugin):
             raise AppaFailClosed(f"appa blocked the prompt: {decision.reason}")
         if decision.kind != "ack":
             raise AppaFailClosed(f"appa answered the prompt with {decision.detail or decision.kind}")
-        # ADK 1.x has no run-error callback. A failed runner can abandon
-        # an admitted call and its local lease. The runtime closes that
-        # dispatch when this next prompt arrives; only then release local
-        # leases for this same branch. Concurrent branches stay intact.
-        self._release_branch_dispatches(root_id, child_id)
         if contract is None:
             return None
         return _with_contract(contract, user_message)
@@ -374,6 +379,7 @@ class AppaPluginKagent(BasePlugin):
     # -- liveness gates -----------------------------------------------
 
     async def before_run_callback(self, *, invocation_context):
+        self._own_invocation(invocation_context.invocation_id)
         self._identity.open_invocation(invocation_context)
         await self._ping()
         return None
@@ -433,16 +439,25 @@ class AppaPluginKagent(BasePlugin):
         if call_id is None:
             return
         lease = (tool_context.invocation_id, call_id)
-        if lease in self._dispatch_leases:
+        if lease in self._dispatch_leases or lease in self._dispatch_waiters:
             raise AppaFailClosed(f"ADK reused function-call id {call_id!r} before its result")
         key = (root_id, child_id)
         lock = self._dispatch_locks.setdefault(key, asyncio.Lock())
         self._dispatch_users[key] = self._dispatch_users.get(key, 0) + 1
+        self._dispatch_waiters[lease] = (key, lock)
         try:
             await lock.acquire()
         except BaseException:
+            self._dispatch_waiters.pop(lease, None)
             self._drop_dispatch_user(key, lock)
+            self._forget_abandoned(tool_context.invocation_id)
             raise
+        self._dispatch_waiters.pop(lease, None)
+        if tool_context.invocation_id in self._abandoned_invocations:
+            lock.release()
+            self._drop_dispatch_user(key, lock)
+            self._forget_abandoned(tool_context.invocation_id)
+            raise AppaFailClosed("the runner ended before this queued tool call could execute")
         self._dispatch_leases[lease] = (key, lock)
 
     def _release_dispatch(self, lease: tuple[str, str]) -> None:
@@ -453,17 +468,30 @@ class AppaPluginKagent(BasePlugin):
         key, lock = held
         lock.release()
         self._drop_dispatch_user(key, lock)
+        self._forget_abandoned(lease[0])
 
     def _release_tool_dispatch(self, tool_context: Any) -> None:
         call_id = _call_id(tool_context)
         if call_id is not None:
             self._release_dispatch((tool_context.invocation_id, call_id))
 
-    def _release_branch_dispatches(self, root_id: str, child_id: str | None) -> None:
-        key = (root_id, child_id)
-        for lease, held in list(self._dispatch_leases.items()):
-            if held[0] == key:
-                self._release_dispatch(lease)
+    def _own_invocation(self, invocation_id: str) -> None:
+        task = asyncio.current_task()
+        if task is not None:
+            self._runner_invocations.setdefault(task, set()).add(invocation_id)
+
+    def _abandon_invocation(self, invocation_id: str) -> None:
+        self._abandoned_invocations.add(invocation_id)
+        for lease in [lease for lease in self._dispatch_leases if lease[0] == invocation_id]:
+            self._release_dispatch(lease)
+        self._forget_abandoned(invocation_id)
+
+    def _forget_abandoned(self, invocation_id: str) -> None:
+        if any(lease[0] == invocation_id for lease in self._dispatch_leases):
+            return
+        if any(waiter[0] == invocation_id for waiter in self._dispatch_waiters):
+            return
+        self._abandoned_invocations.discard(invocation_id)
 
     def _drop_dispatch_user(self, key: tuple[str, str | None], lock: asyncio.Lock) -> None:
         users = self._dispatch_users[key] - 1
