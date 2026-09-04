@@ -148,7 +148,7 @@ helm upgrade --install appa-runtime oci://ghcr.io/archestra-ai/charts/appa-runti
   --version 0.9.0 \
   --namespace appa --create-namespace \
   --set persistence.enabled=true \
-  --set persistence.size=8Gi # x-release-please-version
+  --set persistence.size=8Gi
 ```
 
 From a repository clone, use `charts/appa-runtime` as the chart path instead.
