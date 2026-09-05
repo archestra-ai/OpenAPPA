@@ -1,10 +1,12 @@
-# The demo deployment's full policy: every APPA feature the kagent
-# integration carries, on one gated cluster-ops fleet.
+# The demo fleet's policy template: every APPA feature the kagent
+# integration carries, on one gated cluster-ops fleet. appa-guide copies
+# this template into the policy ConfigMap owned by the shared runtime only
+# after the operator approves the proposed behavior.
 #
 # This is the shared-runtime variant of the example policy
 # (`../examples/kagent.appa.toml`): the same cluster-ops toolset, plus
-# real sanitizers over `[externals.llm]`, the delegated log-analyst
-# child, and the human-review authority. Serve it from one
+# deterministic sanitizers, the delegated log-analyst child, and the
+# human-review authority. Serve it from one
 # `appa-runtime` that every agent pod reaches, so a parent and its
 # delegated child land in one trajectory.
 
@@ -92,7 +94,7 @@ attention = ["release-window"]
 
 # --- an effectful action behind a remote approval board ---
 
-# The change board is a URL authority backed by people out of band: the
+# The change board is an Authority backed by people out of band: the
 # mock parks the consult until someone rules through its own channel
 # (approve, deny, or nobody within the consult window — then no answer,
 # and the offer stands).
@@ -152,7 +154,9 @@ delta = {}
 # --- the configuring actor: the appa-guide agent ---
 # The guide agent runs the routing skill against these tools. Reads are
 # unrestricted; cluster and Helm writes sit behind a person (kagent's
-# Approve card is the oncall authority's channel), and exec needs trusted data.
+# Approve card is the oncall authority's channel). The command annotator
+# permits read-only inspection and puts every state-changing helper behind
+# that same person.
 # The skill's file helpers that it never uses (bash, write_file,
 # edit_file) stay undeclared, so they are refused.
 [[policy.tool]]
@@ -195,12 +199,16 @@ delta = {}
 trust = "trusted"
 attention = ["human-approval"]
 
+[[policy.annotator]]
+name = "appa-guide-command"
+ranks = ["trusted"]
+audiences = []
+marks = ["human-approval"]
+effects = []
+
 [[policy.tool]]
 name = "k8s_execute_command"
-delta = {}
-
-[policy.tool.requires]
-trust = "trusted"
+annotator = "appa-guide-command"
 
 [[policy.tool]]
 name = "helm_list_releases"
@@ -227,7 +235,7 @@ trust = "trusted"
 attention = ["human-approval"]
 
 [[policy.tool]]
-name = "appa-guide"
+name = "skills"
 delta = {}
 
 [[policy.tool]]
@@ -252,8 +260,8 @@ attention = ["human-approval"]
 
 # --- sanitizers: the third way past a narrowing ---
 
-# Both run on the runtime's own model profile ([externals.llm]); the
-# hint is the instruction the transform executes under.
+# The demo mock service implements both transformations deterministically;
+# the hint states the derivation each sanitizer may return.
 [[policy.sanitizer]]
 name = "strip-secret-values"
 on = ["tool_output"]
@@ -278,31 +286,27 @@ max_body_bytes = 65536
 [externals.authorities.oncall]
 builtin = "hitl"
 
-# The mock externals (demo/mocks/) answer these two on the runtime's
-# loopback — a url binding takes cleartext http to loopback only.
+[externals.annotators.appa-guide-command]
+command = ["/usr/local/bin/appa-guide-command-annotator"]
+
+# The runtime's Python image carries the standard-library client used by
+# these fixed command adapters. Each adapter forwards one consult envelope
+# to the demo-only Service and writes the HTTP body back, including 404 and
+# 504 abstentions. A non-success body is then a consult no-answer, not a
+# command-transport failure. No provider credential enters the subprocess.
 [externals.annotators.runbook-readers]
-url = "http://127.0.0.1:8081/annotate"
+command = ["/usr/local/bin/python3", "-c", "import sys, urllib.error, urllib.request; request = urllib.request.Request(sys.argv[1], data=sys.stdin.buffer.read(), headers={'Content-Type': 'application/json'})\ntry:\n    sys.stdout.buffer.write(urllib.request.urlopen(request, timeout=29).read())\nexcept urllib.error.HTTPError as error:\n    sys.stdout.buffer.write(error.read())", "http://appa-demo-mocks.kagent.svc.cluster.local:8081/annotate"]
 
 [externals.authorities.release-window]
-url = "http://127.0.0.1:8081/authorize"
+command = ["/usr/local/bin/python3", "-c", "import sys, urllib.error, urllib.request; request = urllib.request.Request(sys.argv[1], data=sys.stdin.buffer.read(), headers={'Content-Type': 'application/json'})\ntry:\n    sys.stdout.buffer.write(urllib.request.urlopen(request, timeout=29).read())\nexcept urllib.error.HTTPError as error:\n    sys.stdout.buffer.write(error.read())", "http://appa-demo-mocks.kagent.svc.cluster.local:8081/authorize"]
 
 # Parks each consult until a board member rules on the mock's side
 # channel; unanswered within the consult window is a clean no-answer.
 [externals.authorities.change-board]
-url = "http://127.0.0.1:8081/approve"
+command = ["/usr/local/bin/python3", "-c", "import sys, urllib.error, urllib.request; request = urllib.request.Request(sys.argv[1], data=sys.stdin.buffer.read(), headers={'Content-Type': 'application/json'})\ntry:\n    sys.stdout.buffer.write(urllib.request.urlopen(request, timeout=29).read())\nexcept urllib.error.HTTPError as error:\n    sys.stdout.buffer.write(error.read())", "http://appa-demo-mocks.kagent.svc.cluster.local:8081/approve"]
 
 [externals.sanitizers.strip-secret-values]
-builtin = "llm"
+command = ["/usr/local/bin/python3", "-c", "import sys, urllib.error, urllib.request; request = urllib.request.Request(sys.argv[1], data=sys.stdin.buffer.read(), headers={'Content-Type': 'application/json'})\ntry:\n    sys.stdout.buffer.write(urllib.request.urlopen(request, timeout=29).read())\nexcept urllib.error.HTTPError as error:\n    sys.stdout.buffer.write(error.read())", "http://appa-demo-mocks.kagent.svc.cluster.local:8081/sanitize"]
 
 [externals.sanitizers.strip-instructions]
-builtin = "llm"
-
-# The one model profile every `builtin = "llm"` binding consults.
-# The values here are the chart defaults, so this file loads as it
-# stands and CI opens it. The chart substitutes them per release
-# (`appa-demo.policy`), replacing the model and URL from `llm` values.
-# An empty `llm.url` removes the URL and uses the provider's default.
-[externals.llm]
-provider = "openai"
-model = "gpt-4.1-mini"
-token_env = "APPA_LLM_API_KEY"
+command = ["/usr/local/bin/python3", "-c", "import sys, urllib.error, urllib.request; request = urllib.request.Request(sys.argv[1], data=sys.stdin.buffer.read(), headers={'Content-Type': 'application/json'})\ntry:\n    sys.stdout.buffer.write(urllib.request.urlopen(request, timeout=29).read())\nexcept urllib.error.HTTPError as error:\n    sys.stdout.buffer.write(error.read())", "http://appa-demo-mocks.kagent.svc.cluster.local:8081/sanitize"]

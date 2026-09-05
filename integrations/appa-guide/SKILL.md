@@ -1,7 +1,7 @@
 ---
 name: appa-guide
-description: Guide an operator through configuring OpenAPPA on the host you run in — Claude Code or a kagent cluster. Use for a guided quickstart, an initial sync of installed tools, after MCP servers change, or when the operator wants to adjust how OpenAPPA treats a tool, data source, destination, battery, or approval.
-argument-hint: "quickstart|init|adjust"
+description: Guide an operator through configuring OpenAPPA on the host you run in — Claude Code or a kagent cluster. Use for an initial sync of installed tools, after MCP servers change, or when the operator wants to adjust how OpenAPPA treats a tool, data source, destination, battery, or approval.
+argument-hint: "init|adjust"
 ---
 
 OpenAPPA configuration helper. Request: $ARGUMENTS
@@ -20,8 +20,11 @@ guess its content.
   `# Claude Code` section below. Do not call `Read` to load the
   reference.
 - **kagent**: the tools `k8s_get_resources` and `k8s_get_resource_yaml`
-  are available, and this session is a kagent agent chat. Read
-  `references/kagent.md` and follow it.
+  are available, and this session is a kagent agent chat. Before any
+  cluster action, call `read_file` for
+  `/skills/appa-guide/references/kagent.md` with `offset: 1` and
+  `limit: 0`. This exact call reads through end of file. Follow the
+  complete result.
 - Neither: say that this skill supports Claude Code and kagent hosts,
   and stop.
 
@@ -29,17 +32,21 @@ guess its content.
 
 Use one mode:
 
-- **`quickstart`** — on kagent, guide the operator through initial policy,
-  batteries, health verification, and one useful protected action.
 - **`init`** — inspect the installed tools and build a useful starting
   config.
 - **`adjust`** — help the operator make changes to an existing config.
 
 If the request already makes the mode clear, start there. Otherwise show
-these three choices in one short message and wait. Do not run modes
-together. `quickstart` is available only on kagent; on Claude Code,
-recommend `init` instead. If the operator chooses `adjust` without
-describing the change, ask what they want OpenAPPA to do differently.
+these two choices in one short message and wait. Do not run both modes
+together. Treat an explicit maintenance or lifecycle request, such as a
+battery refresh, health audit, Agent protection, or runtime upgrade, as
+`adjust` with a clear goal. Do not ask the operator to select a mode in
+that case. If the operator chooses `adjust` without describing the change,
+ask what they want OpenAPPA to do differently.
+
+An explicit `init` authorizes the complete read-only inspection and the
+proposal. Do not ask whether to continue before the proposal. Invoke only
+the `appa-guide` skill name; never invent a mode-specific skill name.
 
 ## Rules that apply on every host
 
@@ -55,6 +62,13 @@ describing the change, ask what they want OpenAPPA to do differently.
 - Read before proposing. Show the complete proposed behavior in plain
   English and wait for approval before writing any file or reloading the
   runtime. Ask for approval again if a correction changes that behavior.
+- An initial request for a change is not approval to execute it. End the
+  first turn with the proposal. Act only after a later message approves
+  that exact proposal.
+- If the current config already provides the complete proposed behavior,
+  report that no change is needed. Do not ask for approval, write, or
+  reload an unchanged config. Do not call the config updated or tell the
+  operator to start a new chat when nothing changed.
 - Make the smallest change that achieves the request. Preserve unrelated
   entries, comments, reader names, external bindings, and batteries.
 - Use short sentences. Explain what data stays private, what can leave

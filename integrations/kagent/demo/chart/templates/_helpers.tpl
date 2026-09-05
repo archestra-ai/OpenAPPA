@@ -3,14 +3,9 @@
 {{- printf "%s:%s" .image.repository (.image.tag | default .root.Chart.AppVersion) -}}
 {{- end -}}
 
-{{/* The Secret carrying OPENAI_API_KEY: the operator's, or the one named after the ModelConfig. */}}
-{{- define "appa-demo.secretName" -}}
-{{- .Values.openai.existingSecret | default .Values.modelConfig.name -}}
-{{- end -}}
-
-{{/* Where every agent reaches the shared runtime: the relay's Service. */}}
+{{/* The existing shared runtime Service used by every demo Agent. */}}
 {{- define "appa-demo.runtimeUrl" -}}
-{{- printf "http://appa-runtime.%s.svc.cluster.local:18789" .Release.Namespace -}}
+{{- required "runtime.url is required: the existing appa-runtime Service URL" .Values.runtime.url -}}
 {{- end -}}
 
 {{- define "appa-demo.controllerUrl" -}}
@@ -50,25 +45,19 @@ Fails the render on a missing or repeated name. Renders nothing.
 {{- end -}}
 
 {{/*
-The demo policy with the agent-tool names kagent dispatches:
+The inert demo policy template with the agent-tool names kagent dispatches:
 <namespace>__NS__<agent>, hyphens as underscores. The names check
-establishes both child values. The model profile the sanitizers consult
-comes from llm.model and llm.url. An empty llm.url drops the url line,
-which leaves the runtime on the OpenAI default endpoint.
+establishes both child values. Its local command adapters forward consults
+to the demo mock Service in this release namespace. appa-guide copies the
+approved template into the policy ConfigMap owned by appa-runtime.
 */}}
 {{- define "appa-demo.policy" -}}
 {{- include "appa-demo.requireDistinctAgentNames" . -}}
 {{- $ns := .Release.Namespace | replace "-" "_" -}}
 {{- $child := .Values.agents.childName | replace "-" "_" -}}
 {{- $childGo := .Values.agents.go.childName | replace "-" "_" -}}
-{{- $llmModel := required "llm.model is required: the model the policy's sanitizers consult" .Values.llm.model -}}
-{{- $llm := printf "model = %q\n" $llmModel -}}
-{{- if .Values.llm.url -}}
-{{- $llm = printf "%surl = %q\n" $llm .Values.llm.url -}}
-{{- end -}}
-{{- /* The file on disk is a loadable policy carrying these defaults, so
-       CI opens it (appa-runtime/tests/examples_load.rs). Substitute the
-       defaults, longest agent name first so the plain one cannot match
-       inside the go one. */ -}}
-{{- .Files.Get "files/demo.appa.toml" | replace "kagent__NS__log_analyst_go" (printf "%s__NS__%s" $ns $childGo) | replace "kagent__NS__log_analyst" (printf "%s__NS__%s" $ns $child) | replace "model = \"gpt-4.1-mini\"\n" $llm -}}
+{{- $mock := printf "http://appa-demo-mocks.%s.svc.cluster.local:8081" .Release.Namespace -}}
+{{- /* Substitute the longest agent name first so the plain one cannot
+       match inside the go one. The file defaults stay loadable in CI. */ -}}
+{{- .Files.Get "files/demo.appa.toml" | replace "kagent__NS__log_analyst_go" (printf "%s__NS__%s" $ns $childGo) | replace "kagent__NS__log_analyst" (printf "%s__NS__%s" $ns $child) | replace "http://appa-demo-mocks.kagent.svc.cluster.local:8081" $mock -}}
 {{- end -}}

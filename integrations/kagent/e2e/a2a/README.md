@@ -2,7 +2,7 @@
 
 The mirror of [../ui/](../ui/): the same conversations against the
 same live stack, driven over kagent's A2A endpoint alone — JSON-RPC
-`message/send`, no browser. Seventeen cases, the UI matrix's twin,
+`message/send`, no browser. Eighteen cases, the UI matrix's twin,
 including both answers to the policy's human-review remedy and the
 remote change board approving, denying, and staying silent (the
 matrix plays the board member on the mock's side channel,
@@ -11,6 +11,9 @@ case suspends the task (`input-required`) with a confirmation request
 on the wire; the client answers with the same `data` part the kagent UI
 sends (`{"decision_type": "approve" | "reject"}`), and the runtime spends
 that answer as the authority's ruling.
+
+The matrix also checks both suspicious ingress sources and verifies that
+an audience-narrowed session cannot use the public status sink.
 
 ## Requirements
 
@@ -22,7 +25,7 @@ kubectl port-forward -n kagent svc/cluster-ops 18089:8080
 ```
 
 `APPA_A2A_URL` overrides the default `http://127.0.0.1:18089/`; point it
-at `svc/cluster-ops-go` to run the same seventeen cases against the go
+at `svc/cluster-ops-go` to run the same eighteen cases against the go
 cell.
 `APPA_NAMESPACE` (default `kagent`), `APPA_CHILD` (default `log-analyst`) and `APPA_UNDECLARED` (default `release-manager`) set the release namespace and the two delegated agents. The two delegation cases ask for each agent by that name. They read the parent's call to it off the task history under its wire name, `<namespace>__NS__<agent>` with hyphens as underscores. The name is matched as a prefix, because the go cell's names end in `_go`.
 

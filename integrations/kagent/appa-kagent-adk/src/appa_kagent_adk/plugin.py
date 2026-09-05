@@ -45,6 +45,7 @@ and proposes the same call again.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
@@ -70,6 +71,10 @@ _REVIEW = "review"
 _REVIEW_PENDING = (
     "[appa] this remedy needs a person's ruling. The reviewer has been asked through the "
     "confirmation; wait for the answer and do not call the tool again."
+)
+_REVIEW_REJECTED = (
+    "[appa] the operator rejected this request. The proposed call did not run. "
+    "Stop this operation; do not request or await approval again."
 )
 
 RETURN_TOOL = "appa_return"
@@ -151,6 +156,7 @@ class AppaPluginKagent(BasePlugin):
         # call that quotes one asks the person through kagent's own
         # confirmation before it crosses, and the answer rides the call.
         self._reviews: dict[str, str] = {}
+        self._rejected_controls: dict[str, set[str]] = {}
         # The return the gate crossed for a run, by invocation id, and
         # the exact bytes that crossed. The stop of that run then carries
         # those bytes, so the reply the child sends replays them. The
@@ -163,6 +169,17 @@ class AppaPluginKagent(BasePlugin):
         # nothing. The result gate drops the entry it reads, and the
         # run's end drops what no result gate reached.
         self._settled: dict[str, set[str]] = {}
+        # ADK executes parallel function calls concurrently, while one
+        # OpenAPPA branch admits one dispatch lifecycle at a time. A
+        # function-call id holds its branch's lock from the call gate
+        # through the result or error gate. Calls on other branches stay
+        # independent.
+        self._dispatch_locks: dict[tuple[str, str | None], asyncio.Lock] = {}
+        self._dispatch_users: dict[tuple[str, str | None], int] = {}
+        self._dispatch_leases: dict[tuple[str, str], tuple[tuple[str, str | None], asyncio.Lock]] = {}
+        self._dispatch_waiters: dict[tuple[str, str], tuple[tuple[str, str | None], asyncio.Lock]] = {}
+        self._abandoned_invocations: set[str] = set()
+        self._runner_invocations: dict[asyncio.Task, set[str]] = {}
         # The agent scope each invocation opened first. Every later
         # scope of that invocation is an in-process child.
         self._scopes: dict[str, str] = {}
@@ -175,6 +192,9 @@ class AppaPluginKagent(BasePlugin):
         self._return_tool = _return_gate_tool(self)
 
     async def close(self) -> None:
+        task = asyncio.current_task()
+        for invocation_id in self._runner_invocations.pop(task, set()) if task is not None else ():
+            self._abandon_invocation(invocation_id)
         await self._client.aclose()
 
     # -- transport ----------------------------------------------------
@@ -265,10 +285,16 @@ class AppaPluginKagent(BasePlugin):
 
     def _close_run(self, invocation_id: str) -> None:
         """Drop everything this run pinned. The next run reads afresh."""
+        self._abandon_invocation(invocation_id)
+        for task, invocations in list(self._runner_invocations.items()):
+            invocations.discard(invocation_id)
+            if not invocations:
+                self._runner_invocations.pop(task)
         self._identity.close_invocation(invocation_id)
         self._crossed.pop(invocation_id, None)
         self._scopes.pop(invocation_id, None)
         self._settled.pop(invocation_id, None)
+        self._rejected_controls.pop(invocation_id, None)
 
     # -- synthetic gates for the entrypoint wrappers ------------------
 
@@ -329,6 +355,7 @@ class AppaPluginKagent(BasePlugin):
         return None
 
     async def on_user_message_callback(self, *, invocation_context, user_message):
+        self._own_invocation(invocation_context.invocation_id)
         root_id, child_id = self._identity.open_invocation(invocation_context)
         contract = None
         opening = self._opening(invocation_context.session, root_id, child_id)
@@ -358,6 +385,7 @@ class AppaPluginKagent(BasePlugin):
     # -- liveness gates -----------------------------------------------
 
     async def before_run_callback(self, *, invocation_context):
+        self._own_invocation(invocation_context.invocation_id)
         self._identity.open_invocation(invocation_context)
         await self._ping()
         return None
@@ -410,6 +438,75 @@ class AppaPluginKagent(BasePlugin):
         return None
 
     # -- the tool gate ------------------------------------------------
+
+    async def _acquire_dispatch(self, root_id: str, child_id: str | None, tool_context: Any) -> None:
+        """Queue one ADK call behind the open dispatch on its branch."""
+        call_id = _call_id(tool_context)
+        if call_id is None:
+            return
+        lease = (tool_context.invocation_id, call_id)
+        if lease in self._dispatch_leases or lease in self._dispatch_waiters:
+            raise AppaFailClosed(f"ADK reused function-call id {call_id!r} before its result")
+        key = (root_id, child_id)
+        lock = self._dispatch_locks.setdefault(key, asyncio.Lock())
+        self._dispatch_users[key] = self._dispatch_users.get(key, 0) + 1
+        self._dispatch_waiters[lease] = (key, lock)
+        try:
+            await lock.acquire()
+        except BaseException:
+            self._dispatch_waiters.pop(lease, None)
+            self._drop_dispatch_user(key, lock)
+            self._forget_abandoned(tool_context.invocation_id)
+            raise
+        self._dispatch_waiters.pop(lease, None)
+        if tool_context.invocation_id in self._abandoned_invocations:
+            lock.release()
+            self._drop_dispatch_user(key, lock)
+            self._forget_abandoned(tool_context.invocation_id)
+            raise AppaFailClosed("the runner ended before this queued tool call could execute")
+        self._dispatch_leases[lease] = (key, lock)
+
+    def _release_dispatch(self, lease: tuple[str, str]) -> None:
+        """Release the branch held by one completed ADK call."""
+        held = self._dispatch_leases.pop(lease, None)
+        if held is None:
+            return
+        key, lock = held
+        lock.release()
+        self._drop_dispatch_user(key, lock)
+        self._forget_abandoned(lease[0])
+
+    def _release_tool_dispatch(self, tool_context: Any) -> None:
+        call_id = _call_id(tool_context)
+        if call_id is not None:
+            self._release_dispatch((tool_context.invocation_id, call_id))
+
+    def _own_invocation(self, invocation_id: str) -> None:
+        task = asyncio.current_task()
+        if task is not None:
+            self._runner_invocations.setdefault(task, set()).add(invocation_id)
+
+    def _abandon_invocation(self, invocation_id: str) -> None:
+        self._abandoned_invocations.add(invocation_id)
+        for lease in [lease for lease in self._dispatch_leases if lease[0] == invocation_id]:
+            self._release_dispatch(lease)
+        self._forget_abandoned(invocation_id)
+
+    def _forget_abandoned(self, invocation_id: str) -> None:
+        if any(lease[0] == invocation_id for lease in self._dispatch_leases):
+            return
+        if any(waiter[0] == invocation_id for waiter in self._dispatch_waiters):
+            return
+        self._abandoned_invocations.discard(invocation_id)
+
+    def _drop_dispatch_user(self, key: tuple[str, str | None], lock: asyncio.Lock) -> None:
+        users = self._dispatch_users[key] - 1
+        if users:
+            self._dispatch_users[key] = users
+            return
+        self._dispatch_users.pop(key)
+        if self._dispatch_locks.get(key) is lock:
+            self._dispatch_locks.pop(key)
 
     def _settle(self, tool_context: Any) -> None:
         """Remember that this plugin closed the call the context names.
@@ -466,23 +563,34 @@ class AppaPluginKagent(BasePlugin):
             else:
                 ruling = "approve" if confirmation.confirmed else "deny"
                 self._reviews.pop(offer, None)
+                if ruling == "deny":
+                    call_id = _call_id(tool_context)
+                    if call_id is not None:
+                        self._rejected_controls.setdefault(tool_context.invocation_id, set()).add(call_id)
+        await self._acquire_dispatch(root_id, child_id, tool_context)
         call = wire.tool_call(root_id, tool.name, _plain_json(tool_args), self._is_spawn(tool), child_id, ruling=ruling)
-        decision = await self._post(call)
-        route = _return_offer(decision)
-        if route is not None:
-            decision = await self._declare_return(root_id, child_id, call, route, decision)
+        try:
+            decision = await self._post(call)
+            route = _return_offer(decision)
+            if route is not None:
+                decision = await self._declare_return(root_id, child_id, call, route, decision)
+        except BaseException:
+            self._release_tool_dispatch(tool_context)
+            raise
         if decision.kind in ("allow_call", "pass_control"):
             return None
         if decision.kind == "deny_call":
             for offer_id, text in decision.review:
                 self._reviews[offer_id] = text
             self._settle(tool_context)
+            self._release_tool_dispatch(tool_context)
             # The feedback rides under "result": kagent's model converters
             # serialize a function response only from a str or a dict with
             # a "content" or "result" key, and any other shape reaches the
             # model as an EMPTY tool message — the model then cannot see
             # why the call was blocked, or the remedy offer it quotes.
             return {"result": decision.feedback, _DENY_KEY: _DENIED}
+        self._release_tool_dispatch(tool_context)
         raise AppaFailClosed(f"appa answered the tool call with {decision.detail or decision.kind}")
 
     async def after_tool_callback(self, *, tool, tool_args, tool_context, result):
@@ -498,35 +606,49 @@ class AppaPluginKagent(BasePlugin):
             # dispatch. The id of the call decides that, never the
             # payload — a tool result carries whatever its tool spells,
             # the `appa` key included.
+            self._release_tool_dispatch(tool_context)
             return None
         root_id, child_id = self._ids(tool_context)
+        call_id = _call_id(tool_context)
+        rejected = bool(
+            call_id is not None and call_id in self._rejected_controls.get(tool_context.invocation_id, set())
+        )
+        if rejected:
+            self._rejected_controls[tool_context.invocation_id].discard(call_id)
+            if not self._rejected_controls[tool_context.invocation_id]:
+                self._rejected_controls.pop(tool_context.invocation_id)
         arguments = _plain_json(tool_args)
         # A result of None with no failure is a deferred or long-running
         # call. Nothing entered attention, and the dispatch is genuinely
         # unresolved here.
         outcome = wire.indeterminate() if result is None else wire.success(_plain_json(result))
-        if self._is_spawn(tool):
-            spawned_id, value = _spawn_return(result)
-            decision = await self._post(
-                wire.spawn_result(root_id, tool.name, arguments, outcome, spawned_id, value, child_id)
-            )
+        try:
+            if self._is_spawn(tool):
+                spawned_id, value = _spawn_return(result)
+                decision = await self._post(
+                    wire.spawn_result(root_id, tool.name, arguments, outcome, spawned_id, value, child_id)
+                )
+                if decision.kind == "ack":
+                    return None
+                if decision.kind == "child_return":
+                    return {"result": decision.value}
+                if decision.kind == "replace_output":
+                    return {"result": decision.output}
+                if decision.kind == "block":
+                    return _withheld(decision.reason or "")
+                raise AppaFailClosed(f"appa answered the spawn result with {decision.detail or decision.kind}")
+            decision = await self._post(wire.tool_result(root_id, tool.name, arguments, outcome, child_id))
             if decision.kind == "ack":
+                if rejected:
+                    return {"result": _REVIEW_REJECTED, _DENY_KEY: _DENIED}
                 return None
-            if decision.kind == "child_return":
-                return {"result": decision.value}
             if decision.kind == "replace_output":
                 return {"result": decision.output}
             if decision.kind == "block":
                 return _withheld(decision.reason or "")
-            raise AppaFailClosed(f"appa answered the spawn result with {decision.detail or decision.kind}")
-        decision = await self._post(wire.tool_result(root_id, tool.name, arguments, outcome, child_id))
-        if decision.kind == "ack":
-            return None
-        if decision.kind == "replace_output":
-            return {"result": decision.output}
-        if decision.kind == "block":
-            return _withheld(decision.reason or "")
-        raise AppaFailClosed(f"appa answered the tool result with {decision.detail or decision.kind}")
+            raise AppaFailClosed(f"appa answered the tool result with {decision.detail or decision.kind}")
+        finally:
+            self._release_tool_dispatch(tool_context)
 
     async def on_tool_error_callback(self, *, tool, tool_args, tool_context, error):
         # The failure closes the dispatch here. ADK runs the result gate
@@ -534,16 +656,19 @@ class AppaPluginKagent(BasePlugin):
         # double-count one dispatch.
         self._settle(tool_context)
         root_id, child_id = self._ids(tool_context)
-        decision = await self._post(
-            wire.tool_result(root_id, tool.name, _plain_json(tool_args), wire.failure(str(error)), child_id)
-        )
-        if decision.kind == "ack":
-            return None  # the original error propagates
-        if decision.kind == "replace_output":
-            return {"result": decision.output}
-        if decision.kind == "block":
-            return _withheld(decision.reason or "")
-        raise AppaFailClosed(f"appa answered the tool failure with {decision.detail or decision.kind}")
+        try:
+            decision = await self._post(
+                wire.tool_result(root_id, tool.name, _plain_json(tool_args), wire.failure(str(error)), child_id)
+            )
+            if decision.kind == "ack":
+                return None  # the original error propagates
+            if decision.kind == "replace_output":
+                return {"result": decision.output}
+            if decision.kind == "block":
+                return _withheld(decision.reason or "")
+            raise AppaFailClosed(f"appa answered the tool failure with {decision.detail or decision.kind}")
+        finally:
+            self._release_tool_dispatch(tool_context)
 
     # -- the return gate ----------------------------------------------
 

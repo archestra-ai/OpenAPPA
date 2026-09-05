@@ -1,63 +1,19 @@
-# The one thing the demo needs from you: the model provider key.
-# Everything else has a preset.
-openai:
-  # Your OpenAI API key. It lands in a Secret named after the ModelConfig,
-  # read by the agents and by appa-runtime's own sanitizer model. Leave it
-  # empty to paste the key in the kagent dashboard after install instead
-  # (Models → appa-demo-model → Edit → API Key): the dashboard writes the
-  # same Secret, and the agent and runtime pods start once it exists.
-  apiKey: ""
-  # The agents' model.
-  model: gpt-4.1-mini
-  # An existing Secret carrying OPENAI_API_KEY, instead of apiKey. Name it
-  # like the ModelConfig for the dashboard's Edit flow to find it.
-  existingSecret: ""
-  # The OpenAI-compatible endpoint for the agents' model. The chart renders
-  # spec.openAI.baseUrl only when this value is non-empty.
-  baseUrl: ""
-
+# The kagent ModelConfig already used by appa-guide. The kagent release owns
+# its provider credentials; this chart never creates or copies them.
 modelConfig:
-  name: appa-demo-model
+  name: default-model-config
 
-# The shared appa-runtime: one pod carrying the runtime (loopback only, by
-# design), the relay that gives it a cluster address, and the mock
-# externals it consults over loopback — the proxy-pair topology in one
-# pod. Every demo agent points at the relay.
+# The appa-runtime release owns the runtime, policy, persistence, and
+# appa-guide. This chart only points its demo Agents at that existing Service.
 runtime:
-  image:
-    repository: ghcr.io/archestra-ai/appa-kagent-quickstart
-    tag: ""            # defaults to the chart's appVersion
-    pullPolicy: IfNotPresent
+  url: http://appa-runtime.appa.svc.cluster.local:18787
   # Fills the OpenAI model's reasoning_effort when the ModelConfig leaves
   # it unset (APPA_KAGENT_OPENAI_REASONING_EFFORT on every agent).
   reasoningEffort: ""
-  # -v for the decision path at debug, -vv for the algebra at trace.
-  verbosity: ""
-  persistence:
-    # Keep trajectories and a writable batteries overlay across restarts.
-    # The appa-guide skill refreshes bundled batteries only when this is on.
-    enabled: false
-    size: 1Gi
-    storageClass: ""
-    existingClaim: ""
 
-# The one model profile the policy's `builtin = "llm"` sanitizers
-# consult, the [externals.llm] block of files/demo.appa.toml. The
-# runtime reads the same Secret as the agents, as APPA_LLM_API_KEY.
-llm:
-  # The sanitizers' model. It answers a json_schema request, so pick a
-  # model that supports structured outputs.
-  model: gpt-4.1-mini
-  # The OpenAI-compatible endpoint for that model. HTTPS works anywhere;
-  # cleartext HTTP works on loopback only.
-  url: ""
-
-relay:
-  image:
-    repository: nginx
-    tag: 1.27-alpine
-    pullPolicy: IfNotPresent
-
+# Deterministic demo-only implementations of the policy's Annotator,
+# sanitizers, and non-HITL Authorities. The shared runtime invokes these
+# through local command adapters; the service never owns runtime resources.
 mocks:
   image:
     repository: ghcr.io/archestra-ai/appa-demo-mocks
@@ -84,31 +40,15 @@ tools:
 # go.undeclaredName. The policy declares both children even without
 # the go cell, so go.childName stays in the set.
 
-# The APPA guide agent: the canonical composable appa-guide skill (one
-# router, one reference per host) attached
-# through kagent git-ref skills, with the kagent tool server's k8s tools and
-# the shared runtime as its own gate. The agent is packaging; any host with
-# the same tools can run the same skill.
-guide:
-  enabled: true
-  # The cluster must be able to clone this repo (or a fork of it).
-  skill:
-    git:
-      url: https://github.com/archestra-ai/OpenAPPA
-      ref: main
-      path: integrations/appa-guide
-    name: appa-guide
-  # The kagent tool server that serves the k8s_* tools.
-  toolServer: kagent-tool-server
 agents:
   # The python child cluster-ops delegates to.
   childName: log-analyst
   # The go cell: a twin of cluster-ops on kagent's go runtime, gated by
-  # the go plugin. kagent derives its image from the python one — the
-  # last path segment becomes `golang-adk` — so it needs that image
-  # beside appa-kagent-quickstart (the chart README shows the build).
+  # the go plugin. On kagent 0.9.12, the controller derives its image
+  # from controller.agentImage by replacing the last path segment with
+  # `golang-adk`, so the alias must be published beside appa-kagent-adk.
   go:
-    enabled: true
+    enabled: false
     name: cluster-ops-go
     # Its delegated child on the go runtime too, so the fork's child side
     # is exercised on the go plugin as well.
