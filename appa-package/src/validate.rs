@@ -193,36 +193,56 @@ fn check_externals(policy: &Path, externals: &Value, helpers: &[RelativePath]) -
     let Some(table) = externals.as_table() else {
         return Err(root_setting(""));
     };
-    for (key, value) in table {
+    for (kind, value) in table {
         // A deployment's own settings (`timeout_ms`, `max_body_bytes`, …) sit
-        // directly under `[externals]`; a battery's externals are tables.
-        if !value.is_table() {
-            return Err(root_setting(key));
+        // directly under `[externals]`, and so do the sections only a root
+        // config may bind (`llm`, `claude_code`). A battery binds externals of
+        // the kinds an included file may carry, and nothing else.
+        if !BINDABLE_KINDS.contains(&kind.as_str()) {
+            return Err(root_setting(kind));
         }
-        check_commands(policy, value, key, helpers)?;
+        let Some(bindings) = value.as_table() else {
+            return Err(root_setting(kind));
+        };
+        for (id, binding) in bindings {
+            check_binding(policy, binding, &format!("{kind}.{id}"), helpers)?;
+        }
     }
     Ok(())
 }
 
-/// Every `command` below `[externals]`, wherever the kind of external puts it.
-fn check_commands(policy: &Path, value: &Value, path: &str, helpers: &[RelativePath]) -> Result<(), PackageError> {
-    let Some(table) = value.as_table() else {
-        return Ok(());
+/// The external kinds an included file may bind. A battery is an included
+/// fragment, so this is exactly the set the config loader accepts from one.
+const BINDABLE_KINDS: [&str; 5] = ["authorities", "sanitizers", "annotators", "audience", "identity"];
+
+/// One binding of one external. A battery runs the programs it ships and
+/// nothing else: the `command` shape naming a declared helper is the only one
+/// it may bind. The `url` shape would reach the network from inside a fragment
+/// the deployment merely included, and the `builtin` shape would name a runtime
+/// module the deployment did not choose — both are the root's to bind.
+fn check_binding(policy: &Path, binding: &Value, external: &str, helpers: &[RelativePath]) -> Result<(), PackageError> {
+    let refuse = || PackageError::PolicyExternalCommand {
+        policy: policy.to_path_buf(),
+        external: external.to_owned(),
     };
+    let Some(table) = binding.as_table() else {
+        return Err(refuse());
+    };
+    let mut runs_a_helper = false;
     for (key, value) in table {
-        let below = format!("{path}.{key}");
         match key.as_str() {
-            "command" if !runs_a_declared_helper(value, helpers) => {
-                return Err(PackageError::PolicyExternalCommand {
-                    policy: policy.to_path_buf(),
-                    external: path.to_owned(),
-                });
-            }
-            "command" => {}
-            _ => check_commands(policy, value, &below, helpers)?,
+            "command" if runs_a_declared_helper(value, helpers) => runs_a_helper = true,
+            // A token the helper reads is the deployment's to name, but naming
+            // one is inert on its own: the runtime refuses a variable outside
+            // its own namespace when it reads the binding.
+            "token_env" if value.is_str() => {}
+            _ => return Err(refuse()),
         }
     }
-    Ok(())
+    match runs_a_helper {
+        true => Ok(()),
+        false => Err(refuse()),
+    }
 }
 
 /// A battery ships the programs it runs, so an argv is exactly `python3` and one
@@ -419,6 +439,46 @@ mod tests {
                 "accepted {command}"
             );
         }
+    }
+
+    /// A battery runs the programs it ships. Every other binding shape reaches
+    /// something the deployment did not choose — a network endpoint, a runtime
+    /// module — from inside a fragment it merely included, so the shape itself
+    /// is refused rather than its contents inspected.
+    #[test]
+    fn a_battery_binding_that_is_not_its_own_helper_is_refused() {
+        let binding = "[externals.audience.github]\ncommand = [\"python3\", \"audience-source.py\"]\n";
+        for replacement in [
+            "[externals.audience.github]\nurl = \"https://elsewhere.example/audience\"\n",
+            "[externals.audience.github]\nbuiltin = \"llm\"\n",
+            "[externals.authorities.review]\nurl = \"https://elsewhere.example/review\"\n",
+            // A command beside a url is still a url binding on the wire.
+            "[externals.audience.github]\ncommand = [\"python3\", \"audience-source.py\"]\n             url = \"https://elsewhere.example/audience\"\n",
+            // An external kind only a root config binds.
+            "[externals.llm]\nprovider = \"anthropic\"\nmodel = \"claude-opus-5\"\n",
+        ] {
+            let directory = battery(&BATTERY_POLICY.replace(binding, replacement));
+
+            assert!(
+                matches!(
+                    validate_package(directory.path()),
+                    Err(PackageError::PolicyExternalCommand { .. } | PackageError::PolicyRootSetting { .. })
+                ),
+                "accepted {replacement}"
+            );
+        }
+    }
+
+    /// The token a helper reads is named beside the command that runs it, and
+    /// naming one binds nothing on its own.
+    #[test]
+    fn a_battery_may_name_the_token_its_own_helper_reads() {
+        let directory = battery(&BATTERY_POLICY.replace(
+            "command = [\"python3\", \"audience-source.py\"]\n",
+            "command = [\"python3\", \"audience-source.py\"]\ntoken_env = \"APPA_GITHUB_TOKEN\"\n",
+        ));
+
+        validate_package(directory.path()).expect("a helper may read a named token");
     }
 
     #[test]
