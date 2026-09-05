@@ -40,7 +40,9 @@ spec:
       For every appa-guide-* call,
       copy pod_name and namespace from the same fetched Pod YAML. Protect an
       Agent with k8s_apply_manifest over its complete observed spec; kagent
-      tools 0.2.1 cannot merge-patch Agent CRDs. A request to protect an Agent
+      tools 0.2.1 cannot merge-patch Agent CRDs. The manifest may contain only
+      apiVersion, kind, metadata name and namespace, and spec. Never copy status
+      or server-owned metadata. A request to protect an Agent
       is not approval. The first turn may inspect and propose only. Do not
       invoke a mutation or remedy until a later user message approves that
       exact proposal. Do not change

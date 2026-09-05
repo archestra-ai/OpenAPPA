@@ -4,14 +4,17 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 namespace=${APPA_NAMESPACE:-kagent}
-target=${APPA_GUIDE_TARGET:-guide-fixture}
+target=appa-guide-e2e-fixture
+created=false
 
 cleanup() {
-  kubectl delete agent "$target" -n "$namespace" --ignore-not-found >/dev/null
+  if [ "$created" = true ]; then
+    kubectl delete agent "$target" -n "$namespace" --ignore-not-found >/dev/null
+  fi
 }
 trap cleanup EXIT
 
-kubectl apply -f - <<EOF
+kubectl create -f - <<EOF
 apiVersion: kagent.dev/v1alpha2
 kind: Agent
 metadata:
@@ -34,6 +37,7 @@ spec:
         - name: EXISTING_SETTING
           value: preserve-me
 EOF
+created=true
 kubectl wait agent/"$target" -n "$namespace" --for=condition=Ready=True --timeout=5m
 
 (
@@ -44,8 +48,20 @@ kubectl wait agent/"$target" -n "$namespace" --for=condition=Ready=True --timeou
 )
 
 kubectl get agent "$target" -n "$namespace" -o json | jq -e '
-  .spec.declarative.deployment.env as $env |
-  any($env[]; .name == "EXISTING_SETTING" and .value == "preserve-me") and
-  any($env[]; .name == "APPA_ENABLED" and .value == "true") and
-  any($env[]; .name == "APPA_RUNTIME_URL" and (.value | endswith(":18787")))
+  .spec.description == "Fixture Agent for appa-guide migration." and
+  .spec.type == "Declarative" and
+  .spec.declarative.systemMessage == "List Kubernetes pods when asked." and
+  .spec.declarative.modelConfig == "appa-demo-model" and
+  (.spec.declarative.tools == [{
+    "type": "McpServer",
+    "mcpServer": {
+      "name": "demo-tools",
+      "kind": "RemoteMCPServer",
+      "toolNames": ["list_pods"]
+    }
+  }]) and
+  (.spec.declarative.deployment.env as $env |
+    any($env[]; .name == "EXISTING_SETTING" and .value == "preserve-me") and
+    any($env[]; .name == "APPA_ENABLED" and .value == "true") and
+    any($env[]; .name == "APPA_RUNTIME_URL" and (.value | endswith(":18787"))))
 ' >/dev/null

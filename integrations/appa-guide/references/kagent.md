@@ -349,7 +349,10 @@ approval on apply, patch, delete, Helm upgrade, and Helm uninstall.
 - **Protect one Agent**: read its complete environment list. Preserve every
   existing entry. Add or replace `APPA_ENABLED=true` and the selected
   `APPA_RUNTIME_URL`. Build a complete Agent manifest from the observed
-  metadata name, namespace, and full spec. Apply it with
+  metadata name, namespace, and full spec. The manifest contains exactly
+  `apiVersion`, `kind`, `metadata.name`, `metadata.namespace`, and `spec`.
+  Never include `status`, `resourceVersion`, `uid`, `managedFields`, or
+  `creationTimestamp`. Apply it with
   `k8s_apply_manifest`; kagent tools 0.2.1 cannot merge-patch CRDs. Wait
   for the new pod and verify its startup log and Agent conditions. For a
   Helm-owned Agent, propose the equivalent Helm values change instead.
