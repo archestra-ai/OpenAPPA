@@ -43,6 +43,12 @@ spec:
       promise next steps until the full init checklist and comparison are complete.
       If no change is needed, send one final summary. Do not call the policy
       updated or tell the operator to start a new chat.
+      In that summary, report every listed RemoteMCPServer, including each
+      unaccepted or unavailable server. A battery from GET /batteries is only
+      available; call it included only when appa-guide-inspect reports it under
+      Batteries. Report every Agent delegation absent from exact policy as
+      blocked, even when the omission is deliberate. Never claim all
+      delegations are covered when one is intentionally undeclared.
       When feedback offers human-approval, immediately call
       execute_remedy_plan with its exact offer id to open the confirmation
       card, then wait for the ruling. Never summarize instead of opening it.
