@@ -95,6 +95,15 @@ pub enum Adapter {
 }
 
 impl Adapter {
+    /// The host this adapter connects, which is also the tag its manifest block
+    /// is written under.
+    pub fn host(&self) -> Host {
+        match self {
+            Self::ClaudeCode { .. } => Host::ClaudeCode,
+            Self::Kagent { .. } => Host::Kagent,
+        }
+    }
+
     pub fn default_policy(&self) -> &RelativePath {
         match self {
             Self::ClaudeCode { default_policy, .. } | Self::Kagent { default_policy, .. } => default_policy,
