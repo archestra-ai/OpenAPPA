@@ -314,6 +314,11 @@ fn check_externals(policy: &Path, externals: &Value, helpers: &[RelativePath]) -
 /// fragment, so this is exactly the set the config loader accepts from one.
 const BINDABLE_KINDS: [&str; 5] = ["authorities", "sanitizers", "annotators", "audience", "identity"];
 
+/// The namespace a command's credential comes from. The config loader owns this
+/// rule (`PROVIDER_CREDENTIAL_PREFIX`); a package that names a variable outside
+/// it validates here and refuses to load there, so it is refused here instead.
+const PROVIDER_CREDENTIAL_PREFIX: &str = "APPA_PROVIDER_";
+
 /// One binding of one external. A battery runs the programs it ships and
 /// nothing else: the `command` shape naming a declared helper is the only one
 /// it may bind. The `url` shape would reach the network from inside a fragment
@@ -331,10 +336,14 @@ fn check_binding(policy: &Path, binding: &Value, external: &str, helpers: &[Rela
     for (key, value) in table {
         match key.as_str() {
             "command" if runs_a_declared_helper(value, helpers) => runs_a_helper = true,
-            // A token the helper reads is the deployment's to name, but naming
-            // one is inert on its own: the runtime refuses a variable outside
-            // its own namespace when it reads the binding.
-            "token_env" if value.is_str() => {}
+            // A command's credential comes from the runtime's provider
+            // namespace and nowhere else, so a helper may name a variable only
+            // there. The loader refuses any other name when it reads the
+            // binding; refusing it here means a package that validates loads.
+            "token_env"
+                if value
+                    .as_str()
+                    .is_some_and(|var| var.starts_with(PROVIDER_CREDENTIAL_PREFIX)) => {}
             _ => return Err(refuse()),
         }
     }
@@ -593,16 +602,31 @@ mod tests {
         }
     }
 
-    /// The token a helper reads is named beside the command that runs it, and
-    /// naming one binds nothing on its own.
+    /// The token a helper reads is named beside the command that runs it, and it
+    /// comes from the runtime's provider namespace. A name outside that
+    /// namespace is one the config loader refuses, so it is refused here.
     #[test]
-    fn a_battery_may_name_the_token_its_own_helper_reads() {
-        let directory = battery(&BATTERY_POLICY.replace(
-            "command = [\"python3\", \"audience-source.py\"]\n",
-            "command = [\"python3\", \"audience-source.py\"]\ntoken_env = \"APPA_GITHUB_TOKEN\"\n",
-        ));
+    fn a_helper_reads_its_token_from_the_provider_namespace_only() {
+        let named = |var: &str| {
+            battery(&BATTERY_POLICY.replace(
+                "command = [\"python3\", \"audience-source.py\"]\n",
+                &format!("command = [\"python3\", \"audience-source.py\"]\ntoken_env = \"{var}\"\n"),
+            ))
+        };
 
-        validate_package(directory.path()).expect("a helper may read a named token");
+        let allowed = named("APPA_PROVIDER_GITHUB_TOKEN");
+        validate_package(allowed.path()).expect("a helper may read a provider credential");
+
+        for var in ["APPA_GITHUB_TOKEN", "GITHUB_TOKEN", ""] {
+            let refused = named(var);
+            assert!(
+                matches!(
+                    validate_package(refused.path()),
+                    Err(PackageError::PolicyExternalCommand { .. })
+                ),
+                "accepted token_env {var:?}"
+            );
+        }
     }
 
     /// A declared path names one kind of thing. Containment alone accepts a
